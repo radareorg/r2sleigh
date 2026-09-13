@@ -596,17 +596,6 @@ pub enum PreparedInterprocSummaryError {
     NonConverged,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InterprocSolveConfig {
-    pub max_iterations: usize,
-}
-
-impl Default for InterprocSolveConfig {
-    fn default() -> Self {
-        Self { max_iterations: 8 }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct InterprocFunctionInput<'a> {
     pub id: InterprocFunctionId,
@@ -911,7 +900,6 @@ pub fn solve_interproc_summary_set(
     arch: Option<&ArchSpec>,
     root: Option<InterprocFunctionId>,
     seed_summaries: &BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
-    config: InterprocSolveConfig,
 ) -> Result<InterprocSummarySet, InterprocSummarySchemaError> {
     validate_function_summary_map(seed_summaries)?;
     let abi = AbiProfile::from_arch(arch);
@@ -930,7 +918,6 @@ pub fn solve_interproc_summary_set(
         locals,
         current,
         root,
-        config,
         functions.len(),
     ))
 }
@@ -939,7 +926,6 @@ fn solve_interproc_summary_set_from_locals(
     locals: BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
     mut current: BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
     root: Option<InterprocFunctionId>,
-    config: InterprocSolveConfig,
     scope_size: usize,
 ) -> InterprocSummarySet {
     let sccs = compute_summary_sccs(&locals);
@@ -947,15 +933,26 @@ fn solve_interproc_summary_set_from_locals(
     // one pass to compute a summary and a second to confirm it. A budget of one
     // can only ever end mid-change, which reports every summary as unconverged
     // no matter how simple the function is.
-    let max_iterations = config.max_iterations.max(2);
     let mut iterations = 0usize;
     let mut converged = true;
     let mut max_scc_size = 0usize;
+    let mut max_iterations = 0usize;
 
     for scc in &sccs {
         max_scc_size = max_scc_size.max(scc.len());
+        // Rounds enough to reach the fixed point, from the facts rather than
+        // from a policy. `resolve_summary` rebuilds a summary from the
+        // function's own facts plus its callees', combining them only by set
+        // insertion and boolean `or`, and remapping never invents a region,
+        // range or nesting that was not already there. So the universe of
+        // facts an SCC can derive is fixed before the loop starts, every
+        // summary ascends in it, and a round that reports a change moved at
+        // least one fact into at least one summary. Bound the rounds by how
+        // many such moves exist, plus the round that observes no change.
+        let scc_bound = scc_fixpoint_round_bound(scc, &locals);
+        max_iterations = max_iterations.max(scc_bound);
         let mut scc_converged = false;
-        for _ in 0..max_iterations {
+        for _ in 0..scc_bound {
             iterations += 1;
             let mut changed = false;
             for function_id in scc {
@@ -972,6 +969,13 @@ fn solve_interproc_summary_set_from_locals(
                 scc_converged = true;
                 break;
             }
+        }
+        if !scc_converged {
+            r2il::refusal_evidence!(
+                "interproc-summary-cap",
+                "an SCC of {} functions did not settle in {max_iterations} rounds",
+                scc.len()
+            );
         }
         converged &= scc_converged;
     }
@@ -1109,7 +1113,6 @@ impl PreparedCalleeSummary {
 pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     root: Arc<SsaArtifact>,
     callees: &[PreparedCalleeSummary],
-    config: InterprocSolveConfig,
 ) -> Result<PreparedInterprocSummarySet, PreparedInterprocSummaryError> {
     let root_id = InterprocFunctionId(root.function().entry);
     let mut seen = BTreeSet::new();
@@ -1168,13 +1171,8 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         locals.insert(callee.id, (None, callee.local.clone()));
     }
 
-    let report = solve_interproc_summary_set_from_locals(
-        locals,
-        current,
-        Some(root_id),
-        config,
-        callees.len() + 1,
-    );
+    let report =
+        solve_interproc_summary_set_from_locals(locals, current, Some(root_id), callees.len() + 1);
     require_converged_summary_report(&report)?;
     Ok(PreparedInterprocSummarySet {
         root: root_id,
@@ -1189,7 +1187,6 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
 pub fn solve_prepared_interproc_summary_set(
     root: Arc<SsaArtifact>,
     functions: &[PreparedInterprocFunctionInput<'_>],
-    config: InterprocSolveConfig,
 ) -> Result<PreparedInterprocSummarySet, PreparedInterprocSummaryError> {
     let root_id = InterprocFunctionId(root.function().entry);
     let mut function_ids = BTreeSet::new();
@@ -1252,8 +1249,7 @@ pub fn solve_prepared_interproc_summary_set(
             function.prepared,
         )?);
     }
-    let mut set =
-        solve_prepared_interproc_summary_set_from_callee_summaries(root, &callees, config)?;
+    let mut set = solve_prepared_interproc_summary_set_from_callee_summaries(root, &callees)?;
     // This entry point was handed the bodies, so it can retain them.
     for function in functions {
         set.owners
@@ -1402,6 +1398,34 @@ fn initial_summary(
         writes_global_memory,
         touches_unknown_memory,
     }
+}
+
+/// How many rounds an SCC can take to reach its fixed point.
+///
+/// One move per (function, fact) pair, where a fact is one entry a summary can
+/// gain: an argument effect, a memory, transfer, allocation, lifetime, sync or
+/// atomic effect, the unknown-call flag, or one call observation resolving from
+/// absent to present. Plus the round that observes no change.
+fn scc_fixpoint_round_bound(
+    scc: &[InterprocFunctionId],
+    locals: &BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
+) -> usize {
+    let universe: usize = scc
+        .iter()
+        .filter_map(|id| locals.get(id))
+        .map(|(_, local)| {
+            local.arg_effects.len()
+                + local.memory_effects.len()
+                + local.transfer_effects.len()
+                + local.allocation_effects.len()
+                + local.lifetime_effects.len()
+                + local.sync_effects.len()
+                + local.atomic_effects.len()
+                + local.call_observations.len()
+                + 1
+        })
+        .sum();
+    scc.len().saturating_mul(universe).saturating_add(1).max(2)
 }
 
 fn resolve_summary(
@@ -2257,8 +2281,26 @@ fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId, depth: u32) ->
     }
 }
 
+/// The iterations this dataflow can take, from the data rather than a guess.
+///
+/// The carrier lattice is flat: a cell is absent, then a specific entry
+/// argument or value, then `Unknown`, and a join with anything leaves
+/// `Unknown` where it is. So each of a block's carrier cells advances at most
+/// twice, and the block's own in-state and out-state each appear once, which
+/// is what the first pass reports as a change. Every round that reports a
+/// change made at least one of those moves, so bound the rounds by how many
+/// exist and add the round that reports none.
+fn call_arg_state_iteration_bound(prepared: &SsaArtifact, abi: &AbiProfile) -> usize {
+    let blocks = prepared.function().block_addrs().len();
+    let carriers = tracked_call_carriers(prepared, abi).len();
+    blocks
+        .saturating_mul(carriers.saturating_mul(2).saturating_add(2))
+        .saturating_add(1)
+}
+
 fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgumentState {
-    collect_call_arg_state_with_iteration_limit(prepared, abi, 64)
+    let bound = call_arg_state_iteration_bound(prepared, abi);
+    collect_call_arg_state_with_iteration_limit(prepared, abi, bound)
 }
 
 fn collect_call_arg_state_with_iteration_limit(
@@ -2779,28 +2821,7 @@ fn classify_value_operand(prepared: &SsaArtifact, value_id: ValueId, depth: u32)
 }
 
 fn canonical_root_value(prepared: &SsaArtifact, value_id: ValueId) -> ValueId {
-    let Some(facts) = prepared.function().decompile_prep_facts() else {
-        return value_id;
-    };
-    let Some(start) = prepared.value_var(value_id) else {
-        return value_id;
-    };
-    let mut current = start.clone();
-    let mut current_id = value_id;
-    for _ in 0..32 {
-        let Some(next) = facts.canonical_root_of(&current) else {
-            break;
-        };
-        if next == &current {
-            break;
-        }
-        let Some(next_id) = prepared.graph().value_id_for_var(next) else {
-            break;
-        };
-        current = next.clone();
-        current_id = next_id;
-    }
-    current_id
+    crate::function::canonical_root_value_id(prepared, value_id)
 }
 
 fn global_address_for_value_id(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64> {
@@ -3260,7 +3281,6 @@ mod tests {
                 name: Some("root".to_string()),
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect("source-owned summary");
 
@@ -3298,7 +3318,6 @@ mod tests {
                 name: None,
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect("source-owned summary remains conservatively representable");
         let summary = prepared
@@ -3412,26 +3431,14 @@ mod tests {
         let mut stale = FunctionSemanticSummary::unknown(id, None);
         stale.schema_version = 1;
         assert_eq!(
-            solve_interproc_summary_set(
-                &[],
-                None,
-                None,
-                &BTreeMap::from([(id, stale)]),
-                InterprocSolveConfig::default(),
-            ),
+            solve_interproc_summary_set(&[], None, None, &BTreeMap::from([(id, stale)]),),
             Err(InterprocSummarySchemaError::FunctionSchemaVersion { id, found: 1 })
         );
 
         let foreign_id = InterprocFunctionId(0x4300);
         let mislabeled = FunctionSemanticSummary::unknown(foreign_id, None);
         assert_eq!(
-            solve_interproc_summary_set(
-                &[],
-                None,
-                None,
-                &BTreeMap::from([(id, mislabeled)]),
-                InterprocSolveConfig::default(),
-            ),
+            solve_interproc_summary_set(&[], None, None, &BTreeMap::from([(id, mislabeled)]),),
             Err(InterprocSummarySchemaError::FunctionIdentityMismatch {
                 key: id,
                 summary_id: foreign_id,
@@ -3451,7 +3458,6 @@ mod tests {
                     name,
                     prepared: &root,
                 }],
-                InterprocSolveConfig::default(),
             )
             .expect("source-owned summary")
         };
@@ -3534,7 +3540,6 @@ mod tests {
                 name: None,
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect("source-owned summary");
         let summary = prepared
@@ -3589,7 +3594,6 @@ mod tests {
                 name: Some("foreign".to_string()),
                 prepared: &foreign,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect_err("foreign root must refuse");
 
@@ -3599,12 +3603,8 @@ mod tests {
     #[test]
     fn prepared_summary_set_refuses_missing_root() {
         let arch = x86_64_arch();
-        let error = solve_prepared_interproc_summary_set(
-            prepared_owner(0x4000, &arch),
-            &[],
-            InterprocSolveConfig::default(),
-        )
-        .expect_err("missing root must refuse");
+        let error = solve_prepared_interproc_summary_set(prepared_owner(0x4000, &arch), &[])
+            .expect_err("missing root must refuse");
 
         assert_eq!(error, PreparedInterprocSummaryError::MissingRoot);
     }
@@ -3627,7 +3627,6 @@ mod tests {
                     prepared: &root,
                 },
             ],
-            InterprocSolveConfig::default(),
         )
         .expect_err("duplicate root must refuse");
 
@@ -3645,7 +3644,6 @@ mod tests {
                 name: Some("wrong-id".to_string()),
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect_err("mislabeled root must refuse");
 
@@ -3671,7 +3669,6 @@ mod tests {
                     prepared: &helper,
                 },
             ],
-            InterprocSolveConfig::default(),
         )
         .expect_err("mislabeled helper must refuse");
 
@@ -3703,7 +3700,6 @@ mod tests {
                     prepared: &helper_b,
                 },
             ],
-            InterprocSolveConfig::default(),
         )
         .expect_err("duplicate helper id must refuse");
 
@@ -3729,7 +3725,6 @@ mod tests {
                     prepared: &helper,
                 },
             ],
-            InterprocSolveConfig::default(),
         )
         .expect_err("manual helper must not become prepared evidence");
 
@@ -3755,7 +3750,6 @@ mod tests {
                     prepared: &helper,
                 },
             ],
-            InterprocSolveConfig::default(),
         )
         .expect_err("cross-function block overlap must refuse authoritative evidence");
 
@@ -3808,7 +3802,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x4000)),
             &BTreeMap::from([(seed_id, seed)]),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
         let prepared = solve_prepared_interproc_summary_set(
@@ -3818,7 +3811,6 @@ mod tests {
                 name: Some("root".to_string()),
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect("seedless prepared summary");
 
@@ -3838,7 +3830,6 @@ mod tests {
                 name: Some("root".to_string()),
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect_err("unknown family must refuse authoritative summary");
 
@@ -3869,7 +3860,6 @@ mod tests {
                     prepared: &helper,
                 },
             ],
-            InterprocSolveConfig::default(),
         )
         .expect_err("cross-family helper must refuse authoritative summary");
 
@@ -3944,7 +3934,6 @@ mod tests {
                 name: Some("root".to_string()),
                 prepared: &root,
             }],
-            InterprocSolveConfig::default(),
         )
         .expect("source-owned summary");
         let summary = prepared
@@ -4104,7 +4093,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x3000)),
             &seeds,
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
 
@@ -4157,7 +4145,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x1000)),
             &seeds,
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
 
@@ -4201,7 +4188,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x401000)),
             &seeds,
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
 
@@ -4238,7 +4224,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x3500)),
             &BTreeMap::new(),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
 
@@ -4283,7 +4268,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x4000)),
             &BTreeMap::new(),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
         assert!(
@@ -4322,7 +4306,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x4050)),
             &BTreeMap::new(),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
         let summary = set
@@ -4373,7 +4356,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x4060)),
             &BTreeMap::new(),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
         let summary = set
@@ -4416,7 +4398,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x4100)),
             &BTreeMap::new(),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
         let summary = set
@@ -4487,7 +4468,6 @@ mod tests {
             Some(&arch),
             Some(InterprocFunctionId(0x4200)),
             &BTreeMap::new(),
-            InterprocSolveConfig::default(),
         )
         .expect("current report-only seed schema");
         let summary = set

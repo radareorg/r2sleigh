@@ -1053,17 +1053,9 @@ impl Importer<'_> {
         if let Some(root) = facts.stack_address_root_of(var) {
             return Some(*root);
         }
-        let mut current = var;
-        for _ in 0..32 {
-            let Some(next) = facts.canonical_root_of(current) else {
-                break;
-            };
-            if next == current {
-                break;
-            }
-            current = next;
-        }
-        facts.stack_address_root_of(current).copied()
+        facts
+            .stack_address_root_of(facts.canonical_root(var))
+            .copied()
     }
 
     /// The walk certificate of `value`, if it is a pointer carried round a

@@ -561,11 +561,9 @@ impl<'a> AddressCollector<'a> {
 
     fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
         let prep = self.function.decompile_prep_facts()?;
-        prep.stack_address_root_of(var).copied().or_else(|| {
-            prep.canonical_root_of(var)
-                .and_then(|root| prep.stack_address_root_of(root))
-                .copied()
-        })
+        prep.stack_address_root_of(var)
+            .or_else(|| prep.stack_address_root_of(prep.canonical_root(var)))
+            .copied()
     }
 
     fn scalar_for_var(&mut self, var: &SSAVar) -> Option<AffineScalar> {

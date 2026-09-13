@@ -2127,7 +2127,9 @@ impl TrustedSsaArtifact {
     }
 }
 
-fn canonical_root_value_id(
+/// The value the canonical root names, or `value_id` where the root is not a
+/// value of this graph.
+pub(crate) fn canonical_root_value_id(
     prepared: &SsaArtifact,
     value_id: crate::graph::ValueId,
 ) -> crate::graph::ValueId {
@@ -2137,22 +2139,10 @@ fn canonical_root_value_id(
     let Some(start) = prepared.value_var(value_id) else {
         return value_id;
     };
-    let mut current = start.clone();
-    let mut current_id = value_id;
-    for _ in 0..32 {
-        let Some(next) = facts.canonical_root_of(&current) else {
-            break;
-        };
-        if next == &current {
-            break;
-        }
-        let Some(next_id) = prepared.graph().value_id_for_var(next) else {
-            break;
-        };
-        current = next.clone();
-        current_id = next_id;
-    }
-    current_id
+    prepared
+        .graph()
+        .value_id_for_var(facts.canonical_root(start))
+        .unwrap_or(value_id)
 }
 
 impl Deref for SsaArtifact {
@@ -2166,6 +2156,30 @@ impl Deref for SsaArtifact {
 impl DecompilePrepFacts {
     pub fn canonical_root_of(&self, var: &SSAVar) -> Option<&SSAVar> {
         self.canonical_value_roots.get(var)
+    }
+
+    /// The canonical root of `var`: the fixed point of `canonical_root_of`.
+    ///
+    /// The walk terminates because every step moves to a var it has not seen
+    /// and the map is finite, so it runs at most once per var and ends at the
+    /// fixed point. The visited set makes the map's acyclicity -- which
+    /// `insert_canonical_root` establishes by canonicalising before it stores
+    /// -- a checked property rather than an assumed one. Stopping short of the
+    /// fixed point would hand back a value that is not the root, and identity
+    /// is what every later stage builds on.
+    pub fn canonical_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
+        let mut current = var;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(current) {
+            let Some(next) = self.canonical_value_roots.get(current) else {
+                break;
+            };
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
     }
 
     pub fn indexed_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {

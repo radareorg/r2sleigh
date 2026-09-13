@@ -2219,8 +2219,9 @@ fn prepared_stack_object_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option
             prepared
                 .function()
                 .decompile_prep_facts()
-                .and_then(|facts| facts.canonical_root_of(var))
-                .and_then(|root| prepared.object_for_var(root, r2il::SpaceId::Ram))
+                .and_then(|facts| {
+                    prepared.object_for_var(facts.canonical_root(var), r2il::SpaceId::Ram)
+                })
         })
 }
 
@@ -2286,8 +2287,9 @@ fn stack_offset_for_value(prepared: &SsaArtifact, value: &SSAVar) -> Option<i64>
             prepared
                 .function()
                 .decompile_prep_facts()
-                .and_then(|facts| facts.canonical_root_of(value))
-                .and_then(|root| prepared.object_for_var(root, r2il::SpaceId::Ram))
+                .and_then(|facts| {
+                    prepared.object_for_var(facts.canonical_root(value), r2il::SpaceId::Ram)
+                })
         })?;
     let fact = prepared.objects().object(object)?;
     stack_offset_for_object_kind(&fact.kind)
@@ -2333,8 +2335,7 @@ fn expr_for_compare_operand_with_width(
         .prepared
         .function()
         .decompile_prep_facts()
-        .and_then(|facts| facts.canonical_root_of(&var))
-        .cloned()
+        .map(|facts| facts.canonical_root(&var).clone())
         .unwrap_or_else(|| var.clone());
     if let Some(expr) = compare_style_operand_expr(inputs.prepared, &root, compare_width) {
         return Some(expr);

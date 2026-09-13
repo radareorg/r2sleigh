@@ -1500,7 +1500,6 @@ pub struct EngineAnalyzeRequest {
     pub semantic_metadata_enabled: bool,
     pub reg_type_hints: HashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
-    pub interproc_max_iterations: usize,
     pub semantic_mode: EngineSemanticMode,
     pub include_interproc_summary_set: bool,
     pub execution: EngineExecutionControl,
@@ -1517,7 +1516,6 @@ pub struct EngineAnalyzeRequestParts {
     pub semantic_metadata_enabled: bool,
     pub reg_type_hints: HashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
-    pub interproc_max_iterations: usize,
     pub include_interproc_summary_set: bool,
 }
 
@@ -1636,7 +1634,6 @@ pub struct EngineAnalyzeRequestInput {
     pub semantic_metadata_enabled: bool,
     pub reg_type_hints: HashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
-    pub interproc_max_iterations: usize,
     pub include_interproc_summary_set: bool,
 }
 
@@ -1646,7 +1643,6 @@ pub struct EngineAnalyzeFunctionRequestInput {
     pub ptr_bits: Option<u32>,
     pub reg_type_hints: HashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
-    pub interproc_max_iterations: usize,
     pub include_interproc_summary_set: bool,
 }
 
@@ -2215,7 +2211,6 @@ impl EngineAnalyzeRequest {
             semantic_metadata_enabled: parts.semantic_metadata_enabled,
             reg_type_hints: parts.reg_type_hints,
             parsed_context: parts.parsed_context,
-            interproc_max_iterations: parts.interproc_max_iterations,
             semantic_mode,
             include_interproc_summary_set: parts.include_interproc_summary_set,
             execution: EngineExecutionControl::default(),
@@ -2245,7 +2240,6 @@ impl EngineAnalyzeRequest {
         self.semantic_metadata_enabled = true;
         self.reg_type_hints.clear();
         self.parsed_context = trusted_parsed_context(&trusted, self.ptr_bits);
-        self.interproc_max_iterations = self.interproc_max_iterations.max(1);
         self.semantic_mode = EngineSemanticMode::Full;
         self.trusted_ssa = Some(trusted);
         self
@@ -2313,7 +2307,6 @@ fn engine_analyze_request_input_from_function(
         semantic_metadata_enabled: input.function.semantic_metadata_enabled,
         reg_type_hints: input.reg_type_hints,
         parsed_context: input.parsed_context,
-        interproc_max_iterations: input.interproc_max_iterations,
         include_interproc_summary_set: input.include_interproc_summary_set,
     }
 }
@@ -2334,7 +2327,6 @@ fn engine_analyze_request_parts_from_input(
         semantic_metadata_enabled: input.semantic_metadata_enabled,
         reg_type_hints: input.reg_type_hints,
         parsed_context: input.parsed_context,
-        interproc_max_iterations: input.interproc_max_iterations,
         include_interproc_summary_set: input.include_interproc_summary_set,
     }
 }
@@ -2374,7 +2366,6 @@ pub struct EngineFunctionDecompileRequestInput {
     function: EngineFunctionInput,
     ptr_bits: Option<u32>,
     parsed_context: r2types::ParsedExternalContext,
-    interproc_max_iterations: usize,
     input_quality: EngineFunctionInputQuality,
     execution: EngineExecutionControl,
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
@@ -2392,7 +2383,6 @@ impl EngineFunctionDecompileRequestInput {
             function,
             ptr_bits,
             parsed_context,
-            interproc_max_iterations: 1,
             input_quality: EngineFunctionInputQuality::complete(function_block_count),
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
@@ -2453,7 +2443,6 @@ impl EngineFunctionDecompileRequest {
                     ptr_bits: input.ptr_bits,
                     reg_type_hints: HashMap::new(),
                     parsed_context: input.parsed_context,
-                    interproc_max_iterations: input.interproc_max_iterations,
                     include_interproc_summary_set: true,
                 },
             )
@@ -2509,7 +2498,6 @@ pub struct EngineFunctionAnalysisArtifactRequestInput {
     pub function: EngineFunctionInput,
     pub ptr_bits: Option<u32>,
     pub parsed_context: r2types::ParsedExternalContext,
-    pub interproc_max_iterations: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2532,7 +2520,6 @@ impl EngineFunctionAnalysisArtifactRequest {
                     ptr_bits: input.ptr_bits,
                     reg_type_hints: HashMap::new(),
                     parsed_context: input.parsed_context,
-                    interproc_max_iterations: input.interproc_max_iterations,
                     include_interproc_summary_set: true,
                 },
             ),
@@ -2553,7 +2540,6 @@ impl EngineFunctionAnalysisArtifactRequest {
                     ptr_bits: input.ptr_bits,
                     reg_type_hints: HashMap::new(),
                     parsed_context: input.parsed_context,
-                    interproc_max_iterations: input.interproc_max_iterations,
                     include_interproc_summary_set: true,
                 },
                 register_name,
@@ -2615,7 +2601,6 @@ impl EngineFunctionAnalysisReportRequest {
                     ptr_bits: input.ptr_bits,
                     reg_type_hints: HashMap::new(),
                     parsed_context: input.parsed_context,
-                    interproc_max_iterations: input.interproc_max_iters,
                     include_interproc_summary_set: true,
                 },
             ),
@@ -2640,7 +2625,6 @@ impl EngineFunctionAnalysisReportRequest {
                     ptr_bits: input.ptr_bits,
                     reg_type_hints: HashMap::new(),
                     parsed_context: input.parsed_context,
-                    interproc_max_iterations: input.interproc_max_iters,
                     include_interproc_summary_set: true,
                 },
                 register_name,
@@ -4025,7 +4009,6 @@ fn build_engine_analysis_from_parts_with_control<C: r2ssa::SsaWorkControl + ?Siz
 
 struct InterprocSummaryBuildInput<'a> {
     pub analysis: &'a EngineAnalysis,
-    pub max_iterations: usize,
     /// Bodies of the functions the root calls, captured with it. Without these
     /// every direct call is an unresolved callee, and the solver has to mark
     /// every pointer argument read, written and escaped.
@@ -4047,9 +4030,6 @@ fn build_prepared_interproc_summary_set(
     r2ssa::solve_prepared_interproc_summary_set_from_callee_summaries(
         Arc::clone(&input.analysis.ssa_func),
         &callees,
-        r2ssa::InterprocSolveConfig {
-            max_iterations: input.max_iterations.max(1),
-        },
     )
 }
 
@@ -4123,7 +4103,6 @@ fn build_engine_analysis_artifact(
     let interproc_summary_set = if request.include_interproc_summary_set {
         match build_prepared_interproc_summary_set(InterprocSummaryBuildInput {
             analysis: &semantic_analysis,
-            max_iterations: request.interproc_max_iterations,
             callee_summaries: &request
                 .callee_facts
                 .iter()
@@ -4485,7 +4464,6 @@ mod tests {
                 ptr_bits: Some(64),
                 reg_type_hints: HashMap::new(),
                 parsed_context: r2types::ParsedExternalContext::default(),
-                interproc_max_iterations: 1,
                 include_interproc_summary_set: false,
             });
         assert!(Arc::ptr_eq(
@@ -4545,7 +4523,6 @@ mod tests {
                 ptr_bits: Some(64),
                 reg_type_hints: HashMap::new(),
                 parsed_context: r2types::ParsedExternalContext::default(),
-                interproc_max_iterations: 1,
                 include_interproc_summary_set: false,
             });
 
@@ -4588,7 +4565,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Optional,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -5014,7 +4990,6 @@ mod tests {
             semantic_metadata_enabled: false,
             reg_type_hints: HashMap::new(),
             parsed_context: r2types::parse_external_context_json("{}", 64),
-            interproc_max_iterations: 1,
             include_interproc_summary_set: true,
         };
 
@@ -5049,7 +5024,6 @@ mod tests {
             semantic_metadata_enabled: true,
             reg_type_hints: HashMap::new(),
             parsed_context: r2types::parse_external_context_json("{}", 32),
-            interproc_max_iterations: 2,
             include_interproc_summary_set: true,
         };
 
@@ -5084,7 +5058,6 @@ mod tests {
                 ptr_bits: Some(32),
                 reg_type_hints: HashMap::new(),
                 parsed_context: r2types::parse_external_context_json("{}", 32),
-                interproc_max_iterations: 1,
                 include_interproc_summary_set: false,
             });
         assert_eq!(grouped.function_name, "sym.grouped");
@@ -5174,7 +5147,6 @@ mod tests {
             ptr_bits: Some(64),
             reg_type_hints: HashMap::new(),
             parsed_context: r2types::parse_external_context_json("{}", 64),
-            interproc_max_iterations: 1,
             include_interproc_summary_set: false,
         };
 
@@ -5262,7 +5234,6 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()?;
             build_prepared_interproc_summary_set(InterprocSummaryBuildInput {
                 analysis: &analysis,
-                max_iterations: 1,
                 callee_summaries: &summaries,
             })
         };
@@ -5398,12 +5369,13 @@ mod tests {
             semantic_metadata_enabled: false,
             reg_type_hints: HashMap::new(),
             parsed_context: r2types::ParsedExternalContext::default(),
-            interproc_max_iterations: 1,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
             execution: EngineExecutionControl::default(),
         };
-        let response = session.analyze(request).expect("analysis should succeed");
+        let response = session
+            .analyze_checked(request)
+            .unwrap_or_else(|error| panic!("analysis should succeed: {error:?}"));
 
         assert!(response.metrics.planning_time > Duration::default());
         assert_eq!(response.metrics.phase_timings.len(), EnginePhase::ALL.len());
@@ -5466,7 +5438,6 @@ mod tests {
             ptr_bits: Some(64),
             reg_type_hints: HashMap::new(),
             parsed_context: r2types::ParsedExternalContext::default(),
-            interproc_max_iterations: 1,
             include_interproc_summary_set: false,
         })
     }
@@ -6225,7 +6196,6 @@ mod tests {
                 ptr_bits: Some(64),
                 reg_type_hints: HashMap::new(),
                 parsed_context: r2types::ParsedExternalContext::default(),
-                interproc_max_iterations: 1,
                 include_interproc_summary_set: false,
             })
             .with_cancellation(cancellation);
@@ -6522,7 +6492,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -6558,7 +6527,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -6605,7 +6573,6 @@ mod tests {
         assert_eq!(request.analysis.ptr_bits, 64);
         assert_eq!(request.analysis.semantic_mode, EngineSemanticMode::Full);
         assert!(request.analysis.include_interproc_summary_set);
-        assert_eq!(request.analysis.interproc_max_iterations, 5);
         assert_eq!(request.interproc_max_iters, 5);
         assert!(request.interproc_converged);
         assert_eq!(request.writeback_budget.global_max_links, 7);
@@ -6627,7 +6594,6 @@ mod tests {
                 },
                 ptr_bits: Some(64),
                 parsed_context: r2types::ParsedExternalContext::default(),
-                interproc_max_iterations: 9,
             },
         );
 
@@ -6636,7 +6602,6 @@ mod tests {
         assert_eq!(request.analysis.ptr_bits, 64);
         assert_eq!(request.analysis.semantic_mode, EngineSemanticMode::Full);
         assert!(request.analysis.include_interproc_summary_set);
-        assert_eq!(request.analysis.interproc_max_iterations, 9);
         assert!(
             request.analysis.reg_type_hints.is_empty(),
             "request builder owns default register-hint policy"
@@ -6663,7 +6628,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -6695,7 +6659,6 @@ mod tests {
             },
             ptr_bits: Some(64),
             parsed_context,
-            interproc_max_iterations: 1,
             input_quality: EngineFunctionInputQuality {
                 expected_blocks: 2,
                 lifted_blocks: 1,
@@ -6764,7 +6727,6 @@ mod tests {
             },
             ptr_bits: Some(64),
             parsed_context,
-            interproc_max_iterations: 1,
             input_quality: EngineFunctionInputQuality::complete(2),
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
@@ -6817,7 +6779,6 @@ mod tests {
             },
             ptr_bits: Some(64),
             parsed_context,
-            interproc_max_iterations: 1,
             input_quality: EngineFunctionInputQuality {
                 expected_blocks: 1,
                 lifted_blocks: 0,
@@ -6876,7 +6837,6 @@ mod tests {
             },
             ptr_bits: Some(64),
             parsed_context,
-            interproc_max_iterations: 1,
             input_quality: EngineFunctionInputQuality::complete(0),
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
@@ -6928,7 +6888,6 @@ mod tests {
             },
             ptr_bits: Some(64),
             parsed_context,
-            interproc_max_iterations: 1,
             input_quality: EngineFunctionInputQuality::complete(1),
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
@@ -6973,7 +6932,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -7021,7 +6979,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -7065,7 +7022,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -7107,7 +7063,6 @@ mod tests {
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
                 parsed_context,
-                interproc_max_iterations: 1,
                 semantic_mode: EngineSemanticMode::Full,
                 include_interproc_summary_set: true,
                 execution: EngineExecutionControl::default(),
@@ -7135,7 +7090,6 @@ mod tests {
                 },
                 ptr_bits: Some(64),
                 parsed_context: r2types::ParsedExternalContext::default(),
-                interproc_max_iterations: 3,
                 input_quality: EngineFunctionInputQuality::complete(0),
                 execution: EngineExecutionControl::default(),
                 trusted_ssa: None,
@@ -7148,7 +7102,6 @@ mod tests {
         assert_eq!(request.analysis.ptr_bits, 64);
         assert_eq!(request.analysis.semantic_mode, EngineSemanticMode::Full);
         assert!(request.analysis.include_interproc_summary_set);
-        assert_eq!(request.analysis.interproc_max_iterations, 3);
     }
 
     #[test]

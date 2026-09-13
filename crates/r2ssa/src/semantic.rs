@@ -6801,11 +6801,12 @@ fn collect_stack_geometry_certificate(
     // bits refused the one instruction that establishes the frame base, and
     // with it the whole stack-pointer chain: the prologue's decrement then
     // rendered as `SP_0 = SP_0 - 112`, reading an entry stack pointer no
-    // statement had written. The walk is bounded because it is a chain, not a
-    // search.
+    // statement had written. The walk ends because each step moves to a value
+    // it has not seen and the graph is finite.
     let is_constant = |value: ValueId| {
         let mut current = value;
-        for _ in 0..8 {
+        let mut visited = BTreeSet::new();
+        while visited.insert(current) {
             let Some(resolved) = graph.value(current) else {
                 return false;
             };
@@ -8450,10 +8451,13 @@ fn source_aggregate_layout(
 /// The bits a value carries when it is constant, followed through copies.
 ///
 /// A constant-space varnode states its value as its storage offset, which is
-/// how a value too wide for the bit accessor is still proved constant.
+/// how a value too wide for the bit accessor is still proved constant. The
+/// walk ends because each step moves to a value it has not seen and the graph
+/// is finite.
 fn constant_bits_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64> {
     let mut current = value;
-    for _ in 0..8 {
+    let mut visited = BTreeSet::new();
+    while visited.insert(current) {
         let carrier = graph.value(current)?;
         if let Some(bits) = carrier.var.constant_bits() {
             return Some(bits);
@@ -8739,7 +8743,7 @@ fn expression_phi_has_single_canonical_root(
     };
     let mut roots = inst.inputs.iter().filter_map(|input| {
         let var = graph.value(*input).map(|value| &value.var)?;
-        let root = prep_facts.canonical_root_of(var).unwrap_or(var);
+        let root = prep_facts.canonical_root(var);
         graph.value_id_for_var(root).or(Some(*input))
     });
     let Some(first) = roots.next() else {
@@ -8751,12 +8755,18 @@ fn expression_phi_has_single_canonical_root(
     roots.all(|root| root == first)
 }
 
+/// Whether any value this one is computed from reads memory.
+///
+/// The visited set is the termination argument: the def-use graph is finite
+/// and each value is expanded once, so the walk is linear in it. A depth bound
+/// here would answer "no memory read" for a dependence it declined to look
+/// at, which is the one answer that must never be guessed.
 fn expression_value_depends_on_memory_read(graph: &SsaGraph, value: ValueId) -> bool {
-    let mut stack = vec![(value, 0usize)];
+    let mut stack = vec![value];
     let mut visited = BTreeSet::new();
 
-    while let Some((current, depth)) = stack.pop() {
-        if depth >= 32 || !visited.insert(current) {
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
             continue;
         }
         let Some(inst) = graph
@@ -8768,7 +8778,7 @@ fn expression_value_depends_on_memory_read(graph: &SsaGraph, value: ValueId) -> 
         if matches!(&inst.payload, InstPayload::Op(op) if op.is_memory_read()) {
             return true;
         }
-        stack.extend(inst.inputs.iter().map(|input| (*input, depth + 1)));
+        stack.extend(inst.inputs.iter().copied());
     }
 
     false
@@ -12416,12 +12426,11 @@ fn canonical_compare_operand(
     copy_sources: &BTreeMap<SSAVar, SSAVar>,
     var: &SSAVar,
 ) -> Option<ValueId> {
+    // The visited set is the whole termination argument: each step moves to a
+    // var it has not seen and the map is finite.
     let mut current = var;
     let mut visited = BTreeSet::new();
-    for _ in 0..32 {
-        if !visited.insert(current) {
-            return None;
-        }
+    while visited.insert(current) {
         let Some(source) = copy_sources.get(current) else {
             return graph.value_id_for_var(current);
         };
@@ -12856,20 +12865,7 @@ fn resolve_entry_stack_root(
 }
 
 fn canonical_value_root<'a>(facts: Option<&'a DecompilePrepFacts>, var: &'a SSAVar) -> &'a SSAVar {
-    let Some(facts) = facts else {
-        return var;
-    };
-    let mut current = var;
-    for _ in 0..32 {
-        let Some(next) = facts.canonical_root_of(current) else {
-            break;
-        };
-        if next == current {
-            break;
-        }
-        current = next;
-    }
-    current
+    facts.map_or(var, |facts| facts.canonical_root(var))
 }
 
 fn const_value(var: &SSAVar) -> Option<u64> {

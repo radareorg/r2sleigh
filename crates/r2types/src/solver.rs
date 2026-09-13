@@ -642,6 +642,17 @@ fn solve_worklist<K: SolverNode>(
 
     state.diagnostics.converged = queue.is_empty();
     if !state.diagnostics.converged {
+        // The cap decides the answer here, so it says how far it got and over
+        // what: the bound has to be derived from these, not chosen.
+        r2il::refusal_evidence!(
+            "type-solver-cap",
+            "worklist stopped at {} iterations with {} constraints queued; vars={} constraints={} pops={}",
+            max_iterations,
+            queue.len(),
+            state.diagnostics.var_count,
+            state.diagnostics.rewritten_constraints,
+            state.diagnostics.queue_pops
+        );
         state.diagnostics.warnings.push(format!(
             "type solver reached iteration cap ({})",
             max_iterations
@@ -773,6 +784,13 @@ fn solve_reference<K: SolverNode>(
     }
 
     if !state.diagnostics.converged {
+        r2il::refusal_evidence!(
+            "type-solver-cap",
+            "round-robin stopped at {} iterations; vars={} constraints={}",
+            max_iterations,
+            state.diagnostics.var_count,
+            state.diagnostics.rewritten_constraints
+        );
         state.diagnostics.warnings.push(format!(
             "type solver reached iteration cap ({})",
             max_iterations

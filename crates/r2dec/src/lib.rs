@@ -5828,7 +5828,6 @@ mod tests {
                 name: None,
                 prepared: &foreign,
             }],
-            r2ssa::InterprocSolveConfig::default(),
         )
         .expect("foreign prepared summary");
         let request = r2types::TypeWritebackAnalysisRequest::new(
