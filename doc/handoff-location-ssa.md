@@ -109,6 +109,63 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -8. **What the whole command costs, and the three quadratics inside it.**
+     With the bytes named, the same instrument was pointed at the clock. One
+     command, `radare2 -c 'a:sla; aaa; pd:s @@F'` on bzip2 -O2, 114 functions:
+
+         24.4 s, 696 MB   before this arc
+         16.1 s, 666 MB   after
+
+     A sample of the run, symbolicated with `tests/corpus/locked_sample.sh`,
+     splits it: preparing the SSA is 63 per cent of the command and rendering
+     is 32, so the half nobody had looked at was the larger one. Within
+     preparation, `propagate_stack_roots` was 10 per cent and the semantic
+     collection 18.
+
+     Three fixed points were computing their answer by copying it.
+
+     *The control domains* iterated `while changed`, copying the whole
+     block-to-state map at the top of every round so a round could read the
+     previous round's answers, and every state started as the entire guard
+     universe. It is a worklist now, reading the states as they stand: a
+     monotone decreasing iteration from the top element reaches the same
+     greatest fixed point in any order, and a block is revisited only when a
+     predecessor moves. 241 ms to 13 on one function.
+
+     *Liveness of the rename identities* rebuilt an ordered set per block per
+     round and constructed each operand's identity -- name and all -- every
+     time it looked at an operation. The identities a function can name are
+     fixed before the walk starts, so they are numbered once, each operation's
+     effect is recorded once, and the fixed point is bitwise.
+
+     *The post-loop merge walk* seeded itself with every merge outside the loop
+     and then discarded almost all of them on their first line, once per loop.
+     It is seeded with the merges whose span a carrier actually holds.
+
+     Two more of the same shape were not fixed points but repeated questions.
+     The canonical-root walk allocated an ordered set on every call to detect a
+     cycle it could count instead, and it is called three and a half million
+     times for one five-hundred-block function; the map it walks is now hashed
+     rather than ordered, since nothing iterates it. And a merge's incoming
+     roots were resolved once per question rather than once per merge.
+
+     The largest single churn was in the render: `cleanup_recurse` deep-copied
+     every statement it passed through, three times per block, so a statement
+     at depth d was copied three times at every level above it. Moving them
+     through took a render's allocations from 8.1 million to 6.6.
+
+     What the profile says is left, as a share of the whole command: comparing
+     and hashing variables, about 30 per cent. `SSAVar` carries its name and is
+     compared by it, so every ordered map keyed by a variable walks its tree
+     comparing strings behind pointers. That is the same finding the byte
+     measurement reached from the other side, and the answer is the same: the
+     variable should be a dense index into the function that owns it, with the
+     name a rendering of the storage. Two attempts at a cheaper version were
+     measured and rejected -- a comparison prefix inside the variable made the
+     whole command 1 per cent faster and every operation eight bytes wider, and
+     hashing that prefix instead of the name put every temporary in one bucket
+     and cost 65 per cent. There is no cheap version; the index is the work.
+
   -7. **Half of what a decompile holds was a second copy of something.** With
      the stage marks reporting live bytes as well as their high-water mark, the
      climb to the peak became a list of retained blocks, and seven of them were
