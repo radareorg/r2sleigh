@@ -484,13 +484,19 @@ impl<'a> FoldingContext<'a> {
                     cells.push(crate::observation_journal::GapCell::Value(output));
                 }
             }
+            // A claimed read sits where its instruction is, not where the
+            // marker stands: a reader the gap took from the block after the
+            // anchor still reads after that block's own writes.
+            let reader_block = graph
+                .block(instruction.block)
+                .map_or(block_addr, |block| block.addr);
             for (input_idx, input) in instruction.inputs.iter().copied().enumerate() {
                 cells.push(crate::observation_journal::GapCell::Use {
                     site: UseSite {
                         inst: *inst,
                         input_idx,
                     },
-                    block: block_addr,
+                    block: reader_block,
                 });
                 // A value the caller supplied has no defining statement to
                 // answer for it; its cell is answered wherever it is read. If
