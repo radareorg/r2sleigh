@@ -10688,14 +10688,34 @@ fn loop_carrier_member_rows(
         }
     }
 
-    let mut pending = graph
-        .insts
-        .iter()
-        .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
-        .filter_map(|inst| graph.block(inst.block).map(|block| (inst.id, block.addr)))
-        .filter(|(_, block_addr)| *block_addr != header && !loop_body.contains(block_addr))
-        .map(|(inst, _)| inst)
-        .collect::<BTreeSet<_>>();
+    // Seed the walk with the merges that can match a carrier, not with every
+    // merge outside the loop.
+    //
+    // The body's first act is to look the merge's span up among the carriers'
+    // spans and give up on a miss, and almost every merge in a function misses,
+    // so the ordered set was built with thousands of entries per loop and
+    // emptied again doing nothing. The guards below are the body's own, in its
+    // order, so what is skipped here is exactly what it would have skipped.
+    let mut pending = BTreeSet::new();
+    for inst in &graph.insts {
+        let InstPayload::Phi { .. } = &inst.payload else {
+            continue;
+        };
+        let Some(block) = graph.block(inst.block) else {
+            continue;
+        };
+        if block.addr == header || loop_body.contains(&block.addr) {
+            continue;
+        }
+        let output = inst.output?;
+        if inst.inputs.len() < 2 {
+            continue;
+        }
+        if !roots_by_span.contains_key(&storage_spans.span_of(output)?) {
+            continue;
+        }
+        pending.insert(inst.id);
+    }
     while let Some(inst_id) = pending.pop_first() {
         let inst = graph.inst(inst_id)?;
         let InstPayload::Phi { .. } = &inst.payload else {

@@ -2810,7 +2810,10 @@ mod tests {
             .next()
             .expect("source obligation");
         obligation.source = SemanticSourceSite::GraphInstruction(InstId(u32::MAX));
-        assert!(!inventory.is_complete());
+        // The inventory decides this once, where it is built, so a mapping
+        // broken afterwards is asked of the derivation rather than of the
+        // answer it recorded before the break.
+        assert!(!inventory.derive_is_complete());
     }
 
     #[test]
