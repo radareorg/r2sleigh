@@ -155,11 +155,9 @@ pub struct GraphValue {
     pub canonical_storage: Option<CanonicalStorageId>,
 }
 
+/// Graph instructions keep the canonical operation inline, so reading one is
+/// not a pointer chase and building one is not an allocation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "graph instructions keep canonical SSA operations inline to avoid one heap allocation per instruction"
-)]
 pub enum InstPayload {
     Phi { predecessors: Vec<BlockId> },
     Op(SSAOp),

@@ -95,27 +95,118 @@ impl SSAVarNameKind {
 ///
 /// In SSA form, each assignment creates a new version of the variable.
 /// For example, if `RAX` is written twice, we get `RAX_0` and `RAX_1`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "SSAVarFields", into = "SSAVarFields")]
 pub struct SSAVar {
     /// The base name of the variable (e.g., "RAX", "tmp:0x1000", "const:0x42").
-    name: String,
+    ///
+    /// A boxed string rather than a growable one: a variable's name is set
+    /// when it is made and never appended to, and the capacity word is eight
+    /// bytes on every variable of every operation of every function.
+    name: Box<str>,
+    /// Exact source bitvector for constants, zero where `is_constant` is
+    /// false so that two non-constants compare equal.
+    ///
+    /// This is semantic data. The `name` field is presentation-only and must
+    /// not be parsed by proof-bearing consumers to recover a constant value.
+    /// Held beside a flag rather than inside an `Option`, which has no spare
+    /// bit pattern for a sixty-four bit value and so costs sixteen bytes.
+    constant_bits: u64,
     /// The version number (0 for initial/input, incremented on each write).
     pub version: u32,
     /// Size in bytes.
     pub size: u32,
-    /// Exact source bitvector for constants.
-    ///
-    /// This is semantic data. The `name` field is presentation-only and must
-    /// not be parsed by proof-bearing consumers to recover a constant value.
-    #[serde(default)]
-    constant_bits: Option<u64>,
     /// Deterministic construction-time discriminator for two exact source
     /// storages that project to the same display name and width.
     ///
     /// This is identity only, not storage authority. Canonical storage remains
     /// in the source-retained graph facts.
+    rename_disambiguator: u32,
+    /// Whether `constant_bits` is a constant this variable carries.
+    is_constant: bool,
+}
+
+/// A variable as it is written down.
+///
+/// The ordering the identity fields give is the one this shape gives, read in
+/// this order: a variable that carries no constant sorts below one that does,
+/// exactly as `None` sorts below `Some`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SSAVarFields {
+    name: String,
+    version: u32,
+    size: u32,
+    #[serde(default)]
+    constant_bits: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     rename_disambiguator: u32,
+}
+
+impl From<SSAVarFields> for SSAVar {
+    fn from(fields: SSAVarFields) -> Self {
+        Self {
+            name: fields.name.into_boxed_str(),
+            constant_bits: fields.constant_bits.unwrap_or(0),
+            version: fields.version,
+            size: fields.size,
+            rename_disambiguator: fields.rename_disambiguator,
+            is_constant: fields.constant_bits.is_some(),
+        }
+    }
+}
+
+impl From<SSAVar> for SSAVarFields {
+    fn from(var: SSAVar) -> Self {
+        Self {
+            name: var.name.into_string(),
+            version: var.version,
+            size: var.size,
+            constant_bits: var.is_constant.then_some(var.constant_bits),
+            rename_disambiguator: var.rename_disambiguator,
+        }
+    }
+}
+
+impl PartialEq for SSAVar {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.size == other.size
+            && self.is_constant == other.is_constant
+            && self.constant_bits == other.constant_bits
+            && self.rename_disambiguator == other.rename_disambiguator
+            && self.name == other.name
+    }
+}
+
+impl Eq for SSAVar {}
+
+impl Ord for SSAVar {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name
+            .cmp(&other.name)
+            .then_with(|| self.version.cmp(&other.version))
+            .then_with(|| self.size.cmp(&other.size))
+            .then_with(|| self.is_constant.cmp(&other.is_constant))
+            .then_with(|| self.constant_bits.cmp(&other.constant_bits))
+            .then_with(|| self.rename_disambiguator.cmp(&other.rename_disambiguator))
+    }
+}
+
+impl PartialOrd for SSAVar {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for SSAVar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.version.hash(state);
+        self.size.hash(state);
+        self.is_constant.hash(state);
+        self.constant_bits.hash(state);
+        self.rename_disambiguator.hash(state);
+    }
 }
 
 const fn is_zero(value: &u32) -> bool {
@@ -126,11 +217,12 @@ impl SSAVar {
     /// Create a new SSA variable.
     pub fn new(name: impl Into<String>, version: u32, size: u32) -> Self {
         Self {
-            name: name.into(),
+            name: name.into().into_boxed_str(),
+            constant_bits: 0,
             version,
             size,
-            constant_bits: None,
             rename_disambiguator: 0,
+            is_constant: false,
         }
     }
 
@@ -158,11 +250,8 @@ impl SSAVar {
     /// it this way.
     pub fn renamed(&self, name: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
-            version: self.version,
-            size: self.size,
-            constant_bits: self.constant_bits,
-            rename_disambiguator: self.rename_disambiguator,
+            name: name.into().into_boxed_str(),
+            ..self.clone()
         }
     }
 
@@ -178,11 +267,8 @@ impl SSAVar {
 
     pub(crate) fn with_size(&self, size: u32) -> Self {
         Self {
-            name: self.name.clone(),
-            version: self.version,
             size,
-            constant_bits: self.constant_bits,
-            rename_disambiguator: self.rename_disambiguator,
+            ..self.clone()
         }
     }
 
@@ -194,11 +280,12 @@ impl SSAVar {
     /// Create a constant SSA variable.
     pub fn constant(value: u64, size: u32) -> Self {
         Self {
-            name: format!("const:{:x}", value),
+            name: format!("const:{value:x}").into_boxed_str(),
+            constant_bits: value,
             version: 0,
             size,
-            constant_bits: Some(value),
             rename_disambiguator: 0,
+            is_constant: true,
         }
     }
 
@@ -208,11 +295,8 @@ impl SSAVar {
     /// silently wrapping and aliasing a different SSA definition.
     pub fn next_version(&self) -> Option<Self> {
         Some(Self {
-            name: self.name.clone(),
             version: self.version.checked_add(1)?,
-            size: self.size,
-            constant_bits: self.constant_bits,
-            rename_disambiguator: self.rename_disambiguator,
+            ..self.clone()
         })
     }
 
@@ -221,7 +305,11 @@ impl SSAVar {
     /// Unlike legacy helpers that parse `name`, this accessor is safe to use
     /// as semantic evidence.
     pub const fn constant_bits(&self) -> Option<u64> {
-        self.constant_bits
+        if self.is_constant {
+            Some(self.constant_bits)
+        } else {
+            None
+        }
     }
 
     /// Get a display name like "RAX_0" or "RAX_1".
