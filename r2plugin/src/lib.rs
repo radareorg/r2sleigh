@@ -2601,7 +2601,7 @@ fn r2sleigh_engine_decompile_trusted_output(
         callees,
         capture: _,
     } = ingress;
-    let block_count = trusted.source_blocks().len();
+    let block_count = trusted.source_block_count();
     let function_input = trusted_engine_function_input(&trusted);
     let ptr_bits = helpers::effective_ptr_bits(trusted.arch_spec());
     let decompile_input = r2engine::EngineFunctionDecompileRequestInput::single_function(

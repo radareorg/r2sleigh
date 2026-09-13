@@ -2303,11 +2303,17 @@ impl EngineAnalyzeRequest {
         }
     }
 
-    /// The blocks this request's SSA is built from, wherever they live.
+    /// The blocks this request's SSA is built from, when the request is what
+    /// owns them. A trusted artifact has already consumed its own.
     pub fn source_blocks(&self) -> &[R2ILBlock] {
+        &self.blocks
+    }
+
+    /// How many blocks were lifted, asking whoever owns them.
+    pub fn lifted_block_count(&self) -> usize {
         match self.trusted_ssa.as_deref() {
-            Some(trusted) => trusted.source_blocks(),
-            None => &self.blocks,
+            Some(trusted) => trusted.source_block_count(),
+            None => self.blocks.len(),
         }
     }
 
@@ -2418,7 +2424,7 @@ impl EngineFunctionDecompileRequestInput {
     /// How many blocks were lifted, asking whoever owns them.
     fn lifted_block_count(&self) -> usize {
         match self.trusted_ssa.as_deref() {
-            Some(trusted) => trusted.source_blocks().len(),
+            Some(trusted) => trusted.source_block_count(),
             None => self.function.blocks.len(),
         }
     }
@@ -3033,7 +3039,7 @@ impl EngineSession {
                 *refusal.diagnostics,
             );
         }
-        let actual_lifted_blocks = analysis_request.source_blocks().len();
+        let actual_lifted_blocks = analysis_request.lifted_block_count();
         let input_quality_facts = if let Some(quality) = input_quality {
             let reason = quality.refusal_reason_for_actual_lifted_blocks(actual_lifted_blocks);
             let facts = function_input_quality_facts(quality, actual_lifted_blocks, reason.clone());

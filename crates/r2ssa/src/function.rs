@@ -329,7 +329,7 @@ enum SsaArtifactProvenance {
 pub struct TrustedSsaArtifact {
     artifact: Arc<SsaArtifact>,
     lift_authority: GenuineLiftedFunctionAuthority,
-    source_blocks: Arc<[R2ILBlock]>,
+    source_block_count: usize,
     arch: ArchSpec,
 }
 
@@ -2066,7 +2066,7 @@ impl TrustedSsaArtifact {
         Ok(Self {
             artifact: Arc::new(artifact),
             lift_authority,
-            source_blocks: blocks.into(),
+            source_block_count: blocks.len(),
             arch,
         })
     }
@@ -2097,11 +2097,17 @@ impl TrustedSsaArtifact {
         &self.lift_authority
     }
 
-    /// Exact canonical Sleigh P-code retained from the trusted lift event.
-    /// Native spans, including zero-op spans, remain separate source evidence
-    /// in the artifact obligation inventory.
-    pub fn source_blocks(&self) -> &[R2ILBlock] {
-        &self.source_blocks
+    /// How many blocks the trusted lift produced.
+    ///
+    /// The p-code itself used to be retained here as evidence of the lift
+    /// event. Nothing read it: preparation consumes it into the SSA function
+    /// and the graph, native spans are separate evidence in the obligation
+    /// inventory, and the only question anyone asked of the blocks afterwards
+    /// was how many there were. On one 501-block function that retention was
+    /// fourteen megabytes, held for the life of the artifact and of the cache
+    /// entry that keeps it.
+    pub const fn source_block_count(&self) -> usize {
+        self.source_block_count
     }
 
     /// Architecture extracted from the same embedded trusted Sleigh profile.
