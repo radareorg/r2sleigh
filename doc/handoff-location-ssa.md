@@ -139,14 +139,24 @@ learn.
        the base of an indexed access that is not displaced below its origin.
        Before this, the folded displacement in `buf + len - 3` minted a
        one-byte object at `buf - 3` and stole the buffer's accesses.
-     * **An indexed root does not propagate through a subtraction.**
-       `indexed_stack_address_root_from_add` has no `IntSub` counterpart, so
-       `buf + i - 3` has no stack root at all and its store lands on
-       `EscapedUnknown`. In `file_uncompress` that leaves the 1032-byte buffer
-       sized by its one remaining byte access: `uint8_t stack_m1080;` with
-       `&stack_m1080 + RBX_1` written past it. The rendering is wrong C and no
-       obligation catches it. Fix the propagation, then re-check the
-       `DisplacedIndexBase` array-layout refusal this added.
+     * **An indexed root now propagates through a constant subtraction**
+       (`indexed_stack_address_root_from_sub`), so `buf + i - 3` is inside
+       `buf` at an offset nothing states and its store lands on the buffer
+       rather than on `EscapedUnknown`. The index it inherits no longer
+       measures from the base, so the address is marked displaced and the
+       array layout refuses it.
+
+       **The extent is still wrong and the rendering is still wrong C.**
+       `file_uncompress` declares `uint8_t stack_m1080;` for a 1032-byte
+       buffer and writes `&stack_m1080 + RBX_1` past it, because an element
+       access states the element's width and nothing states the object's
+       extent. Sizing such an object by the gap to its next neighbour was
+       tried, in the slot certificate, the callee-allocation certificate and
+       both sides of the plan's identity check: it fixes this declaration and
+       costs ten functions (777 to 767), because the gap is not a proof of
+       extent either -- it covers whatever the model did not discover. What
+       this needs is a real extent: the size argument the call itself states
+       (`__snprintf_chk(buf, 0x400, ...)`), radare2's slot list, or DWARF.
      * **`f7a0` still refuses**, now `RenderedValueRequired` on a bound
        `ValueId(31)` with `UnobservedValueCellAtSeal`
        (`observation_journal.rs:3782`). Its earlier
@@ -154,6 +164,30 @@ learn.
        dereferences an address expression now has that address ordered before
        the store it serves (`direct_stack_assignment_observations` recurses
        through `Deref`, `AddrOf` and non-assign `Binary`).
+
+  -3. **The fork carries three commits and nothing else.** It was seventeen
+     ahead of upstream and zero behind; twelve of those were already upstream
+     in equivalent form and were dropped by a rebase, and the withdrawn
+     signature query and its revert were removed as a pair. What is left is
+     the three open pull requests: the post-analysis hook depth (26708),
+     dropping the unused plugin surface (26702), and resolving a function's
+     calling convention when it is assigned (26733, which replaced the
+     withdrawn 26707 after the maintainer chose that shape).
+
+     The plugin moved to that shape with it. Both signature reads call the
+     plain `r_anal_function_get_signature`, which no longer loads type
+     databases or resolves a marker; the convention accessor is called
+     directly because it no longer writes; and two parameters that existed
+     only to carry the old workaround are gone.
+
+     **The one place the reviewed API does not answer the plugin's question**
+     is whether DWARF linked a prototype to an address. `RAnalFunctionSignature.origin`
+     says an address selected the prototype, which a plain `tl` type link also
+     does, while the promotions that ask (`snapshot_promote_exact_dwarf_stack_homes`,
+     the frame-pointer storage proof) are DWARF proofs. Reading the origin
+     instead cost ten functions before the narrower question was restored;
+     `snapshot_function_dwarf_prototype_linked` now reads the `fcnlink` key in
+     the plugin, which is where that policy belongs.
 
   -1. **Variadic arity: what the format-parameter unification left open.**
      A callsite now carries `SourceFormatParameterRule` for any callee whose

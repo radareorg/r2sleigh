@@ -39,7 +39,7 @@ static bool cc_parse_return_mechanism(const char *record, RAnalCCReturnMechanism
 static bool cc_parse_stack_allocation_contract(const char *record, const char *red_zone_record, RAnalCCStackAllocationContract *contract);
 static const char *cc_regset(RAnal *anal, const char *convention, const char *field);
 static bool r_anal_cc_regset_contains(const char *regset, const char *reg);
-static RAnalFunctionSignature *function_signature_build(RAnal *anal, RAnalFunction *function, char *type_name, bool load_types);
+static RAnalFunctionSignature *function_signature_build(RAnal *anal, RAnalFunction *function, char *type_name);
 static char *function_signature_try_type_name(Sdb *types, const char *candidate);
 static int var_ptr_comparator(RAnalVar * const *a, RAnalVar * const *b);
 static BaseTypeAppendResult append_base_type_if_unseen(RAnal *anal, RList *types, Sdb *seen, const char *kind, const char *sname);
@@ -52,7 +52,7 @@ static bool cc_parse_u64_field(const char **sp, const char *end, ut64 limit, cha
 static const char *dyncc_intern(RAnal *anal, const char *p, size_t len);
 static bool dyncc_parse(const char *cc, RAnalDynCC *out);
 static void function_param_free(RAnalFunctionParam *param);
-static const char *function_signature_callconv(RAnal *anal, RAnalFunction *fcn, const char *type_name, bool resolve_dynamic);
+static const char *function_signature_callconv(RAnal *anal, RAnalFunction *fcn, const char *type_name);
 static bool function_signature_fallback_to_vars(RAnal *anal, RAnalFunction *fcn, RAnalFunctionSignature *signature);
 static bool function_signature_is_noreturn(Sdb *types, const char *type_name, bool fallback);
 static char *function_signature_string(const char *name, const char *ret_type, RList *params, bool sanitize_name, bool fill_defaults);
@@ -702,12 +702,14 @@ static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, R
 }
 static RAnalFunctionSignature *fcn_context_collect_signature(RAnalFunction *fcn) {
 	R_RETURN_VAL_IF_FAIL (fcn, NULL);
-	RAnalFunctionSignature *signature = r_anal_function_get_signature_current (fcn);
-	const char *fcncc = fcn->callconv;
+	RAnalFunctionSignature *signature = r_anal_function_get_signature (fcn);
+	const char *fcncc = r_anal_function_cc (fcn);
 	if (signature || (!R_STR_ISNOTEMPTY (fcncc) && !fcn->is_noreturn)) {
 		return signature;
 	}
+	// No prototype at all: what stands here comes from the function itself.
 	signature = R_NEW0 (RAnalFunctionSignature);
+	signature->origin = R_ANAL_FUNCTION_SIGNATURE_ORIGIN_VARIABLES;
 	signature->params = r_list_new ();
 	if (!signature->params) {
 		r_anal_function_signature_free (signature);
@@ -782,7 +784,7 @@ static RAnalFunctionSignature *fcn_context_resolve_callee_signature(RAnal *anal,
 	R_RETURN_VAL_IF_FAIL (anal, NULL);
 	callee_fcn = r_anal_get_function_at (anal, addr);
 	RAnalFunctionSignature *signature = callee_fcn
-		? r_anal_function_get_signature_current (callee_fcn): NULL;
+		? r_anal_function_get_signature (callee_fcn): NULL;
 	// The body's own noreturn finding is part of what the signature says.
 	if (signature && callee_fcn->is_noreturn) {
 		signature->noreturn = true;
@@ -2639,7 +2641,7 @@ static bool snapshot_promote_exact_dwarf_stack_homes(
 	RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx,
 	RAnalFunctionInterfaceSnapshot *interface, const char *calling_convention) {
 	if (!ctx->signature
-		|| !r_anal_function_has_address_linked_signature_current (fcn)) {
+		|| ctx->signature->origin != R_ANAL_FUNCTION_SIGNATURE_ORIGIN_ADDRESS) {
 		return true;
 	}
 	const size_t parameter_count = (size_t)r_list_length (ctx->signature->params);
@@ -3296,8 +3298,8 @@ static bool function_interface_snapshot_collect(
 			interface->stack_pointer_preserved_across_calls,
 			r_str_get (fp_name), interface->frame_pointer_preserved_across_calls);
 	}
-	const bool address_linked =
-		r_anal_function_has_address_linked_signature_current (fcn);
+	const bool address_linked = ctx->signature
+		&& ctx->signature->origin == R_ANAL_FUNCTION_SIGNATURE_ORIGIN_ADDRESS;
 	if (!ctx->signature || !address_linked) {
 		// Leaving without a word here hid the largest refusal cause in the
 		// benchmark. A function that takes this exit carries no interface into
@@ -3614,8 +3616,8 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 		const RAnalFunctionInterfaceSnapshot *interface,
 		RAnalSnapshotRegisterStorage *storage) {
 	if (!interface->complete
-		|| !r_anal_function_has_address_linked_signature_current (
-			(RAnalFunction *)fcn)) {
+		|| !ctx->signature
+		|| ctx->signature->origin != R_ANAL_FUNCTION_SIGNATURE_ORIGIN_ADDRESS) {
 		return true;
 	}
 	R2SleighDwarfFrameBase proof = {0};
@@ -6184,7 +6186,7 @@ static RAnalFunctionSignature *r_anal_function_signature_from_type_name(RAnal *a
 	if (!type_name) {
 		return NULL;
 	}
-	return function_signature_build (anal, NULL, type_name, false);
+	return function_signature_build (anal, NULL, type_name);
 }
 
 static void r_anal_function_vars_cache_init_readonly(RAnal *anal, RAnalFcnVarsCache *cache, RAnalFunction *fcn) {
@@ -6360,7 +6362,7 @@ static bool r_anal_cc_regset_contains(const char *regset, const char *reg) {
 	return false;
 }
 
-static RAnalFunctionSignature *function_signature_build(RAnal *anal, RAnalFunction *function, char *type_name, bool load_types) {
+static RAnalFunctionSignature *function_signature_build(RAnal *anal, RAnalFunction *function, char *type_name) {
 	int i;
 	RAnalFunctionSignature *signature = NULL;
 
@@ -6396,8 +6398,7 @@ static RAnalFunctionSignature *function_signature_build(RAnal *anal, RAnalFuncti
 	if (!signature->signature) {
 		goto beach;
 	}
-	const char *callconv = function_signature_callconv (
-		anal, function, type_name, load_types);
+	const char *callconv = function_signature_callconv (anal, function, type_name);
 	if (callconv) {
 		signature->callconv = strdup (callconv);
 		if (!signature->callconv) {
@@ -6629,7 +6630,7 @@ static void function_param_free(RAnalFunctionParam *param) {
 	free (param);
 }
 
-static const char *function_signature_callconv(RAnal *anal, RAnalFunction *fcn, const char *type_name, bool resolve_dynamic) {
+static const char *function_signature_callconv(RAnal *anal, RAnalFunction *fcn, const char *type_name) {
 	const char *callconv = NULL;
 
 	R_RETURN_VAL_IF_FAIL (anal, NULL);
@@ -6639,7 +6640,7 @@ static const char *function_signature_callconv(RAnal *anal, RAnalFunction *fcn, 
 	if (R_STR_ISNOTEMPTY (callconv) && r_anal_cc_exist (anal, callconv)) {
 		return callconv;
 	}
-	const char *fcncc = !fcn? NULL: resolve_dynamic? r_anal_function_cc (fcn): fcn->callconv;
+	const char *fcncc = fcn? r_anal_function_cc (fcn): NULL;
 	if (R_STR_ISNOTEMPTY (fcncc) && r_anal_cc_exist (anal, fcncc)) {
 		callconv = fcncc;
 	}
