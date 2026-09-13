@@ -655,12 +655,23 @@ typedef struct {
 	// than being assigned a signedness it may not have.
 	RAnalSnapshotTypeKind char_kind;
 	bool char_kind_known;
+	// A pointer needs its pointee to exist, not to have a layout. Laying the
+	// pointee out immediately made a struct pair that points at each other
+	// unbuildable, so a declared aggregate waits here until its members can be
+	// placed. One entry per aggregate slot; `num_pending` is the queue length.
+	bool *aggregate_laid_out;
+	bool *aggregate_in_progress;
+	ut32 *pending_aggregates;
+	size_t num_pending;
 } SnapshotTypeGraphBuilder;
 
 typedef enum {
 	SNAPSHOT_TYPE_GRAPH_UNSUPPORTED = 0,
 	SNAPSHOT_TYPE_GRAPH_VALID,
 	SNAPSHOT_TYPE_GRAPH_NO_MEMORY,
+	// A function type, which is not an object. Only a pointer to one is
+	// representable, so every other caller treats this as unsupported.
+	SNAPSHOT_TYPE_GRAPH_FUNCTION_TYPE,
 } SnapshotTypeGraphResult;
 
 typedef enum {

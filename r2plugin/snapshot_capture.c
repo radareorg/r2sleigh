@@ -219,6 +219,7 @@ static RList *snapshot_type_resolver_capture(RAnal *anal, const RAnalFunctionSna
 static bool snapshot_arch_char_kind(const char *arch, RAnalSnapshotTypeKind *kind);
 static const RAnalBaseType *snapshot_type_find_unique_base( const RList *base_types, const char *name, RAnalBaseTypeKind kind, bool *ambiguous);
 static const RAnalBaseType *snapshot_type_find_bare_base( const SnapshotTypeGraphBuilder *builder, const char *name, bool *ambiguous);
+static bool snapshot_type_spec_names_word(const char *spec, const char *word);
 static void snapshot_type_strip_qualifiers(char *spec);
 static char *snapshot_type_member_element_spec(const char *spec, ut64 *count);
 static bool snapshot_type_spec_rejected(const char *spec);
@@ -230,8 +231,13 @@ static SnapshotTypeGraphResult snapshot_type_add_integer( SnapshotTypeGraphBuild
 static bool snapshot_type_align_up(ut64 value, ut64 alignment, ut64 *result);
 static SnapshotTypeGraphResult snapshot_type_resolve_struct( const SnapshotTypeGraphBuilder *builder, const char *type, const RAnalBaseType **result_base);
 static SnapshotTypeGraphResult snapshot_type_add_struct( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
+static SnapshotTypeGraphResult snapshot_type_declare_struct( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id, ut32 *out_aggregate_index);
+static SnapshotTypeGraphResult snapshot_type_layout_struct( SnapshotTypeGraphBuilder *builder, ut32 aggregate_index);
+static SnapshotTypeGraphResult snapshot_type_place_struct_members( SnapshotTypeGraphBuilder *builder, ut32 aggregate_index);
+static SnapshotTypeGraphResult snapshot_type_drain_pending( SnapshotTypeGraphBuilder *builder);
 static void snapshot_type_root_report(const char *stage, const char *type, const char *spec, SnapshotTypeGraphResult result);
 static SnapshotTypeGraphResult snapshot_type_add_pointer( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
+static SnapshotTypeGraphResult snapshot_type_finish_pointer( SnapshotTypeGraphBuilder *builder, RAnalSnapshotTypeId target_id, RAnalSnapshotTypeId *result_id);
 static SnapshotTypeGraphResult snapshot_type_add_root( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
 static bool snapshot_type_carrier_project( const RAnalSnapshotTypeGraph *graph, RAnalSnapshotTypeId type_id, const RAnalSnapshotRegisterStorage *storage, RAnalSnapshotCarrierProjection *projection);
 static SnapshotTypeGraphResult function_type_graph_snapshot_collect( RAnal *anal, const RAnalFcnContext *ctx, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits);
@@ -3871,9 +3877,26 @@ static const RAnalBaseType *snapshot_type_find_bare_base(
 	}
 	return found;
 }
+// Whether a whole identifier in the spec is this word. A substring test says
+// yes to `atomic_file_flags` for `atomic`, which is an ordinary enum.
+static bool snapshot_type_spec_names_word(const char *spec, const char *word) {
+	const size_t length = strlen (word);
+	const char *cursor = spec;
+	while ((cursor = strstr (cursor, word))) {
+		const bool starts_word = cursor == spec || !(isalnum ((unsigned char)cursor[-1])
+			|| cursor[-1] == '_');
+		const char *after = cursor + length;
+		const bool ends_word = !(isalnum ((unsigned char)*after) || *after == '_');
+		if (starts_word && ends_word) {
+			return true;
+		}
+		cursor = after;
+	}
+	return false;
+}
 static void snapshot_type_strip_qualifiers(char *spec) {
 	static const char *qualifiers[] = {
-		"const", "volatile", "restrict", "__restrict", "_Atomic", NULL
+		"const", "volatile", "restrict", "__restrict", NULL
 	};
 	size_t i;
 	for (i = 0; qualifiers[i]; i++) {
@@ -3980,13 +4003,23 @@ static bool snapshot_type_spec_is_function_pointer(const char *spec) {
 	return star && star > spec && spec[len - 1] == ')'
 		&& strchr (spec, '[') == NULL && strchr (spec, ']') == NULL;
 }
+// `void ()` is a function type, which `error_handler_func` typedefs. It is not
+// an object, but a pointer to it is exactly a pointer to code.
+static bool snapshot_type_spec_is_function_type(const char *spec) {
+	const size_t len = strlen (spec);
+	return len && !snapshot_type_spec_is_function_pointer (spec)
+		&& strchr (spec, '(') && spec[len - 1] == ')'
+		&& !strchr (spec, '[') && !strchr (spec, ']');
+}
+// `_Atomic T` may have a size and alignment T does not, so the graph declines
+// it rather than claiming T's layout for it.
 static bool snapshot_type_spec_rejected(const char *spec) {
 	if (snapshot_type_spec_is_function_pointer (spec)) {
-		return strstr (spec, "atomic") != NULL;
+		return snapshot_type_spec_names_word (spec, "_Atomic");
 	}
 	// A bracketed spec is an array, which `snapshot_type_add_array` parses.
 	return R_STR_ISEMPTY (spec) || strchr (spec, '(') || strchr (spec, ')')
-		|| strstr (spec, "atomic");
+		|| snapshot_type_spec_names_word (spec, "_Atomic");
 }
 /* The one node of an opaque kind: an object the graph does not describe, or
  * code. It has no size and no layout and is only ever a pointer's target. */
@@ -4026,6 +4059,10 @@ static SnapshotTypeGraphResult snapshot_type_unalias(
 	size_t depth;
 	const size_t maximum_depth = (size_t)r_list_length (builder->base_types) + 1;
 	for (depth = 0; depth < maximum_depth; depth++) {
+		if (snapshot_type_spec_is_function_type (current)) {
+			free (current);
+			return SNAPSHOT_TYPE_GRAPH_FUNCTION_TYPE;
+		}
 		if (snapshot_type_spec_rejected (current)) {
 			free (current);
 			return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
@@ -4055,6 +4092,9 @@ static SnapshotTypeGraphResult snapshot_type_unalias(
 		if (!next) {
 			return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
 		}
+		// A typedef body carries its own qualifiers, so each step is stripped
+		// the way the spelling that entered the walk was.
+		snapshot_type_strip_qualifiers (next);
 		current = next;
 	}
 	free (current);
@@ -4365,9 +4405,11 @@ static SnapshotTypeGraphResult snapshot_type_resolve_struct(
 	const RAnalBaseType **result_base) {
 	return snapshot_type_resolve_struct_undefined (builder, type, result_base, NULL);
 }
-static SnapshotTypeGraphResult snapshot_type_add_struct(
+// Reserve this aggregate's node without placing its members: the node exists
+// so a pointer can point at it, and its layout is queued.
+static SnapshotTypeGraphResult snapshot_type_declare_struct(
 	SnapshotTypeGraphBuilder *builder, const char *type,
-	RAnalSnapshotTypeId *result_id) {
+	RAnalSnapshotTypeId *result_id, ut32 *out_aggregate_index) {
 	const RAnalBaseType *base = NULL;
 	SnapshotTypeGraphResult result = snapshot_type_resolve_struct (
 		builder, type, &base);
@@ -4378,6 +4420,7 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 	for (i = 0; i < builder->graph->num_aggregates; i++) {
 		if (builder->aggregate_sources[i] == base) {
 			*result_id = builder->graph->aggregates[i].type_id;
+			*out_aggregate_index = (ut32)i;
 			return SNAPSHOT_TYPE_GRAPH_VALID;
 		}
 	}
@@ -4418,6 +4461,42 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 	if (!aggregate->name) {
 		return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
 	}
+	builder->aggregate_laid_out[aggregate_index] = false;
+	builder->aggregate_in_progress[aggregate_index] = false;
+	builder->pending_aggregates[builder->num_pending++] = (ut32)aggregate_index;
+	*result_id = snapshot_type->id;
+	*out_aggregate_index = (ut32)aggregate_index;
+	return SNAPSHOT_TYPE_GRAPH_VALID;
+}
+
+// Place one declared aggregate's members, resolving each member's type.
+static SnapshotTypeGraphResult snapshot_type_layout_struct(
+	SnapshotTypeGraphBuilder *builder, ut32 aggregate_index) {
+	if (builder->aggregate_laid_out[aggregate_index]) {
+		return SNAPSHOT_TYPE_GRAPH_VALID;
+	}
+	// A member held by value while its own layout is still open is a cycle C
+	// cannot express, so nothing here can give it a size.
+	if (builder->aggregate_in_progress[aggregate_index]) {
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	builder->aggregate_in_progress[aggregate_index] = true;
+	SnapshotTypeGraphResult result = snapshot_type_place_struct_members (
+		builder, aggregate_index);
+	builder->aggregate_in_progress[aggregate_index] = false;
+	builder->aggregate_laid_out[aggregate_index] = result == SNAPSHOT_TYPE_GRAPH_VALID;
+	return result;
+}
+
+static SnapshotTypeGraphResult snapshot_type_place_struct_members(
+	SnapshotTypeGraphBuilder *builder, ut32 aggregate_index) {
+	RAnalSnapshotAggregateLayout *aggregate =
+		&builder->graph->aggregates[aggregate_index];
+	RAnalSnapshotType *snapshot_type = &builder->graph->types[aggregate->type_id];
+	const RAnalBaseType *base = builder->aggregate_sources[aggregate_index];
+	const char *type = aggregate->name;
+	const bool is_union = snapshot_type->kind == R_ANAL_SNAPSHOT_TYPE_UNION;
+	SnapshotTypeGraphResult result = SNAPSHOT_TYPE_GRAPH_VALID;
 	RVecAnalTypeMember *base_members = r_anal_base_type_members (base);
 	aggregate->num_members = RVecAnalTypeMember_length (base_members);
 	if (!aggregate->num_members) {
@@ -4534,7 +4613,38 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 	aggregate->complete = true;
 	snapshot_type->size_bits = size_bits;
 	snapshot_type->align_bits = maximum_alignment;
-	*result_id = snapshot_type->id;
+	return SNAPSHOT_TYPE_GRAPH_VALID;
+}
+
+// A struct used by value needs its layout here, so declaring it is followed by
+// placing it.
+static SnapshotTypeGraphResult snapshot_type_add_struct(
+	SnapshotTypeGraphBuilder *builder, const char *type,
+	RAnalSnapshotTypeId *result_id) {
+	ut32 aggregate_index = 0;
+	SnapshotTypeGraphResult result = snapshot_type_declare_struct (
+		builder, type, result_id, &aggregate_index);
+	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+		return result;
+	}
+	return snapshot_type_layout_struct (builder, aggregate_index);
+}
+
+// Place every aggregate a pointer only declared. Laying one out can declare
+// more, so this runs until the queue is empty; each aggregate is placed once,
+// so it terminates in the number of aggregates.
+static SnapshotTypeGraphResult snapshot_type_drain_pending(
+	SnapshotTypeGraphBuilder *builder) {
+	while (builder->num_pending) {
+		const ut32 aggregate_index = builder->pending_aggregates[--builder->num_pending];
+		const SnapshotTypeGraphResult result = snapshot_type_layout_struct (
+			builder, aggregate_index);
+		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			snapshot_type_root_report ("deferred aggregate",
+				builder->graph->aggregates[aggregate_index].name, NULL, result);
+			return result;
+		}
+	}
 	return SNAPSHOT_TYPE_GRAPH_VALID;
 }
 static SnapshotTypeGraphResult snapshot_type_add_pointer(
@@ -4581,6 +4691,17 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 		// them every prototype of the bzip2 stream API.
 		char *pointee = NULL;
 		result = snapshot_type_unalias (builder, spelled_pointee, &pointee);
+		// A pointer to a function type is a pointer to code, the same as the
+		// `void (*)(void)` spelling the detector above recognises.
+		if (result == SNAPSHOT_TYPE_GRAPH_FUNCTION_TYPE) {
+			free (spelled_pointee);
+			result = snapshot_type_add_opaque (
+				builder, R_ANAL_SNAPSHOT_TYPE_CODE, &target_id);
+			if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+				return result;
+			}
+			return snapshot_type_finish_pointer (builder, target_id, result_id);
+		}
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			snapshot_type_root_report ("pointee unalias", type,
 				spelled_pointee, result);
@@ -4607,8 +4728,10 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 					bool undefined = false;
 					result = snapshot_type_resolve_struct_undefined (
 						builder, pointee, &base, &undefined);
+					ut32 pointee_aggregate = 0;
 					result = result == SNAPSHOT_TYPE_GRAPH_VALID
-						? snapshot_type_add_struct (builder, pointee, &target_id)
+						? snapshot_type_declare_struct (builder, pointee,
+							&target_id, &pointee_aggregate)
 						: (undefined
 							? snapshot_type_add_opaque (builder,
 								R_ANAL_SNAPSHOT_TYPE_VOID, &target_id)
@@ -4624,6 +4747,13 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 			return result;
 		}
 	}
+	return snapshot_type_finish_pointer (builder, target_id, result_id);
+}
+
+// The pointer node itself: one per pointee, at the target's pointer width.
+static SnapshotTypeGraphResult snapshot_type_finish_pointer(
+	SnapshotTypeGraphBuilder *builder, RAnalSnapshotTypeId target_id,
+	RAnalSnapshotTypeId *result_id) {
 	size_t i;
 	for (i = 0; i < builder->graph->num_types; i++) {
 		RAnalSnapshotType *existing = &builder->graph->types[i];
@@ -4637,7 +4767,7 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 	if (builder->graph->num_types >= builder->type_capacity
 		|| builder->graph->num_types >= UT32_MAX) {
 		snapshot_type_root_report ("pointer exceeds the graph's capacity",
-			type, NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
+			NULL, NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	RAnalSnapshotType *snapshot_type =
@@ -4698,6 +4828,15 @@ static void snapshot_type_graph_rollback(SnapshotTypeGraphBuilder *builder, Snap
 	}
 	graph->num_aggregates = mark.num_aggregates;
 	graph->num_types = mark.num_types;
+	// A queued layout for an aggregate this rollback discarded has nothing left
+	// to place.
+	size_t kept = 0;
+	for (i = 0; i < builder->num_pending; i++) {
+		if (builder->pending_aggregates[i] < mark.num_aggregates) {
+			builder->pending_aggregates[kept++] = builder->pending_aggregates[i];
+		}
+	}
+	builder->num_pending = kept;
 }
 
 /* Name the spelling a root could not place, and at which stage. Rooting
@@ -4962,6 +5101,19 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 			return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
 		}
 	}
+	// One entry per aggregate slot: an aggregate is declared once and placed
+	// once, so the queue never needs to hold more than the graph can carry.
+	bool *aggregate_laid_out = base_count? calloc (base_count, sizeof (bool)): NULL;
+	bool *aggregate_in_progress = base_count? calloc (base_count, sizeof (bool)): NULL;
+	ut32 *pending_aggregates = base_count? calloc (base_count, sizeof (ut32)): NULL;
+	if (base_count && (!aggregate_laid_out || !aggregate_in_progress || !pending_aggregates)) {
+		free (aggregate_laid_out);
+		free (aggregate_in_progress);
+		free (pending_aggregates);
+		free (aggregate_sources);
+		snapshot_type_graph_fini (graph);
+		return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
+	}
 	RAnalSnapshotTypeKind char_kind = R_ANAL_SNAPSHOT_TYPE_SIGNED_INTEGER;
 	const bool char_kind_known = snapshot_arch_char_kind (
 		anal->config? anal->config->arch: NULL, &char_kind);
@@ -4974,6 +5126,9 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		.pointer_bits = pointer_bits,
 		.char_kind = char_kind,
 		.char_kind_known = char_kind_known,
+		.aggregate_laid_out = aggregate_laid_out,
+		.aggregate_in_progress = aggregate_in_progress,
+		.pending_aggregates = pending_aggregates,
 	};
 	SnapshotTypeGraphResult result = SNAPSHOT_TYPE_GRAPH_VALID;
 	RListIter *iter;
@@ -5066,7 +5221,16 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 			}
 		}
 	}
+	// Every aggregate a pointer only declared is placed now that the roots are
+	// in: a struct pair that points at each other is buildable in this order
+	// and was not in the recursive one.
+	if (result == SNAPSHOT_TYPE_GRAPH_VALID) {
+		result = snapshot_type_drain_pending (&builder);
+	}
 	free (aggregate_sources);
+	free (aggregate_laid_out);
+	free (aggregate_in_progress);
+	free (pending_aggregates);
 	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 		snapshot_type_graph_fini (graph);
 		function_logical_types_clear (interface);

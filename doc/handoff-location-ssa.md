@@ -109,6 +109,55 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -1. **The capture's type graph was the largest refusal cause at scale, and
+     three defects in it are fixed.** The DecBench sweep's biggest single
+     refusal was `memory_renderer.rs:116` "access has no planned expression",
+     159 functions, 42 of them in dpkg alone. Tracing it in dpkg-divert -O0
+     with `R2SLEIGH_DUMP_SSA=1` and `R2DEC_TRACE_REFUSAL=1` gave one chain,
+     not many: a parameter's stack home is refused with
+     `ParameterHomeWidthMismatch` because the parameter's width came from its
+     8-byte register carrier rather than from its declared type; every access
+     to that home then falls to `AccessSyntax::Address`; the address is an
+     elided `DeadStackBase`; and the function refuses. Of the 51 functions in
+     that binary that reached an unplanned stack address, 49 were that one
+     disposition.
+
+     The width came from the carrier because the capture had discarded the
+     whole type graph for the function, so there were no logical parameter
+     types to narrow it with. `R2SLEIGH_DEBUG_INTERFACE=1` named why, and it
+     was three separate defects in `r2plugin/snapshot_capture.c`:
+
+     * `snapshot_type_spec_rejected` refused any type spec containing the
+       substring `atomic`, which is dpkg's ordinary `enum atomic_file_flags`.
+       The intent was the C11 `_Atomic` qualifier, so the test is now a
+       whole-word one and each typedef step is stripped of qualifiers the way
+       the spelling that entered the walk is.
+     * A pointer laid its pointee out eagerly, so `struct pkginfo` and
+       `struct pkgset`, which point at each other with one holding the other by
+       value, were unbuildable: laying out the first required the second, which
+       required the first's size. A pointer needs its pointee to *exist*, not
+       to have a layout, so `snapshot_type_declare_struct` reserves the node
+       and queues it, and `snapshot_type_drain_pending` places every queued
+       aggregate once the roots are in. A by-value member still forces its
+       type's layout on demand, and a by-value cycle, which C cannot express,
+       refuses.
+     * A pointer to a function *type* (`error_handler_func *`, where the
+       typedef names `void ()`) was refused because the spelling has
+       parentheses. It is a pointer to code, the same as `void (*)(void)`, and
+       `snapshot_type_unalias` now says so with its own result.
+
+     Measured on dpkg-divert -O0, 659 functions: refusals 64 to 21,
+     `memory_renderer.rs:116` 34 to 1, control certificates 607 to 640 with
+     the same five `terminal-fallthrough` failures. The 13-binary corpus stays
+     at 777 of 787 with the same ten causes, and the gate stays 54/54 on raw,
+     differential, snapshot and all four audits.
+
+     What is left in that binary: 11 variadic `missing_format_parameter`, 7
+     `PlannedElidedValueRendered`, 2 `calls.rs:291`, 1 `memory_renderer.rs:116`.
+     What is left in the capture: 346 "interface incomplete" refusals, which
+     are imports with no signature and are not a defect.
+
+
   -2. **An object's address is a term.** 777 of 787 with the gate at 54/54,
      up from 775; the two stack-pointer-chain refusals
      (`file_uncompress` `fcn_2cb0`, `generateMTFValues` `fcn_88a0`) render and
