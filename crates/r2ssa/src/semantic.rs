@@ -11602,33 +11602,49 @@ fn collect_control_domain_facts(
         }),
     );
 
-    let iteration_limit = function
+    // A worklist over the blocks, reading the states as they stand.
+    //
+    // This used to sweep every block once per round and copy the whole state
+    // map at the top of each round so that a round read the previous round's
+    // answers. The map holds one guard set per block, initialised to the whole
+    // universe, so a copy is the function's guard count times its block count,
+    // and a five-hundred-block function paid it once per round. Reading the
+    // current answers instead is the same fixed point -- every state only ever
+    // loses guards, the transfer over an edge is monotone in its input, and a
+    // monotone decreasing iteration from the top element reaches the same
+    // greatest fixed point whatever order the equations are applied in -- and
+    // a block is only revisited when a predecessor actually changed.
+    //
+    // The bound is the same one the round count was derived from: a state can
+    // change only by losing a guard or by widening a switch arm, so the number
+    // of updates is bounded by the blocks times the height of the lattice.
+    let update_limit = function
         .num_blocks()
         .saturating_mul(guard_universe.len().saturating_add(2))
         .max(8);
-    for _ in 0..iteration_limit {
-        let previous = states.clone();
-        let mut changed = false;
-        for &block_addr in function.block_addrs() {
-            if block_addr == function.entry {
-                continue;
-            }
-            let predecessors = function.predecessors(block_addr);
-            if predecessors.is_empty() {
-                let state = Some(ControlDomainState {
-                    guards: BTreeSet::new(),
-                    complete: false,
-                });
-                if states.get(&block_addr) != Some(&state) {
-                    states.insert(block_addr, state);
-                    changed = true;
-                }
-                continue;
-            }
-
+    let mut worklist =
+        std::collections::VecDeque::from_iter(function.block_addrs().iter().copied());
+    let mut queued = function
+        .block_addrs()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut updates = 0usize;
+    while let Some(block_addr) = worklist.pop_front() {
+        queued.remove(&block_addr);
+        if block_addr == function.entry || updates >= update_limit {
+            continue;
+        }
+        let predecessors = function.predecessors(block_addr);
+        let state = if predecessors.is_empty() {
+            Some(ControlDomainState {
+                guards: BTreeSet::new(),
+                complete: false,
+            })
+        } else {
             let mut incoming = Vec::new();
             for predecessor in predecessors {
-                let Some(mut state) = previous.get(&predecessor).cloned().flatten() else {
+                let Some(mut state) = states.get(&predecessor).cloned().flatten() else {
                     continue;
                 };
                 let (guard, edge_complete) =
@@ -11642,22 +11658,24 @@ fn collect_control_domain_facts(
             if incoming.is_empty() {
                 continue;
             }
-
             let mut guards = incoming[0].guards.clone();
             for state in &incoming[1..] {
                 guards = meet_control_guards(&guards, &state.guards, &switch_arity);
             }
-            let state = Some(ControlDomainState {
+            Some(ControlDomainState {
                 guards,
                 complete: incoming.iter().all(|state| state.complete),
-            });
-            if states.get(&block_addr) != Some(&state) {
-                states.insert(block_addr, state);
-                changed = true;
-            }
+            })
+        };
+        if states.get(&block_addr) == Some(&state) {
+            continue;
         }
-        if !changed {
-            break;
+        states.insert(block_addr, state);
+        updates += 1;
+        for successor in function.successors(block_addr) {
+            if queued.insert(successor) {
+                worklist.push_back(successor);
+            }
         }
     }
 
