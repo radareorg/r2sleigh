@@ -1978,6 +1978,7 @@ impl PreparedFunctionFacts {
             &memory_round_trips,
         );
         phase("obligations", obligations.obligations().len());
+        r2il::refusal_evidence!("obligation-shape", "{}", obligations.probe_shape());
         // A lifted body merges every storage live across a join, so the graph
         // records uses that carry no program observation. `DeadPhis` names
         // exactly those, and the merges stay in the function by design, so a

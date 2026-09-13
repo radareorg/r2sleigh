@@ -949,6 +949,30 @@ impl SemanticObligationInventory {
         &self.obligations
     }
 
+    /// What the inventory holds, for the byte fit.
+    pub fn probe_shape(&self) -> String {
+        let obligation_inputs: usize = self.obligations.values().map(|o| o.inputs.len()).sum();
+        let owned: usize = self
+            .instructions
+            .values()
+            .map(|d| d.obligations.len())
+            .sum();
+        format!(
+            "instructions {} obligations {} by_inst {} native_spans {} inputs {} owned {} sizeof(id) {} sizeof(obligation) {} sizeof(disposition) {} sizeof(instid) {} sizeof(span) {}",
+            self.instructions.len(),
+            self.obligations.len(),
+            self.by_inst.len(),
+            self.native_spans.len(),
+            obligation_inputs,
+            owned,
+            std::mem::size_of::<SemanticObligationId>(),
+            std::mem::size_of::<SemanticObligation>(),
+            std::mem::size_of::<SemanticInstructionDisposition>(),
+            std::mem::size_of::<CanonicalInstructionId>(),
+            std::mem::size_of::<crate::GenuineNativeInstructionSpan>(),
+        )
+    }
+
     pub fn construction_failures(&self) -> &[ObligationInventoryFailure] {
         &self.construction_failures
     }
