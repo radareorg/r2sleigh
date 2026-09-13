@@ -119,19 +119,16 @@ learn.
      of `__snprintf_chk`, which the previous 5-argument rendering silently dropped.
      Four things are known and not done:
 
-     * **The capture follows calls one level and keeps at most four callees**
-       (`SNAPSHOT_CALLEE_DEPTH 1`, `SNAPSHOT_MAX_CALLEE_SNAPSHOTS 4` in
-       `r2plugin/snapshot_capture.h`; the Rust `SNAPSHOT_CALLEE_DEPTH: usize = 2`
-       and `CapturedCallee.callees` are dead against it). dpkg's wrappers go
-       `ohshite -> error_context_errmsg_format(fmt, va_list) -> vasprintf`, so the
-       `va_list` half is never captured and `atomic_file_close` keeps its
-       `missing_format_parameter` gap; that is most of the 2395 gaps in the last
-       sweep. The design settled on: the C side collects the transitive closure
-       with a worklist (no depth, no cap) and encodes bodies flat in post-order;
-       facts derive bottom-up with the in-process memo keyed by a Merkle key over
-       the closure; captures memoised per function by the fork's dirty epochs
-       (`r_anal_sleigh.c` already holds one). Both caps are the kind the project
-       forbids, and the cost model is O(N) lifts per session.
+     * **The capture is the closure of the call graph now** (`84976a88`): one
+       body per function kept as wire bytes, current by the fork's function and
+       type dirty epochs, collected with a worklist and encoded flat; the Rust
+       side orders bodies post-order over advisory call targets and keys the
+       facts memo by a SHA-256 over body and callee keys. `SNAPSHOT_CALLEE_DEPTH`
+       and `SNAPSHOT_MAX_CALLEE_SNAPSHOTS` are gone; the two revision-equality
+       checks (exact callee binding, interproc `ForeignFunction`) went with them,
+       since the epochs are what makes a set consistent. dpkg-divert -O0 `pd:s
+       @@F`: 29.1s against 33.0s. Still dead on the Rust side: `CapturedCallee.
+       callees` and `SNAPSHOT_CALLEE_DEPTH: usize = 2` in `r2source`.
      * **A body-proven return still lives on a promoted copy.** `CalleeFacts::derive`
        applies `with_body_proven_return` after the artifact is sealed, so for such
        a callee `SourceOwnedCalleeSignature.interface` (the artifact's) and the

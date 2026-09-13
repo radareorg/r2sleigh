@@ -1527,11 +1527,23 @@ fn correlate_call_site_interfaces(
             let Some(callee) = recovered else {
                 continue;
             };
-            if let Some(interface) = crate::recover_interface::mint_recovered_call_site_interface(
-                callee,
-                identity,
-                source.source_revision_identity(),
-            ) {
+            if let Some(mut interface) =
+                crate::recover_interface::mint_recovered_call_site_interface(
+                    callee,
+                    identity,
+                    source.source_revision_identity(),
+                )
+            {
+                // The gettext family is named, not prototyped, so the rule
+                // that its result is a translation of its own argument binds
+                // here as it does on the prototype path below.
+                if let Some(target_name) = call.target_name()
+                    && let Some(rule) =
+                        r2source::SourceFormatForwardingRule::for_target_name(target_name)
+                    && let Ok(bound) = interface.clone().with_format_forwarding(rule)
+                {
+                    interface = bound;
+                }
                 interfaces.push(interface);
             }
             continue;
