@@ -150,7 +150,22 @@ learn.
        `StackFrame` answer, and the seal then demands the entry `RSP`. That is
        the address-family question the ADR reserves for the binding plan
        (`DeadStackBase`), traced in `scratchpad/rvr-88a0.err` and `rvr-2cb0.err`.
-       Census 775 of 787 with it, 776 without.
+       Census 775 of 787 with it, 776 without. Tried and measured: counting
+       "computes the address of a sized stack object" as an address use in the
+       geometry collector (so the chain is `DeadStackBase`) turns the three into
+       `missing program-variable authorization`, adds seven `missing_definition`
+       and fails one gate cell -- the ADR's 26-function warning again. The
+       spelling side must come first: the plan has to authorise `&object` (or
+       the array's name) for an escaping stack address, and only then can
+       geometry drop the chain beneath it. In `file_uncompress` the escaping
+       address is `R13_1 = Copy(RSP_10)`: the buffer sits at offset 0 of the
+       final frame, so its address is the stack pointer itself, and no
+       `IntAdd` exists for the object model to mint an object from -- the only
+       stack object the function has is the incoming slot at `+8`. So the first
+       piece is minting the offset-0 object for a copied stack pointer that
+       escapes, then `frame_object_address_replacement` (rules.rs) can inline
+       it; today that rule also requires every non-call use to be a memory
+       access, which a pointer kept in a register across calls is not.
      * **radare2 declares `snprintf_chk`/`sprintf_chk` without `...`**
        (`libr/anal/d/types.sdb.txt`); upstream PR 26731, cherry-picked onto the
        fork's integration branch. Until merged upstream, any tree built from
