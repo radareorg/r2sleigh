@@ -941,15 +941,9 @@ fn validate_phi_edge_origin(
             },
             None,
         ) => origin.incoming_input_idx == 0 && copy_dst == dst && copy_src == src,
-        (
-            SSAOp::Select {
-                dst: select_dst,
-                cond,
-                if_true,
-                if_false,
-            },
-            Some(guarded),
-        ) => {
+        (SSAOp::Select(select), Some(guarded)) => {
+            let (select_dst, cond, if_true, if_false) =
+                (&select.dst, &select.cond, &select.if_true, &select.if_false);
             let Some(guard_inst) = graph.inst(guarded.guard.inst) else {
                 return false;
             };
@@ -1640,12 +1634,12 @@ fn guarded_loop_backedge_phi_op(
             r2ssa::CFGEdge::Normal | r2ssa::CFGEdge::Back => return None,
         };
     Some((
-        SSAOp::Select {
+        SSAOp::Select(Box::new(r2ssa::SelectOp {
             dst: dst.clone(),
             cond,
             if_true,
             if_false,
-        },
+        })),
         Some(GuardedPhiEdgeOrigin {
             guard,
             preserve: SyntheticPreserveOperand {
@@ -2637,7 +2631,7 @@ mod tests {
         let select_idx = latch
             .ops
             .iter()
-            .position(|op| matches!(op, SSAOp::Select { dst, .. } if dst == &hash_2))
+            .position(|op| matches!(op, SSAOp::Select(select) if select.dst == hash_2))
             .expect("guarded edge select");
         let NormalizedOpOrigin::PhiEdgeCopy(edge) = origins
             .origin(NormalizedOpSite {
@@ -2700,15 +2694,11 @@ mod tests {
         assert!(
             latch.ops.iter().any(|op| matches!(
                 op,
-                SSAOp::Select {
-                    dst,
-                    cond: select_cond,
-                    if_true,
-                    if_false,
-                } if dst == &hash_2
-                    && select_cond == &cond
-                    && if_true == &hash_4
-                    && if_false == &hash_2
+                SSAOp::Select(select)
+                    if select.dst == hash_2
+                        && select.cond == cond
+                        && select.if_true == hash_4
+                        && select.if_false == hash_2
             )),
             "the backedge update must execute only when its branch edge is taken"
         );

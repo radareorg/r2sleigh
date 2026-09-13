@@ -436,12 +436,12 @@ where
                     SpaceId::Ram,
                 );
             }
-            SSAOp::AtomicCAS { space, .. } => push_data_ref(
+            SSAOp::AtomicCAS(swap) => push_data_ref(
                 &mut refs,
                 &states,
                 inst.inputs.first().copied(),
                 from,
-                *space,
+                swap.space,
             ),
             SSAOp::IntAdd { .. } | SSAOp::IntSub { .. } => {
                 for input in &inst.inputs {

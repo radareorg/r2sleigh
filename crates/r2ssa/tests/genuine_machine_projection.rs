@@ -226,14 +226,13 @@ fn genuine_x86_ah_write_survives_as_one_high_slice_insert() {
 
     let (definition, write) = exact_single_write_to(&artifact, &projection, rax);
     assert_eq!(write, MachineWriteProjection::Full);
-    let Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::Insert {
-        position, value, ..
-    })) = artifact.graph().inst(definition).map(|inst| &inst.payload)
+    let Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::Insert(insert))) =
+        artifact.graph().inst(definition).map(|inst| &inst.payload)
     else {
         panic!("the high byte write inserts into the root");
     };
-    assert_eq!(position.constant_bits(), Some(8));
-    assert_eq!(value.size, 1);
+    assert_eq!(insert.position.constant_bits(), Some(8));
+    assert_eq!(insert.value.size, 1);
 }
 
 /// `mov bl, ah`: the byte is read as a `Subpiece` of `RAX` one byte up, and

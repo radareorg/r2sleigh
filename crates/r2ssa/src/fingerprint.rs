@@ -210,12 +210,9 @@ fn hash_op(writer: &mut FingerprintWriter, op: &SSAOp) {
             writer.tag(4);
             hash_space(writer, *space);
         }
-        BlockTransfer {
-            space,
-            kind,
-            element_size,
-            ..
-        } => {
+        BlockTransfer(transfer) => {
+            let (space, kind, element_size) =
+                (&transfer.space, &transfer.kind, &transfer.element_size);
             writer.tag(74);
             hash_space(writer, *space);
             writer.tag(match kind {
@@ -242,12 +239,10 @@ fn hash_op(writer: &mut FingerprintWriter, op: &SSAOp) {
             hash_space(writer, *space);
             hash_ordering(writer, *ordering);
         }
-        AtomicCAS {
-            space, ordering, ..
-        } => {
+        AtomicCAS(swap) => {
             writer.tag(8);
-            hash_space(writer, *space);
-            hash_ordering(writer, *ordering);
+            hash_space(writer, swap.space);
+            hash_ordering(writer, swap.ordering);
         }
         LoadGuarded {
             space, ordering, ..

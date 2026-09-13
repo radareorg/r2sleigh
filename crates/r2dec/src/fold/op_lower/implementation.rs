@@ -1729,23 +1729,15 @@ impl<'a> FoldingContext<'a> {
                 let rhs = self.observed_memory_input(frame, 0, rhs);
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(elem_ty)))
             }
-            SSAOp::BlockTransfer {
-                space,
-                kind,
-                destination,
-                source,
-                count,
-                direction,
-                element_size,
-            } => self.block_transfer_stmt(
+            SSAOp::BlockTransfer(transfer) => self.block_transfer_stmt(
                 frame,
-                *space,
-                *kind,
-                destination,
-                source,
-                count,
-                direction,
-                *element_size,
+                transfer.space,
+                transfer.kind,
+                &transfer.destination,
+                &transfer.source,
+                &transfer.count,
+                &transfer.direction,
+                transfer.element_size,
             )?,
             SSAOp::Store { addr, val, space } => {
                 if *space != r2il::SpaceId::Ram {
@@ -1850,14 +1842,15 @@ impl<'a> FoldingContext<'a> {
                     Some(CStmt::Expr(call))
                 }
             }
-            SSAOp::AtomicCAS {
-                dst,
-                space,
-                addr,
-                expected,
-                replacement,
-                ordering,
-            } => {
+            SSAOp::AtomicCAS(swap) => {
+                let (dst, space, addr, expected, replacement, ordering) = (
+                    &swap.dst,
+                    &swap.space,
+                    &swap.addr,
+                    &swap.expected,
+                    &swap.replacement,
+                    &swap.ordering,
+                );
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let call = CExpr::call(
                     CExpr::External {
@@ -2083,12 +2076,13 @@ impl<'a> FoldingContext<'a> {
                 let rhs = CExpr::binary(BinaryOp::BitOr, shifted, lo_cast);
                 self.assign_stmt(lhs, rhs)
             }
-            SSAOp::Insert {
-                dst,
-                src,
-                value,
-                position,
-            } => {
+            SSAOp::Insert(insert) => {
+                let (dst, src, value, position) = (
+                    &insert.dst,
+                    &insert.src,
+                    &insert.value,
+                    &insert.position,
+                );
                 // A lane written into its root: keep the root's other bits
                 // and put the lane's, widened to the root, at its position.
                 let lhs = self.assignment_lhs_expr(dst)?;
@@ -2366,12 +2360,13 @@ impl<'a> FoldingContext<'a> {
                 let rhs = self.ptr_arith_expr(frame, base, index, *element_size, true)?;
                 self.assign_stmt(lhs, rhs)
             }
-            SSAOp::Select {
-                dst,
-                cond,
-                if_true,
-                if_false,
-            } => {
+            SSAOp::Select(select) => {
+                let (dst, cond, if_true, if_false) = (
+                    &select.dst,
+                    &select.cond,
+                    &select.if_true,
+                    &select.if_false,
+                );
                 let lhs = self.assignment_lhs_expr(dst)?;
                 // Both arms are brought to the machine type of the selection,
                 // so the selection has it whichever arm is taken.

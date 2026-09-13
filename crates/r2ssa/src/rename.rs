@@ -222,12 +222,14 @@ impl RenameContext {
         defined_vars.push(identity);
         let position =
             u32::try_from(self.lane_lsb_byte(root, varnode) * 8).expect("lane inside its root");
-        self.lanes.suffix.push(SSAOp::Insert {
-            dst: after.clone(),
-            src: before.clone(),
-            value: temp.clone(),
-            position: SSAVar::constant(u64::from(position), 4),
-        });
+        self.lanes
+            .suffix
+            .push(SSAOp::Insert(Box::new(crate::op::InsertOp {
+                dst: after.clone(),
+                src: before.clone(),
+                value: temp.clone(),
+                position: SSAVar::constant(u64::from(position), 4),
+            })));
         let storage = Self::root_storage(root);
         self.lanes.storage.push((before, storage));
         self.lanes.storage.push((after, storage));
@@ -1023,7 +1025,7 @@ fn rename_op(
             count,
             direction,
             element_size,
-        } => SSAOp::BlockTransfer {
+        } => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
             space: *space,
             kind: *kind,
             destination: read_varnode(destination, ctx, reg_names),
@@ -1031,7 +1033,7 @@ fn rename_op(
             count: read_varnode(count, ctx, reg_names),
             direction: read_varnode(direction, ctx, reg_names),
             element_size: *element_size,
-        },
+        })),
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
         },
@@ -1082,14 +1084,14 @@ fn rename_op(
             let expected_ssa = read_varnode(expected, ctx, reg_names);
             let replacement_ssa = read_varnode(replacement, ctx, reg_names);
             let dst_ssa = write_varnode(dst, ctx, defined_vars, reg_names);
-            SSAOp::AtomicCAS {
+            SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
                 dst: dst_ssa,
                 space: *space,
                 addr: addr_ssa,
                 expected: expected_ssa,
                 replacement: replacement_ssa,
                 ordering: *ordering,
-            }
+            }))
         }
         LoadGuarded {
             dst,
@@ -1753,12 +1755,12 @@ fn rename_op(
             let val_ssa = read_varnode(value, ctx, reg_names);
             let pos_ssa = read_varnode(position, ctx, reg_names);
             let dst_ssa = write_varnode(dst, ctx, defined_vars, reg_names);
-            SSAOp::Insert {
+            SSAOp::Insert(Box::new(crate::op::InsertOp {
                 dst: dst_ssa,
                 src: src_ssa,
                 value: val_ssa,
                 position: pos_ssa,
-            }
+            }))
         }
 
         Select {
@@ -1771,12 +1773,12 @@ fn rename_op(
             let true_ssa = read_varnode(if_true, ctx, reg_names);
             let false_ssa = read_varnode(if_false, ctx, reg_names);
             let dst_ssa = write_varnode(dst, ctx, defined_vars, reg_names);
-            SSAOp::Select {
+            SSAOp::Select(Box::new(crate::op::SelectOp {
                 dst: dst_ssa,
                 cond: cond_ssa,
                 if_true: true_ssa,
                 if_false: false_ssa,
-            }
+            }))
         }
     }
 }

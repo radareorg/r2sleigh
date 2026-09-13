@@ -1396,7 +1396,8 @@ fn seed_direct_obligations(
         // A block operation is not a structured access, so nothing else
         // answers for its memory: it owns the write over its whole extent
         // here, and a move owns the read it copies from as well.
-        SSAOp::BlockTransfer { kind, .. } => {
+        SSAOp::BlockTransfer(transfer) => {
+            let kind = &transfer.kind;
             seed_instruction(
                 inst.id,
                 Kind::ObservableMemoryWrite,
@@ -1460,12 +1461,12 @@ fn seed_direct_obligations(
                 );
             }
         }
-        SSAOp::AtomicCAS { ordering, .. } => {
+        SSAOp::AtomicCAS(swap) => {
             seed_instruction(inst.id, Kind::Atomicity, Component::Whole, required);
             seed_instruction(
                 inst.id,
                 Kind::MemoryOrdering,
-                Component::MemoryOrdering((*ordering).into()),
+                Component::MemoryOrdering(swap.ordering.into()),
                 required,
             );
         }
@@ -1579,9 +1580,6 @@ fn seed_direct_obligations(
             ordering: r2il::MemoryOrdering::Unknown,
             ..
         } | SSAOp::StoreConditional {
-            ordering: r2il::MemoryOrdering::Unknown,
-            ..
-        } | SSAOp::AtomicCAS {
             ordering: r2il::MemoryOrdering::Unknown,
             ..
         } | SSAOp::LoadGuarded {

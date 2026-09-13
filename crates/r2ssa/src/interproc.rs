@@ -1915,17 +1915,13 @@ fn collect_local_summary_facts_with_obligation_authority(
                         });
                     }
                 }
-                SSAOp::AtomicCAS {
-                    addr,
-                    expected,
-                    space,
-                    ..
-                } => {
-                    if memory_access_is_local_stack(prepared, addr, *space) {
+                SSAOp::AtomicCAS(swap) => {
+                    let (addr, expected, space) = (&swap.addr, &swap.expected, swap.space);
+                    if memory_access_is_local_stack(prepared, addr, space) {
                         continue;
                     }
                     let location =
-                        classify_memory_access_location(prepared, abi, addr, *space, expected.size);
+                        classify_memory_access_location(prepared, abi, addr, space, expected.size);
                     mark_location_arg_effect(&mut out.arg_effects, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -1938,8 +1934,8 @@ fn collect_local_summary_facts_with_obligation_authority(
                     out.atomic_effects.insert(SummaryAtomicEffect {
                         op: SummaryAtomicOp::CompareExchange,
                         location,
-                        ordering: if let SSAOp::AtomicCAS { ordering, .. } = op {
-                            summary_atomic_ordering(*ordering)
+                        ordering: if let SSAOp::AtomicCAS(swap) = op {
+                            summary_atomic_ordering(swap.ordering)
                         } else {
                             SummaryAtomicOrdering::Unknown
                         },

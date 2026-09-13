@@ -501,8 +501,8 @@ fn narrow_zero_extend_input_size(graph: &SsaGraph, value: crate::ValueId) -> Opt
     // The lane the carrier's definition widens, or inserts at its low end.
     let input = match (&definition.payload, definition.inputs.as_slice()) {
         (crate::graph::InstPayload::Op(crate::SSAOp::IntZExt { .. }), [input]) => *input,
-        (crate::graph::InstPayload::Op(crate::SSAOp::Insert { position, .. }), [_, input, _])
-            if position.constant_bits() == Some(0) =>
+        (crate::graph::InstPayload::Op(crate::SSAOp::Insert(insert)), [_, input, _])
+            if insert.position.constant_bits() == Some(0) =>
         {
             *input
         }

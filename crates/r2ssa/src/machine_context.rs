@@ -1826,9 +1826,9 @@ fn ssa_memory_space(op: &SSAOp) -> Option<SpaceId> {
         | SSAOp::Store { space, .. }
         | SSAOp::LoadLinked { space, .. }
         | SSAOp::StoreConditional { space, .. }
-        | SSAOp::AtomicCAS { space, .. }
         | SSAOp::LoadGuarded { space, .. }
         | SSAOp::StoreGuarded { space, .. } => Some(*space),
+        SSAOp::AtomicCAS(swap) => Some(swap.space),
         _ => None,
     }
 }

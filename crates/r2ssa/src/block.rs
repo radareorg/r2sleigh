@@ -201,7 +201,7 @@ fn convert_op(
             count,
             direction,
             element_size,
-        } => SSAOp::BlockTransfer {
+        } => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
             space: *space,
             kind: *kind,
             destination: read_var(destination, disasm, ctx),
@@ -209,7 +209,7 @@ fn convert_op(
             count: read_var(count, disasm, ctx),
             direction: read_var(direction, disasm, ctx),
             element_size: *element_size,
-        },
+        })),
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
         },
@@ -244,14 +244,14 @@ fn convert_op(
             expected,
             replacement,
             ordering,
-        } => SSAOp::AtomicCAS {
+        } => SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
             dst: write_var(dst, disasm, ctx),
             space: *space,
             addr: read_var(addr, disasm, ctx),
             expected: read_var(expected, disasm, ctx),
             replacement: read_var(replacement, disasm, ctx),
             ordering: *ordering,
-        },
+        })),
         LoadGuarded {
             dst,
             space,
@@ -699,12 +699,12 @@ fn convert_op(
             src,
             value,
             position,
-        } => SSAOp::Insert {
+        } => SSAOp::Insert(Box::new(crate::op::InsertOp {
             dst: write_var(dst, disasm, ctx),
             src: read_var(src, disasm, ctx),
             value: read_var(value, disasm, ctx),
             position: read_var(position, disasm, ctx),
-        },
+        })),
 
         Select {
             dst,
@@ -715,12 +715,12 @@ fn convert_op(
             let cond = read_var(cond, disasm, ctx);
             let if_true = read_var(if_true, disasm, ctx);
             let if_false = read_var(if_false, disasm, ctx);
-            SSAOp::Select {
+            SSAOp::Select(Box::new(crate::op::SelectOp {
                 dst: write_var(dst, disasm, ctx),
                 cond,
                 if_true,
                 if_false,
-            }
+            }))
         }
     }
 }

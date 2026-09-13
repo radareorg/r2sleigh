@@ -1774,11 +1774,10 @@ pub(crate) fn certificate_elided_cells(
     // Which way a block operation walks. The rendering writes one walk, so the
     // operand that selected it has no C expression to sit on.
     for inst in &graph.insts {
-        let r2ssa::InstPayload::Op(r2ssa::SSAOp::BlockTransfer { direction, .. }) = &inst.payload
-        else {
+        let r2ssa::InstPayload::Op(r2ssa::SSAOp::BlockTransfer(transfer)) = &inst.payload else {
             continue;
         };
-        let Some(direction) = graph.value_id_for_var(direction) else {
+        let Some(direction) = graph.value_id_for_var(&transfer.direction) else {
             continue;
         };
         for (input_idx, input) in inst.inputs.iter().enumerate() {

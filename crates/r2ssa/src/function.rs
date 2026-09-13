@@ -4057,13 +4057,8 @@ impl SSAFunction {
                 }
             }
             for op in &block.ops {
-                if let SSAOp::Insert {
-                    src,
-                    value,
-                    position,
-                    ..
-                } = op
-                {
+                if let SSAOp::Insert(insert) = op {
+                    let (src, value, position) = (&insert.src, &insert.value, &insert.position);
                     uses.entry(src.clone())
                         .or_default()
                         .push((ScratchUse::InsertSource, src.clone()));
@@ -4161,10 +4156,10 @@ impl SSAFunction {
                 }
             }
             for op in &mut block.ops {
-                if let SSAOp::Insert { src, .. } = op
-                    && let Some(zero) = zeros.get(src)
+                if let SSAOp::Insert(insert) = op
+                    && let Some(zero) = zeros.get(&insert.src)
                 {
-                    *src = zero.clone();
+                    insert.src = zero.clone();
                 }
             }
         }
@@ -4425,12 +4420,12 @@ impl SSAFunction {
                                 root.size,
                             )
                         };
-                        minted.push(SSAOp::Insert {
+                        minted.push(SSAOp::Insert(Box::new(crate::op::InsertOp {
                             dst: dst.clone(),
                             src: carried,
                             value: lane.clone(),
                             position: SSAVar::constant(u64::from(*offset) * 8, 4),
-                        });
+                        })));
                         carried = dst;
                     }
                 }
@@ -6685,13 +6680,12 @@ mod tests {
             .ops
             .iter()
             .filter_map(|op| match op {
-                SSAOp::Insert {
-                    dst,
-                    src,
-                    value,
-                    position,
-                } if accumulator(dst) && accumulator(src) && value.size == 4 => {
-                    position.constant_bits()
+                SSAOp::Insert(insert)
+                    if accumulator(&insert.dst)
+                        && accumulator(&insert.src)
+                        && insert.value.size == 4 =>
+                {
+                    insert.position.constant_bits()
                 }
                 _ => None,
             })
@@ -11435,14 +11429,11 @@ mod tests {
         let lane = ops
             .iter()
             .find_map(|op| match op {
-                SSAOp::Insert {
-                    dst,
-                    src,
-                    value,
-                    position,
-                } if *dst == stored && *src == SSAVar::new("RAX", 0, 8) => {
-                    assert_eq!(position.constant_bits(), Some(8));
-                    Some(value.clone())
+                SSAOp::Insert(insert)
+                    if insert.dst == stored && insert.src == SSAVar::new("RAX", 0, 8) =>
+                {
+                    assert_eq!(insert.position.constant_bits(), Some(8));
+                    Some(insert.value.clone())
                 }
                 _ => None,
             })

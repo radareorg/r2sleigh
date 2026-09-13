@@ -465,19 +465,18 @@ fn opcode_for_op(op: &SSAOp) -> ExecutionOpcode {
 fn effect_for_op(inst: InstId, op: &SSAOp) -> Result<ExecutionEffect, ExecutionViewError> {
     match op {
         SSAOp::Phi { .. } => Err(ExecutionViewError::UnexpectedPhiOp(inst)),
-        SSAOp::Load { space, .. }
-        | SSAOp::Store { space, .. }
-        | SSAOp::BlockTransfer { space, .. } => Ok(ExecutionEffect::Memory {
+        SSAOp::Load { space, .. } | SSAOp::Store { space, .. } => Ok(ExecutionEffect::Memory {
             space: *space,
+            ordering: None,
+        }),
+        SSAOp::BlockTransfer(transfer) => Ok(ExecutionEffect::Memory {
+            space: transfer.space,
             ordering: None,
         }),
         SSAOp::LoadLinked {
             space, ordering, ..
         }
         | SSAOp::StoreConditional {
-            space, ordering, ..
-        }
-        | SSAOp::AtomicCAS {
             space, ordering, ..
         }
         | SSAOp::LoadGuarded {
@@ -488,6 +487,10 @@ fn effect_for_op(inst: InstId, op: &SSAOp) -> Result<ExecutionEffect, ExecutionV
         } => Ok(ExecutionEffect::Memory {
             space: *space,
             ordering: Some(*ordering),
+        }),
+        SSAOp::AtomicCAS(swap) => Ok(ExecutionEffect::Memory {
+            space: swap.space,
+            ordering: Some(swap.ordering),
         }),
         SSAOp::Fence { ordering } => Ok(ExecutionEffect::Fence {
             ordering: *ordering,
@@ -1088,14 +1091,14 @@ mod tests {
                 val: v(),
                 ordering: MemoryOrdering::Release,
             },
-            SSAOp::AtomicCAS {
+            SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
                 dst: v(),
                 space: r2il::SpaceId::Ram,
                 addr: v(),
                 expected: v(),
                 replacement: v(),
                 ordering: MemoryOrdering::AcqRel,
-            },
+            })),
             SSAOp::LoadGuarded {
                 dst: v(),
                 space: r2il::SpaceId::Ram,
@@ -1358,18 +1361,18 @@ mod tests {
                 src: v(),
                 position: v(),
             },
-            SSAOp::Insert {
+            SSAOp::Insert(Box::new(crate::op::InsertOp {
                 dst: v(),
                 src: v(),
                 value: v(),
                 position: v(),
-            },
-            SSAOp::Select {
+            })),
+            SSAOp::Select(Box::new(crate::op::SelectOp {
                 dst: v(),
                 cond: v(),
                 if_true: v(),
                 if_false: v(),
-            },
+            })),
         ]
     }
 

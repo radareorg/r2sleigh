@@ -40,15 +40,7 @@ pub enum SSAOp {
     /// One repeated string operation, as the block it is
     /// (`r2il::R2ILOp::BlockTransfer`). It writes only memory; the register
     /// updates the instruction also performs are ordinary operations beside it.
-    BlockTransfer {
-        space: SpaceId,
-        kind: r2il::BlockTransferKind,
-        destination: SSAVar,
-        source: SSAVar,
-        count: SSAVar,
-        direction: SSAVar,
-        element_size: u32,
-    },
+    BlockTransfer(Box<BlockTransferOp>),
 
     /// Memory fence/barrier.
     Fence { ordering: MemoryOrdering },
@@ -71,14 +63,7 @@ pub enum SSAOp {
     },
 
     /// Atomic compare-and-swap.
-    AtomicCAS {
-        dst: SSAVar,
-        space: SpaceId,
-        addr: SSAVar,
-        expected: SSAVar,
-        replacement: SSAVar,
-        ordering: MemoryOrdering,
-    },
+    AtomicCAS(Box<AtomicCasOp>),
 
     /// Guarded memory load.
     LoadGuarded {
@@ -407,20 +392,62 @@ pub enum SSAOp {
     },
 
     /// Insert (bit field insertion)
-    Insert {
-        dst: SSAVar,
-        src: SSAVar,
-        value: SSAVar,
-        position: SSAVar,
-    },
+    Insert(Box<InsertOp>),
 
     /// Conditional merge of two values from instruction-local P-code control.
-    Select {
-        dst: SSAVar,
-        cond: SSAVar,
-        if_true: SSAVar,
-        if_false: SSAVar,
-    },
+    Select(Box<SelectOp>),
+}
+
+/// A repeated string operation, as one block move.
+///
+/// Held out of line for the same reason as [`SelectOp`]: four variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransferOp {
+    pub space: SpaceId,
+    pub kind: r2il::BlockTransferKind,
+    pub destination: SSAVar,
+    pub source: SSAVar,
+    pub count: SSAVar,
+    pub direction: SSAVar,
+    pub element_size: u32,
+}
+
+/// A compare-and-swap on one memory cell.
+///
+/// Held out of line for the same reason as [`SelectOp`]: four variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicCasOp {
+    pub dst: SSAVar,
+    pub space: SpaceId,
+    pub addr: SSAVar,
+    pub expected: SSAVar,
+    pub replacement: SSAVar,
+    pub ordering: MemoryOrdering,
+}
+
+/// A field written into a value at a position.
+///
+/// Held out of line for the same reason as [`SelectOp`]: four variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsertOp {
+    pub dst: SSAVar,
+    pub src: SSAVar,
+    pub value: SSAVar,
+    pub position: SSAVar,
+}
+
+/// A conditional choice between two values.
+///
+/// Held out of line: it names four variables where nearly every other
+/// operation names three, and an enum is as wide as its widest variant, so
+/// those four set the width of every operation the function holds, of the
+/// graph's copy of them and of normalization's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectOp {
+    pub dst: SSAVar,
+    pub cond: SSAVar,
+    pub if_true: SSAVar,
+    pub if_false: SSAVar,
 }
 
 impl SSAOp {
@@ -429,12 +456,12 @@ impl SSAOp {
         match self {
             Self::Load { space, .. }
             | Self::Store { space, .. }
-            | Self::BlockTransfer { space, .. }
             | Self::LoadLinked { space, .. }
             | Self::StoreConditional { space, .. }
-            | Self::AtomicCAS { space, .. }
             | Self::LoadGuarded { space, .. }
             | Self::StoreGuarded { space, .. } => Some(*space),
+            Self::AtomicCAS(swap) => Some(swap.space),
+            Self::BlockTransfer(transfer) => Some(transfer.space),
             _ => None,
         }
     }
@@ -447,7 +474,6 @@ impl SSAOp {
             | Copy { dst, .. }
             | Load { dst, .. }
             | LoadLinked { dst, .. }
-            | AtomicCAS { dst, .. }
             | LoadGuarded { dst, .. }
             | IntAdd { dst, .. }
             | IntSub { dst, .. }
@@ -509,10 +535,12 @@ impl SSAOp {
             | New { dst, .. }
             | Cast { dst, .. }
             | Extract { dst, .. }
-            | Insert { dst, .. }
-            | Select { dst, .. }
             | CallDefine { dst }
             | CallRestore { dst, .. } => Some(dst),
+
+            AtomicCAS(swap) => Some(&swap.dst),
+            Insert(insert) => Some(&insert.dst),
+            Select(select) => Some(&select.dst),
 
             CallOther { output, .. } | StoreConditional { result: output, .. } => output.as_ref(),
 
@@ -573,28 +601,20 @@ impl SSAOp {
                 f(val);
             }
 
-            BlockTransfer {
-                destination,
-                source,
-                count,
-                direction,
-                ..
-            } => {
+            BlockTransfer(transfer) => {
+                let (destination, source, count) =
+                    (&transfer.destination, &transfer.source, &transfer.count);
+                let direction = &transfer.direction;
                 f(destination);
                 f(source);
                 f(count);
                 f(direction);
             }
 
-            AtomicCAS {
-                addr,
-                expected,
-                replacement,
-                ..
-            } => {
-                f(addr);
-                f(expected);
-                f(replacement);
+            AtomicCAS(swap) => {
+                f(&swap.addr);
+                f(&swap.expected);
+                f(&swap.replacement);
             }
 
             LoadGuarded { addr, guard, .. } => {
@@ -657,26 +677,16 @@ impl SSAOp {
                 f(position);
             }
 
-            Insert {
-                src,
-                value,
-                position,
-                ..
-            } => {
-                f(src);
-                f(value);
-                f(position);
+            Insert(insert) => {
+                f(&insert.src);
+                f(&insert.value);
+                f(&insert.position);
             }
 
-            Select {
-                cond,
-                if_true,
-                if_false,
-                ..
-            } => {
-                f(cond);
-                f(if_true);
-                f(if_false);
+            Select(select) => {
+                f(&select.cond);
+                f(&select.if_true);
+                f(&select.if_false);
             }
 
             PtrAdd { base, index, .. } | PtrSub { base, index, .. } => {
@@ -810,22 +820,25 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
             SSAOp::Load { dst, space, addr } => write!(f, "{} = LOAD [{}]{}", dst, space, addr),
             SSAOp::Store { space, addr, val } => write!(f, "STORE [{}]{} = {}", space, addr, val),
-            SSAOp::BlockTransfer {
-                space,
-                kind,
-                destination,
-                source,
-                count,
-                element_size,
-                direction,
-            } => write!(
-                f,
-                "BLOCK{} [{space}]{destination} <- {source} x {count} ({element_size} bytes each, direction {direction})",
-                match kind {
-                    r2il::BlockTransferKind::Move => "MOVE",
-                    r2il::BlockTransferKind::Fill => "FILL",
-                }
-            ),
+            SSAOp::BlockTransfer(transfer) => {
+                let (space, kind, destination, source, count, element_size, direction) = (
+                    &transfer.space,
+                    &transfer.kind,
+                    &transfer.destination,
+                    &transfer.source,
+                    &transfer.count,
+                    &transfer.element_size,
+                    &transfer.direction,
+                );
+                write!(
+                    f,
+                    "BLOCK{} [{space}]{destination} <- {source} x {count} ({element_size} bytes each, direction {direction})",
+                    match kind {
+                        r2il::BlockTransferKind::Move => "MOVE",
+                        r2il::BlockTransferKind::Fill => "FILL",
+                    }
+                )
+            }
             SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),
             SSAOp::LoadLinked {
                 dst,
@@ -853,17 +866,10 @@ impl std::fmt::Display for SSAOp {
                     ordering, space, addr, val
                 )
             }
-            SSAOp::AtomicCAS {
-                dst,
-                space,
-                addr,
-                expected,
-                replacement,
-                ordering,
-            } => write!(
+            SSAOp::AtomicCAS(swap) => write!(
                 f,
                 "{} = ATOMIC_CAS({:?}) [{}]{}, {}, {}",
-                dst, ordering, space, addr, expected, replacement
+                swap.dst, swap.ordering, swap.space, swap.addr, swap.expected, swap.replacement
             ),
             SSAOp::LoadGuarded {
                 dst,
@@ -998,18 +1004,16 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Extract { dst, src, position } => {
                 write!(f, "{} = EXTRACT({}, {})", dst, src, position)
             }
-            SSAOp::Insert {
-                dst,
-                src,
-                value,
-                position,
-            } => write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position),
-            SSAOp::Select {
-                dst,
-                cond,
-                if_true,
-                if_false,
-            } => write!(f, "{} = SELECT({}, {}, {})", dst, cond, if_true, if_false),
+            SSAOp::Insert(insert) => write!(
+                f,
+                "{} = INSERT({}, {}, {})",
+                insert.dst, insert.src, insert.value, insert.position
+            ),
+            SSAOp::Select(select) => write!(
+                f,
+                "{} = SELECT({}, {}, {})",
+                select.dst, select.cond, select.if_true, select.if_false
+            ),
         }
     }
 }

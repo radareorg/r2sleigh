@@ -1095,13 +1095,9 @@ fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<
         SSAOp::Copy { src: value, .. } if value.constant_bits().is_some() => {
             subpiece(value, u64::from(*offset))
         }
-        SSAOp::Insert {
-            src: root,
-            value,
-            position,
-            ..
-        } => {
-            let position = position.constant_bits()?;
+        SSAOp::Insert(insert) => {
+            let (root, value) = (&insert.src, &insert.value);
+            let position = insert.position.constant_bits()?;
             let inserted_end = position.checked_add(u64::from(value.size) * 8)?;
             if position <= lane_start && lane_end <= inserted_end {
                 subpiece(value, (lane_start - position) / 8)
@@ -1381,23 +1377,15 @@ where
             addr: map(addr),
             val: map(val),
         },
-        BlockTransfer {
-            space,
-            kind,
-            destination,
-            source,
-            count,
-            direction,
-            element_size,
-        } => BlockTransfer {
-            space: *space,
-            kind: *kind,
-            destination: map(destination),
-            source: map(source),
-            count: map(count),
-            direction: map(direction),
-            element_size: *element_size,
-        },
+        BlockTransfer(transfer) => BlockTransfer(Box::new(crate::op::BlockTransferOp {
+            space: transfer.space,
+            kind: transfer.kind,
+            destination: map(&transfer.destination),
+            source: map(&transfer.source),
+            count: map(&transfer.count),
+            direction: map(&transfer.direction),
+            element_size: transfer.element_size,
+        })),
         Fence { ordering } => Fence {
             ordering: *ordering,
         },
@@ -1425,21 +1413,14 @@ where
             val: map(val),
             ordering: *ordering,
         },
-        AtomicCAS {
-            dst,
-            space,
-            addr,
-            expected,
-            replacement,
-            ordering,
-        } => AtomicCAS {
-            dst: dst.clone(),
-            space: *space,
-            addr: map(addr),
-            expected: map(expected),
-            replacement: map(replacement),
-            ordering: *ordering,
-        },
+        AtomicCAS(swap) => AtomicCAS(Box::new(crate::op::AtomicCasOp {
+            dst: swap.dst.clone(),
+            space: swap.space,
+            addr: map(&swap.addr),
+            expected: map(&swap.expected),
+            replacement: map(&swap.replacement),
+            ordering: swap.ordering,
+        })),
         LoadGuarded {
             dst,
             space,
@@ -1808,28 +1789,18 @@ where
             src: map(src),
             position: map(position),
         },
-        Insert {
-            dst,
-            src,
-            value,
-            position,
-        } => Insert {
-            dst: dst.clone(),
-            src: map(src),
-            value: map(value),
-            position: map(position),
-        },
-        Select {
-            dst,
-            cond,
-            if_true,
-            if_false,
-        } => Select {
-            dst: dst.clone(),
-            cond: map(cond),
-            if_true: map(if_true),
-            if_false: map(if_false),
-        },
+        Insert(insert) => Insert(Box::new(crate::op::InsertOp {
+            dst: insert.dst.clone(),
+            src: map(&insert.src),
+            value: map(&insert.value),
+            position: map(&insert.position),
+        })),
+        Select(select) => Select(Box::new(crate::op::SelectOp {
+            dst: select.dst.clone(),
+            cond: map(&select.cond),
+            if_true: map(&select.if_true),
+            if_false: map(&select.if_false),
+        })),
         Nop => Nop,
         Unimplemented => Unimplemented,
         Breakpoint => Breakpoint,
@@ -2242,12 +2213,12 @@ mod sccp_tests {
 
         // A lane inserted at bit 32: a read inside it is the inserted value,
         // a read outside it is the same read of the older root.
-        let inserted = defined_by(SSAOp::Insert {
+        let inserted = defined_by(SSAOp::Insert(Box::new(crate::op::InsertOp {
             dst: root.clone(),
             src: older.clone(),
             value: lane.clone(),
             position: SSAVar::constant(32, 4),
-        });
+        })));
         assert_eq!(
             fold_through_definition(&read(4, 4), &inserted),
             Some(SSAOp::Copy {

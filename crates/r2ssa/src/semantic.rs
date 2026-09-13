@@ -2356,10 +2356,12 @@ impl<'a> ObjectModelBuilder<'a> {
                     | SSAOp::Store { addr, space, .. }
                     | SSAOp::LoadLinked { addr, space, .. }
                     | SSAOp::StoreConditional { addr, space, .. }
-                    | SSAOp::AtomicCAS { addr, space, .. }
                     | SSAOp::LoadGuarded { addr, space, .. }
                     | SSAOp::StoreGuarded { addr, space, .. } => {
                         let _ = self.object_for_address_value(graph, addr, *space);
+                    }
+                    SSAOp::AtomicCAS(swap) => {
+                        let _ = self.object_for_address_value(graph, &swap.addr, swap.space);
                     }
                     _ => {}
                 }
@@ -2832,21 +2834,15 @@ fn collect_access_summaries(
                     uses.push(location.clone());
                     defs.push(location);
                 }
-                SSAOp::AtomicCAS {
-                    addr,
-                    expected,
-                    replacement,
-                    space,
-                    ..
-                } => {
+                SSAOp::AtomicCAS(swap) => {
                     let location = memory_location_for_addr(
                         prep_facts,
                         addresses,
                         object_model,
                         graph,
-                        addr,
-                        *space,
-                        expected.size.max(replacement.size),
+                        &swap.addr,
+                        swap.space,
+                        swap.expected.size.max(swap.replacement.size),
                     );
                     uses.push(location.clone());
                     defs.push(location);
@@ -7203,13 +7199,13 @@ fn evidenced_stack_roots(
                 | SSAOp::Store { addr, space, .. }
                 | SSAOp::LoadLinked { addr, space, .. }
                 | SSAOp::StoreConditional { addr, space, .. }
-                | SSAOp::AtomicCAS { addr, space, .. }
                 | SSAOp::LoadGuarded { addr, space, .. }
                 | SSAOp::StoreGuarded { addr, space, .. }
                     if *space == SpaceId::Ram =>
                 {
                     addr
                 }
+                SSAOp::AtomicCAS(swap) if swap.space == SpaceId::Ram => &swap.addr,
                 _ => continue,
             };
             if let Some(root) = resolve_stack_root(Some(facts), addr) {
@@ -9230,15 +9226,11 @@ fn exact_logical_lane_input(
         {
             (*input, src)
         }
-        (
-            InstPayload::Op(SSAOp::Insert {
-                dst,
-                value,
-                position,
-                ..
-            }),
-            [_, input, _],
-        ) if *dst == carrier_value.var && position.constant_bits() == Some(0) => (*input, value),
+        (InstPayload::Op(SSAOp::Insert(insert)), [_, input, _])
+            if insert.dst == carrier_value.var && insert.position.constant_bits() == Some(0) =>
+        {
+            (*input, &insert.value)
+        }
         _ => return None,
     };
     let lane_value = graph.value(lane)?;
@@ -11143,13 +11135,9 @@ fn collect_structured_memory_access_facts(
                         );
                     }
                 }
-                SSAOp::AtomicCAS {
-                    dst,
-                    addr,
-                    replacement,
-                    space,
-                    ..
-                } => {
+                SSAOp::AtomicCAS(swap) => {
+                    let (dst, addr, replacement, space) =
+                        (&swap.dst, &swap.addr, &swap.replacement, swap.space);
                     if let Some(address) = graph.value_id_for_var(addr) {
                         insert_raw_memory_subeffect(
                             &mut access_facts,
@@ -11160,7 +11148,7 @@ fn collect_structured_memory_access_facts(
                             block.addr,
                             op_index,
                             address,
-                            *space,
+                            space,
                             graph.value_id_for_var(dst),
                             false,
                             replacement.size,
@@ -11174,7 +11162,7 @@ fn collect_structured_memory_access_facts(
                             block.addr,
                             op_index,
                             address,
-                            *space,
+                            space,
                             graph.value_id_for_var(replacement),
                             true,
                             replacement.size,

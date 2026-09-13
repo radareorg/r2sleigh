@@ -6962,8 +6962,8 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(index, op)| match op {
-                SSAOp::Insert { dst, position, .. } => {
-                    Some((index, dst.size, position.constant_bits()))
+                SSAOp::Insert(insert) => {
+                    Some((index, insert.dst.size, insert.position.constant_bits()))
                 }
                 _ => None,
             })

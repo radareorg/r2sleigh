@@ -1488,13 +1488,11 @@ fn infer_pointer_var_keys_from_ssa(
                     space: r2il::SpaceId::Ram,
                     addr,
                     ..
-                }
-                | SSAOp::AtomicCAS {
-                    space: r2il::SpaceId::Ram,
-                    addr,
-                    ..
                 } => {
                     pointer_vars.insert(ssa_var_key(addr));
+                }
+                SSAOp::AtomicCAS(swap) if swap.space == r2il::SpaceId::Ram => {
+                    pointer_vars.insert(ssa_var_key(&swap.addr));
                 }
                 _ => {}
             }
