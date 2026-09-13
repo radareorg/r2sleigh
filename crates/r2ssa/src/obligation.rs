@@ -1665,6 +1665,28 @@ mod tests {
         vec![entry]
     }
 
+    // Storing back what was loaded is a certified round trip that owes no
+    // write of its own, so a test about a write stores a value of its own.
+    fn observable_write_fixture() -> Vec<R2ILBlock> {
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        let addr = Varnode::register(0, 8);
+        let sum = Varnode::unique(0x20, 4);
+        entry.push(R2ILOp::IntAdd {
+            dst: sum.clone(),
+            a: Varnode::constant(1, 4),
+            b: Varnode::constant(2, 4),
+        });
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr,
+            val: sum,
+        });
+        entry.push(R2ILOp::Return {
+            target: Varnode::register(8, 8),
+        });
+        vec![entry]
+    }
+
     fn loop_carrier_fixture() -> Vec<R2ILBlock> {
         let accumulator = Varnode::register(0, 8);
         let mut entry = R2ILBlock::new(0x2000, 4);
@@ -2903,7 +2925,7 @@ mod tests {
 
     #[test]
     fn coverage_reports_lost_effect_and_duplicated_write() {
-        let artifact = SsaArtifact::raw(&obligation_fixture(), None).expect("SSA artifact");
+        let artifact = SsaArtifact::raw(&observable_write_fixture(), None).expect("SSA artifact");
         let inventory = &artifact.facts().obligations;
         let all = inventory.obligations.keys().copied().collect::<Vec<_>>();
         assert!(inventory.audit_coverage(all.clone()).is_closed());

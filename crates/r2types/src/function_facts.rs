@@ -1643,15 +1643,24 @@ impl SourceOwnedCalleeSignature {
         signature: crate::FunctionType,
     ) -> Option<Self> {
         let interface = source.machine_context().function_interface()?.clone();
-        function_type_matches_source_interface(
+        let matches = function_type_matches_source_interface(
             &signature,
             &interface,
             source
                 .machine_context()
                 .memory_model()
                 .default_address_bits(),
-        )
-        .then_some(Self {
+        );
+        if !matches {
+            r2il::refusal_evidence!(
+                "callee-signature",
+                "{:#x}: the C signature {signature:?} does not match the interface ({} parameters, {:?})",
+                source.function().entry,
+                interface.parameters().len(),
+                interface.return_kind()
+            );
+        }
+        matches.then_some(Self {
             address: source.function().entry,
             interface,
             signature,
@@ -2198,6 +2207,27 @@ impl FunctionFacts {
                 let mut logical_signature = signature.signature.clone();
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
+            } else {
+                let site = source
+                    .call_site_interface(arguments.call_site_id)
+                    .and_then(r2ssa::SourceCallSiteInterface::exact_callee_interface);
+                r2il::refusal_evidence!(
+                    "callee-signature",
+                    "call to {target:#x}: same_interface={same_interface} signature_address={:#x} site={:?} signature_interface={:?}",
+                    signature.address(),
+                    site.map(|i| (
+                        i.parameters().len(),
+                        i.return_kind(),
+                        i.body_proven_format_parameter(),
+                        i.revision_identity().len()
+                    )),
+                    (
+                        signature.interface.parameters().len(),
+                        signature.interface.return_kind(),
+                        signature.interface.body_proven_format_parameter(),
+                        signature.interface.revision_identity().len()
+                    )
+                );
             }
         }
     }
@@ -2955,11 +2985,26 @@ impl FunctionFacts {
         // not appear in the graph's ordinary use lists. The callsite
         // certificate is their canonical use table; index it once so a formal
         // handed straight to a callee remains a live parameter binding.
+        // A carrier passed to a call is read by that call, whether or not the
+        // call certified: an import thunk's tail forwards a variadic tail no
+        // count proves, and its fixed parameters are still what it passes.
         let implicit_call_arguments = prepared
             .certificates()
             .callsites
             .values()
             .flat_map(|callsite| callsite.argument_values.iter().copied())
+            .chain(
+                prepared
+                    .facts()
+                    .boundaries
+                    .calls
+                    .values()
+                    .flat_map(|boundary| boundary.arguments.iter())
+                    .filter_map(|argument| match argument.value {
+                        r2ssa::SourceCallArgumentValue::Value(value) => Some(value),
+                        r2ssa::SourceCallArgumentValue::PreservedEntry => None,
+                    }),
+            )
             .collect::<BTreeSet<_>>();
         // The resolver names each formal's one value -- the carrier's entry
         // value or the lane projection minted for it -- and its width is the

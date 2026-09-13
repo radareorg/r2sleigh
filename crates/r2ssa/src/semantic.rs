@@ -621,7 +621,7 @@ pub struct VariadicCallsiteArgumentCountEvidence {
     /// Which rule named the format parameter: radare2's recovered prototype,
     /// or the callee's own body. Orthogonal to `merged_literals`, which is
     /// about the literal rather than the parameter.
-    pub parameter_rule: r2source::SourceVariadicArgumentCountRule,
+    pub parameter_rule: r2source::SourceFormatParameterRule,
     /// Whether several literals reach the format argument and agree on the
     /// count. A count is a property of the format, so formats that agree
     /// prove it the same way one does.
@@ -3576,7 +3576,7 @@ fn variadic_callsite_argument_count(
     fixed_arguments: &[Option<SourceCallArgumentFact>],
     forwarding: &FormatForwardingLookup<'_>,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
-    let Some(parameter_rule) = interface.variadic_argument_count_rule() else {
+    let Some(parameter_rule) = interface.format_parameter_rule() else {
         return Err(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter);
     };
     let parameter_index = parameter_rule.parameter_index();
@@ -3855,7 +3855,7 @@ impl FormatForwardingLookup<'_> {
 fn merged_format_literal_argument_count(
     context: FormatLiteralContext<'_>,
     interface: &r2source::SourceCallSiteInterface,
-    parameter_rule: r2source::SourceVariadicArgumentCountRule,
+    parameter_rule: r2source::SourceFormatParameterRule,
     format_value: ValueId,
     format_argument_index: usize,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
@@ -4553,6 +4553,14 @@ fn collect_source_boundary_facts(
                                 "callsite ({block_addr:#x}, {op_index}) could not prove its argument count: {refusal:?}"
                             );
                             boundary.variadic_argument_count_refusal = Some(refusal);
+                            // The fixed prefix is the prototype's and is read
+                            // whether or not the tail is counted: an import
+                            // thunk forwarding its own tail still reads every
+                            // fixed carrier, and that is what names its parameters.
+                            if fixed_arguments.iter().all(Option::is_some) {
+                                boundary.arguments =
+                                    fixed_arguments.iter().flatten().copied().collect();
+                            }
                             false
                         }
                     }
@@ -6943,6 +6951,37 @@ fn accessed_object_storage(
     width.map(|width| (width, false))
 }
 
+/// The gap from a frame object up to the next one the frame lays out above
+/// it, or to the entry stack pointer when it is the topmost: the extent of a
+/// buffer that only a callee ever fills.
+fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) -> Option<u32> {
+    if offset >= 0 {
+        return None;
+    }
+    let next = objects
+        .objects
+        .values()
+        .filter_map(|fact| match fact.kind {
+            ObjectKind::StackSlot {
+                base: other_base,
+                offset: other,
+                ..
+            }
+            | ObjectKind::FrameObject {
+                base: other_base,
+                offset: other,
+                ..
+            } if other_base == base && other > offset => Some(other),
+            _ => None,
+        })
+        .min()
+        .unwrap_or(0)
+        .min(0);
+    u32::try_from(next - offset)
+        .ok()
+        .filter(|extent| *extent > 0)
+}
+
 /// The extent an object's accesses reach, when every one lands at a known
 /// non-negative offset inside it; the containment proof is the offsets.
 fn accessed_object_extent(structured: &StructuredDataflowFacts, object: ObjectId) -> Option<u32> {
@@ -7778,6 +7817,13 @@ fn collect_prepared_function_certificates(
                     None
                 } else {
                     accessed_object_storage(graph, structured, *object)
+                        // No access sizes it and nothing declares it: a buffer
+                        // whose address escapes to a callee. The frame lays it
+                        // out between its neighbours, and that gap is its extent,
+                        // as bytes -- nothing here ever read it at a width.
+                        .or_else(|| {
+                            frame_gap_extent(objects, base, offset).map(|extent| (extent, true))
+                        })
                 };
                 Some((
                     *object,

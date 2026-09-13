@@ -1884,8 +1884,10 @@ fn trusted_source_signature(
     ptr_bits: u32,
 ) -> Option<(r2types::FunctionSignatureSpec, Option<String>, bool)> {
     let signature = trusted.source().presentation().signature()?;
+    // The ellipsis is not a parameter: carried as one, with no type, it left
+    // a variadic thunk with a signature no caller could be matched against.
     let params = signature
-        .parameters()
+        .named_parameters()
         .iter()
         .enumerate()
         .map(|(index, parameter)| r2types::FunctionParamSpec {
@@ -2016,13 +2018,6 @@ impl CalleeFacts {
         // otherwise; the body is the stronger claim about what it does.
         let interface = match body_proven_return(&shared) {
             Some(storage) => interface.with_body_proven_return(storage).ok()?,
-            None => interface,
-        };
-        // radare2 names a format parameter only where it has a prototype, so a
-        // variadic wrapper defined here gets none and its callers lose every
-        // argument count. What it forwards says which parameter it is.
-        let interface = match r2ssa::body_proven_format_parameter(callee) {
-            Some(index) => interface.with_body_proven_format_parameter(index).ok()?,
             None => interface,
         };
         let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();

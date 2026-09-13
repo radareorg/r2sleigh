@@ -1020,12 +1020,34 @@ impl TypeWritebackAnalysis {
     /// The opaque result keeps the SSA and physical interface that authorize
     /// the logical C types, so it cannot be reattached to an unrelated call.
     pub fn source_owned_callee_signature(&self) -> Option<crate::SourceOwnedCalleeSignature> {
-        let signature = self
+        let entry = self.source.function().entry;
+        let Some(signature) = self
             .function_facts
             .type_facts()
-            .render_authorized_signature()?;
-        let return_type = signature.ret_type.clone()?;
-        let render = self.function_facts.render()?;
+            .render_authorized_signature()
+        else {
+            r2il::refusal_evidence!(
+                "callee-signature",
+                "{entry:#x}: no render-authorized signature; certificate={:?}",
+                self.function_facts
+                    .type_facts()
+                    .signature_certificate
+                    .as_ref()
+                    .map(|c| c.confidence)
+            );
+            return None;
+        };
+        let Some(return_type) = signature.ret_type.clone() else {
+            r2il::refusal_evidence!(
+                "callee-signature",
+                "{entry:#x}: the signature has no return type"
+            );
+            return None;
+        };
+        let Some(render) = self.function_facts.render() else {
+            r2il::refusal_evidence!("callee-signature", "{entry:#x}: no render facts");
+            return None;
+        };
         let ptr_bits = self
             .source
             .machine_context()
@@ -1037,9 +1059,14 @@ impl TypeWritebackAnalysis {
             .enumerate()
             .map(|(slot, parameter)| {
                 let id = r2ssa::SemanticId::parameter(slot)?;
-                let crate::CertifiedEntity::Parameter { carrier_width, .. } =
-                    render.certified_entities.get(&id)?
+                let Some(crate::CertifiedEntity::Parameter { carrier_width, .. }) =
+                    render.certified_entities.get(&id)
                 else {
+                    r2il::refusal_evidence!(
+                        "callee-signature",
+                        "{entry:#x}: parameter {slot} ({}) has no certified entity",
+                        parameter.name
+                    );
                     return None;
                 };
                 let width_bits = carrier_width.checked_mul(8)?;

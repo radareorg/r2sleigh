@@ -21,11 +21,11 @@ pub use r2source::{
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
     SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection,
-    SourceConventionSlots, SourceFunctionInterface, SourceFunctionInterfaceError,
-    SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
-    SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
-    SourceVariadicArgumentCountRule, StackAddressBase,
+    SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
+    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
+    SourceMachineRolesError, SourceParameterLocation, SourceStackAllocationContract,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeGraph,
+    SourceTypeGraphError, SourceTypeKind, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 24;
@@ -902,12 +902,12 @@ fn write_call_site_interface(
         write_parameter_location_identity(writer, argument.location());
     }
     writer.bool(interface.is_variadic());
-    match interface.variadic_argument_count_rule() {
-        Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index }) => {
+    match interface.format_parameter_rule() {
+        Some(SourceFormatParameterRule::Radare2FormatString { parameter_index }) => {
             writer.u8(1);
             writer.u32(parameter_index);
         }
-        Some(SourceVariadicArgumentCountRule::BodyProvenFormatString { parameter_index }) => {
+        Some(SourceFormatParameterRule::BodyProvenFormatString { parameter_index }) => {
             writer.u8(2);
             writer.u32(parameter_index);
         }
@@ -1345,6 +1345,12 @@ impl SourceMachineContext {
 
     pub const fn function_interface(&self) -> Option<&SourceFunctionInterface> {
         self.function_interface.as_ref()
+    }
+
+    /// Replace the function interface with the one the body has been read
+    /// into. Identity is computed on demand, so it follows the replacement.
+    pub(crate) fn seal_function_interface(&mut self, interface: SourceFunctionInterface) {
+        self.function_interface = Some(interface);
     }
 
     /// Exact source-owned convention slots, including their typed ABI class.

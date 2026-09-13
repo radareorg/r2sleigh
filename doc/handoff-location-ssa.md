@@ -109,6 +109,62 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -1. **Variadic arity: what the format-parameter unification left open.**
+     A callsite now carries `SourceFormatParameterRule` for any callee whose
+     prototype names `format` or whose body forwards a parameter as one, variadic
+     or not, and the fact is sealed into the artifact's own function interface at
+     construction (`SsaArtifact::seal_body_proven_interface`), so callers,
+     callee facts and the callee's C signature read one interface. Measured at
+     776 of 787 with the gate 54/54; `file_compress` renders all seven arguments
+     of `__snprintf_chk`, which the previous 5-argument rendering silently dropped.
+     Four things are known and not done:
+
+     * **The capture follows calls one level and keeps at most four callees**
+       (`SNAPSHOT_CALLEE_DEPTH 1`, `SNAPSHOT_MAX_CALLEE_SNAPSHOTS 4` in
+       `r2plugin/snapshot_capture.h`; the Rust `SNAPSHOT_CALLEE_DEPTH: usize = 2`
+       and `CapturedCallee.callees` are dead against it). dpkg's wrappers go
+       `ohshite -> error_context_errmsg_format(fmt, va_list) -> vasprintf`, so the
+       `va_list` half is never captured and `atomic_file_close` keeps its
+       `missing_format_parameter` gap; that is most of the 2395 gaps in the last
+       sweep. The design settled on: the C side collects the transitive closure
+       with a worklist (no depth, no cap) and encodes bodies flat in post-order;
+       facts derive bottom-up with the in-process memo keyed by a Merkle key over
+       the closure; captures memoised per function by the fork's dirty epochs
+       (`r_anal_sleigh.c` already holds one). Both caps are the kind the project
+       forbids, and the cost model is O(N) lifts per session.
+     * **A body-proven return still lives on a promoted copy.** `CalleeFacts::derive`
+       applies `with_body_proven_return` after the artifact is sealed, so for such
+       a callee `SourceOwnedCalleeSignature.interface` (the artifact's) and the
+       callsite's `exact_callee_interface` (the promoted copy) differ and
+       `apply_source_owned_callee_signatures` drops the signature (evidence
+       `callee-signature ... same_interface=false`). Sealing the return the same
+       way needs an exactness marker: `with_body_proven_return` cannot tell a
+       DWARF-stated `void` from radare2's defaulted one, and `live_out` counts a
+       trailing call's RAX as a return, so sealing it for roots today would type
+       every void function that ends in a call.
+     * **Variadic callees never get a C signature**, by three agreeing sites:
+       `with_exact_callee_interface` refuses `self.variadic`, r2dec's
+       `calls.rs` refuses `signature.variadic`, and `apply_source_owned_callee_signatures`
+       already sets `logical_signature.variadic = arguments.variadic` as if the
+       first two allowed it. Relaxing all three to "the fixed prefix matches" is
+       one model statement and would type printf-family arguments.
+     * **radare2 declares `snprintf_chk`/`sprintf_chk` without `...`**
+       (`libr/anal/d/types.sdb.txt`); upstream PR 26731, cherry-picked onto the
+       fork's integration branch. Until merged upstream, any tree built from
+       radare2 master analyses those calls as fixed.
+
+     Also landed on the way: an import thunk's tail boundary keeps its fixed
+     prefix when the tail count is unprovable (`semantic.rs`, count-unknown
+     branch) and its tail result is taken from `results_complete` rather than
+     the combined flag (`recover_interface.rs`), so the thunk has parameters and
+     a result; the root's signature spec no longer carries the ellipsis as a
+     typeless parameter (`trusted_source_signature`); and a frame object no
+     access sizes and no slot names is sized by the frame gap and declared as
+     bytes in the r2ssa stack-slot certificate (`frame_gap_extent`), which is
+     `MissingSourceIdentity` for escaping buffers and what `file_compress`
+     needed for `uint8_t stack_m1080[1032]`.
+
+
   0. **The failures are eight causes, not one.** An earlier revision of this
      item claimed that eleven of twelve remaining failures were the spelling
      defect below. That was read off `out_x64_O0.txt` while it was stale. Fresh

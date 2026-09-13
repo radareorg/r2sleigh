@@ -93,7 +93,6 @@ pub use function::{
     RegisterFamilySlot, RegisterIdentityCensus, SSABlock as FunctionSSABlock, SSAFunction,
     SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
     StackAddressBase, StackAddressRoot, SwitchInfo, TrustedSsaArtifact,
-    body_proven_format_parameter,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -130,11 +129,11 @@ pub use machine_context::{
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
     SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection,
-    SourceConventionSlots, SourceFunctionInterface, SourceFunctionInterfaceError,
-    SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceMachineRoles,
-    SourceMachineRolesError, SourceParameterLocation, SourceStackAllocationContract,
-    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeGraph,
-    SourceTypeGraphError, SourceTypeKind, SourceVariadicArgumentCountRule,
+    SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
+    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
+    SourceMachineRoles, SourceMachineRolesError, SourceParameterLocation,
+    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
+    SourceType, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationCoverageReport,

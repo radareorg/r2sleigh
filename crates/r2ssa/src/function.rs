@@ -435,7 +435,7 @@ impl SsaArtifact {
             &machine_context,
         );
         control.poll()?;
-        Ok(Self {
+        let mut artifact = Self {
             authority: SsaArtifactAuthority::new(),
             provenance,
             function,
@@ -449,7 +449,24 @@ impl SsaArtifact {
             aggregate_accesses,
             display_names: r2source::DisplayNames::default(),
             user_operations: Arc::from([] as [String; 0]),
-        })
+        };
+        artifact.seal_body_proven_interface();
+        Ok(artifact)
+    }
+
+    /// Read the body's own facts into the function interface, so that a
+    /// caller correlated against it and the signature derived from it see one
+    /// interface rather than the capture's and a promoted copy of it.
+    fn seal_body_proven_interface(&mut self) {
+        let Some(index) = body_proven_format_parameter(self) else {
+            return;
+        };
+        let Some(interface) = self.machine_context.function_interface() else {
+            return;
+        };
+        if let Ok(sealed) = interface.clone().with_body_proven_format_parameter(index) {
+            self.machine_context.seal_function_interface(sealed);
+        }
     }
 
     /// Run-local identity shared by every clone and downstream proof derived
@@ -1544,11 +1561,10 @@ fn correlate_call_site_interfaces(
         // The exact target identity correlates this call with the prototype
         // radare2 recovered for that target. Parameter names are otherwise
         // presentation-only; promote precisely one `format` name into the
-        // checked callsite contract, where it can serve as provenance for
-        // literal format counting. Missing or ambiguous names stay unknown.
-        if prototype.variadic
-            && let Some(target_name) = call.target_name()
-        {
+        // checked callsite contract, where it serves as provenance for literal
+        // format counting at a variadic call and, at a `va_list` call, says
+        // which argument a caller's body forwards as its own format.
+        if let Some(target_name) = call.target_name() {
             let mut signatures =
                 source
                     .presentation()
@@ -1556,7 +1572,7 @@ fn correlate_call_site_interfaces(
                     .iter()
                     .filter(|(name, signature)| {
                         name.as_ref() == target_name
-                            && signature.is_variadic()
+                            && signature.is_variadic() == prototype.variadic
                             && signature.named_parameters().len() == prototype.arguments.len()
                     });
             if let (Some((_, signature)), None) = (signatures.next(), signatures.next()) {
@@ -1590,8 +1606,7 @@ fn correlate_call_site_interfaces(
         // the wrapper. Its own body proved which parameter it forwards as a
         // format, and that travels on the callee interface; the builder leaves
         // an already-bound radare2 rule alone.
-        if prototype.variadic
-            && let Some(callee) = recovered
+        if let Some(callee) = recovered
             && let Some(index) = callee.body_proven_format_parameter()
             && let Ok(bound) = interface.clone().with_body_proven_format_parameter(index)
         {
@@ -1605,72 +1620,35 @@ fn correlate_call_site_interfaces(
     }
 }
 
-/// Which parameter of this body holds a format string, proven by what the body
-/// forwards.
+/// Which of this function's own parameters its body forwards as a format.
 ///
-/// radare2 names a format parameter `format` only in its own prototypes, so
-/// libc's printf family resolves and nothing else does: with DWARF the name is
-/// whatever the programmer wrote -- `fmt`, `msg`, `templ` -- and without it
-/// there is no name at all. The body says it regardless. A printf-style
-/// wrapper hands one of its own parameters to `vfprintf` or a sibling, and
-/// radare2 does name the format parameter of every one of those, so the claim
-/// composes: the callee's prototype supplies the argument index, and this body
-/// supplies which of its parameters arrives there. The forwarded callee need
-/// not be variadic itself; the whole family takes a `va_list`.
-///
-/// The last fixed parameter would be cheaper and is only a guess:
-/// `void f(const char *fmt, int flags, ...)` is legal C. Two forwards that
-/// disagree prove nothing and refuse.
-pub fn body_proven_format_parameter(artifact: &TrustedSsaArtifact) -> Option<u32> {
+/// The callsites this body was correlated against already say which argument
+/// each callee consumes as a format: radare2's prototype for the printf
+/// family, or the callee's own body when it is a wrapper defined in this
+/// binary. The value that argument carries is traced back to a parameter of
+/// this function. Whether this function itself takes a variadic tail is not
+/// the question: `vfprintf` takes a `va_list` and forwards its format all the
+/// same, and a wrapper's `va_list` half is exactly what the variadic half
+/// forwards through.
+fn body_proven_format_parameter(shared: &SsaArtifact) -> Option<u32> {
     use crate::semantic::SourceCallArgumentValue;
-    let shared = artifact.shared_artifact();
-    let source = artifact.source();
-    // A function with no variadic tail has no format parameter in the sense
-    // this rule means: there is nothing to count. `__snprintf_chk` forwards
-    // its fifth parameter to `__vsnprintf_chk`'s format and is still declared
-    // with five fixed parameters by the prototype a caller uses, and claiming
-    // a format for it turned a call that rendered into one that had to prove a
-    // count it could not.
-    if !source
-        .presentation()
-        .signature()
-        .is_some_and(r2source::SourceSignaturePresentation::is_variadic)
-    {
-        return None;
-    }
     let boundaries = &shared.facts().boundaries;
     if boundaries.parameters.is_empty() {
         return None;
     }
-    let signatures = source.presentation().callee_signatures();
-    let names: BTreeMap<u64, &str> = source
-        .advisory_calls()
-        .iter()
-        .filter_map(|call| call.target_name().map(|name| (call.target_address(), name)))
-        .collect();
-
     let mut proven: Option<u32> = None;
     for (call_site, boundary) in &boundaries.calls {
-        let Some(certificate) = shared.certificates().callsites.get(call_site) else {
+        let Some(interface) = shared.call_site_interface(*call_site) else {
             continue;
         };
-        let Some(target) = certificate.direct_target else {
+        let Some(rule) = interface.format_parameter_rule() else {
             continue;
         };
-        let Some(name) = names.get(&target) else {
-            r2il::refusal_evidence!(
-                "body-format-parameter",
-                "call {call_site:?} to {target:#x} has no source name to look a prototype up by"
-            );
-            continue;
-        };
-        let Some(format_index) = prototype_format_parameter_index(signatures, name) else {
-            continue;
-        };
+        let format_index = rule.parameter_index() as usize;
         let Some(argument) = boundary.arguments.get(format_index) else {
             r2il::refusal_evidence!(
                 "body-format-parameter",
-                "{name} names its format at {format_index} and this call carries {} arguments",
+                "{call_site:?} names its format at {format_index} and carries {} arguments",
                 boundary.arguments.len()
             );
             continue;
@@ -1678,14 +1656,14 @@ pub fn body_proven_format_parameter(artifact: &TrustedSsaArtifact) -> Option<u32
         let SourceCallArgumentValue::Value(value) = argument.value else {
             r2il::refusal_evidence!(
                 "body-format-parameter",
-                "the format argument of {name} is this function's entry carrier, not a value"
+                "the format argument of {call_site:?} is this function's entry carrier, not a value"
             );
             continue;
         };
-        let Some(index) = forwarded_parameter_index(&shared, value, &mut BTreeSet::new()) else {
+        let Some(index) = forwarded_parameter_index(shared, value, &mut BTreeSet::new()) else {
             r2il::refusal_evidence!(
                 "body-format-parameter",
-                "the format argument {value:?} of {name} is no parameter of this function"
+                "the format argument {value:?} of {call_site:?} is no parameter of this function"
             );
             continue;
         };
@@ -1707,28 +1685,6 @@ pub fn body_proven_format_parameter(artifact: &TrustedSsaArtifact) -> Option<u32
         );
     }
     proven
-}
-
-/// The parameter index the exact prototype for `name` calls the format string.
-///
-/// Unlike the variadic count rule this does not require the callee to be
-/// variadic: `vfprintf` and its siblings take a `va_list` and are the point.
-fn prototype_format_parameter_index(
-    signatures: &[(Box<str>, r2source::SourceSignaturePresentation)],
-    name: &str,
-) -> Option<usize> {
-    let mut matching = signatures.iter().filter(|(key, _)| key.as_ref() == name);
-    let (_, signature) = matching.next()?;
-    if matching.next().is_some() {
-        return None;
-    }
-    let mut formats = signature
-        .named_parameters()
-        .iter()
-        .enumerate()
-        .filter(|(_, parameter)| parameter.name() == Some("format"));
-    let (index, _) = formats.next()?;
-    formats.next().is_none().then_some(index)
 }
 
 /// The parameter this value carries, directly, through a copy or merge, or
@@ -8233,7 +8189,7 @@ mod tests {
         assert!(evidence.merged_literals);
         assert!(matches!(
             evidence.parameter_rule,
-            crate::SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index: 1 }
+            crate::SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 }
         ));
         assert_eq!(evidence.format_argument_index, 1);
         assert_eq!(evidence.format_consumed_argument_count, 1);

@@ -779,7 +779,10 @@ fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailRe
         .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
         .map(|call| {
             let boundary = facts.boundaries.calls.get(&call.id)?;
-            boundary.complete.then_some(boundary.result_kind?)
+            // What the tail callee returns is the prototype's claim, and an
+            // argument count the body cannot prove -- a variadic import thunk
+            // forwards a tail it never sees -- says nothing about the result.
+            boundary.results_complete.then_some(boundary.result_kind?)
         })
         .peekable();
     if results.peek().is_none() {

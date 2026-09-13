@@ -3577,7 +3577,7 @@ impl Decompiler {
                     .is_some_and(|evidence| {
                         matches!(
                             evidence.parameter_rule,
-                            r2ssa::SourceVariadicArgumentCountRule::Radare2FormatString { .. }
+                            r2ssa::SourceFormatParameterRule::Radare2FormatString { .. }
                         )
                     })
             })

@@ -2329,14 +2329,16 @@ impl SourceFormatForwardingRule {
     }
 }
 
-/// Source-owned rule that can prove how many arguments one variadic callsite
-/// passes.
+/// Which fixed parameter the callee consumes as a printf format, and what
+/// proved it.
 ///
-/// This is deliberately attached to the exact callsite interface rather than
-/// to a callee type. A variadic prototype names only its fixed prefix; each
-/// call's literal format decides the length of its own tail.
+/// A variadic callsite counts its tail from the literal that reaches this
+/// parameter. A callsite with a fixed prototype -- `vfprintf` and the
+/// `va_list` half of every wrapper -- has nothing to count, and carries the
+/// rule so that a caller's body can be seen to forward its own parameter as
+/// a format through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SourceVariadicArgumentCountRule {
+pub enum SourceFormatParameterRule {
     /// radare2's recovered prototype named this fixed parameter `format`.
     Radare2FormatString { parameter_index: u32 },
     /// The callee's own body forwards this fixed parameter as the format
@@ -2346,7 +2348,7 @@ pub enum SourceVariadicArgumentCountRule {
     BodyProvenFormatString { parameter_index: u32 },
 }
 
-impl SourceVariadicArgumentCountRule {
+impl SourceFormatParameterRule {
     /// The fixed parameter the rule names, whichever proved it.
     pub const fn parameter_index(self) -> u32 {
         match self {
@@ -2368,7 +2370,7 @@ pub struct SourceCallSiteInterface {
     abi_class: SourceAbiClass,
     arguments: Box<[SourceCallArgumentSpec]>,
     variadic: bool,
-    variadic_argument_count_rule: Option<SourceVariadicArgumentCountRule>,
+    format_parameter_rule: Option<SourceFormatParameterRule>,
     /// Set when this call's target hands back one of its own arguments as a
     /// format string, so a caller can count from the msgid it passed.
     format_forwarding: Option<SourceFormatForwardingRule>,
@@ -2392,7 +2394,6 @@ pub enum SourceCallSiteInterfaceError {
     InvalidArgumentOrder,
     InvalidRegisterStorage,
     OverlappingRegisterStorages,
-    VariadicCountRuleOnFixedPrototype,
     InvalidFormatParameterIndex,
     NoreturnWithResult,
     IncompatibleCalleeInterface,
@@ -2467,7 +2468,7 @@ impl SourceCallSiteInterface {
             abi_class,
             arguments: arguments.into_boxed_slice(),
             variadic,
-            variadic_argument_count_rule: None,
+            format_parameter_rule: None,
             format_forwarding: None,
             noreturn,
             result,
@@ -2550,8 +2551,8 @@ impl SourceCallSiteInterface {
         parameter_index: u32,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
         self.check_format_parameter(parameter_index)?;
-        self.variadic_argument_count_rule =
-            Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index });
+        self.format_parameter_rule =
+            Some(SourceFormatParameterRule::Radare2FormatString { parameter_index });
         Ok(self)
     }
 
@@ -2564,9 +2565,9 @@ impl SourceCallSiteInterface {
         parameter_index: u32,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
         self.check_format_parameter(parameter_index)?;
-        if self.variadic_argument_count_rule.is_none() {
-            self.variadic_argument_count_rule =
-                Some(SourceVariadicArgumentCountRule::BodyProvenFormatString { parameter_index });
+        if self.format_parameter_rule.is_none() {
+            self.format_parameter_rule =
+                Some(SourceFormatParameterRule::BodyProvenFormatString { parameter_index });
         }
         Ok(self)
     }
@@ -2575,9 +2576,6 @@ impl SourceCallSiteInterface {
         &self,
         parameter_index: u32,
     ) -> Result<(), SourceCallSiteInterfaceError> {
-        if !self.variadic {
-            return Err(SourceCallSiteInterfaceError::VariadicCountRuleOnFixedPrototype);
-        }
         if usize::try_from(parameter_index)
             .ok()
             .is_none_or(|index| index >= self.arguments.len())
@@ -2608,8 +2606,8 @@ impl SourceCallSiteInterface {
         self.format_forwarding
     }
 
-    pub const fn variadic_argument_count_rule(&self) -> Option<SourceVariadicArgumentCountRule> {
-        self.variadic_argument_count_rule
+    pub const fn format_parameter_rule(&self) -> Option<SourceFormatParameterRule> {
+        self.format_parameter_rule
     }
 
     pub const fn is_noreturn(&self) -> bool {
@@ -2763,8 +2761,8 @@ mod tests {
         .with_radare2_format_parameter(1)
         .expect("second fixed parameter is the format");
         assert_eq!(
-            variadic.variadic_argument_count_rule(),
-            Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index: 1 })
+            variadic.format_parameter_rule(),
+            Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
         assert_eq!(
             variadic.clone().with_radare2_format_parameter(2),
@@ -2781,10 +2779,13 @@ mod tests {
             false,
             SourceCallResult::Void,
         )
-        .expect("fixed interface");
+        .expect("fixed interface")
+        .with_radare2_format_parameter(1)
+        .expect("a va_list callee names its format without a tail to count");
+        assert!(!fixed.is_variadic());
         assert_eq!(
-            fixed.with_radare2_format_parameter(1),
-            Err(SourceCallSiteInterfaceError::VariadicCountRuleOnFixedPrototype)
+            fixed.format_parameter_rule(),
+            Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
     }
 
@@ -2820,12 +2821,12 @@ mod tests {
             .with_body_proven_format_parameter(0)
             .expect("first fixed parameter is the format");
         assert_eq!(
-            proven.variadic_argument_count_rule(),
-            Some(SourceVariadicArgumentCountRule::BodyProvenFormatString { parameter_index: 0 })
+            proven.format_parameter_rule(),
+            Some(SourceFormatParameterRule::BodyProvenFormatString { parameter_index: 0 })
         );
         assert_eq!(
             proven
-                .variadic_argument_count_rule()
+                .format_parameter_rule()
                 .map(|rule| rule.parameter_index()),
             Some(0)
         );
@@ -2844,8 +2845,8 @@ mod tests {
             .with_body_proven_format_parameter(0)
             .expect("body proof is accepted and ignored");
         assert_eq!(
-            both.variadic_argument_count_rule(),
-            Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index: 1 })
+            both.format_parameter_rule(),
+            Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
     }
 
