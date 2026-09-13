@@ -139,11 +139,22 @@ learn.
      unread on the C side apart from `mode`, `taint_enabled`,
      `taint_focus_only` and `post_budget_us`.
 
-     The remaining cost is per function, not per program. One capture and SSA
-     preparation of bzip2's largest function holds 73.5 MB at roughly 2.4 KB
-     per instruction, which is why a 114-function binary costs more than a
-     169-function one. That is the density figure the representation work in
-     item -4 is aimed at.
+     The remaining cost is per function, not per program, and
+     `tests/corpus/alloc_fit.py` is how it is read. Build the plugin with
+     `RUST_FEATURES=all-archs,alloc-probe`, run under `R2SLEIGH_TIMING=1` and
+     `R2DEC_TRACE_REFUSAL=1`, and it reports what each preparation phase holds
+     and what each render stage adds. On bzip2's 501-block `BZ2_decompress`,
+     30,281 instructions:
+
+         preparation   obligations 16.1 MB, predicates 12.2 MB,
+                       structured 5.3 MB, certificates 4.6 MB
+         entry         138.2 MB already held when the render begins
+         render        +153.7 MB: prepare 65.8, fold 30.2, binding plan 25.0,
+                       structure walk 20.8, structure cleanup 11.9
+         density       10,109 bytes per instruction at peak
+
+     That is why a 114-function binary costs more than a 169-function one, and
+     it is the figure the representation work is aimed at.
 
 
    0. **The review of the cap work, answered in full.** Eight findings; all
