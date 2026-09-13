@@ -26,10 +26,6 @@ typedef ut32 RAnalSnapshotTypeId;
 #define SNAPSHOT_REFUSE(why) do { refusal = (why); goto fail; } while (0)
 #define SNAPSHOT_MAX_CODE_POINTER_TABLES 16
 #define SNAPSHOT_MAX_CODE_POINTER_TABLE_ENTRIES 256
-#define SNAPSHOT_MAX_CALLEE_SNAPSHOTS 4
-// How far a capture follows calls. A second level lets a callee prove what it
-// preserves, and costs a lift per body; raise it only against a measured gain.
-#define SNAPSHOT_CALLEE_DEPTH 1
 #define DB anal->sdb_cc
 #define R_ANAL_FUNCTION_SNAPSHOT_LIMITS_VERSION 4
 
@@ -154,6 +150,12 @@ typedef struct r_anal_fcn_slot_t {
 	 * slot says where something is and nothing about how wide it is. */
 	bool dereferenced;
 } RAnalFcnSlot;
+
+typedef struct {
+	ut64 addr;
+	const uint8_t *bytes;
+	size_t len;
+} RAnalSnapshotBodyWire;
 
 typedef struct r_anal_fcn_callee_t {
 	ut64 call_addr;
@@ -470,7 +472,7 @@ typedef struct r_anal_function_snapshot_view_t {
 	size_t num_string_literals;
 	size_t num_data_symbols;
 	size_t total_source_bytes;
-	size_t num_callee_snapshots;
+	size_t num_callee_wires;
 	size_t num_code_pointer_tables;
 } RAnalFunctionSnapshotView;
 
@@ -878,12 +880,11 @@ struct r_anal_function_snapshot_t {
 	ut64 content_identity;
 	RAnalSnapshotTypeGraph type_graph;
 	RAnalFunctionImageSnapshot image;
-	// Snapshots of the functions this one calls directly, collected in the same
-	// locked transaction so the set describes one state of the analysis rather
-	// than several. Bounded and one level deep: a consumer that reasons across a
-	// call needs the callee's body, not the whole program.
-	RAnalFunctionSnapshot **callee_snapshots;
-	size_t num_callee_snapshots;
+	// Every function reachable from this one through calls, as the wire bytes
+	// of its own capture. The plugin keeps one body per function, current by
+	// the analysis epochs, and a snapshot borrows them for its own encoding.
+	const RAnalSnapshotBodyWire *callee_wires;
+	size_t num_callee_wires;
 };
 
 
@@ -900,6 +901,8 @@ struct r_anal_function_snapshot_t {
  * Refuses on a debug-backed target, where the bytes under a function are not
  * stable enough to prove anything about. */
 RAnalFunctionSnapshot *r2sleigh_function_snapshot_take(RCore *core, ut64 function_addr, const char **reason);
+// Drop every memoised body; the next capture reads them again.
+void r2sleigh_snapshot_bodies_release(void);
 
 /* Release a snapshot and everything it owns. Safe on NULL. */
 void r2sleigh_function_snapshot_free(RAnalFunctionSnapshot *snapshot);

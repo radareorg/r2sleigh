@@ -3484,6 +3484,7 @@ static bool sleigh_fini(RAnal *anal) {
 	 * sweep, and `aa` is where most of the callback cost turned out to be. */
 	sleigh_callback_report ();
 	sleigh_function_capture_release ();
+	r2sleigh_snapshot_bodies_release ();
 	const R2SleighApiV2 *api = sleigh_lift_api_v2 ();
 	uint32_t status = sleigh_v2_owned_bytes_release (api, &sleigh_pending_owned_bytes);
 	if (status != R2SLEIGH_STATUS_OK_V2) {

@@ -10,6 +10,7 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+sha2 = "0.10"
 r2il = { path = "../crates/r2il" }
 r2source = { path = "../crates/r2source" }
 r2sleigh-lift = { path = "../crates/r2sleigh-lift", default-features = false }

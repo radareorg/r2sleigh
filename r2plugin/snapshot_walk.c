@@ -1146,35 +1146,22 @@ bool r2sleigh_wire_write_snapshot(R2SleighWireWriter *writer, const void *snapsh
 	 * transport's own choice rather than inventing a second one. */
 	r2sleigh_wire_u64 (writer, source->revision_identity);
 
-	/* Each callee is a whole snapshot with its own string table, so it decodes
-	 * by the same reader that decodes this one and nothing about it depends on
-	 * where it sits in this buffer. They carry no callees of their own, so this
-	 * nests exactly one level. */
+	/* Each body is a whole snapshot with its own string table, already encoded
+	 * once by its own capture, so it decodes by the same reader that decodes
+	 * this one. The set is flat: every function reachable through calls, and
+	 * a consumer orders them itself. */
 	const size_t num_callees = (source->capabilities
-		& R_ANAL_FUNCTION_SNAPSHOT_CAP_CALLEE_SNAPSHOTS)? source->num_callee_snapshots: 0;
+		& R_ANAL_FUNCTION_SNAPSHOT_CAP_CALLEE_SNAPSHOTS)? source->num_callee_wires: 0;
 	if (num_callees > UINT32_MAX) {
 		WIRE_REFUSE ();
 	}
 	r2sleigh_wire_u32 (writer, (uint32_t)num_callees);
 	for (size_t i = 0; i < num_callees; i++) {
-		const RAnalFunctionSnapshot *callee = source->callee_snapshots
-			? source->callee_snapshots[i]: NULL;
-		if (!callee) {
+		const RAnalSnapshotBodyWire *body = source->callee_wires? &source->callee_wires[i]: NULL;
+		if (!body || !body->bytes) {
 			WIRE_REFUSE ();
 		}
-		R2SleighWireWriter *nested = r2sleigh_wire_writer_new ();
-		if (!nested) {
-			WIRE_REFUSE ();
-		}
-		size_t nested_len = 0;
-		uint8_t *nested_buffer = r2sleigh_wire_write_snapshot (nested, callee)
-			? r2sleigh_wire_writer_finish (nested, &nested_len): NULL;
-		r2sleigh_wire_writer_free (nested);
-		if (!nested_buffer) {
-			WIRE_REFUSE ();
-		}
-		r2sleigh_wire_bytes (writer, nested_buffer, nested_len);
-		free (nested_buffer);
+		r2sleigh_wire_bytes (writer, body->bytes, body->len);
 	}
 	return r2sleigh_wire_writer_ok (writer);
 }

@@ -10,6 +10,7 @@
 #include <r_core.h>
 #include <r_util.h>
 #include "snapshot_capture.h"
+#include "snapshot_wire.h"
 #include "dwarf_facts.h"
 
 /* forward declarations, so the moved bodies keep their original order */
@@ -247,7 +248,7 @@ static bool function_snapshot_machine_tuple_collect(RAnalFunctionSnapshot *snaps
 static bool function_snapshot_machine_tuple_is_current(const RAnalFunctionSnapshot *snapshot, const RAnal *anal);
 static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAnal *anal, RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, const char **reason);
 static void r_anal_function_snapshot_limits_default(RAnalFunctionSnapshotLimits *limits);
-static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits, unsigned depth, ut64 root_addr);
+static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits);
 static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_with_limits(RAnal *anal, RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, const char **reason);
 static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_bounded(RAnal *anal, RAnalFunction *fcn, const char **reason);
 static RList *r_anal_types_snapshot_with_limits(RAnal *anal, const RAnalFunctionSnapshotLimits *limits);
@@ -2200,11 +2201,8 @@ static void r_anal_function_snapshot_free(RAnalFunctionSnapshot *snapshot) {
 	if (!snapshot) {
 		return;
 	}
-	size_t callee;
-	for (callee = 0; callee < snapshot->num_callee_snapshots; callee++) {
-		r_anal_function_snapshot_free (snapshot->callee_snapshots[callee]);
-	}
-	free (snapshot->callee_snapshots);
+	// the bodies belong to the memo; only the borrowing array is this snapshot's
+	free ((void *)snapshot->callee_wires);
 	function_context_fini (&snapshot->context);
 	function_interface_snapshot_fini (&snapshot->function_interface);
 	snapshot_register_storage_fini (&snapshot->frame_pointer_storage);
@@ -5810,67 +5808,161 @@ static void r_anal_function_snapshot_limits_default(RAnalFunctionSnapshotLimits 
 		.max_total_owned_bytes = 512 * 1024 * 1024,
 	};
 }
-static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits, unsigned depth, ut64 root_addr) {
-	if (!snapshot->context.callees || !depth) {
+/* One captured body, kept across requests. A function's capture depends on
+ * the function and the type graph, and the fork bumps an epoch for each, so the
+ * pair says exactly when a body is stale. */
+typedef struct {
+	ut64 function_epoch;
+	ut64 type_epoch;
+	uint8_t *wire;
+	size_t wire_len;
+	ut64 *callees;
+	size_t num_callees;
+} SnapshotBodyMemo;
+
+static HtUP *snapshot_bodies;
+
+static void snapshot_body_memo_free(SnapshotBodyMemo *memo) {
+	if (!memo) {
 		return;
 	}
-	RAnalFunctionSnapshot **collected = R_NEWS0 (RAnalFunctionSnapshot *, SNAPSHOT_MAX_CALLEE_SNAPSHOTS);
-	if (!collected) {
+	free (memo->wire);
+	free (memo->callees);
+	free (memo);
+}
+
+static bool snapshot_body_memo_release_cb(void *user, const ut64 key, const void *value) {
+	(void)user;
+	(void)key;
+	snapshot_body_memo_free ((SnapshotBodyMemo *)value);
+	return true;
+}
+
+void r2sleigh_snapshot_bodies_release(void) {
+	if (!snapshot_bodies) {
 		return;
 	}
-	size_t count = 0;
+	ht_up_foreach (snapshot_bodies, snapshot_body_memo_release_cb, NULL);
+	ht_up_free (snapshot_bodies);
+	snapshot_bodies = NULL;
+}
+
+/* The capture of one function as wire bytes, read again only when the function
+ * or the types changed since it was read. */
+static const SnapshotBodyMemo *snapshot_body_memo_get(RAnal *anal, RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits) {
+	if (!snapshot_bodies) {
+		snapshot_bodies = ht_up_new0 ();
+		if (!snapshot_bodies) {
+			return NULL;
+		}
+	}
+	const ut64 function_epoch = r_anal_function_dirty_epoch (fcn);
+	const ut64 type_epoch = r_anal_types_dirty_epoch (anal);
+	SnapshotBodyMemo *held = ht_up_find (snapshot_bodies, fcn->addr, NULL);
+	if (held && held->function_epoch == function_epoch && held->type_epoch == type_epoch) {
+		return held;
+	}
+	if (held) {
+		ht_up_delete (snapshot_bodies, fcn->addr);
+		snapshot_body_memo_free (held);
+	}
+	RAnalFunctionSnapshot *snapshot = function_snapshot_collect_with_limits_unlocked (anal, fcn, limits, NULL);
+	if (!snapshot) {
+		return NULL;
+	}
+	SnapshotBodyMemo *memo = R_NEW0 (SnapshotBodyMemo);
+	R2SleighWireWriter *writer = memo? r2sleigh_wire_writer_new (): NULL;
+	if (writer && r2sleigh_wire_write_snapshot (writer, snapshot)) {
+		memo->wire = r2sleigh_wire_writer_finish (writer, &memo->wire_len);
+	}
+	r2sleigh_wire_writer_free (writer);
+	if (memo && memo->wire && snapshot->context.callees) {
+		const size_t count = r_list_length (snapshot->context.callees);
+		memo->callees = count? R_NEWS0 (ut64, count): NULL;
+		RListIter *iter;
+		RAnalFcnCallee *callee;
+		r_list_foreach (snapshot->context.callees, iter, callee) {
+			if (memo->callees && callee && callee->addr != UT64_MAX) {
+				memo->callees[memo->num_callees++] = callee->addr;
+			}
+		}
+	}
+	r_anal_function_snapshot_free (snapshot);
+	if (!memo || !memo->wire) {
+		snapshot_body_memo_free (memo);
+		return NULL;
+	}
+	memo->function_epoch = function_epoch;
+	memo->type_epoch = type_epoch;
+	ht_up_insert (snapshot_bodies, fcn->addr, memo);
+	return memo;
+}
+
+/* Every function reachable from this one through calls, each captured once
+ * per analysis state. A consumer derives what a body contributes from the
+ * bodies it calls, so the set has to reach the bottom of every wrapper chain;
+ * a depth or a count would cut exactly the chains that matter. */
+static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits) {
+	if (!snapshot->context.callees) {
+		return;
+	}
+	HtUP *seen = ht_up_new0 ();
+	RList *work = r_list_new ();
+	RList *bodies = r_list_new ();
+	if (!seen || !work || !bodies) {
+		goto beach;
+	}
+	ht_up_insert (seen, snapshot->function_addr, (void *)1);
 	RListIter *iter;
 	RAnalFcnCallee *callee;
 	r_list_foreach (snapshot->context.callees, iter, callee) {
-		if (count >= SNAPSHOT_MAX_CALLEE_SNAPSHOTS) {
-			break;
+		if (callee && callee->addr != UT64_MAX) {
+			r_list_push (work, (void *)(size_t)callee->addr);
 		}
-		// A callee that is the caller is the same body, and one already taken
-		// is the same body too: a set with a repeat describes nothing extra and
-		// costs a consumer a disjointness check it cannot satisfy.
-		if (!callee || callee->addr == UT64_MAX
-			|| callee->addr == snapshot->function_addr
-			|| callee->addr == root_addr) {
-			continue;
-		}
-		size_t seen;
-		bool duplicate = false;
-		for (seen = 0; seen < count && !duplicate; seen++) {
-			duplicate = collected[seen]->function_addr == callee->addr;
-		}
-		if (duplicate) {
-			continue;
-		}
-		RAnalFunction *callee_fcn = r_anal_get_function_at (anal, callee->addr);
-		if (!callee_fcn) {
-			continue;
-		}
-		RAnalFunctionSnapshot *callee_snapshot = function_snapshot_collect_with_limits_unlocked (
-			anal, callee_fcn, limits, NULL);
-		if (!callee_snapshot) {
-			continue;
-		}
-		// A callee preserves nothing it calls something unknown for, so a
-		// body one level down is what makes the level above prove anything.
-		function_snapshot_collect_callees_unlocked (anal, callee_snapshot,
-			limits, depth - 1, root_addr);
-		// The identity a set carries is the identity of the capture, not of one
-		// function in it. A consumer reasoning across a call has to be able to
-		// tell that these bodies were read together, and a per-function hash
-		// says the opposite about every member.
-		// Only the revision. `content_identity` stays the callee's own hash,
-		// computed by its own collect above, so a consumer can tell both that
-		// these bodies were read together and which body this is.
-		callee_snapshot->revision_identity = snapshot->revision_identity;
-		collected[count++] = callee_snapshot;
 	}
-	if (!count) {
-		free (collected);
-		return;
+	while (!r_list_empty (work)) {
+		const ut64 addr = (ut64)(size_t)r_list_pop (work);
+		if (ht_up_find (seen, addr, NULL)) {
+			continue;
+		}
+		ht_up_insert (seen, addr, (void *)1);
+		RAnalFunction *fcn = r_anal_get_function_at (anal, addr);
+		if (!fcn) {
+			continue;
+		}
+		const SnapshotBodyMemo *body = snapshot_body_memo_get (anal, fcn, limits);
+		if (!body) {
+			continue;
+		}
+		r_list_push (bodies, (void *)body);
+		size_t i;
+		for (i = 0; i < body->num_callees; i++) {
+			if (!ht_up_find (seen, body->callees[i], NULL)) {
+				r_list_push (work, (void *)(size_t)body->callees[i]);
+			}
+		}
 	}
-	snapshot->callee_snapshots = collected;
-	snapshot->num_callee_snapshots = count;
-	snapshot->capabilities |= R_ANAL_FUNCTION_SNAPSHOT_CAP_CALLEE_SNAPSHOTS;
+	const size_t count = r_list_length (bodies);
+	if (count) {
+		RAnalSnapshotBodyWire *wires = R_NEWS0 (RAnalSnapshotBodyWire, count);
+		if (wires) {
+			size_t i = 0;
+			RListIter *it;
+			const SnapshotBodyMemo *body;
+			r_list_foreach (bodies, it, body) {
+				wires[i].bytes = body->wire;
+				wires[i].len = body->wire_len;
+				i++;
+			}
+			snapshot->callee_wires = wires;
+			snapshot->num_callee_wires = count;
+			snapshot->capabilities |= R_ANAL_FUNCTION_SNAPSHOT_CAP_CALLEE_SNAPSHOTS;
+		}
+	}
+beach:
+	r_list_free (bodies);
+	r_list_free (work);
+	ht_up_free (seen);
 }
 static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_with_limits(RAnal *anal, RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, const char **reason) {
 	R_RETURN_VAL_IF_FAIL (anal && anal->lock, NULL);
@@ -5878,8 +5970,7 @@ static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_with_limits(RAnal
 	RAnalFunctionSnapshot *snapshot = function_snapshot_collect_with_limits_unlocked (
 		anal, fcn, limits, reason);
 	if (snapshot) {
-		function_snapshot_collect_callees_unlocked (anal, snapshot, limits,
-			SNAPSHOT_CALLEE_DEPTH, snapshot->function_addr);
+		function_snapshot_collect_callees_unlocked (anal, snapshot, limits);
 	}
 	r_th_lock_leave (anal->lock);
 	return snapshot;

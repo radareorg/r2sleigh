@@ -2478,6 +2478,11 @@ impl SourceCallSiteInterface {
 
     /// Attach a callee-owned logical interface when its physical call
     /// contract is exactly this call site's contract.
+    ///
+    /// The two are not required to share a revision: a capture set is
+    /// consistent by construction, every body in it current by the analysis
+    /// epochs when the root was read, and a body kept across roots carries
+    /// the revision of its own capture.
     pub fn with_exact_callee_interface(
         mut self,
         callee: SourceFunctionInterface,
@@ -2490,7 +2495,6 @@ impl SourceCallSiteInterface {
             && !self.variadic
             && !self.noreturn
             && self.abi_class == callee.abi_class()
-            && self.revision_identity() == callee.revision_identity()
             && self.result == expected_result
             && self.arguments.len() == callee.parameters().len()
             && self

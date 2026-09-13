@@ -588,7 +588,6 @@ pub enum PreparedInterprocSummaryError {
     DuplicateFunction,
     MislabeledFunction,
     ManualFunction,
-    ForeignFunction,
     UnknownOrIncoherentMachineContext,
     ArchitectureMismatch,
     ManualRootWithHelpers,
@@ -1059,7 +1058,6 @@ fn require_trusted_root_for_helper_scope(
 pub struct PreparedCalleeSummary {
     id: InterprocFunctionId,
     architecture_family: crate::MachineArchitectureFamily,
-    revision_identity: Vec<u8>,
     blocks: Vec<(u64, u32)>,
     local: LocalSummaryFacts,
 }
@@ -1083,17 +1081,11 @@ impl PreparedCalleeSummary {
         }
         let abi = AbiProfile::from_machine_context(prepared.machine_context())
             .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
-        let revision_identity = prepared
-            .machine_context()
-            .function_interface()
-            .map(|interface| interface.revision_identity().to_vec())
-            .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
         let local = collect_source_owned_summary_facts(prepared, &abi);
         require_converged_call_carriers(&local)?;
         Ok(Self {
             id,
             architecture_family: prepared.machine_context().architecture_family(),
-            revision_identity,
             blocks: prepared
                 .function()
                 .blocks()
@@ -1132,20 +1124,18 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     }
 
     let root_family = root.machine_context().architecture_family();
-    let root_revision = root
-        .machine_context()
-        .function_interface()
-        .map(|interface| interface.revision_identity().to_vec())
-        .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
+    if root.machine_context().function_interface().is_none() {
+        return Err(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext);
+    }
     let root_abi = AbiProfile::from_machine_context(root.machine_context())
         .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
 
+    // A body kept across roots carries the revision of its own capture; the
+    // set is consistent by construction, each body current by the analysis
+    // epochs when the root was read, so no revision is compared here.
     for callee in callees {
         if callee.architecture_family != root_family {
             return Err(PreparedInterprocSummaryError::ArchitectureMismatch);
-        }
-        if callee.revision_identity != root_revision {
-            return Err(PreparedInterprocSummaryError::ForeignFunction);
         }
     }
     validate_interproc_block_ranges(

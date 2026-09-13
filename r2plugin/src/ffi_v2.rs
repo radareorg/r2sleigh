@@ -1183,46 +1183,86 @@ unsafe fn capture_trusted_ssa_from_buffer(
     // Callees first, so the root can describe a call whose prototype the
     // source never recovered from what the callee's own body does.
     //
-    // A callee that will not lift costs the caller nothing: the solver falls
-    // back to knowing nothing about that call, which is where it started.
+    // The capture is the closure of the call graph, flat. A body's own
+    // contribution depends on the bodies it calls -- a wrapper proves its
+    // format parameter through the `va_list` half below it -- so facts derive
+    // bottom-up: each body after its callees, against their interfaces. A
+    // cycle breaks at the first body seen twice, which then reads its
+    // cycle-mate as unknown, as the recursion this replaces did. Every callee
+    // in one capture is the same machine as the root, which is what the
+    // interprocedural solve checks before it uses any of them.
     let mut callee_facts = Vec::new();
     let mut callee_interfaces = std::collections::BTreeMap::new();
     let mut callee_preserved_carriers = r2ssa::CalleePreservedCarriers::new();
     let callee_started = Instant::now();
     let callee_count = callees.len();
     let mut callee_hits = 0usize;
-    // Every callee in one capture is the same machine as the root, which is
-    // what the interprocedural solve checks before it uses any of them.
     let ptr_bits = source.machine().bits();
-    for callee in callees {
-        let entry = callee.snapshot.function().address();
-        // A callee body is prepared from its own snapshot and nothing else --
-        // the set is one level deep, so it has no callee interfaces of its own
-        // to be prepared against. Re-serializing it therefore reproduces the
-        // whole of what its lift reads, which is what the cache compares. The
-        // encoder is deterministic, so the same body yields the same bytes;
-        // re-encoding costs microseconds against a lift's hundreds of
-        // milliseconds, and a body that will not serialize is simply not
-        // cached rather than being cached under a partial key.
-        //
-        // `encode_snapshot_cache_key` rather than `encode_snapshot`, because a
-        // callee inherits its caller's capture tag and a plain encoding would
-        // therefore differ for every caller of the same body. That function
-        // states exactly what it substitutes and why.
-        // A callee's own contribution now depends on the bodies it calls, so
-        // the key covers them too or a depth-1 answer would be served for it.
-        let nested_bodies = callee
-            .callees
+    let bodies: std::collections::BTreeMap<u64, &r2source::snapshot_wire::CapturedCallee> = callees
+        .iter()
+        .map(|callee| (callee.snapshot.function().address(), callee))
+        .collect();
+    let targets_of = |snapshot: &r2source::OwnedFunctionSnapshot| {
+        let own = snapshot.function().address();
+        snapshot
+            .advisory_calls()
             .iter()
-            .map(|nested| nested.snapshot.clone())
-            .collect::<Vec<_>>();
-        let key =
-            r2source::snapshot_wire::encode_snapshot_cache_key(&callee.snapshot, &nested_bodies)
-                .ok();
-        let cached = key
-            .as_deref()
-            .and_then(|key| r2engine::cached_callee_facts(entry, key));
-        let facts = match cached {
+            .map(|call| call.target_address())
+            .filter(|target| *target != own && bodies.contains_key(target))
+            .collect::<std::collections::BTreeSet<u64>>()
+    };
+    // Post-order over the closure, iteratively: the stack holds a body and
+    // whether its callees were already pushed above it.
+    let mut order = Vec::with_capacity(callee_count);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<(u64, bool)> = targets_of(&source)
+        .into_iter()
+        .rev()
+        .map(|entry| (entry, false))
+        .collect();
+    while let Some((entry, expanded)) = stack.pop() {
+        if expanded {
+            order.push(entry);
+            continue;
+        }
+        if !seen.insert(entry) {
+            continue;
+        }
+        stack.push((entry, true));
+        for target in targets_of(&bodies[&entry].snapshot).into_iter().rev() {
+            if !seen.contains(&target) {
+                stack.push((target, false));
+            }
+        }
+    }
+    // What a body contributes is a function of its own bytes and of what its
+    // callees contribute, so the key is a digest over the body and the keys
+    // of its callees -- the closure below it, in one hash.
+    let mut keys: std::collections::BTreeMap<u64, [u8; 32]> = std::collections::BTreeMap::new();
+    for entry in order {
+        let callee = bodies[&entry];
+        let targets = targets_of(&callee.snapshot);
+        let Ok(body) = r2source::snapshot_wire::encode_snapshot_cache_key(&callee.snapshot, &[])
+        else {
+            continue;
+        };
+        let key = {
+            use sha2::Digest;
+            let mut digest = sha2::Sha256::new();
+            digest.update(&body);
+            for target in &targets {
+                digest.update(target.to_le_bytes());
+                match keys.get(target) {
+                    Some(key) => digest.update(key),
+                    // a cycle-mate or a body that would not derive: named, not known
+                    None => digest.update([0u8; 32]),
+                }
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&digest.finalize());
+            out
+        };
+        let facts = match r2engine::cached_callee_facts(entry, &key) {
             Some(facts) => {
                 // A hit answers the whole of what this callee contributes, so
                 // its body is never built. That is the point of deriving the
@@ -1231,28 +1271,19 @@ unsafe fn capture_trusted_ssa_from_buffer(
                 facts
             }
             None => {
-                // What this callee preserves is erased by the clobbers of
-                // anything it calls, so its own callees are read first.
                 let mut nested_interfaces = std::collections::BTreeMap::new();
                 let mut nested_preserved = r2ssa::CalleePreservedCarriers::new();
-                for nested in &callee.callees {
-                    let nested_entry = nested.snapshot.function().address();
-                    let Ok(nested_artifact) =
-                        trusted_from_source(nested.snapshot.clone(), execution)
-                    else {
-                        continue;
-                    };
-                    let Some(nested_facts) =
-                        r2engine::CalleeFacts::derive(&nested_artifact, ptr_bits)
-                    else {
-                        continue;
-                    };
-                    nested_interfaces.insert(nested_entry, nested_facts.interface().clone());
-                    nested_preserved
-                        .insert(nested_entry, nested_facts.preserved_carriers().clone());
+                for target in &targets {
+                    if let Some(interface) = callee_interfaces.get(target) {
+                        nested_interfaces
+                            .insert(*target, r2ssa::SourceFunctionInterface::clone(interface));
+                    }
+                    if let Some(preserved) = callee_preserved_carriers.get(target) {
+                        nested_preserved.insert(*target, preserved.clone());
+                    }
                 }
                 let Ok(artifact) = trusted_from_source_with_callees(
-                    callee.snapshot,
+                    callee.snapshot.clone(),
                     execution,
                     &nested_interfaces,
                     &nested_preserved,
@@ -1262,12 +1293,11 @@ unsafe fn capture_trusted_ssa_from_buffer(
                 let Some(facts) = r2engine::CalleeFacts::derive(&artifact, ptr_bits) else {
                     continue;
                 };
-                if let Some(key) = key.as_deref() {
-                    r2engine::cache_callee_facts(entry, key, &facts);
-                }
+                r2engine::cache_callee_facts(entry, &key, &facts);
                 facts
             }
         };
+        keys.insert(entry, key);
         callee_interfaces.insert(entry, facts.interface().clone());
         callee_preserved_carriers.insert(entry, facts.preserved_carriers().clone());
         callee_facts.push(facts);
@@ -1359,21 +1389,6 @@ pub(crate) struct TrustedIngress {
     pub(crate) root: Arc<r2ssa::TrustedSsaArtifact>,
     pub(crate) callees: Vec<r2engine::CalleeFacts>,
     pub(crate) capture: CaptureTiming,
-}
-
-/// Lift and prepare one owned snapshot, whichever transport produced it. Both
-/// ingress paths share this so the buffer path cannot drift from the accessor
-/// path in anything after the source is owned.
-fn trusted_from_source(
-    source: r2source::OwnedFunctionSnapshot,
-    execution: &r2engine::EngineExecutionControl,
-) -> Result<Arc<r2ssa::TrustedSsaArtifact>, BoundaryError> {
-    trusted_from_source_with_callees(
-        source,
-        execution,
-        &std::collections::BTreeMap::new(),
-        &r2ssa::CalleePreservedCarriers::new(),
-    )
 }
 
 /// Lift and prepare one owned snapshot, describing each call whose callee body
