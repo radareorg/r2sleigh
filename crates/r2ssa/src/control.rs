@@ -1,8 +1,50 @@
 //! Cooperative control for bounded SSA preparation work.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Work one controlled run has done, counted rather than timed.
+///
+/// A wall clock answers a different question on every machine, so the same
+/// binary refuses different functions under load and a census cannot be
+/// reproduced. Every phase already reports through one `poll`, so counting
+/// those polls measures the same thing the clock was standing in for and
+/// measures it identically on every run.
+#[derive(Debug, Default)]
+pub struct SsaWorkMeter {
+    polls: AtomicU64,
+    limit: Option<u64>,
+}
+
+impl SsaWorkMeter {
+    /// A meter that also stops the run once `limit` units are spent.
+    pub fn with_limit(limit: u64) -> Self {
+        Self {
+            polls: AtomicU64::new(0),
+            limit: Some(limit),
+        }
+    }
+
+    /// Count one unit of work and return the running total.
+    pub fn spend(&self) -> u64 {
+        self.polls.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+    }
+
+    /// Work counted so far.
+    pub fn spent(&self) -> u64 {
+        self.polls.load(Ordering::Relaxed)
+    }
+
+    /// The units this run may spend, where it is bounded.
+    pub fn limit(&self) -> Option<u64> {
+        self.limit
+    }
+
+    fn exhausted(&self, spent: u64) -> bool {
+        self.limit.is_some_and(|limit| spent >= limit)
+    }
+}
 
 /// Cloneable cancellation token shared by SSA preparation callers.
 #[derive(Debug, Clone, Default)]
@@ -27,6 +69,9 @@ impl SsaCancellationToken {
 pub enum SsaExecutionStopReason {
     Cancelled,
     DeadlineExceeded,
+    /// The run spent the work its captured input allows. Counted rather than
+    /// timed, so the same input stops at the same place on every machine.
+    WorkExhausted,
 }
 
 impl std::fmt::Display for SsaExecutionStopReason {
@@ -34,6 +79,7 @@ impl std::fmt::Display for SsaExecutionStopReason {
         formatter.write_str(match self {
             Self::Cancelled => "SSA preparation cancelled",
             Self::DeadlineExceeded => "SSA preparation deadline exceeded",
+            Self::WorkExhausted => "SSA preparation exhausted the work its input allows",
         })
     }
 }
@@ -50,6 +96,7 @@ pub enum SsaPrepareError {
     MalformedInput,
     Cancelled,
     DeadlineExceeded,
+    WorkExhausted,
 }
 
 impl std::fmt::Display for SsaPrepareError {
@@ -58,6 +105,7 @@ impl std::fmt::Display for SsaPrepareError {
             Self::MalformedInput => "malformed SSA source input",
             Self::Cancelled => "SSA preparation cancelled",
             Self::DeadlineExceeded => "SSA preparation deadline exceeded",
+            Self::WorkExhausted => "SSA preparation exhausted the work its input allows",
         })
     }
 }
@@ -69,6 +117,7 @@ impl From<SsaExecutionStopReason> for SsaPrepareError {
         match reason {
             SsaExecutionStopReason::Cancelled => Self::Cancelled,
             SsaExecutionStopReason::DeadlineExceeded => Self::DeadlineExceeded,
+            SsaExecutionStopReason::WorkExhausted => Self::WorkExhausted,
         }
     }
 }
@@ -86,6 +135,7 @@ pub trait SsaWorkControl {
 pub struct SsaExecutionControl {
     cancellation: SsaCancellationToken,
     deadline: Option<Instant>,
+    meter: Option<Arc<SsaWorkMeter>>,
 }
 
 impl SsaExecutionControl {
@@ -94,7 +144,21 @@ impl SsaExecutionControl {
         Self {
             cancellation,
             deadline,
+            meter: None,
         }
+    }
+
+    /// Count this run's work into `meter`, so what the deadline is standing in
+    /// for can be measured against the body's own size.
+    #[must_use]
+    pub fn metered(mut self, meter: Arc<SsaWorkMeter>) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
+    /// The meter this run counts into.
+    pub fn meter(&self) -> Option<&Arc<SsaWorkMeter>> {
+        self.meter.as_ref()
     }
 
     pub fn with_cancellation(cancellation: SsaCancellationToken) -> Self {
@@ -133,6 +197,11 @@ impl SsaExecutionControl {
 
 impl SsaWorkControl for SsaExecutionControl {
     fn poll(&self) -> Result<(), SsaExecutionStopReason> {
+        if let Some(meter) = &self.meter
+            && meter.exhausted(meter.spend())
+        {
+            return Err(SsaExecutionStopReason::WorkExhausted);
+        }
         self.stop_reason().map_or(Ok(()), Err)
     }
 }

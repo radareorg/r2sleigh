@@ -1336,6 +1336,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
             callee_lift: callee_elapsed,
             callee_count,
             callee_hits,
+            captured_bytes: bytes.len(),
             root_lift: root_started.elapsed(),
             root_hit,
         },
@@ -1357,6 +1358,10 @@ pub(crate) struct CaptureTiming {
     /// being lifted. Reported beside the count, because `callee_lift` falling
     /// says nothing on its own about whether the cache or the program changed.
     pub(crate) callee_hits: usize,
+    /// The capture buffer this request was given: the root and every body
+    /// taken with it. Work is spent over all of them, so this is the measure
+    /// a bound on that work has to be a function of.
+    pub(crate) captured_bytes: usize,
     pub(crate) root_lift: Duration,
     pub(crate) root_hit: bool,
 }
@@ -1367,12 +1372,13 @@ impl CaptureTiming {
         std::env::var_os("R2SLEIGH_TIMING")?;
         let cache = r2engine::program_cache_stats();
         Some(format!(
-            "/* r2dec timing: capture={}us decode={}us callee_lift={}us callees={} cached_callees={} root_lift={}us cached_root={} cache_entries={} cache_hits={} cache_misses={} cache_replacements={} */",
+            "/* r2dec timing: capture={}us decode={}us callee_lift={}us callees={} cached_callees={} captured_bytes={} root_lift={}us cached_root={} cache_entries={} cache_hits={} cache_misses={} cache_replacements={} */",
             (self.decode + self.callee_lift + self.root_lift).as_micros(),
             self.decode.as_micros(),
             self.callee_lift.as_micros(),
             self.callee_count,
             self.callee_hits,
+            self.captured_bytes,
             self.root_lift.as_micros(),
             u8::from(self.root_hit),
             cache.entries,
@@ -1475,7 +1481,10 @@ unsafe fn execute_request(
             .checked_add(Duration::from_micros(payload.timeout_us))
             .unwrap_or_else(Instant::now)
     });
-    let execution = r2engine::EngineExecutionControl::new(cancellation, deadline);
+    // The capture is the input the work is spent over, so it is what bounds
+    // the work. The clock stays only for a caller that asked for one.
+    let execution = r2engine::EngineExecutionControl::new(cancellation, deadline)
+        .with_work_budget(payload.snapshot_buffer_len);
     let trusted = unsafe { capture_trusted_ssa_from_buffer(payload, &execution) }?;
     let capture_comment = trusted.capture.comment();
     let ffi_conversion_elapsed_us = elapsed_us(ffi_started);

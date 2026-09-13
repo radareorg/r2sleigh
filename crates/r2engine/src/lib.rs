@@ -1078,6 +1078,9 @@ pub struct EngineMetrics {
     pub semantic_time: Duration,
     pub type_time: Duration,
     pub render_time: Duration,
+    /// Units of work this request counted, the deterministic measure of what
+    /// the wall-clock deadline stands in for.
+    pub work_spent: u64,
     /// Stable, complete phase inventory. A phase which this engine boundary
     /// did not execute is retained with `NotExecuted` status and zero time.
     pub phase_timings: Vec<EnginePhaseTimingJson>,
@@ -1086,6 +1089,7 @@ pub struct EngineMetrics {
 impl Default for EngineMetrics {
     fn default() -> Self {
         Self {
+            work_spent: 0,
             planning_time: Duration::default(),
             ssa_time: Duration::default(),
             semantic_time: Duration::default(),
@@ -1330,6 +1334,9 @@ impl EngineCancellationToken {
 pub struct EngineExecutionControl {
     cancellation: EngineCancellationToken,
     deadline: Option<Instant>,
+    /// Work this request has done, counted rather than timed, so the size of
+    /// the thing the deadline stands in for can be measured.
+    meter: Arc<r2ssa::SsaWorkMeter>,
 }
 
 impl EngineExecutionControl {
@@ -1338,7 +1345,26 @@ impl EngineExecutionControl {
         Self {
             cancellation,
             deadline,
+            meter: Arc::new(r2ssa::SsaWorkMeter::default()),
         }
+    }
+
+    /// Bound this request by counted work rather than by a clock.
+    ///
+    /// `captured_bytes` is the root and every body taken with it, which is what
+    /// the work is spent over; `work_budget_for_captured_bytes` turns it into
+    /// the number of units the corpus says that input can need.
+    #[must_use]
+    pub fn with_work_budget(mut self, captured_bytes: usize) -> Self {
+        self.meter = Arc::new(r2ssa::SsaWorkMeter::with_limit(
+            work_budget_for_captured_bytes(captured_bytes),
+        ));
+        self
+    }
+
+    /// Work counted for this request so far.
+    pub fn work_spent(&self) -> u64 {
+        self.meter.spent()
     }
 
     pub fn with_cancellation_and_deadline(
@@ -1374,6 +1400,7 @@ impl EngineExecutionControl {
 
     pub fn ssa_execution_control(&self) -> r2ssa::SsaExecutionControl {
         r2ssa::SsaExecutionControl::new(self.cancellation.ssa.clone(), self.deadline)
+            .metered(Arc::clone(&self.meter))
     }
 
     fn replace_cancellation(&mut self, cancellation: EngineCancellationToken) {
@@ -1468,6 +1495,9 @@ fn ssa_prepare_execution_refusal(
         }
         r2ssa::SsaPrepareError::MalformedInput => {
             "malformed SSA source input during ssa phase".to_string()
+        }
+        r2ssa::SsaPrepareError::WorkExhausted => {
+            "engine request exhausted the work its input allows during ssa phase".to_string()
         }
     };
     engine_execution_refusal(reason, EnginePhase::Ssa, metrics)
@@ -3353,6 +3383,7 @@ impl EngineSession {
                 None,
             );
         }
+        metrics.work_spent = request.execution.work_spent();
         let output = with_phase_timing_comment(output, &metrics);
         EngineDecompileResponse {
             output,
@@ -3611,6 +3642,10 @@ fn engine_render_stop_reason(
             "engine request deadline exceeded during {} phase",
             phase.as_str()
         ),
+        r2ssa::SsaExecutionStopReason::WorkExhausted => format!(
+            "engine request exhausted the work its input allows during {} phase",
+            phase.as_str()
+        ),
     };
     EngineRenderExecutionStop {
         reason,
@@ -3810,6 +3845,7 @@ fn phase_timing_comment(metrics: &EngineMetrics) -> Option<String> {
 /// testable without a process-global environment variable.
 fn format_phase_timing(metrics: &EngineMetrics) -> String {
     let mut measured = String::new();
+    let work = metrics.work_spent;
     let mut total_us = 0u64;
     // `EnginePhase::ALL` order, so two runs of one function print one line.
     for timing in &metrics.phase_timings {
@@ -3831,7 +3867,7 @@ fn format_phase_timing(metrics: &EngineMetrics) -> String {
             }
         }
     }
-    format!("/* r2dec timing: measured={total_us}us{measured} */")
+    format!("/* r2dec timing: measured={total_us}us work={work}{measured} */")
 }
 
 /// Append the timing comment to a rendered body, or leave it exactly as it was.
@@ -5648,6 +5684,10 @@ mod tests {
                     "engine request deadline exceeded during {} phase",
                     phase.as_str()
                 ),
+                r2ssa::SsaExecutionStopReason::WorkExhausted => format!(
+                    "engine request exhausted the work its input allows during {} phase",
+                    phase.as_str()
+                ),
             };
             assert_eq!(response.metrics.phase_timings.len(), EnginePhase::ALL.len());
             assert!(response.metrics.phase_timings.iter().any(|timing| {
@@ -5806,6 +5846,15 @@ mod tests {
                             mapped.reason,
                             format!(
                                 "engine request deadline exceeded during {} phase",
+                                engine_phase.as_str()
+                            )
+                        );
+                    }
+                    r2ssa::SsaExecutionStopReason::WorkExhausted => {
+                        assert_eq!(
+                            mapped.reason,
+                            format!(
+                                "engine request exhausted the work its input allows during {} phase",
                                 engine_phase.as_str()
                             )
                         );
@@ -7234,7 +7283,7 @@ mod tests {
         let comment = format_phase_timing(&metrics);
         assert_eq!(
             comment,
-            "/* r2dec timing: measured=15500us ssa=4000us types=folded rendering=11500us */"
+            "/* r2dec timing: measured=15500us work=0 ssa=4000us types=folded rendering=11500us */"
         );
         // A phase this boundary never ran says nothing, rather than claiming
         // it cost nothing.

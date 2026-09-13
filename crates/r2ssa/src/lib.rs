@@ -72,7 +72,7 @@ pub use block::SSABlock;
 pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge, DeclaredSuccessors};
 pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,
-    SsaWorkControl,
+    SsaWorkControl, SsaWorkMeter,
 };
 pub use data_ref::{
     DataRefFact, DataRefKind, data_refs_from_artifact_with_op_sources, data_refs_from_blocks,

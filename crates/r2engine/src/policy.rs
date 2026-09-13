@@ -71,6 +71,32 @@ fn per_function_budget_usec() -> u64 {
     })
 }
 
+/// Units of counted work a capture of this size may spend.
+///
+/// A wall clock answered a different question on every machine, and it was
+/// scaled by the program's function count, which says nothing about the
+/// request in front of it. Counted work answers the same question the clock
+/// was standing in for, identically on every run, and the measure it is a
+/// function of is the capture: the root and every body taken with it.
+///
+/// Measured over 470 functions of the corpus, work per captured byte has a
+/// median of 0.2 and a maximum of 30.5, and grows sublinearly with the
+/// capture. The slope here is that maximum doubled, so a typical function is
+/// bounded two orders of magnitude above what it uses and only a run that has
+/// stopped making progress can reach it; the floor covers a tiny capture,
+/// whose cost is fixed overhead rather than work.
+pub const WORK_BUDGET_PER_CAPTURED_BYTE: u64 = 61;
+
+/// Floor for a capture too small for the slope to cover its fixed cost.
+pub const WORK_BUDGET_MINIMUM: u64 = 8192;
+
+/// The work budget for a capture of this size.
+pub fn work_budget_for_captured_bytes(captured_bytes: usize) -> u64 {
+    (captured_bytes as u64)
+        .saturating_mul(WORK_BUDGET_PER_CAPTURED_BYTE)
+        .max(WORK_BUDGET_MINIMUM)
+}
+
 /// The post-analysis budget for a program of this size.
 pub fn post_analysis_budget_usec(function_count: usize) -> u64 {
     let per_function = per_function_budget_usec();
