@@ -3534,21 +3534,6 @@ static bool sleigh_direct_sla_debug_only_command(const char *cmd) {
 	return cmd_matches_exact_or_arg (cmd, "sla.slice");
 }
 
-/* The deadline one engine call gets, derived from the engine's own budget for a
- * program this size.
- *
- * Both call sites passed zero, which made `deadline` None in the boundary and
- * every poll inside the engine a no-op: a single function could run without end.
- * That cost far more than itself, because the benchmark harness decompiles every
- * function of a binary in one process, so one unbounded function lost the whole
- * binary. Bounding a call by what the entire sweep was allotted cannot refuse
- * anything the sweep would have finished anyway. */
-static ut64 sleigh_engine_call_deadline_us(RAnal *anal) {
-	const size_t function_count = (anal && anal->fcns)
-		? (size_t)r_list_length (anal->fcns): 0;
-	return r2sleigh_engine_budget_usec_v2 (function_count);
-}
-
 // In band, and in the shape every other refusal takes. Returning nothing leaves
 // the function neither rendered nor declined, which reads as a function nobody asked about.
 static RCodeMeta *sleigh_decline(const RAnalFunction *fcn, const char *reason) {
@@ -3601,7 +3586,9 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 	const R2SleighEngineRequestPayloadV2 payload = {
 		.abi_version = R2SLEIGH_ABI_V2,
 		.struct_size = sizeof (payload),
-		.timeout_us = sleigh_engine_call_deadline_us (anal),
+		/* No clock. The engine bounds the call by counted work over the
+		 * bytes it was given, which is the same answer on every machine. */
+		.timeout_us = 0,
 		.snapshot_buffer = held->wire,
 		.snapshot_buffer_len = held->wire_len,
 	};
@@ -4364,7 +4351,8 @@ static char *sleigh_proven_facts_json(RAnal *anal, RAnalFunction *fcn) {
 	const R2SleighEngineRequestPayloadV2 payload = {
 		.abi_version = R2SLEIGH_ABI_V2,
 		.struct_size = sizeof (payload),
-		.timeout_us = sleigh_engine_call_deadline_us (anal),
+		/* No clock; the engine's counted-work budget bounds this call. */
+		.timeout_us = 0,
 		.snapshot_buffer = capture->wire,
 		.snapshot_buffer_len = capture->wire_len,
 	};

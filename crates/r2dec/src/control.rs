@@ -72,4 +72,9 @@ impl<'a> DecompileWorkControl<'a> {
             .poll()
             .map_err(|reason| DecompileExecutionStop::new(self.phase, reason))
     }
+
+    /// The seam beneath, for a callee that reports its own stop.
+    pub const fn work(self) -> &'a dyn SsaWorkControl {
+        self.control
+    }
 }

@@ -1149,6 +1149,8 @@ pub(crate) enum BindingPlanBuildError {
     CanonicalDisagreement {
         value: ValueId,
     },
+    /// The run's counted work ran out while the plan was being built.
+    WorkExhausted(r2ssa::SsaExecutionStopReason),
 }
 
 #[derive(Debug)]

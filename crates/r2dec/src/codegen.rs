@@ -133,15 +133,23 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
 }
 
 /// C code generator.
-pub(crate) struct CodeGenerator {
+pub(crate) struct CodeGenerator<'c> {
     config: CodeGenConfig,
     output: String,
     indent_level: usize,
     /// The names of the function being written, so a reference can be spelled.
     symbols: crate::symbol::SymbolTable,
+    /// Where emission is counted. Writing the C out is the largest phase of a
+    /// decompile by measured time -- two thirds of it over dpkg-divert -- and
+    /// before this it charged two units for the whole of it, so the meter said
+    /// nothing about the phase it most needed to bound.
+    work: Option<&'c dyn r2ssa::SsaWorkControl>,
+    /// Set once the work control stops the run; emission then unwinds without
+    /// writing more, and the caller's poll reports the stop with the partial.
+    stopped: bool,
 }
 
-impl CodeGenerator {
+impl<'c> CodeGenerator<'c> {
     /// Create a new code generator.
     pub(crate) fn new(config: CodeGenConfig) -> Self {
         Self {
@@ -149,7 +157,29 @@ impl CodeGenerator {
             output: String::new(),
             indent_level: 0,
             symbols: crate::symbol::SymbolTable::new(),
+            work: None,
+            stopped: false,
         }
+    }
+
+    /// Count what this generator emits against the run's work budget.
+    pub(crate) fn with_work(mut self, work: &'c dyn r2ssa::SsaWorkControl) -> Self {
+        self.work = Some(work);
+        self
+    }
+
+    /// One unit for one emitted node, and false once the run is stopped.
+    fn charge(&mut self) -> bool {
+        if self.stopped {
+            return false;
+        }
+        if let Some(work) = self.work
+            && work.poll().is_err()
+        {
+            self.stopped = true;
+            return false;
+        }
+        true
     }
 
     /// Generate code for a function.
@@ -319,6 +349,9 @@ impl CodeGenerator {
 
     /// Emit a statement.
     fn emit_stmt(&mut self, stmt: &CStmt) {
+        if !self.charge() {
+            return;
+        }
         let stmt = stmt.unobserved();
         match stmt {
             CStmt::StructuredRegion { stmt, .. } => self.emit_stmt(stmt),
@@ -585,6 +618,9 @@ impl CodeGenerator {
 
     /// Emit an expression with parent precedence for parenthesization.
     fn emit_expr(&mut self, expr: &CExpr, parent_prec: u8) {
+        if !self.charge() {
+            return;
+        }
         let expr = expr.unobserved();
         let my_prec = expr.precedence();
         let need_parens = my_prec < parent_prec;

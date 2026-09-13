@@ -538,8 +538,22 @@ impl BindingPlan {
     /// Binding identity is the transitive closure of exact upstream storage-span
     /// and certified-entity membership. It never depends on a register location,
     /// renderer alias, or hash-map iteration order.
+    #[cfg(test)]
     pub(crate) fn build_shadow(
         source_owned: &SourceOwnedFunctionFacts,
+    ) -> Result<Self, BindingPlanBuildError> {
+        Self::build_shadow_with_control(source_owned, &r2ssa::SsaExecutionControl::default())
+    }
+
+    /// The same plan, counting its work.
+    ///
+    /// The plan is the largest measured stage of a render -- 1.81 s of the
+    /// 6.48 s dpkg-divert -O0 spends -- and it is linear in the graph's values,
+    /// so a unit per value is what it costs. Without this the meter charged
+    /// almost nothing for the phase it most needed to bound.
+    pub(crate) fn build_shadow_with_control(
+        source_owned: &SourceOwnedFunctionFacts,
+        control: &dyn r2ssa::SsaWorkControl,
     ) -> Result<Self, BindingPlanBuildError> {
         let source = source_owned.source();
         let machine_projection = MachineProjection::from_artifact(source)
@@ -580,6 +594,9 @@ impl BindingPlan {
             .collect::<Vec<_>>();
 
         for (index, graph_value) in graph.values.iter().enumerate() {
+            control
+                .poll()
+                .map_err(BindingPlanBuildError::WorkExhausted)?;
             if graph_value.id.0 as usize != index {
                 return Err(BindingPlanBuildError::Seal(
                     BindingPlanSourceMismatch::ValueTopology {

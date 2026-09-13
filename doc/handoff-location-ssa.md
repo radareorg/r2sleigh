@@ -109,6 +109,45 @@ learn.
 
 ### Open, each scoped by measurement
 
+   0. **The review of the cap work, answered in full.** Eight findings; all
+      eight are fixed, and two of them changed what the bound is.
+
+      * **The wall clock is gone.** `sleigh_engine_call_deadline_us` scaled a
+        single request's deadline by the whole program's function count, and
+        both call sites passed it, so the machine dependence the work meter was
+        built to remove was still there. Both sites now pass no deadline, and
+        `r2sleigh_engine_budget_usec_v2` is deleted with its header
+        declaration; the post-analysis budget, which is a program-wide clock
+        for a program-wide pass, is untouched.
+      * **The meter now binds where the cost is, which was not where it was
+        charging.** Measured over dpkg-divert -O0, a render spends 1.81 s in the
+        binding plan, 0.56 s in the audit and 0.43 s in the structure walk, and
+        0.0003 s in code generation. Every poll site was in SSA preparation,
+        which the timing reports as folded. The plan now polls once per graph
+        value through `build_shadow_with_control`, and the generator once per
+        emitted statement and expression. The spread of microseconds per
+        counted unit fell from 69x to 39x. Every stage's cost fits an exponent
+        near 1.0 against instruction count, so there is no quadratic hiding
+        under this, which was the other thing worth knowing.
+      * **The envelope was re-derived, twice.** The old slope had no intercept,
+        which is the wrong shape for a cost with a fixed part, and it needed a
+        floor to paper over that. The bound is now affine and computed as the
+        upper convex hull of (captured bytes, work), doubled: `786432 + 17 *
+        captured_bytes` against a measured dominating bound of `346768 + 8.34 *
+        captured_bytes`. The first attempt fitted dpkg-divert alone and refused
+        five functions of the other binaries; the constants shipped are fitted
+        over all 1444. `R2SLEIGH_WORK_BUDGET_SCALE` exists so the fit can be
+        repeated, since a bound cannot be derived from runs it truncated.
+      * The SCC round bound counts the facts its callees outside the SCC bring
+        in, not only the members' own; the refusal names the rounds that SCC
+        was given rather than the running maximum; `canonical_root_in` is the
+        one walker for both the mutable and the frozen map and says so when the
+        relation cycles instead of returning a plausible wrong root; a
+        parameter's home width is taken only where the frame states exactly one;
+        and a function-type spelling has to have a parameter list in it, so
+        `int (x)` is not one.
+
+
   -1. **The capture's type graph was the largest refusal cause at scale, and
      three defects in it are fixed.** The DecBench sweep's biggest single
      refusal was `memory_renderer.rs:116` "access has no planned expression",

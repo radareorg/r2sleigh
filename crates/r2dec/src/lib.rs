@@ -2644,8 +2644,9 @@ impl Decompiler {
         let product = self.prepare_decompile_with_control(input, control)?;
         let render_work = DecompileWorkControl::new(control, DecompileWorkPhase::Rendering);
         render_work.poll()?;
-        let output =
-            CodeGenerator::new(self.config.codegen.clone()).generate_function(product.emission());
+        let output = CodeGenerator::new(self.config.codegen.clone())
+            .with_work(control)
+            .generate_function(product.emission());
         // This is deliberately the last production work-control decision.
         // Everything below classifies the already sealed observation journal.
         render_work.poll()?;
@@ -2726,6 +2727,8 @@ impl Decompiler {
         };
         let render_work = DecompileWorkControl::new(control, DecompileWorkPhase::Rendering);
         if let Err(stop) = render_work.poll() {
+            // The run has already stopped; this writes the partial the caller
+            // keeps, so it is not charged again against a spent budget.
             let output = CodeGenerator::new(self.config.codegen.clone())
                 .generate_function(product.emission());
             return Err((
@@ -2738,8 +2741,9 @@ impl Decompiler {
             ));
         }
         crate::stage_timing::mark("audit");
-        let output =
-            CodeGenerator::new(self.config.codegen.clone()).generate_function(product.emission());
+        let output = CodeGenerator::new(self.config.codegen.clone())
+            .with_work(control)
+            .generate_function(product.emission());
         crate::stage_timing::mark("codegen");
         crate::stage_timing::report(&product.emission().function().name);
         if let Err(stop) = render_work.poll() {
@@ -3041,8 +3045,9 @@ impl Decompiler {
             ));
         }
         crate::stage_timing::mark("prepare");
-        let binding_plan = match crate::binding_plan::BindingPlan::build_shadow(
+        let binding_plan = match crate::binding_plan::BindingPlan::build_shadow_with_control(
             input.source_owned_facts(),
+            work.work(),
         ) {
             Ok(plan) => {
                 // Every value's disposition, beside the SSA dump it indexes.
@@ -3103,6 +3108,11 @@ impl Decompiler {
                     "{}: {error:?}",
                     rendered_function_name(func)
                 );
+                // A run that spent its work budget is stopped, not a function
+                // whose program variables could not be authorized.
+                if let crate::binding_plan::BindingPlanBuildError::WorkExhausted(reason) = error {
+                    return Err(DecompileExecutionStop::new(work.phase(), reason));
+                }
                 let refusal = match error {
                     crate::binding_plan::BindingPlanBuildError::MachineProjection(_)
                     | crate::binding_plan::BindingPlanBuildError::Seal(
@@ -6465,9 +6475,21 @@ mod tests {
             .decompile_input_keeping_partial_with_binding_audit(&input, &baseline_control)
             .expect("unbounded audited rendering");
         let final_poll = baseline_control.polls.get();
-        let first_render_poll = final_poll
-            .checked_sub(1)
-            .expect("successful product rendering has two rendering polls");
+        // Writing the C is counted too, so the two rendering-phase decisions are
+        // no longer the last two polls of the run: the one before generation is
+        // the first poll the Rendering phase makes, and it is found by asking.
+        let first_render_poll = (1..=final_poll)
+            .find(|stop_at| {
+                let probe = CountingControl {
+                    polls: std::cell::Cell::new(0),
+                    stop_at: Some(*stop_at),
+                };
+                decompiler
+                    .decompile_input_keeping_partial_with_binding_audit(&input, &probe)
+                    .err()
+                    .is_some_and(|(stop, _)| stop.phase() == DecompileWorkPhase::Rendering)
+            })
+            .expect("a successful rendering makes at least one rendering poll");
 
         for stop_at in [first_render_poll, final_poll] {
             let stopped_control = CountingControl {
