@@ -52,8 +52,6 @@ pub(crate) type ControlFlowStructureResult<T> = Result<T, ControlFlowStructureEr
 pub(crate) struct ControlFlowStructurer<'a, 'o> {
     func: &'a r2ssa::RewrittenFunction<'a>,
     fold_ctx: &'o FoldingContext<'o>,
-    /// Cached folded statements per basic block.
-    folded_block_cache: HashMap<u64, FoldedBlock>,
     /// Labels for blocks some edge jumps to.
     labels: HashMap<u64, String>,
     label_counter: usize,
@@ -64,11 +62,6 @@ pub(crate) struct ControlFlowStructurer<'a, 'o> {
     certified_for_header_sites: BTreeSet<crate::normalize::NormalizedOpSite>,
     /// What each rewrite stage did, for the census.
     rewrite_outcomes: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct FoldedBlock {
-    stmts: Vec<crate::fold::op_lower::FoldedOpStmt>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +79,6 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         Self {
             func,
             fold_ctx,
-            folded_block_cache: HashMap::new(),
             labels: HashMap::new(),
             label_counter: 0,
             control: None,
@@ -107,7 +99,6 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         Ok(Self {
             func,
             fold_ctx,
-            folded_block_cache: HashMap::new(),
             labels: HashMap::new(),
             label_counter: 0,
             control: Some(control),
@@ -684,42 +675,21 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         Ok(writes)
     }
 
+    /// The statements one block folds to.
+    ///
+    /// A copy of every block's statements used to be kept here so that a block
+    /// placed twice could be answered without folding it again. Structured
+    /// output places a block once, so the copy was the whole folded body held
+    /// a second time and read back for almost nothing; folding the rare
+    /// repeat again is cheaper than holding every block against it, and it
+    /// mints the occurrence identities the second placement needs by the
+    /// ordinary route rather than by copying them out of the first.
     fn folded_block_entries(
         &mut self,
         block: &r2ssa::FunctionSSABlock,
         addr: u64,
     ) -> ControlFlowStructureResult<Vec<crate::fold::op_lower::FoldedOpStmt>> {
-        Ok(if let Some(folded) = self.folded_block_cache.get(&addr) {
-            if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
-                eprintln!("FOLDCACHE hit block={addr:#x} stmts={}", folded.stmts.len());
-            }
-            let semantic = folded
-                .stmts
-                .iter()
-                .map(|entry| entry.stmt.clone())
-                .collect::<Vec<_>>();
-            self.fold_ctx
-                .clone_cached_render_occurrence(&semantic)
-                .into_iter()
-                .zip(&folded.stmts)
-                .map(|(stmt, original)| crate::fold::op_lower::FoldedOpStmt {
-                    site: original.site,
-                    stmt,
-                })
-                .collect()
-        } else {
-            let stmts = self.fold_ctx.fold_block_with_sites(block, addr)?;
-            if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
-                eprintln!("FOLDCACHE miss block={addr:#x} stmts={}", stmts.len());
-            }
-            self.folded_block_cache.insert(
-                addr,
-                FoldedBlock {
-                    stmts: stmts.clone(),
-                },
-            );
-            stmts
-        })
+        Ok(self.fold_ctx.fold_block_with_sites(block, addr)?)
     }
 
     fn get_branch_condition_with_predicate(
