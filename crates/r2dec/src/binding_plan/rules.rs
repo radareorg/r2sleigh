@@ -240,14 +240,16 @@ pub(super) fn verified_stack_slot_role(
     }
 }
 
-/// The width the parameter's home slot has, where the frame gave it one.
+/// The width of the parameter's one home slot, where the frame gave it exactly
+/// one. Two homes of different widths are two answers, and the rule below rests
+/// on the frame stating a single number, so it declines rather than picking.
 fn parameter_home_width_bytes(source_owned: &SourceOwnedFunctionFacts, slot: u32) -> Option<u32> {
-    source_owned
+    let mut homes = source_owned
         .report()
         .render()?
         .certified_entities
         .values()
-        .find_map(|entity| match entity {
+        .filter_map(|entity| match entity {
             r2types::CertifiedEntity::StackSlot {
                 size, source_slot, ..
             } => source_slot
@@ -260,7 +262,9 @@ fn parameter_home_width_bytes(source_owned: &SourceOwnedFunctionFacts, slot: u32
                 })
                 .and(*size),
             _ => None,
-        })
+        });
+    let first = homes.next()?;
+    homes.all(|other| other == first).then_some(first)
 }
 
 /// What the parameter's declaration says it is, exact first.

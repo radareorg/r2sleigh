@@ -4016,12 +4016,45 @@ static bool snapshot_type_spec_is_function_pointer(const char *spec) {
 		&& strchr (spec, '[') == NULL && strchr (spec, ']') == NULL;
 }
 // `void ()` is a function type, which `error_handler_func` typedefs. It is not
-// an object, but a pointer to it is exactly a pointer to code.
+// an object, but a pointer to it is exactly a pointer to code. The parenthesis
+// has to open the parameter list, so a parenthesised declarator such as
+// `int (x)` -- one identifier and nothing else inside -- is not one.
 static bool snapshot_type_spec_is_function_type(const char *spec) {
 	const size_t len = strlen (spec);
-	return len && !snapshot_type_spec_is_function_pointer (spec)
-		&& strchr (spec, '(') && spec[len - 1] == ')'
-		&& !strchr (spec, '[') && !strchr (spec, ']');
+	if (!len || snapshot_type_spec_is_function_pointer (spec)
+		|| spec[len - 1] != ')' || strchr (spec, '[') || strchr (spec, ']')) {
+		return false;
+	}
+	const char *open = strchr (spec, '(');
+	// A return type has to precede the list, and only the one list may appear.
+	if (!open || open == spec || strchr (open + 1, '(')) {
+		return false;
+	}
+	const char *before = open;
+	while (before > spec && isspace ((unsigned char)before[-1])) {
+		before--;
+	}
+	if (before == spec) {
+		return false;
+	}
+	// `int (x)` names an object; `void ()` and `int (int, char *)` name
+	// functions. A parameter list is empty, says `void`, or has a type in it,
+	// and a bare single identifier is none of those.
+	const char *cursor = r_str_trim_head_ro (open + 1);
+	size_t inner = (size_t)(spec + len - 1 - cursor);
+	while (inner && isspace ((unsigned char)cursor[inner - 1])) {
+		inner--;
+	}
+	if (!inner) {
+		return true;
+	}
+	size_t i;
+	for (i = 0; i < inner; i++) {
+		if (!isalnum ((unsigned char)cursor[i]) && cursor[i] != '_') {
+			return true;
+		}
+	}
+	return inner == strlen ("void") && !strncmp (cursor, "void", inner);
 }
 // `_Atomic T` may have a size and alignment T does not, so the graph declines
 // it rather than claiming T's layout for it.
