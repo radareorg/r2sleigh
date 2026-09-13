@@ -46,8 +46,6 @@ pub(crate) struct PreparedSemanticView {
     pub(crate) binding_names: Option<Rc<crate::binding_plan::BindingNameResolution>>,
     #[cfg(test)]
     pub(crate) stack_aliases_by_offset: BTreeMap<i64, StackAliasView>,
-    pub(crate) value_id_by_var: HashMap<SSAVar, ValueId>,
-    pub(crate) var_by_value_id: HashMap<ValueId, SSAVar>,
     pub(crate) owner_expr_by_value: HashMap<ValueId, CExpr>,
     pub(crate) stack_offset_by_value: HashMap<ValueId, i64>,
     pub(crate) predicate_expr_by_value: HashMap<ValueId, CExpr>,
@@ -207,7 +205,6 @@ impl PreparedSemanticView {
                 .collect(),
             ..Self::default()
         };
-        view.init_value_indexes(inputs.prepared);
 
         #[cfg(test)]
         populate_stack_aliases(&mut view, &inputs);
@@ -226,8 +223,13 @@ impl PreparedSemanticView {
         self.stack_aliases_by_offset.get(&offset)
     }
 
-    pub(crate) fn value_id_for_var(&self, var: &SSAVar) -> Option<ValueId> {
-        self.value_id_by_var.get(var).copied()
+    /// The value one variable names, asked of the graph that owns both.
+    ///
+    /// The view used to keep this table and its inverse, which is every
+    /// variable of a function held twice more on top of the graph's own copy.
+    /// The graph answers both directions already, so the view asks it.
+    fn value_id_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option<ValueId> {
+        prepared.graph().value_id_for_var(var)
     }
 
     /// Project one exact value through the already-admitted binding plan.
@@ -235,9 +237,13 @@ impl PreparedSemanticView {
     /// `build_with_bindings` validates every dense disposition first, so an
     /// error here would mean the sealed plan changed after admission. Inline
     /// and elided values intentionally return no program-variable symbol.
-    fn admitted_value_symbol(&self, var: &SSAVar) -> Option<crate::symbol::SymbolId> {
+    fn admitted_value_symbol(
+        &self,
+        prepared: &SsaArtifact,
+        var: &SSAVar,
+    ) -> Option<crate::symbol::SymbolId> {
         let resolver = self.binding_names.as_ref()?;
-        let value = self.value_id_for_var(var)?;
+        let value = Self::value_id_for_var(prepared, var)?;
         let disposition = match resolver.require_value(value) {
             Ok(disposition) => disposition,
             Err(_) => return None,
@@ -284,22 +290,26 @@ impl PreparedSemanticView {
         Some(symbol)
     }
 
-    pub(crate) fn var_for_value_id(&self, value_id: ValueId) -> Option<&SSAVar> {
-        self.var_by_value_id.get(&value_id)
-    }
-
-    pub(crate) fn stack_offset_for_var(&self, var: &SSAVar) -> Option<i64> {
-        self.value_id_for_var(var)
+    pub(crate) fn stack_offset_for_var(&self, prepared: &SsaArtifact, var: &SSAVar) -> Option<i64> {
+        Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.stack_offset_by_value.get(&value_id).copied())
     }
 
-    pub(crate) fn owner_expr_for_var(&self, var: &SSAVar) -> Option<&CExpr> {
-        self.value_id_for_var(var)
+    pub(crate) fn owner_expr_for_var(
+        &self,
+        prepared: &SsaArtifact,
+        var: &SSAVar,
+    ) -> Option<&CExpr> {
+        Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.owner_expr_by_value.get(&value_id))
     }
 
-    pub(crate) fn predicate_expr_for_cond(&self, var: &SSAVar) -> Option<&CExpr> {
-        self.value_id_for_var(var)
+    pub(crate) fn predicate_expr_for_cond(
+        &self,
+        prepared: &SsaArtifact,
+        var: &SSAVar,
+    ) -> Option<&CExpr> {
+        Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.predicate_expr_by_value.get(&value_id))
     }
 
@@ -312,8 +322,12 @@ impl PreparedSemanticView {
         self.call_view_by_site.get(&site)
     }
 
-    pub(crate) fn call_result_source_for_var(&self, var: &SSAVar) -> Option<(u64, usize)> {
-        self.value_id_for_var(var)
+    pub(crate) fn call_result_source_for_var(
+        &self,
+        prepared: &SsaArtifact,
+        var: &SSAVar,
+    ) -> Option<(u64, usize)> {
+        Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.call_result_source_by_value.get(&value_id).copied())
     }
 
@@ -325,38 +339,30 @@ impl PreparedSemanticView {
         self.call_result_source_by_value.get(&value_id).copied()
     }
 
-    fn init_value_indexes(&mut self, prepared: &SsaArtifact) {
-        self.value_id_by_var.clear();
-        self.var_by_value_id.clear();
-        for value in &prepared.graph().values {
-            self.value_id_by_var.insert(value.var.clone(), value.id);
-            self.var_by_value_id.insert(value.id, value.var.clone());
-        }
-    }
-
-    fn insert_stack_offset(&mut self, var: &SSAVar, offset: i64) {
-        if let Some(value_id) = self.value_id_for_var(var) {
+    fn insert_stack_offset(&mut self, prepared: &SsaArtifact, var: &SSAVar, offset: i64) {
+        if let Some(value_id) = Self::value_id_for_var(prepared, var) {
             self.stack_offset_by_value.insert(value_id, offset);
         }
     }
 
-    fn insert_owner_expr(&mut self, var: &SSAVar, expr: CExpr) {
-        if let Some(value_id) = self.value_id_for_var(var) {
+    fn insert_owner_expr(&mut self, prepared: &SsaArtifact, var: &SSAVar, expr: CExpr) {
+        if let Some(value_id) = Self::value_id_for_var(prepared, var) {
             self.owner_expr_by_value.insert(value_id, expr);
         }
     }
 
-    fn insert_predicate_expr(&mut self, var: &SSAVar, expr: CExpr) {
-        if let Some(value_id) = self.value_id_for_var(var) {
+    fn insert_predicate_expr(&mut self, prepared: &SsaArtifact, var: &SSAVar, expr: CExpr) {
+        if let Some(value_id) = Self::value_id_for_var(prepared, var) {
             self.predicate_expr_by_value.insert(value_id, expr);
         }
     }
 
-    fn stack_offset_entries(&self) -> Vec<(SSAVar, i64)> {
+    fn stack_offset_entries(&self, prepared: &SsaArtifact) -> Vec<(SSAVar, i64)> {
         self.stack_offset_by_value
             .iter()
             .filter_map(|(value_id, offset)| {
-                self.var_for_value_id(*value_id)
+                prepared
+                    .value_var(*value_id)
                     .cloned()
                     .map(|var| (var, *offset))
             })
@@ -425,13 +431,14 @@ fn preflight_rendered_identities(
 /// their fixture spelling path; native views never enter it.
 fn prepared_value_program_expr(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+    prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     var: &SSAVar,
 ) -> Option<CExpr> {
     // The binding plan answers, or nothing does. The alias ladder that used to
     // spell a name here under test consulted tables with no writers.
     let _ = symbols;
-    view.admitted_value_symbol(var).map(CExpr::Var)
+    view.admitted_value_symbol(prepared, var).map(CExpr::Var)
 }
 
 fn prepared_parameter_program_expr(
@@ -459,21 +466,21 @@ fn prepared_var(prepared: &SsaArtifact, value_id: ValueId) -> Option<&SSAVar> {
 
 fn bind_prepared_value_id(
     use_info: &mut UseInfo,
-    view: &PreparedSemanticView,
+    prepared: &SsaArtifact,
     var: &SSAVar,
 ) -> Option<ValueId> {
-    let value_id = view.value_id_for_var(var)?;
+    let value_id = PreparedSemanticView::value_id_for_var(prepared, var)?;
     use_info.bind_value_id(var, value_id)
 }
 
 fn bind_prepared_copy_ids(
     use_info: &mut UseInfo,
-    view: &PreparedSemanticView,
+    prepared: &SsaArtifact,
     dst: &SSAVar,
     src: &SSAVar,
 ) -> Option<(ValueId, ValueId)> {
-    let _ = bind_prepared_value_id(use_info, view, dst);
-    let _ = bind_prepared_value_id(use_info, view, src);
+    let _ = bind_prepared_value_id(use_info, prepared, dst);
+    let _ = bind_prepared_value_id(use_info, prepared, src);
     Some((
         use_info.exact_value_id_for_var(dst)?,
         use_info.exact_value_id_for_var(src)?,
@@ -704,7 +711,7 @@ fn populate_stack_offsets(view: &mut PreparedSemanticView, prepared: &SsaArtifac
     };
     for var in prep.stack_address_roots.keys() {
         if let Some(offset) = prep.stack_address_root_of(var).map(|root| root.offset) {
-            view.insert_stack_offset(var, offset);
+            view.insert_stack_offset(prepared, var, offset);
         }
     }
     for (key, object_id) in &prepared.objects().value_objects {
@@ -715,7 +722,7 @@ fn populate_stack_offsets(view: &mut PreparedSemanticView, prepared: &SsaArtifac
             && let Some(offset) = stack_offset_for_object_kind(&object.kind)
             && let Some(value) = prepared_var(prepared, key.value)
         {
-            view.insert_stack_offset(value, offset);
+            view.insert_stack_offset(prepared, value, offset);
         }
     }
 }
@@ -735,7 +742,7 @@ fn populate_owner_exprs(
         }
     }
 
-    for (value, _offset) in view.stack_offset_entries() {
+    for (value, _offset) in view.stack_offset_entries(inputs.prepared) {
         if !is_prepared_stack_address_carrier(prepared, &value) {
             continue;
         }
@@ -746,7 +753,7 @@ fn populate_owner_exprs(
         else {
             continue;
         };
-        view.insert_owner_expr(&value, CExpr::AddrOf(Box::new(stack_expr)));
+        view.insert_owner_expr(inputs.prepared, &value, CExpr::AddrOf(Box::new(stack_expr)));
     }
 
     for block in prepared.function().blocks() {
@@ -797,11 +804,11 @@ fn populate_owner_exprs(
                 let Some((expr, offset)) = derived else {
                     continue;
                 };
-                view.insert_owner_expr(dst, expr);
+                view.insert_owner_expr(inputs.prepared, dst, expr);
                 if let Some(offset) = offset
-                    && view.stack_offset_for_var(dst) != Some(offset)
+                    && view.stack_offset_for_var(inputs.prepared, dst) != Some(offset)
                 {
-                    view.insert_stack_offset(dst, offset);
+                    view.insert_stack_offset(inputs.prepared, dst, offset);
                 }
             }
         }
@@ -819,17 +826,21 @@ fn populate_owner_exprs(
                     | SSAOp::Trunc { dst, src }
                     | SSAOp::Cast { dst, src, .. }
                     | SSAOp::Subpiece { dst, src, .. } => {
-                        if let Some(expr) = view.owner_expr_for_var(src).cloned().or_else(|| {
-                            scalar_owner_expr_for_value(symbols, prepared, view, src, src.size)
-                        }) && view.owner_expr_for_var(dst) != Some(&expr)
+                        if let Some(expr) = view
+                            .owner_expr_for_var(inputs.prepared, src)
+                            .cloned()
+                            .or_else(|| {
+                                scalar_owner_expr_for_value(symbols, prepared, view, src, src.size)
+                            })
+                            && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
-                        if let Some(offset) = view.stack_offset_for_var(src)
-                            && view.stack_offset_for_var(dst) != Some(offset)
+                        if let Some(offset) = view.stack_offset_for_var(inputs.prepared, src)
+                            && view.stack_offset_for_var(inputs.prepared, dst) != Some(offset)
                         {
-                            view.insert_stack_offset(dst, offset);
+                            view.insert_stack_offset(inputs.prepared, dst, offset);
                             changed = true;
                         }
                     }
@@ -870,9 +881,9 @@ fn populate_owner_exprs(
                             })
                         });
                         if let Some(expr) = derived
-                            && view.owner_expr_for_var(dst) != Some(&expr)
+                            && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -913,9 +924,9 @@ fn populate_owner_exprs(
                             })
                         });
                         if let Some(expr) = derived
-                            && view.owner_expr_for_var(dst) != Some(&expr)
+                            && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -956,9 +967,9 @@ fn populate_owner_exprs(
                             })
                         });
                         if let Some(expr) = derived
-                            && view.owner_expr_for_var(dst) != Some(&expr)
+                            && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -999,9 +1010,9 @@ fn populate_owner_exprs(
                             })
                         });
                         if let Some(expr) = derived
-                            && view.owner_expr_for_var(dst) != Some(&expr)
+                            && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -1020,9 +1031,9 @@ fn populate_owner_exprs(
                             a,
                             b,
                             compare_width,
-                        ) && view.owner_expr_for_var(dst) != Some(&expr)
+                        ) && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -1062,9 +1073,9 @@ fn populate_owner_exprs(
                             )
                         });
                         if let Some(expr) = derived
-                            && view.owner_expr_for_var(dst) != Some(&expr)
+                            && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -1086,9 +1097,9 @@ fn populate_owner_exprs(
                             a,
                             b,
                             compare_width,
-                        ) && view.owner_expr_for_var(dst) != Some(&expr)
+                        ) && view.owner_expr_for_var(inputs.prepared, dst) != Some(&expr)
                         {
-                            view.insert_owner_expr(dst, expr);
+                            view.insert_owner_expr(inputs.prepared, dst, expr);
                             changed = true;
                         }
                     }
@@ -1157,15 +1168,21 @@ fn refine_load_owner_exprs(
             let Some((candidate_expr, candidate_offset)) = candidate else {
                 continue;
             };
-            let should_replace = view.owner_expr_for_var(dst).is_none_or(|current| {
-                prepared_load_owner_candidate_should_replace(symbols, current, &candidate_expr)
-            });
+            let should_replace =
+                view.owner_expr_for_var(inputs.prepared, dst)
+                    .is_none_or(|current| {
+                        prepared_load_owner_candidate_should_replace(
+                            symbols,
+                            current,
+                            &candidate_expr,
+                        )
+                    });
             if should_replace {
-                view.insert_owner_expr(dst, candidate_expr);
+                view.insert_owner_expr(inputs.prepared, dst, candidate_expr);
                 if let Some(candidate_offset) = candidate_offset
-                    && view.stack_offset_for_var(dst) != Some(candidate_offset)
+                    && view.stack_offset_for_var(inputs.prepared, dst) != Some(candidate_offset)
                 {
-                    view.insert_stack_offset(dst, candidate_offset);
+                    view.insert_stack_offset(inputs.prepared, dst, candidate_offset);
                 }
             }
         }
@@ -1242,7 +1259,7 @@ fn prepared_direct_stack_load_offset(
     addr: &SSAVar,
 ) -> Option<i64> {
     let offset = view
-        .stack_offset_for_var(addr)
+        .stack_offset_for_var(prepared, addr)
         .or_else(|| stack_offset_for_value(prepared, addr))?;
     prepared
         .function()
@@ -1250,7 +1267,7 @@ fn prepared_direct_stack_load_offset(
         .and_then(|facts| facts.stack_address_root_of(addr))
         .map(|_| offset)
         .or_else(|| {
-            view.owner_expr_for_var(addr)
+            view.owner_expr_for_var(prepared, addr)
                 .is_some_and(prepared_expr_is_direct_stack_address)
                 .then_some(offset)
         })
@@ -1266,7 +1283,7 @@ fn prepared_load_access_expr_for_addr(
 ) -> Option<CExpr> {
     let addr_expr = authoritative_scalar_expr_for_value(symbols, prepared, block, view, addr, 0)
         .or_else(|| scalar_owner_expr_for_value(symbols, prepared, view, addr, addr.size))
-        .or_else(|| view.owner_expr_for_var(addr).cloned())?;
+        .or_else(|| view.owner_expr_for_var(prepared, addr).cloned())?;
     prepared_load_access_expr_from_visible_addr(
         addr_expr,
         elem_size,
@@ -1440,7 +1457,7 @@ fn populate_predicates(
         let Some(cond_var) = prepared_var(inputs.prepared, predicate.condition) else {
             continue;
         };
-        view.insert_predicate_expr(cond_var, expr.clone());
+        view.insert_predicate_expr(inputs.prepared, cond_var, expr.clone());
     }
 
     populate_derived_predicates(symbols, view, inputs);
@@ -1459,7 +1476,7 @@ fn populate_derived_predicates(
                 let Some(dst) = op.dst() else {
                     continue;
                 };
-                if view.predicate_expr_for_cond(dst).is_some() {
+                if view.predicate_expr_for_cond(inputs.prepared, dst).is_some() {
                     continue;
                 }
 
@@ -1469,9 +1486,11 @@ fn populate_derived_predicates(
                     | SSAOp::IntSExt { src, .. }
                     | SSAOp::Trunc { src, .. }
                     | SSAOp::Cast { src, .. }
-                    | SSAOp::Subpiece { src, .. } => view.predicate_expr_for_cond(src).cloned(),
+                    | SSAOp::Subpiece { src, .. } => {
+                        view.predicate_expr_for_cond(inputs.prepared, src).cloned()
+                    }
                     SSAOp::BoolNot { src, .. } => view
-                        .predicate_expr_for_cond(src)
+                        .predicate_expr_for_cond(inputs.prepared, src)
                         .cloned()
                         .map(|expr| CExpr::unary(UnaryOp::Not, expr)),
                     SSAOp::BoolAnd { a, b, .. } => {
@@ -1499,7 +1518,7 @@ fn populate_derived_predicates(
                 };
 
                 if let Some(expr) = derived {
-                    view.insert_predicate_expr(dst, expr);
+                    view.insert_predicate_expr(inputs.prepared, dst, expr);
                     changed = true;
                 }
             }
@@ -1643,7 +1662,7 @@ fn predicate_expr_for_operand_with_depth(
         return None;
     }
 
-    if let Some(expr) = view.predicate_expr_for_cond(var).cloned() {
+    if let Some(expr) = view.predicate_expr_for_cond(inputs.prepared, var).cloned() {
         return Some(expr);
     }
     if let Some(expr) = compare_style_operand_expr(inputs.prepared, var, var.size) {
@@ -1656,7 +1675,7 @@ fn predicate_expr_for_operand_with_depth(
     }
     let expr = expr_for_compare_operand(symbols, inputs, var.clone(), view)?;
     let is_self = view
-        .admitted_value_symbol(var)
+        .admitted_value_symbol(inputs.prepared, var)
         .is_some_and(|symbol| matches!(expr, CExpr::Var(candidate) if candidate == symbol));
     (!is_self).then_some(expr)
 }
@@ -1905,8 +1924,8 @@ fn authoritative_expr_for_prepared_value(
     let var = prepared.value_var(value)?;
     authoritative_scalar_expr_for_value(symbols, prepared, block, view, var, 0)
         .or_else(|| scalar_owner_expr_for_value(symbols, prepared, view, var, var.size))
-        .or_else(|| view.owner_expr_for_var(var).cloned())
-        .or_else(|| prepared_value_program_expr(symbols, view, var))
+        .or_else(|| view.owner_expr_for_var(prepared, var).cloned())
+        .or_else(|| prepared_value_program_expr(symbols, prepared, view, var))
 }
 
 fn authoritative_scalar_expr_for_value(
@@ -1924,17 +1943,17 @@ fn authoritative_scalar_expr_for_value(
     if let Some(expr) = compare_style_operand_expr(prepared, var, var.size) {
         return Some(expr);
     }
-    if let Some(expr) = view.predicate_expr_for_cond(var).cloned() {
+    if let Some(expr) = view.predicate_expr_for_cond(prepared, var).cloned() {
         return Some(expr);
     }
     #[cfg(test)]
     if view.binding_names.is_none()
-        && let Some(offset) = view.stack_offset_for_var(var)
+        && let Some(offset) = view.stack_offset_for_var(prepared, var)
         && let Some(alias) = preferred_stack_alias_name(view, offset)
     {
         return Some(crate::symbol::var_ref(symbols, alias));
     }
-    if let Some(expr) = prepared_result_expr_for_var(symbols, view, var) {
+    if let Some(expr) = prepared_result_expr_for_var(symbols, prepared, view, var) {
         return Some(expr);
     }
 
@@ -1962,7 +1981,7 @@ fn authoritative_scalar_expr_for_value(
             #[cfg(test)]
             if view.binding_names.is_none()
                 && let Some(expr) = view
-                    .stack_offset_for_var(addr)
+                    .stack_offset_for_var(prepared, addr)
                     .and_then(|offset| preferred_stack_alias_name(view, offset))
                     .map(|name| crate::symbol::var_ref(symbols, name))
             {
@@ -2040,10 +2059,11 @@ fn authoritative_scalar_expr_for_value(
 
 fn prepared_result_expr_for_var(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+    prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     var: &SSAVar,
 ) -> Option<CExpr> {
-    let site = view.call_result_source_for_var(var)?;
+    let site = view.call_result_source_for_var(prepared, var)?;
     let call_view = view.call_view_for_site(site)?;
     call_view
         .result_owner
@@ -2085,7 +2105,7 @@ fn certified_call_result_owner_expr(
         Some(ValueOwner::Value(value)) if *value != cert.value => {
             let var = prepared.value_var(*value)?;
             (!var.is_register())
-                .then(|| prepared_value_program_expr(symbols, view, var))
+                .then(|| prepared_value_program_expr(symbols, prepared, view, var))
                 .flatten()
         }
         Some(ValueOwner::StackSlot { .. }) | Some(ValueOwner::Value(_)) | None => None,
@@ -2119,8 +2139,8 @@ fn assign_certified_call_result_owner(
         let Some(var) = prepared.value_var(cert.value) else {
             continue;
         };
-        if view.owner_expr_for_var(var).is_none() {
-            view.insert_owner_expr(var, owner.clone());
+        if view.owner_expr_for_var(prepared, var).is_none() {
+            view.insert_owner_expr(prepared, var, owner.clone());
         }
     }
 }
@@ -2239,7 +2259,7 @@ fn prepared_stack_program_expr_for_var(
     #[cfg(test)]
     {
         let offset = view
-            .stack_offset_for_var(var)
+            .stack_offset_for_var(prepared, var)
             .or_else(|| stack_offset_for_value(prepared, var))?;
         prepared_stack_alias_expr_for_offset(symbols, view, offset)
     }
@@ -2347,55 +2367,55 @@ fn expr_for_compare_operand_with_width(
         return Some(expr);
     }
 
-    if let Some(expr) = non_generic_prepared_owner_expr(symbols, view, &var)
-        .or_else(|| non_generic_prepared_predicate_expr(symbols, view, &var))
-        .or_else(|| non_generic_prepared_owner_expr(symbols, view, &root))
-        .or_else(|| non_generic_prepared_predicate_expr(symbols, view, &root))
+    if let Some(expr) = non_generic_prepared_owner_expr(symbols, inputs.prepared, view, &var)
+        .or_else(|| non_generic_prepared_predicate_expr(symbols, inputs.prepared, view, &var))
+        .or_else(|| non_generic_prepared_owner_expr(symbols, inputs.prepared, view, &root))
+        .or_else(|| non_generic_prepared_predicate_expr(symbols, inputs.prepared, view, &root))
     {
         return Some(expr);
     }
 
     #[cfg(test)]
-    if preferred_non_generic_stack_alias(view, &var).is_some()
+    if preferred_non_generic_stack_alias(inputs.prepared, view, &var).is_some()
         && let Some(expr) =
             prepared_stack_program_expr_for_var(symbols, view, inputs.prepared, &var)
     {
         return Some(expr);
     }
     #[cfg(test)]
-    if preferred_non_generic_stack_alias(view, &root).is_some()
+    if preferred_non_generic_stack_alias(inputs.prepared, view, &root).is_some()
         && let Some(expr) =
             prepared_stack_program_expr_for_var(symbols, view, inputs.prepared, &root)
     {
         return Some(expr);
     }
 
-    if let Some(expr) =
-        generic_prepared_owner_expr(view, &var).or_else(|| generic_prepared_owner_expr(view, &root))
+    if let Some(expr) = generic_prepared_owner_expr(inputs.prepared, view, &var)
+        .or_else(|| generic_prepared_owner_expr(inputs.prepared, view, &root))
     {
         return Some(expr);
     }
 
-    if view.stack_offset_for_var(&var).is_some()
+    if view.stack_offset_for_var(inputs.prepared, &var).is_some()
         && let Some(expr) =
             prepared_stack_program_expr_for_var(symbols, view, inputs.prepared, &var)
     {
         return Some(expr);
     }
-    if view.stack_offset_for_var(&root).is_some()
+    if view.stack_offset_for_var(inputs.prepared, &root).is_some()
         && let Some(expr) =
             prepared_stack_program_expr_for_var(symbols, view, inputs.prepared, &root)
     {
         return Some(expr);
     }
 
-    if let Some(expr) = prepared_fallback_visible_expr(symbols, view, &root)
-        .or_else(|| prepared_fallback_visible_expr(symbols, view, &var))
+    if let Some(expr) = prepared_fallback_visible_expr(symbols, inputs.prepared, view, &root)
+        .or_else(|| prepared_fallback_visible_expr(symbols, inputs.prepared, view, &var))
     {
         return Some(expr);
     }
 
-    prepared_value_program_expr(symbols, view, &var)
+    prepared_value_program_expr(symbols, inputs.prepared, view, &var)
 }
 
 fn exact_prepared_constant_bits(prepared: &SsaArtifact, var: &SSAVar) -> Option<u64> {
@@ -2462,9 +2482,9 @@ fn scalar_owner_expr_for_value(
     compare_width: u32,
 ) -> Option<CExpr> {
     compare_style_operand_expr(prepared, var, compare_width)
-        .or_else(|| prepared_value_program_expr(symbols, view, var))
-        .or_else(|| non_generic_prepared_predicate_expr(symbols, view, var))
-        .or_else(|| non_generic_prepared_owner_expr(symbols, view, var))
+        .or_else(|| prepared_value_program_expr(symbols, prepared, view, var))
+        .or_else(|| non_generic_prepared_predicate_expr(symbols, prepared, view, var))
+        .or_else(|| non_generic_prepared_owner_expr(symbols, prepared, view, var))
         .or_else(|| {
             // A value that *is* the address of a stack slot is not named by
             // that slot. `buf` reads what the slot holds; the address is
@@ -2475,13 +2495,16 @@ fn scalar_owner_expr_for_value(
             // arithmetic on the variable, which is a different location. A
             // frame base sitting at offset zero is how that shows: `sp + 32`
             // becomes `buf + 32`.
-            if matches!(view.owner_expr_for_var(var), Some(CExpr::AddrOf(_))) {
+            if matches!(
+                view.owner_expr_for_var(prepared, var),
+                Some(CExpr::AddrOf(_))
+            ) {
                 return None;
             }
             #[cfg(test)]
             if view.binding_names.is_none() {
                 return view
-                    .stack_offset_for_var(var)
+                    .stack_offset_for_var(prepared, var)
                     .and_then(|offset| preferred_stack_alias_name(view, offset))
                     .filter(|alias| {
                         !is_generic_prepared_stack_alias(alias) && !alias.ends_with("_home")
@@ -2490,8 +2513,8 @@ fn scalar_owner_expr_for_value(
             }
             None
         })
-        .or_else(|| view.predicate_expr_for_cond(var).cloned())
-        .or_else(|| generic_prepared_owner_expr(view, var))
+        .or_else(|| view.predicate_expr_for_cond(prepared, var).cloned())
+        .or_else(|| generic_prepared_owner_expr(prepared, view, var))
 }
 
 fn prepared_binary_owner_expr(
@@ -2871,8 +2894,8 @@ fn prepared_scaled_index_owner_expr(
     compare_width: u32,
 ) -> Option<CExpr> {
     scalar_owner_expr_for_value(symbols, prepared, view, var, compare_width)
-        .or_else(|| generic_prepared_owner_expr(view, var))
-        .or_else(|| prepared_fallback_visible_expr(symbols, view, var))
+        .or_else(|| generic_prepared_owner_expr(prepared, view, var))
+        .or_else(|| prepared_fallback_visible_expr(symbols, prepared, view, var))
 }
 
 fn is_prepared_stack_address_carrier(prepared: &SsaArtifact, value: &SSAVar) -> bool {
@@ -2892,41 +2915,52 @@ fn is_prepared_stack_address_carrier(prepared: &SsaArtifact, value: &SSAVar) -> 
 }
 
 #[cfg(test)]
-fn preferred_non_generic_stack_alias(view: &PreparedSemanticView, var: &SSAVar) -> Option<String> {
-    view.stack_offset_for_var(var)
+fn preferred_non_generic_stack_alias(
+    prepared: &SsaArtifact,
+    view: &PreparedSemanticView,
+    var: &SSAVar,
+) -> Option<String> {
+    view.stack_offset_for_var(prepared, var)
         .and_then(|offset| preferred_stack_alias_name(view, offset))
         .filter(|alias| !is_generic_prepared_stack_alias(alias) && !alias.ends_with("_home"))
 }
 
 fn non_generic_prepared_owner_expr(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+    prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     var: &SSAVar,
 ) -> Option<CExpr> {
-    view.owner_expr_for_var(var)
+    view.owner_expr_for_var(prepared, var)
         .cloned()
         .filter(|expr| !matches!(expr, CExpr::AddrOf(_)))
         .filter(|expr| !prepared_expr_is_generic_scalar_alias(symbols, expr))
 }
 
-fn generic_prepared_owner_expr(view: &PreparedSemanticView, var: &SSAVar) -> Option<CExpr> {
-    view.owner_expr_for_var(var)
+fn generic_prepared_owner_expr(
+    prepared: &SsaArtifact,
+    view: &PreparedSemanticView,
+    var: &SSAVar,
+) -> Option<CExpr> {
+    view.owner_expr_for_var(prepared, var)
         .cloned()
         .filter(|expr| !matches!(expr, CExpr::AddrOf(_)))
 }
 
 fn non_generic_prepared_predicate_expr(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+    prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     var: &SSAVar,
 ) -> Option<CExpr> {
-    view.predicate_expr_for_cond(var)
+    view.predicate_expr_for_cond(prepared, var)
         .cloned()
         .filter(|expr| !prepared_expr_is_generic_scalar_alias(symbols, expr))
 }
 
 fn prepared_fallback_visible_expr(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+    prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     var: &SSAVar,
 ) -> Option<CExpr> {
@@ -2956,7 +2990,7 @@ fn prepared_fallback_visible_expr(
     if var.version > 0 {
         return None;
     }
-    prepared_value_program_expr(symbols, view, var)
+    prepared_value_program_expr(symbols, prepared, view, var)
 }
 
 #[cfg(test)]
@@ -2985,7 +3019,7 @@ fn local_store_owner_expr_for_offset(
             continue;
         };
         let store_offset = view
-            .stack_offset_for_var(addr)
+            .stack_offset_for_var(prepared, addr)
             .or_else(|| stack_offset_for_value(prepared, addr));
         if store_offset != Some(offset) {
             continue;
@@ -3122,19 +3156,19 @@ fn collect_prepared_runtime_facts(
 ) {
     for block in blocks {
         for phi in &block.phis {
-            let _ = bind_prepared_value_id(use_info, view, &phi.dst);
+            let _ = bind_prepared_value_id(use_info, prepared, &phi.dst);
             for (_, src) in &phi.sources {
                 // Bind first, then let the one helper write both halves.
                 // Writing them here as well meant a second copy of the pairing
                 // rule living beside the first.
-                let _ = bind_prepared_value_id(use_info, view, src);
+                let _ = bind_prepared_value_id(use_info, prepared, src);
             }
-            let _ = bind_prepared_value_id(use_info, view, &phi.dst);
+            let _ = bind_prepared_value_id(use_info, prepared, &phi.dst);
         }
 
         for op in &block.ops {
             for src in op.sources() {
-                let _ = bind_prepared_value_id(use_info, view, src);
+                let _ = bind_prepared_value_id(use_info, prepared, src);
             }
             // A value defined by adding or subtracting a constant is that
             // operand at an offset. This was the only fact the local-struct
@@ -3144,11 +3178,11 @@ fn collect_prepared_runtime_facts(
             // pointer member it offered was taken because nothing else computes
             // them. So the rule moves here and the overlay goes.
             if let SSAOp::CBranch { cond, .. } = op {
-                let _ = bind_prepared_value_id(use_info, view, cond);
+                let _ = bind_prepared_value_id(use_info, prepared, cond);
             }
 
             if let Some(dst) = op.dst() {
-                let _ = bind_prepared_value_id(use_info, view, dst);
+                let _ = bind_prepared_value_id(use_info, prepared, dst);
             }
 
             match op {
@@ -3158,13 +3192,13 @@ fn collect_prepared_runtime_facts(
                 | SSAOp::Trunc { dst, src }
                 | SSAOp::Cast { dst, src, .. }
                 | SSAOp::Subpiece { dst, src, .. } => {
-                    let bound_copy = bind_prepared_copy_ids(use_info, view, dst, src);
+                    let bound_copy = bind_prepared_copy_ids(use_info, prepared, dst, src);
                     let bound_dst_id = bound_copy.map(|(dst_id, _)| dst_id);
                     let bound_src_id = bound_copy.map(|(_, src_id)| src_id);
                     let source_stack_slot = use_info
                         .forwarded_value_for_var(src)
                         .and_then(|provenance| provenance.stack_slot)
-                        .or_else(|| view.stack_offset_for_var(src))
+                        .or_else(|| view.stack_offset_for_var(prepared, src))
                         .or_else(|| stack_offset_for_value(prepared, src));
                     // Forwarding a carrier member past its merge would restore the value it entered with.
                     let forwards = !bound_dst_id
@@ -3393,30 +3427,23 @@ mod tests {
         std::cell::RefCell::new(crate::symbol::SymbolTable::new())
     }
 
+    /// Two variables cannot share one value, and a claim that they do poisons
+    /// both rather than picking one.
+    ///
+    /// The graph is now the only oracle for which value a variable names, and
+    /// it is injective, so this contradiction cannot arrive through it. The
+    /// guard stays because the identity table is what enforces the rule, and
+    /// the test states it where the rule lives.
     #[test]
     fn prepared_copy_binding_rejects_shared_value_id_before_fact_seeding() {
         let dst = SSAVar::new("dst", 1, 8);
         let src = SSAVar::new("src", 1, 8);
-        let mut view = PreparedSemanticView::default();
-        view.value_id_by_var.insert(dst.clone(), ValueId(1));
-        view.value_id_by_var.insert(src.clone(), ValueId(1));
-        view.var_by_value_id.insert(ValueId(1), dst.clone());
 
         let mut info = UseInfo::default();
-        let binding = bind_prepared_copy_ids(&mut info, &view, &dst, &src);
-        if let Some((dst_id, src_id)) = binding {
-            info.forwarded_values_by_value.insert(
-                dst_id,
-                ValueProvenance {
-                    source: src.display_name(),
-                    source_value_id: Some(src_id),
-                    source_var: Some(src.clone()),
-                    stack_slot: None,
-                },
-            );
-        }
+        assert_eq!(info.bind_value_id(&dst, ValueId(1)), Some(ValueId(1)));
+        assert_eq!(info.bind_value_id(&src, ValueId(1)), None);
+        info.forwarded_values_by_value.retain(|_, _| false);
 
-        assert_eq!(binding, None);
         assert!(info.forwarded_values_by_value.is_empty());
         assert_eq!(info.value_id_for_var(&dst), None);
         assert_eq!(info.value_id_for_var(&src), None);
@@ -3431,12 +3458,6 @@ mod tests {
         spoof.name = "same".to_string();
         assert_eq!(src.display_name(), spoof.display_name());
         assert_ne!(src, spoof);
-
-        let mut view = PreparedSemanticView::default();
-        view.value_id_by_var.insert(dst.clone(), ValueId(1));
-        view.value_id_by_var.insert(src.clone(), ValueId(2));
-        view.var_by_value_id.insert(ValueId(1), dst.clone());
-        view.var_by_value_id.insert(ValueId(2), src.clone());
 
         let mut info = UseInfo::default();
         assert_eq!(info.bind_value_id(&spoof, ValueId(3)), Some(ValueId(3)));
@@ -3455,8 +3476,14 @@ mod tests {
             },
         );
 
-        let (dst_id, src_id) =
-            bind_prepared_copy_ids(&mut info, &view, &dst, &src).expect("exact copy binding");
+        assert_eq!(info.bind_value_id(&dst, ValueId(1)), Some(ValueId(1)));
+        assert_eq!(info.bind_value_id(&src, ValueId(2)), Some(ValueId(2)));
+        let (dst_id, src_id) = (
+            info.exact_value_id_for_var(&dst)
+                .expect("exact copy target"),
+            info.exact_value_id_for_var(&src)
+                .expect("exact copy source"),
+        );
         assert_eq!((dst_id, src_id), (ValueId(1), ValueId(2)));
         assert_eq!(info.forwarded_value_for_var(&src), None);
 
@@ -4316,6 +4343,7 @@ mod tests {
     #[test]
     fn no_binding_plan_spells_nothing() {
         let symbols = test_table();
+        let (prepared, _) = test_prepared_constant(1);
         let view = PreparedSemanticView::default();
         for var in [
             SSAVar::constant(1, 8),
@@ -4325,7 +4353,7 @@ mod tests {
             test_var("const:40", 0, 8),
         ] {
             assert_eq!(
-                prepared_fallback_visible_expr(&symbols, &view, &var),
+                prepared_fallback_visible_expr(&symbols, &prepared, &view, &var),
                 None,
                 "an empty binding plan cannot name {var:?}"
             );

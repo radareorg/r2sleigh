@@ -1169,7 +1169,7 @@ impl<'a> FoldingContext<'a> {
 
     pub(crate) fn call_result_source_for_var(&self, var: &SSAVar) -> Option<(u64, usize)> {
         self.prepared_semantic_view()?
-            .call_result_source_for_var(var)
+            .call_result_source_for_var(self.inputs.prepared_ssa?, var)
     }
 
 
