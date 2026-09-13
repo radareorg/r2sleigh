@@ -354,6 +354,14 @@ pub struct SemanticObligationInventory {
     native_spans: BTreeMap<CanonicalInstructionId, crate::GenuineNativeInstructionSpan>,
     construction_failures: Vec<ObligationInventoryFailure>,
     unstructured_cycle_blocks: BTreeSet<u64>,
+    /// Whether the inventory closes, decided when it was built.
+    ///
+    /// Deciding it is a walk of every instruction and every obligation with a
+    /// map lookup for each, over keys that are forty and eighty bytes wide.
+    /// Six places in a render ask, and the answer cannot change between them:
+    /// the inventory is built once and bound to its native spans once, and
+    /// nothing else may touch it. So it is decided where it is built.
+    complete: bool,
 }
 
 impl SemanticObligationInventory {
@@ -367,6 +375,7 @@ impl SemanticObligationInventory {
             native_spans: BTreeMap::new(),
             construction_failures: Vec::new(),
             unstructured_cycle_blocks: BTreeSet::new(),
+            complete: false,
         }
     }
 }
@@ -798,6 +807,7 @@ impl SemanticObligationInventory {
                 },
             );
         }
+        inventory.complete = inventory.derive_is_complete();
         inventory
     }
 
@@ -857,6 +867,7 @@ impl SemanticObligationInventory {
                 return false;
             }
         }
+        self.complete = self.derive_is_complete();
         true
     }
 
@@ -981,7 +992,11 @@ impl SemanticObligationInventory {
         &self.unstructured_cycle_blocks
     }
 
-    pub fn is_complete(&self) -> bool {
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn derive_is_complete(&self) -> bool {
         let zero_op_span_count = self
             .native_spans
             .values()
