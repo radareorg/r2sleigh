@@ -15,18 +15,27 @@ impl ControlFlowStructurer<'_, '_> {
         stmt: CStmt,
     ) -> CStmt {
         // Recurse first, then simplify
-        let stmt = Self::cleanup_recurse(symbols, stmt);
+        let mut stmt = stmt;
+        Self::cleanup_recurse(symbols, &mut stmt);
         Self::flatten(stmt)
     }
 
     /// Recursively clean up children first, then apply local simplifications.
-    fn cleanup_recurse(
-        symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-        stmt: CStmt,
-    ) -> CStmt {
+    ///
+    /// The walk edits the tree it is given. It used to take each node by value
+    /// and hand back a new one, which unboxed and reboxed every child: one
+    /// free and one allocation per node, and on a five-hundred-block function
+    /// that was 1.46 million allocations, the largest single source of churn
+    /// in a render and none of it retained. A node whose rewrite consumes it is
+    /// still taken out and put back, which moves the node and allocates
+    /// nothing.
+    fn cleanup_recurse(symbols: &std::cell::RefCell<crate::symbol::SymbolTable>, stmt: &mut CStmt) {
         match stmt {
-            CStmt::StructuredRegion { marker, stmt } => {
-                let cleaned = Self::cleanup_recurse(symbols, *stmt);
+            CStmt::StructuredRegion {
+                marker,
+                stmt: inner,
+            } => {
+                Self::cleanup_recurse(symbols, inner);
                 // An empty region renders nothing and its marker goes with
                 // it -- except the function body's. That marker is what
                 // sealing looks for at the root, so collapsing it turned a
@@ -35,109 +44,93 @@ impl ControlFlowStructurer<'_, '_> {
                 // refusal reading "unrepresentable control flow", when the
                 // control flow was fine and the honest report is the one the
                 // proof line already makes: rendering produced no statements.
-                if matches!(cleaned.unobserved(), CStmt::Empty)
+                if matches!(inner.unobserved(), CStmt::Empty)
                     && marker.kind() != StructuredRegionKind::FunctionBody
                 {
-                    CStmt::Empty
-                } else {
-                    CStmt::structured_region(marker, cleaned)
+                    *stmt = CStmt::Empty;
                 }
             }
-            CStmt::Observed { id, stmt } => {
-                CStmt::observed(id, Self::cleanup_recurse(symbols, *stmt))
-            }
+            CStmt::Observed { stmt: inner, .. } => Self::cleanup_recurse(symbols, inner),
             CStmt::Block(stmts) => {
-                let cleaned = stmts
-                    .into_iter()
-                    .map(|x| Self::cleanup_recurse(symbols, x))
-                    .filter(|s| !matches!(s.unobserved(), CStmt::Empty))
-                    .collect();
+                for child in stmts.iter_mut() {
+                    Self::cleanup_recurse(symbols, child);
+                }
+                stmts.retain(|child| !matches!(child.unobserved(), CStmt::Empty));
+                let cleaned = std::mem::take(stmts);
                 let cleaned = Self::rewrite_block_tail_guard_clauses(cleaned);
                 let cleaned = Self::rewrite_guarded_switch_if_else(cleaned);
                 let cleaned = Self::rewrite_continue_tail_merges(symbols, cleaned);
-                let cleaned = Self::truncate_dead_straight_line_tail(cleaned);
-                if cleaned.is_empty() {
+                let mut cleaned = Self::truncate_dead_straight_line_tail(cleaned);
+                *stmt = if cleaned.is_empty() {
                     CStmt::Empty
                 } else if cleaned.len() == 1 {
-                    cleaned.into_iter().next().unwrap()
+                    cleaned.remove(0)
                 } else {
                     CStmt::Block(cleaned)
-                }
+                };
             }
             CStmt::If {
-                cond,
                 then_body,
                 else_body,
+                ..
             } => {
-                let then_body = Box::new(Self::cleanup_recurse(symbols, *then_body));
-                let else_body = else_body
-                    .map(|e| Box::new(Self::cleanup_recurse(symbols, *e)))
-                    .and_then(|e| (!matches!(e.unobserved(), CStmt::Empty)).then_some(e));
-                let stmt = CStmt::If {
-                    cond,
-                    then_body,
-                    else_body,
-                };
-                let stmt = Self::rewrite_if_short_circuit(stmt);
-                let stmt = Self::rewrite_empty_if_bodies(stmt);
-                Self::rewrite_guarded_switch_with_trailing_return(stmt)
-            }
-            CStmt::While { cond, body } => {
-                let body = Self::strip_trailing_continue(Self::cleanup_recurse(symbols, *body));
-                CStmt::While {
-                    cond,
-                    body: Box::new(body),
+                Self::cleanup_recurse(symbols, then_body);
+                if let Some(body) = else_body {
+                    Self::cleanup_recurse(symbols, body);
                 }
+                if else_body
+                    .as_ref()
+                    .is_some_and(|body| matches!(body.unobserved(), CStmt::Empty))
+                {
+                    *else_body = None;
+                }
+                let taken = std::mem::replace(stmt, CStmt::Empty);
+                let taken = Self::rewrite_if_short_circuit(taken);
+                let taken = Self::rewrite_empty_if_bodies(taken);
+                *stmt = Self::rewrite_guarded_switch_with_trailing_return(taken);
             }
-            CStmt::DoWhile { body, cond } => {
-                let body = Self::strip_trailing_continue(Self::cleanup_recurse(symbols, *body));
+            CStmt::While { body, .. } => {
+                Self::cleanup_recurse(symbols, body);
+                let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
+                **body = Self::strip_trailing_continue(taken);
+            }
+            CStmt::DoWhile { body, .. } => {
+                Self::cleanup_recurse(symbols, body);
+                let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
+                **body = Self::strip_trailing_continue(taken);
+                let CStmt::DoWhile { body, cond } = std::mem::replace(stmt, CStmt::Empty) else {
+                    unreachable!("the node matched as a do-while");
+                };
                 // Fix C: do { if (c) break; rest } while(1) -> while(!c) { rest }
-                Self::try_convert_do_while_to_while(body, cond)
+                *stmt = Self::try_convert_do_while_to_while(*body, cond);
             }
-            CStmt::For {
-                init,
-                cond,
-                update,
-                body,
-            } => {
-                let body = Self::strip_trailing_continue(Self::cleanup_recurse(symbols, *body));
+            CStmt::For { update, body, .. } => {
+                Self::cleanup_recurse(symbols, body);
+                let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
+                let cleaned = Self::strip_trailing_continue(taken);
                 // The strip consumes the body and hands one back either way, so
                 // matching moves it. Written as `map(...).unwrap_or(body)` the
                 // closure could not move it and every loop body in the function
                 // was deep-copied to be passed, which nests: an outer loop
                 // copied every inner loop that had just copied itself.
-                let body = match update.as_ref() {
-                    Some(update) => Self::strip_trailing_for_update(symbols, body, update),
-                    None => body,
+                **body = match update.as_ref() {
+                    Some(update) => Self::strip_trailing_for_update(symbols, cleaned, update),
+                    None => cleaned,
                 };
-                CStmt::For {
-                    init,
-                    cond,
-                    update,
-                    body: Box::new(body),
+            }
+            CStmt::Switch { cases, default, .. } => {
+                for case in cases.iter_mut() {
+                    case.body = Self::cleanup_switch_body(symbols, std::mem::take(&mut case.body));
+                }
+                if let Some(body) = default {
+                    *body = Self::cleanup_switch_body(symbols, std::mem::take(body));
                 }
             }
-            CStmt::Switch {
-                expr,
-                cases,
-                default,
-            } => {
-                let cases = cases
-                    .into_iter()
-                    .map(|c| crate::ast::SwitchCase {
-                        value: c.value,
-                        body: Self::cleanup_switch_body(symbols, c.body),
-                    })
-                    .collect();
-                let default = default.map(|b| Self::cleanup_switch_body(symbols, b));
-                CStmt::Switch {
-                    expr,
-                    cases,
-                    default,
-                }
+            CStmt::Expr(expr) => {
+                let taken = std::mem::replace(expr, CExpr::IntLit(0));
+                *expr = Self::rewrite_compound_assignment_expr(taken);
             }
-            CStmt::Expr(expr) => CStmt::Expr(Self::rewrite_compound_assignment_expr(expr)),
-            other => other,
+            _ => {}
         }
     }
 
@@ -145,11 +138,11 @@ impl ControlFlowStructurer<'_, '_> {
         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
         stmts: Vec<CStmt>,
     ) -> Vec<CStmt> {
-        let cleaned = stmts
-            .into_iter()
-            .map(|x| Self::cleanup_recurse(symbols, x))
-            .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty))
-            .collect();
+        let mut cleaned = stmts;
+        for stmt in cleaned.iter_mut() {
+            Self::cleanup_recurse(symbols, stmt);
+        }
+        cleaned.retain(|stmt| !matches!(stmt.unobserved(), CStmt::Empty));
         Self::truncate_dead_straight_line_tail(cleaned)
     }
 
@@ -438,6 +431,11 @@ impl ControlFlowStructurer<'_, '_> {
     }
 
     fn rewrite_block_tail_guard_clauses(stmts: Vec<CStmt>) -> Vec<CStmt> {
+        // Statements pass through by moving out of the vector this owns.
+        // Cloning them copied every subtree it did not rewrite, and three
+        // passes over one block did it three times, which on a nested tree
+        // was the largest source of churn in a whole render.
+        let mut stmts = stmts;
         let mut rewritten = Vec::with_capacity(stmts.len());
         let mut i = 0;
         while i < stmts.len() {
@@ -464,18 +462,23 @@ impl ControlFlowStructurer<'_, '_> {
                 );
                 rewritten.push(guard);
                 Self::append_stmt_body_flat(&mut rewritten, then_body.as_ref().clone());
-                rewritten.push(stmts[i + 1].clone());
+                rewritten.push(std::mem::replace(&mut stmts[i + 1], CStmt::Empty));
                 i += 2;
                 continue;
             }
 
-            rewritten.push(stmts[i].clone());
+            rewritten.push(std::mem::replace(&mut stmts[i], CStmt::Empty));
             i += 1;
         }
         rewritten
     }
 
     fn rewrite_guarded_switch_if_else(stmts: Vec<CStmt>) -> Vec<CStmt> {
+        // Statements pass through by moving out of the vector this owns.
+        // Cloning them copied every subtree it did not rewrite, and three
+        // passes over one block did it three times, which on a nested tree
+        // was the largest source of churn in a whole render.
+        let mut stmts = stmts;
         let mut rewritten = Vec::with_capacity(stmts.len());
         let mut i = 0;
         while i < stmts.len() {
@@ -496,13 +499,13 @@ impl ControlFlowStructurer<'_, '_> {
                     (Some(switch_stmt), None) => (switch_stmt, else_body.as_ref().clone()),
                     (None, Some(switch_stmt)) => (switch_stmt, then_body.as_ref().clone()),
                     _ => {
-                        rewritten.push(stmts[i].clone());
+                        rewritten.push(std::mem::replace(&mut stmts[i], CStmt::Empty));
                         i += 1;
                         continue;
                     }
                 };
                 if !Self::stmt_guarantees_termination(&default_stmt) {
-                    rewritten.push(stmts[i].clone());
+                    rewritten.push(std::mem::replace(&mut stmts[i], CStmt::Empty));
                     i += 1;
                     continue;
                 }
@@ -513,13 +516,13 @@ impl ControlFlowStructurer<'_, '_> {
                         cases,
                         default: Some(vec![default_stmt]),
                     });
-                    rewritten.push(stmts[i + 1].clone());
+                    rewritten.push(std::mem::replace(&mut stmts[i + 1], CStmt::Empty));
                     i += 2;
                     continue;
                 }
             }
 
-            rewritten.push(stmts[i].clone());
+            rewritten.push(std::mem::replace(&mut stmts[i], CStmt::Empty));
             i += 1;
         }
         rewritten
@@ -529,6 +532,11 @@ impl ControlFlowStructurer<'_, '_> {
         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
         stmts: Vec<CStmt>,
     ) -> Vec<CStmt> {
+        // Statements pass through by moving out of the vector this owns.
+        // Cloning them copied every subtree it did not rewrite, and three
+        // passes over one block did it three times, which on a nested tree
+        // was the largest source of churn in a whole render.
+        let mut stmts = stmts;
         let mut rewritten = Vec::with_capacity(stmts.len());
         let mut i = 0;
         while i < stmts.len() {
@@ -554,7 +562,7 @@ impl ControlFlowStructurer<'_, '_> {
                 }
             }
 
-            rewritten.push(stmts[i].clone());
+            rewritten.push(std::mem::replace(&mut stmts[i], CStmt::Empty));
             i += 1;
         }
 

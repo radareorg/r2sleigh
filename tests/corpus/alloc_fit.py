@@ -34,6 +34,7 @@ PHASE = re.compile(
 STAGE = re.compile(r"r2dec stage timing (?P<name>\S+): instructions=(?P<n>\d+)")
 BYTES = re.compile(r"(?P<key>\w+)_bytes=(?P<v>\d+)")
 LIVE = re.compile(r"(?P<key>\w+)_live=(?P<v>\d+)")
+ALLOCS = re.compile(r"(?P<key>\w+)_allocs=(?P<v>\d+)")
 
 
 class Render:
@@ -46,6 +47,7 @@ class Render:
         self.peak = 0
         self.stages: list[tuple[str, int]] = []
         self.live: list[tuple[str, int]] = []
+        self.allocs: list[tuple[str, int]] = []
 
     @property
     def growth(self) -> int:
@@ -77,6 +79,8 @@ def read(paths: list[str]) -> tuple[list[Render], list[dict]]:
                 render = Render(stage["name"], int(stage["n"]))
                 for match in LIVE.finditer(line):
                     render.live.append((match["key"], int(match["v"])))
+                for match in ALLOCS.finditer(line):
+                    render.allocs.append((match["key"], int(match["v"])))
                 for match in BYTES.finditer(line):
                     key, value = match["key"], int(match["v"])
                     if key == "entry":
@@ -134,6 +138,8 @@ def report_renders(renders: list[Render]) -> None:
     biggest = max(sized, key=lambda row: row.growth)
     print(f"largest render growth: {biggest.name}, {megabytes(biggest.growth)}")
     live = dict(biggest.live)
+    allocs = dict(biggest.allocs)
+    print(f"  allocations: {sum(allocs.values()):,}")
     previous = biggest.entry
     held = biggest.entry
     for stage, value in biggest.stages:
@@ -144,6 +150,7 @@ def report_renders(renders: list[Render]) -> None:
             print(
                 f"  {stage:<24} high +{megabytes(step):>10}"
                 f"   kept {megabytes(kept):>10}   live {megabytes(now):>10}"
+                f"   allocs {allocs.get(stage, 0):>9,}"
             )
         previous = max(previous, value)
         if now:

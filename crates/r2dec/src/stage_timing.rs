@@ -30,7 +30,9 @@ thread_local! {
     /// shows in the first and not the second, and only the second accumulates
     /// into the render's own peak, so reading one without the other says
     /// nothing about which stage to change.
-    static PEAKS: RefCell<Vec<(&'static str, usize, usize)>> = const { RefCell::new(Vec::new()) };
+    static PEAKS: RefCell<Vec<(&'static str, usize, usize, usize)>> = const { RefCell::new(Vec::new()) };
+    /// The allocation count when the running stage began.
+    static ALLOCS: RefCell<usize> = const { RefCell::new(0) };
     /// What was already held when this render began, so a stage's high-water
     /// mark can be read as what the render added rather than as what the
     /// process holds.
@@ -52,6 +54,7 @@ pub(crate) fn begin(instructions: usize) {
     STAGES.with_borrow_mut(Vec::clear);
     PEAKS.with_borrow_mut(Vec::clear);
     r2il::allocation::reset_peak();
+    ALLOCS.with_borrow_mut(|allocs| *allocs = r2il::allocation::allocation_count());
     LAST.with_borrow_mut(|last| *last = Some(Instant::now()));
 }
 
@@ -68,13 +71,20 @@ pub(crate) fn mark(stage: &'static str) {
     });
     let peak = r2il::allocation::peak_bytes();
     let live = r2il::allocation::live_bytes();
+    let allocs = ALLOCS.with_borrow_mut(|allocs| {
+        let now = r2il::allocation::allocation_count();
+        let made = now.saturating_sub(*allocs);
+        *allocs = now;
+        made
+    });
     r2il::allocation::reset_peak();
     PEAKS.with_borrow_mut(|peaks| {
-        if let Some(row) = peaks.iter_mut().find(|(name, _, _)| *name == stage) {
+        if let Some(row) = peaks.iter_mut().find(|(name, _, _, _)| *name == stage) {
             row.1 = row.1.max(peak);
             row.2 = row.2.max(live);
+            row.3 += allocs;
         } else {
-            peaks.push((stage, peak, live));
+            peaks.push((stage, peak, live, allocs));
         }
     });
     if let Some(elapsed) = elapsed {
@@ -115,13 +125,17 @@ pub(crate) fn report(function: &str) {
     // otherwise read as "this stage allocated nothing", which is a different
     // claim from "nobody measured".
     if r2il::allocation::is_counting() {
-        let high = peaks.iter().map(|(_, peak, _)| *peak).max().unwrap_or(0);
+        let high = peaks.iter().map(|(_, peak, _, _)| *peak).max().unwrap_or(0);
         line.push_str(&format!(
             " entry_bytes={} peak_bytes={high}",
             ENTRY.with_borrow(|entry| *entry)
         ));
-        for (stage, peak, live) in &peaks {
-            line.push_str(&format!(" {stage}_bytes={peak} {stage}_live={live}"));
+        let made: usize = peaks.iter().map(|(_, _, _, allocs)| *allocs).sum();
+        line.push_str(&format!(" allocations={made}"));
+        for (stage, peak, live, allocs) in &peaks {
+            line.push_str(&format!(
+                " {stage}_bytes={peak} {stage}_live={live} {stage}_allocs={allocs}"
+            ));
         }
     }
     eprintln!("{line}");

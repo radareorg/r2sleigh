@@ -17,12 +17,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+/// How many allocations have been made. Bytes alone cannot say whether a
+/// stage asked the allocator once for a megabyte or thirty thousand times for
+/// thirty bytes, and on this workload the difference shows up as resident
+/// memory the allocator holds above what is live.
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Record an allocation. Called by the counting allocator, not by hand.
 pub fn record_allocation(bytes: usize) {
     // Marking here rather than at plugin init means a report can never claim
     // zero bytes because nobody remembered to announce the allocator.
     COUNTING.store(1, Ordering::Relaxed);
+    ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
     PEAK.fetch_max(live, Ordering::Relaxed);
 }
@@ -35,6 +41,11 @@ pub fn record_deallocation(bytes: usize) {
 /// Bytes allocated and not yet freed.
 pub fn live_bytes() -> usize {
     LIVE.load(Ordering::Relaxed)
+}
+
+/// How many allocations have been made since the process started.
+pub fn allocation_count() -> usize {
+    ALLOCATIONS.load(Ordering::Relaxed)
 }
 
 /// The high-water mark since it was last reset.
