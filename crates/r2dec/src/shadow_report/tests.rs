@@ -113,9 +113,7 @@ fn matching_snapshot(
         for cell in row {
             cell.observation = match plan.use_disposition(cell.site).expect("dense use") {
                 MachineUseDisposition::Exact(slice) => LegacyUseObservation::Exact(*slice),
-                MachineUseDisposition::MemoryAddress(address) => {
-                    LegacyUseObservation::MemoryAddress(*address)
-                }
+                MachineUseDisposition::MemoryAddress(_) => LegacyUseObservation::MemoryAddress,
                 MachineUseDisposition::Refused(reason) => LegacyUseObservation::Refused(*reason),
             };
         }

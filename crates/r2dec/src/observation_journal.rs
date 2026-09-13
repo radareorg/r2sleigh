@@ -1833,12 +1833,14 @@ impl LegacyObservationJournal {
                 .into_boxed_slice();
             normalized_projections[block_id.0 as usize] = rows;
         }
+        crate::stage_timing::mark("journal_projections");
         let value_is_literal = graph
             .values
             .iter()
             .map(|value| value.var.constant_bits().is_some())
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        crate::stage_timing::mark("journal_literals");
         let mut coalesced_carrier_copy_sites = BTreeSet::new();
         let mut coalesced_copy_writes = BTreeSet::new();
         let mut coalesced_copy_outputs = BTreeSet::new();
@@ -2062,6 +2064,7 @@ impl LegacyObservationJournal {
             })
             .map(|removed| removed.definition.inst)
             .collect::<BTreeSet<_>>();
+        crate::stage_timing::mark("journal_coalesced");
         let values = vec![None; graph.values.len()].into_boxed_slice();
         let uses = graph
             .insts
@@ -2076,6 +2079,7 @@ impl LegacyObservationJournal {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let writes = vec![None; graph.insts.len()].into_boxed_slice();
+        crate::stage_timing::mark("journal_slots");
         let effect_occurrences = source
             .source()
             .obligations()
@@ -4223,8 +4227,8 @@ impl LegacyObservationJournal {
     ) -> Result<LegacyUseObservation, LegacyObservationJournalError> {
         match self.plan.use_disposition(site) {
             Some(MachineUseDisposition::Exact(slice)) => Ok(LegacyUseObservation::Exact(*slice)),
-            Some(MachineUseDisposition::MemoryAddress(address)) => {
-                Ok(LegacyUseObservation::MemoryAddress(*address))
+            Some(MachineUseDisposition::MemoryAddress(_)) => {
+                Ok(LegacyUseObservation::MemoryAddress)
             }
             Some(MachineUseDisposition::Refused(_)) => {
                 Err(LegacyObservationJournalError::RefusedRenderedUse(site))
@@ -4660,7 +4664,7 @@ impl LegacyObservationJournal {
             .filter(|cell| {
                 matches!(
                     cell,
-                    Some(LegacyUseObservation::Exact(_) | LegacyUseObservation::MemoryAddress(_))
+                    Some(LegacyUseObservation::Exact(_) | LegacyUseObservation::MemoryAddress)
                 )
             })
             .count();
@@ -7233,8 +7237,8 @@ mod tests {
                     Some(MachineUseDisposition::Exact(slice)) => {
                         LegacyUseObservation::Exact(*slice)
                     }
-                    Some(MachineUseDisposition::MemoryAddress(address)) => {
-                        LegacyUseObservation::MemoryAddress(*address)
+                    Some(MachineUseDisposition::MemoryAddress(_)) => {
+                        LegacyUseObservation::MemoryAddress
                     }
                     other => panic!("discharged use must be exact, got {other:?}"),
                 };

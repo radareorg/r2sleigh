@@ -8,9 +8,8 @@
 //! renderer input by accident.
 
 use r2ssa::{
-    InstId, MachineUseDisposition, MachineUseRefusal, MachineUseSlice, MachineValueUse,
-    MachineWriteDisposition, MachineWriteProjection, MachineWriteRefusal, SsaArtifactAuthority,
-    UseSite, ValueId,
+    InstId, MachineUseDisposition, MachineUseRefusal, MachineUseSlice, MachineWriteDisposition,
+    MachineWriteProjection, MachineWriteRefusal, SsaArtifactAuthority, UseSite, ValueId,
 };
 use r2types::SourceOwnedFunctionFacts;
 
@@ -62,7 +61,12 @@ pub(crate) enum LegacyValueObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyUseObservation {
     Exact(MachineUseSlice),
-    MemoryAddress(MachineValueUse),
+    /// The address operand of a structured access. What that address is, is
+    /// the binding plan's answer for this exact use site and is read back from
+    /// it; a copy here would be the same answer stored a second time in every
+    /// one of a function's use slots, and `MachineValueUse` is large enough
+    /// that the copy set the width of the whole dense array.
+    MemoryAddress,
     Elided(r2ssa::ledger::ElisionReason),
     Refused(MachineUseRefusal),
     /// Covered by the marked gap anchored here; unproven and said so.

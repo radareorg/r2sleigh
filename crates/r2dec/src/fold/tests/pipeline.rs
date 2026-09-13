@@ -1021,8 +1021,8 @@ mod tests {
             Some(r2ssa::MachineUseDisposition::Exact(slice)) => {
                 crate::shadow_report::LegacyUseObservation::Exact(*slice)
             }
-            Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) => {
-                crate::shadow_report::LegacyUseObservation::MemoryAddress(*address)
+            Some(r2ssa::MachineUseDisposition::MemoryAddress(_)) => {
+                crate::shadow_report::LegacyUseObservation::MemoryAddress
             }
             other => panic!("expected exact machine use at {site:?}, got {other:?}"),
         }

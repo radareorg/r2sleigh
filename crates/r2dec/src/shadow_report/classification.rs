@@ -182,7 +182,9 @@ fn derive_report(
                     let candidate_observation = normalized_machine_use(candidate_disposition);
                     let old_observation = normalized_legacy_use(
                         legacy.uses[inst.id.0 as usize][input_idx].observation,
-                    );
+                        candidate_disposition,
+                    )
+                    .ok_or(ShadowReportError::MissingPlanUse { site })?;
                     let old_judgment = judge_use(old_observation, canonical_observation);
                     let shadow_judgment = judge_use(candidate_observation, canonical_observation);
                     let observations_equal = old_observation == candidate_observation;
@@ -480,17 +482,25 @@ fn normalized_machine_use(disposition: &MachineUseDisposition) -> NormalizedUseO
     }
 }
 
-fn normalized_legacy_use(observation: LegacyUseObservation) -> NormalizedUseObservation {
-    match observation {
+/// What one recorded use observation says, with the address of a structured
+/// access read back from the plan that answered for it.
+fn normalized_legacy_use(
+    observation: LegacyUseObservation,
+    disposition: &MachineUseDisposition,
+) -> Option<NormalizedUseObservation> {
+    Some(match observation {
         LegacyUseObservation::Exact(slice) => NormalizedUseObservation::Exact(slice),
-        LegacyUseObservation::MemoryAddress(address) => {
-            NormalizedUseObservation::MemoryAddress(address)
+        LegacyUseObservation::MemoryAddress => {
+            let MachineUseDisposition::MemoryAddress(address) = disposition else {
+                return None;
+            };
+            NormalizedUseObservation::MemoryAddress(*address)
         }
         LegacyUseObservation::Elided(reason) => NormalizedUseObservation::Elided(reason),
         LegacyUseObservation::Refused(reason) => NormalizedUseObservation::Refused(reason),
         LegacyUseObservation::Gap(anchor) => NormalizedUseObservation::Gap(anchor),
         LegacyUseObservation::LegacyAbsent => NormalizedUseObservation::LegacyAbsent,
-    }
+    })
 }
 
 fn judge_use(
