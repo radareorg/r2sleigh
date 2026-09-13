@@ -659,8 +659,13 @@ struct EdgeCertificate {
 }
 
 /// Dense index over the already-validated upstream loop-carrier evidence.
+///
+/// Edges are flat with one offset per instruction rather than a vector per
+/// instruction: the old shape cost one heap allocation for every instruction in
+/// the function, and this is built three times over one render.
 struct CarrierEdgeCertificates {
-    by_inst: Vec<Vec<Option<EdgeCertificate>>>,
+    edge_offsets: Vec<u32>,
+    edges: Vec<Option<EdgeCertificate>>,
     relocations_by_value: Vec<Option<RelocationCertificate>>,
 }
 
@@ -673,17 +678,29 @@ struct RelocationCertificate {
     entries: Vec<r2ssa::LoopCarrierEdgeValue>,
 }
 
+/// Where one instruction's input edge sits in the flat edge vector.
+fn result_edge_index(offsets: &[u32], inst: usize, input: usize) -> Option<usize> {
+    let start = *offsets.get(inst)? as usize;
+    let end = *offsets.get(inst.checked_add(1)?)? as usize;
+    let index = start.checked_add(input)?;
+    (index < end).then_some(index)
+}
+
 impl CarrierEdgeCertificates {
     fn build(
         graph: &SsaGraph,
         render_facts: Option<&r2types::FunctionRenderFacts>,
     ) -> Option<Self> {
+        let mut edge_offsets = Vec::with_capacity(graph.insts.len().saturating_add(1));
+        let mut total = 0u32;
+        for inst in &graph.insts {
+            edge_offsets.push(total);
+            total = total.checked_add(u32::try_from(inst.inputs.len()).ok()?)?;
+        }
+        edge_offsets.push(total);
         let mut result = Self {
-            by_inst: graph
-                .insts
-                .iter()
-                .map(|inst| vec![None; inst.inputs.len()])
-                .collect(),
+            edge_offsets,
+            edges: vec![None; total as usize],
             relocations_by_value: vec![None; graph.values.len()],
         };
         let Some(render_facts) = render_facts else {
@@ -727,10 +744,11 @@ impl CarrierEdgeCertificates {
                 if !valid {
                     return None;
                 }
-                let slot = result
-                    .by_inst
-                    .get_mut(site.inst.0 as usize)?
-                    .get_mut(site.input_idx)?;
+                let slot = result.edges.get_mut(result_edge_index(
+                    &result.edge_offsets,
+                    site.inst.0 as usize,
+                    site.input_idx,
+                )?)?;
                 match slot {
                     Some(existing) if existing.entity != *id => return None,
                     Some(existing) => {
@@ -769,10 +787,8 @@ impl CarrierEdgeCertificates {
     }
 
     fn get(&self, site: UseSite) -> Option<&EdgeCertificate> {
-        self.by_inst
-            .get(site.inst.0 as usize)?
-            .get(site.input_idx)?
-            .as_ref()
+        let index = result_edge_index(&self.edge_offsets, site.inst.0 as usize, site.input_idx)?;
+        self.edges.get(index)?.as_ref()
     }
 
     fn relocation(&self, entity: r2ssa::SemanticId) -> Option<&RelocationCertificate> {

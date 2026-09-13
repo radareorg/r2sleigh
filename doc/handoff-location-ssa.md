@@ -109,6 +109,42 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -4. **The memory arc, and the null result it opened with.** Two changes that
+     are structurally right measured as nothing, and why is the useful part.
+
+     The changes: SSA construction moved the renamed operations into the SSA
+     blocks instead of cloning them per block, so the function's operations no
+     longer exist twice at once; and `CarrierEdgeCertificates` became flat with
+     one offset per instruction rather than a vector per instruction, which had
+     cost one heap allocation for every instruction and is built three times
+     over one render.
+
+     Neither moved the peak. Counted peak stayed at 292.0 MB against 291.9, and
+     peak resident set moved from 617-637 MB to 630 MB, inside the noise. Peak
+     resident on a single run varies by about a quarter, so nothing worth less
+     than roughly 100 MB can be measured that way at all.
+
+     The reason both measured zero is that they reduce *churn*, not what is
+     retained. A high-water mark of live bytes does not fall when an allocation
+     that was already freed before the high-water point stops happening. To
+     lower the peak the work has to remove bytes that are still held at the
+     moment the peak is reached.
+
+     What is held, on bzip2's `BZ2_decompress`:
+
+         a:sla; aaa                          83 MB   fixed, plugin and Sleigh
+         + pd:s on a small function          92 MB   +9 MB
+         + pd:s on BZ2_decompress           496 MB   +413 MB
+
+     So the cost is one function's, not the program's, and about seventy per
+     cent of the 413 MB is counted Rust allocation. The largest single retained
+     item is `normalize.rs:1350`, which clones the whole `SSAFunction` so it can
+     mutate a copy; that clone is most of the render's `prepare` stage at
+     +64.6 MB and it is held for the whole render. Production only ever mutates
+     the copy's blocks, through `get_block_mut`, so the control-flow graph and
+     the dominator tree could be shared rather than copied.
+
+
   -3. **The proof sweep cost more than radare2's whole analysis and produced
      nothing, and it now runs only under `aaaa`.** Measured on bzip2 -O2, 114
      functions, best of repeated runs:

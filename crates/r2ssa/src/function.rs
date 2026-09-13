@@ -3296,12 +3296,17 @@ impl SSAFunction {
             control,
         )?;
 
-        // Build SSA blocks
+        // Build SSA blocks. The renamed ops move across rather than being
+        // cloned: holding both copies doubled every operation of the function,
+        // and each operation owns up to four named variables.
+        let mut renamed_blocks = renamed.blocks;
+        let renamed_block_order = renamed.block_order;
+        let renamed_storage = renamed.canonical_storage_by_var;
         let mut ssa_blocks = HashMap::new();
-        for &addr in &renamed.block_order {
+        for &addr in &renamed_block_order {
             control.poll()?;
             let cfg_block = cfg.get_block(addr).ok_or_else(malformed_ssa_input)?;
-            let ops = renamed.blocks.get(&addr).cloned().unwrap_or_default();
+            let ops = renamed_blocks.remove(&addr).unwrap_or_default();
 
             // Separate phi nodes from other ops
             let (phi_ops, other_ops): (Vec<_>, Vec<_>) = ops
@@ -3351,8 +3356,8 @@ impl SSAFunction {
             cfg,
             domtree,
             blocks: ssa_blocks,
-            block_order: renamed.block_order,
-            canonical_storage_by_var: renamed.canonical_storage_by_var,
+            block_order: renamed_block_order,
+            canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             decompile_prep_facts: None,
             query_index: RwLock::new(None),
