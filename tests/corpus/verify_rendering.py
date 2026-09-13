@@ -279,6 +279,7 @@ PLACEMENT_AUDIT_CAUSE_FIELDS = {
     "certified_value_read_before_assignment": frozenset(
         {"binding_index", "value_id", "instruction_id"}
     ),
+    "object_address_read_before_assignment": frozenset({"binding_index", "value_id"}),
     "stack_access_read_before_assignment": frozenset(
         {"binding_index", "instruction_id", "access_ordinal"}
     ),

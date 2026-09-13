@@ -2538,6 +2538,13 @@ impl<'a> ObjectModelBuilder<'a> {
                     | crate::SSAOp::Cast { src, .. }
                     | crate::SSAOp::CallRestore { src, .. },
                 ) => (graph.value_id_for_var(src)?, None),
+                // Taken back by a constant from an address already inside the
+                // object: the same object, at an offset nothing states.
+                crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. })
+                    if b.constant_bits().is_some() =>
+                {
+                    (graph.value_id_for_var(a)?, None)
+                }
                 crate::InstPayload::Phi { .. } => (*inst.inputs.first()?, None),
                 _ => return None,
             };
@@ -2549,12 +2556,16 @@ impl<'a> ObjectModelBuilder<'a> {
             ) {
                 return None;
             }
+            let inherited = index.is_none();
             let index = index.or_else(|| self.indexed_addresses.get(&base).copied())?;
             self.indexed_addresses.insert(value_id, index);
-            if self
-                .interior_offsets
-                .get(&base)
-                .is_some_and(|offset| *offset != 0)
+            // An index inherited through arithmetic no longer measures from the
+            // object's base, so it cannot say which element this is.
+            if inherited
+                || self
+                    .interior_offsets
+                    .get(&base)
+                    .is_some_and(|offset| *offset != 0)
                 || self.displaced_indexed_addresses.contains(&base)
             {
                 self.displaced_indexed_addresses.insert(value_id);
@@ -8094,17 +8105,8 @@ fn collect_prepared_function_certificates(
                     Some(StackArrayLayoutDisposition::Proven(_))
                 ) || exact_stack_slots.contains_key(&(base, offset))
                     || callee_stack_allocations.contains_key(object);
-                // An element access at a computed offset says how wide an
-                // element is, not how far the object reaches.
-                let indexed = structured.memory_accesses.values().any(|access| {
-                    access.object == *object && objects.address_is_indexed(access.address)
-                });
                 let storage = if declared {
                     None
-                } else if indexed {
-                    frame_gap_extent(objects, base, offset)
-                        .map(|extent| (extent, true))
-                        .or_else(|| accessed_object_storage(graph, structured, *object))
                 } else {
                     accessed_object_storage(graph, structured, *object)
                         // No access sizes it and nothing declares it: a buffer

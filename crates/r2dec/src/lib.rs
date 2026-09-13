@@ -3041,71 +3041,86 @@ impl Decompiler {
             ));
         }
         crate::stage_timing::mark("prepare");
-        let binding_plan =
-            match crate::binding_plan::BindingPlan::build_shadow(input.source_owned_facts()) {
-                Ok(plan) => {
-                    // Every value's disposition, beside the SSA dump it indexes.
-                    if std::env::var_os("R2SLEIGH_DUMP_SSA").is_some() {
-                        let canonical = plan.canonical();
-                        for value in &prepared.graph().values {
-                            let term = canonical.value(value.id).map(|rewrite| {
-                                r2rewrite::spell_term(canonical.arena(), rewrite.canonical)
-                            });
-                            eprintln!(
-                                "PLANVALUE {:?} {} {:?} term={}",
-                                value.id,
-                                value.var,
-                                plan.disposition(value.id),
-                                term.unwrap_or_default()
-                            );
-                        }
-                        for (object, fact) in &prepared.objects().objects {
-                            eprintln!(
-                                "PLANOBJECT {:?} {:?} {:?} slot={:?}",
-                                object,
-                                fact.kind,
-                                plan.stack_object_disposition(*object),
-                                prepared.certificates().stack_slots.get(object).map(|slot| (
-                                    slot.offset,
-                                    slot.size,
-                                    slot.byte_array
-                                ))
-                            );
-                        }
+        let binding_plan = match crate::binding_plan::BindingPlan::build_shadow(
+            input.source_owned_facts(),
+        ) {
+            Ok(plan) => {
+                // Every value's disposition, beside the SSA dump it indexes.
+                if std::env::var_os("R2SLEIGH_DUMP_SSA").is_some() {
+                    let canonical = plan.canonical();
+                    for value in &prepared.graph().values {
+                        let term = canonical.value(value.id).map(|rewrite| {
+                            r2rewrite::spell_term(canonical.arena(), rewrite.canonical)
+                        });
+                        eprintln!(
+                            "PLANVALUE {:?} {} {:?} term={}",
+                            value.id,
+                            value.var,
+                            plan.disposition(value.id),
+                            term.unwrap_or_default()
+                        );
                     }
-                    std::rc::Rc::new(plan)
+                    for (id, access) in &prepared.structured().memory_accesses {
+                        eprintln!(
+                            "PLANACCESS {:?} object={:?} address={:?} width={} offset={:?} write={} complete={} indexed={} interior={:?}",
+                            id,
+                            access.object,
+                            access.address,
+                            access.width,
+                            access.object_offset,
+                            access.is_write,
+                            access.provenance_complete,
+                            prepared.objects().address_is_indexed(access.address),
+                            prepared.objects().interior_offset(access.address)
+                        );
+                    }
+                    for (object, fact) in &prepared.objects().objects {
+                        eprintln!(
+                            "PLANOBJECT {:?} {:?} {:?} slot={:?}",
+                            object,
+                            fact.kind,
+                            plan.stack_object_disposition(*object),
+                            prepared.certificates().stack_slots.get(object).map(|slot| (
+                                slot.offset,
+                                slot.size,
+                                slot.byte_array
+                            ))
+                        );
+                    }
                 }
-                Err(error) => {
-                    debug_log_render_contract_error(prepared, "binding-plan", &error);
-                    // The plan's own error says which value or entity it could
-                    // not place, and until now it reached only a debug log
-                    // nobody turns on: the census recorded six functions as
-                    // `BindingPlanBuild` with no way to tell what any of them
-                    // met. It rides the same evidence channel as every other
-                    // refusal now.
-                    r2il::refusal_evidence!(
-                        "binding-plan-build",
-                        "{}: {error:?}",
-                        rendered_function_name(func)
-                    );
-                    let refusal = match error {
-                        crate::binding_plan::BindingPlanBuildError::MachineProjection(_)
-                        | crate::binding_plan::BindingPlanBuildError::Seal(
-                            crate::binding_plan::BindingPlanSourceMismatch::MachineProjection(_),
-                        ) => DecompileRenderRefusal::MissingMachineProjectionAuthorization(
-                            MachineProjectionRefusalOrigin::BindingPlanBuild,
-                        ),
-                        _ => DecompileRenderRefusal::MissingProgramVariableAuthorization,
-                    };
-                    return Ok(InternalBuildProduct::refused(
-                        residual_function_for_render_boundary(
-                            &rendered_function_name(func),
-                            &format!("native render refusal: {}", refusal.kind()),
-                        ),
-                        refusal,
-                    ));
-                }
-            };
+                std::rc::Rc::new(plan)
+            }
+            Err(error) => {
+                debug_log_render_contract_error(prepared, "binding-plan", &error);
+                // The plan's own error says which value or entity it could
+                // not place, and until now it reached only a debug log
+                // nobody turns on: the census recorded six functions as
+                // `BindingPlanBuild` with no way to tell what any of them
+                // met. It rides the same evidence channel as every other
+                // refusal now.
+                r2il::refusal_evidence!(
+                    "binding-plan-build",
+                    "{}: {error:?}",
+                    rendered_function_name(func)
+                );
+                let refusal = match error {
+                    crate::binding_plan::BindingPlanBuildError::MachineProjection(_)
+                    | crate::binding_plan::BindingPlanBuildError::Seal(
+                        crate::binding_plan::BindingPlanSourceMismatch::MachineProjection(_),
+                    ) => DecompileRenderRefusal::MissingMachineProjectionAuthorization(
+                        MachineProjectionRefusalOrigin::BindingPlanBuild,
+                    ),
+                    _ => DecompileRenderRefusal::MissingProgramVariableAuthorization,
+                };
+                return Ok(InternalBuildProduct::refused(
+                    residual_function_for_render_boundary(
+                        &rendered_function_name(func),
+                        &format!("native render refusal: {}", refusal.kind()),
+                    ),
+                    refusal,
+                ));
+            }
+        };
         if let Err(error) = crate::fold::op_lower::PlannedLoweringInput::try_new(
             input.source_owned_facts(),
             &binding_plan,

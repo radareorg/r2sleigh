@@ -4611,6 +4611,20 @@ impl SSAFunction {
                                     root,
                                 );
                             }
+                            if !facts.stack_address_roots.contains_key(dst)
+                                && let Some(root) = indexed_stack_address_root_from_sub(
+                                    a,
+                                    b,
+                                    &facts.canonical_value_roots,
+                                    &facts.indexed_stack_address_roots,
+                                )
+                            {
+                                changed |= insert_stack_root(
+                                    &mut facts.indexed_stack_address_roots,
+                                    dst.clone(),
+                                    root,
+                                );
+                            }
                             if entry_stack_address_size.is_some_and(|size| {
                                 dst.size == size && a.size == size && b.size == size
                             }) && let Some(root) = stack_address_root_from_sub(
@@ -5481,6 +5495,24 @@ fn indexed_stack_address_root_from_add(
         return Some(base);
     }
     None
+}
+
+/// An address inside an object, taken back by a constant.
+///
+/// `buf + i - 3` is still inside `buf` at an offset nothing states, exactly as
+/// `buf + i` is. Only an already-indexed base qualifies: an exact base less a
+/// constant is an exact position and `stack_address_root_from_sub` states it,
+/// and an exact base less an opaque amount points below the object.
+fn indexed_stack_address_root_from_sub(
+    a: &SSAVar,
+    b: &SSAVar,
+    roots: &BTreeMap<SSAVar, SSAVar>,
+    indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
+) -> Option<StackAddressRoot> {
+    let base = stack_root_from_operand(a, roots, indexed_roots)?;
+    signed_stack_delta_through_roots(b, roots)
+        .is_some()
+        .then_some(base)
 }
 
 fn stack_address_root_from_sub(

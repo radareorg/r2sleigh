@@ -4611,7 +4611,7 @@ mod tests {
             assert!(kinds.insert(kind.to_string()), "duplicate wire kind {kind}");
             causes.push(cause);
         }
-        assert_eq!(kinds.len(), 44);
+        assert_eq!(kinds.len(), 45);
 
         let checker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/corpus/check_binding_audit_schema.py");
@@ -4637,7 +4637,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "44");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "45");
 
         assert_eq!(
             placement_audit_json(Some(PlacementAudit::Applied)),
