@@ -146,17 +146,38 @@ learn.
        measures from the base, so the address is marked displaced and the
        array layout refuses it.
 
-       **The extent is still wrong and the rendering is still wrong C.**
+       **The extent is still wrong and the rendering is still wrong C**, and
+       the chain below it is now measured rather than guessed.
        `file_uncompress` declares `uint8_t stack_m1080;` for a 1032-byte
        buffer and writes `&stack_m1080 + RBX_1` past it, because an element
        access states the element's width and nothing states the object's
        extent. Sizing such an object by the gap to its next neighbour was
        tried, in the slot certificate, the callee-allocation certificate and
-       both sides of the plan's identity check: it fixes this declaration and
-       costs ten functions (777 to 767), because the gap is not a proof of
-       extent either -- it covers whatever the model did not discover. What
-       this needs is a real extent: the size argument the call itself states
-       (`__snprintf_chk(buf, 0x400, ...)`), radare2's slot list, or DWARF.
+       both sides of the plan's identity check. Measured twice, the second time
+       against a healthy baseline after a separate ten-function defect in the
+       plugin migration was fixed: it costs ten functions either way, 777 to
+       767, and the gate stays 54/54.
+
+       **What it costs them on is not the extent claim.** The new refusals are
+       `memory_renderer.rs:111`, "access has no planned expression": once the
+       object is a 1032-byte byte array, an access at a computed index inside
+       it has no spelling. `access_syntax`'s `SlotBytes` rung requires
+       `!indexed`, so an indexed access into a bound byte array falls through
+       to `Address`, and the address of an elided frame position has none.
+
+       So the chain is three layers deep, each one named:
+       1. the extent, which the frame gap can supply but only as a claim the
+          model cannot prove is exclusive;
+       2. a `σ` rung for an access at a computed index inside a byte array,
+          spelling `*(T *)((uint8_t *)name + index)`;
+       3. an authority for the index read that rung introduces, since
+          `certified_array_index_read_matches` wants a proven array layout and
+          a gap-sized byte array has none.
+
+       Worth doing only with a real extent behind it -- the size argument the
+       call itself states (`__snprintf_chk(buf, 0x400, ...)`), radare2's slot
+       list, or DWARF -- because layers two and three are machinery in service
+       of layer one's claim.
      * **`f7a0` still refuses**, now `RenderedValueRequired` on a bound
        `ValueId(31)` with `UnobservedValueCellAtSeal`
        (`observation_journal.rs:3782`). Its earlier
