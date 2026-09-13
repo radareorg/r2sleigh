@@ -152,8 +152,22 @@ learn.
      at 777 of 787 with the same ten causes, and the gate stays 54/54 on raw,
      differential, snapshot and all four audits.
 
-     What is left in that binary: 11 variadic `missing_format_parameter`, 7
+     A fourth defect in the same capture followed from the same trace: a
+     slot's extent was measured from the spelling as written, so `va_list`,
+     which is `__va_list_tag[1]` once the typedef is followed, had no array and
+     no size, and the plan refused its object with `InvalidWidth { 0 }`.
+     Resolving the typedef before splitting the array extent takes
+     dpkg-divert -O0 from 21 refusals to 19.
+
+     What is left in that binary: 11 variadic `missing_format_parameter`, 5
      `PlannedElidedValueRendered`, 2 `calls.rs:291`, 1 `memory_renderer.rs:116`.
+     All six of the stack-address ones are still
+     `ParameterHomeWidthMismatch`, and they are now the *other* half of the
+     cause: `apply_parameter_declarations` admits a declared type only where
+     its width equals the binding's, and an `int` parameter in a 64-bit
+     register never does. The parameter's width should come from its declared
+     type where the home slot's width agrees with it, which is the same
+     construction-and-seal twin the project uses elsewhere.
      What is left in the capture: 346 "interface incomplete" refusals, which
      are imports with no signature and are not a defect.
 

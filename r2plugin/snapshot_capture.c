@@ -651,7 +651,12 @@ static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, R
 		// `unsigned char[4]` had no extent and left every slot in the frame
 		// unproven against overlap.
 		ut64 count = 1;
-		char *element = snapshot_type_member_element_spec (slot->type, &count);
+		// The extent may only appear once the typedef is followed: `va_list`
+		// is `__va_list_tag[1]`, and splitting the spelling as written found
+		// neither the array nor a size for it.
+		char *resolved = r_type_resolve_typedef (anal->sdb_types, slot->type);
+		const char *spelled = R_STR_ISNOTEMPTY (resolved)? resolved: slot->type;
+		char *element = snapshot_type_member_element_spec (spelled, &count);
 		ut64 bits = element? r_anal_type_bitsize (anal, element): 0;
 		if (!bits && element) {
 			// `signed int` is `int` and the type database sizes only the
@@ -662,15 +667,14 @@ static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, R
 				bits = r_anal_type_bitsize (anal, rest + strlen ("signed "));
 			}
 		}
-		free (element);
 		ut64 total_bits;
 		if (bits && count && !r_mul_overflow (bits, count, &total_bits)
 			&& !(total_bits % 8) && total_bits / 8 <= UT32_MAX) {
 			slot->size = (ut32)(total_bits / 8);
 		}
-		char *resolved = r_type_resolve_typedef (anal->sdb_types, slot->type);
 		const RTypeKind kind = r_type_kind (anal->sdb_types,
-			resolved? resolved: slot->type);
+			element? element: spelled);
+		free (element);
 		free (resolved);
 		type_is_aggregate = count > 1
 			|| kind == R_TYPE_STRUCT || kind == R_TYPE_UNION;
