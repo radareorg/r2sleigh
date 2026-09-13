@@ -797,7 +797,7 @@ mod tests {
         let SSAOp::Copy { dst: written, .. } = &mut block.ops[0] else {
             unreachable!();
         };
-        *written = SSAVar::new(dst.name, 0, dst.size);
+        *written = SSAVar::new(dst.name(), 0, dst.size);
         assert!(matches!(
             validate_ssa_function(&zero),
             Err(SsaIntegrityError::DefinitionAtVersionZero { .. })
@@ -818,7 +818,7 @@ mod tests {
         let mut width = diamond();
         let phi = &mut width.get_block_mut(0x100c).expect("merge block").phis[0];
         let old = phi.sources[0].1.clone();
-        phi.sources[0].1 = SSAVar::new(old.name, old.version, 4);
+        phi.sources[0].1 = SSAVar::new(old.name(), old.version, 4);
         assert!(matches!(
             validate_ssa_function(&width),
             Err(SsaIntegrityError::PhiWidthMismatch { .. })

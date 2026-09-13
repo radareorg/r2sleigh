@@ -2536,7 +2536,7 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(index, op)| {
-                matches!(op, crate::op::SSAOp::Copy { dst, .. } if dst.name == "rdi")
+                matches!(op, crate::op::SSAOp::Copy { dst, .. } if dst.name() == "rdi")
                     .then_some((0x3180u64, index as u64))
             })
             .expect("argument-carrier definition");

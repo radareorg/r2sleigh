@@ -75,7 +75,7 @@ pub(crate) fn is_low_signal_ssa_storage_name(name: &str) -> bool {
 pub(crate) fn ssa_render_base_name(var: &SSAVar) -> String {
     match var.name_kind() {
         SSAVarNameKind::RegisterAlias => {
-            let reg = var.name.strip_prefix("reg:").unwrap_or(&var.name);
+            let reg = var.name().strip_prefix("reg:").unwrap_or(var.name());
             if is_hex_name(reg) {
                 format!("r{}", reg)
             } else {
@@ -83,10 +83,10 @@ pub(crate) fn ssa_render_base_name(var: &SSAVar) -> String {
             }
         }
         SSAVarNameKind::Temporary => {
-            let tmp = SSAVarNameKind::strip_temporary_prefix(&var.name).unwrap_or(&var.name);
+            let tmp = SSAVarNameKind::strip_temporary_prefix(var.name()).unwrap_or(var.name());
             format!("t{}", tmp)
         }
-        _ => var.name.to_lowercase(),
+        _ => var.name().to_lowercase(),
     }
 }
 

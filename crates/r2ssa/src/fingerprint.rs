@@ -2069,7 +2069,7 @@ mod tests {
                     && value.var.is_register()
                     && value.canonical_storage == Some(storage)
             })
-            .map(|value| value.var.name.clone())
+            .map(|value| value.var.name().to_string())
             .expect("canonical entry register")
     }
 

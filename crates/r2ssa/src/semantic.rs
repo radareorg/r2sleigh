@@ -4316,7 +4316,7 @@ fn call_entering_stack_pointer_offset(
                     };
                     let source_roots = sources
                         .iter()
-                        .filter(|source| source.name == var.name)
+                        .filter(|source| source.name() == var.name())
                         .map(|source| {
                             format!(
                                 "{source}:{:?}",
@@ -4332,11 +4332,11 @@ fn call_entering_stack_pointer_offset(
                     cursor = sources
                         .iter()
                         .find(|source| {
-                            source.name == var.name
+                            source.name() == var.name()
                                 && resolve_entry_stack_root(function.decompile_prep_facts(), source)
                                     .is_none()
                         })
-                        .or_else(|| sources.iter().find(|source| source.name == var.name))
+                        .or_else(|| sources.iter().find(|source| source.name() == var.name()))
                         .cloned();
                 }
                 chain
@@ -14174,8 +14174,7 @@ mod tests {
         let named_stack_pointer = SSAVar::new("rsp", 0, 8);
         assert_eq!(super::resolve_stack_root(None, &named_stack_pointer), None);
 
-        let mut canonical_constant = SSAVar::constant(0x401000, 8);
-        canonical_constant.name = "unrelated-display-name".to_string();
+        let canonical_constant = SSAVar::constant(0x401000, 8).renamed("unrelated-display-name");
         assert_eq!(super::const_value(&canonical_constant), Some(0x401000));
     }
 
@@ -14263,8 +14262,7 @@ mod tests {
             .find(|value| value.var.version == 0 && value.var.is_register())
             .expect("entry register")
             .var
-            .name
-            .clone();
+            .name();
         let assumption = register_assumption(display_name);
         let conditioned = base.with_assumptions(&AssumptionSet::new(vec![assumption.clone()]));
 

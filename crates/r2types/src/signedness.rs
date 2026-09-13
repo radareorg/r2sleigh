@@ -152,7 +152,7 @@ fn is_implicit_register_zero_extension(
         return false;
     }
     let arch = arch_name.unwrap_or_default().to_ascii_lowercase();
-    let dst = dst.name.to_ascii_lowercase();
+    let dst = dst.name().to_ascii_lowercase();
     if arch == "x86-64"
         || arch == "x86_64"
         || arch == "x64"

@@ -3452,10 +3452,8 @@ mod tests {
     #[test]
     fn prepared_copy_provenance_ignores_colliding_display_fact() {
         let dst = SSAVar::new("dst", 1, 8);
-        let mut src = SSAVar::constant(1, 8);
-        let mut spoof = SSAVar::constant(2, 8);
-        src.name = "same".to_string();
-        spoof.name = "same".to_string();
+        let src = SSAVar::constant(1, 8).renamed("same");
+        let spoof = SSAVar::constant(2, 8).renamed("same");
         assert_eq!(src.display_name(), spoof.display_name());
         assert_ne!(src, spoof);
 
@@ -3545,8 +3543,7 @@ mod tests {
             );
         }
 
-        let mut foreign = constant.clone();
-        foreign.name = "0x40".to_string();
+        let foreign = constant.renamed("0x40");
         assert_eq!(foreign.constant_bits(), Some(0x40));
         assert_eq!(
             compare_style_operand_expr(&prepared, &foreign, 8),

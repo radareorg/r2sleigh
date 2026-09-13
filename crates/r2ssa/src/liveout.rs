@@ -424,13 +424,13 @@ mod tests {
         let returned = graph
             .values
             .iter()
-            .position(|value| value.var.name.eq_ignore_ascii_case("rax"))
+            .position(|value| value.var.name().eq_ignore_ascii_case("rax"))
             .map(|index| ValueId(index as u32))
             .expect("a value in the return register");
         let discarded = graph
             .values
             .iter()
-            .position(|value| value.var.name.eq_ignore_ascii_case("rcx"))
+            .position(|value| value.var.name().eq_ignore_ascii_case("rcx"))
             .map(|index| ValueId(index as u32))
             .expect("a value in a register the caller does not read");
 

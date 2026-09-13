@@ -210,7 +210,7 @@ fn incoming_stack_arg_index(
 ) -> Option<usize> {
     if !arch_is_x86_64_sysv_like(architecture)
         || base.version != 0
-        || !base.name.eq_ignore_ascii_case("rsp")
+        || !base.name().eq_ignore_ascii_case("rsp")
         || ptr_bits != 64
     {
         return None;
@@ -225,12 +225,12 @@ fn incoming_stack_arg_index(
 fn stack_addr_temp(op: &SSAOp, stack_bases: BaseRegList) -> Option<(&SSAVar, &SSAVar, i64)> {
     match op {
         SSAOp::IntAdd { dst, a, b } => {
-            if stack_bases.contains(&a.name.to_ascii_lowercase().as_str())
+            if stack_bases.contains(&a.name().to_ascii_lowercase().as_str())
                 && let Some(offset) = b.constant_bits()
             {
                 return Some((dst, a, offset as i64));
             }
-            if stack_bases.contains(&b.name.to_ascii_lowercase().as_str())
+            if stack_bases.contains(&b.name().to_ascii_lowercase().as_str())
                 && let Some(offset) = a.constant_bits()
             {
                 return Some((dst, b, offset as i64));
@@ -238,7 +238,7 @@ fn stack_addr_temp(op: &SSAOp, stack_bases: BaseRegList) -> Option<(&SSAVar, &SS
             None
         }
         SSAOp::IntSub { dst, a, b } => {
-            if stack_bases.contains(&a.name.to_ascii_lowercase().as_str())
+            if stack_bases.contains(&a.name().to_ascii_lowercase().as_str())
                 && let Some(offset) = b.constant_bits()
             {
                 return Some((dst, a, -(offset as i64)));
@@ -289,7 +289,7 @@ pub fn size_to_type(size: u32) -> String {
 pub fn ssa_var_key(var: &SSAVar) -> String {
     format!(
         "{}_{}_{}",
-        var.name.to_ascii_lowercase(),
+        var.name().to_ascii_lowercase(),
         var.version,
         var.rename_disambiguator()
     )
@@ -495,7 +495,7 @@ pub fn recover_signature_params_from_ssa(
                 if src.version != 0 {
                     continue;
                 }
-                let base_name = src.name.to_lowercase();
+                let base_name = src.name().to_lowercase();
                 for (index, (canonical, aliases)) in arg_regs.iter().enumerate() {
                     if !aliases.contains(&base_name.as_str()) || seen_arg_regs.contains(*canonical)
                     {
@@ -797,7 +797,7 @@ pub fn recover_vars_from_ssa_with_prep_facts(
                         let is_frame_base = canonical_root
                             .map(|root| matches!(root.base, StackAddressBase::FramePointer))
                             .unwrap_or_else(|| {
-                                frame_bases.contains(&base.name.to_ascii_lowercase().as_str())
+                                frame_bases.contains(&base.name().to_ascii_lowercase().as_str())
                             });
                         let dst_key = ssa_var_block_key(block.addr, dst);
                         stack_addr_temps.insert(dst_key, (base.clone(), offset, is_frame_base));
@@ -871,7 +871,7 @@ pub fn recover_vars_from_ssa_with_prep_facts(
             }
 
             for src in op.sources() {
-                let base_name = src.name.to_lowercase();
+                let base_name = src.name().to_lowercase();
                 if src.version == 0 {
                     for (i, (canonical, aliases)) in arg_regs.iter().enumerate() {
                         if aliases.contains(&base_name.as_str())
@@ -978,7 +978,7 @@ fn recovered_arg_family_width_hint(
     evidence: &SignatureTypeEvidenceContext,
     src: &SSAVar,
 ) -> Option<u32> {
-    let family = scalar_register_family_key(&src.name);
+    let family = scalar_register_family_key(src.name());
     evidence
         .width_bits
         .iter()
@@ -1156,7 +1156,7 @@ fn collect_register_version_keys(ssa_blocks: &[SSABlock]) -> HashMap<String, Vec
                 if !ssa_var_is_register_like(var) {
                     return;
                 }
-                let reg_name = scalar_register_family_key(&var.name);
+                let reg_name = scalar_register_family_key(var.name());
                 reg_versions
                     .entry(reg_name)
                     .or_default()
@@ -1184,7 +1184,7 @@ fn collect_register_live_in_aliases(ssa_blocks: &[SSABlock]) -> Vec<(String, Str
                 if !ssa_var_is_register_like(var) {
                     return;
                 }
-                let family = scalar_register_family_key(&var.name);
+                let family = scalar_register_family_key(var.name());
                 let source = ssa_var_key(var);
                 if let Some(previous) = last_definitions.get(&family)
                     && var.version <= previous.version
@@ -1196,7 +1196,7 @@ fn collect_register_live_in_aliases(ssa_blocks: &[SSABlock]) -> Vec<(String, Str
             if let Some(dst) = op.dst()
                 && ssa_var_is_register_like(dst)
             {
-                last_definitions.insert(scalar_register_family_key(&dst.name), dst.clone());
+                last_definitions.insert(scalar_register_family_key(dst.name()), dst.clone());
             }
         }
     }
@@ -1330,7 +1330,7 @@ fn propagate_normalized_scalar_result_widths(
 }
 
 fn ssa_var_is_stack_base(var: &SSAVar, stack_bases: BaseRegList) -> bool {
-    stack_bases.contains(&var.name.to_ascii_lowercase().as_str())
+    stack_bases.contains(&var.name().to_ascii_lowercase().as_str())
 }
 
 fn infer_pointer_width_bytes(ssa_blocks: &[SSABlock], stack_bases: BaseRegList) -> u32 {
@@ -1448,14 +1448,14 @@ fn infer_pointer_var_keys_from_ssa(
                         };
                         stack_addr_slots.insert(
                             ssa_var_block_key(block.addr, dst),
-                            format!("{}:{offset}", a.name.to_ascii_lowercase()),
+                            format!("{}:{offset}", a.name().to_ascii_lowercase()),
                         );
                     } else if matches!(op, SSAOp::IntAdd { .. }) && b_is_stack && a_const.is_some()
                     {
                         let raw = a_const.unwrap_or(0);
                         stack_addr_slots.insert(
                             ssa_var_block_key(block.addr, dst),
-                            format!("{}:{}", b.name.to_ascii_lowercase(), raw as i64),
+                            format!("{}:{}", b.name().to_ascii_lowercase(), raw as i64),
                         );
                     }
                 }
@@ -1668,7 +1668,7 @@ fn infer_pointer_pointee_width_bytes(
                     if let Some(offset) = offset {
                         stack_addr_slots.insert(
                             ssa_var_block_key(block.addr, dst),
-                            format!("{}:{offset}", base.name.to_ascii_lowercase()),
+                            format!("{}:{offset}", base.name().to_ascii_lowercase()),
                         );
                     }
                 }
@@ -1676,7 +1676,7 @@ fn infer_pointer_pointee_width_bytes(
                     if let Some(offset) = b.constant_bits() {
                         stack_addr_slots.insert(
                             ssa_var_block_key(block.addr, dst),
-                            format!("{}:{}", a.name.to_ascii_lowercase(), -(offset as i64)),
+                            format!("{}:{}", a.name().to_ascii_lowercase(), -(offset as i64)),
                         );
                     }
                 }
@@ -2126,7 +2126,7 @@ fn infer_usage_register_type_hints(
                 }
                 merge_type_hint(
                     &mut hints,
-                    var.name.to_ascii_lowercase(),
+                    var.name().to_ascii_lowercase(),
                     TypeHint::pointer(),
                 );
             };

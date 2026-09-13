@@ -6496,8 +6496,8 @@ mod tests {
                     .find(|value| value.canonical_storage == Some(root))
                     .expect("root register value")
                     .var
-                    .name
-                    .clone()
+                    .name()
+                    .to_string()
             };
             assert_ne!(name_of(&original_artifact), name_of(&renamed_artifact));
         }

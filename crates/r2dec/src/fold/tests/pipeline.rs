@@ -2815,9 +2815,9 @@ mod tests {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
-                        if dst.name == "RAX"
+                        if dst.name() == "RAX"
                             && dst.version == 1
-                            && src.name == "const:1"
+                            && src.name() == "const:1"
                             && src.version == 0
                 )
             });
@@ -2826,9 +2826,9 @@ mod tests {
                 matches!(
                     op,
                     SSAOp::Copy { dst, src }
-                        if dst.name == "RAX"
+                        if dst.name() == "RAX"
                             && dst.version == 2
-                            && src.name == "const:0"
+                            && src.name() == "const:0"
                             && src.version == 0
                 )
             });
@@ -3876,14 +3876,14 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name.eq_ignore_ascii_case("rax") && value.var.version == 0)
+            .find(|value| value.var.name().eq_ignore_ascii_case("rax") && value.var.version == 0)
             .map(|value| value.id)
             .expect("lhs value id");
         let rhs_value_id = prepared
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name.eq_ignore_ascii_case("rsi") && value.var.version == 0)
+            .find(|value| value.var.name().eq_ignore_ascii_case("rsi") && value.var.version == 0)
             .map(|value| value.id)
             .expect("rhs value id");
         let cond_value_id = prepared

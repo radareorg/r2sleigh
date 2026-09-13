@@ -98,7 +98,7 @@ impl SSAVarNameKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SSAVar {
     /// The base name of the variable (e.g., "RAX", "tmp:0x1000", "const:0x42").
-    pub name: String,
+    name: String,
     /// The version number (0 for initial/input, incremented on each write).
     pub version: u32,
     /// Size in bytes.
@@ -139,6 +139,31 @@ impl SSAVar {
     pub(crate) fn with_rename_disambiguator(mut self, disambiguator: u32) -> Self {
         self.rename_disambiguator = disambiguator;
         self
+    }
+
+    /// The variable's base name.
+    ///
+    /// Read-only: the name decides the comparison prefix the struct carries,
+    /// so a variable's name is set when it is made and never after.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The same variable under a different display name.
+    ///
+    /// The name is presentation, so respelling one is an ordinary operation
+    /// and this is how it is done: the identity fields travel unchanged. A
+    /// fixture that needs a variable whose spelling disagrees with the bits it
+    /// carries -- the case the name-versus-identity rule exists for -- builds
+    /// it this way.
+    pub fn renamed(&self, name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: self.version,
+            size: self.size,
+            constant_bits: self.constant_bits,
+            rename_disambiguator: self.rename_disambiguator,
+        }
     }
 
     /// The construction-time discriminator that separates two exact storages
@@ -267,7 +292,7 @@ mod tests {
     #[test]
     fn test_ssa_var_creation() {
         let var = SSAVar::new("RAX", 0, 8);
-        assert_eq!(var.name, "RAX");
+        assert_eq!(var.name(), "RAX");
         assert_eq!(var.version, 0);
         assert_eq!(var.size, 8);
         assert_eq!(var.display_name(), "RAX_0");

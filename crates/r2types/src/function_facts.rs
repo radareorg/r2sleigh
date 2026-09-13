@@ -5412,7 +5412,7 @@ mod tests {
             "SSA preparation must consume the same exact boundary slot"
         );
         assert_eq!(
-            Some(parameter_var.name.as_str()),
+            Some(parameter_var.name()),
             Some("rax"),
             "the deliberately ABI-misleading display name must not change the slot"
         );
@@ -7179,7 +7179,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name.eq_ignore_ascii_case("rdi") && value.var.version == 0)
+            .find(|value| value.var.name().eq_ignore_ascii_case("rdi") && value.var.version == 0)
             .expect("entry rdi value");
         let param_id = r2ssa::SemanticId::parameter(0).expect("parameter ID");
         assert!(
@@ -7297,7 +7297,7 @@ mod tests {
         let phi = prepared
             .function()
             .get_block(0x40100c)
-            .and_then(|block| block.phis.iter().find(|phi| phi.dst.name == "rdi"))
+            .and_then(|block| block.phis.iter().find(|phi| phi.dst.name() == "rdi"))
             .and_then(|phi| prepared.graph().value_id_for_var(&phi.dst))
             .expect("return phi");
         let render = FunctionRenderFacts::from_prepared(&prepared);
@@ -7406,13 +7406,13 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name == "tmp:100")
+            .find(|value| value.var.name() == "tmp:100")
             .expect("same-width parameter copy");
         let derived = prepared
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name == "tmp:108")
+            .find(|value| value.var.name() == "tmp:108")
             .expect("derived expression");
 
         assert_eq!(render.exact_parameter_slot_for_value(copied.id), Some(0));

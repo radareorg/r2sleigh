@@ -720,7 +720,7 @@ impl BindingPlan {
                                 "missing literal projection {:?} bits={:?} name={:?} uses={} def={:?} users={users:?}",
                                 graph_value.id,
                                 graph_value.var.constant_bits(),
-                                graph_value.var.name,
+                                graph_value.var.name(),
                                 graph.use_sites(graph_value.id).len(),
                                 graph
                                     .def_inst(graph_value.id)

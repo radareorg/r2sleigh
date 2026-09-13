@@ -130,9 +130,9 @@ impl TaintPolicy for DefaultTaintPolicy {
         // Version 0 variables that are registers (not const/temp) are inputs
         if var.version == 0
             && var.is_register()
-            && (self.sources.is_empty() || self.sources.contains(&var.name))
+            && (self.sources.is_empty() || self.sources.contains(var.name()))
         {
-            return Some(vec![TaintLabel::new(format!("input:{}", var.name))]);
+            return Some(vec![TaintLabel::new(format!("input:{}", var.name()))]);
         }
         None
     }
@@ -877,7 +877,7 @@ mod tests {
             sink_hit
                 .tainted_vars
                 .iter()
-                .any(|(var, _)| var.name == "reg:0"),
+                .any(|(var, _)| var.name() == "reg:0"),
             "taint should flow through phi-merged reg:0 into the store sink"
         );
     }
@@ -889,7 +889,7 @@ mod tests {
 
     impl TaintPolicy for TestPolicy {
         fn is_source(&self, var: &SSAVar, _block_addr: u64) -> Option<Vec<TaintLabel>> {
-            if var.name == self.source_var && var.version == 0 {
+            if var.name() == self.source_var && var.version == 0 {
                 Some(vec![TaintLabel::new("test_source")])
             } else {
                 None

@@ -3852,7 +3852,7 @@ fn local_struct_type_slots(
                 return;
             }
             let Some(slot) = pointer_arg_slot_map
-                .get(var.name.to_ascii_lowercase().as_str())
+                .get(var.name().to_ascii_lowercase().as_str())
                 .copied()
             else {
                 return;
@@ -4433,7 +4433,7 @@ fn infer_local_struct_artifacts_from_blocks(
             for (op_index, op) in block.ops.iter().enumerate() {
                 let addr_of = |var: &SSAVar, map: &HashMap<SSAVar, LocalAddrExpr>| {
                     if var.version == 0 {
-                        let key = var.name.to_ascii_lowercase();
+                        let key = var.name().to_ascii_lowercase();
                         if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
                             return Some(LocalAddrExpr {
                                 slot,
@@ -4532,13 +4532,13 @@ fn infer_local_struct_artifacts_from_blocks(
                     }
                     SSAOp::IntAdd { dst, a, b } => {
                         if let Some(off) = exact_ssa_const_offset(b, ptr_bits) {
-                            let a_lower = a.name.to_ascii_lowercase();
+                            let a_lower = a.name().to_ascii_lowercase();
                             if is_stack_base(a_lower.as_str()) {
                                 changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
                             }
                         }
                         if let Some(off) = exact_ssa_const_offset(a, ptr_bits) {
-                            let b_lower = b.name.to_ascii_lowercase();
+                            let b_lower = b.name().to_ascii_lowercase();
                             if is_stack_base(b_lower.as_str()) {
                                 changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
                             }
@@ -4639,7 +4639,7 @@ fn infer_local_struct_artifacts_from_blocks(
                     }
                     SSAOp::IntSub { dst, a, b } => {
                         if let Some(delta) = exact_ssa_const_offset(b, ptr_bits) {
-                            let a_lower = a.name.to_ascii_lowercase();
+                            let a_lower = a.name().to_ascii_lowercase();
                             if is_stack_base(a_lower.as_str()) {
                                 changed |= set_stack_slot(
                                     dst,
@@ -4771,7 +4771,7 @@ fn infer_local_struct_artifacts_from_blocks(
         for (op_index, op) in block.ops.iter().enumerate() {
             let resolve_addr = |addr: &SSAVar| -> Option<LocalAddrExpr> {
                 if addr.version == 0 {
-                    let key = addr.name.to_ascii_lowercase();
+                    let key = addr.name().to_ascii_lowercase();
                     if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
                         return Some(LocalAddrExpr {
                             slot,
@@ -5532,7 +5532,7 @@ fn scalar_array_access_certificates_from_ssa(
                     }
                     SSAOp::IntAdd { dst, a, b } => {
                         if let Some(off) = exact_ssa_const_offset(b, ptr_bits)
-                            && is_stack_base(a.name.to_ascii_lowercase().as_str())
+                            && is_stack_base(a.name().to_ascii_lowercase().as_str())
                         {
                             changed |= set_stack_addr_offset(
                                 block.addr,
@@ -5543,7 +5543,7 @@ fn scalar_array_access_certificates_from_ssa(
                             );
                         }
                         if let Some(off) = exact_ssa_const_offset(a, ptr_bits)
-                            && is_stack_base(b.name.to_ascii_lowercase().as_str())
+                            && is_stack_base(b.name().to_ascii_lowercase().as_str())
                         {
                             changed |= set_stack_addr_offset(
                                 block.addr,
@@ -5613,7 +5613,7 @@ fn scalar_array_access_certificates_from_ssa(
                     }
                     SSAOp::IntSub { dst, a, b } => {
                         if let Some(delta) = exact_ssa_const_offset(b, ptr_bits)
-                            && is_stack_base(a.name.to_ascii_lowercase().as_str())
+                            && is_stack_base(a.name().to_ascii_lowercase().as_str())
                         {
                             changed |= set_stack_addr_offset(
                                 block.addr,
@@ -6048,7 +6048,7 @@ fn scalar_pointer_value_for_var(
     var: &SSAVar,
     ctx: &ScalarArrayInferenceCtx<'_>,
 ) -> Option<ScalarPointerValue> {
-    let lower = var.name.to_ascii_lowercase();
+    let lower = var.name().to_ascii_lowercase();
     if let Some(param_index) = ctx.pointer_arg_slot_map.get(lower.as_str()).copied() {
         let has_local_def = ctx.value_ops.contains_key(&var.display_name())
             || ctx
@@ -6064,7 +6064,7 @@ fn scalar_pointer_value_for_var(
                     ctx.parsed_context
                         .register_params
                         .iter()
-                        .find(|param| param.reg.eq_ignore_ascii_case(&var.name))
+                        .find(|param| param.reg.eq_ignore_ascii_case(var.name()))
                         .and_then(|param| param.ty.as_ref())
                         .into_iter()
                         .chain(
@@ -6639,7 +6639,7 @@ fn scalar_index_affine_factor(
     }
     if var.version == 0 {
         return Some(AffineIndexFactor {
-            root: Some(var.name.to_ascii_lowercase()),
+            root: Some(var.name().to_ascii_lowercase()),
             scale: 1,
         });
     }
@@ -7246,7 +7246,7 @@ fn canonicalize_param_home_stack_slots(
                     let Some((param_index, param_reg)) =
                         register_params.iter().enumerate().find_map(|(idx, param)| {
                             registers
-                                .same_parameter_storage(&param.reg, &rooted_val.name)
+                                .same_parameter_storage(&param.reg, rooted_val.name())
                                 .then_some((idx, param.reg.clone()))
                         })
                     else {

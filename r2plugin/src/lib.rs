@@ -3469,17 +3469,17 @@ fn infer_structs_from_ssa(
                 is_scaled_index_like(block_addr, src, ops_by_block, addr_exprs, depth + 1)
             }
             r2ssa::SSAOp::IntMult { a, b, .. } => {
-                (parse_ssa_const_offset(&a.name, 64).is_some()
+                (parse_ssa_const_offset(a.name(), 64).is_some()
                     && is_scaled_index_like(block_addr, b, ops_by_block, addr_exprs, depth + 1))
-                    || (parse_ssa_const_offset(&b.name, 64).is_some()
+                    || (parse_ssa_const_offset(b.name(), 64).is_some()
                         && is_scaled_index_like(block_addr, a, ops_by_block, addr_exprs, depth + 1))
             }
             r2ssa::SSAOp::IntLeft { a, b, .. } => {
-                parse_ssa_const_offset(&b.name, 64).is_some()
+                parse_ssa_const_offset(b.name(), 64).is_some()
                     && is_scaled_index_like(block_addr, a, ops_by_block, addr_exprs, depth + 1)
             }
             r2ssa::SSAOp::IntSub { a, b, .. } => {
-                parse_ssa_const_offset(&a.name, 64) == Some(0)
+                parse_ssa_const_offset(a.name(), 64) == Some(0)
                     && is_scaled_index_like(block_addr, b, ops_by_block, addr_exprs, depth + 1)
             }
             r2ssa::SSAOp::Load { .. } | r2ssa::SSAOp::Phi { .. } => true,
@@ -3494,7 +3494,7 @@ fn infer_structs_from_ssa(
                 if src.version != 0 {
                     return;
                 }
-                let key = src.name.to_ascii_lowercase();
+                let key = src.name().to_ascii_lowercase();
                 if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
                     addr_exprs
                         .entry(ssa_var_block_key(block.addr, src))
@@ -3515,7 +3515,7 @@ fn infer_structs_from_ssa(
             for op in &block.ops {
                 let addr_of = |var: &r2ssa::SSAVar, map: &HashMap<String, ArgAddrExpr>| {
                     if var.version == 0 {
-                        let key = var.name.to_ascii_lowercase();
+                        let key = var.name().to_ascii_lowercase();
                         if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
                             return Some(ArgAddrExpr {
                                 slot,
@@ -3612,20 +3612,20 @@ fn infer_structs_from_ssa(
                         }
                     }
                     r2ssa::SSAOp::IntAdd { dst, a, b } => {
-                        if let Some(off) = parse_ssa_const_offset(&b.name, ptr_bits) {
-                            let a_lower = a.name.to_ascii_lowercase();
+                        if let Some(off) = parse_ssa_const_offset(b.name(), ptr_bits) {
+                            let a_lower = a.name().to_ascii_lowercase();
                             if a_lower == sp_name || a_lower == fp_name {
                                 changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
                             }
                         }
-                        if let Some(off) = parse_ssa_const_offset(&a.name, ptr_bits) {
-                            let b_lower = b.name.to_ascii_lowercase();
+                        if let Some(off) = parse_ssa_const_offset(a.name(), ptr_bits) {
+                            let b_lower = b.name().to_ascii_lowercase();
                             if b_lower == sp_name || b_lower == fp_name {
                                 changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
                             }
                         }
                         if let Some(base) = addr_of(a, &addr_exprs)
-                            && let Some(delta) = parse_ssa_const_offset(&b.name, ptr_bits)
+                            && let Some(delta) = parse_ssa_const_offset(b.name(), ptr_bits)
                         {
                             let off = base.offset.saturating_add(delta);
                             if (-offset_bound..=offset_bound).contains(&off) {
@@ -3652,7 +3652,7 @@ fn infer_structs_from_ssa(
                                 &mut addr_exprs,
                             );
                         } else if let Some(base) = addr_of(b, &addr_exprs)
-                            && let Some(delta) = parse_ssa_const_offset(&a.name, ptr_bits)
+                            && let Some(delta) = parse_ssa_const_offset(a.name(), ptr_bits)
                         {
                             let off = base.offset.saturating_add(delta);
                             if (-offset_bound..=offset_bound).contains(&off) {
@@ -3681,8 +3681,8 @@ fn infer_structs_from_ssa(
                         }
                     }
                     r2ssa::SSAOp::IntSub { dst, a, b } => {
-                        if let Some(delta) = parse_ssa_const_offset(&b.name, ptr_bits) {
-                            let a_lower = a.name.to_ascii_lowercase();
+                        if let Some(delta) = parse_ssa_const_offset(b.name(), ptr_bits) {
+                            let a_lower = a.name().to_ascii_lowercase();
                             if a_lower == sp_name || a_lower == fp_name {
                                 changed |= set_stack_slot(
                                     dst,
@@ -3692,7 +3692,7 @@ fn infer_structs_from_ssa(
                             }
                         }
                         if let Some(base) = addr_of(a, &addr_exprs)
-                            && let Some(delta) = parse_ssa_const_offset(&b.name, ptr_bits)
+                            && let Some(delta) = parse_ssa_const_offset(b.name(), ptr_bits)
                         {
                             let off = base.offset.saturating_sub(delta);
                             if (-offset_bound..=offset_bound).contains(&off) {
@@ -3757,7 +3757,7 @@ fn infer_structs_from_ssa(
         for op in &block.ops {
             let resolve_addr = |addr: &r2ssa::SSAVar| -> Option<ArgAddrExpr> {
                 if addr.version == 0 {
-                    let key = addr.name.to_ascii_lowercase();
+                    let key = addr.name().to_ascii_lowercase();
                     if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
                         return Some(ArgAddrExpr {
                             slot,
@@ -4148,7 +4148,7 @@ fn infer_global_field_profiles(
         for block in ssa_blocks {
             for op in &block.ops {
                 let addr_of = |var: &r2ssa::SSAVar, map: &HashMap<String, GlobalAddrExpr>| {
-                    parse_const_value(&var.name)
+                    parse_const_value(var.name())
                         .filter(|addr| *addr >= 0x10000)
                         .map(|base| GlobalAddrExpr {
                             base,
@@ -4211,7 +4211,7 @@ fn infer_global_field_profiles(
                     }
                     r2ssa::SSAOp::IntAdd { dst, a, b } => {
                         if let Some(base) = addr_of(a, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&b.name)
+                            && let Some(raw) = parse_const_value(b.name())
                         {
                             let off = base
                                 .offset
@@ -4228,7 +4228,7 @@ fn infer_global_field_profiles(
                                 );
                             }
                         } else if let Some(base) = addr_of(b, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&a.name)
+                            && let Some(raw) = parse_const_value(a.name())
                         {
                             let off = base
                                 .offset
@@ -4248,7 +4248,7 @@ fn infer_global_field_profiles(
                     }
                     r2ssa::SSAOp::IntSub { dst, a, b } => {
                         if let Some(base) = addr_of(a, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&b.name)
+                            && let Some(raw) = parse_const_value(b.name())
                         {
                             let off = base
                                 .offset
@@ -4273,7 +4273,7 @@ fn infer_global_field_profiles(
                         element_size,
                     } => {
                         if let Some(base_expr) = addr_of(base, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&index.name)
+                            && let Some(raw) = parse_const_value(index.name())
                         {
                             let scaled = signed_offset_from_const(raw, ptr_bits)
                                 .saturating_mul((*element_size).into());
@@ -4298,7 +4298,7 @@ fn infer_global_field_profiles(
                         element_size,
                     } => {
                         if let Some(base_expr) = addr_of(base, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&index.name)
+                            && let Some(raw) = parse_const_value(index.name())
                         {
                             let scaled = signed_offset_from_const(raw, ptr_bits)
                                 .saturating_mul((*element_size).into());
@@ -4328,7 +4328,7 @@ fn infer_global_field_profiles(
     for block in ssa_blocks {
         for op in &block.ops {
             let resolve_addr = |addr: &r2ssa::SSAVar| -> Option<GlobalAddrExpr> {
-                parse_const_value(&addr.name)
+                parse_const_value(addr.name())
                     .filter(|base| *base >= 0x10000)
                     .map(|base| GlobalAddrExpr {
                         base,
@@ -4636,7 +4636,7 @@ fn function_annotations_for_ffi(
             let phi_vars: Vec<&str> = block
                 .phis
                 .iter()
-                .map(|p| p.dst.name.as_str())
+                .map(|p| p.dst.name())
                 .filter(|n| is_real_reg(n))
                 .collect();
             if !phi_vars.is_empty() {
@@ -4654,8 +4654,8 @@ fn function_annotations_for_ffi(
         let mut func_inputs = Vec::new();
         for op in &block.ops {
             for src in op.sources() {
-                if src.version == 0 && is_real_reg(&src.name) {
-                    func_inputs.push(src.name.as_str());
+                if src.version == 0 && is_real_reg(src.name()) {
+                    func_inputs.push(src.name());
                 }
             }
         }
@@ -4672,9 +4672,9 @@ fn function_annotations_for_ffi(
         let mut defs = Vec::new();
         for op in &block.ops {
             if let Some(dst) = op.dst()
-                && is_real_reg(&dst.name)
+                && is_real_reg(dst.name())
             {
-                defs.push(dst.name.as_str());
+                defs.push(dst.name());
             }
         }
         defs.sort();

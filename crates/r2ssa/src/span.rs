@@ -475,7 +475,7 @@ mod tests {
             .values
             .iter()
             .position(|value| {
-                value.var.name.eq_ignore_ascii_case(name) && value.var.version == version
+                value.var.name().eq_ignore_ascii_case(name) && value.var.version == version
             })
             .map(|index| ValueId(index as u32))
             .unwrap_or_else(|| panic!("no {name}_{version}"))
@@ -672,7 +672,7 @@ mod tests {
         let narrow = graph
             .values
             .iter()
-            .find(|value| value.var.name.starts_with("tmp:lane:") && value.var.size == 4)
+            .find(|value| value.var.name().starts_with("tmp:lane:") && value.var.size == 4)
             .map(|value| value.id)
             .expect("lane temporary");
         let wide = value_named(&graph, "RAX", 1);

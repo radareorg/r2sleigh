@@ -764,7 +764,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name.starts_with("tmp:50"))
+            .find(|value| value.var.name().starts_with("tmp:50"))
             .expect("address value");
         assert!(
             artifact
@@ -806,7 +806,7 @@ mod tests {
                 .graph()
                 .values
                 .iter()
-                .find(|value| value.var.name == name)
+                .find(|value| value.var.name() == name)
                 .map(|value| value.id)
                 .expect(name)
         };
@@ -945,7 +945,7 @@ mod tests {
                 SSAOp::Load { dst, space, .. } if *space == SpaceId::Custom(7) => artifact
                     .graph()
                     .value_id_for_var(dst)
-                    .map(|value| (dst.name.clone(), value)),
+                    .map(|value| (dst.name(), value)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -988,8 +988,8 @@ mod tests {
             .iter()
             .find(|value| {
                 value.var.size == 4
-                    && (value.var.name.eq_ignore_ascii_case("w1")
-                        || value.var.name.starts_with("tmp:lane:"))
+                    && (value.var.name().eq_ignore_ascii_case("w1")
+                        || value.var.name().starts_with("tmp:lane:"))
             })
             .expect("narrow formal read");
         assert!(
@@ -1014,7 +1014,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name.starts_with("tmp:10"))
+            .find(|value| value.var.name().starts_with("tmp:10"))
             .expect("sum");
         assert!(artifact.addresses().parameter_expression(sum.id).is_none());
     }
@@ -1098,7 +1098,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name.starts_with("tmp:90"))
+            .find(|value| value.var.name().starts_with("tmp:90"))
             .expect("field address value");
         assert!(
             artifact
@@ -1154,7 +1154,7 @@ mod tests {
             .values
             .iter()
             .find(|value| {
-                value.var.name == "tmp:10"
+                value.var.name() == "tmp:10"
                     && artifact.graph().def_inst(value.id).is_some_and(|inst| {
                         matches!(
                             artifact.graph().inst(inst).map(|inst| &inst.payload),

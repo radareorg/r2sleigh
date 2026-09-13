@@ -685,7 +685,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
 /// Whether a value is a lane temporary: a projection of a register root with
 /// no storage of its own.
 pub(crate) fn is_lane_temp(var: &SSAVar) -> bool {
-    var.name.starts_with("tmp:lane:")
+    var.name().starts_with("tmp:lane:")
 }
 
 /// The lane this operation writes is superseded within the instruction: a
@@ -1921,7 +1921,7 @@ mod tests {
         else {
             panic!("expected two live-in copies");
         };
-        assert_eq!(first_live_in.name, second_live_in.name);
+        assert_eq!(first_live_in.name(), second_live_in.name());
         assert_eq!(first_live_in.size, second_live_in.size);
         assert_eq!(first_live_in.version, 0);
         assert_eq!(second_live_in.version, 0);

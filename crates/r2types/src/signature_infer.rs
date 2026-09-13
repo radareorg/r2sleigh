@@ -840,7 +840,7 @@ pub fn collect_signature_type_evidence_for_var(
     initial_ty: &CTypeLike,
 ) -> SignatureTypeEvidence {
     let key = crate::prepare::ssa_var_key(var);
-    let family = scalar_register_family_key(&var.name);
+    let family = scalar_register_family_key(var.name());
     let mut evidence = SignatureTypeEvidence::default();
     if evidence_ctx.pointer_vars.contains(&key) {
         evidence.pointer_proven = 1;
@@ -1307,7 +1307,7 @@ pub fn collect_version0_input_regs(func: &SSAFunction) -> HashMap<String, u32> {
                 if !ssa_var_is_register_like(src) {
                     continue;
                 }
-                let key = src.name.to_ascii_lowercase();
+                let key = src.name().to_ascii_lowercase();
                 *counts.entry(key).or_insert(0) += 1;
             }
         }

@@ -553,7 +553,7 @@ mod tests {
         let zf = exit
             .phis
             .iter()
-            .find(|phi| phi.dst.name.eq_ignore_ascii_case("zf"))
+            .find(|phi| phi.dst.name().eq_ignore_ascii_case("zf"))
             .and_then(|phi| graph.value_id_for_var(&phi.dst));
         assert!(
             zf.is_some_and(|value| dead.contains(value)),
@@ -591,7 +591,7 @@ mod tests {
         let rax = exit
             .phis
             .iter()
-            .find(|phi| phi.dst.name.eq_ignore_ascii_case("rax"))
+            .find(|phi| phi.dst.name().eq_ignore_ascii_case("rax"))
             .and_then(|phi| graph.value_id_for_var(&phi.dst))
             .expect("the return register is merged at the exit");
         assert!(

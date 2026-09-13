@@ -4130,13 +4130,13 @@ impl SSAFunction {
                     let disambiguator = self
                         .canonical_storage_by_var
                         .keys()
-                        .filter(|other| other.name == var.name)
+                        .filter(|other| other.name() == var.name())
                         .map(SSAVar::rename_disambiguator)
                         .max()
                         .map_or(1, |max| max + 1);
                     // Version one: it is a definition, and version zero is
                     // reserved for the value a block was entered with.
-                    let zero = SSAVar::new(var.name.clone(), 1, var.size)
+                    let zero = SSAVar::new(var.name(), 1, var.size)
                         .with_rename_disambiguator(disambiguator);
                     minted.push(SSAOp::IntZExt {
                         dst: zero.clone(),
@@ -4400,12 +4400,12 @@ impl SSAFunction {
             let disambiguator = self
                 .canonical_storage_by_var
                 .keys()
-                .filter(|var| var.name == root_var.name)
+                .filter(|var| var.name() == root_var.name())
                 .map(SSAVar::rename_disambiguator)
                 .max()
                 .map_or(1, |max| max + 1);
-            let composed = SSAVar::new(root_var.name.clone(), 0, root.size)
-                .with_rename_disambiguator(disambiguator);
+            let composed =
+                SSAVar::new(root_var.name(), 0, root.size).with_rename_disambiguator(disambiguator);
             match lanes.as_slice() {
                 [(lane, 0)] if lane.size < root.size => minted.push(SSAOp::IntZExt {
                     dst: composed.clone(),
@@ -4417,7 +4417,11 @@ impl SSAFunction {
                         let dst = if index + 1 == lanes.len() {
                             composed.clone()
                         } else {
-                            SSAVar::new(format!("tmp:root:{}:{index}", root_var.name), 1, root.size)
+                            SSAVar::new(
+                                format!("tmp:root:{}:{index}", root_var.name()),
+                                1,
+                                root.size,
+                            )
                         };
                         minted.push(SSAOp::Insert {
                             dst: dst.clone(),
@@ -5158,7 +5162,7 @@ impl SSAFunction {
             return false;
         }
 
-        let lower = var.name.to_ascii_lowercase();
+        let lower = var.name().to_ascii_lowercase();
         let base = lower.split('_').next().unwrap_or(lower.as_str());
         if matches!(base, "rbp" | "rsp" | "ebp" | "esp" | "bp" | "sp") {
             return true;
@@ -6506,12 +6510,12 @@ mod tests {
             left_graph
                 .values
                 .iter()
-                .map(|value| value.var.name.as_str())
+                .map(|value| value.var.name())
                 .collect::<Vec<_>>(),
             right_graph
                 .values
                 .iter()
-                .map(|value| value.var.name.as_str())
+                .map(|value| value.var.name())
                 .collect::<Vec<_>>()
         );
         let storages = left_graph
@@ -6718,9 +6722,9 @@ mod tests {
             .iter()
             .filter_map(|op| match op {
                 SSAOp::IntSub { dst, a, .. } | SSAOp::IntAdd { dst, a, .. }
-                    if dst.name == "rsp" =>
+                    if dst.name() == "rsp" =>
                 {
-                    Some((dst.version, a.name.as_str(), a.version))
+                    Some((dst.version, a.name(), a.version))
                 }
                 _ => None,
             })
@@ -6979,7 +6983,7 @@ mod tests {
                 op,
                 SSAOp::Subpiece { dst, src, offset: 0 }
                     if *dst == stored
-                        && src.name.eq_ignore_ascii_case("x9")
+                        && src.name().eq_ignore_ascii_case("x9")
                         && src.version == 1
                         && src.size == 8
             )),
@@ -7516,7 +7520,7 @@ mod tests {
                 block
                     .ops
                     .iter()
-                    .position(|op| matches!(op, SSAOp::Return { target } if target.name.eq_ignore_ascii_case("rip")))
+                    .position(|op| matches!(op, SSAOp::Return { target } if target.name().eq_ignore_ascii_case("rip")))
             })
             .expect("control return op");
         assert!(
@@ -7617,7 +7621,7 @@ mod tests {
                 block
                     .ops
                     .iter()
-                    .position(|op| matches!(op, SSAOp::Return { target } if target.name.eq_ignore_ascii_case("rip")))
+                    .position(|op| matches!(op, SSAOp::Return { target } if target.name().eq_ignore_ascii_case("rip")))
             })
             .expect("control return op");
         assert!(
@@ -7923,7 +7927,7 @@ mod tests {
         let post_call_x0 = ops
             .iter()
             .find_map(|op| match op {
-                SSAOp::CallDefine { dst } if dst.name == "x0" => Some(dst.clone()),
+                SSAOp::CallDefine { dst } if dst.name() == "x0" => Some(dst.clone()),
                 _ => None,
             })
             .expect("decompile SSA should define a fresh x0 after calls");
@@ -7931,7 +7935,7 @@ mod tests {
         let copied_x8_source = ops
             .iter()
             .find_map(|op| match op {
-                SSAOp::Copy { dst, src } if dst.name == "x8" => Some(src.clone()),
+                SSAOp::Copy { dst, src } if dst.name() == "x8" => Some(src.clone()),
                 _ => None,
             })
             .expect("expected x8 copy from call return register");
@@ -7959,7 +7963,7 @@ mod tests {
         let copied_x8_dst = ops
             .iter()
             .find_map(|op| match op {
-                SSAOp::Copy { dst, src } if dst.name == "x8" && src == &post_call_x0 => {
+                SSAOp::Copy { dst, src } if dst.name() == "x8" && src == &post_call_x0 => {
                     Some(dst.clone())
                 }
                 _ => None,
@@ -7977,7 +7981,7 @@ mod tests {
 
         for op in ops {
             if let SSAOp::CallDefine { dst } = op
-                && dst.name == "x8"
+                && dst.name() == "x8"
             {
                 let x8_call_define_value = prepared
                     .graph()
@@ -9160,7 +9164,7 @@ mod tests {
                     dst,
                     src,
                     offset: 0,
-                } if dst.size == 4 && src.name.eq_ignore_ascii_case("rax") => {
+                } if dst.size == 4 && src.name().eq_ignore_ascii_case("rax") => {
                     prepared.graph().value_id_for_var(dst)
                 }
                 _ => None,
@@ -9238,7 +9242,7 @@ mod tests {
             .get_block(0x1780)
             .and_then(|block| {
                 block.ops.iter().find_map(|op| match op {
-                    SSAOp::Copy { dst, .. } if dst.name == "tmp:1798" => Some(dst.clone()),
+                    SSAOp::Copy { dst, .. } if dst.name() == "tmp:1798" => Some(dst.clone()),
                     _ => None,
                 })
             })
@@ -9257,7 +9261,7 @@ mod tests {
             .get_block(0x1780)
             .and_then(|block| {
                 block.ops.iter().find_map(|op| match op {
-                    SSAOp::Subpiece { dst, .. } if dst.name == "tmp:17a0" => Some(dst),
+                    SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst),
                     _ => None,
                 })
             })
@@ -11444,7 +11448,7 @@ mod tests {
             .ops
             .iter()
             .find_map(|op| match op {
-                SSAOp::Copy { dst, src } if dst.size == 1 && dst.name == "reg:200" => {
+                SSAOp::Copy { dst, src } if dst.size == 1 && dst.name() == "reg:200" => {
                     Some(src.clone())
                 }
                 SSAOp::IntEqual { a, .. } => Some(a.clone()),
@@ -11934,7 +11938,7 @@ mod tests {
                     .value(*value)
                     .expect("graph value")
                     .var
-                    .name;
+                    .name();
                 !matches!(
                     name.to_ascii_lowercase().as_str(),
                     "sp" | "rsp" | "fp" | "rbp"
@@ -12202,8 +12206,7 @@ mod tests {
         assert_eq!(named_constant.constant_bits(), None);
         assert_eq!(adapt_root_width(&named_constant, 4), None);
 
-        let mut canonical_constant = SSAVar::constant(0x1234, 8);
-        canonical_constant.name = "not-a-constant".to_string();
+        let canonical_constant = SSAVar::constant(0x1234, 8).renamed("not-a-constant");
         assert_eq!(canonical_constant.constant_bits(), Some(0x1234));
         assert_eq!(
             adapt_root_width(&canonical_constant, 4),
@@ -12364,7 +12367,7 @@ mod tests {
                 .ops
                 .iter()
                 .filter(|op| {
-                    matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case(name))
+                    matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case(name))
                 })
                 .count()
         };
@@ -12660,10 +12663,7 @@ mod tests {
             panic!("{boundary:?}");
         };
         assert_eq!(
-            artifact
-                .graph()
-                .value(value)
-                .map(|value| value.var.name.as_str()),
+            artifact.graph().value(value).map(|value| value.var.name()),
             Some("rdi"),
             "the argument is what the first store put in the slot"
         );

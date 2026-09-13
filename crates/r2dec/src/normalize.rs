@@ -3121,12 +3121,12 @@ mod tests {
         let post_loop_phi = prepared
             .function()
             .get_block(0x3010)
-            .and_then(|block| block.phis.iter().find(|phi| phi.dst.name == "RDI"))
+            .and_then(|block| block.phis.iter().find(|phi| phi.dst.name() == "RDI"))
             .expect("exit merges the skipped-loop and loop-carried pointers");
         let loop_phi = prepared
             .function()
             .get_block(0x3008)
-            .and_then(|block| block.phis.iter().find(|phi| phi.dst.name == "RDI"))
+            .and_then(|block| block.phis.iter().find(|phi| phi.dst.name() == "RDI"))
             .expect("loop header owns the pointer carrier");
         let post_loop_value = prepared
             .graph()
@@ -3226,16 +3226,16 @@ mod tests {
             .position(|op| {
                 matches!(op,
                 SSAOp::Copy { dst, src }
-                    if dst.name == "RCX" && src == &post_loop_phi.dst)
+                    if dst.name() == "RCX" && src == &post_loop_phi.dst)
             })
             .expect("the exact post-loop pointer is preserved");
         let reuse = exit_ops
             .iter()
-            .position(|op| matches!(op, SSAOp::IntSub { dst, .. } if dst.name == "RDI"))
+            .position(|op| matches!(op, SSAOp::IntSub { dst, .. } if dst.name() == "RDI"))
             .expect("RDI is reused for the byte-count computation");
         let dereference = exit_ops
             .iter()
-            .position(|op| matches!(op, SSAOp::Load { addr, .. } if addr.name == "RCX"))
+            .position(|op| matches!(op, SSAOp::Load { addr, .. } if addr.name() == "RCX"))
             .expect("the tail load uses the preserved pointer carrier");
         assert!(preserve < reuse && reuse < dereference);
     }

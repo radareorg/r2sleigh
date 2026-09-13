@@ -176,7 +176,7 @@ enum UseLocation {
 impl VarKey {
     fn from_var(var: &SSAVar) -> Self {
         Self {
-            name: var.name.clone(),
+            name: var.name().to_string(),
             version: var.version,
             size: var.size,
             rename_disambiguator: var.rename_disambiguator(),
@@ -1920,8 +1920,7 @@ mod sccp_tests {
             Some(&LatticeValue::Bottom)
         );
 
-        let mut renamed = SSAVar::constant(0x2a, 8);
-        renamed.name = "renamed-value".to_string();
+        let renamed = SSAVar::constant(0x2a, 8).renamed("renamed-value");
         assert_eq!(const_value(&renamed), Some(0x2a));
     }
 

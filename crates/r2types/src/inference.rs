@@ -269,7 +269,9 @@ impl TypeInference {
         let mut reg0_map: HashMap<String, SSAVar> = HashMap::new();
         for var in collect_vars(func) {
             if var.version == 0 {
-                reg0_map.entry(var.name.to_ascii_lowercase()).or_insert(var);
+                reg0_map
+                    .entry(var.name().to_ascii_lowercase())
+                    .or_insert(var);
             }
         }
 
@@ -921,7 +923,9 @@ impl TypeInference {
         let mut reg0_map: HashMap<String, SSAVar> = HashMap::new();
         for var in vars {
             if var.version == 0 {
-                reg0_map.entry(var.name.to_ascii_lowercase()).or_insert(var);
+                reg0_map
+                    .entry(var.name().to_ascii_lowercase())
+                    .or_insert(var);
             }
         }
 
