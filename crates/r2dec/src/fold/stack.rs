@@ -48,6 +48,17 @@ impl<'a> FoldingContext<'a> {
         Some(frame_object_address_expr(object_expr, ty))
     }
 
+    /// One rendered occurrence of a frame object's address, marked as the
+    /// placement read it is.
+    pub(super) fn object_address_expr(
+        &self,
+        value: r2ssa::ValueId,
+        object: ObjectId,
+    ) -> Option<CExpr> {
+        let (expr, _) = self.certified_stack_address_expr_for_object(object)?;
+        Some(self.observe_object_address_expr(value, object, expr))
+    }
+
     /// Whether a copy restates a write the block has already rendered.
     ///
     /// Materialising a merge replaces it with a copy on every predecessor edge,

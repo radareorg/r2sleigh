@@ -111,16 +111,16 @@ enum ObservationTarget {
         symbol: SymbolId,
         is_write: bool,
     },
-    /// One call-boundary occurrence of a certified frame object's base
-    /// address. This authorizes the program-object spelling and tells
-    /// placement that the object's declaration is its storage definition.
-    EscapedStackAddress {
-        call: InstId,
-        argument_index: usize,
+    /// One spelled occurrence of a frame object's base address, inside the
+    /// rendering of `value`. It tells placement that the object's declaration
+    /// must dominate this statement and that its storage is its definition.
+    ObjectAddress {
         value: ValueId,
         object: r2ssa::ObjectId,
         binding: crate::binding_plan::BindingId,
         symbol: SymbolId,
+        /// Where the statement spelling the address is emitted.
+        block: u64,
     },
     /// One cell a marked gap accounts for.
     ///
@@ -788,14 +788,15 @@ impl SurvivingEffectObservations {
             .is_some_and(|occurrences| occurrences.exclusive)
     }
 
-    /// Whether the obligation's value is a literal the plan spells at each
-    /// reader, which is the other way several occurrences are one execution.
+    /// Whether the obligation's value is a frame constant the plan spells at
+    /// each reader, which is the other way several occurrences are one
+    /// execution.
     ///
-    /// The machine writes the temporary once. A reader that spells `5` instead
-    /// of naming it performs nothing, so three readers are three spellings of
-    /// one execution rather than three executions. This holds only because the
-    /// value reads nothing: an expression repeated at three readers would be
-    /// three evaluations and is not admitted here.
+    /// The machine writes the temporary once. A reader that spells `5` or
+    /// `&slot` instead of naming it performs nothing, so three readers are
+    /// three spellings of one execution rather than three executions. This
+    /// holds only because the value reads nothing: an expression repeated at
+    /// three readers would be three evaluations and is not admitted here.
     pub(crate) fn duplicates_are_a_repeated_literal(&self, id: SemanticObligationId) -> bool {
         self.occurrences
             .get(&id)
@@ -1050,11 +1051,10 @@ fn placement_refusal(
         },
         Private::ReadBeforeAssignment {
             binding,
-            read: crate::binding_plan::PlacementRead::EscapedStackAddress { call, value },
-        } => Public::CertifiedValueReadBeforeAssignment {
+            read: crate::binding_plan::PlacementRead::ObjectAddress { value },
+        } => Public::ObjectAddressReadBeforeAssignment {
             binding_index: binding.index(),
             value_id: value.0,
-            instruction_id: call.0,
         },
         Private::ReadBeforeAssignment {
             binding,
@@ -1638,7 +1638,7 @@ impl LegacyObservationJournal {
                 Some(*block)
             }
             ObservationTarget::StackAccess { access, .. } => inst_block(access.inst),
-            ObservationTarget::EscapedStackAddress { call, .. } => inst_block(*call),
+            ObservationTarget::ObjectAddress { block, .. } => Some(*block),
             ObservationTarget::Gapped { anchor, .. } => Some(anchor.block_addr),
             ObservationTarget::Effect(id) => match id.instruction.site {
                 r2ssa::CanonicalInstructionSite::Phi(_) => None,
@@ -1685,6 +1685,12 @@ impl LegacyObservationJournal {
                     symbol: *symbol,
                 },
             ),
+            // An elided use is not an occurrence: nothing spells the value
+            // there, so placement has no read to place.
+            ObservationTarget::Use {
+                observation: LegacyUseObservation::Elided(_),
+                ..
+            } => Some(crate::placement::PlacementObservationTarget::Other),
             ObservationTarget::Use { site, block, .. } => Some(
                 self.source
                     .graph()
@@ -1740,21 +1746,19 @@ impl LegacyObservationJournal {
                 symbol: *symbol,
                 is_write: *is_write,
             }),
-            ObservationTarget::EscapedStackAddress {
-                call,
-                argument_index,
+            ObservationTarget::ObjectAddress {
                 value,
                 object,
                 binding,
                 symbol,
+                block,
             } => Some(
-                crate::placement::PlacementObservationTarget::EscapedStackAddress {
-                    call: *call,
-                    argument_index: *argument_index,
+                crate::placement::PlacementObservationTarget::ObjectAddress {
                     value: *value,
                     object: *object,
                     binding: *binding,
                     symbol: *symbol,
+                    block: *block,
                 },
             ),
             // A gapped read of a value defined outside the gap is still a
@@ -2660,7 +2664,7 @@ impl LegacyObservationJournal {
         &mut self,
         contract: crate::fold::op_lower::RenderedReplacementContract,
     ) -> Result<CExpr, LegacyObservationJournalError> {
-        let (expr, value, replaced, obligations, frame_address) = contract.into_parts();
+        let (expr, value, replaced, obligations) = contract.into_parts();
         self.value_slot(value)?;
         // A stack address the geometry certificate elided has no occurrence;
         // the spelling that stands in its place names the cell, not the value.
@@ -2670,51 +2674,6 @@ impl LegacyObservationJournal {
             vec![ObservationTarget::Value(value)]
         };
         targets.extend(self.discharged_instruction_targets(Some(value), &replaced, Some(&expr))?);
-
-        if let Some(frame_address) = frame_address {
-            let Some(object) = crate::binding_plan::certified_frame_object_call_argument(
-                &self.source,
-                frame_address.call,
-                frame_address.argument_index,
-                value,
-            ) else {
-                return Err(LegacyObservationJournalError::InvalidCertifiedValueRead {
-                    value,
-                    at: frame_address.call,
-                });
-            };
-            let Some(StackObjectDisposition::Bound { binding }) =
-                self.plan.stack_object_disposition(object)
-            else {
-                return Err(LegacyObservationJournalError::MissingPlannedValue(value));
-            };
-            let symbol = self
-                .names
-                .symbol_for_binding(binding)
-                .ok_or(LegacyObservationJournalError::MissingPlannedValue(value))?;
-            if object != frame_address.object
-                || !crate::placement::frame_object_address_expr_matches(
-                    &expr,
-                    symbol,
-                    self.plan.binding(binding).is_some_and(|binding| {
-                        matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
-                    }),
-                )
-            {
-                return Err(LegacyObservationJournalError::InvalidCertifiedValueRead {
-                    value,
-                    at: frame_address.call,
-                });
-            }
-            targets.push(ObservationTarget::EscapedStackAddress {
-                call: frame_address.call,
-                argument_index: frame_address.argument_index,
-                value,
-                object,
-                binding,
-                symbol,
-            });
-        }
 
         for obligation in obligations {
             if !self.effect_occurrences.contains_key(&obligation) {
@@ -2985,6 +2944,54 @@ impl LegacyObservationJournal {
             symbol,
             expr,
         )
+    }
+
+    /// Mark one spelled frame-object address inside the rendering of `value`.
+    ///
+    /// The plan's canonical term for `value` names the object's address, the
+    /// object is bound, and the expression is that binding's address spelling.
+    pub(crate) fn observe_object_address_expr(
+        &mut self,
+        value: ValueId,
+        object: r2ssa::ObjectId,
+        expr: CExpr,
+        block: u64,
+    ) -> Result<CExpr, LegacyObservationJournalError> {
+        self.value_slot(value)?;
+        if !crate::placement::value_names_object_address(&self.plan, value, object) {
+            return Err(LegacyObservationJournalError::MissingPlannedValue(value));
+        }
+        let Some(StackObjectDisposition::Bound { binding }) =
+            self.plan.stack_object_disposition(object)
+        else {
+            return Err(LegacyObservationJournalError::MissingPlannedValue(value));
+        };
+        let symbol = self
+            .names
+            .symbol_for_binding(binding)
+            .ok_or(LegacyObservationJournalError::MissingPlannedValue(value))?;
+        let is_array = self.plan.binding(binding).is_some_and(|binding| {
+            matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
+        });
+        if !crate::placement::frame_object_address_expr_matches(&expr, symbol, is_array) {
+            r2il::refusal_evidence!(
+                "object-address",
+                "{value:?} spells {object:?} bound to {binding:?} as {expr:?}, not its address"
+            );
+            return Err(LegacyObservationJournalError::MissingPlannedValue(value));
+        }
+        let id = self
+            .allocate_many(vec![ObservationTarget::ObjectAddress {
+                value,
+                object,
+                binding,
+                symbol,
+                block,
+            }])?
+            .into_iter()
+            .next()
+            .ok_or(LegacyObservationJournalError::TooManyObservations)?;
+        Ok(CExpr::observed(id, expr))
     }
 
     pub(crate) fn observe_certified_address_read_expr(
@@ -3576,7 +3583,7 @@ impl LegacyObservationJournal {
                 | ObservationTarget::StackAccess { .. }
                 | ObservationTarget::CertifiedValueRead { .. }
                 | ObservationTarget::CertifiedArrayIndexRead { .. }
-                | ObservationTarget::EscapedStackAddress { .. } => {}
+                | ObservationTarget::ObjectAddress { .. } => {}
             }
         }
 
@@ -3932,11 +3939,15 @@ impl LegacyObservationJournal {
             .names
             .symbol_for_binding(*binding)
             .is_some_and(|symbol| rendered_symbols.contains(&symbol));
-        !spelled
-            && self
-                .source
-                .entry_stack_address_root_for_value(value)
-                .is_some()
+        let entry_root = self.source.entry_stack_address_root_for_value(value);
+        if spelled || entry_root.is_none() {
+            r2il::refusal_evidence!(
+                "stack-base-absorbed",
+                "{value:?} bound to {binding:?} is not absorbed: spelled={spelled} entry_root={entry_root:?} stack_root={:?}",
+                self.source.stack_address_root_for_value(value)
+            );
+        }
+        !spelled && entry_root.is_some()
     }
 
     /// Mark one rendered definition and its source write using the exact
@@ -4521,7 +4532,7 @@ impl LegacyObservationJournal {
                         }
                     },
                     ObservationTarget::StackAccess { .. }
-                    | ObservationTarget::EscapedStackAddress { .. } => Ok(()),
+                    | ObservationTarget::ObjectAddress { .. } => Ok(()),
                     ObservationTarget::Effect(effect) => {
                         let occurrences = effect_occurrences.get_mut(&effect).ok_or(
                             LegacyObservationJournalError::InvalidEffectObligation(effect),
@@ -4750,12 +4761,12 @@ impl LegacyObservationJournal {
         }
     }
 
-    /// The obligations of every value the plan spells as a literal wherever it
-    /// is read.
+    /// The obligations of every value the plan spells as a frame constant
+    /// wherever it is read: a literal, or a frame object's address.
     ///
     /// Asked of the plan's canonical term, which is the same identity the
     /// inline disposition renders, so planning and accounting cannot disagree
-    /// about which values are literals.
+    /// about which values are constants.
     fn repeated_literal_effects(&self) -> BTreeSet<SemanticObligationId> {
         let graph = self.source.graph();
         let mut ids = BTreeSet::new();
@@ -4766,7 +4777,7 @@ impl LegacyObservationJournal {
             };
             if !matches!(
                 self.plan.canonical().arena().term(*term).kind,
-                r2rewrite::TermKind::Literal(_)
+                r2rewrite::TermKind::Literal(_) | r2rewrite::TermKind::ObjectAddress(_)
             ) {
                 continue;
             }

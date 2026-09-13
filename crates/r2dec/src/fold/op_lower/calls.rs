@@ -528,48 +528,6 @@ impl<'a> FoldingContext<'a> {
     ) -> Option<CExpr> {
         let prepared = self.inputs.prepared_ssa?;
         let call = prepared.graph().inst_id_for_op_site(site.0, site.1)?;
-        let frame_object = crate::binding_plan::certified_frame_object_call_argument(
-            prepared,
-            call,
-            argument_index,
-            value,
-        );
-        let planned_inline = self.inputs.binding_names.is_some_and(|names| {
-            matches!(
-                names.require_value(value),
-                Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
-            )
-        });
-        let spelling = frame_object
-            .filter(|_| planned_inline)
-            .and_then(|object| self.certified_stack_address_expr_for_object(object));
-        if frame_object.is_some() && spelling.is_none() {
-            r2il::refusal_evidence!(
-                "call-argument-frame-address",
-                "callsite ({:#x}, {}) argument {argument_index} value {value:?} names frame object {:?}: planned inline={planned_inline} spelled={}",
-                site.0,
-                site.1,
-                frame_object,
-                spelling.is_some()
-            );
-        }
-        if let Some((object, (expr, ty))) = frame_object.zip(spelling) {
-            let expr = self.finish_replacement_expr(PendingReplacementExpr::escaped_stack_address(
-                value,
-                call,
-                argument_index,
-                object,
-                expr,
-            ));
-            let declared = self
-                .certified_callsite_for_op(site.0, site.1)
-                .and_then(|cert| cert.callee_signature.as_ref())
-                .and_then(|signature| signature.params.get(argument_index))
-                .cloned()
-                .or_else(|| self.machine_value_width_bits(value).map(CType::uint))?;
-            return Some(self.convert_from(expr, Some(&CValue::Typed(ty)), &declared));
-        }
-
         let expr = match self.planned_value_expr(value) {
             Ok(expr) => expr,
             Err(error) => {

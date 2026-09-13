@@ -10,33 +10,6 @@ use r2rewrite::CValue;
 /// expressions. A frame-object address replaces the whole expression with one
 /// program-object spelling, so it has no nested AST on which to carry those
 /// contracts and must collect the same closure up front.
-fn planned_inline_definition_closure(
-    prepared: &r2ssa::SsaArtifact,
-    names: &crate::binding_plan::BindingNameResolution,
-    value: ValueId,
-) -> Option<Vec<r2ssa::InstId>> {
-    let mut pending = vec![value];
-    let mut seen = BTreeSet::new();
-    let mut definitions = BTreeSet::new();
-    while let Some(value) = pending.pop() {
-        if !seen.insert(value)
-            || !matches!(
-                names.plan().disposition(value),
-                Some(crate::binding_plan::ValueDisposition::Inline { .. })
-            )
-        {
-            continue;
-        }
-        let Some(definition) = prepared.graph().def_inst(value) else {
-            continue;
-        };
-        let instruction = prepared.graph().inst(definition)?;
-        definitions.insert(definition);
-        pending.extend(instruction.inputs.iter().copied());
-    }
-    Some(definitions.into_iter().collect())
-}
-
 fn operation_requires_final_write_projection(op: &SSAOp) -> bool {
     op.dst().is_some()
 }
@@ -79,8 +52,8 @@ impl<'a> FoldingContext<'a> {
             self.retain_first_observation_error(invalid());
             return expr;
         };
-        let (replaced, frame_address) = match source {
-            ReplacementSource::RenderedValue => (Vec::new(), None),
+        let replaced = match source {
+            ReplacementSource::RenderedValue => Vec::new(),
             ReplacementSource::PlannedInline => {
                 let Some(names) = self.inputs.binding_names else {
                     self.retain_first_observation_error(invalid());
@@ -110,7 +83,7 @@ impl<'a> FoldingContext<'a> {
                     };
                     replaced.insert(inst);
                 }
-                (replaced.into_iter().collect(), None)
+                replaced.into_iter().collect()
             }
             ReplacementSource::CanonicalAccess(access) => {
                 let Some(names) = self.inputs.binding_names else {
@@ -138,19 +111,7 @@ impl<'a> FoldingContext<'a> {
                     self.retain_first_observation_error(invalid());
                     return expr;
                 }
-                (replaced, None)
-            }
-            ReplacementSource::EscapedStackAddress(frame_address) => {
-                let Some(names) = self.inputs.binding_names else {
-                    self.retain_first_observation_error(invalid());
-                    return expr;
-                };
-                let Some(replaced) = planned_inline_definition_closure(prepared, names, value)
-                else {
-                    self.retain_first_observation_error(invalid());
-                    return expr;
-                };
-                (replaced, Some(frame_address))
+                replaced
             }
         };
         let obligations = replaced
@@ -172,8 +133,7 @@ impl<'a> FoldingContext<'a> {
             "{value:?} from {source:?} discharges {replaced:?} as {expr:?}"
         );
         let fallback = expr.clone();
-        let contract =
-            RenderedReplacementContract::new(expr, value, replaced, obligations, frame_address);
+        let contract = RenderedReplacementContract::new(expr, value, replaced, obligations);
         match journal
             .borrow_mut()
             .observe_rendered_replacement_expr(contract)
@@ -810,11 +770,14 @@ impl<'a> FoldingContext<'a> {
                     vec![child(0, left)?, child(1, right)?],
                 )
             }
-            Kind::Opaque(_)
-            | Kind::Variable(_)
-            | Kind::Load { .. }
-            | Kind::Subscript { .. }
-            | Kind::ObjectAddress(_) => return Err(invalid()),
+            // The object's address is a constant of the frame: the array's
+            // name, or `&name` for anything else.
+            Kind::ObjectAddress(object) => self
+                .object_address_expr(value, object)
+                .ok_or_else(invalid)?,
+            Kind::Opaque(_) | Kind::Variable(_) | Kind::Load { .. } | Kind::Subscript { .. } => {
+                return Err(invalid());
+            }
         })
     }
 

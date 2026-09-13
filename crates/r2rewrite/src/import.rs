@@ -28,6 +28,9 @@ use crate::term::{MAX_TERM_WIDTH_BITS, ObjectPlacement, PointerWalk, TermArena, 
 /// Rule id recorded for a `Copy` root elided at import.
 pub const COPY_ELIDE: &str = "copy.elide";
 
+/// Rule id recorded for a root whose value is a frame object's exact address.
+pub const OBJECT_ADDRESS: &str = "address.object";
+
 #[derive(Debug, Clone)]
 pub struct ImportedValue {
     pub value: ValueId,
@@ -210,6 +213,26 @@ pub fn machine_expr_is_literal(projection: &MachineProjection, root: MachineExpr
         }
     }
     true
+}
+
+/// The declarable stack object whose exact base address `value` is.
+///
+/// Not an element inside it and not a member at an interior offset: those keep
+/// their leaf, and the subscript and member rules read the root. An object with
+/// no stated extent is not declarable and has no name for `&` to take.
+pub fn exact_stack_object_address(artifact: &SsaArtifact, value: ValueId) -> Option<ObjectId> {
+    let objects = artifact.objects();
+    let object = objects.object_for_value(value, r2il::SpaceId::Ram)?;
+    if objects.address_is_indexed(value) || objects.interior_offset(value).is_some() {
+        return None;
+    }
+    if !matches!(
+        objects.object(object)?.kind,
+        ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
+    ) {
+        return None;
+    }
+    artifact.declarable_stack_object(object).then_some(object)
 }
 
 /// Entry values whose storage no instruction of the function writes.
@@ -396,13 +419,18 @@ impl Importer<'_> {
             // reads the location it defines. Not a term.
             return opaque_term(self.arena);
         }
+        let output = self
+            .artifact
+            .graph()
+            .inst(inst)
+            .and_then(|instruction| instruction.output);
         let done = if self.dispositions_exact(inst) {
             let kind = self
                 .projection
                 .expr(root)
                 .map(|expr| expr.kind().clone())
                 .expect("entity root is in the arena");
-            match kind {
+            let imported = match kind {
                 MachineExprKind::Copy { input } => match self.import_expr(input) {
                     Some((term, mut trace, substituted)) => {
                         let from = self.arena.intern(ty, TermKind::Opaque(root));
@@ -429,6 +457,31 @@ impl Importer<'_> {
                     },
                     None => opaque_term(self.arena),
                 },
+            };
+            // Whatever arithmetic computed it, the value is the object's
+            // address, a constant of the frame. The producers the import
+            // absorbed stay absorbed: the spelling changes, not the discharge.
+            match output.and_then(|value| self.object_address_of(value)) {
+                Some(object) if !imported.opaque => {
+                    let term = self.arena.intern(ty, TermKind::ObjectAddress(object));
+                    self.place_object(object);
+                    if let Some(value) = output {
+                        self.declare_leaf_facts(term, value);
+                    }
+                    let mut trace = imported.trace;
+                    trace.push(Rewrite {
+                        rule: OBJECT_ADDRESS,
+                        from: imported.term,
+                        to: term,
+                    });
+                    RootImport {
+                        term,
+                        trace,
+                        substituted: imported.substituted,
+                        opaque: false,
+                    }
+                }
+                _ => imported,
             }
         } else {
             opaque_term(self.arena)
@@ -484,6 +537,15 @@ impl Importer<'_> {
             MachineExprKind::Source { binding, .. } => match self.try_substitute(binding.value()) {
                 Some(substituted) => Some(substituted),
                 None => {
+                    // The exact base address of a declarable stack object is
+                    // that object's address, a constant of the frame, the way
+                    // a constant leaf is a literal.
+                    if let Some(object) = self.object_address_of(binding.value()) {
+                        let term = self.arena.intern(ty, TermKind::ObjectAddress(object));
+                        self.place_object(object);
+                        self.declare_leaf_facts(term, binding.value());
+                        return Some((term, Vec::new(), BTreeSet::new()));
+                    }
                     let leaf = leaf(self.arena);
                     if let Some((leaf_id, _, _)) = &leaf {
                         if let Some(definition) = self.definition_of(binding.value()) {
@@ -859,18 +921,24 @@ impl Importer<'_> {
         width_bits: u32,
         cell_ty: MachineType,
     ) -> Option<TermId> {
-        let TermKind::Leaf(address_node) = self.arena.term(imported_address).kind else {
+        let address_value = match self.arena.term(imported_address).kind {
+            TermKind::Leaf(address_node) => {
+                let MachineExprKind::Source { binding, .. } =
+                    self.projection.expr(address_node)?.kind()
+                else {
+                    return None;
+                };
+                Some(binding.value())
+            }
+            // The object's own address names the access's address by identity.
+            TermKind::ObjectAddress(addressed) if addressed == object => None,
             // An expanded address already carries its producer and discharge
             // set. Let the algebraic subscript rules decide that path.
-            return None;
-        };
-        let MachineExprKind::Source { binding, .. } = self.projection.expr(address_node)?.kind()
-        else {
-            return None;
+            _ => return None,
         };
         let fact = self.artifact.structured().memory_accesses.get(&access)?;
         if fact.object != object
-            || fact.address != binding.value()
+            || address_value.is_some_and(|value| fact.address != value)
             || fact.width.checked_mul(8) != Some(width_bits)
             || !fact.provenance_complete
         {
@@ -972,6 +1040,10 @@ impl Importer<'_> {
                 expression.terms.is_empty()
                     && self.pointer_parameters.contains(&expression.parameter)
             })
+    }
+
+    fn object_address_of(&self, value: ValueId) -> Option<ObjectId> {
+        exact_stack_object_address(self.artifact, value)
     }
 
     /// The frame position `value` holds, through the copies that carried it.

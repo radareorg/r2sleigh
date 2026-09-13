@@ -929,6 +929,35 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Mark one spelled frame-object address as a placement read of the object.
+    pub(crate) fn observe_object_address_expr(
+        &self,
+        value: r2ssa::ValueId,
+        object: r2ssa::ObjectId,
+        expr: CExpr,
+    ) -> CExpr {
+        let Some(journal) = self.inputs.observation_journal else {
+            return expr;
+        };
+        let fallback = expr.clone();
+        let Some(block) = self.current_block_addr.get() else {
+            self.retain_first_observation_error(
+                crate::observation_journal::LegacyObservationJournalError::MissingNormalizedSiteContext,
+            );
+            return fallback;
+        };
+        match journal
+            .borrow_mut()
+            .observe_object_address_expr(value, object, expr, block)
+        {
+            Ok(marked) => marked,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                fallback
+            }
+        }
+    }
+
     pub(crate) fn observe_certified_address_read_expr(
         &self,
         value: r2ssa::ValueId,

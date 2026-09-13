@@ -936,12 +936,7 @@ impl BindingPlan {
                 else {
                     continue;
                 };
-                if source
-                    .certificates()
-                    .stack_frame_round_trips
-                    .contains_key(object)
-                    || super::certified_return_control_stack_objects(source).contains(object)
-                {
+                if source.frame_managed_stack_object(*object) {
                     stack_objects.insert(
                         *object,
                         StackObjectDisposition::Elided {
@@ -1281,6 +1276,8 @@ impl BindingPlan {
                 })
             })
             .unwrap_or_default();
+        let escaped_frame_objects =
+            super::rules::frame_objects_with_escaped_address(source, &machine_projection);
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,
@@ -1290,7 +1287,7 @@ impl BindingPlan {
             parameters: parameters.into_boxed_slice(),
             stack_objects,
             call_clobbers,
-            escaped_frame_objects: super::rules::frame_objects_with_escaped_address(source),
+            escaped_frame_objects,
             access_syntax,
             typed: std::cell::OnceCell::new(),
         };

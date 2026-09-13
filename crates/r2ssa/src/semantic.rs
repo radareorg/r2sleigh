@@ -319,11 +319,20 @@ pub struct ObjectModel {
     /// its object's own offset has to ask this first.
     pub indexed_addresses: BTreeMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
-    /// aggregate. Absent means the address is the object's own base.
+    /// aggregate or an address displaced from an object's base. Absent means
+    /// the address is the object's own base.
     pub interior_offsets: BTreeMap<ValueId, i64>,
+    /// Indexed addresses whose base is displaced from the object's base, so
+    /// the index alone does not say where in the object the element is.
+    pub displaced_indexed_addresses: BTreeSet<ValueId>,
 }
 
 impl ObjectModel {
+    /// Whether this indexed address starts from a displaced base.
+    pub fn indexed_base_is_displaced(&self, value: ValueId) -> bool {
+        self.displaced_indexed_addresses.contains(&value)
+    }
+
     /// Whether this address reaches its object at a computed offset.
     pub fn address_is_indexed(&self, value: ValueId) -> bool {
         self.indexed_addresses.contains_key(&value)
@@ -1503,6 +1512,7 @@ pub enum StackArrayLayoutRefusal {
     ConflictingAccessWidths,
     MissingConstantOffset,
     InvalidExtent,
+    DisplacedIndexBase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2212,8 +2222,15 @@ struct ObjectModelBuilder<'a> {
     value_objects: BTreeMap<MemoryObjectKey, ObjectId>,
     indexed_addresses: BTreeMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
-    /// aggregate. Absent means the address is the object's own base.
+    /// aggregate or an address displaced from an object's base.
     interior_offsets: BTreeMap<ValueId, i64>,
+    displaced_indexed_addresses: BTreeSet<ValueId>,
+    /// Frame positions something proves an object starts at: a declared slot,
+    /// a direct access, or an address that leaves as a value.
+    evidenced_roots: BTreeSet<StackAddressRoot>,
+    /// Addresses whose displaced parent is being resolved, against a cycle.
+    resolving: BTreeSet<ValueId>,
+    stack_pointer_carrier: Option<CanonicalStorageId>,
     stack_objects: BTreeMap<StackObjectKey, ObjectId>,
     entry_stack_roots: BTreeMap<ObjectId, StackAddressRoot>,
     ambiguous_entry_stack_objects: BTreeSet<ObjectId>,
@@ -2265,6 +2282,11 @@ impl<'a> ObjectModelBuilder<'a> {
             value_objects: BTreeMap::new(),
             indexed_addresses: BTreeMap::new(),
             interior_offsets: BTreeMap::new(),
+            displaced_indexed_addresses: BTreeSet::new(),
+            evidenced_roots: BTreeSet::new(),
+            resolving: BTreeSet::new(),
+            stack_pointer_carrier: machine_context
+                .and_then(SourceMachineContext::stack_pointer_carrier),
             stack_objects: BTreeMap::new(),
             entry_stack_roots: BTreeMap::new(),
             ambiguous_entry_stack_objects: BTreeSet::new(),
@@ -2279,12 +2301,21 @@ impl<'a> ObjectModelBuilder<'a> {
 
     fn build(mut self, function: &SSAFunction, graph: &SsaGraph) -> ObjectModel {
         if let Some(facts) = self.facts {
+            self.evidenced_roots = evidenced_stack_roots(
+                facts,
+                self.declared_slots,
+                function,
+                graph,
+                self.stack_pointer_carrier,
+            );
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
             stack_roots.sort_unstable();
             stack_roots.dedup();
             for root in stack_roots {
-                self.ensure_stack_object(root);
+                if self.evidenced_roots.contains(&root) {
+                    self.ensure_stack_object(root);
+                }
             }
             for var in facts.stack_address_roots.keys() {
                 let _ = self.object_for_address_value(graph, var, SpaceId::Ram);
@@ -2339,6 +2370,7 @@ impl<'a> ObjectModelBuilder<'a> {
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,
             interior_offsets: self.interior_offsets,
+            displaced_indexed_addresses: self.displaced_indexed_addresses,
             stack_objects: self.stack_objects,
             entry_stack_roots: self.entry_stack_roots,
             address_bits_by_space: self.address_bits_by_space,
@@ -2375,6 +2407,15 @@ impl<'a> ObjectModelBuilder<'a> {
                     Some((container, displacement)) => (container, Some(displacement)),
                     None => (root, None),
                 };
+                // A position nothing proves an object starts at is not one:
+                // the address is its operand's object, displaced.
+                if interior.is_none()
+                    && !self.evidenced_roots.contains(&root)
+                    && let Some(object) = self.displaced_object(graph, value_id)
+                {
+                    self.value_objects.insert(key, object);
+                    return object;
+                }
                 let object = self.ensure_stack_object(root);
                 if let Some(displacement) = interior {
                     self.interior_offsets.insert(value_id, displacement);
@@ -2383,15 +2424,21 @@ impl<'a> ObjectModelBuilder<'a> {
                 }
                 object
             } else if let Some(root) = resolve_indexed_stack_root(self.facts, value) {
-                if let Some(index) = self.index_operand_for_indexed_address(graph, value_id) {
-                    self.indexed_addresses.insert(value_id, index);
-                }
                 // An address inside a stack object at an offset the machine
                 // computes. It is the same object a constant offset from that
                 // base would reach -- `buf[i]` and `buf[0]` are one buffer --
                 // so it resolves to that object rather than escaping, which is
                 // what left an indexed local with no identity at all.
-                self.ensure_stack_object(root)
+                match self.indexed_object(graph, value_id) {
+                    Some(object) => object,
+                    None => {
+                        if let Some(index) = self.index_operand_for_indexed_address(graph, value_id)
+                        {
+                            self.indexed_addresses.insert(value_id, index);
+                        }
+                        self.ensure_stack_object(root)
+                    }
+                }
             } else if let Some(expression) = self.addresses.parameter_expression(value_id) {
                 self.ensure_parameter_object(expression.parameter)
             } else if let Some(expression) = self.addresses.pointee_expression(value_id) {
@@ -2408,6 +2455,114 @@ impl<'a> ObjectModelBuilder<'a> {
         };
         self.value_objects.insert(key, object);
         object
+    }
+
+    /// The object an address displaced from another stack address names:
+    /// that address's object, with the displacement carried as the offset
+    /// inside it. `None` when the address is not a displacement of one.
+    fn displaced_object(&mut self, graph: &SsaGraph, value_id: ValueId) -> Option<ObjectId> {
+        if !self.resolving.insert(value_id) {
+            return None;
+        }
+        let result = self
+            .displaced_parent(graph, value_id)
+            .and_then(|(parent, delta)| {
+                let parent_var = graph.value(parent)?.var.clone();
+                let object = self.object_for_address_value(graph, &parent_var, SpaceId::Ram);
+                if !matches!(
+                    self.objects.get(&object).map(|fact| &fact.kind),
+                    Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
+                ) {
+                    return None;
+                }
+                let offset = self.interior_offsets.get(&parent).copied().unwrap_or(0) + delta;
+                if offset != 0 {
+                    self.interior_offsets.insert(value_id, offset);
+                }
+                Some(object)
+            });
+        self.resolving.remove(&value_id);
+        result
+    }
+
+    /// The stack address this one is computed from, and by how much.
+    fn displaced_parent(&self, graph: &SsaGraph, value_id: ValueId) -> Option<(ValueId, i64)> {
+        let inst = graph.inst(graph.def_inst(value_id)?)?;
+        let rooted = |var: &SSAVar| resolve_stack_root(self.facts, var).is_some();
+        let id = |var: &SSAVar| graph.value_id_for_var(var);
+        match &inst.payload {
+            crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
+                match (rooted(a), b.constant_bits(), rooted(b), a.constant_bits()) {
+                    (true, Some(delta), _, _) => Some((id(a)?, delta as i64)),
+                    (_, _, true, Some(delta)) => Some((id(b)?, delta as i64)),
+                    _ => None,
+                }
+            }
+            crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. }) => {
+                let delta = b.constant_bits()?;
+                rooted(a).then(|| id(a).map(|a| (a, (delta as i64).wrapping_neg())))?
+            }
+            crate::InstPayload::Op(
+                crate::SSAOp::Copy { src, .. }
+                | crate::SSAOp::Cast { src, .. }
+                | crate::SSAOp::CallRestore { src, .. },
+            ) => rooted(src).then(|| id(src).map(|src| (src, 0)))?,
+            crate::InstPayload::Phi { .. } => inst
+                .inputs
+                .iter()
+                .copied()
+                .find(|input| graph.value(*input).is_some_and(|value| rooted(&value.var)))
+                .map(|input| (input, 0)),
+            _ => None,
+        }
+    }
+
+    /// The object an indexed address reaches: its base operand's, with the
+    /// index recorded, and marked displaced when the base is not that object's
+    /// own address.
+    fn indexed_object(&mut self, graph: &SsaGraph, value_id: ValueId) -> Option<ObjectId> {
+        if !self.resolving.insert(value_id) {
+            return None;
+        }
+        let result = (|| {
+            let inst = graph.inst(graph.def_inst(value_id)?)?;
+            let (base, index) = match &inst.payload {
+                crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
+                    let index = self.index_operand_for_indexed_address(graph, value_id)?;
+                    let a_id = graph.value_id_for_var(a)?;
+                    let b_id = graph.value_id_for_var(b)?;
+                    (if index == a_id { b_id } else { a_id }, Some(index))
+                }
+                crate::InstPayload::Op(
+                    crate::SSAOp::Copy { src, .. }
+                    | crate::SSAOp::Cast { src, .. }
+                    | crate::SSAOp::CallRestore { src, .. },
+                ) => (graph.value_id_for_var(src)?, None),
+                crate::InstPayload::Phi { .. } => (*inst.inputs.first()?, None),
+                _ => return None,
+            };
+            let base_var = graph.value(base)?.var.clone();
+            let object = self.object_for_address_value(graph, &base_var, SpaceId::Ram);
+            if !matches!(
+                self.objects.get(&object).map(|fact| &fact.kind),
+                Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
+            ) {
+                return None;
+            }
+            let index = index.or_else(|| self.indexed_addresses.get(&base).copied())?;
+            self.indexed_addresses.insert(value_id, index);
+            if self
+                .interior_offsets
+                .get(&base)
+                .is_some_and(|offset| *offset != 0)
+                || self.displaced_indexed_addresses.contains(&base)
+            {
+                self.displaced_indexed_addresses.insert(value_id);
+            }
+            Some(object)
+        })();
+        self.resolving.remove(&value_id);
+        result
     }
 
     /// The operand of an indexed address that supplies the offset.
@@ -6815,8 +6970,8 @@ fn collect_stack_geometry_certificate(
         let removed = values
             .iter()
             .copied()
-            .filter(|value| {
-                graph.use_sites(*value).iter().any(|site| {
+            .filter_map(|value| {
+                let site = graph.use_sites(value).iter().find(|site| {
                     !frame_uses.contains(site)
                         && !return_control_uses.contains(site)
                         && !stack_address_uses.contains(site)
@@ -6831,13 +6986,19 @@ fn collect_stack_geometry_certificate(
                         && !geometry_outputs
                             .get(&site.inst)
                             .is_some_and(|output| values.contains(output))
-                })
+                })?;
+                Some((value, *site))
             })
             .collect::<Vec<_>>();
         if removed.is_empty() {
             break;
         }
-        for value in removed {
+        for (value, site) in removed {
+            r2il::refusal_evidence!(
+                "stack-geometry",
+                "{value:?} leaves the geometry: read at {site:?} by {:?}",
+                graph.inst(site.inst).map(|inst| &inst.payload)
+            );
             values.remove(&value);
         }
     }
@@ -6954,6 +7115,118 @@ fn accessed_object_storage(
 /// The gap from a frame object up to the next one the frame lays out above
 /// it, or to the entry stack pointer when it is the topmost: the extent of a
 /// buffer that only a callee ever fills.
+/// The frame positions an object is proven to start at.
+///
+/// A declared slot starts one; so does a direct access, an address that
+/// leaves the function as a value -- through a call, or stored into memory --
+/// a position the stack pointer itself takes, and the base of an indexed
+/// access unless that base points below the address it was displaced from.
+/// A position that is only ever displaced from is not one.
+fn evidenced_stack_roots(
+    facts: &DecompilePrepFacts,
+    declared_slots: &DeclaredStackSlots,
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    stack_pointer_carrier: Option<CanonicalStorageId>,
+) -> BTreeSet<StackAddressRoot> {
+    let mut roots = BTreeSet::new();
+    let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
+    let negative_displacement = |var: &SSAVar| {
+        let Some(inst) = graph
+            .value_id_for_var(var)
+            .and_then(|value| graph.def_inst(value))
+            .and_then(|inst| graph.inst(inst))
+        else {
+            return false;
+        };
+        match &inst.payload {
+            InstPayload::Op(SSAOp::IntAdd { a, b, .. }) => {
+                let delta = if exact_root(a).is_some() { b } else { a };
+                delta.constant_bits().is_some_and(|bits| (bits as i64) < 0)
+            }
+            InstPayload::Op(SSAOp::IntSub { b, .. }) => {
+                b.constant_bits().is_some_and(|bits| (bits as i64) > 0)
+            }
+            _ => false,
+        }
+    };
+    for block in function.blocks() {
+        for op in &block.ops {
+            match op {
+                SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
+                    if stack_pointer_carrier.is_some()
+                        && graph.canonical_storage_for_var(dst) == stack_pointer_carrier
+                        && let Some(root) = exact_root(dst)
+                    {
+                        roots.insert(root);
+                    }
+                    if facts.indexed_stack_address_root_of(dst).is_some()
+                        && matches!(op, SSAOp::IntAdd { .. })
+                    {
+                        for base in [a, b] {
+                            if let Some(root) = exact_root(base)
+                                && !negative_displacement(base)
+                            {
+                                roots.insert(root);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for slot in declared_slots.by_key.values() {
+        roots.insert(StackAddressRoot {
+            base: slot.base(),
+            offset: slot.offset(),
+        });
+    }
+    for block in function.blocks() {
+        for op in &block.ops {
+            let addr = match op {
+                SSAOp::Load { addr, space, .. }
+                | SSAOp::Store { addr, space, .. }
+                | SSAOp::LoadLinked { addr, space, .. }
+                | SSAOp::StoreConditional { addr, space, .. }
+                | SSAOp::AtomicCAS { addr, space, .. }
+                | SSAOp::LoadGuarded { addr, space, .. }
+                | SSAOp::StoreGuarded { addr, space, .. }
+                    if *space == SpaceId::Ram =>
+                {
+                    addr
+                }
+                _ => continue,
+            };
+            if let Some(root) = resolve_stack_root(Some(facts), addr) {
+                roots.insert(root);
+            }
+        }
+    }
+    for (var, root) in &facts.stack_address_roots {
+        let Some(value) = graph.value_id_for_var(var) else {
+            continue;
+        };
+        let escapes = graph.use_sites(value).iter().any(|site| {
+            graph
+                .inst(site.inst)
+                .is_some_and(|inst| match &inst.payload {
+                    InstPayload::Op(SSAOp::CallUse { .. }) => true,
+                    InstPayload::Op(
+                        SSAOp::Store { .. }
+                        | SSAOp::StoreConditional { .. }
+                        | SSAOp::StoreGuarded { .. },
+                    ) => site.input_idx != 0,
+                    _ => false,
+                })
+        });
+        if escapes {
+            roots.insert(*root);
+        }
+    }
+    roots
+}
+
 fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) -> Option<u32> {
     if offset >= 0 {
         return None;
@@ -7115,6 +7388,14 @@ fn stack_array_layout(
         .collect::<BTreeSet<_>>();
     if indexed_addresses.is_empty() {
         return StackArrayLayoutDisposition::NotIndexed;
+    }
+    // An index from a displaced base says how far from the displacement the
+    // element is, not how far into the object.
+    if indexed_addresses
+        .iter()
+        .any(|address| objects.indexed_base_is_displaced(*address))
+    {
+        return StackArrayLayoutDisposition::Refused(StackArrayLayoutRefusal::DisplacedIndexBase);
     }
 
     let mut element_width = None;
@@ -7813,8 +8094,17 @@ fn collect_prepared_function_certificates(
                     Some(StackArrayLayoutDisposition::Proven(_))
                 ) || exact_stack_slots.contains_key(&(base, offset))
                     || callee_stack_allocations.contains_key(object);
+                // An element access at a computed offset says how wide an
+                // element is, not how far the object reaches.
+                let indexed = structured.memory_accesses.values().any(|access| {
+                    access.object == *object && objects.address_is_indexed(access.address)
+                });
                 let storage = if declared {
                     None
+                } else if indexed {
+                    frame_gap_extent(objects, base, offset)
+                        .map(|extent| (extent, true))
+                        .or_else(|| accessed_object_storage(graph, structured, *object))
                 } else {
                     accessed_object_storage(graph, structured, *object)
                         // No access sizes it and nothing declares it: a buffer

@@ -109,6 +109,52 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -2. **An object's address is a term.** 777 of 787 with the gate at 54/54,
+     up from 775; the two stack-pointer-chain refusals
+     (`file_uncompress` `fcn_2cb0`, `generateMTFValues` `fcn_88a0`) render and
+     nothing was lost. `doc/adr-access-syntax.md` carries the design; in short,
+     the rewriter spells the exact base address of a declarable stack object as
+     `TermKind::ObjectAddress(o)`, the plan admits it as a frame constant beside
+     literals, one journal target records each spelled occurrence as a placement
+     read, and the call-argument replacement path
+     (`frame_object_address_replacement`, `EscapedStackAddress`, ~300 lines
+     across the plan, the journal, placement and lowering) is deleted.
+
+     Four things are known and not done:
+
+     * **`r2ssa` owns which stack objects are declarable now**
+       (`SsaArtifact::declarable_stack_object`, built on
+       `frame_managed_stack_object`): a frame-management slot is not a program
+       object and neither is one with no stated extent. The plan's construction
+       reads the frame half; its seal still re-derives it, which is the
+       project's construction/seal twin convention rather than duplication.
+       What is *not* covered is the role refusals
+       (`ParameterHomeWidthMismatch`, `UnclassifiedSourceRole`): an object with
+       a size whose role the plan refuses still gets a term, and if its address
+       is ever spelled as a value the function refuses. None does on this
+       corpus. The clean close is to move the whole disposition into `r2ssa`.
+     * **A frame position is an object only when something proves one starts
+       there** (`evidenced_stack_roots`): a declared slot, a direct access, an
+       address that leaves as a value, a position the stack pointer takes, or
+       the base of an indexed access that is not displaced below its origin.
+       Before this, the folded displacement in `buf + len - 3` minted a
+       one-byte object at `buf - 3` and stole the buffer's accesses.
+     * **An indexed root does not propagate through a subtraction.**
+       `indexed_stack_address_root_from_add` has no `IntSub` counterpart, so
+       `buf + i - 3` has no stack root at all and its store lands on
+       `EscapedUnknown`. In `file_uncompress` that leaves the 1032-byte buffer
+       sized by its one remaining byte access: `uint8_t stack_m1080;` with
+       `&stack_m1080 + RBX_1` written past it. The rendering is wrong C and no
+       obligation catches it. Fix the propagation, then re-check the
+       `DisplacedIndexBase` array-layout refusal this added.
+     * **`f7a0` still refuses**, now `RenderedValueRequired` on a bound
+       `ValueId(31)` with `UnobservedValueCellAtSeal`
+       (`observation_journal.rs:3782`). Its earlier
+       `ambiguous_observation_execution_order` is fixed: a destination that
+       dereferences an address expression now has that address ordered before
+       the store it serves (`direct_stack_assignment_observations` recurses
+       through `Deref`, `AddrOf` and non-assign `Binary`).
+
   -1. **Variadic arity: what the format-parameter unification left open.**
      A callsite now carries `SourceFormatParameterRule` for any callee whose
      prototype names `format` or whose body forwards a parameter as one, variadic

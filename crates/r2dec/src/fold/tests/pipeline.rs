@@ -1249,13 +1249,11 @@ mod tests {
             !rendered.contains("opaque_machine_base"),
             "the contextual use must not fall back to its opaque machine binding: {rendered}"
         );
-        // This fixture intentionally withholds an upstream frame-pointer role,
-        // so the opaque address value remains an ordinary binding.  The exact
-        // per-use stack-object projection must still render the access without
-        // reinterpreting that binding's spelling downstream.
+        // The address is the certified slot's own, so it is a constant of the
+        // frame and binds nothing, whatever its opaque machine base was called.
         assert!(matches!(
             names.require_value(address.binding().value()),
-            Ok(crate::binding_plan::PlannedValueSymbol::Bound(_))
+            Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
         ));
         assert_eq!(*ctx.observation_error.borrow(), None);
     }
@@ -3176,22 +3174,13 @@ mod tests {
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
-        let call = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, call_idx)
-            .expect("call instruction");
         let argument = prepared
             .callsite_certificate_for_op(block.addr, call_idx)
             .and_then(|certificate| certificate.argument_values.first())
             .copied()
             .expect("certified address argument");
-        let object = crate::binding_plan::certified_frame_object_call_argument(
-            &prepared,
-            call,
-            0,
-            argument,
-        )
-        .expect("argument must name its exact frame object");
+        let object = r2rewrite::exact_stack_object_address(&prepared, argument)
+            .expect("argument must name its exact frame object");
 
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
@@ -3243,7 +3232,7 @@ mod tests {
                 journal.borrow().placement_target(
                     crate::observation_journal::test_render_observation_id(index as u32)
                 ),
-                Some(crate::placement::PlacementObservationTarget::EscapedStackAddress {
+                Some(crate::placement::PlacementObservationTarget::ObjectAddress {
                     binding: observed,
                     ..
                 }) if names.plan().stack_object_disposition(object)
@@ -3255,7 +3244,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_frame_address_call_arg_keeps_the_plans_value_spelling() {
+    fn frame_address_with_a_value_reader_is_spelled_as_the_object_everywhere() {
         let arch = make_test_arch_x86_64();
         let mut entry = R2ILBlock::new(0x1800, 4);
         entry.push(R2ILOp::IntSub {
@@ -3272,10 +3261,9 @@ mod tests {
             addr: Varnode::register(0x10, 8),
             val: Varnode::constant(0, 8),
         });
-        // This second, non-address use makes the value ineligible for the
-        // frame-object replacement. The call must then use the ordinary bound
-        // value path rather than treating certification alone as permission
-        // to override the binding plan.
+        // A second, non-address reader. The address is a constant of the
+        // frame, so it is spelled as the object at this reader and at the
+        // call alike, and the value binds nothing.
         entry.push(R2ILOp::IntAdd {
             dst: Varnode::unique(0x28, 8),
             a: Varnode::register(0x10, 8),
@@ -3297,19 +3285,13 @@ mod tests {
             .iter()
             .position(|op| matches!(op, SSAOp::Call { .. }))
             .expect("call operation");
-        let call = prepared
-            .graph()
-            .inst_id_for_op_site(block.addr, call_idx)
-            .expect("call instruction");
         let argument = prepared
             .callsite_certificate_for_op(block.addr, call_idx)
             .and_then(|certificate| certificate.argument_values.first())
             .copied()
             .expect("certified address argument");
-        assert!(crate::binding_plan::certified_frame_object_call_argument(
-            &prepared, call, 0, argument,
-        )
-        .is_some());
+        let object = r2rewrite::exact_stack_object_address(&prepared, argument)
+            .expect("argument must name its exact frame object");
 
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
@@ -3324,8 +3306,12 @@ mod tests {
         let (_plan, names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         assert!(matches!(
             names.require_value(argument),
-            Ok(crate::binding_plan::PlannedValueSymbol::Bound(_))
+            Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
         ));
+        let stack_symbol = match names.require_stack(object) {
+            Ok(crate::binding_plan::PlannedStackSymbol::Bound(symbol)) => symbol,
+            other => panic!("frame object must have one program symbol: {other:?}"),
+        };
 
         enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
@@ -3338,14 +3324,15 @@ mod tests {
         let CExpr::Call { args, .. } = call_expr.unobserved() else {
             panic!("expected call expression: {call_expr:?}");
         };
-        let expected = ctx
-            .planned_value_expr(argument)
-            .expect("the bound value keeps its ordinary spelling");
-        let actual_value = match args[0].unobserved() {
+        let address = match args[0].unobserved() {
             CExpr::Cast { expr, .. } => expr.unobserved(),
             expr => expr,
         };
-        assert_eq!(actual_value, expected.unobserved());
+        assert!(matches!(
+            address,
+            CExpr::AddrOf(inner)
+                if matches!(inner.unobserved(), CExpr::Var(symbol) if *symbol == stack_symbol)
+        ));
         assert_eq!(*ctx.observation_error.borrow(), None);
     }
 

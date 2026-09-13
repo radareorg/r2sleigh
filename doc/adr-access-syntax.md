@@ -131,3 +131,35 @@ its spelling.
    gate 54).
 
 Each step keeps the gate at 54 of 54 and is measured by the census.
+
+## Addendum: an object's address is a term
+
+The spelling `&slot` was reachable from two positions only: a memory access,
+through `σ`, and a call argument, through a replacement path of its own
+(`frame_object_address_replacement` in the plan, `EscapedStackAddress` in the
+journal and in placement). Every other reader of a stack address -- a copy
+into a pointer variable, an index added to it, the address stored -- kept the
+value bound, and a bound `sp + k` drags the whole stack-pointer chain into a
+binding that the seal then demands as `RSP_0`. Six of the twelve local refusals
+were that shape (`RenderedValueRequired`, `file_uncompress`,
+`generateMTFValues`).
+
+The value is a constant of the frame. The rewriter now spells the exact base
+address of a certified stack object as `TermKind::ObjectAddress(o)`, at the
+leaf and at the root alike (`exact_stack_object_address`), the way a constant
+leaf is a `Literal`. It has no leaves, so it is duplicable by construction; the
+plan admits it as a frame constant beside literals (`frame_constant`), the
+renderer spells it in every position (`materialize_term`), one journal target
+(`ObjectAddress`) records each spelled occurrence as the placement read it is,
+and the ledger counts repeated occurrences as repeated spellings, as it does
+for literals. The call-argument path is deleted.
+
+Two consequences in the object model. A frame position is an object only when
+something proves one starts there -- a declared slot, a direct access, an
+address that leaves as a value, a position the stack pointer takes, or the base
+of an indexed access that is not displaced below its origin -- so the folded
+displacement in `buf + len - 3` no longer mints a one-byte object at `buf - 3`;
+it resolves to `buf` with an interior offset, and an indexed address from a
+displaced base refuses the array layout (`DisplacedIndexBase`). And an object
+whose accesses are indexed is sized by its frame gap, since an element access
+says how wide an element is, not how far the object reaches.

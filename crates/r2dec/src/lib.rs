@@ -1902,6 +1902,10 @@ pub enum PlacementAuditRefusal {
         value_id: u32,
         instruction_id: u32,
     },
+    ObjectAddressReadBeforeAssignment {
+        binding_index: usize,
+        value_id: u32,
+    },
     StackAccessReadBeforeAssignment {
         binding_index: usize,
         instruction_id: u32,
@@ -1979,6 +1983,9 @@ impl PlacementAuditRefusal {
             Self::ReadBeforeAssignment { .. } => "read_before_assignment",
             Self::CertifiedValueReadBeforeAssignment { .. } => {
                 "certified_value_read_before_assignment"
+            }
+            Self::ObjectAddressReadBeforeAssignment { .. } => {
+                "object_address_read_before_assignment"
             }
             Self::StackAccessReadBeforeAssignment { .. } => "stack_access_read_before_assignment",
             Self::UnprovableExecutionOrder { .. } => "unprovable_execution_order",
@@ -3036,7 +3043,38 @@ impl Decompiler {
         crate::stage_timing::mark("prepare");
         let binding_plan =
             match crate::binding_plan::BindingPlan::build_shadow(input.source_owned_facts()) {
-                Ok(plan) => std::rc::Rc::new(plan),
+                Ok(plan) => {
+                    // Every value's disposition, beside the SSA dump it indexes.
+                    if std::env::var_os("R2SLEIGH_DUMP_SSA").is_some() {
+                        let canonical = plan.canonical();
+                        for value in &prepared.graph().values {
+                            let term = canonical.value(value.id).map(|rewrite| {
+                                r2rewrite::spell_term(canonical.arena(), rewrite.canonical)
+                            });
+                            eprintln!(
+                                "PLANVALUE {:?} {} {:?} term={}",
+                                value.id,
+                                value.var,
+                                plan.disposition(value.id),
+                                term.unwrap_or_default()
+                            );
+                        }
+                        for (object, fact) in &prepared.objects().objects {
+                            eprintln!(
+                                "PLANOBJECT {:?} {:?} {:?} slot={:?}",
+                                object,
+                                fact.kind,
+                                plan.stack_object_disposition(*object),
+                                prepared.certificates().stack_slots.get(object).map(|slot| (
+                                    slot.offset,
+                                    slot.size,
+                                    slot.byte_array
+                                ))
+                            );
+                        }
+                    }
+                    std::rc::Rc::new(plan)
+                }
                 Err(error) => {
                     debug_log_render_contract_error(prepared, "binding-plan", &error);
                     // The plan's own error says which value or entity it could

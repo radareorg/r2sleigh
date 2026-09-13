@@ -491,22 +491,34 @@ fn distinct_reader_count(use_sites: &[r2ssa::UseSite], boundary_readers: &[InstI
             .count()
 }
 
-/// The frame objects whose address leaves this function as a call argument.
+/// The frame objects whose address leaves this function as a value.
 ///
 /// An out-parameter is the case: the callee writes through the pointer, so the
 /// object is defined by a statement this function does not contain. Reading it
-/// afterwards is ordinary C and needs no assignment here.
+/// afterwards is ordinary C and needs no assignment here. A read that is the
+/// address of a memory access, or the frame geometry itself, is not an escape.
 pub(super) fn frame_objects_with_escaped_address(
     source: &r2ssa::SsaArtifact,
+    projection: &r2ssa::MachineProjection,
 ) -> BTreeSet<r2ssa::ObjectId> {
+    let graph = source.graph();
+    let geometry = &source.certificates().stack_geometry.insts;
+    let boundary_readers = certified_value_readers(source);
     let mut escaped = BTreeSet::new();
-    for certificate in source.certificates().callsites.values() {
-        for (index, value) in certificate.argument_values.iter().copied().enumerate() {
-            if let Some(object) =
-                super::certified_frame_object_call_argument(source, certificate.at, index, value)
-            {
-                escaped.insert(object);
-            }
+    for value in &graph.values {
+        let Some(object) = r2rewrite::exact_stack_object_address(source, value.id) else {
+            continue;
+        };
+        let escapes = boundary_readers.contains_key(&value.id)
+            || graph.use_sites(value.id).iter().any(|site| {
+                !geometry.contains(&site.inst)
+                    && !matches!(
+                        projection.use_disposition(*site),
+                        Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
+                    )
+            });
+        if escapes {
+            escaped.insert(object);
         }
     }
     escaped
@@ -969,7 +981,7 @@ pub(super) fn rewrite_inlining_partition(
         .filter(|component| component.members.len() == 1)
         .filter_map(|component| component.members.first().copied())
         .collect::<BTreeSet<_>>();
-    let admitted = duplicable_bound_literals(projection, source_owned, &alone);
+    let admitted = duplicable_bound_constants(projection, source_owned, &seed_canonical, &alone);
     let inlinable = if admitted.is_empty() {
         conservative
     } else {
@@ -1033,16 +1045,17 @@ pub(super) fn term_absorbs_producer(
     inlinable.contains(&query.value)
 }
 
-/// Literals held in a machine location that are alone in their object.
+/// Frame constants held in a machine location that are alone in their object.
 ///
 /// A literal in a lowering temporary is admitted by the gate in
 /// `inlinable_core` without asking anything else, because the lifter's own
 /// scratch is never coalesced. This is the rest: a literal the machine keeps
 /// in a register or a memory cell, which may be an object's only write, and
 /// is safe to spell at its readers exactly when nothing shares that object.
-fn duplicable_bound_literals(
+fn duplicable_bound_constants(
     projection: &r2ssa::MachineProjection,
     source_owned: &SourceOwnedFunctionFacts,
+    canonical: &r2rewrite::CanonicalRoots,
     alone: &BTreeSet<ValueId>,
 ) -> BTreeSet<ValueId> {
     let graph = source_owned.source().graph();
@@ -1050,94 +1063,33 @@ fn duplicable_bound_literals(
     for entity in projection.entities() {
         expr_by_value.insert(entity.output().value(), entity.root());
     }
-    let literal_candidates = graph
+    graph
         .values
         .iter()
         .filter(|value| alone.contains(&value.id))
-        .filter(|value| {
-            expr_by_value
-                .get(&value.id)
-                .copied()
-                .is_some_and(|root| r2rewrite::machine_expr_is_literal(projection, root))
-        })
+        .filter(|value| frame_constant(projection, canonical, &expr_by_value, value.id))
         .map(|value| value.id)
-        .collect::<BTreeSet<_>>();
-    literal_candidates.iter().copied().collect()
+        .collect()
 }
 
-/// The frame object base whose exact call-boundary readers may replace this value.
-///
-/// This is deliberately narrower than a generic multi-reader exception.  The
-/// graph readers must all be certified load/store address cells for the same
-/// object, and every graphless boundary reader must contain the value in an
-/// exact call-argument cell. Repeating a pure frame address across calls does
-/// not repeat a program effect; each occurrence carries the same value/use/write
-/// classification, while the effect ledger still rejects any duplicated live
-/// obligation.
-fn frame_object_address_replacement(
-    source: &r2ssa::SsaArtifact,
+/// A value that is the same at every reader and costs nothing to spell there:
+/// a literal, or the address of a frame object.
+fn frame_constant(
     projection: &r2ssa::MachineProjection,
+    canonical: &r2rewrite::CanonicalRoots,
+    expr_by_value: &std::collections::BTreeMap<ValueId, r2ssa::MachineExprId>,
     value: ValueId,
-    use_sites: &[UseSite],
-    boundary_readers: &[InstId],
-) -> Option<r2ssa::ObjectId> {
-    if boundary_readers.is_empty() {
-        return None;
-    }
-    let mut object = None;
-    for call in boundary_readers {
-        let call_site = source.certificates().callsites_by_inst.get(call)?;
-        let certificate = source.certificates().callsites.get(call_site)?;
-        let mut matched = false;
-        for (argument_index, argument) in certificate.argument_values.iter().enumerate() {
-            if *argument != value {
-                continue;
-            }
-            let candidate =
-                super::certified_frame_object_call_argument(source, *call, argument_index, value)?;
-            if object.is_some_and(|object| object != candidate) {
-                return None;
-            }
-            object = Some(candidate);
-            matched = true;
-        }
-        if !matched {
-            return None;
-        }
-    }
-    let object = object?;
-    use_sites
-        .iter()
-        // A call boundary's read of the carrier is the argument pass itself,
-        // already accounted above. It is not a memory access and says nothing
-        // about whether the value is this object's address.
-        .filter(|site| {
-            !matches!(
-                source.graph().inst(site.inst).map(|inst| &inst.payload),
-                Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. }))
+) -> bool {
+    expr_by_value
+        .get(&value)
+        .copied()
+        .is_some_and(|root| r2rewrite::machine_expr_is_literal(projection, root))
+        || canonical.value(value).is_some_and(|canonical_value| {
+            matches!(
+                canonical.arena().term(canonical_value.canonical).kind,
+                r2rewrite::TermKind::ObjectAddress(_)
             )
         })
-        .all(|site| {
-            let Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) =
-                projection.use_disposition(*site)
-            else {
-                return false;
-            };
-            let Some(access) = address.memory_access() else {
-                return false;
-            };
-            source
-                .certificates()
-                .memory_accesses
-                .get(&access)
-                .is_some_and(|memory| {
-                    memory.access == access
-                        && memory.address == value
-                        && memory.object == object
-                        && source.objects().object_for_value(value, memory.space) == Some(object)
-                })
-        })
-        .then_some(object)
 }
 
 fn inlinable_core(
@@ -1274,20 +1226,10 @@ fn inlinable_core(
         // lifter's own scratch, which is the case this can decide without the
         // partition. Widening it needs the two-pass structure described in
         // the handoff, and is a design question rather than a bug.
-        let literal_only = expr_by_value
-            .get(&value.id)
-            .copied()
-            .is_some_and(|root| r2rewrite::machine_expr_is_literal(projection, root))
+        let literal_only = frame_constant(projection, canonical, &expr_by_value, value.id)
             && (value.canonical_storage.is_none_or(|storage| {
                 matches!(storage.space, r2ssa::CanonicalStorageSpace::Unique)
             }) || admitted.contains(&value.id));
-        let frame_address_replacement = frame_object_address_replacement(
-            source,
-            projection,
-            value.id,
-            &use_sites,
-            boundary_readers,
-        );
         let root_kind = expr_by_value
             .get(&value.id)
             .and_then(|root| projection.expr(*root))
@@ -1297,7 +1239,7 @@ fn inlinable_core(
         // those readers made values live across later object rewrites look
         // single-use and produced wrong hashes. Only source-certified dead-phi
         // edges on lowering temporaries are absent above.
-        if !literal_only && frame_address_replacement.is_none() && reader_count != 1 {
+        if !literal_only && reader_count != 1 {
             rejected(&format!(
                 "{reader_count} readers ({} of them certified boundary reads), of which {} sit in a \
                  certificate-elided instruction; root {root_kind}; sites [{}]",
@@ -1388,13 +1330,6 @@ fn inlinable_core(
                 .any(|inst| elided_reads.contains(inst))
         {
             rejected("a reader sits in a certificate-elided instruction");
-            continue;
-        }
-        if frame_address_replacement.is_some() {
-            // The memory-address cells remain owned by their load/store
-            // renderings.  The sole call-boundary replacement owns the
-            // producer expression and spells the canonical object's address.
-            inlinable.insert(value.id);
             continue;
         }
         if literal_only {
@@ -1607,6 +1542,7 @@ fn term_renders_inline(kind: &r2rewrite::TermKind) -> bool {
             | Kind::Select { .. }
             | Kind::Shift { .. }
             | Kind::Flag { .. }
+            | Kind::ObjectAddress(_)
     )
 }
 

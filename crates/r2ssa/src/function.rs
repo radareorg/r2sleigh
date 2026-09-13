@@ -1149,6 +1149,30 @@ impl SsaArtifact {
         &self.facts.control_domains
     }
 
+    /// Whether frame management owns this stack object: the slot a callee-saved
+    /// carrier round-trips through, or the one a return control reads from.
+    pub fn frame_managed_stack_object(&self, object: crate::ObjectId) -> bool {
+        let certificates = self.certificates();
+        certificates.stack_frame_round_trips.contains_key(&object)
+            || certificates
+                .machine_return_controls
+                .values()
+                .any(|certificate| certificate.claimed_stack_object() == Some(object))
+    }
+
+    /// Whether this stack object is one the rendering can declare and name.
+    ///
+    /// A frame-management slot is not a program object, and neither is one
+    /// whose extent nothing states.
+    pub fn declarable_stack_object(&self, object: crate::ObjectId) -> bool {
+        !self.frame_managed_stack_object(object)
+            && self
+                .certificates()
+                .stack_slots
+                .get(&object)
+                .is_some_and(|slot| slot.size.is_some_and(|size| size > 0))
+    }
+
     pub fn certificates(&self) -> &crate::semantic::PreparedFunctionCertificates {
         &self.facts.certificates
     }

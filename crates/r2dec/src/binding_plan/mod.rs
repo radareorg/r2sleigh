@@ -296,67 +296,6 @@ pub(crate) fn certified_boundary_read(
     certified_boundary_read_values(source, at).contains(&value)
 }
 
-/// The exact frame object whose base address one certified call argument passes.
-///
-/// Call arguments are boundary reads rather than graph uses, while object
-/// identity belongs to the source-owned object model. Joining those two facts
-/// here keeps the renderer and final placement audit on one predicate. An
-/// indexed address names storage inside the object, not the object's base, and
-/// therefore cannot license the `&object`/array-decay spelling.
-pub(crate) fn certified_frame_object_call_argument(
-    source: &r2ssa::SsaArtifact,
-    at: InstId,
-    argument_index: usize,
-    value: ValueId,
-) -> Option<r2ssa::ObjectId> {
-    let Some(certificate) = certified_call_site(source, at) else {
-        // Without a call certificate no argument of this site can name a frame
-        // object, and an out-parameter's escape becomes invisible.
-        r2il::refusal_evidence!(
-            "call-argument-frame-object",
-            "call {at:?} argument {argument_index} value {value:?}: the site has no call certificate"
-        );
-        return None;
-    };
-    let listed = certificate.argument_values.get(argument_index).copied() == Some(value);
-    let certified = certificate
-        .argument_certificates
-        .iter()
-        .any(|argument| argument.index == argument_index && argument.value == value);
-    let indexed = source.objects().address_is_indexed(value);
-    let object = source.objects().object_for_value(value, r2il::SpaceId::Ram);
-    let kind = object.and_then(|object| {
-        source
-            .objects()
-            .object(object)
-            .map(|object| object.kind.clone())
-    });
-    let frame = matches!(
-        kind,
-        Some(r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. })
-    );
-    if !(listed && certified && !indexed && frame) {
-        r2il::refusal_evidence!(
-            "call-argument-frame-object",
-            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?} stack_root={:?} def={:?}",
-            source.graph().value(value).and_then(|value| source
-                .function()
-                .decompile_prep_facts()
-                .and_then(|facts| facts.stack_address_roots.get(&value.var))),
-            source
-                .graph()
-                .def_inst(value)
-                .and_then(|inst| source.graph().inst(inst))
-                .map(|inst| format!("{:?}", inst.payload)
-                    .chars()
-                    .take(220)
-                    .collect::<String>())
-        );
-        return None;
-    }
-    object
-}
-
 /// Whether affine address provenance certifies that one structured memory
 /// occurrence reads `value` as its parameter base or scalar index.
 ///
@@ -987,11 +926,10 @@ pub(crate) enum PlacementRead {
     /// declaration defines and which no per-element proof can be built for --
     /// the write that would answer for it is at an offset nobody knows.
     IndexedStackAccess(r2ssa::StructuredAccessId),
-    /// The base address of this frame object is passed through a certified
-    /// call boundary. It is a placement occurrence, because the declaration
-    /// must dominate the call, but it does not read the object's contents.
-    EscapedStackAddress {
-        call: InstId,
+    /// The base address of this frame object is spelled as a value. It is a
+    /// placement occurrence, because the declaration must dominate it, but it
+    /// does not read the object's contents.
+    ObjectAddress {
         value: ValueId,
     },
 }

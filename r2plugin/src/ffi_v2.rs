@@ -2272,6 +2272,16 @@ fn placement_refusal_json(refusal: r2engine::PlacementAuditRefusal) -> serde_jso
                 serde_json::json!(instruction_id),
             );
         }
+        Refusal::ObjectAddressReadBeforeAssignment {
+            binding_index,
+            value_id,
+        } => {
+            cause.insert(
+                "binding_index".to_string(),
+                serde_json::json!(binding_index),
+            );
+            cause.insert("value_id".to_string(), serde_json::json!(value_id));
+        }
         Refusal::StackAccessReadBeforeAssignment {
             binding_index,
             instruction_id,
@@ -4559,6 +4569,10 @@ mod tests {
                 binding_index: 27,
                 value_id: 28,
                 instruction_id: 29,
+            },
+            Refusal::ObjectAddressReadBeforeAssignment {
+                binding_index: 27,
+                value_id: 28,
             },
             Refusal::StackAccessReadBeforeAssignment {
                 binding_index: 28,

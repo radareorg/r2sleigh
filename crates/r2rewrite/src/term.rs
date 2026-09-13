@@ -457,6 +457,41 @@ impl TermArena {
 
     /// Every base-arena node this term reads, each once, in first-visit order.
     /// Covers both `Leaf` and `Opaque` terms.
+    /// One line per term, for a dump: the kind and its children, recursively.
+    pub fn spell(&self, root: TermId) -> String {
+        let term = self.term(root);
+        let children = term
+            .kind
+            .children()
+            .into_iter()
+            .map(|child| self.spell(child))
+            .collect::<Vec<_>>();
+        let kind = format!("{:?}", term.kind);
+        let name = kind.split(['(', ' ']).next().unwrap_or("?");
+        match term.kind {
+            TermKind::Leaf(expr) | TermKind::Opaque(expr) => format!("{name}({expr:?})"),
+            TermKind::Literal(bits) => format!("{}", bits.bits()),
+            TermKind::ObjectAddress(object) => format!("&{object:?}"),
+            _ => format!("{name}({})", children.join(", ")),
+        }
+    }
+
+    /// Whether `object`'s address is spelled anywhere inside `root`.
+    pub fn names_object_address(&self, root: TermId, object: ObjectId) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match self.term(id).kind {
+                TermKind::ObjectAddress(named) if named == object => return true,
+                kind => stack.extend(kind.children()),
+            }
+        }
+        false
+    }
+
     pub fn leaves(&self, root: TermId) -> Vec<MachineExprId> {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();

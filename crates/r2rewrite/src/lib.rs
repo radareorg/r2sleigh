@@ -23,7 +23,8 @@ pub use driver::{
 pub use eval::{LeafRef, eval, mask, signed};
 pub use import::{
     COPY_ELIDE, ExpansionPolicy, ExpansionQuery, Import, ImportedAccess, ImportedValue,
-    default_expansion_policy, import, import_with, machine_expr_is_literal, term_is_duplicable,
+    OBJECT_ADDRESS, default_expansion_policy, exact_stack_object_address, import, import_with,
+    machine_expr_is_literal, term_is_duplicable,
 };
 pub use rules::{
     DEFAULT_PROOF_WIDTHS, Measure, MeasureVector, RULES, Rule, RuleGroup, RuleId, measure,
@@ -32,3 +33,8 @@ pub use term::{
     MAX_TERM_WIDTH_BITS, ObjectPlacement, PointerWalk, Term, TermArena, TermId, TermKind,
 };
 pub use typed::{CValue, RenderTypes, TypedBoundaries, c_type_of, promoted, typed_boundaries};
+
+/// One line spelling of a term for a dump.
+pub fn spell_term(arena: &TermArena, root: TermId) -> String {
+    arena.spell(root)
+}
