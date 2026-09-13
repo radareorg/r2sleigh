@@ -50,8 +50,8 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                 "├─────────────────────────────────────────────────┤"
             );
 
-            let ops_to_show = std::cmp::min(5, block.ops.len());
-            for op in block.ops.iter().take(ops_to_show) {
+            let ops_to_show = std::cmp::min(5, block.ops().len());
+            for op in block.ops().iter().take(ops_to_show) {
                 let op_str = format_r2il_op_short(op, disasm);
                 let truncated = if op_str.len() > 45 {
                     format!("{}...", &op_str[..42])
@@ -60,11 +60,11 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                 };
                 let _ = writeln!(output, "│ {:<47} │", truncated);
             }
-            if block.ops.len() > ops_to_show {
+            if block.ops().len() > ops_to_show {
                 let _ = writeln!(
                     output,
                     "│ ... ({} more ops)                               │",
-                    block.ops.len() - ops_to_show
+                    block.ops().len() - ops_to_show
                 );
             }
 
@@ -258,7 +258,7 @@ pub(crate) fn r2cfg_function_json(
             json_blocks.push(CFGBlockJson {
                 addr,
                 size: block.size,
-                num_ops: block.ops.len(),
+                num_ops: block.ops().len(),
                 terminator: term_str.to_string(),
                 successors: cfg.successors(addr),
             });

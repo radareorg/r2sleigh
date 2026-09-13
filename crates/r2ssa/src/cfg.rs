@@ -21,7 +21,16 @@ pub struct BasicBlock {
     /// The size of this block in bytes.
     pub size: u32,
     /// The r2il operations in this block.
-    pub ops: Vec<R2ILOp>,
+    ///
+    /// These belong to SSA construction: the defs collection, the merge
+    /// placement, the liveness walk and the renamer read them, and once the
+    /// renamer has run what each operation does is what the function's own
+    /// `SSABlock::ops` says. The graph is asked for its edges and terminators
+    /// for the rest of a decompile and never for these again, so a prepared
+    /// function releases them -- a copy of the whole lifted body, fourteen
+    /// megabytes on a five-hundred-block function, otherwise held for as long
+    /// as the function is.
+    pub(crate) ops: Vec<R2ILOp>,
     /// The type of terminator for this block.
     pub terminator: BlockTerminator,
     /// Original switch metadata, retained so certification can validate every
@@ -505,7 +514,26 @@ pub enum CFGEdge {
     Back,
 }
 
+impl BasicBlock {
+    /// The lifted operations this block was built from, while it still holds
+    /// them. A prepared function releases them once its SSA form exists.
+    pub fn ops(&self) -> &[R2ILOp] {
+        &self.ops
+    }
+}
+
 impl CFG {
+    /// Drop the lifted operations every block was built from.
+    ///
+    /// Called once, where SSA construction finishes. See `BasicBlock::ops`.
+    pub(crate) fn release_operations(&mut self) {
+        for index in self.graph.node_indices() {
+            let block = &mut self.graph[index];
+            block.ops = Vec::new();
+            block.ops.shrink_to_fit();
+        }
+    }
+
     fn edge_sort_rank(edge: CFGEdge) -> u8 {
         match edge {
             CFGEdge::True => 0,

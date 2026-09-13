@@ -3584,6 +3584,8 @@ impl SSAFunction {
             ssa_blocks.push(ssa_block);
         }
 
+        let mut cfg = cfg;
+        cfg.release_operations();
         let mut function = Self {
             call_preserved_carriers: None,
             stack_pointer_carrier: None,
