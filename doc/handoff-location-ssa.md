@@ -155,7 +155,32 @@ learn.
      measured on the way here and both are recorded above as failures. What is
      done towards it: the name is behind an accessor and cannot be set after
      construction, so the identity cannot drift from what is derived from it,
-     and `canonical_value_roots` no longer needs an ordered key.
+     the variable is down to forty bytes, and `canonical_value_roots` no longer
+     needs an ordered key.
+
+     Three more campaigns are measured and waiting, each too large to start
+     without finishing:
+
+     *The operation's four widest variants.* `SSAOp` is 176 bytes because
+     `BlockTransfer`, `AtomicCAS`, `Insert` and `Select` name four variables
+     where nearly every other operation names three. Boxing those four payloads
+     takes it to about 128 and the graph instruction from 248 to 200, which is
+     3.2 MB across the function's operations, the graph's copy of them and
+     normalization's copy. About eighty match sites, and an automated rewrite
+     of them is not safe: `R2ILOp` has variants of the same names, and a script
+     that rewrote by name confused the two.
+
+     *The graph's copy of the operations.* `InstPayload::Op` holds the whole
+     `SSAOp` inline, which is 7.4 MB of a thirty-thousand-instruction function
+     and is the same operation the function's own block already holds. The
+     graph could name the site instead and read it back, but 261 places match
+     on `InstPayload::`, so the borrow has to be arranged before the change is
+     worth starting.
+
+     *The rendered tree.* `structure_walk` retains 24 MB and makes 1.1 million
+     allocations, which is one per node of a tree of about four hundred
+     thousand individually boxed nodes. An arena with `u32` identifiers is the
+     answer and it reaches every consumer of `CStmt` and `CExpr` in `r2dec`.
 
   -8. **What the whole command costs, and the three quadratics inside it.**
      With the bytes named, the same instrument was pointed at the clock. One
