@@ -95,7 +95,14 @@ pub struct StackAddressRoot {
 /// Decompiler-prep analysis facts derived from SSA.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
-    pub canonical_value_roots: BTreeMap<SSAVar, SSAVar>,
+    /// The canonical root of each value, as an unordered index.
+    ///
+    /// Nothing iterates it -- the fingerprint sorts what it takes -- and the
+    /// root propagation asks it three and a half million times for one
+    /// five-hundred-block function, so every question was a walk down an
+    /// ordered tree comparing variable names. Hashing the variable once and
+    /// probing is the same answer for a fraction of the comparisons.
+    pub canonical_value_roots: HashMap<SSAVar, SSAVar>,
     pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
     /// dataflow. Unlike `stack_address_roots`, these roots are never rebased
@@ -2144,7 +2151,7 @@ impl TrustedSsaArtifact {
 /// it says so rather than returning whichever node the walk stopped at as if it
 /// were the root.
 pub(crate) fn canonical_root_in<'a>(
-    roots: &'a BTreeMap<SSAVar, SSAVar>,
+    roots: &'a HashMap<SSAVar, SSAVar>,
     var: &'a SSAVar,
 ) -> &'a SSAVar {
     let mut current = var;
@@ -5580,11 +5587,11 @@ fn mask_const_to_width(value: u64, width: u32) -> u64 {
     }
 }
 
-fn canonicalize_value_root(root: &SSAVar, roots: &BTreeMap<SSAVar, SSAVar>) -> SSAVar {
+fn canonicalize_value_root(root: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> SSAVar {
     canonical_root_in(roots, root).clone()
 }
 
-fn ensure_value_root_identity(roots: &mut BTreeMap<SSAVar, SSAVar>, var: SSAVar) -> bool {
+fn ensure_value_root_identity(roots: &mut HashMap<SSAVar, SSAVar>, var: SSAVar) -> bool {
     if roots.contains_key(&var) {
         return false;
     }
@@ -5592,7 +5599,7 @@ fn ensure_value_root_identity(roots: &mut BTreeMap<SSAVar, SSAVar>, var: SSAVar)
     true
 }
 
-fn insert_canonical_root(roots: &mut BTreeMap<SSAVar, SSAVar>, dst: SSAVar, root: SSAVar) -> bool {
+fn insert_canonical_root(roots: &mut HashMap<SSAVar, SSAVar>, dst: SSAVar, root: SSAVar) -> bool {
     let root = canonicalize_value_root(&root, roots);
     let changed = !matches!(roots.get(&dst), Some(existing) if *existing == root);
     roots.insert(dst.clone(), root.clone());
@@ -5609,25 +5616,29 @@ fn common_root(values: &[SSAVar]) -> Option<SSAVar> {
     }
 }
 
-fn resolve_value_root(var: &SSAVar, roots: &BTreeMap<SSAVar, SSAVar>) -> SSAVar {
+fn resolve_value_root(var: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> SSAVar {
     canonicalize_value_root(var, roots)
 }
 
 fn resolve_stack_root(
     var: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
-    let resolved = resolve_value_root(var, roots);
-    stack_roots
-        .get(var)
-        .copied()
-        .or_else(|| stack_roots.get(&resolved).copied())
+    // The variable's own answer first. Resolving its canonical root before
+    // asking cost a walk and a copy of the root's name on every call, and the
+    // root propagation makes three and a half million of them for one
+    // five-hundred-block function; the root is only needed when the variable
+    // itself has no stack root recorded.
+    if let Some(root) = stack_roots.get(var).copied() {
+        return Some(root);
+    }
+    stack_roots.get(canonical_root_in(roots, var)).copied()
 }
 
 fn common_stack_root(
     sources: &[(u64, SSAVar)],
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     let mut iter = sources.iter();
@@ -5642,7 +5653,7 @@ fn common_stack_root(
 
 fn stack_root_from_operand(
     var: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     resolve_stack_root(var, roots, stack_roots)
@@ -5651,22 +5662,23 @@ fn stack_root_from_operand(
 fn stack_address_root_from_add(
     a: &SSAVar,
     b: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
-    if let (Some(base), Some(delta)) = (
-        stack_root_from_operand(a, roots, stack_roots),
-        signed_stack_delta_through_roots(b, roots),
-    ) {
+    // One side at a time: an operand with no stack root is the ordinary case,
+    // and asking for the other side's displacement first cost a root walk for
+    // every sum in the function.
+    if let Some(base) = stack_root_from_operand(a, roots, stack_roots)
+        && let Some(delta) = signed_stack_delta_through_roots(b, roots)
+    {
         return Some(StackAddressRoot {
             base: base.base,
             offset: base.offset.checked_add(delta)?,
         });
     }
-    if let (Some(base), Some(delta)) = (
-        stack_root_from_operand(b, roots, stack_roots),
-        signed_stack_delta_through_roots(a, roots),
-    ) {
+    if let Some(base) = stack_root_from_operand(b, roots, stack_roots)
+        && let Some(delta) = signed_stack_delta_through_roots(a, roots)
+    {
         return Some(StackAddressRoot {
             base: base.base,
             offset: base.offset.checked_add(delta)?,
@@ -5686,7 +5698,7 @@ fn stack_address_root_from_add(
 fn indexed_stack_address_root_from_add(
     a: &SSAVar,
     b: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
     indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
@@ -5719,7 +5731,7 @@ fn indexed_stack_address_root_from_add(
 fn indexed_stack_address_root_from_sub(
     a: &SSAVar,
     b: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     let base = stack_root_from_operand(a, roots, indexed_roots)?;
@@ -5731,7 +5743,7 @@ fn indexed_stack_address_root_from_sub(
 fn stack_address_root_from_sub(
     a: &SSAVar,
     b: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
+    roots: &HashMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     let base = stack_root_from_operand(a, roots, stack_roots)?;
@@ -5750,12 +5762,12 @@ fn stack_address_root_from_sub(
 /// left every frame pointer established that way without a stack root, and with
 /// it every address derived from the frame pointer -- which is most of a
 /// non-leaf function's locals.
-fn signed_stack_delta_through_roots(var: &SSAVar, roots: &BTreeMap<SSAVar, SSAVar>) -> Option<i64> {
+fn signed_stack_delta_through_roots(var: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> Option<i64> {
     if let Some(delta) = signed_stack_delta(var) {
         return Some(delta);
     }
-    let root = resolve_value_root(var, roots);
-    (root != *var).then(|| signed_stack_delta(&root)).flatten()
+    let root = canonical_root_in(roots, var);
+    (root != var).then(|| signed_stack_delta(root)).flatten()
 }
 
 fn signed_stack_delta(var: &SSAVar) -> Option<i64> {
@@ -6259,7 +6271,7 @@ mod tests {
                 offset: -0x70,
             },
         );
-        let mut roots = BTreeMap::new();
+        let mut roots = HashMap::new();
         assert_eq!(
             stack_address_root_from_add(&sp, &displacement, &roots, &stack_roots,),
             None,
