@@ -109,6 +109,43 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -3. **The proof sweep cost more than radare2's whole analysis and produced
+     nothing, and it now runs only under `aaaa`.** Measured on bzip2 -O2, 114
+     functions, best of repeated runs:
+
+         depth   proofs   wall      peak
+         aa           0   0.70 s    78 MB
+         aaa          0   0.90 s    86 MB
+         aaaa        51   10.96 s   580 MB
+
+     Before the gate, `aa` alone cost 10.74 s and 579 MB against radare2's own
+     0.62 s and 26 MB. The plugin made the default analysis of a 331 KB binary
+     seventeen times slower and twenty-four times larger, and nothing had asked
+     it to decompile anything.
+
+     The cause was one operator. `proof_eligible` read
+     `post_mode >= FULL || sleigh_function_may_prove(fcn)`, so the mode was
+     consulted and then bypassed: at any mode, a function with a switch or an
+     unresolved block exit was proved anyway. It is now `&&`, so aggressive
+     analysis asks and nothing shallower pays, and even at `aaaa` only the
+     functions that need proving are proved, 51 rather than 114.
+
+     Worth knowing before anyone widens it again. The yield was measured across
+     four binaries before the change: 237 proofs, **zero** call targets, and two
+     unreachable-block comments each. Whatever the sweep is for, it is not
+     currently resolving indirect calls, and the corpus and the gate are
+     unchanged without it, so its output was not reaching our own renderings
+     either. The eight plan fields the wire carries for this hook are still
+     unread on the C side apart from `mode`, `taint_enabled`,
+     `taint_focus_only` and `post_budget_us`.
+
+     The remaining cost is per function, not per program. One capture and SSA
+     preparation of bzip2's largest function holds 73.5 MB at roughly 2.4 KB
+     per instruction, which is why a 114-function binary costs more than a
+     169-function one. That is the density figure the representation work in
+     item -4 is aimed at.
+
+
    0. **The review of the cap work, answered in full.** Eight findings; all
       eight are fixed, and two of them changed what the bound is.
 

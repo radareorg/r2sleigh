@@ -4786,12 +4786,13 @@ static bool sleigh_post_analysis_inner(RAnal *anal) {
 		if (!fcn) {
 			continue;
 		}
-		/* Proofs run for every function, not just the ones taint looks at.
-		 * They are what the analysis pass is here to contribute, and the work
-		 * is the engine's rather than ours. */
+		/* Aggressive analysis asked for this; nothing shallower did. Testing
+		 * the mode beside the per-function gate rather than around it let `aa`
+		 * prove 49 of bzip2's 114 functions and hold 550 MB, and 237 proofs
+		 * over four binaries found no call target at all. */
 		SleighArtifactPlan proof_plan;
 		const bool proof_eligible = post_mode >= SLEIGH_MODE_FULL
-			|| sleigh_function_may_prove (anal, fcn);
+			&& sleigh_function_may_prove (anal, fcn);
 		if (proof_eligible && sleigh_artifact_plan_init (&proof_plan, anal, fcn, "proof")) {
 			const ut64 proof_start_us = r_time_now_mono ();
 			if (collect_proof_artifacts_for_function (&proof_plan, anal, fcn,
