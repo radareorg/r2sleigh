@@ -1441,6 +1441,7 @@ impl SsaArtifact {
     pub fn local_ssa_blocks(&self) -> Vec<LocalSSABlock> {
         self.function
             .blocks()
+            .iter()
             .map(|block| LocalSSABlock {
                 addr: block.addr,
                 size: block.size,
@@ -2249,9 +2250,16 @@ pub struct SSAFunction {
     cfg: CFG,
     /// Dominator tree.
     domtree: DomTree,
-    /// SSA operations for each block.
-    blocks: HashMap<u64, SSABlock>,
-    /// Block addresses in reverse postorder.
+    /// SSA operations, one entry per block, in reverse postorder.
+    ///
+    /// Dense and ordered rather than a hash map beside a separate order, so
+    /// that reading the blocks is a slice rather than a walk of one container
+    /// looking each address up in another.
+    blocks: Vec<SSABlock>,
+    /// Where each block address sits in `blocks`.
+    block_index: BTreeMap<u64, u32>,
+    /// The same addresses as `blocks`, in the same order, for readers that want
+    /// the addresses without the operations.
     block_order: Vec<u64>,
     /// Canonical lifted storage retained during SSA renaming.
     ///
@@ -2275,6 +2283,24 @@ struct SsaQueryIndex {
     uses: HashMap<SSAVar, Vec<(u64, UseLocation)>>,
 }
 
+/// One block of a reverse-postorder vector, by address.
+fn block_at_mut<'a>(
+    index: &BTreeMap<u64, u32>,
+    blocks: &'a mut [SSABlock],
+    addr: u64,
+) -> Option<&'a mut SSABlock> {
+    blocks.get_mut(*index.get(&addr)? as usize)
+}
+
+/// Where each block sits in a reverse-postorder block vector.
+fn block_index_of(blocks: &[SSABlock]) -> BTreeMap<u64, u32> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| Some((block.addr, u32::try_from(index).ok()?)))
+        .collect()
+}
+
 impl Clone for SSAFunction {
     fn clone(&self) -> Self {
         Self {
@@ -2285,6 +2311,7 @@ impl Clone for SSAFunction {
             cfg: self.cfg.clone(),
             domtree: self.domtree.clone(),
             blocks: self.blocks.clone(),
+            block_index: self.block_index.clone(),
             block_order: self.block_order.clone(),
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
@@ -3302,7 +3329,7 @@ impl SSAFunction {
         let mut renamed_blocks = renamed.blocks;
         let renamed_block_order = renamed.block_order;
         let renamed_storage = renamed.canonical_storage_by_var;
-        let mut ssa_blocks = HashMap::new();
+        let mut ssa_blocks = Vec::with_capacity(renamed_block_order.len());
         for &addr in &renamed_block_order {
             control.poll()?;
             let cfg_block = cfg.get_block(addr).ok_or_else(malformed_ssa_input)?;
@@ -3345,7 +3372,7 @@ impl SSAFunction {
                 ops: other_ops,
                 phis,
             };
-            ssa_blocks.insert(addr, ssa_block);
+            ssa_blocks.push(ssa_block);
         }
 
         let mut function = Self {
@@ -3355,8 +3382,9 @@ impl SSAFunction {
             entry,
             cfg,
             domtree,
-            blocks: ssa_blocks,
+            block_index: block_index_of(&ssa_blocks),
             block_order: renamed_block_order,
+            blocks: ssa_blocks,
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             decompile_prep_facts: None,
@@ -3368,7 +3396,7 @@ impl SSAFunction {
         // "malformed SSA source input" and nothing to look at.
         validate_ssa_function(&function).map_err(|error| {
             if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                let mut addrs = function.blocks.keys().copied().collect::<Vec<_>>();
+                let mut addrs = function.block_order.clone();
                 addrs.sort_unstable();
                 eprintln!("ssa block domain ({}): {addrs:x?}", addrs.len());
             }
@@ -3392,26 +3420,25 @@ impl SSAFunction {
 
     /// Get the entry block.
     pub fn entry_block(&self) -> Option<&SSABlock> {
-        self.blocks.get(&self.entry)
+        self.get_block(self.entry)
     }
 
     /// Get a block by address.
     pub fn get_block(&self, addr: u64) -> Option<&SSABlock> {
-        self.blocks.get(&addr)
+        self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
     /// Get a mutable block by address.
     pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
+        let index = *self.block_index.get(&addr)? as usize;
         self.invalidate_query_index();
         self.decompile_prep_facts = None;
-        self.blocks.get_mut(&addr)
+        self.blocks.get_mut(index)
     }
 
-    /// Get all blocks in reverse postorder.
-    pub fn blocks(&self) -> impl Iterator<Item = &SSABlock> {
-        self.block_order
-            .iter()
-            .filter_map(|&addr| self.blocks.get(&addr))
+    /// All blocks in reverse postorder.
+    pub fn blocks(&self) -> &[SSABlock] {
+        &self.blocks
     }
 
     /// Get block addresses in reverse postorder.
@@ -3515,8 +3542,9 @@ impl SSAFunction {
 
     /// Remove a block from SSA and CFG.
     pub fn remove_block(&mut self, addr: u64) {
-        self.blocks.remove(&addr);
+        self.blocks.retain(|block| block.addr != addr);
         self.block_order.retain(|&a| a != addr);
+        self.block_index = block_index_of(&self.blocks);
         self.cfg.remove_block(addr);
         self.decompile_prep_facts = None;
         self.invalidate_query_index();
@@ -3524,7 +3552,7 @@ impl SSAFunction {
 
     /// Remove phi sources for a specific predecessor edge.
     pub fn remove_phi_source(&mut self, block_addr: u64, pred_addr: u64) {
-        if let Some(block) = self.blocks.get_mut(&block_addr) {
+        if let Some(block) = self.get_block_mut(block_addr) {
             for phi in &mut block.phis {
                 phi.sources.retain(|(pred, _)| *pred != pred_addr);
             }
@@ -3534,10 +3562,23 @@ impl SSAFunction {
     }
 
     /// Recompute cached metadata after CFG mutation.
+    /// Put the blocks back in the order `block_order` states, and reindex.
+    fn reorder_blocks(&mut self) {
+        let mut ordered = Vec::with_capacity(self.block_order.len());
+        for &addr in &self.block_order {
+            if let Some(position) = self.blocks.iter().position(|block| block.addr == addr) {
+                ordered.push(self.blocks.swap_remove(position));
+            }
+        }
+        self.blocks = ordered;
+        self.block_index = block_index_of(&self.blocks);
+    }
+
     pub fn refresh_after_cfg_mutation(&mut self) {
         self.blocks
-            .retain(|addr, _| self.cfg.get_block(*addr).is_some());
+            .retain(|block| self.cfg.get_block(block.addr).is_some());
         self.block_order = self.cfg.reverse_postorder();
+        self.reorder_blocks();
         self.domtree = DomTree::compute(&self.cfg);
         self.decompile_prep_facts = None;
         self.invalidate_query_index();
@@ -3545,12 +3586,12 @@ impl SSAFunction {
 
     /// Iterate over all SSA operations in the function.
     pub fn all_ops(&self) -> impl Iterator<Item = &SSAOp> {
-        self.blocks.values().flat_map(|b| b.ops.iter())
+        self.blocks.iter().flat_map(|b| b.ops.iter())
     }
 
     /// Iterate over all phi nodes in the function.
     pub fn all_phis(&self) -> impl Iterator<Item = &PhiNode> {
-        self.blocks.values().flat_map(|b| b.phis.iter())
+        self.blocks.iter().flat_map(|b| b.phis.iter())
     }
 
     /// Get all variables defined in this function.
@@ -3796,7 +3837,7 @@ impl SSAFunction {
             Observed,
         }
         let mut uses = BTreeMap::<SSAVar, Vec<(ScratchUse, SSAVar)>>::new();
-        for block in self.blocks.values() {
+        for block in self.blocks.iter() {
             for phi in &block.phis {
                 for (_, src) in &phi.sources {
                     uses.entry(src.clone())
@@ -3900,7 +3941,7 @@ impl SSAFunction {
                 (var.clone(), zero)
             })
             .collect::<BTreeMap<_, _>>();
-        for block in self.blocks.values_mut() {
+        for block in self.blocks.iter_mut() {
             for phi in &mut block.phis {
                 for (_, src) in &mut phi.sources {
                     if let Some(zero) = zeros.get(src) {
@@ -3916,7 +3957,7 @@ impl SSAFunction {
                 }
             }
         }
-        if let Some(entry) = self.blocks.get_mut(&self.entry) {
+        if let Some(entry) = self.get_block_mut(self.entry) {
             entry.ops.splice(0..0, minted);
         }
         self.invalidate_query_index();
@@ -3972,7 +4013,7 @@ impl SSAFunction {
                 var.clone()
             }
         };
-        for block in self.blocks.values_mut() {
+        for block in self.blocks.iter_mut() {
             for phi in &mut block.phis {
                 for (_, src) in &mut phi.sources {
                     *src = substitute(src);
@@ -4027,7 +4068,7 @@ impl SSAFunction {
         // Only a lane the interface declares is a formal; any other lane read
         // of an entry root stays the `Subpiece` of the caller's value it is.
         for addr in self.block_order.clone() {
-            let Some(block) = self.blocks.get(&addr) else {
+            let Some(block) = self.get_block(addr) else {
                 continue;
             };
             for (op_index, op) in block.ops.iter().enumerate() {
@@ -4091,7 +4132,7 @@ impl SSAFunction {
             self.formal_projections
                 .insert(projection.clone(), lane_storage);
             for (addr, op_index, inside) in reads {
-                if let Some(block) = self.blocks.get_mut(&addr)
+                if let Some(block) = block_at_mut(&self.block_index, &mut self.blocks, addr)
                     && let Some(SSAOp::Subpiece { dst, .. }) = block.ops.get(op_index)
                 {
                     let dst = dst.clone();
@@ -4137,7 +4178,7 @@ impl SSAFunction {
             if root.size > 8 {
                 continue;
             }
-            let read_elsewhere = self.blocks.values().any(|block| {
+            let read_elsewhere = self.blocks.iter().any(|block| {
                 block
                     .phis
                     .iter()
@@ -4187,7 +4228,7 @@ impl SSAFunction {
                     var.clone()
                 }
             };
-            for block in self.blocks.values_mut() {
+            for block in self.blocks.iter_mut() {
                 for phi in &mut block.phis {
                     for (_, src) in &mut phi.sources {
                         *src = replace(src);
@@ -4198,7 +4239,7 @@ impl SSAFunction {
                 }
             }
         }
-        if let Some(entry) = self.blocks.get_mut(&self.entry) {
+        if let Some(entry) = block_at_mut(&self.block_index, &mut self.blocks, self.entry) {
             entry.ops.splice(0..0, minted);
         }
         self.invalidate_query_index();
@@ -4301,7 +4342,7 @@ impl SSAFunction {
                     self.call_preserved_carriers,
                     function_interface,
                 );
-        let entry_stack_roots_are_stable = self.blocks().all(|block| {
+        let entry_stack_roots_are_stable = self.blocks().iter().all(|block| {
             block.ops.iter().all(|op| match op {
                 SSAOp::Call { .. }
                 | SSAOp::CallInd { .. }
@@ -4955,7 +4996,7 @@ impl SSAFunction {
         out.push_str(&format!("Blocks: {}\n\n", self.num_blocks()));
 
         for &addr in &self.block_order {
-            if let Some(block) = self.blocks.get(&addr) {
+            if let Some(block) = self.get_block(addr) {
                 out.push_str(&format!("Block 0x{:x}:\n", addr));
 
                 // Predecessors
@@ -6377,6 +6418,7 @@ mod tests {
         assert!(
             !function
                 .blocks()
+                .iter()
                 .flat_map(|block| &block.ops)
                 .any(|op| matches!(op, SSAOp::Piece { .. }))
         );
@@ -6624,6 +6666,7 @@ mod tests {
         for (lhs, rhs) in unchecked
             .function()
             .blocks()
+            .iter()
             .zip(controlled.function().blocks())
         {
             assert_eq!(lhs.addr, rhs.addr);
@@ -6815,7 +6858,7 @@ mod tests {
         assert_eq!(local_blocks[0].addr, 0x1000);
         assert_eq!(
             local_blocks[0].ops,
-            prepared.blocks().next().expect("entry block").ops
+            prepared.blocks().iter().next().expect("entry block").ops
         );
 
         let symbolic = SsaArtifact::for_symbolic(&blocks, Some(&arch))
@@ -6986,6 +7029,7 @@ mod tests {
         let graph = artifact.graph();
         let value = artifact
             .blocks()
+            .iter()
             .next()
             .and_then(|block| block.ops.first())
             .and_then(|op| op.dst())

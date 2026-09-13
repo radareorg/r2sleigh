@@ -1723,7 +1723,7 @@ mod tests {
         let constraints = emit_inferred_for_test(&ti, &func);
         let mut ram_dst = None;
         let mut custom_dst = None;
-        for op in func.blocks().flat_map(|block| &block.ops) {
+        for op in func.blocks().iter().flat_map(|block| &block.ops) {
             match op {
                 SSAOp::Load {
                     dst,
@@ -1779,6 +1779,7 @@ mod tests {
         let consumers = collect_deref_consumers(&func, &defs);
         let ram = func
             .blocks()
+            .iter()
             .flat_map(|block| &block.ops)
             .find_map(|op| match op {
                 SSAOp::Load {
@@ -1791,6 +1792,7 @@ mod tests {
             .expect("Ram load address");
         let custom = func
             .blocks()
+            .iter()
             .flat_map(|block| &block.ops)
             .find_map(|op| match op {
                 SSAOp::Load {

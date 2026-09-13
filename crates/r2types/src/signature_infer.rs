@@ -228,10 +228,12 @@ fn refine_parameter_signedness(
         prepared
             .function()
             .blocks()
+            .iter()
             .flat_map(|block| block.ops.iter()),
         prepared
             .function()
             .blocks()
+            .iter()
             .flat_map(|block| {
                 block
                     .phis

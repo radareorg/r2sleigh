@@ -2855,7 +2855,7 @@ impl Decompiler {
             let graph = prepared.graph();
             let live = prepared.live_out();
             let dead = prepared.unobserved_merges();
-            let total: usize = func.blocks().map(|b| b.phis.len()).sum();
+            let total: usize = func.blocks().iter().map(|b| b.phis.len()).sum();
             eprintln!(
                 "MERGES fn={:#x} phis={} unobserved={} live_out={} unresolved={}",
                 func.entry,
@@ -3371,9 +3371,8 @@ impl Decompiler {
         for (anchor, kind) in seed_gaps {
             fold_ctx.plan_gap_at_anchor(*anchor, kind);
         }
-        let fold_blocks: Vec<_> = func.blocks().cloned().collect();
         let structuring_work = work.with_phase(DecompileWorkPhase::Structuring);
-        if let Err(error) = fold_ctx.analyze_blocks_with_control(&fold_blocks, structuring_work) {
+        if let Err(error) = fold_ctx.analyze_blocks_with_control(func.blocks(), structuring_work) {
             debug_log_render_contract_error(prepared, "fold-analysis", &error);
             match error {
                 analysis::PreparedRuntimeFactsError::ExecutionStop(stop) => return Err(stop),

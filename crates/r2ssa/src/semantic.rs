@@ -4271,6 +4271,7 @@ fn call_entering_stack_pointer_offset(
             {
                 let defs = function
                     .blocks()
+                    .iter()
                     .flat_map(|block| {
                         block
                             .phis
@@ -6075,7 +6076,7 @@ fn collect_callee_stack_allocation_certificates(
     ) else {
         return BTreeMap::new();
     };
-    let contains_call = function.blocks().any(|block| {
+    let contains_call = function.blocks().iter().any(|block| {
         block.ops.iter().any(|op| {
             matches!(
                 op,
@@ -9550,10 +9551,12 @@ fn collect_call_result_certificates(
     let mut out_states = BTreeMap::<u64, CallResultFlowState>::new();
     let mut worklist = function
         .blocks()
+        .iter()
         .map(|block| block.addr)
         .collect::<VecDeque<_>>();
     let mut queued = function
         .blocks()
+        .iter()
         .map(|block| block.addr)
         .collect::<BTreeSet<_>>();
 

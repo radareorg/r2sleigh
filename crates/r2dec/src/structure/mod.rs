@@ -366,7 +366,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     ) -> BTreeSet<r2ssa::SemanticObligationId> {
         let mut obligations = BTreeSet::new();
         for anchor in anchors {
-            let Some(block) = self.func.blocks().find(|block| block.addr == anchor) else {
+            let Some(block) = self.func.blocks().iter().find(|block| block.addr == anchor) else {
                 continue;
             };
             let Some(op_idx) = block.ops.len().checked_sub(1) else {

@@ -252,6 +252,7 @@ impl<'a> AddressCollector<'a> {
     ) -> Self {
         let definitions = function
             .blocks()
+            .iter()
             .flat_map(|block| block.ops.iter())
             .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
             .collect();
@@ -277,6 +278,7 @@ impl<'a> AddressCollector<'a> {
         }
         let load_count = function
             .blocks()
+            .iter()
             .flat_map(|block| block.ops.iter())
             .filter(|op| {
                 matches!(

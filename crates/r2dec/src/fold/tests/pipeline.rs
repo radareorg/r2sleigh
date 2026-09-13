@@ -3691,7 +3691,7 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(&[block], &arch);
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
-        let blocks = prepared.function().blocks().cloned().collect::<Vec<_>>();
+        let blocks = prepared.function().blocks().iter().cloned().collect::<Vec<_>>();
         ctx.analyze_blocks(&blocks);
         let fact = ctx
             .inputs

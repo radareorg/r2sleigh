@@ -1003,6 +1003,7 @@ fn validate_prepared_interproc_block_ranges(
             .prepared
             .function()
             .blocks()
+            .iter()
             .map(move |block| (function.id, block.addr, block.size))
     }))
 }
@@ -1093,6 +1094,7 @@ impl PreparedCalleeSummary {
             blocks: prepared
                 .function()
                 .blocks()
+                .iter()
                 .map(|block| (block.addr, block.size))
                 .collect(),
             local,
@@ -1144,6 +1146,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     validate_interproc_block_ranges(
         root.function()
             .blocks()
+            .iter()
             .map(|block| (root_id, block.addr, block.size))
             .chain(callees.iter().flat_map(|callee| {
                 callee

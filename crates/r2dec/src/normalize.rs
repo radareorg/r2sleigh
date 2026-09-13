@@ -2177,7 +2177,7 @@ mod tests {
         });
 
         let func = SSAFunction::from_blocks_raw_no_arch(&[b0, b1, b2, b3]).expect("ssa function");
-        let with_phis = func.blocks().any(|b| !b.phis.is_empty());
+        let with_phis = func.blocks().iter().any(|b| !b.phis.is_empty());
         assert!(with_phis, "fixture should include phi nodes");
 
         let (normalized, origins, graph) = materialize_all_phis_with_origins(&func);
@@ -2282,7 +2282,7 @@ mod tests {
             Err(NormalizationOriginError::RemovedPhiEdge),
             "equal row counts cannot hide one duplicated and one omitted input"
         );
-        let any_phi = normalized.blocks().any(|b| !b.phis.is_empty());
+        let any_phi = normalized.blocks().iter().any(|b| !b.phis.is_empty());
         assert!(
             !any_phi,
             "phis should be removed when all edges materialize"
@@ -2367,6 +2367,7 @@ mod tests {
         assert_eq!(removed, BTreeSet::from([root_value]));
         let copies = normalized
             .blocks()
+            .iter()
             .flat_map(|block| block.ops.iter())
             .filter(|op| matches!(op, SSAOp::Copy { dst, .. } if *dst == root_phi))
             .count();

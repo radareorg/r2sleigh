@@ -4299,7 +4299,8 @@ fn infer_local_struct_artifacts_from_prepared_ssa(
     ptr_bits: u32,
     diagnostics: &mut TypeWritebackDiagnostics,
 ) -> LocalStructArtifacts {
-    let blocks = local_struct_inference_from_function_blocks(prepared.function().blocks().cloned());
+    let blocks =
+        local_struct_inference_from_function_blocks(prepared.function().blocks().iter().cloned());
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
     let architecture = prepared.machine_context().architecture_family();
     let pointer_arg_slots = collect_prepared_pointer_arg_slot_map(prepared);

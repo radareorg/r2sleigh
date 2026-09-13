@@ -990,6 +990,7 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let block_addrs = func.block_addrs().to_vec();
     let mut defs = func
         .blocks()
+        .iter()
         .flat_map(|block| block.ops.iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();

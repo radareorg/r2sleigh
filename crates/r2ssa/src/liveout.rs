@@ -367,7 +367,7 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&x86_64_arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let returned = func.blocks().next().expect("one block").ops[1]
+        let returned = func.blocks().iter().next().expect("one block").ops[1]
             .dst()
             .and_then(|value| graph.value_id_for_var(value))
             .expect("last return-register definition");
