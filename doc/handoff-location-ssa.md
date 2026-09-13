@@ -109,6 +109,35 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -6. **Where the peak actually is, and phi-edge liveness rewritten.** The
+     render's stages now report their own bytes, so the climb to the peak is a
+     table rather than one number. On bzip2's `BZ2_decompress`, the live total
+     at each mark:
+
+         entry                  138.2 MB
+         normalization          171.4 MB, falling back to 164.3
+         canonical terms        193.1 MB   +28.8
+         rest of the plan       193.7 MB   flat
+         naming                 217.1 MB   +23.4
+         fold                   238.0 MB   +20.9
+         structure walk         258.3 MB   +20.3
+         structure cleanup      270.2 MB   +11.9  <- the peak
+         then falling to        195.8 MB   by code generation
+
+     So the peak is reached during structure cleanup, and the two largest
+     retained climbs are the canonical term arena and whatever the naming step
+     between the sealed plan and the binding-plan mark builds. Everything
+     before the plan is transient: normalization's own 33 MB is freed again.
+
+     Phi-edge liveness was 28.2 MB of that transient, as `HashMap<u64,
+     HashSet<SSAVar>>` with an owned name per entry, and a fresh set cloned per
+     block per worklist pop. The only question anyone asks it is whether one
+     variable is live on one edge, and every such variable appears in a merge;
+     liveness of one variable does not depend on another, so it now numbers
+     exactly the variables a merge names and keeps the sets as words. That is
+     7.4 MB rather than 28.2, and the peak is unchanged because the bytes were
+     never held at the peak, which is the same lesson as item -4.
+
   -5. **Normalization no longer copies the function to rewrite its operations.**
      Two changes, both removing a copy rather than pricing one.
 

@@ -580,6 +580,7 @@ impl BindingPlan {
         // term arena per derivation, six per function before this.
         let partition =
             super::rules::rewrite_inlining_partition(source_owned, &machine_projection)?;
+        crate::stage_timing::mark("plan_canonical");
         let canonical = &partition.canonical;
         let inlinable = &partition.inlinable;
         let component_eligible = &partition.component_eligible;
@@ -766,6 +767,7 @@ impl BindingPlan {
             }
         }
 
+        crate::stage_timing::mark("plan_dispositions");
         let components = binding_components_with(source_owned, component_eligible)?;
         if u32::try_from(components.len()).is_err() {
             return Err(BindingPlanBuildError::TooManyBindings {
@@ -773,6 +775,7 @@ impl BindingPlan {
             });
         }
 
+        crate::stage_timing::mark("plan_partition");
         let mut bindings = Vec::with_capacity(components.len());
 
         let mut call_clobbers = BTreeSet::new();
@@ -929,6 +932,7 @@ impl BindingPlan {
                 .default_address_bits(),
         );
 
+        crate::stage_timing::mark("plan_bindings");
         let mut stack_objects = BTreeMap::new();
         let mut bound_value_counts = BTreeMap::<BindingId, usize>::new();
         for disposition in &dispositions {
@@ -1293,6 +1297,7 @@ impl BindingPlan {
                 })
             })
             .unwrap_or_default();
+        crate::stage_timing::mark("plan_objects");
         let escaped_frame_objects =
             super::rules::frame_objects_with_escaped_address(source, &machine_projection);
         let plan = Self {
@@ -1308,7 +1313,9 @@ impl BindingPlan {
             access_syntax,
             typed: std::cell::OnceCell::new(),
         };
+        crate::stage_timing::mark("plan_assembled");
         plan.validate_seal(source_owned)?;
+        crate::stage_timing::mark("plan_seal");
         Ok(plan)
     }
 }

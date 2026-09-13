@@ -1365,10 +1365,14 @@ fn materialize_phis_where_with_control<'f>(
     control.poll()?;
     // Only the operations change, so only the operations are copied.
     let mut normalized = r2ssa::RewrittenFunction::new(func, func.blocks().to_vec());
+    crate::stage_timing::mark("normalize_operations");
     let mut origins = NormalizationOrigins::from_source(func, graph, authority);
+    crate::stage_timing::mark("normalize_origins");
     let certificates = CarrierEdgeCertificates::build(graph, render_facts)
         .ok_or(NormalizationOriginError::InvalidCarrierCertificates)?;
+    crate::stage_timing::mark("normalize_certificates");
     let liveness = PhiEdgeLiveness::compute_with_control(func, control)?;
+    crate::stage_timing::mark("normalize_liveness");
     let mut copies_by_pred = BTreeMap::<u64, Vec<PhiMove>>::new();
     let mut materialized_by_block = BTreeMap::<u64, BTreeSet<r2ssa::SSAVar>>::new();
 
@@ -1540,8 +1544,10 @@ fn materialize_phis_where_with_control<'f>(
         }
     }
 
+    crate::stage_timing::mark("normalize_apply");
     control.poll()?;
     origins.validate_against_graph(&normalized, graph, render_facts)?;
+    crate::stage_timing::mark("normalize_validate");
     Ok((normalized, origins))
 }
 
@@ -1674,10 +1680,63 @@ fn schedule_parallel_phi_moves_with_control(
     Ok(Some(scheduled))
 }
 
+/// Liveness of the variables a merge can ask about, on the edges between
+/// blocks.
+///
+/// The only question anyone asks is whether one variable is live on one edge,
+/// and every such variable appears in a merge. Liveness of one variable does
+/// not depend on any other, so the analysis tracks exactly the variables that
+/// can be asked about rather than every value in the function: on a 501-block
+/// function that is a few hundred rather than tens of thousands, and the sets
+/// become words instead of hashed owned names.
 pub(crate) struct PhiEdgeLiveness {
-    live_in: HashMap<u64, HashSet<r2ssa::SSAVar>>,
-    phi_defs: HashMap<u64, HashSet<r2ssa::SSAVar>>,
-    edge_phi_uses: HashMap<(u64, u64), HashSet<r2ssa::SSAVar>>,
+    numbering: HashMap<r2ssa::SSAVar, u32>,
+    live_in: HashMap<u64, VarSet>,
+    phi_defs: HashMap<u64, VarSet>,
+    edge_phi_uses: HashMap<(u64, u64), VarSet>,
+}
+
+/// A set of numbered variables, one bit each.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct VarSet {
+    words: Vec<u64>,
+}
+
+impl VarSet {
+    fn with_capacity(bits: usize) -> Self {
+        Self {
+            words: vec![0; bits.div_ceil(64)],
+        }
+    }
+
+    fn insert(&mut self, bit: u32) {
+        let word = bit as usize / 64;
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
+        }
+        self.words[word] |= 1u64 << (bit % 64);
+    }
+
+    fn contains(&self, bit: u32) -> bool {
+        self.words
+            .get(bit as usize / 64)
+            .is_some_and(|word| word & (1u64 << (bit % 64)) != 0)
+    }
+
+    /// Add everything in `other` that neither exclusion holds.
+    fn union_excluding(&mut self, other: &Self, first: Option<&Self>, second: &Self) {
+        if other.words.len() > self.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        for (index, word) in other.words.iter().enumerate() {
+            let excluded = first
+                .and_then(|set| set.words.get(index))
+                .copied()
+                .unwrap_or(0)
+                | second.words.get(index).copied().unwrap_or(0);
+            self.words[index] |= word & !excluded;
+        }
+    }
 }
 
 impl PhiEdgeLiveness {
@@ -1686,41 +1745,66 @@ impl PhiEdgeLiveness {
         control: DecompileWorkControl<'_>,
     ) -> Result<Self, DecompileExecutionStop> {
         control.poll()?;
-        let mut defs_by_block = HashMap::<u64, HashSet<r2ssa::SSAVar>>::new();
-        let mut uses_by_block = HashMap::<u64, HashSet<r2ssa::SSAVar>>::new();
-        let mut phi_defs = HashMap::<u64, HashSet<r2ssa::SSAVar>>::new();
-        let mut edge_phi_uses = HashMap::<(u64, u64), HashSet<r2ssa::SSAVar>>::new();
+        // The universe is what a merge names: its destination, and the values
+        // its edges carry. Nothing else is ever asked about.
+        let mut numbering = HashMap::<r2ssa::SSAVar, u32>::new();
+        for block in func.blocks() {
+            control.poll()?;
+            for phi in &block.phis {
+                let next = u32::try_from(numbering.len()).unwrap_or(u32::MAX);
+                numbering.entry(phi.dst.clone()).or_insert(next);
+                for (_, src) in &phi.sources {
+                    let next = u32::try_from(numbering.len()).unwrap_or(u32::MAX);
+                    numbering.entry(src.clone()).or_insert(next);
+                }
+            }
+        }
+        let bits = numbering.len();
+        let number = |var: &r2ssa::SSAVar| numbering.get(var).copied();
+
+        let mut defs_by_block = HashMap::<u64, VarSet>::new();
+        let mut uses_by_block = HashMap::<u64, VarSet>::new();
+        let mut phi_defs = HashMap::<u64, VarSet>::new();
+        let mut edge_phi_uses = HashMap::<(u64, u64), VarSet>::new();
 
         for block in func.blocks() {
             control.poll()?;
-            let mut defs = HashSet::new();
-            let mut uses = HashSet::new();
-            let mut defined = HashSet::new();
+            let mut defs = VarSet::with_capacity(bits);
+            let mut uses = VarSet::with_capacity(bits);
+            let mut defined = VarSet::with_capacity(bits);
             for phi in &block.phis {
                 control.poll()?;
-                defs.insert(phi.dst.clone());
-                defined.insert(phi.dst.clone());
-                phi_defs
-                    .entry(block.addr)
-                    .or_default()
-                    .insert(phi.dst.clone());
+                if let Some(bit) = number(&phi.dst) {
+                    defs.insert(bit);
+                    defined.insert(bit);
+                    phi_defs
+                        .entry(block.addr)
+                        .or_insert_with(|| VarSet::with_capacity(bits))
+                        .insert(bit);
+                }
                 for (pred, src) in &phi.sources {
-                    edge_phi_uses
-                        .entry((*pred, block.addr))
-                        .or_default()
-                        .insert(src.clone());
+                    if let Some(bit) = number(src) {
+                        edge_phi_uses
+                            .entry((*pred, block.addr))
+                            .or_insert_with(|| VarSet::with_capacity(bits))
+                            .insert(bit);
+                    }
                 }
             }
             for op in &block.ops {
                 control.poll()?;
                 for src in op.sources() {
-                    if !defined.contains(src) {
-                        uses.insert(src.clone());
+                    if let Some(bit) = number(src)
+                        && !defined.contains(bit)
+                    {
+                        uses.insert(bit);
                     }
                 }
-                if let Some(dst) = op.dst() {
-                    defs.insert(dst.clone());
-                    defined.insert(dst.clone());
+                if let Some(dst) = op.dst()
+                    && let Some(bit) = number(dst)
+                {
+                    defs.insert(bit);
+                    defined.insert(bit);
                 }
             }
             defs_by_block.insert(block.addr, defs);
@@ -1731,12 +1815,12 @@ impl PhiEdgeLiveness {
             .block_addrs()
             .iter()
             .copied()
-            .map(|addr| (addr, HashSet::new()))
+            .map(|addr| (addr, VarSet::with_capacity(bits)))
             .collect::<HashMap<_, _>>();
         // Backward liveness on a worklist: a block is recomputed only when a
         // successor's live-in grew, which reaches the same fixed point as a
         // sweep per round without re-walking every block each time.
-        let empty = HashSet::new();
+        let empty = VarSet::with_capacity(bits);
         let mut worklist: std::collections::VecDeque<u64> =
             func.block_addrs().iter().rev().copied().collect();
         let mut queued: HashSet<u64> = worklist.iter().copied().collect();
@@ -1747,25 +1831,11 @@ impl PhiEdgeLiveness {
             let defs = defs_by_block.get(&addr).unwrap_or(&empty);
             for successor in func.successors(addr) {
                 control.poll()?;
-                let successor_phi_defs = phi_defs.get(&successor);
                 if let Some(successor_live_in) = live_in.get(&successor) {
-                    next_in.extend(
-                        successor_live_in
-                            .iter()
-                            .filter(|value| {
-                                successor_phi_defs.is_none_or(|phis| !phis.contains(*value))
-                                    && !defs.contains(*value)
-                            })
-                            .cloned(),
-                    );
+                    next_in.union_excluding(successor_live_in, phi_defs.get(&successor), defs);
                 }
                 if let Some(phi_uses) = edge_phi_uses.get(&(addr, successor)) {
-                    next_in.extend(
-                        phi_uses
-                            .iter()
-                            .filter(|value| !defs.contains(*value))
-                            .cloned(),
-                    );
+                    next_in.union_excluding(phi_uses, None, defs);
                 }
             }
             if live_in.get(&addr) != Some(&next_in) {
@@ -1779,6 +1849,7 @@ impl PhiEdgeLiveness {
         }
         control.poll()?;
         Ok(Self {
+            numbering,
             live_in,
             phi_defs,
             edge_phi_uses,
@@ -1787,19 +1858,22 @@ impl PhiEdgeLiveness {
 
     /// Whether `value` is live on the edge, without building the edge's set.
     fn live_on_edge_contains(&self, pred: u64, successor: u64, value: &r2ssa::SSAVar) -> bool {
+        let Some(bit) = self.numbering.get(value).copied() else {
+            return false;
+        };
         let through_successor = self
             .live_in
             .get(&successor)
-            .is_some_and(|live| live.contains(value))
+            .is_some_and(|live| live.contains(bit))
             && self
                 .phi_defs
                 .get(&successor)
-                .is_none_or(|defs| !defs.contains(value));
+                .is_none_or(|defs| !defs.contains(bit));
         through_successor
             || self
                 .edge_phi_uses
                 .get(&(pred, successor))
-                .is_some_and(|uses| uses.contains(value))
+                .is_some_and(|uses| uses.contains(bit))
     }
 }
 
