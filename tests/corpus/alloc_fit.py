@@ -27,12 +27,13 @@ import sys
 
 # `prepare@0xcc30/501 obligations 584 ms size 8981 bytes 16841780`
 PHASE = re.compile(
-    r"(?P<role>prepare|recover)@(?P<addr>0x[0-9a-f]+)/(?P<blocks>\d+)\s+"
+    r"(?P<role>prepare|recover|build)@(?P<addr>0x[0-9a-f]+)/(?P<blocks>\d+)\s+"
     r"(?P<phase>\w+)\s+(?P<ms>\d+) ms size (?P<size>\d+) bytes (?P<bytes>\d+)"
 )
 # `r2dec stage timing dbg_x: instructions=30281 total=...us a=1us entry_bytes=N peak_bytes=M a_bytes=K`
 STAGE = re.compile(r"r2dec stage timing (?P<name>\S+): instructions=(?P<n>\d+)")
 BYTES = re.compile(r"(?P<key>\w+)_bytes=(?P<v>\d+)")
+LIVE = re.compile(r"(?P<key>\w+)_live=(?P<v>\d+)")
 
 
 class Render:
@@ -44,6 +45,7 @@ class Render:
         self.entry = 0
         self.peak = 0
         self.stages: list[tuple[str, int]] = []
+        self.live: list[tuple[str, int]] = []
 
     @property
     def growth(self) -> int:
@@ -73,6 +75,8 @@ def read(paths: list[str]) -> tuple[list[Render], list[dict]]:
                 if not stage:
                     continue
                 render = Render(stage["name"], int(stage["n"]))
+                for match in LIVE.finditer(line):
+                    render.live.append((match["key"], int(match["v"])))
                 for match in BYTES.finditer(line):
                     key, value = match["key"], int(match["v"])
                     if key == "entry":
@@ -91,19 +95,24 @@ def megabytes(value: float) -> str:
 
 def report_phases(phases: list[dict]) -> None:
     """What one root's preparation holds, phase by phase."""
-    roots = [row for row in phases if row["role"] == "prepare"]
+    for role in ("build", "prepare"):
+        report_role(phases, role)
+
+
+def report_role(phases: list[dict], role: str) -> None:
+    roots = [row for row in phases if row["role"] == role]
     if not roots:
         return
     worst = max(roots, key=lambda row: row["bytes"])
     same_root = [row for row in roots if row["addr"] == worst["addr"]]
-    print(f"preparation of {worst['addr']}, {worst['blocks']} blocks:")
+    print(f"{role} of {worst['addr']}, {worst['blocks']} blocks:")
     for row in sorted(same_root, key=lambda row: -row["bytes"]):
         print(f"  {row['phase']:<18} {row['ms']:>6} ms  {megabytes(row['bytes']):>10}")
     totals = collections.Counter()
     for row in roots:
         totals[row["phase"]] += row["bytes"]
     total = sum(totals.values()) or 1
-    print("every root preparation, by phase:")
+    print(f"every root {role}, by phase:")
     for phase, value in totals.most_common(8):
         print(f"  {phase:<18} {megabytes(value):>10}  {100 * value / total:5.1f}%")
 
@@ -124,12 +133,21 @@ def report_renders(renders: list[Render]) -> None:
         )
     biggest = max(sized, key=lambda row: row.growth)
     print(f"largest render growth: {biggest.name}, {megabytes(biggest.growth)}")
+    live = dict(biggest.live)
     previous = biggest.entry
+    held = biggest.entry
     for stage, value in biggest.stages:
         step = value - previous
-        if step > 0:
-            print(f"  {stage:<24} +{megabytes(step):>10}")
+        now = live.get(stage, 0)
+        kept = now - held if now else 0
+        if step > 0 or kept:
+            print(
+                f"  {stage:<24} high +{megabytes(step):>10}"
+                f"   kept {megabytes(kept):>10}   live {megabytes(now):>10}"
+            )
         previous = max(previous, value)
+        if now:
+            held = now
 
 
 def main(argv: list[str]) -> int:

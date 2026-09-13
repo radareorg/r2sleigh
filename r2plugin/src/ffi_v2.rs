@@ -1410,8 +1410,10 @@ fn trusted_from_source_with_callees(
             "trusted ingress stopped after source capture: {error}"
         ))
     })?;
+    let before_lift = r2il::allocation::live_bytes();
     let lifted = r2sleigh_lift::Disassembler::lift_owned_function(source)
         .map_err(|error| BoundaryError::unsupported(format!("trusted lift refused: {error}")))?;
+    let after_lift = r2il::allocation::live_bytes();
     r2ssa::SsaWorkControl::poll(&ssa_control).map_err(|error| {
         BoundaryError::engine(format!("trusted ingress stopped after lift: {error}"))
     })?;
@@ -1422,6 +1424,12 @@ fn trusted_from_source_with_callees(
         callee_preserved_carriers,
     )
     .map_err(|error| BoundaryError::engine(format!("trusted SSA preparation failed: {error}")))?;
+    r2il::refusal_evidence!(
+        "ingress-lift",
+        "lift {} prepare {}",
+        after_lift.saturating_sub(before_lift),
+        r2il::allocation::live_bytes().saturating_sub(after_lift)
+    );
     Ok(Arc::new(trusted))
 }
 

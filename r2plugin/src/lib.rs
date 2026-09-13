@@ -2583,7 +2583,8 @@ fn trusted_engine_function_input(
     r2engine::EngineFunctionInput {
         function_name: source_function_name(trusted),
         function_addr,
-        blocks: trusted.source_blocks().to_vec(),
+        // The artifact owns the lift and the request reads it from there.
+        blocks: Vec::new(),
         arch: Some(trusted.arch_spec().clone()),
         semantic_metadata_enabled: true,
         source_snapshot: None,

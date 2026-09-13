@@ -1518,7 +1518,11 @@ fn poll_engine_execution(
 pub struct EngineAnalyzeRequest {
     pub function_name: String,
     pub function_addr: u64,
-    pub blocks: Vec<R2ILBlock>,
+    /// The lift this request is built from, when the request is the thing that
+    /// owns it. A trusted artifact already holds the blocks its SSA was built
+    /// from, so this is empty on that path and `source_blocks` reads through
+    /// the artifact: one lift, one owner.
+    blocks: Vec<R2ILBlock>,
     pub arch: Option<r2il::ArchSpec>,
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
@@ -2263,7 +2267,7 @@ impl EngineAnalyzeRequest {
         let function_addr = trusted.source().function().address();
         self.function_name = format!("fcn_{function_addr:x}");
         self.function_addr = function_addr;
-        self.blocks = trusted.source_blocks().to_vec();
+        self.blocks = Vec::new();
         self.arch = Some(trusted.arch_spec().clone());
         self.ptr_bits = engine_arch_target(self.arch.as_ref()).1;
         self.source_snapshot = None;
@@ -2296,6 +2300,14 @@ impl EngineAnalyzeRequest {
         match trusted {
             Some(trusted) => self.with_trusted_ssa(trusted),
             None => self,
+        }
+    }
+
+    /// The blocks this request's SSA is built from, wherever they live.
+    pub fn source_blocks(&self) -> &[R2ILBlock] {
+        match self.trusted_ssa.as_deref() {
+            Some(trusted) => trusted.source_blocks(),
+            None => &self.blocks,
         }
     }
 
@@ -2403,6 +2415,14 @@ pub struct EngineFunctionDecompileRequestInput {
 }
 
 impl EngineFunctionDecompileRequestInput {
+    /// How many blocks were lifted, asking whoever owns them.
+    fn lifted_block_count(&self) -> usize {
+        match self.trusted_ssa.as_deref() {
+            Some(trusted) => trusted.source_blocks().len(),
+            None => self.function.blocks.len(),
+        }
+    }
+
     pub fn single_function(
         function: EngineFunctionInput,
         ptr_bits: Option<u32>,
@@ -2851,7 +2871,7 @@ impl EngineSession {
             Arc::new(
                 match build_engine_analysis_from_parts_with_control(
                     &request.function_name,
-                    &request.blocks,
+                    request.source_blocks(),
                     request.arch.as_ref(),
                     source_snapshot,
                     ssa_control,
@@ -3013,7 +3033,7 @@ impl EngineSession {
                 *refusal.diagnostics,
             );
         }
-        let actual_lifted_blocks = analysis_request.blocks.len();
+        let actual_lifted_blocks = analysis_request.source_blocks().len();
         let input_quality_facts = if let Some(quality) = input_quality {
             let reason = quality.refusal_reason_for_actual_lifted_blocks(actual_lifted_blocks);
             let facts = function_input_quality_facts(quality, actual_lifted_blocks, reason.clone());
@@ -3157,7 +3177,7 @@ impl EngineSession {
         &self,
         input: EngineFunctionDecompileRequestInput,
     ) -> EngineDecompileResponse {
-        let actual_lifted_blocks = input.function.blocks.len();
+        let actual_lifted_blocks = input.lifted_block_count();
         if let Some(reason) = input
             .input_quality
             .refusal_reason_for_actual_lifted_blocks(actual_lifted_blocks)

@@ -25,8 +25,12 @@ fn enabled() -> bool {
 thread_local! {
     static STAGES: RefCell<Vec<(&'static str, Duration)>> = const { RefCell::new(Vec::new()) };
     static LAST: RefCell<Option<Instant>> = const { RefCell::new(None) };
-    /// The high-water mark each stage reached, when something is counting.
-    static PEAKS: RefCell<Vec<(&'static str, usize)>> = const { RefCell::new(Vec::new()) };
+    /// What each stage reached at its high-water mark, and what it still held
+    /// when it ended. A stage that allocates a scratch structure and frees it
+    /// shows in the first and not the second, and only the second accumulates
+    /// into the render's own peak, so reading one without the other says
+    /// nothing about which stage to change.
+    static PEAKS: RefCell<Vec<(&'static str, usize, usize)>> = const { RefCell::new(Vec::new()) };
     /// What was already held when this render began, so a stage's high-water
     /// mark can be read as what the render added rather than as what the
     /// process holds.
@@ -63,12 +67,14 @@ pub(crate) fn mark(stage: &'static str) {
         elapsed
     });
     let peak = r2il::allocation::peak_bytes();
+    let live = r2il::allocation::live_bytes();
     r2il::allocation::reset_peak();
     PEAKS.with_borrow_mut(|peaks| {
-        if let Some(row) = peaks.iter_mut().find(|(name, _)| *name == stage) {
+        if let Some(row) = peaks.iter_mut().find(|(name, _, _)| *name == stage) {
             row.1 = row.1.max(peak);
+            row.2 = row.2.max(live);
         } else {
-            peaks.push((stage, peak));
+            peaks.push((stage, peak, live));
         }
     });
     if let Some(elapsed) = elapsed {
@@ -109,13 +115,13 @@ pub(crate) fn report(function: &str) {
     // otherwise read as "this stage allocated nothing", which is a different
     // claim from "nobody measured".
     if r2il::allocation::is_counting() {
-        let high = peaks.iter().map(|(_, peak)| *peak).max().unwrap_or(0);
+        let high = peaks.iter().map(|(_, peak, _)| *peak).max().unwrap_or(0);
         line.push_str(&format!(
             " entry_bytes={} peak_bytes={high}",
             ENTRY.with_borrow(|entry| *entry)
         ));
-        for (stage, peak) in &peaks {
-            line.push_str(&format!(" {stage}_bytes={peak}"));
+        for (stage, peak, live) in &peaks {
+            line.push_str(&format!(" {stage}_bytes={peak} {stage}_live={live}"));
         }
     }
     eprintln!("{line}");

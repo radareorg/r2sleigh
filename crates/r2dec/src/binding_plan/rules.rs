@@ -1068,6 +1068,7 @@ pub(super) fn rewrite_inlining_partition(
     let source = source_owned.source();
     let seed_canonical = r2rewrite::canonicalize_with(source, projection, &|_| false)
         .map_err(BindingPlanBuildError::Canonicalisation)?;
+    crate::stage_timing::mark("plan_seed");
     let conservative = inlinable_core(source_owned, projection, &seed_canonical, &BTreeSet::new());
     let eligible = component_eligible_with(source_owned, projection, &conservative)?;
     let components = super::construction::binding_components_with(source_owned, &eligible)?;
@@ -1087,7 +1088,9 @@ pub(super) fn rewrite_inlining_partition(
     // holding it across the second canonicalisation doubles the arena's share
     // of the peak for nothing.
     drop(seed_canonical);
+    crate::stage_timing::mark("plan_conservative");
     let component_eligible = component_eligible_with(source_owned, projection, &inlinable)?;
+    crate::stage_timing::mark("plan_eligible");
     let canonical =
         r2rewrite::canonicalize_with(source, projection, &|query: &r2rewrite::ExpansionQuery<
             '_,

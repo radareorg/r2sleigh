@@ -3208,6 +3208,24 @@ impl SSAFunction {
                 }
             }))
             .collect::<Vec<_>>();
+        // The same phase report the semantic collector gives, for the half of
+        // a decompile's bytes that are already held before the collector runs.
+        // Construction is three passes over the same body and they do not cost
+        // alike; without this the whole of it is one number.
+        let started = std::time::Instant::now();
+        let held = std::cell::Cell::new(r2il::allocation::live_bytes());
+        let phase = |name: &str, size: usize| {
+            let live = r2il::allocation::live_bytes();
+            let grew = live.saturating_sub(held.get());
+            held.set(live);
+            r2il::refusal_evidence!(
+                "collect-phase",
+                "build@{:#x}/{} {name} {} ms size {size} bytes {grew}",
+                blocks.first().map_or(0, |block| block.addr),
+                blocks.len(),
+                started.elapsed().as_millis()
+            );
+        };
         let mut func = Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
             arch,
@@ -3217,6 +3235,7 @@ impl SSAFunction {
             &abi_carriers,
             control,
         )?;
+        phase("raw", func.num_blocks());
         func.call_preserved_carriers = call_preserved_carriers;
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Preparation reads the interface for the return projection only.
@@ -3225,12 +3244,15 @@ impl SSAFunction {
             questions.for_return_boundary(),
             control,
         )?;
+        phase("prepared", func.num_blocks());
         // The prep facts read it for the declared stack bases.
         func.refresh_decompile_prep_facts_with_interface_and_control(
             questions.for_frame_geometry(),
             control,
         )?;
+        phase("prep_facts", func.num_blocks());
         validate_ssa_function(&func).map_err(|_| malformed_ssa_input())?;
+        phase("validated", 0);
         control.poll()?;
         Ok(func)
     }

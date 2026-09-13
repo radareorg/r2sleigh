@@ -3189,6 +3189,7 @@ impl Decompiler {
                 ));
             }
         };
+        crate::stage_timing::mark("plan_names");
         let func = &normalized_func;
         let func_name = rewritten_function_name(func);
         let observation_journal = match LegacyObservationJournal::new(
@@ -3212,6 +3213,7 @@ impl Decompiler {
                 ));
             }
         };
+        crate::stage_timing::mark("plan_journal");
         work.poll()?;
         if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
             eprintln!(
@@ -3351,6 +3353,7 @@ impl Decompiler {
                 ));
             }
         };
+        crate::stage_timing::mark("plan_view");
         let fold_inputs = FoldInputs {
             normalization_origins: Some(&normalization_origins),
             observation_journal: Some(&observation_journal),
