@@ -364,53 +364,187 @@ pub fn live_in_by_block(
     let arguments = resolve(&call_boundaries.argument_regs);
     let returned = resolve(&call_boundaries.return_regs);
 
-    let mut live_in: HashMap<u64, BTreeSet<RenameIdentity>> = HashMap::new();
+    // Number every identity the walk can name, then answer in words.
+    //
+    // Liveness used to be an ordered set of identities per block, rebuilt from
+    // the successors on every visit, with the identity of each operand
+    // constructed -- name and all -- each time an operation was looked at. The
+    // question asked of the result is only whether one identity is live at one
+    // block, one identity's liveness does not depend on another's, and the set
+    // of identities a function can name is fixed before the walk starts. So
+    // the identities are numbered once, each operation's effect on them is
+    // recorded once, and the fixed point is bitwise.
+    let mut identities: Vec<RenameIdentity> = Vec::new();
+    let mut numbers: HashMap<RenameIdentity, u32> = HashMap::new();
+    let number_of = |identity: RenameIdentity,
+                     identities: &mut Vec<RenameIdentity>,
+                     numbers: &mut HashMap<RenameIdentity, u32>| {
+        if let Some(number) = numbers.get(&identity) {
+            return *number;
+        }
+        let number = identities.len() as u32;
+        identities.push(identity.clone());
+        numbers.insert(identity, number);
+        number
+    };
+
     let addrs = cfg.block_addrs().collect::<Vec<_>>();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for addr in addrs.iter().rev() {
-            let Some(block) = cfg.get_block(*addr) else {
+    let mut effects: Vec<Vec<LivenessOpEffect>> = Vec::with_capacity(addrs.len());
+    let mut present = Vec::with_capacity(addrs.len());
+    for addr in &addrs {
+        let Some(block) = cfg.get_block(*addr) else {
+            effects.push(Vec::new());
+            present.push(false);
+            continue;
+        };
+        present.push(true);
+        let mut rows = Vec::with_capacity(block.ops.len());
+        for op in &block.ops {
+            let kill = get_op_output_varnode(op)
+                .filter(|varnode| register_root_slot(varnode, families).is_none())
+                .map(|varnode| {
+                    number_of(
+                        RenameIdentity::for_varnode(varnode, reg_names, families),
+                        &mut identities,
+                        &mut numbers,
+                    )
+                });
+            let reads = op
+                .inputs()
+                .into_iter()
+                .filter(|varnode| !matches!(varnode.space, r2il::SpaceId::Const))
+                .map(|varnode| {
+                    number_of(
+                        RenameIdentity::for_varnode(varnode, reg_names, families),
+                        &mut identities,
+                        &mut numbers,
+                    )
+                })
+                .collect::<Vec<_>>();
+            rows.push(LivenessOpEffect {
+                boundary: match op {
+                    r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => {
+                        LivenessBoundary::Call
+                    }
+                    r2il::R2ILOp::Return { .. } => LivenessBoundary::Return,
+                    _ => LivenessBoundary::None,
+                },
+                kill,
+                reads,
+            });
+        }
+        effects.push(rows);
+    }
+    let numbers_of_set = |set: &BTreeSet<RenameIdentity>,
+                          numbers: &HashMap<RenameIdentity, u32>| {
+        set.iter()
+            .filter_map(|identity| numbers.get(identity).copied())
+            .collect::<Vec<_>>()
+    };
+    let clobbered_numbers = numbers_of_set(&clobbered, &numbers);
+    let argument_numbers = numbers_of_set(&arguments, &numbers);
+    let returned_numbers = numbers_of_set(&returned, &numbers);
+
+    let words = identities.len().div_ceil(64).max(1);
+    let mut live = vec![0u64; addrs.len() * words];
+    let mut position = HashMap::with_capacity(addrs.len());
+    for (index, addr) in addrs.iter().enumerate() {
+        position.insert(*addr, index);
+    }
+    let mut worklist = addrs
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(index, _)| present[*index])
+        .map(|(index, _)| index)
+        .collect::<std::collections::VecDeque<_>>();
+    let mut queued = vec![true; addrs.len()];
+    let mut scratch = vec![0u64; words];
+    while let Some(index) = worklist.pop_front() {
+        queued[index] = false;
+        let addr = addrs[index];
+        scratch.iter_mut().for_each(|word| *word = 0);
+        for successor in cfg.successors(addr) {
+            let Some(successor) = position.get(&successor).copied() else {
                 continue;
             };
-            let mut live = cfg
-                .successors(*addr)
-                .into_iter()
-                .filter_map(|succ| live_in.get(&succ))
-                .flatten()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            for op in block.ops.iter().rev() {
-                match op {
-                    r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => {
-                        for identity in &clobbered {
-                            live.remove(identity);
-                        }
-                        live.extend(arguments.iter().cloned());
-                    }
-                    r2il::R2ILOp::Return { .. } => live.extend(returned.iter().cloned()),
-                    _ => {}
-                }
-                // A lane write keeps the rest of its root alive, so only a
-                // write of the whole identity kills it.
-                if let Some(varnode) = get_op_output_varnode(op)
-                    && register_root_slot(varnode, families).is_none()
-                {
-                    live.remove(&RenameIdentity::for_varnode(varnode, reg_names, families));
-                }
-                for varnode in op.inputs() {
-                    if !matches!(varnode.space, r2il::SpaceId::Const) {
-                        live.insert(RenameIdentity::for_varnode(varnode, reg_names, families));
-                    }
-                }
+            let base = successor * words;
+            for (word, value) in scratch.iter_mut().zip(&live[base..base + words]) {
+                *word |= value;
             }
-            if live_in.get(addr) != Some(&live) {
-                live_in.insert(*addr, live);
-                changed = true;
+        }
+        for effect in effects[index].iter().rev() {
+            match effect.boundary {
+                LivenessBoundary::Call => {
+                    for number in &clobbered_numbers {
+                        scratch[*number as usize / 64] &= !(1u64 << (*number % 64));
+                    }
+                    for number in &argument_numbers {
+                        scratch[*number as usize / 64] |= 1u64 << (*number % 64);
+                    }
+                }
+                LivenessBoundary::Return => {
+                    for number in &returned_numbers {
+                        scratch[*number as usize / 64] |= 1u64 << (*number % 64);
+                    }
+                }
+                LivenessBoundary::None => {}
+            }
+            if let Some(number) = effect.kill {
+                scratch[number as usize / 64] &= !(1u64 << (number % 64));
+            }
+            for number in &effect.reads {
+                scratch[*number as usize / 64] |= 1u64 << (*number % 64);
+            }
+        }
+        let base = index * words;
+        if live[base..base + words] == scratch[..] {
+            continue;
+        }
+        live[base..base + words].copy_from_slice(&scratch);
+        for predecessor in cfg.predecessors(addr) {
+            let Some(predecessor) = position.get(&predecessor).copied() else {
+                continue;
+            };
+            if present[predecessor] && !queued[predecessor] {
+                queued[predecessor] = true;
+                worklist.push_back(predecessor);
             }
         }
     }
+
+    let mut live_in = HashMap::with_capacity(addrs.len());
+    for (index, addr) in addrs.iter().enumerate() {
+        if !present[index] {
+            continue;
+        }
+        let base = index * words;
+        let mut set = BTreeSet::new();
+        for (word_index, word) in live[base..base + words].iter().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                set.insert(identities[word_index * 64 + bit].clone());
+            }
+        }
+        live_in.insert(*addr, set);
+    }
     live_in
+}
+
+/// What one operation does to the liveness of the numbered identities.
+struct LivenessOpEffect {
+    boundary: LivenessBoundary,
+    kill: Option<u32>,
+    reads: Vec<u32>,
+}
+
+/// The convention's own reads and writes at a call or a return.
+enum LivenessBoundary {
+    None,
+    Call,
+    Return,
 }
 
 fn get_op_output_varnode(op: &r2il::R2ILOp) -> Option<&r2il::Varnode> {
