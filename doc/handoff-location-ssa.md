@@ -109,6 +109,73 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -7. **Half of what a decompile holds was a second copy of something.** With
+     the stage marks reporting live bytes as well as their high-water mark, the
+     climb to the peak became a list of retained blocks, and seven of them were
+     duplicates. On bzip2's `BZ2_decompress`, 30,281 instructions:
+
+         peak 291.9 MB, 10,109 bytes per instruction   before
+         peak 225.7 MB,  7,815 bytes per instruction   after
+
+     What was removed, largest first.
+
+     *The lifted p-code, 14.0 MB.* `TrustedSsaArtifact` retained the blocks its
+     SSA was built from as evidence of the lift event. Nothing read them:
+     preparation consumes them into the function and the graph, native spans
+     are separate evidence in the obligation inventory, and the only question
+     anyone asked afterwards was how many there were. The artifact keeps the
+     count. A second copy of the same vector was also made per request, to hand
+     the engine blocks it already owned; the request reads them through the
+     artifact now.
+
+     *The machine projection's use table, 6.4 MB.* `MachineUseDisposition` has
+     one variant carrying a `MachineValueUse`, which is 112 bytes, and the cell
+     is dense over every graph input of every instruction, so the rare variant
+     set the width of the whole table -- and each instruction's row was its own
+     allocation. The table is now flat with an offset per instruction, the cell
+     is the 24 bytes the other two dispositions need, and the address
+     certificates live in their own vector.
+
+     *The observation journal's use slots, 6.0 MB.* The same 112 bytes again,
+     because the journal recorded the address it had just read from the plan.
+     The plan is the authority and the slot is keyed by the same site, so the
+     observation says `MemoryAddress` and the address is read back where it is
+     compared.
+
+     *A copy of every block's folded statements, 5.8 MB.* The structurer kept
+     one so that a block placed twice could be answered without folding it
+     again. Structured output places a block once, so the copy was the whole
+     folded body held a second time and read back for almost nothing.
+
+     *A copy of the whole function body per rewrite stage, 6.0 MB at the peak.*
+     The shape and cleanup stages ran on a copy so that a stage failing its
+     certificate could return the tree it was given. That copy stood beside the
+     body at exactly the render's high-water mark, on every render, against a
+     fallback no corpus binary reaches -- 155 of 155 functions in bzip2 at -O0
+     apply both stages. The tree is rewritten in place and a stage that fails
+     declines the writing, which the caller repeats from the rolled-back
+     journal with that stage skipped, by the same mechanism the gap loop
+     already used.
+
+     *A second name for every definition and use, 7.4 MB.* `SsaQueryIndex` was
+     two hash maps keyed by an owned `SSAVar`, with a vector of use sites per
+     variable. The function already holds each variable once, at the site that
+     names it, so the index is now the sites alone, sorted by the variable they
+     mention, and a query binary-searches them and reads the variable back out
+     of the block.
+
+     The remaining named blocks, in the same measurement: the placed C tree
+     25.6 MB, the SSA graph 23.2, the SSA function 22.3, the obligation
+     inventory 16.1, the canonical term arena 15.7, the prepared semantic view
+     11.6, the machine arena 11.4, normalization 26 across five stages. Two of
+     those are known duplicates and are not yet removed: the semantic view
+     keeps both directions of the value-to-variable table the graph already
+     holds (5.8 MB), and the journal keeps a projection table that is a pure
+     function of the normalization origins (2.1 MB). The view's copy is the
+     awkward one -- it has no artifact reference to read through, and giving it
+     one runs into `FoldingContext`'s test-only `OnceCell`, which would make
+     the context invariant in its lifetime.
+
   -6. **Where the peak actually is, and phi-edge liveness rewritten.** The
      render's stages now report their own bytes, so the climb to the peak is a
      table rather than one number. On bzip2's `BZ2_decompress`, the live total
