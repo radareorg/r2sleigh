@@ -1242,8 +1242,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
     for entry in order {
         let callee = bodies[&entry];
         let targets = targets_of(&callee.snapshot);
-        let Ok(body) = r2source::snapshot_wire::encode_snapshot_cache_key(&callee.snapshot, &[])
-        else {
+        let Ok(body) = r2source::snapshot_wire::encode_snapshot_cache_key(&callee.snapshot) else {
             continue;
         };
         let key = {

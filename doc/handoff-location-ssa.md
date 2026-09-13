@@ -127,8 +127,8 @@ learn.
        and `SNAPSHOT_MAX_CALLEE_SNAPSHOTS` are gone; the two revision-equality
        checks (exact callee binding, interproc `ForeignFunction`) went with them,
        since the epochs are what makes a set consistent. dpkg-divert -O0 `pd:s
-       @@F`: 29.1s against 33.0s. Still dead on the Rust side: `CapturedCallee.
-       callees` and `SNAPSHOT_CALLEE_DEPTH: usize = 2` in `r2source`.
+       @@F`: 29.1s against 33.0s. The Rust decoder is flat too: `CapturedCallee`
+       carries one body, and `SNAPSHOT_CALLEE_DEPTH` is gone with it.
      * **A body-proven return still lives on a promoted copy.** `CalleeFacts::derive`
        applies `with_body_proven_return` after the artifact is sealed, so for such
        a callee `SourceOwnedCalleeSignature.interface` (the artifact's) and the
