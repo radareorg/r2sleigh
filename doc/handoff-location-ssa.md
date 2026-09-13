@@ -109,6 +109,33 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -5. **Normalization no longer copies the function to rewrite its operations.**
+     Two changes, both removing a copy rather than pricing one.
+
+     The blocks are held as a vector in reverse postorder with an address index
+     beside it, rather than a hash map beside a separate order vector. Reading
+     them is then a slice, which deleted the third copy of every block: the
+     render had been cloning them all into a `Vec` purely to satisfy a
+     `&[SSABlock]` parameter whose two consumers only iterate.
+
+     `RewrittenFunction` pairs rewritten operations with the function they
+     belong to. The control-flow graph, the dominator tree, the storage map and
+     the projections are statements about the function, not about its
+     operations, so a pass that rewrites operations borrows them from the
+     artifact that outlives the render. The prep facts are not carried either,
+     because the first `get_block_mut` discarded them anyway.
+
+     On bzip2's `BZ2_decompress`:
+
+         peak          291.9 MB   ->  270.7 MB
+         per inst       10,109 B  ->   9,373 B
+         render fold    +30.2 MB  ->  +20.9 MB
+         render prepare +64.6 MB  ->  +52.7 MB
+
+     An `Arc` around the graph and the tree was tried first and reverted. It
+     bought 7.9 MB of the clone and left the other 16.3 exactly where it was,
+     because it made the copy cheaper instead of asking why there was a copy.
+
   -4. **The memory arc, and the null result it opened with.** Two changes that
      are structurally right measured as nothing, and why is the useful part.
 

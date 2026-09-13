@@ -2334,6 +2334,169 @@ pub struct SSABlock {
     pub phis: Vec<PhiNode>,
 }
 
+/// One function's operations after a pass rewrote them, over the function they
+/// belong to.
+///
+/// The control-flow graph, the dominator tree, the storage map and the
+/// projections are statements about the function, not about its operations, so
+/// a pass that rewrites operations borrows them rather than copying them.
+#[derive(Debug)]
+pub struct RewrittenFunction<'a> {
+    source: &'a SSAFunction,
+    blocks: Vec<SSABlock>,
+    block_index: BTreeMap<u64, u32>,
+}
+
+impl<'a> RewrittenFunction<'a> {
+    /// Pair rewritten operations with the function whose shape they keep.
+    pub fn new(source: &'a SSAFunction, blocks: Vec<SSABlock>) -> Self {
+        let block_index = block_index_of(&blocks);
+        Self {
+            source,
+            blocks,
+            block_index,
+        }
+    }
+
+    /// The function the operations were rewritten from.
+    pub const fn source(&self) -> &'a SSAFunction {
+        self.source
+    }
+
+    pub const fn entry(&self) -> u64 {
+        self.source.entry
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.source.name.as_deref()
+    }
+
+    pub fn cfg(&self) -> &CFG {
+        self.source.cfg()
+    }
+
+    pub fn domtree(&self) -> &DomTree {
+        self.source.domtree()
+    }
+
+    /// All blocks in reverse postorder.
+    pub fn blocks(&self) -> &[SSABlock] {
+        &self.blocks
+    }
+
+    pub fn block_addrs(&self) -> &[u64] {
+        self.source.block_addrs()
+    }
+
+    pub fn num_blocks(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn get_block(&self, addr: u64) -> Option<&SSABlock> {
+        self.blocks.get(*self.block_index.get(&addr)? as usize)
+    }
+
+    pub fn entry_block(&self) -> Option<&SSABlock> {
+        self.get_block(self.entry())
+    }
+
+    pub fn predecessors(&self, addr: u64) -> Vec<u64> {
+        self.source.predecessors(addr)
+    }
+
+    pub fn successors(&self, addr: u64) -> Vec<u64> {
+        self.source.successors(addr)
+    }
+
+    pub fn switch_info(&self, addr: u64) -> Option<SwitchInfo> {
+        self.source.switch_info(addr)
+    }
+
+    pub fn dominates(&self, a: u64, b: u64) -> bool {
+        self.source.dominates(a, b)
+    }
+
+    /// One block's operations, mutable, for the pass that is still building.
+    pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
+        let index = *self.block_index.get(&addr)? as usize;
+        self.blocks.get_mut(index)
+    }
+
+    /// A second copy of these operations over the same function, for a test
+    /// that wants to rewrite them again.
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
+        Self::new(self.source, self.blocks.clone())
+    }
+
+    /// The rewritten operations, in the text the source function dumps.
+    pub fn dump(&self) -> String {
+        dump_blocks(self.name(), self.entry(), self.blocks(), self.source)
+    }
+}
+
+/// One function's blocks as text, shared by a function and by operations
+/// rewritten over it.
+fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAFunction) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("Function: {}\n", name.unwrap_or("<unnamed>")));
+    out.push_str(&format!("Entry: 0x{:x}\n", entry));
+    out.push_str(&format!("Blocks: {}\n\n", blocks.len()));
+
+    for block in blocks {
+        {
+            let addr = block.addr;
+            out.push_str(&format!("Block 0x{:x}:\n", addr));
+
+            // Predecessors
+            let preds = shape.predecessors(addr);
+            if !preds.is_empty() {
+                out.push_str(&format!(
+                    "  preds: {}\n",
+                    preds
+                        .iter()
+                        .map(|p| format!("0x{:x}", p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+
+            // Phi nodes
+            for phi in &block.phis {
+                let sources: Vec<String> = phi
+                    .sources
+                    .iter()
+                    .map(|(pred, var)| format!("[0x{:x}]: {}", pred, var))
+                    .collect();
+                out.push_str(&format!("  {} = phi({})\n", phi.dst, sources.join(", ")));
+            }
+
+            // Operations
+            for op in &block.ops {
+                out.push_str(&format!("  {:?}\n", op));
+            }
+
+            // Successors
+            let succs = shape.successors(addr);
+            if !succs.is_empty() {
+                out.push_str(&format!(
+                    "  succs: {}\n",
+                    succs
+                        .iter()
+                        .map(|s| format!("0x{:x}", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 /// A phi node in SSA form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhiNode {
@@ -2928,6 +3091,10 @@ impl SSAFunction {
             .unwrap_or_default();
         let domtree = DomTree::compute(&cfg);
         let block_order = cfg.reverse_postorder();
+        let ordered = block_order
+            .iter()
+            .filter_map(|addr| blocks.iter().find(|block| block.addr == *addr).cloned())
+            .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
             stack_pointer_carrier: None,
@@ -2935,11 +3102,8 @@ impl SSAFunction {
             entry,
             cfg,
             domtree,
-            blocks: blocks
-                .iter()
-                .cloned()
-                .map(|block| (block.addr, block))
-                .collect(),
+            block_index: block_index_of(&ordered),
+            blocks: ordered,
             block_order,
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
@@ -4986,65 +5150,7 @@ impl SSAFunction {
 
     /// Print the function in a human-readable format.
     pub fn dump(&self) -> String {
-        let mut out = String::new();
-
-        out.push_str(&format!(
-            "Function: {}\n",
-            self.name.as_deref().unwrap_or("<unnamed>")
-        ));
-        out.push_str(&format!("Entry: 0x{:x}\n", self.entry));
-        out.push_str(&format!("Blocks: {}\n\n", self.num_blocks()));
-
-        for &addr in &self.block_order {
-            if let Some(block) = self.get_block(addr) {
-                out.push_str(&format!("Block 0x{:x}:\n", addr));
-
-                // Predecessors
-                let preds = self.predecessors(addr);
-                if !preds.is_empty() {
-                    out.push_str(&format!(
-                        "  preds: {}\n",
-                        preds
-                            .iter()
-                            .map(|p| format!("0x{:x}", p))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-
-                // Phi nodes
-                for phi in &block.phis {
-                    let sources: Vec<String> = phi
-                        .sources
-                        .iter()
-                        .map(|(pred, var)| format!("[0x{:x}]: {}", pred, var))
-                        .collect();
-                    out.push_str(&format!("  {} = phi({})\n", phi.dst, sources.join(", ")));
-                }
-
-                // Operations
-                for op in &block.ops {
-                    out.push_str(&format!("  {:?}\n", op));
-                }
-
-                // Successors
-                let succs = self.successors(addr);
-                if !succs.is_empty() {
-                    out.push_str(&format!(
-                        "  succs: {}\n",
-                        succs
-                            .iter()
-                            .map(|s| format!("0x{:x}", s))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-
-                out.push('\n');
-            }
-        }
-
-        out
+        dump_blocks(self.name.as_deref(), self.entry, self.blocks(), self)
     }
 }
 

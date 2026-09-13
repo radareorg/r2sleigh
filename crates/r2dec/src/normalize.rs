@@ -535,7 +535,7 @@ impl NormalizationOrigins {
 
     pub(crate) fn validate(
         &self,
-        normalized: &SSAFunction,
+        normalized: &r2ssa::RewrittenFunction<'_>,
         prepared: &r2ssa::SsaArtifact,
         render_facts: Option<&r2types::FunctionRenderFacts>,
     ) -> Result<(), NormalizationOriginError> {
@@ -547,7 +547,7 @@ impl NormalizationOrigins {
 
     fn validate_against_graph(
         &self,
-        normalized: &SSAFunction,
+        normalized: &r2ssa::RewrittenFunction<'_>,
         graph: &SsaGraph,
         render_facts: Option<&r2types::FunctionRenderFacts>,
     ) -> Result<(), NormalizationOriginError> {
@@ -990,7 +990,7 @@ fn validate_phi_edge_origin(
 fn validate_relocated_initializer_origin(
     graph: &SsaGraph,
     certificates: &CarrierEdgeCertificates,
-    normalized: &SSAFunction,
+    normalized: &r2ssa::RewrittenFunction<'_>,
     op: &SSAOp,
     origin: &RelocatedInitializerOrigin,
 ) -> bool {
@@ -1063,7 +1063,7 @@ fn validate_relocated_initializer_origin(
 
 fn validate_removed_phis(
     graph: &SsaGraph,
-    normalized: &SSAFunction,
+    normalized: &r2ssa::RewrittenFunction<'_>,
     removed: &[RemovedPhiOrigin],
 ) -> bool {
     if !removed
@@ -1287,11 +1287,11 @@ fn is_block_terminator(op: &SSAOp) -> bool {
 /// temporary or flag phi creates artificial C effects and obscures the proof
 /// boundary between SSA values and mutable loop state.
 #[allow(dead_code)]
-pub(crate) fn materialize_certified_loop_carriers(
-    func: &SSAFunction,
+pub(crate) fn materialize_certified_loop_carriers<'f>(
+    func: &'f SSAFunction,
     prepared: &r2ssa::SsaArtifact,
     render_facts: &r2types::FunctionRenderFacts,
-) -> Result<(SSAFunction, NormalizationOrigins), NormalizationOriginError> {
+) -> Result<(r2ssa::RewrittenFunction<'f>, NormalizationOrigins), NormalizationOriginError> {
     let execution = SsaExecutionControl::default();
     let control = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
     match materialize_certified_loop_carriers_with_control(func, prepared, render_facts, control) {
@@ -1303,12 +1303,12 @@ pub(crate) fn materialize_certified_loop_carriers(
     }
 }
 
-pub(crate) fn materialize_certified_loop_carriers_with_control(
-    func: &SSAFunction,
+pub(crate) fn materialize_certified_loop_carriers_with_control<'f>(
+    func: &'f SSAFunction,
     prepared: &r2ssa::SsaArtifact,
     render_facts: &r2types::FunctionRenderFacts,
     control: DecompileWorkControl<'_>,
-) -> Result<(SSAFunction, NormalizationOrigins), NormalizationFailure> {
+) -> Result<(r2ssa::RewrittenFunction<'f>, NormalizationOrigins), NormalizationFailure> {
     // A merge whose destination is read has to be placed, whether or not it is
     // a certified loop carrier. Admitting carriers alone left every other merge
     // with no definition anywhere in the rendered body, and the fold cannot
@@ -1354,16 +1354,17 @@ pub(crate) fn materialize_certified_loop_carriers_with_control(
     )
 }
 
-fn materialize_phis_where_with_control(
-    func: &SSAFunction,
+fn materialize_phis_where_with_control<'f>(
+    func: &'f SSAFunction,
     graph: &SsaGraph,
     authority: Option<SsaArtifactAuthority>,
     render_facts: Option<&r2types::FunctionRenderFacts>,
     control: DecompileWorkControl<'_>,
     mut eligible: impl FnMut(&r2ssa::PhiNode) -> bool,
-) -> Result<(SSAFunction, NormalizationOrigins), NormalizationFailure> {
+) -> Result<(r2ssa::RewrittenFunction<'f>, NormalizationOrigins), NormalizationFailure> {
     control.poll()?;
-    let mut normalized = func.clone();
+    // Only the operations change, so only the operations are copied.
+    let mut normalized = r2ssa::RewrittenFunction::new(func, func.blocks().to_vec());
     let mut origins = NormalizationOrigins::from_source(func, graph, authority);
     let certificates = CarrierEdgeCertificates::build(graph, render_facts)
         .ok_or(NormalizationOriginError::InvalidCarrierCertificates)?;
@@ -1545,14 +1546,14 @@ fn materialize_phis_where_with_control(
 }
 
 #[cfg(test)]
-fn materialize_all_phis(func: &SSAFunction) -> SSAFunction {
+fn materialize_all_phis(func: &SSAFunction) -> r2ssa::RewrittenFunction<'_> {
     materialize_all_phis_with_origins(func).0
 }
 
 #[cfg(test)]
 fn materialize_all_phis_with_origins(
     func: &SSAFunction,
-) -> (SSAFunction, NormalizationOrigins, SsaGraph) {
+) -> (r2ssa::RewrittenFunction<'_>, NormalizationOrigins, SsaGraph) {
     let execution = SsaExecutionControl::default();
     let control = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
     let graph = SsaGraph::from_function(func);
@@ -1868,7 +1869,7 @@ fn remove_phi_edge_operation(
 /// point.
 #[allow(dead_code)]
 pub(crate) fn materialize_certified_loop_carrier_initializers(
-    func: &mut SSAFunction,
+    func: &mut r2ssa::RewrittenFunction<'_>,
     origins: &mut NormalizationOrigins,
     prepared: &r2ssa::SsaArtifact,
     render_facts: &r2types::FunctionRenderFacts,
@@ -1891,7 +1892,7 @@ pub(crate) fn materialize_certified_loop_carrier_initializers(
 }
 
 pub(crate) fn materialize_certified_loop_carrier_initializers_with_control(
-    func: &mut SSAFunction,
+    func: &mut r2ssa::RewrittenFunction<'_>,
     origins: &mut NormalizationOrigins,
     prepared: &r2ssa::SsaArtifact,
     render_facts: &r2types::FunctionRenderFacts,
@@ -2206,7 +2207,7 @@ mod tests {
             .first()
             .expect("fixture materializes phi inputs");
 
-        let mut duplicate_function = normalized.clone();
+        let mut duplicate_function = normalized.duplicate();
         let duplicate_op = duplicate_function
             .get_block(block_addr)
             .expect("materialized predecessor")
@@ -2232,7 +2233,7 @@ mod tests {
             "two individually valid rows cannot claim one original input"
         );
 
-        let mut omitted_function = normalized.clone();
+        let mut omitted_function = normalized.duplicate();
         omitted_function
             .get_block_mut(block_addr)
             .expect("materialized predecessor")
@@ -2253,7 +2254,7 @@ mod tests {
             .get(1)
             .expect("join fixture has a second incoming edge");
         assert_ne!(block_id, omitted_block_id);
-        let mut duplicate_and_omitted_function = normalized.clone();
+        let mut duplicate_and_omitted_function = normalized.duplicate();
         duplicate_and_omitted_function
             .get_block_mut(block_addr)
             .expect("duplicated predecessor")

@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use r2ssa::{
-    InstId, MachineUseDisposition, MachineWriteDisposition, SSAFunction, SemanticObligationId,
-    SsaArtifact, SsaArtifactAuthority, UseSite, ValueId,
+    InstId, MachineUseDisposition, MachineWriteDisposition, SemanticObligationId, SsaArtifact,
+    SsaArtifactAuthority, UseSite, ValueId,
 };
 use r2types::SourceOwnedFunctionFacts;
 
@@ -1793,7 +1793,7 @@ impl LegacyObservationJournal {
 
     pub(crate) fn new(
         source: &SourceOwnedFunctionFacts,
-        normalized: &SSAFunction,
+        normalized: &r2ssa::RewrittenFunction<'_>,
         origins: &NormalizationOrigins,
         names: Rc<BindingNameResolution>,
         symbols: Rc<RefCell<SymbolTable>>,
@@ -5527,8 +5527,10 @@ mod tests {
     ) {
         let plan = BindingPlan::build_shadow(&source).expect("sealed binding plan");
         let function = CFunction::new("journal", CType::Void);
-        let normalized = source.source().function().clone();
-        let origins = NormalizationOrigins::for_unchanged(&normalized, source.source());
+        let function_source = source.source().function();
+        let normalized =
+            r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+        let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
         let names =
             test_binding_names(&source, Rc::new(plan.clone()), Rc::clone(&function.symbols));
         let journal = LegacyObservationJournal::new(
@@ -5766,8 +5768,10 @@ mod tests {
             plan.disposition(return_control),
             Some(ValueDisposition::Bound { .. })
         ));
-        let normalized = source.source().function().clone();
-        let origins = NormalizationOrigins::for_unchanged(&normalized, source.source());
+        let function_source = source.source().function();
+        let normalized =
+            r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+        let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
         let function = CFunction::new("mixed_return_control", CType::Void);
         let names = test_binding_names(&source, Rc::new(plan), Rc::clone(&function.symbols));
         let journal = LegacyObservationJournal::new(
@@ -5836,8 +5840,10 @@ mod tests {
             Some(ValueDisposition::Bound { binding }) => *binding,
             other => panic!("certified return must be bound, got {other:?}"),
         };
-        let normalized = source.source().function().clone();
-        let origins = NormalizationOrigins::for_unchanged(&normalized, source.source());
+        let function_source = source.source().function();
+        let normalized =
+            r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+        let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
         let mut journal = LegacyObservationJournal::new(
             &source,
             &normalized,
@@ -6277,8 +6283,10 @@ mod tests {
             .clone();
         let plan = Rc::new(BindingPlan::build_shadow(&source).expect("dead-merge-aware plan"));
         let function = CFunction::new("dead_phi", CType::Void);
-        let normalized = source.source().function().clone();
-        let origins = NormalizationOrigins::for_unchanged(&normalized, source.source());
+        let function_source = source.source().function();
+        let normalized =
+            r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+        let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
         let names = test_binding_names(&source, plan, Rc::clone(&function.symbols));
         let journal = LegacyObservationJournal::new(
             &source,
@@ -6394,8 +6402,10 @@ mod tests {
                 signedness: r2types::Signedness::Signed,
             },
         );
-        let normalized = source.source().function().clone();
-        let origins = NormalizationOrigins::for_unchanged(&normalized, source.source());
+        let function_source = source.source().function();
+        let normalized =
+            r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+        let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
         let names = test_binding_names(&source, plan, Rc::clone(&function.symbols));
         let journal = LegacyObservationJournal::new(
             &source,

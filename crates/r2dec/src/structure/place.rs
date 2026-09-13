@@ -8,9 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use r2ssa::SSAOp;
 use r2ssa::cfg::BlockTerminator;
 use r2ssa::domtree::DomTree;
-use r2ssa::{SSAFunction, SSAOp};
 
 use crate::ast::{CExpr, CStmt, SwitchCase};
 use crate::structured_region::{StructuredRegionKind, StructuredRegionMarker};
@@ -46,9 +46,9 @@ pub(crate) struct Placement {
 }
 
 impl Placement {
-    pub(crate) fn compute(func: &SSAFunction) -> Self {
+    pub(crate) fn compute(func: &r2ssa::RewrittenFunction<'_>) -> Self {
         let cfg = func.cfg();
-        let entry = func.entry;
+        let entry = func.entry();
         let dom = DomTree::compute(cfg);
         let rpo: HashMap<u64, usize> = cfg
             .reverse_postorder()

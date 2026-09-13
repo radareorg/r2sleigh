@@ -957,7 +957,10 @@ mod tests {
         let journal = Box::leak(Box::new(std::cell::RefCell::new(
             crate::observation_journal::LegacyObservationJournal::new(
                 &prepared.facts,
-                prepared.function(),
+                &r2ssa::RewrittenFunction::new(
+                    prepared.function(),
+                    prepared.function().blocks().to_vec(),
+                ),
                 origins,
                 Rc::clone(names),
                 Rc::clone(&ctx.symbols),
@@ -982,7 +985,10 @@ mod tests {
             crate::normalize::NormalizationOrigins::for_unchanged(prepared.function(), prepared);
         let replacement = crate::observation_journal::LegacyObservationJournal::new(
             &prepared.facts,
-            prepared.function(),
+            &r2ssa::RewrittenFunction::new(
+                prepared.function(),
+                prepared.function().blocks().to_vec(),
+            ),
             &origins,
             Rc::clone(names),
             Rc::clone(&symbols),

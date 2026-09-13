@@ -10,7 +10,7 @@ mod shape;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use r2ssa::{PredicateId, SSAFunction, SSAOp, ValueId};
+use r2ssa::{PredicateId, SSAOp, ValueId};
 
 use crate::ast::{CExpr, CStmt};
 use crate::control::{DecompileExecutionStop, DecompileWorkControl};
@@ -50,7 +50,7 @@ pub(crate) type ControlFlowStructureResult<T> = Result<T, ControlFlowStructureEr
 
 /// Writes a function's blocks as C control, by the placement.
 pub(crate) struct ControlFlowStructurer<'a, 'o> {
-    func: &'a SSAFunction,
+    func: &'a r2ssa::RewrittenFunction<'a>,
     fold_ctx: &'o FoldingContext<'o>,
     /// Cached folded statements per basic block.
     folded_block_cache: HashMap<u64, FoldedBlock>,
@@ -79,7 +79,10 @@ struct CertifiedForRegion {
 
 impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     #[cfg(test)]
-    pub(crate) fn new(func: &'a SSAFunction, fold_ctx: &'o FoldingContext<'o>) -> Self {
+    pub(crate) fn new(
+        func: &'a r2ssa::RewrittenFunction<'a>,
+        fold_ctx: &'o FoldingContext<'o>,
+    ) -> Self {
         Self {
             func,
             fold_ctx,
@@ -96,7 +99,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 
     /// A structurer that polls the engine's work control as it writes.
     pub(crate) fn new_with_control(
-        func: &'a SSAFunction,
+        func: &'a r2ssa::RewrittenFunction<'a>,
         fold_ctx: &'o FoldingContext<'o>,
         control: DecompileWorkControl<'a>,
     ) -> Result<Self, DecompileExecutionStop> {
@@ -172,7 +175,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         crate::stage_timing::mark("structure_prepare");
         let body = self.place_function(&placement)?;
         let stmt = CStmt::structured_region(
-            StructuredRegionMarker::unsealed(self.func.entry, StructuredRegionKind::FunctionBody),
+            StructuredRegionMarker::unsealed(self.func.entry(), StructuredRegionKind::FunctionBody),
             CStmt::Block(body),
         );
         crate::stage_timing::mark("structure_walk");
@@ -323,7 +326,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         certify::certify(
             stmt,
             self.func.cfg(),
-            self.func.entry,
+            self.func.entry(),
             &|id| {
                 journal
                     .as_ref()

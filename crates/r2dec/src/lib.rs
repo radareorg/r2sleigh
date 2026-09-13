@@ -623,10 +623,19 @@ fn incomplete_source_obligations_reason(prepared: &r2ssa::SsaArtifact) -> Option
 /// therefore sanitized once, here, and a name of which nothing survives falls
 /// back to the address form -- the same answer an unnamed function gets.
 pub(crate) fn rendered_function_name(func: &SSAFunction) -> String {
-    func.name
-        .as_deref()
-        .and_then(r2types::sanitize_c_identifier)
-        .unwrap_or_else(|| format!("sub_{:x}", func.entry))
+    rendered_name_of(func.name.as_deref(), func.entry)
+}
+
+/// The C name a rendering gives a function, from what it is called and where
+/// it starts.
+pub(crate) fn rendered_name_of(name: Option<&str>, entry: u64) -> String {
+    name.and_then(r2types::sanitize_c_identifier)
+        .unwrap_or_else(|| format!("sub_{entry:x}"))
+}
+
+/// The same name, for operations that were rewritten over a function.
+pub(crate) fn rewritten_function_name(func: &r2ssa::RewrittenFunction<'_>) -> String {
+    rendered_name_of(func.name(), func.entry())
 }
 
 fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunction {
@@ -2969,7 +2978,7 @@ impl Decompiler {
                 }
             } else {
                 (
-                    func.clone(),
+                    r2ssa::RewrittenFunction::new(func, func.blocks().to_vec()),
                     normalize::NormalizationOrigins::for_unchanged(func, prepared),
                 )
             };
@@ -3181,7 +3190,7 @@ impl Decompiler {
             }
         };
         let func = &normalized_func;
-        let func_name = rendered_function_name(func);
+        let func_name = rewritten_function_name(func);
         let observation_journal = match LegacyObservationJournal::new(
             input.source_owned_facts(),
             &normalized_func,
@@ -3335,7 +3344,7 @@ impl Decompiler {
                 };
                 return Ok(InternalBuildProduct::refused(
                     residual_function_for_render_boundary(
-                        &rendered_function_name(func),
+                        &rewritten_function_name(func),
                         &format!("native render refusal: {}", refusal.kind()),
                     ),
                     refusal,
@@ -3439,7 +3448,7 @@ impl Decompiler {
                         &refusal,
                     );
                     let function = residual_function_for_render_boundary(
-                        &rendered_function_name(func),
+                        &rewritten_function_name(func),
                         &format!("operation lowering refusal: {refusal:?}"),
                     );
                     return Ok(InternalBuildProduct::refused(function, refusal.into()));
@@ -3448,7 +3457,7 @@ impl Decompiler {
                     debug_log_render_contract_error(prepared, "structured-region", &error);
                     return Ok(InternalBuildProduct::refused(
                         residual_function_for_render_boundary(
-                            &rendered_function_name(func),
+                            &rewritten_function_name(func),
                             &format!("structured-region refusal: {error:?}"),
                         ),
                         DecompileRenderRefusal::UnrepresentableControlFlow,
@@ -3475,7 +3484,7 @@ impl Decompiler {
             let certificate = structure::certify::certify(
                 structured_body.stmt(),
                 func.cfg(),
-                func.entry,
+                func.entry(),
                 &|id| journal.observation_block(id),
                 &label_block,
                 &|stmt| {
