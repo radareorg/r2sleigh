@@ -1176,10 +1176,29 @@ unsafe fn capture_trusted_ssa_from_buffer(
     // SAFETY: the caller guarantees the buffer extent.
     let bytes =
         unsafe { std::slice::from_raw_parts(payload.snapshot_buffer, payload.snapshot_buffer_len) };
+    let before_capture = r2il::allocation::live_bytes();
     let decode_started = Instant::now();
     let (source, callees) = r2source::snapshot_wire::decode_snapshot_set(bytes)
         .map_err(|error| BoundaryError::invalid(format!("snapshot buffer rejected: {error}")))?;
     let decode_elapsed = decode_started.elapsed();
+    // The same phase report preparation gives, for the part of a decompile's
+    // bytes that are held before any of it runs. Roughly a third of what a
+    // render starts from is neither the SSA function nor its facts, and
+    // without this that third has no name.
+    let capture_held = std::cell::Cell::new(before_capture);
+    let capture_address = source.function().address();
+    let capture_blocks = source.image().blocks().len();
+    let capture_phase = |name: &str, size: usize| {
+        let live = r2il::allocation::live_bytes();
+        let grew = live.saturating_sub(capture_held.get());
+        capture_held.set(live);
+        r2il::refusal_evidence!(
+            "collect-phase",
+            "capture@{capture_address:#x}/{capture_blocks} {name} {} ms size {size} bytes {grew}",
+            decode_started.elapsed().as_millis()
+        );
+    };
+    capture_phase("decoded", callees.len());
     // Callees first, so the root can describe a call whose prototype the
     // source never recovered from what the callee's own body does.
     //
@@ -1302,6 +1321,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
         callee_facts.push(facts);
     }
     let callee_elapsed = callee_started.elapsed();
+    capture_phase("callee_facts", callee_facts.len());
     let root_started = Instant::now();
     // The root is prepared against the interfaces of the callees above, so its
     // input is the whole request buffer rather than its own record within it.
@@ -1328,6 +1348,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
             (root, false)
         }
     };
+    capture_phase("root_artifact", 0);
     Ok(TrustedIngress {
         root,
         callees: callee_facts,

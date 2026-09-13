@@ -27,7 +27,7 @@ import sys
 
 # `prepare@0xcc30/501 obligations 584 ms size 8981 bytes 16841780`
 PHASE = re.compile(
-    r"(?P<role>prepare|recover|build)@(?P<addr>0x[0-9a-f]+)/(?P<blocks>\d+)\s+"
+    r"(?P<role>prepare|recover|build|capture)@(?P<addr>0x[0-9a-f]+)/(?P<blocks>\d+)\s+"
     r"(?P<phase>\w+)\s+(?P<ms>\d+) ms size (?P<size>\d+) bytes (?P<bytes>\d+)"
 )
 # `r2dec stage timing dbg_x: instructions=30281 total=...us a=1us entry_bytes=N peak_bytes=M a_bytes=K`
@@ -95,7 +95,7 @@ def megabytes(value: float) -> str:
 
 def report_phases(phases: list[dict]) -> None:
     """What one root's preparation holds, phase by phase."""
-    for role in ("build", "prepare"):
+    for role in ("capture", "build", "prepare"):
         report_role(phases, role)
 
 
