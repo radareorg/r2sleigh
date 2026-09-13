@@ -468,7 +468,7 @@ fn binding_width(
             })?;
         binding_width_bits = binding_width_bits.max(member_width_bits);
 
-        for site in &graph.uses_of[value.0 as usize] {
+        for site in graph.use_sites(*value) {
             let Some(MachineUseDisposition::Exact(slice)) =
                 machine_projection.use_disposition(*site)
             else {

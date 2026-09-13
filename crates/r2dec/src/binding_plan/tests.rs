@@ -1080,7 +1080,7 @@ fn refused_machine_use_leaves_its_constant_explicitly_refused() {
         plan.disposition(constant.id),
         Some(ValueDisposition::Inline { .. })
     ));
-    let use_site = source.graph().uses_of[constant.id.0 as usize][0];
+    let use_site = source.graph().use_sites(constant.id)[0];
     assert!(matches!(
         plan.use_disposition(use_site),
         Some(MachineUseDisposition::Refused(_))

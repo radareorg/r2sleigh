@@ -803,7 +803,7 @@ fn original_phi_definition(
     graph: &SsaGraph,
     phi: &r2ssa::PhiNode,
 ) -> Option<OriginalPhiDefinition> {
-    let value = graph.value_by_var.get(&phi.dst).copied()?;
+    let value = graph.value_id_for_var(&phi.dst)?;
     let inst = graph.def_inst(value)?;
     let definition = graph.inst(inst)?;
     matches!(definition.payload, r2ssa::InstPayload::Phi { .. })

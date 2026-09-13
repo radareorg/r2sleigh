@@ -2781,7 +2781,7 @@ mod tests {
         graph.insts.clear();
         graph.values.clear();
         graph.def_of.clear();
-        graph.uses_of.clear();
+        graph.clear_use_sites();
         graph.op_inst_by_site.clear();
         graph.op_site_by_inst.clear();
         for block in &mut graph.blocks {

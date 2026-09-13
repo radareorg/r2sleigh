@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -196,14 +196,52 @@ pub struct SsaGraph {
     pub insts: Vec<GraphInst>,
     pub values: Vec<GraphValue>,
     pub def_of: Vec<Option<InstId>>,
-    pub uses_of: Vec<Vec<UseSite>>,
+    /// Where each value is read, grouped by value.
+    ///
+    /// Flat, with an offset per value, rather than a vector per value: a
+    /// function has one vector header and one allocation per value that way,
+    /// and a thirty-thousand-value function had thirty thousand of each.
+    /// Nothing adds a use to a value after the graph is built -- a value
+    /// interned afterwards is read nowhere -- so the offsets never move.
+    pub(crate) use_offsets: Vec<u32>,
+    pub(crate) use_sites: Vec<UseSite>,
     pub block_by_addr: BTreeMap<u64, BlockId>,
-    pub value_by_var: BTreeMap<SSAVar, ValueId>,
+    /// The values in the order their variables sort, so a variable can be
+    /// looked up without a second copy of every variable in the function.
+    ///
+    /// This was an ordered map from the variable to its value, which is the
+    /// variable held twice: once in `values` and once as a key, name and all.
+    /// A search reads the variable back out of `values`, which is where it
+    /// already is.
+    pub(crate) value_by_var: Vec<ValueId>,
     pub op_inst_by_site: BTreeMap<(u64, usize), InstId>,
     pub op_site_by_inst: BTreeMap<InstId, (u64, usize)>,
     /// Entry-lane projections by value, valued by the lane's storage
     /// (`SSAFunction::mint_entry_lane_projections`).
     pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
+}
+
+/// The start of each value's run of uses, with a final entry for the total.
+/// Every value, in the order its variable sorts.
+pub(crate) fn value_order_of(values: &[GraphValue]) -> Vec<ValueId> {
+    let mut order = values.iter().map(|value| value.id).collect::<Vec<_>>();
+    order.sort_unstable_by(|left, right| {
+        values[left.0 as usize]
+            .var
+            .cmp(&values[right.0 as usize].var)
+    });
+    order
+}
+
+pub(crate) fn use_offsets_of(uses: &[Vec<UseSite>]) -> Vec<u32> {
+    let mut offsets = Vec::with_capacity(uses.len() + 1);
+    let mut total = 0u32;
+    for sites in uses {
+        offsets.push(total);
+        total += sites.len() as u32;
+    }
+    offsets.push(total);
+    offsets
 }
 
 impl SsaGraph {
@@ -268,16 +306,16 @@ impl SsaGraph {
         }
 
         let mut values = Vec::new();
-        let mut value_by_var = BTreeMap::new();
+        let mut value_by_var = HashMap::new();
         let mut def_of = Vec::new();
-        let mut uses_of = Vec::new();
+        let mut uses_of: Vec<Vec<UseSite>> = Vec::new();
         let mut insts = Vec::new();
         let mut op_inst_by_site = BTreeMap::new();
         let mut op_site_by_inst = BTreeMap::new();
 
         let intern_value = |var: &SSAVar,
                             values: &mut Vec<GraphValue>,
-                            value_by_var: &mut BTreeMap<SSAVar, ValueId>,
+                            value_by_var: &mut HashMap<SSAVar, ValueId>,
                             def_of: &mut Vec<Option<InstId>>,
                             uses_of: &mut Vec<Vec<UseSite>>| {
             if let Some(id) = value_by_var.get(var).copied() {
@@ -415,6 +453,7 @@ impl SsaGraph {
             .formal_projection_vars()
             .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
             .collect();
+        let value_order = value_order_of(&values);
         Self {
             entry,
             block_order,
@@ -422,9 +461,10 @@ impl SsaGraph {
             insts,
             values,
             def_of,
-            uses_of,
+            use_offsets: use_offsets_of(&uses_of),
+            use_sites: uses_of.into_iter().flatten().collect(),
             block_by_addr,
-            value_by_var,
+            value_by_var: value_order,
             op_inst_by_site,
             op_site_by_inst,
             formal_projections,
@@ -460,7 +500,11 @@ impl SsaGraph {
     }
 
     pub fn value_id_for_var(&self, var: &SSAVar) -> Option<ValueId> {
-        self.value_by_var.get(var).copied()
+        let at = self
+            .value_by_var
+            .binary_search_by(|id| self.values[id.0 as usize].var.cmp(var))
+            .ok()?;
+        self.value_by_var.get(at).copied()
     }
 
     pub fn inst_id_for_op_site(&self, block_addr: u64, op_idx: usize) -> Option<InstId> {
@@ -502,21 +546,33 @@ impl SsaGraph {
         {
             return None;
         }
-        if let Some(id) = self.value_by_var.get(&var).copied() {
+        if let Some(id) = self.value_id_for_var(&var) {
             let value = self.value(id)?;
             return (self.def_inst(id).is_none() && value.canonical_storage == Some(storage))
                 .then_some(id);
         }
         let id = ValueId(u32::try_from(self.values.len()).ok()?);
+        let at = self
+            .value_by_var
+            .binary_search_by(|other| self.values[other.0 as usize].var.cmp(&var))
+            .unwrap_or_else(|at| at);
         self.values.push(GraphValue {
             id,
-            var: var.clone(),
+            var,
             canonical_storage: Some(storage),
         });
-        self.value_by_var.insert(var, id);
+        self.value_by_var.insert(at, id);
         self.def_of.push(None);
-        self.uses_of.push(Vec::new());
+        self.use_offsets.push(self.use_sites.len() as u32);
         Some(id)
+    }
+
+    /// Forget every recorded use. A fixture that empties the graph to make a
+    /// malformed one uses this; nothing else may.
+    #[cfg(test)]
+    pub(crate) fn clear_use_sites(&mut self) {
+        self.use_offsets.clear();
+        self.use_sites.clear();
     }
 
     pub fn def_inst(&self, id: ValueId) -> Option<InstId> {
@@ -524,9 +580,12 @@ impl SsaGraph {
     }
 
     pub fn use_sites(&self, id: ValueId) -> &[UseSite] {
-        self.uses_of
-            .get(id.0 as usize)
-            .map(|sites| sites.as_slice())
-            .unwrap_or(&[])
+        let start = self.use_offsets.get(id.0 as usize).copied().unwrap_or(0) as usize;
+        let end = self
+            .use_offsets
+            .get(id.0 as usize + 1)
+            .copied()
+            .unwrap_or(self.use_sites.len() as u32) as usize;
+        self.use_sites.get(start..end).unwrap_or(&[])
     }
 }

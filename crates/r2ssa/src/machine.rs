@@ -4836,18 +4836,19 @@ mod tests {
             insts: vec![inst],
             values: vec![value.clone(), count],
             def_of: vec![None, None],
-            uses_of: vec![
-                vec![UseSite {
+            use_offsets: vec![0, 1, 2],
+            use_sites: vec![
+                UseSite {
                     inst: InstId(0),
                     input_idx: 0,
-                }],
-                vec![UseSite {
+                },
+                UseSite {
                     inst: InstId(0),
                     input_idx: 1,
-                }],
+                },
             ],
             block_by_addr: [(0x1000, BlockId(0))].into(),
-            value_by_var: [(value.var, ValueId(0))].into(),
+            value_by_var: vec![ValueId(0), ValueId(1)],
             op_inst_by_site: [((0x1000, 0), InstId(0))].into(),
             op_site_by_inst: [(InstId(0), (0x1000, 0))].into(),
             formal_projections: BTreeMap::new(),

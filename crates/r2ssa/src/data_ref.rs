@@ -571,10 +571,7 @@ mod tests {
             });
         }
         let inst_ids = insts.iter().map(|inst| inst.id).collect::<Vec<_>>();
-        let value_by_var = values
-            .iter()
-            .map(|value| (value.var.clone(), value.id))
-            .collect();
+        let value_by_var = crate::graph::value_order_of(&values);
         SsaGraph {
             entry: block,
             block_order: vec![block],
@@ -589,7 +586,8 @@ mod tests {
             insts,
             values,
             def_of,
-            uses_of,
+            use_offsets: crate::graph::use_offsets_of(&uses_of),
+            use_sites: uses_of.into_iter().flatten().collect(),
             block_by_addr: BTreeMap::from([(0x401000, block)]),
             value_by_var,
             op_inst_by_site,

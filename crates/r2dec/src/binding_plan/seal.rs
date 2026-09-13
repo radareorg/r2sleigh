@@ -192,7 +192,7 @@ fn seal_width_evidence(
             })?;
         lower_bounds.push(member_width_bits);
 
-        for site in &graph.uses_of[value.0 as usize] {
+        for site in graph.use_sites(*value) {
             let Some(MachineUseDisposition::Exact(slice)) =
                 machine_projection.use_disposition(*site)
             else {
