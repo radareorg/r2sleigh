@@ -1812,7 +1812,11 @@ impl SourceOwnedFunctionFacts {
         callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
     ) -> (BTreeSet<usize>, bool) {
         let prior_signature = report.types.merged_signature.clone();
-        let mut enriched = report.clone();
+        // The report is taken rather than copied: it is written back whole at
+        // the end of this function and nothing reads the original in between,
+        // so the copy was the whole fact set duplicated once for the root and
+        // once for every callee whose contribution is derived.
+        let mut enriched = std::mem::take(report);
         let mut usage = source.facts().assumption_usage.clone();
         usage.extend(enriched.assumption_usage());
         enriched.assumption_usage = usage;
