@@ -186,6 +186,27 @@ learn.
        the store it serves (`direct_stack_assignment_observations` recurses
        through `Deref`, `AddrOf` and non-assign `Binary`).
 
+  -2.5. **The three machine-projection refusals are three different defects**,
+     each traced to its evidence line.
+
+     * **A stack argument placed in an earlier block is not found**
+       (`bzip2 -O2 fcn_7af0`). The callsite at `0x7b20` declares seven
+       arguments and `reaching_stack_argument_before_call` scans only
+       `block.ops[..call_op_index]`, so argument 6 at stack `+0` "has no
+       reaching store", the boundary is incomplete, and the call refuses. The
+       answer is which value memory at an entry-relative offset holds at that
+       point, which the reaching-memory machinery already computes for loads;
+       a second backward walk here would be the second owner of one question.
+     * **A call whose successor leaves the function** (`minigzip -O2
+       fcn_2460`). The edge `0x2686 -> 0x25a9` leaves and no certified tail
+       call rendered it, so `structure/place.rs:449` refuses. The call at
+       `0x2686` is `dbg_gz_uncompress` with two fixed arguments, so this is a
+       tail call radare2 split rather than certified.
+     * **An operand the projection refused** (`minigzip -O2 fcn_4d00`).
+       `RefusedRenderedUse(UseSite { inst: InstId(122), input_idx: 0 })` at
+       `0x4d26:60`, beside a `strlen` callsite; the gap machinery then cannot
+       cover it because the closure reaches a control transfer.
+
   -3. **The fork carries three commits and nothing else.** It was seventeen
      ahead of upstream and zero behind; twelve of those were already upstream
      in equivalent form and were dropped by a rebase, and the withdrawn
