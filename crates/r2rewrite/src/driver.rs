@@ -62,7 +62,7 @@ pub struct CanonicalValue {
     /// renders: producers expanded into the term whose values the term no
     /// longer reads. The binding plan decides, per instruction, whether that
     /// rendering is admissible at this site.
-    pub discharges: BTreeSet<CanonicalInstructionId>,
+    pub discharges: DischargedInstructions,
     pub multiplicity: Multiplicity,
 }
 
@@ -77,7 +77,7 @@ pub struct CanonicalAccess {
     pub trace: Box<[Rewrite]>,
     /// Instructions rendering `canonical` at the access renders: the address
     /// producers expanded into the term whose values it no longer reads.
-    pub discharges: BTreeSet<CanonicalInstructionId>,
+    pub discharges: DischargedInstructions,
 }
 
 /// A node whose rewriting exceeded its derived budget.
@@ -170,9 +170,9 @@ pub fn discharged_origins(
     arena: &TermArena,
     value: ValueId,
     canonical: TermId,
-) -> BTreeSet<CanonicalInstructionId> {
+) -> DischargedInstructions {
     let Some(imported) = import.value(value) else {
-        return BTreeSet::new();
+        return DischargedInstructions::default();
     };
     discharged_from(&imported.substituted, projection, arena, canonical)
 }
@@ -184,7 +184,7 @@ fn discharged_from(
     projection: &MachineProjection,
     arena: &TermArena,
     canonical: TermId,
-) -> BTreeSet<CanonicalInstructionId> {
+) -> DischargedInstructions {
     let mut discharged = substituted.clone();
     for leaf in arena.leaves(canonical) {
         if let Some(MachineExprKind::Source { binding, .. }) =
@@ -194,7 +194,44 @@ fn discharged_from(
             discharged.remove(&entity.producer());
         }
     }
-    discharged
+    DischargedInstructions(discharged.into_iter().collect())
+}
+
+/// The instructions that rendering a term also renders, in identity order.
+///
+/// A sorted run rather than an ordered set. Every use is iteration,
+/// membership, emptiness, length or equality, and a set node costs several
+/// hundred bytes whether it holds one identity or eleven -- one per value of a
+/// thirty-thousand-value function, for about two identities each.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DischargedInstructions(Box<[CanonicalInstructionId]>);
+
+impl DischargedInstructions {
+    pub fn iter(&self) -> std::slice::Iter<'_, CanonicalInstructionId> {
+        self.0.iter()
+    }
+
+    pub fn contains(&self, id: &CanonicalInstructionId) -> bool {
+        self.0.binary_search(id).is_ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl<'a> IntoIterator for &'a DischargedInstructions {
+    type Item = &'a CanonicalInstructionId;
+    type IntoIter = std::slice::Iter<'a, CanonicalInstructionId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
 }
 
 struct Budget {
@@ -387,7 +424,7 @@ pub fn canonicalize_with(
             base_root,
             canonical: canonical_term,
             trace: Box::new([]),
-            discharges: BTreeSet::new(),
+            discharges: DischargedInstructions::default(),
             multiplicity: Multiplicity::Any,
         });
     }
