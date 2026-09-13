@@ -113,9 +113,13 @@ learn.
 
      Measured the same way, at the end of the night's work:
 
-         BZ2_decompress,    30,281 instructions   291.9 MB -> 180.5 MB   10,109 -> 6,251 bytes per instruction
-         BZ2_compressBlock, 49,710 instructions   417.4 MB -> 283.6 MB    8,805 -> 5,982
-         radare2 -c 'a:sla; aaa; pd:s @@F' on bzip2 -O2   24.4 s, 696 MB -> 15.0 s, 564 MB
+         BZ2_decompress,    30,281 instructions   291.9 MB -> 177.0 MB   10,109 -> 6,129 bytes per instruction
+         BZ2_compressBlock, 49,710 instructions   417.4 MB -> 276.8 MB    8,805 -> 5,839
+         radare2 -c 'a:sla; aaa; pd:s @@F' on bzip2 -O2   24.4 s, 696 MB -> 14.9 s, 600 MB
+
+     Resident memory is the noisiest of these -- the same build measures
+     anywhere from 564 to 624 MB across runs -- so the live figures are the
+     ones to compare.
 
      The gate is 54/54 on every axis at every commit and the census is 777 of
      787 functions rendered, which is where it was.
@@ -155,20 +159,14 @@ learn.
      measured on the way here and both are recorded above as failures. What is
      done towards it: the name is behind an accessor and cannot be set after
      construction, so the identity cannot drift from what is derived from it,
-     the variable is down to forty bytes, and `canonical_value_roots` no longer
-     needs an ordered key.
+     the variable is down to forty bytes, the four operations that name four
+     variables hold them out of line so the rest are not as wide as they are,
+     and `canonical_value_roots` no longer needs an ordered key. An automated
+     rewrite of those four is not safe, incidentally: `R2ILOp` has variants of
+     the same names, and a script that rewrote by name confused the two.
 
      Three more campaigns are measured and waiting, each too large to start
      without finishing:
-
-     *The operation's four widest variants.* `SSAOp` is 176 bytes because
-     `BlockTransfer`, `AtomicCAS`, `Insert` and `Select` name four variables
-     where nearly every other operation names three. Boxing those four payloads
-     takes it to about 128 and the graph instruction from 248 to 200, which is
-     3.2 MB across the function's operations, the graph's copy of them and
-     normalization's copy. About eighty match sites, and an automated rewrite
-     of them is not safe: `R2ILOp` has variants of the same names, and a script
-     that rewrote by name confused the two.
 
      *The graph's copy of the operations.* `InstPayload::Op` holds the whole
      `SSAOp` inline, which is 7.4 MB of a thirty-thousand-instruction function
