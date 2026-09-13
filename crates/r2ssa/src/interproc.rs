@@ -949,7 +949,7 @@ fn solve_interproc_summary_set_from_locals(
         // summary ascends in it, and a round that reports a change moved at
         // least one fact into at least one summary. Bound the rounds by how
         // many such moves exist, plus the round that observes no change.
-        let scc_bound = scc_fixpoint_round_bound(scc, &locals);
+        let scc_bound = scc_fixpoint_round_bound(scc, &locals, &current);
         max_iterations = max_iterations.max(scc_bound);
         let mut scc_converged = false;
         for _ in 0..scc_bound {
@@ -973,7 +973,7 @@ fn solve_interproc_summary_set_from_locals(
         if !scc_converged {
             r2il::refusal_evidence!(
                 "interproc-summary-cap",
-                "an SCC of {} functions did not settle in {max_iterations} rounds",
+                "an SCC of {} functions did not settle in {scc_bound} rounds",
                 scc.len()
             );
         }
@@ -1406,23 +1406,50 @@ fn initial_summary(
 /// gain: an argument effect, a memory, transfer, allocation, lifetime, sync or
 /// atomic effect, the unknown-call flag, or one call observation resolving from
 /// absent to present. Plus the round that observes no change.
+///
+/// A member's summary also gains whatever its callees outside this SCC already
+/// hold. Those callees are resolved before the SCC runs, so their facts arrive
+/// in the first round, but they then travel round the cycle like any other, so
+/// the universe counts them. Undercounting fails by refusing with
+/// `NonConverged`, which is why this over-approximates rather than assuming
+/// imported facts settle at once.
 fn scc_fixpoint_round_bound(
     scc: &[InterprocFunctionId],
     locals: &BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
+    resolved: &BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
 ) -> usize {
+    let local_facts = |local: &LocalSummaryFacts| {
+        local.arg_effects.len()
+            + local.memory_effects.len()
+            + local.transfer_effects.len()
+            + local.allocation_effects.len()
+            + local.lifetime_effects.len()
+            + local.sync_effects.len()
+            + local.atomic_effects.len()
+            + local.call_observations.len()
+            + 1
+    };
+    let imported_facts = |summary: &FunctionSemanticSummary| {
+        summary.arg_effects.len()
+            + summary.memory_effects.len()
+            + summary.transfer_effects.len()
+            + summary.allocation_effects.len()
+            + summary.lifetime_effects.len()
+            + summary.sync_effects.len()
+            + summary.atomic_effects.len()
+            + 1
+    };
     let universe: usize = scc
         .iter()
         .filter_map(|id| locals.get(id))
         .map(|(_, local)| {
-            local.arg_effects.len()
-                + local.memory_effects.len()
-                + local.transfer_effects.len()
-                + local.allocation_effects.len()
-                + local.lifetime_effects.len()
-                + local.sync_effects.len()
-                + local.atomic_effects.len()
-                + local.call_observations.len()
-                + 1
+            let imported: usize = local
+                .call_observations
+                .values()
+                .filter_map(|call| resolved.get(&InterprocFunctionId(call.target)))
+                .map(imported_facts)
+                .sum();
+            local_facts(local).saturating_add(imported)
         })
         .sum();
     scc.len().saturating_mul(universe).saturating_add(1).max(2)

@@ -2127,6 +2127,39 @@ impl TrustedSsaArtifact {
     }
 }
 
+/// The end of the canonical-root chain from `var`.
+///
+/// One walker for both phases: the map is mutable while the facts are being
+/// built and frozen afterwards, but the relation is the same one, so there is
+/// one place that follows it. `insert_canonical_root` establishes acyclicity by
+/// canonicalising the root it is given before storing it; the visited set here
+/// is what makes a violation of that invariant visible instead of a hang, and
+/// it says so rather than returning whichever node the walk stopped at as if it
+/// were the root.
+pub(crate) fn canonical_root_in<'a>(
+    roots: &'a BTreeMap<SSAVar, SSAVar>,
+    var: &'a SSAVar,
+) -> &'a SSAVar {
+    let mut current = var;
+    let mut visited = std::collections::BTreeSet::new();
+    loop {
+        if !visited.insert(current) {
+            r2il::refusal_evidence!(
+                "canonical-root-cycle",
+                "the canonical-root map cycles at {current:?} on the walk from {var:?}"
+            );
+            return current;
+        }
+        let Some(next) = roots.get(current) else {
+            return current;
+        };
+        if next == current {
+            return current;
+        }
+        current = next;
+    }
+}
+
 /// The value the canonical root names, or `value_id` where the root is not a
 /// value of this graph.
 pub(crate) fn canonical_root_value_id(
@@ -2168,18 +2201,7 @@ impl DecompilePrepFacts {
     /// fixed point would hand back a value that is not the root, and identity
     /// is what every later stage builds on.
     pub fn canonical_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        let mut current = var;
-        let mut visited = std::collections::BTreeSet::new();
-        while visited.insert(current) {
-            let Some(next) = self.canonical_value_roots.get(current) else {
-                break;
-            };
-            if next == current {
-                break;
-            }
-            current = next;
-        }
-        current
+        canonical_root_in(&self.canonical_value_roots, var)
     }
 
     pub fn indexed_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
@@ -5369,20 +5391,7 @@ fn mask_const_to_width(value: u64, width: u32) -> u64 {
 }
 
 fn canonicalize_value_root(root: &SSAVar, roots: &BTreeMap<SSAVar, SSAVar>) -> SSAVar {
-    let mut current = root.clone();
-    let mut seen = HashSet::new();
-
-    loop {
-        let Some(next) = roots.get(&current) else {
-            break;
-        };
-        if *next == current || !seen.insert(current.clone()) {
-            break;
-        }
-        current = next.clone();
-    }
-
-    current
+    canonical_root_in(roots, root).clone()
 }
 
 fn ensure_value_root_identity(roots: &mut BTreeMap<SSAVar, SSAVar>, var: SSAVar) -> bool {
