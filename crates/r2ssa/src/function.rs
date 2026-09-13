@@ -2148,15 +2148,12 @@ pub(crate) fn canonical_root_in<'a>(
     var: &'a SSAVar,
 ) -> &'a SSAVar {
     let mut current = var;
-    let mut visited = std::collections::BTreeSet::new();
-    loop {
-        if !visited.insert(current) {
-            r2il::refusal_evidence!(
-                "canonical-root-cycle",
-                "the canonical-root map cycles at {current:?} on the walk from {var:?}"
-            );
-            return current;
-        }
+    // A walk that visits more entries than the map holds has been somewhere
+    // twice, which is the only way it can fail to terminate. Counting says so
+    // for the cost of an integer; the set of visited variables that said so
+    // before allocated an ordered-set node on every call, and this is the
+    // most-called function of a whole analysis.
+    for _ in 0..=roots.len() {
         let Some(next) = roots.get(current) else {
             return current;
         };
@@ -2165,6 +2162,11 @@ pub(crate) fn canonical_root_in<'a>(
         }
         current = next;
     }
+    r2il::refusal_evidence!(
+        "canonical-root-cycle",
+        "the canonical-root map cycles at {current:?} on the walk from {var:?}"
+    );
+    current
 }
 
 /// The value the canonical root names, or `value_id` where the root is not a
