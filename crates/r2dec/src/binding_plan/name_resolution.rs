@@ -439,23 +439,20 @@ impl BindingNameResolution {
 
     /// Require the canonical disposition for one exact graph use.
     ///
-    /// The successful reference points directly into the plan-owned upstream
-    /// [`r2ssa::MachineProjection`].  No use slice or contextual memory-address
+    /// The answer is the plan-owned upstream [`r2ssa::MachineProjection`]'s,
+    /// read out of its dense table. No use slice or contextual memory-address
     /// certificate is copied into renderer storage.
     pub(crate) fn require_use(
         &self,
         site: UseSite,
-    ) -> Result<&MachineUseDisposition, RenderedIdentityRefusal> {
+    ) -> Result<MachineUseDisposition, RenderedIdentityRefusal> {
         match self.plan.machine_projection().use_disposition(site) {
             Some(
                 disposition @ (MachineUseDisposition::Exact(_)
                 | MachineUseDisposition::MemoryAddress(_)),
             ) => Ok(disposition),
             Some(MachineUseDisposition::Refused(reason)) => {
-                Err(RenderedIdentityRefusal::MachineUse {
-                    site,
-                    reason: *reason,
-                })
+                Err(RenderedIdentityRefusal::MachineUse { site, reason })
             }
             None => Err(RenderedIdentityRefusal::MissingUseDisposition { site }),
         }

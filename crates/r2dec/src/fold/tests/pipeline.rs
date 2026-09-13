@@ -1019,7 +1019,7 @@ mod tests {
     ) -> crate::shadow_report::LegacyUseObservation {
         match plan.use_disposition(site) {
             Some(r2ssa::MachineUseDisposition::Exact(slice)) => {
-                crate::shadow_report::LegacyUseObservation::Exact(*slice)
+                crate::shadow_report::LegacyUseObservation::Exact(slice)
             }
             Some(r2ssa::MachineUseDisposition::MemoryAddress(_)) => {
                 crate::shadow_report::LegacyUseObservation::MemoryAddress
@@ -1221,7 +1221,7 @@ mod tests {
         let (plan, names, _journal) = install_observed_lowering(&mut ctx, &prepared);
         enter_exact_test_site(&ctx, block.addr, load_idx);
         let address = match plan.use_disposition(address_site) {
-            Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) => *address,
+            Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) => address,
             other => panic!("expected contextual memory address, got {other:?}"),
         };
         assert_eq!(
@@ -1575,7 +1575,7 @@ mod tests {
         }
         enter_exact_test_site(&ctx, block.addr, store_idx);
         let address = match plan.use_disposition(address_site) {
-            Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) => *address,
+            Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) => address,
             other => panic!("expected contextual store address, got {other:?}"),
         };
         assert!(matches!(

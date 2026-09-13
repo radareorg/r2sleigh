@@ -1020,7 +1020,7 @@ impl<'a> FoldingContext<'a> {
             Ok(
                 disposition @ (r2ssa::MachineUseDisposition::Exact(_)
                 | r2ssa::MachineUseDisposition::MemoryAddress(_)),
-            ) => *disposition,
+            ) => disposition,
             Ok(r2ssa::MachineUseDisposition::Refused(_)) => {
                 unreachable!("require_use cannot return a refused disposition")
             }
@@ -1041,7 +1041,7 @@ impl<'a> FoldingContext<'a> {
         };
         for use_site in input.uses.iter().copied().skip(1) {
             match names.require_use(use_site) {
-                Ok(disposition) if *disposition == first_disposition => {}
+                Ok(disposition) if disposition == first_disposition => {}
                 Ok(r2ssa::MachineUseDisposition::Refused(_)) => {
                     unreachable!("require_use cannot return a refused disposition")
                 }

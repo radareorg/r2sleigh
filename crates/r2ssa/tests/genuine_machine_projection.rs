@@ -143,7 +143,6 @@ fn exact_uses_from_storage(
         .map(|site| {
             match projection
                 .use_disposition(site)
-                .copied()
                 .expect("dense storage use disposition")
             {
                 MachineUseDisposition::Exact(slice) => slice,

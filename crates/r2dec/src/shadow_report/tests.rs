@@ -112,9 +112,9 @@ fn matching_snapshot(
     for row in &mut snapshot.uses {
         for cell in row {
             cell.observation = match plan.use_disposition(cell.site).expect("dense use") {
-                MachineUseDisposition::Exact(slice) => LegacyUseObservation::Exact(*slice),
+                MachineUseDisposition::Exact(slice) => LegacyUseObservation::Exact(slice),
                 MachineUseDisposition::MemoryAddress(_) => LegacyUseObservation::MemoryAddress,
-                MachineUseDisposition::Refused(reason) => LegacyUseObservation::Refused(*reason),
+                MachineUseDisposition::Refused(reason) => LegacyUseObservation::Refused(reason),
             };
         }
     }
@@ -272,7 +272,7 @@ fn contextual_memory_use_is_not_equal_to_an_integer_slice_observation() {
         Some(MachineUseDisposition::MemoryAddress(_))
     ));
     let wrong_slice = match plan.use_disposition(value_site) {
-        Some(MachineUseDisposition::Exact(slice)) => *slice,
+        Some(MachineUseDisposition::Exact(slice)) => slice,
         other => panic!("store value must have an integer slice: {other:?}"),
     };
 

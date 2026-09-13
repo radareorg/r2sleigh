@@ -472,8 +472,8 @@ fn canonical_value_kind(canonical: NormalizedValueObservation) -> CanonicalDispo
     }
 }
 
-fn normalized_machine_use(disposition: &MachineUseDisposition) -> NormalizedUseObservation {
-    match *disposition {
+fn normalized_machine_use(disposition: MachineUseDisposition) -> NormalizedUseObservation {
+    match disposition {
         MachineUseDisposition::Exact(slice) => NormalizedUseObservation::Exact(slice),
         MachineUseDisposition::MemoryAddress(address) => {
             NormalizedUseObservation::MemoryAddress(address)
@@ -486,7 +486,7 @@ fn normalized_machine_use(disposition: &MachineUseDisposition) -> NormalizedUseO
 /// access read back from the plan that answered for it.
 fn normalized_legacy_use(
     observation: LegacyUseObservation,
-    disposition: &MachineUseDisposition,
+    disposition: MachineUseDisposition,
 ) -> Option<NormalizedUseObservation> {
     Some(match observation {
         LegacyUseObservation::Exact(slice) => NormalizedUseObservation::Exact(slice),
@@ -494,7 +494,7 @@ fn normalized_legacy_use(
             let MachineUseDisposition::MemoryAddress(address) = disposition else {
                 return None;
             };
-            NormalizedUseObservation::MemoryAddress(*address)
+            NormalizedUseObservation::MemoryAddress(address)
         }
         LegacyUseObservation::Elided(reason) => NormalizedUseObservation::Elided(reason),
         LegacyUseObservation::Refused(reason) => NormalizedUseObservation::Refused(reason),
@@ -518,7 +518,7 @@ fn judge_use(
     }
 }
 
-fn canonical_use_kind(disposition: &MachineUseDisposition) -> CanonicalDispositionKind {
+fn canonical_use_kind(disposition: MachineUseDisposition) -> CanonicalDispositionKind {
     match disposition {
         MachineUseDisposition::Exact(_) | MachineUseDisposition::MemoryAddress(_) => {
             CanonicalDispositionKind::Representable

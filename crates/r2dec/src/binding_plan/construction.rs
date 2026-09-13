@@ -558,6 +558,7 @@ impl BindingPlan {
         let source = source_owned.source();
         let machine_projection = MachineProjection::from_artifact(source)
             .map_err(BindingPlanBuildError::MachineProjection)?;
+        crate::stage_timing::mark("plan_projection");
         let graph = source.graph();
         let return_controls = certified_return_control_values(source);
         let direct_control_targets = certified_direct_control_target_values(source);
@@ -572,7 +573,9 @@ impl BindingPlan {
             .ok_or(BindingPlanBuildError::Seal(
                 BindingPlanSourceMismatch::Authority,
             ))?;
+        crate::stage_timing::mark("plan_certified");
         let unread = super::rules::unread_defined_values(source, &machine_projection);
+        crate::stage_timing::mark("plan_unread");
         // One derivation, three readers. The partition is a pure function of the
         // source facts and the projection, and neither the seal nor the shadow
         // oracle can influence either, so deriving it again for each of them

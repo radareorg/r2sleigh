@@ -1070,8 +1070,11 @@ pub(super) fn rewrite_inlining_partition(
         .map_err(BindingPlanBuildError::Canonicalisation)?;
     crate::stage_timing::mark("plan_seed");
     let conservative = inlinable_core(source_owned, projection, &seed_canonical, &BTreeSet::new());
+    crate::stage_timing::mark("plan_inlinable");
     let eligible = component_eligible_with(source_owned, projection, &conservative)?;
+    crate::stage_timing::mark("plan_component_eligible");
     let components = super::construction::binding_components_with(source_owned, &eligible)?;
+    crate::stage_timing::mark("plan_components");
     let alone = components
         .iter()
         .filter(|component| component.members.len() == 1)

@@ -720,6 +720,21 @@ pub enum MachineUseRefusal {
     IncoherentOperation,
 }
 
+/// One use's disposition as the dense table holds it.
+///
+/// `MachineUseDisposition::MemoryAddress` carries a `MachineValueUse`, which is
+/// a hundred and twelve bytes wide and so set the width of a cell that every
+/// graph input of every instruction has one of. A structured access address is
+/// a small minority of a function's uses, so the certificates live in their own
+/// vector and the cell holds the twenty-four bytes the other two dispositions
+/// need. The disposition a caller sees is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum PackedUseDisposition {
+    Exact(MachineUseSlice),
+    MemoryAddress(u32),
+    Refused(MachineUseRefusal),
+}
+
 /// Complete disposition for one graph use, keyed only by its dense table cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum MachineUseDisposition {
@@ -1113,7 +1128,12 @@ pub struct MachineProjection {
     failures: Box<[MachineProjectionFailure]>,
     /// Dense by `ValueId`; every graph value has one explicit geometry disposition.
     value_geometries: Box<[MachineValueGeometryDisposition]>,
-    use_dispositions: Box<[Box<[MachineUseDisposition]>]>,
+    /// Where each instruction's uses begin in `use_slots`, with a final entry
+    /// for the total, so a row is a slice rather than its own allocation.
+    use_offsets: Box<[u32]>,
+    use_slots: Box<[PackedUseDisposition]>,
+    /// The address certificates the `MemoryAddress` cells stand for.
+    address_uses: Box<[MachineValueUse]>,
     /// Dense by `InstId`; `None` is reserved for graph instructions with no output.
     write_dispositions: Box<[Option<MachineWriteDisposition>]>,
 }
@@ -1192,6 +1212,7 @@ impl MachineProjection {
         }
         let use_dispositions =
             canonical_machine_use_dispositions(artifact, builder.use_dispositions)?;
+        let packed = pack_use_dispositions(use_dispositions);
         let projection = Self {
             machine: MachineFunction {
                 arena: MachineExprArena {
@@ -1203,11 +1224,9 @@ impl MachineProjection {
             },
             failures: failures.into_boxed_slice(),
             value_geometries: value_geometries.into_boxed_slice(),
-            use_dispositions: use_dispositions
-                .into_iter()
-                .map(Vec::into_boxed_slice)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            use_offsets: packed.offsets,
+            use_slots: packed.slots,
+            address_uses: packed.addresses,
             write_dispositions: write_dispositions.into_boxed_slice(),
         };
         projection.validate_against(artifact)?;
@@ -1243,15 +1262,55 @@ impl MachineProjection {
     }
 
     /// Dense O(1) lookup for the disposition of one exact graph input use.
-    pub fn use_disposition(&self, site: UseSite) -> Option<&MachineUseDisposition> {
-        self.use_dispositions
-            .get(site.inst.0 as usize)?
-            .get(site.input_idx)
+    pub fn use_disposition(&self, site: UseSite) -> Option<MachineUseDisposition> {
+        let packed = *self.packed_use(site)?;
+        self.unpack_use(packed)
     }
 
-    /// Dense rows indexed by `InstId`, with cells indexed by input position.
-    pub const fn use_dispositions(&self) -> &[Box<[MachineUseDisposition]>] {
-        &self.use_dispositions
+    fn packed_use(&self, site: UseSite) -> Option<&PackedUseDisposition> {
+        let start = *self.use_offsets.get(site.inst.0 as usize)? as usize;
+        let end = *self.use_offsets.get(site.inst.0 as usize + 1)? as usize;
+        self.use_slots.get(start..end)?.get(site.input_idx)
+    }
+
+    fn unpack_use(&self, packed: PackedUseDisposition) -> Option<MachineUseDisposition> {
+        Some(match packed {
+            PackedUseDisposition::Exact(slice) => MachineUseDisposition::Exact(slice),
+            PackedUseDisposition::MemoryAddress(index) => {
+                MachineUseDisposition::MemoryAddress(*self.address_uses.get(index as usize)?)
+            }
+            PackedUseDisposition::Refused(refusal) => MachineUseDisposition::Refused(refusal),
+        })
+    }
+
+    /// How many inputs the dense table holds for one instruction.
+    pub fn use_row_len(&self, inst: InstId) -> Option<usize> {
+        let start = *self.use_offsets.get(inst.0 as usize)? as usize;
+        let end = *self.use_offsets.get(inst.0 as usize + 1)? as usize;
+        end.checked_sub(start)
+    }
+
+    /// Every graph input use and what the projection says about it, in
+    /// instruction and then input order.
+    pub fn uses(&self) -> impl Iterator<Item = (UseSite, MachineUseDisposition)> + '_ {
+        self.use_offsets
+            .windows(2)
+            .enumerate()
+            .flat_map(move |(inst, bounds)| {
+                let range = bounds[0] as usize..bounds[1] as usize;
+                self.use_slots[range]
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(input_idx, packed)| {
+                        Some((
+                            UseSite {
+                                inst: InstId(inst as u32),
+                                input_idx,
+                            },
+                            self.unpack_use(*packed)?,
+                        ))
+                    })
+            })
     }
 
     /// Dense O(1) lookup for one output-producing graph instruction.
@@ -1333,7 +1392,7 @@ impl MachineProjection {
         failures: &BTreeMap<ValueId, &MachineProjectionFailure>,
     ) -> Result<(), MachineBuildError> {
         let graph = artifact.graph();
-        if self.use_dispositions.len() != graph.insts.len() {
+        if self.use_offsets.len() != graph.insts.len() + 1 {
             return Err(MachineBuildError::TopologyMismatch);
         }
         let constant_bindings = self
@@ -1349,7 +1408,14 @@ impl MachineProjection {
             if inst.id.0 as usize != inst_index {
                 return Err(MachineBuildError::TopologyMismatch);
             }
-            let row = &self.use_dispositions[inst_index];
+            let row = (self.use_offsets[inst_index] as usize
+                ..self.use_offsets[inst_index + 1] as usize)
+                .map(|slot| self.use_slots[slot])
+                .map(|packed| {
+                    self.unpack_use(packed)
+                        .ok_or(MachineBuildError::TopologyMismatch)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             if row.len() != inst.inputs.len() {
                 return Err(MachineBuildError::TopologyMismatch);
             }
@@ -1551,6 +1617,40 @@ fn canonical_machine_value_geometry(
             carrier_width_bits: geometry.carrier_bits,
         },
     ))
+}
+
+/// The dense use table, flat.
+struct PackedUseTable {
+    offsets: Box<[u32]>,
+    slots: Box<[PackedUseDisposition]>,
+    addresses: Box<[MachineValueUse]>,
+}
+
+/// Flatten the per-instruction rows and lift every address certificate out of
+/// the cells into its own vector.
+fn pack_use_dispositions(rows: Vec<Vec<MachineUseDisposition>>) -> PackedUseTable {
+    let mut offsets = Vec::with_capacity(rows.len() + 1);
+    let mut slots = Vec::new();
+    let mut addresses = Vec::new();
+    offsets.push(0u32);
+    for row in rows {
+        for disposition in row {
+            slots.push(match disposition {
+                MachineUseDisposition::Exact(slice) => PackedUseDisposition::Exact(slice),
+                MachineUseDisposition::MemoryAddress(address) => {
+                    addresses.push(address);
+                    PackedUseDisposition::MemoryAddress(addresses.len() as u32 - 1)
+                }
+                MachineUseDisposition::Refused(refusal) => PackedUseDisposition::Refused(refusal),
+            });
+        }
+        offsets.push(slots.len() as u32);
+    }
+    PackedUseTable {
+        offsets: offsets.into_boxed_slice(),
+        slots: slots.into_boxed_slice(),
+        addresses: addresses.into_boxed_slice(),
+    }
 }
 
 fn canonical_machine_use_dispositions(
@@ -5569,7 +5669,7 @@ mod tests {
             MachineProjection::from_artifact(&artifact).expect("source-owned machine projection");
         assert_eq!(
             projection.use_disposition(address_use),
-            Some(&MachineUseDisposition::MemoryAddress(projected)),
+            Some(MachineUseDisposition::MemoryAddress(projected)),
             "the contextual address certificate, not an integer slice, owns this UseSite"
         );
         machine
@@ -5839,7 +5939,6 @@ mod tests {
             .expect("operation instruction");
         match projection
             .use_disposition(UseSite { inst, input_idx })
-            .copied()
             .expect("dense use disposition")
         {
             MachineUseDisposition::Exact(slice) => slice,
@@ -5895,7 +5994,7 @@ mod tests {
         let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
         assert_eq!(
             projection.use_disposition(site),
-            Some(&MachineUseDisposition::Exact(MachineUseSlice {
+            Some(MachineUseDisposition::Exact(MachineUseSlice {
                 bit_offset: 0,
                 width_bits: 64,
                 carrier_width_bits: 64,
@@ -5964,7 +6063,6 @@ mod tests {
                 .expect("copy instruction");
             projection
                 .use_disposition(UseSite { inst, input_idx: 0 })
-                .copied()
                 .expect("dense use disposition")
         };
 
@@ -6065,14 +6163,16 @@ mod tests {
         let projection = MachineProjection::from_artifact(&artifact).expect("use projection");
 
         assert_eq!(
-            projection.use_dispositions().len(),
-            artifact.graph().insts.len()
+            projection.uses().count(),
+            artifact
+                .graph()
+                .insts
+                .iter()
+                .map(|inst| inst.inputs.len())
+                .sum::<usize>()
         );
         for inst in &artifact.graph().insts {
-            assert_eq!(
-                projection.use_dispositions()[inst.id.0 as usize].len(),
-                inst.inputs.len()
-            );
+            assert_eq!(projection.use_row_len(inst.id), Some(inst.inputs.len()));
         }
 
         assert_eq!(
@@ -6134,7 +6234,7 @@ mod tests {
                 inst: store_inst,
                 input_idx: 0,
             }),
-            Some(&MachineUseDisposition::Refused(
+            Some(MachineUseDisposition::Refused(
                 MachineUseRefusal::MissingMemoryContext
             )),
             "an address without an exact memory model must not masquerade as an integer slice"
@@ -6187,7 +6287,7 @@ mod tests {
             .expect("subpiece instruction");
         assert_eq!(
             projection.use_disposition(UseSite { inst, input_idx: 0 }),
-            Some(&MachineUseDisposition::Refused(
+            Some(MachineUseDisposition::Refused(
                 MachineUseRefusal::IncoherentOperation
             ))
         );
@@ -6208,8 +6308,8 @@ mod tests {
             .graph()
             .inst_id_for_op_site(0x1000, 0)
             .expect("copy instruction");
-        let MachineUseDisposition::Exact(copy) =
-            &mut projection.use_dispositions[copy_inst.0 as usize][0]
+        let PackedUseDisposition::Exact(copy) =
+            &mut projection.use_slots[projection.use_offsets[copy_inst.0 as usize] as usize]
         else {
             panic!("exact copy use expected");
         };
@@ -6228,8 +6328,8 @@ mod tests {
             .graph()
             .inst_id_for_op_site(0x1000, 1)
             .expect("cast instruction");
-        let MachineUseDisposition::Exact(cast) =
-            &mut projection.use_dispositions[cast_inst.0 as usize][0]
+        let PackedUseDisposition::Exact(cast) =
+            &mut projection.use_slots[projection.use_offsets[cast_inst.0 as usize] as usize]
         else {
             panic!("exact cast use expected");
         };
@@ -6247,7 +6347,10 @@ mod tests {
 
         let mut projection =
             MachineProjection::from_artifact(&artifact).expect("valid exact projection");
-        projection.use_dispositions[copy_inst.0 as usize] = Box::new([]);
+        // One row short of the instruction's inputs, which is the topology
+        // the validator is asked about.
+        projection.use_offsets[copy_inst.0 as usize + 1] =
+            projection.use_offsets[copy_inst.0 as usize];
         assert_eq!(
             projection.validate_against(&artifact),
             Err(MachineBuildError::TopologyMismatch)
@@ -6668,8 +6771,8 @@ mod tests {
         ] {
             let mut corrupted =
                 MachineProjection::from_artifact(&artifact).expect("valid projection");
-            let MachineUseDisposition::Exact(slice) =
-                &mut corrupted.use_dispositions[read.0 as usize][0]
+            let PackedUseDisposition::Exact(slice) =
+                &mut corrupted.use_slots[corrupted.use_offsets[read.0 as usize] as usize]
             else {
                 panic!("the root read must be exact");
             };

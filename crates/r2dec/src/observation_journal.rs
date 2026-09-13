@@ -2272,21 +2272,9 @@ impl LegacyObservationJournal {
         let mut refused_uses = self
             .plan
             .machine_projection()
-            .use_dispositions()
-            .iter()
-            .enumerate()
-            .flat_map(|(inst, row)| {
-                row.iter()
-                    .enumerate()
-                    .filter_map(move |(input_idx, disposition)| {
-                        matches!(disposition, MachineUseDisposition::Refused(_)).then_some(
-                            UseSite {
-                                inst: InstId(inst as u32),
-                                input_idx,
-                            },
-                        )
-                    })
-            })
+            .uses()
+            .filter(|(_, disposition)| matches!(disposition, MachineUseDisposition::Refused(_)))
+            .map(|(site, _)| site)
             .collect::<Vec<_>>();
         let mut refused_writes = self
             .plan
@@ -4157,7 +4145,7 @@ impl LegacyObservationJournal {
         site: UseSite,
     ) -> Result<(), LegacyObservationJournalError> {
         let observation = match self.plan.use_disposition(site) {
-            Some(MachineUseDisposition::Refused(reason)) => LegacyUseObservation::Refused(*reason),
+            Some(MachineUseDisposition::Refused(reason)) => LegacyUseObservation::Refused(reason),
             Some(MachineUseDisposition::Exact(_) | MachineUseDisposition::MemoryAddress(_))
             | None => {
                 return Err(
@@ -4226,7 +4214,7 @@ impl LegacyObservationJournal {
         site: UseSite,
     ) -> Result<LegacyUseObservation, LegacyObservationJournalError> {
         match self.plan.use_disposition(site) {
-            Some(MachineUseDisposition::Exact(slice)) => Ok(LegacyUseObservation::Exact(*slice)),
+            Some(MachineUseDisposition::Exact(slice)) => Ok(LegacyUseObservation::Exact(slice)),
             Some(MachineUseDisposition::MemoryAddress(_)) => {
                 Ok(LegacyUseObservation::MemoryAddress)
             }
@@ -7234,9 +7222,7 @@ mod tests {
                     input_idx,
                 };
                 let observation = match plan.use_disposition(site) {
-                    Some(MachineUseDisposition::Exact(slice)) => {
-                        LegacyUseObservation::Exact(*slice)
-                    }
+                    Some(MachineUseDisposition::Exact(slice)) => LegacyUseObservation::Exact(slice),
                     Some(MachineUseDisposition::MemoryAddress(_)) => {
                         LegacyUseObservation::MemoryAddress
                     }

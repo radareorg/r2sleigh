@@ -1227,7 +1227,7 @@ impl UpstreamShadowOracle<'_> {
         self.values.get(value.0 as usize).copied()
     }
 
-    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<&MachineUseDisposition> {
+    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<MachineUseDisposition> {
         self.machine_projection.use_disposition(site)
     }
 
@@ -1496,7 +1496,7 @@ impl BindingPlan {
         self.stack_objects.get(&object).copied()
     }
 
-    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<&r2ssa::MachineUseDisposition> {
+    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<r2ssa::MachineUseDisposition> {
         self.machine_projection.use_disposition(site)
     }
 

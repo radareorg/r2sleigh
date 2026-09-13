@@ -939,12 +939,10 @@ fn use_and_write_dispositions_delegate_to_the_validated_projection() {
                 plan.use_disposition(site),
                 Some(MachineUseDisposition::Exact(_))
             ));
-            assert!(std::ptr::eq(
-                resolution.require_use(site).expect("required exact use"),
-                plan.machine_projection()
-                    .use_disposition(site)
-                    .expect("projection use"),
-            ));
+            assert_eq!(
+                resolution.require_use(site).ok(),
+                plan.machine_projection().use_disposition(site),
+            );
         }
         assert_eq!(
             plan.write_disposition(inst.id),
@@ -1088,7 +1086,7 @@ fn refused_machine_use_leaves_its_constant_explicitly_refused() {
         Some(MachineUseDisposition::Refused(_))
     ));
     let use_reason = match plan.machine_projection().use_disposition(use_site) {
-        Some(MachineUseDisposition::Refused(reason)) => *reason,
+        Some(MachineUseDisposition::Refused(reason)) => reason,
         other => panic!("expected canonical use refusal, got {other:?}"),
     };
     assert_eq!(
