@@ -241,9 +241,25 @@ pub(super) fn binding_components_with(
     let value_count = graph.values.len();
     let mut parent = (0..value_count).collect::<Vec<_>>();
     let mut rank = vec![0_u8; value_count];
-    let mut component_members = (0..value_count)
-        .map(|index| vec![ValueId(index as u32)])
-        .collect::<Vec<_>>();
+    // One circular list per component, in a flat array: `ring[value]` names the
+    // next value round its component and a lone value points at itself. Two
+    // components join by swapping their two links, so nothing is copied when
+    // they merge and no component owns a vector. This was a vector per value --
+    // one heap allocation for each of thirty thousand singletons, seven times
+    // per render.
+    let mut ring = (0..value_count as u32).collect::<Vec<u32>>();
+
+    /// The values sharing a component with `root`, walked from it.
+    fn ring_members(ring: &[u32], root: usize) -> impl Iterator<Item = ValueId> + '_ {
+        let start = root as u32;
+        let mut current = Some(start);
+        std::iter::from_fn(move || {
+            let value = current?;
+            let next = ring[value as usize];
+            current = (next != start).then_some(next);
+            Some(ValueId(value))
+        })
+    }
 
     fn find(parent: &mut [usize], mut value: usize) -> usize {
         while parent[value] != value {
@@ -260,7 +276,7 @@ pub(super) fn binding_components_with(
     fn union(
         parent: &mut [usize],
         rank: &mut [u8],
-        members: &mut [Vec<ValueId>],
+        ring: &mut [u32],
         left: ValueId,
         right: ValueId,
     ) {
@@ -282,8 +298,7 @@ pub(super) fn binding_components_with(
             }
         };
         parent[child] = root;
-        let moved = std::mem::take(&mut members[child]);
-        members[root].extend(moved);
+        ring.swap(root, child);
     }
 
     let mut certificate_sets = Vec::<(BindingCertificateSource, BTreeSet<ValueId>)>::new();
@@ -309,19 +324,18 @@ pub(super) fn binding_components_with(
     let read_together = super::rules::values_read_together(source.graph());
     // Whether merging every one of these values into one object would put two
     // values that some instruction reads together into that object.
-    let merge_would_interfere = |parent: &mut Vec<usize>,
-                                 component_members: &[Vec<ValueId>],
-                                 values: &BTreeSet<ValueId>| {
-        let roots = values
-            .iter()
-            .map(|value| find(parent, value.0 as usize))
-            .collect::<BTreeSet<_>>();
-        let members = roots
-            .iter()
-            .flat_map(|root| component_members[*root].iter().copied())
-            .collect::<BTreeSet<_>>();
-        super::rules::set_interferes(&read_together, &members)
-    };
+    let merge_would_interfere =
+        |parent: &mut Vec<usize>, ring: &[u32], values: &BTreeSet<ValueId>| {
+            let roots = values
+                .iter()
+                .map(|value| find(parent, value.0 as usize))
+                .collect::<BTreeSet<_>>();
+            let members = roots
+                .iter()
+                .flat_map(|root| ring_members(ring, *root))
+                .collect::<BTreeSet<_>>();
+            super::rules::set_interferes(&read_together, &members)
+        };
 
     for (span, values) in values_by_span {
         if values.len() > 1 {
@@ -332,13 +346,13 @@ pub(super) fn binding_components_with(
             // impossible whichever derivation proposed the merge. `crc32_bitwise`
             // at arm64 -O2 is the case -- one p-code temporary carries both
             // `w10` and `w11`, and `eor w10, w10, w11` reads two of its versions.
-            if merge_would_interfere(&mut parent, &component_members, &values) {
+            if merge_would_interfere(&mut parent, &ring, &values) {
                 r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
                 continue;
             }
             let first = values.first().copied().expect("multi-member span");
             for value in values.iter().copied().skip(1) {
-                union(&mut parent, &mut rank, &mut component_members, first, value);
+                union(&mut parent, &mut rank, &mut ring, first, value);
             }
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
         }
@@ -372,7 +386,7 @@ pub(super) fn binding_components_with(
             // declined and the values keep their own objects, which costs an
             // assignment in the output and nothing in correctness.
             if let Some(first) = values.first().copied() {
-                let interferes = merge_would_interfere(&mut parent, &component_members, &values);
+                let interferes = merge_would_interfere(&mut parent, &ring, &values);
                 let outlives = super::rules::set_outlives_a_redefinition(graph, &values);
                 if interferes || outlives {
                     // Which of the two declined it decides the repair, and the
@@ -385,7 +399,7 @@ pub(super) fn binding_components_with(
                     continue;
                 }
                 for value in values.iter().copied().skip(1) {
-                    union(&mut parent, &mut rank, &mut component_members, first, value);
+                    union(&mut parent, &mut rank, &mut ring, first, value);
                 }
             }
             certificate_sets.push((
