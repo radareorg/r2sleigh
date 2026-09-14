@@ -23364,3 +23364,32 @@ single-reader rule carries silently today, and stating it explicitly is the next
 piece of architecture, not another rewrite of one of the three symptoms.
 
 `loop-lift-and-flag-dce.diff` in the session scratchpad has both attempts.
+
+### A value of an aggregate needs that aggregate defined
+
+A pointer to an undefined tag is legal C; a value of one is not, and seventy-five
+renderings declared exactly that -- `struct type_0x749 n_copy;` with no
+definition anywhere. `SealedNativeFunction::define_declared_aggregates` now
+collects every aggregate a rendering declares a value of, from the return type,
+the parameters and the declaration statements in the body, and emits its
+definition above the signature.
+
+Three things it refuses rather than guesses. A member whose projected width does
+not match the width the capture measured is rebuilt as an array of that element
+-- `UChar b[8]` is an eight-byte member of a one-byte type, and without that
+step `struct type_0x749` defined as `{ uint8_t b; }` would recompile to a
+one-byte object. A member the type graph cannot project drops the whole
+definition. And a layout whose members do not reach the size the capture
+measured is declined outright, because a definition of the wrong size is worse
+than an undefined tag.
+
+The local corpus is unchanged -- 54 snapshots match, every audit passes -- because
+those binaries declare no aggregate by value. On `bzip2` at -O0 the renderings
+that fail to compile fall from 18 to 15, and the `incomplete type` class from 10
+to 6.
+
+Two rewriter tests moved with the layer rather than breaking: `boolean.sub_eq_zero`
+and `flag.signed_lt_from_borrow` no longer fire, because the comparison now
+arrives already folded from the graph. They assert the shape that reaches the
+renderer instead of which rule produced it. The two offline lift fixtures were
+re-blessed for the same reason: the fold changes the SSA, which is the point.

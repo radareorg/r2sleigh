@@ -1210,12 +1210,28 @@ pub struct CFunction {
     /// and C has no syntax for that, so the honest rendering names what the
     /// address resolves to and defines nothing.
     pub declaration_only: Option<String>,
+    /// Aggregate definitions the rendering declares a value of.
+    ///
+    /// A pointer to an undefined tag is legal C; a value of one is not. The
+    /// layout comes from the same type graph the declaration's type did, so
+    /// defining it here costs nothing the declaration did not already claim.
+    pub aggregates: Vec<CAggregateDef>,
     /// Named data objects the body refers to, declared so the rendering stays a
     /// self-contained translation unit.
     ///
     /// An accepted type remains marked with its radare2 provenance. Without
     /// one, the emitter keeps the honest incomplete-byte-array declaration.
     pub extern_objects: Vec<CExternObject>,
+}
+
+/// One aggregate this rendering defines, so a value of it can be declared.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CAggregateDef {
+    /// `struct` or `union`, as the tag was introduced.
+    pub is_union: bool,
+    pub name: String,
+    /// Each member's declared type and name, in offset order.
+    pub members: Vec<(CType, String)>,
 }
 
 /// One program data object used by this function's rendered body.
@@ -1307,6 +1323,7 @@ impl CFunction {
             name: name.into(),
             ret_type,
             externs: Vec::new(),
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             params: Vec::new(),
             locals: Vec::new(),

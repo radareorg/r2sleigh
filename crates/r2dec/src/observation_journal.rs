@@ -1504,6 +1504,109 @@ impl SealedNativeFunction {
         &self.plan
     }
 
+    /// Define the aggregates this rendering declares a value of.
+    ///
+    /// A pointer to an undefined tag is legal C and needs nothing; a value of
+    /// one is not, and seventy-five renderings declared exactly that. The
+    /// layout comes from the same type graph the declaration's type came from.
+    pub(crate) fn define_declared_aggregates(&mut self, prepared: &r2ssa::SsaArtifact) {
+        let Some(graph) = prepared
+            .machine_context()
+            .function_interface()
+            .and_then(r2ssa::SourceFunctionInterface::type_graph)
+        else {
+            return;
+        };
+        let function = self.ready.function_for_aggregate_definitions();
+        let mut wanted = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending = std::iter::once(&function.ret_type)
+            .chain(function.params.iter().map(|param| &param.ty))
+            .chain(function.locals.iter().map(|local| &local.ty))
+            .cloned()
+            .collect::<Vec<_>>();
+        // A local is a declaration statement in the body, not an entry in
+        // `locals`, which production never fills.
+        collect_declared_types(&function.body, &mut pending);
+        while let Some(ty) = pending.pop() {
+            // By value only: an array of them is still by value, a pointer to
+            // one is not.
+            let name = match &ty {
+                crate::ast::CType::Struct(name) | crate::ast::CType::Union(name) => name.clone(),
+                crate::ast::CType::Array(inner, _) => {
+                    pending.push(inner.as_ref().clone());
+                    continue;
+                }
+                _ => continue,
+            };
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(layout) = graph
+                .aggregates()
+                .iter()
+                .find(|aggregate| aggregate.name() == name)
+            else {
+                continue;
+            };
+            let mut members = Vec::new();
+            for member in layout.members() {
+                let mut visiting = std::collections::BTreeSet::<u32>::new();
+                let Some(member_ty) =
+                    r2types::source_type_like(graph, member.type_id(), &mut visiting)
+                else {
+                    members.clear();
+                    break;
+                };
+                // The graph names a member's element type and its extent
+                // separately: `UChar b[8]` is an eight-byte member of a
+                // one-byte type. Rebuilding the array is what makes the
+                // definition the same size the capture measured.
+                let width = r2types::declaration_type_width_bits(&member_ty, 64);
+                let member_ty = match width {
+                    Some(width) if u64::from(width) == member.size_bits() => member_ty,
+                    Some(width)
+                        if width > 0
+                            && member.size_bits() % u64::from(width) == 0
+                            && usize::try_from(member.size_bits() / u64::from(width)).is_ok() =>
+                    {
+                        crate::ast::CType::Array(
+                            Box::new(member_ty),
+                            usize::try_from(member.size_bits() / u64::from(width)).ok(),
+                        )
+                    }
+                    _ => {
+                        members.clear();
+                        break;
+                    }
+                };
+                pending.push(member_ty.clone());
+                members.push((member_ty, member.name().to_string()));
+            }
+            if members.len() != layout.members().len() || members.is_empty() {
+                continue;
+            }
+            // A definition whose members do not account for the size the
+            // capture measured would recompile to a different object, which is
+            // worse than leaving the tag undefined.
+            let covered = layout
+                .members()
+                .iter()
+                .map(|member| member.offset_bits() + member.size_bits())
+                .max()
+                .unwrap_or(0);
+            if covered != layout.size_bits() {
+                continue;
+            }
+            wanted.push(crate::ast::CAggregateDef {
+                is_union: matches!(ty, crate::ast::CType::Union(_)),
+                name,
+                members,
+            });
+        }
+        self.ready.set_aggregate_definitions(wanted);
+    }
+
     pub(crate) fn effect_observations(&self) -> &SurvivingEffectObservations {
         self.observations
             .as_ref()
@@ -7520,4 +7623,42 @@ mod tests {
             "a replacement cannot absorb a producer the plan still renders separately"
         );
     }
+}
+
+/// Every type a declaration statement in this body introduces.
+fn collect_declared_types(body: &[CStmt], out: &mut Vec<crate::ast::CType>) {
+    fn walk(stmt: &CStmt, out: &mut Vec<crate::ast::CType>) {
+        match stmt {
+            CStmt::Decl { ty, .. } => out.push(ty.clone()),
+            CStmt::Block(stmts) => stmts.iter().for_each(|child| walk(child, out)),
+            CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => walk(stmt, out),
+            CStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                walk(then_body, out);
+                if let Some(body) = else_body {
+                    walk(body, out);
+                }
+            }
+            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk(body, out),
+            CStmt::For { init, body, .. } => {
+                if let Some(init) = init {
+                    walk(init, out);
+                }
+                walk(body, out);
+            }
+            CStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    case.body.iter().for_each(|child| walk(child, out));
+                }
+                if let Some(default) = default {
+                    default.iter().for_each(|child| walk(child, out));
+                }
+            }
+            _ => {}
+        }
+    }
+    body.iter().for_each(|stmt| walk(stmt, out));
 }

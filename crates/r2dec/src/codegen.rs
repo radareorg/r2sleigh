@@ -63,6 +63,17 @@ pub(crate) struct EmissionReadyFunction {
 }
 
 impl EmissionReadyFunction {
+    /// The function as the aggregate-definition pass reads it: no observation
+    /// assertion, because that pass runs before the markers are discarded and
+    /// reads only declarations.
+    pub(crate) fn function_for_aggregate_definitions(&self) -> &CFunction {
+        &self.function
+    }
+
+    pub(crate) fn set_aggregate_definitions(&mut self, aggregates: Vec<crate::ast::CAggregateDef>) {
+        self.function.aggregates = aggregates;
+    }
+
     pub(crate) fn function(&self) -> &CFunction {
         assert!(
             !has_render_observations(&self.function),
@@ -126,6 +137,7 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             locals: func.locals,
             params_known: func.params_known,
             externs: func.externs,
+            aggregates: func.aggregates,
             extern_objects: func.extern_objects,
             declaration_only: func.declaration_only,
         },
@@ -196,6 +208,28 @@ impl<'c> CodeGenerator<'c> {
             self.output.push_str(" */\n");
             self.emit_extern_declarations(func, true);
             return self.output.clone();
+        }
+
+        // A value of an aggregate needs that aggregate defined; a pointer to one
+        // does not. Only what the rendering actually declares is defined here.
+        for aggregate in &func.aggregates {
+            self.output.push_str(if aggregate.is_union {
+                "union "
+            } else {
+                "struct "
+            });
+            self.output.push_str(&aggregate.name);
+            self.output.push_str(" {\n");
+            for (ty, name) in &aggregate.members {
+                self.output.push_str(&self.config.indent);
+                self.output
+                    .push_str(&r2types::c_object_declaration(ty, name));
+                self.output.push_str(";\n");
+            }
+            self.output.push_str("};\n");
+        }
+        if !func.aggregates.is_empty() {
+            self.output.push('\n');
         }
 
         // Function signature
@@ -1235,6 +1269,7 @@ mod tests {
                 variadic: true,
                 noreturn: false,
             }],
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "snprintf".to_string(),
             ret_type: CType::i32(),
@@ -1261,6 +1296,7 @@ mod tests {
         let func = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "add".to_string(),
             ret_type: CType::i32(),
@@ -1296,6 +1332,7 @@ mod tests {
         let func = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "uses_stack_buffer".to_string(),
             ret_type: CType::Void,
@@ -1332,6 +1369,7 @@ mod tests {
                     variadic,
                     noreturn: false,
                 }],
+                aggregates: Vec::new(),
                 extern_objects: Vec::new(),
                 name: "caller".to_string(),
                 ret_type: CType::Void,
@@ -1381,6 +1419,7 @@ mod tests {
         let plain = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "observed".to_string(),
             ret_type: CType::i32(),
@@ -1669,6 +1708,7 @@ mod tests {
         let func = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "test".to_string(),
             ret_type: CType::Void,

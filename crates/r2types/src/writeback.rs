@@ -5081,7 +5081,12 @@ fn field_access_certificates_from_struct_artifacts(
         .collect()
 }
 
-pub(crate) fn source_type_like(
+/// One source type as the C model spells it.
+///
+/// Public because a rendering that declares a value of an aggregate has to
+/// define that aggregate, and the definition's member types come from the same
+/// graph the declaration did.
+pub fn source_type_like(
     graph: &r2ssa::SourceTypeGraph,
     type_id: u32,
     visiting: &mut BTreeSet<u32>,

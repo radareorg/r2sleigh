@@ -3564,6 +3564,7 @@ impl Decompiler {
             symbols: std::rc::Rc::clone(&symbol_table),
             name: crate::ast::c_identifier(&func_name),
             declaration_only: None,
+            aggregates: Vec::new(),
             extern_objects: Vec::new(),
             externs: fold_ctx
                 .callee_declarations
@@ -3674,6 +3675,7 @@ impl Decompiler {
             }
         };
         crate::stage_timing::mark("seal");
+        native.define_declared_aggregates(prepared);
         let ledger = effect_ledger::build_obligation_ledger(
             prepared,
             &normalization_origins,

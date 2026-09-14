@@ -193,13 +193,12 @@ fn a_difference_compared_with_zero_compares_its_operands() {
     assert!(matches!(roots.arena().term(left).kind, TermKind::Leaf(_)));
     assert!(matches!(roots.arena().term(right).kind, TermKind::Leaf(_)));
     let rules: Vec<&str> = not.trace.iter().map(|r| r.rule).collect();
-    assert!(rules.contains(&"boolean.sub_eq_zero"), "{rules:?}");
+    // `boolean.not_eq` still runs here. The difference-against-zero half is
+    // `r2ssa::optimize::fold_condition_codes`' now: a machine comparison is
+    // folded in the graph, where every later stage reads it, so by the time the
+    // term arena sees this shape the subtraction is already gone and there is
+    // nothing for `boolean.sub_eq_zero` to do.
     assert!(rules.contains(&"boolean.not_eq"), "{rules:?}");
-    assert_eq!(
-        not.discharges.len(),
-        2,
-        "the subtraction and the equality render here"
-    );
     assert!(roots.budget_failures().is_empty());
 }
 
@@ -365,10 +364,12 @@ fn a_signed_branch_on_flags_becomes_a_comparison_through_the_difference_by_name(
     assert!(matches!(roots.arena().term(left).kind, TermKind::Leaf(_)));
     assert!(matches!(roots.arena().term(right).kind, TermKind::Leaf(_)));
     let rules: Vec<&str> = branch.trace.iter().map(|r| r.rule).collect();
-    assert!(rules.contains(&"flag.signed_lt_from_borrow"), "{rules:?}");
-    // The difference was read by name and is not discharged here; the sign
-    // flag and the borrow flag were expanded and are.
-    assert_eq!(branch.discharges.len(), 2, "{:?}", branch.discharges);
+    // No rule fired: the comparison arrived already folded from
+    // `r2ssa::optimize::fold_condition_codes`, which is the point of doing it
+    // in the graph. What this test still pins is the shape that reaches the
+    // renderer -- a signed comparison of the two operands, read by name.
+    assert!(rules.is_empty(), "{rules:?}");
+    assert!(branch.discharges.is_empty(), "{:?}", branch.discharges);
     let zero_flag = roots
         .value(value_named(&artifact, "tmp:300_1"))
         .expect("zero flag");
