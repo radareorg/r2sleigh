@@ -1345,10 +1345,10 @@ impl MachineProjection {
     pub fn validate_against(&self, artifact: &SsaArtifact) -> Result<(), MachineBuildError> {
         let entities = self.machine.validate_entities_against(artifact)?;
         let graph = artifact.graph();
-        let mut failed_outputs = BTreeMap::new();
+        let mut failed_outputs = ByValue::over(graph.values.len());
         for failure in &self.failures {
-            if failed_outputs.insert(failure.output, failure).is_some()
-                || entities.contains_key(&failure.output)
+            if failed_outputs.put(failure.output, failure).is_err()
+                || entities.get(failure.output).is_some()
             {
                 return Err(MachineBuildError::DuplicateEntity(failure.output));
             }
@@ -1367,7 +1367,7 @@ impl MachineProjection {
             let Some(output) = inst.output else {
                 continue;
             };
-            if entities.contains_key(&output) == failed_outputs.contains_key(&output) {
+            if entities.get(output).is_some() == failed_outputs.get(output).is_some() {
                 return Err(MachineBuildError::EntityMismatch(inst.id));
             }
         }
@@ -1388,8 +1388,8 @@ impl MachineProjection {
     fn validate_use_dispositions(
         &self,
         artifact: &SsaArtifact,
-        entities: &BTreeMap<ValueId, &MachineEntity>,
-        failures: &BTreeMap<ValueId, &MachineProjectionFailure>,
+        entities: &ByValue<&MachineEntity>,
+        failures: &ByValue<&MachineProjectionFailure>,
     ) -> Result<(), MachineBuildError> {
         let graph = artifact.graph();
         if self.use_offsets.len() != graph.insts.len() + 1 {
@@ -1421,11 +1421,11 @@ impl MachineProjection {
             }
             let expected_refusal = inst
                 .output
-                .and_then(|output| failures.get(&output))
+                .and_then(|output| failures.get(output))
                 .map(|failure| use_refusal_for_error(failure.error()));
             let root = inst
                 .output
-                .and_then(|output| entities.get(&output))
+                .and_then(|output| entities.get(output))
                 .and_then(|entity| self.machine.expr(entity.root()));
             let root_children = root.map(|root| root.kind.children());
 
@@ -1484,8 +1484,8 @@ impl MachineProjection {
     fn validate_write_dispositions(
         &self,
         artifact: &SsaArtifact,
-        entities: &BTreeMap<ValueId, &MachineEntity>,
-        failures: &BTreeMap<ValueId, &MachineProjectionFailure>,
+        entities: &ByValue<&MachineEntity>,
+        failures: &ByValue<&MachineProjectionFailure>,
     ) -> Result<(), MachineBuildError> {
         let graph = artifact.graph();
         if self.write_dispositions.len() != graph.insts.len() {
@@ -1505,13 +1505,13 @@ impl MachineProjection {
                 }
                 continue;
             };
-            let expected = if let Some(entity) = entities.get(&output) {
+            let expected = if let Some(entity) = entities.get(output) {
                 let root = self
                     .machine
                     .expr(entity.root())
                     .ok_or(MachineBuildError::WriteDispositionMismatch(inst.id))?;
                 machine_write_disposition(artifact, inst, root)
-            } else if let Some(failure) = failures.get(&output) {
+            } else if let Some(failure) = failures.get(output) {
                 MachineWriteDisposition::Refused(write_refusal_for_error(failure.error()))
             } else {
                 return Err(MachineBuildError::WriteDispositionMismatch(inst.id));
@@ -2284,7 +2284,7 @@ impl MachineFunction {
             let Some(output) = inst.output else {
                 continue;
             };
-            if !by_output.contains_key(&output) {
+            if by_output.get(output).is_none() {
                 return Err(MachineBuildError::EntityMismatch(inst.id));
             }
         }
@@ -2294,21 +2294,21 @@ impl MachineFunction {
     fn validate_entities_against<'a>(
         &'a self,
         artifact: &SsaArtifact,
-    ) -> Result<BTreeMap<ValueId, &'a MachineEntity>, MachineBuildError> {
+    ) -> Result<ByValue<&'a MachineEntity>, MachineBuildError> {
         if !artifact.obligations().is_complete() {
             return Err(MachineBuildError::IncompleteObligationInventory);
         }
         self.validate_arena(artifact)?;
 
         let graph = artifact.graph();
-        let mut by_output = BTreeMap::new();
+        let mut by_output = ByValue::over(graph.values.len());
         for entity in &self.entities {
-            if by_output.insert(entity.output.value, entity).is_some() {
-                return Err(MachineBuildError::DuplicateEntity(entity.output.value));
-            }
             let value = graph
                 .value(entity.output.value)
                 .ok_or(MachineBuildError::MissingGraphValue(entity.output.value))?;
+            if by_output.put(entity.output.value, entity).is_err() {
+                return Err(MachineBuildError::DuplicateEntity(entity.output.value));
+            }
             if binding_for_value(value)? != entity.output {
                 return Err(MachineBuildError::EntityMismatch(
                     graph
@@ -3993,6 +3993,35 @@ pub fn machine_address_provenance(
             | ObjectKind::Pointee { .. } => MachineAddressProvenance::Unknown,
         })
         .unwrap_or(MachineAddressProvenance::Unknown)
+}
+
+/// One entry per graph value, addressed by the value's identifier.
+///
+/// The validation walks every instruction asking what a value projects to, and
+/// an ordered map answered each question with a walk down a tree. Value
+/// identifiers are already dense, so the answer is at the index.
+struct ByValue<T>(Vec<Option<T>>);
+
+impl<T> ByValue<T> {
+    fn over(values: usize) -> Self {
+        Self((0..values).map(|_| None).collect())
+    }
+
+    /// Record a value's entry, refusing a second one for the same value.
+    fn put(&mut self, value: ValueId, entry: T) -> Result<(), ()> {
+        let slot = self.0.get_mut(value.0 as usize).ok_or(())?;
+        if slot.is_some() {
+            return Err(());
+        }
+        *slot = Some(entry);
+        Ok(())
+    }
+}
+
+impl<T: Copy> ByValue<T> {
+    fn get(&self, value: ValueId) -> Option<T> {
+        *self.0.get(value.0 as usize)?
+    }
 }
 
 fn binding_for_value(value: &GraphValue) -> Result<MachineValueBinding, MachineBuildError> {
