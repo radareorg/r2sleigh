@@ -4144,6 +4144,10 @@ fn variadic_callsite_arguments(
             recovery.block_addr,
             recovery.op_index,
             offset,
+            // The convention's derived placement is the caller's view and
+            // carries no second coordinate; a variadic tail call would want
+            // one, and none has been captured for a derived position.
+            offset,
             placement.stride_bytes(),
         )
         .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
@@ -4242,7 +4246,7 @@ fn call_entering_stack_pointer_offset(
     graph: &SsaGraph,
     block: &crate::function::SSABlock,
     call_op_index: usize,
-) -> Option<i64> {
+) -> Option<(i64, bool)> {
     let recorded = block
         .ops
         .get(call_op_index.checked_add(1)?..)?
@@ -4252,6 +4256,7 @@ fn call_entering_stack_pointer_offset(
             SSAOp::CallRestore { src, .. } => Some(src.clone()),
             _ => None,
         });
+    let recorded_restore = recorded.is_some();
     let entering = match recorded {
         Some(entering) => entering,
         // A transfer that spends nothing on the carrier records no restore: a
@@ -4268,7 +4273,7 @@ fn call_entering_stack_pointer_offset(
             };
             match reaching_stack_pointer_before(function, graph, storage, block.addr, call_op_index)
             {
-                Some(ReachingAbiState::PreservedEntry) => return Some(0),
+                Some(ReachingAbiState::PreservedEntry) => return Some((0, false)),
                 Some(ReachingAbiState::Value(value)) => graph.value(value)?.var.clone(),
                 None => {
                     r2il::refusal_evidence!(
@@ -4369,7 +4374,7 @@ fn call_entering_stack_pointer_offset(
         );
         return None;
     };
-    (root.base == StackAddressBase::StackPointer).then_some(root.offset)
+    (root.base == StackAddressBase::StackPointer).then_some((root.offset, recorded_restore))
 }
 
 /// The value a call reads from one slot of its outgoing argument area.
@@ -4389,16 +4394,23 @@ fn reaching_stack_argument_before_call(
     block_addr: u64,
     call_op_index: usize,
     offset: i64,
+    callee_offset: i64,
     size_bytes: u32,
 ) -> Option<(ValueId, i64)> {
     let block = function.get_block(block_addr)?;
-    let Some(entering) = call_entering_stack_pointer_offset(function, graph, block, call_op_index)
+    let Some((entering, transfer_moved_carrier)) =
+        call_entering_stack_pointer_offset(function, graph, block, call_op_index)
     else {
         r2il::refusal_evidence!(
             "call-argument-stack-store",
             "callsite ({block_addr:#x}, {call_op_index}) has no entry-relative stack pointer entering the call"
         );
         return None;
+    };
+    let offset = if transfer_moved_carrier {
+        offset
+    } else {
+        callee_offset
     };
     let entry_offset = entering.checked_add(offset)?;
     for op in block.ops.get(..call_op_index)?.iter().rev() {
@@ -4651,13 +4663,18 @@ fn collect_source_boundary_facts(
                                 value,
                             })
                         }
-                        r2source::SourceParameterLocation::Stack { offset, size_bytes } => {
+                        r2source::SourceParameterLocation::Stack {
+                            offset,
+                            size_bytes,
+                            callee_offset,
+                        } => {
                             let found = reaching_stack_argument_before_call(
                                 function,
                                 graph,
                                 block_addr,
                                 op_index,
                                 offset,
+                                callee_offset,
                                 size_bytes,
                             );
                             if found.is_none() {
@@ -12237,7 +12254,8 @@ fn collect_stack_call_argument_values(
     // instruction finds it. Objects are keyed by their entry-relative
     // position, so the boundary is that pointer's entry-relative position:
     // anything below it is this function's own frame, not an argument.
-    let Some(entering) = call_entering_stack_pointer_offset(function, graph, block, op_idx) else {
+    let Some((entering, _)) = call_entering_stack_pointer_offset(function, graph, block, op_idx)
+    else {
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();

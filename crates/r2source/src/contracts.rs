@@ -764,6 +764,10 @@ pub enum SourceParameterLocation {
     Stack {
         offset: i64,
         size_bytes: u32,
+        /// The same slot named from the stack pointer the callee finds. A
+        /// transfer that pushes no return address leaves the callee the
+        /// pointer the jump had, so a tail call's arguments sit here.
+        callee_offset: i64,
     },
 }
 
@@ -778,7 +782,9 @@ impl SourceParameterLocation {
     pub const fn stack(self) -> Option<(i64, u32)> {
         match self {
             Self::Register(_) => None,
-            Self::Stack { offset, size_bytes } => Some((offset, size_bytes)),
+            Self::Stack {
+                offset, size_bytes, ..
+            } => Some((offset, size_bytes)),
         }
     }
 
@@ -793,9 +799,9 @@ impl SourceParameterLocation {
     fn is_valid(self) -> bool {
         match self {
             Self::Register(storage) => valid_register_storage(storage),
-            Self::Stack { offset, size_bytes } => {
-                size_bytes > 0 && offset.checked_add(i64::from(size_bytes)).is_some()
-            }
+            Self::Stack {
+                offset, size_bytes, ..
+            } => size_bytes > 0 && offset.checked_add(i64::from(size_bytes)).is_some(),
         }
     }
 
@@ -806,10 +812,12 @@ impl SourceParameterLocation {
                 Self::Stack {
                     offset: a,
                     size_bytes: a_size,
+                    ..
                 },
                 Self::Stack {
                     offset: b,
                     size_bytes: b_size,
+                    ..
                 },
             ) => a < b.saturating_add(i64::from(b_size)) && b < a.saturating_add(i64::from(a_size)),
             _ => false,
@@ -836,10 +844,16 @@ impl SourceAbiParameterSpec {
 
     /// A parameter passed in the argument area, `offset` bytes above the
     /// stack pointer at entry.
+    ///
+    /// Entry is already the callee's own view, so the two coordinates agree.
     pub const fn on_stack(index: u32, offset: i64, size_bytes: u32) -> Self {
         Self {
             index,
-            location: SourceParameterLocation::Stack { offset, size_bytes },
+            location: SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset: offset,
+            },
         }
     }
 
@@ -1739,10 +1753,12 @@ impl SourceFunctionInterface {
                 SourceParameterLocation::Stack {
                     offset: call_offset,
                     size_bytes: call_size,
+                    ..
                 },
                 SourceParameterLocation::Stack {
                     offset: entry_offset,
                     size_bytes: entry_size,
+                    ..
                 },
             ) => {
                 let spent = self.return_mechanism.map_or(0, |mechanism| {
@@ -2242,9 +2258,23 @@ impl SourceCallArgumentSpec {
     /// An argument passed in the argument area, `offset` bytes above the
     /// stack pointer at the call instruction.
     pub const fn on_stack(index: u32, offset: i64, size_bytes: u32) -> Self {
+        Self::on_stack_with_callee_view(index, offset, size_bytes, offset)
+    }
+
+    /// The same argument, with the coordinate the callee will read it at.
+    pub const fn on_stack_with_callee_view(
+        index: u32,
+        offset: i64,
+        size_bytes: u32,
+        callee_offset: i64,
+    ) -> Self {
         Self {
             index,
-            location: SourceParameterLocation::Stack { offset, size_bytes },
+            location: SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            },
         }
     }
 

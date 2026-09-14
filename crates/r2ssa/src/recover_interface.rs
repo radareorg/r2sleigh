@@ -975,6 +975,7 @@ fn mint_recovered_interface_inner(
                         SourceParameterLocation::Stack {
                             offset: parameter.offset(),
                             size_bytes: parameter.slot_bytes(),
+                            callee_offset: parameter.offset(),
                         },
                     ))
                 }),
@@ -1087,12 +1088,15 @@ pub fn mint_recovered_call_site_interface(
             SourceParameterLocation::Register(storage) => {
                 SourceParameterLocation::Register(storage)
             }
-            SourceParameterLocation::Stack { offset, size_bytes } => {
-                SourceParameterLocation::Stack {
-                    offset: offset.saturating_sub(spent),
-                    size_bytes,
-                }
-            }
+            SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => SourceParameterLocation::Stack {
+                offset: offset.saturating_sub(spent),
+                size_bytes,
+                callee_offset: callee_offset.saturating_sub(spent),
+            },
         };
         SourceCallArgumentSpec::with_location(parameter.index(), location)
     });

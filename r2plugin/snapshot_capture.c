@@ -2878,6 +2878,13 @@ static bool snapshot_stack_parameter_collect(RAnal *anal, const char *calling_co
 	parameter->on_stack = true;
 	parameter->stack_offset = slot.off;
 	parameter->stack_size = (ut32)slot.size;
+	parameter->stack_callee_offset = slot.off;
+	RAnalCCArgSlot callee_slot = {0};
+	if (!callee_view
+		&& r_anal_cc_argslot (anal, calling_convention, index, count, true, &callee_slot)
+		&& !callee_slot.reg && callee_slot.size > 0) {
+		parameter->stack_callee_offset = callee_slot.off;
+	}
 	return true;
 }
 static bool snapshot_register_storages_overlap(

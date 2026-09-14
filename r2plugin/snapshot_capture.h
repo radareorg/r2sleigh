@@ -256,6 +256,12 @@ typedef struct r_anal_snapshot_parameter_t {
 	bool on_stack;
 	st64 stack_offset;
 	ut32 stack_size;
+	/* The same slot named from the stack pointer the callee will find. A
+	 * transfer that pushes no return address -- a tail call -- leaves the
+	 * callee the pointer the jump had, so this is the coordinate its
+	 * arguments occupy. Equal to `stack_offset` where the machine pushes
+	 * nothing. */
+	st64 stack_callee_offset;
 } RAnalSnapshotParameter;
 
 typedef enum {

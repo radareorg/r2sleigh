@@ -699,10 +699,15 @@ fn write_parameter_location_identity(
             writer.u8(0);
             writer.storage(storage);
         }
-        SourceParameterLocation::Stack { offset, size_bytes } => {
+        SourceParameterLocation::Stack {
+            offset,
+            size_bytes,
+            callee_offset,
+        } => {
             writer.u8(1);
             writer.i64(offset);
             writer.u32(size_bytes);
+            writer.i64(callee_offset);
         }
     }
 }

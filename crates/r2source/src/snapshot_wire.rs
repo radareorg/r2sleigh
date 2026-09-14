@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 13;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 14;
 const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = 1;
 
 /// Bytes of fixed header preceding the string table.
@@ -1473,10 +1473,15 @@ pub fn write_parameter_location(
             writer.u8(LOCATION_REGISTER);
             write_storage(writer, storage);
         }
-        SourceParameterLocation::Stack { offset, size_bytes } => {
+        SourceParameterLocation::Stack {
+            offset,
+            size_bytes,
+            callee_offset,
+        } => {
             writer.u8(LOCATION_STACK);
             writer.i64(offset);
             writer.u32(size_bytes);
+            writer.i64(callee_offset);
         }
     }
 }
@@ -1492,7 +1497,18 @@ pub fn read_parameter_location(
         LOCATION_STACK => {
             let offset = reader.i64()?;
             let size_bytes = reader.u32()?;
-            Ok(SourceParameterLocation::Stack { offset, size_bytes })
+            // Before the callee's view was carried, the caller's was the only
+            // coordinate, which is what a transfer that pushes nothing gives.
+            let callee_offset = if reader.format_version() < 14 {
+                offset
+            } else {
+                reader.i64()?
+            };
+            Ok(SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            })
         }
         tag => Err(SnapshotWireError::UnknownDiscriminant {
             record: "parameter location",

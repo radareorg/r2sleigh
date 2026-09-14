@@ -526,6 +526,7 @@ static void walk_parameter_location(R2SleighWireWriter *writer, const RAnalSnaps
 		r2sleigh_wire_u8 (writer, WALK_LOCATION_STACK);
 		r2sleigh_wire_i64 (writer, parameter->stack_offset);
 		r2sleigh_wire_u32 (writer, parameter->stack_size);
+		r2sleigh_wire_i64 (writer, parameter->stack_callee_offset);
 		return;
 	}
 	r2sleigh_wire_u8 (writer, WALK_LOCATION_REGISTER);
