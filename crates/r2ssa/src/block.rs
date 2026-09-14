@@ -6,10 +6,14 @@ use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::Disassembler;
 use serde::{Deserialize, Serialize};
 
+use crate::function::PhiNode;
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 
 /// An SSA basic block containing versioned operations.
+///
+/// Lifting produces one with no phis and renaming fills them in, so the two
+/// stages share a type and a function's blocks can be read without copying.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SSABlock {
     /// The address of the instruction.
@@ -18,6 +22,9 @@ pub struct SSABlock {
     pub size: u32,
     /// The SSA operations.
     pub ops: Vec<SSAOp>,
+    /// Phi nodes at the start of this block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phis: Vec<PhiNode>,
 }
 
 /// Context for SSA conversion, tracking variable versions.
@@ -85,6 +92,7 @@ impl SSABlock {
             addr,
             size,
             ops: Vec::new(),
+            phis: Vec::new(),
         }
     }
 

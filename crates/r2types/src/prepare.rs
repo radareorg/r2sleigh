@@ -2397,6 +2397,7 @@ mod tests {
                 dst: SSAVar::new("tmp:0", 1, 8),
                 src: SSAVar::new("rdi", 0, 8),
             }],
+            phis: Vec::new(),
         };
 
         let params = recover_signature_params_from_ssa(
@@ -2428,6 +2429,7 @@ mod tests {
                 dst: SSAVar::new("tmp:0", 1, 8),
                 src: SSAVar::new("rdi", 0, 8),
             }],
+            phis: Vec::new(),
         };
         let hints = HashMap::from([(
             "rdi".to_string(),
@@ -2472,6 +2474,7 @@ mod tests {
                     b: SSAVar::constant(0x38, 8),
                 },
             ],
+            phis: Vec::new(),
         };
 
         let params = recover_signature_params_from_ssa(
@@ -2557,6 +2560,7 @@ mod tests {
                 addr: 0x401000,
                 size: 8,
                 ops,
+                phis: Vec::new(),
             };
 
             let params = recover_signature_params_from_ssa(
@@ -2604,6 +2608,7 @@ mod tests {
                     b: SSAVar::constant(1, 4),
                 },
             ],
+            phis: Vec::new(),
         };
 
         let params = recover_signature_params_from_ssa(
@@ -2642,6 +2647,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let params = recover_signature_params_from_ssa(
@@ -2695,6 +2701,7 @@ mod tests {
                     val: SSAVar::new("tmp:value", 1, 4),
                 },
             ],
+            phis: Vec::new(),
         };
 
         let ram = block_for_space(r2il::SpaceId::Ram);
@@ -2773,6 +2780,7 @@ mod tests {
                         addr: SSAVar::new("tmp:base", 1, 8),
                     },
                 ],
+                phis: Vec::new(),
             }]
         };
         let param_type_for_space = |space| {
@@ -2820,6 +2828,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
         let body = SSABlock {
             addr: 0x401010,
@@ -2859,6 +2868,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let params = recover_signature_params_from_ssa(
@@ -2909,6 +2919,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let evidence = collect_signature_type_evidence_context_with_arch(
@@ -2963,6 +2974,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let evidence = collect_signature_type_evidence_context_with_arch(
@@ -3007,6 +3019,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
         let body = SSABlock {
             addr: 0x1010,
@@ -3042,6 +3055,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let evidence = collect_signature_type_evidence_context_with_arch(
@@ -3081,6 +3095,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let vars = recover_vars_from_ssa(
@@ -3117,6 +3132,7 @@ mod tests {
                     val: SSAVar::constant(1, 4),
                 },
             ],
+            phis: Vec::new(),
         };
         let prep_facts = DecompilePrepFacts {
             stack_address_roots: [(
@@ -3168,6 +3184,7 @@ mod tests {
                     target: SSAVar::new("rip", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         };
 
         let vars = recover_vars_from_ssa(
@@ -3198,6 +3215,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                 },
             ],
+            phis: Vec::new(),
         };
 
         let vars = recover_vars_from_ssa(
@@ -3219,6 +3237,7 @@ mod tests {
                 dst: SSAVar::new("tmp:0", 1, 8),
                 src: SSAVar::new("x1", 0, 8),
             }],
+            phis: Vec::new(),
         };
 
         let params = recover_signature_params_from_ssa(

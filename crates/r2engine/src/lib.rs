@@ -2971,7 +2971,7 @@ impl EngineSession {
             Some(artifact.ssa_func()),
             &cfg_summary,
         );
-        let callsite_count = count_prepared_callsites(&artifact.ssa_func().local_ssa_blocks());
+        let callsite_count = count_prepared_callsites(artifact.ssa_func().local_ssa_blocks());
         let current_summary = current_interproc_summary(artifact.function_facts());
         let EngineAnalysisArtifact {
             type_analysis,

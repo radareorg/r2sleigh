@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::aggregate_access::{
     AggregateAccessProjectionFacts, collect_aggregate_access_projections,
 };
+pub use crate::block::SSABlock;
 use crate::block::SSABlock as LocalSSABlock;
 use crate::cfg::{CFG, CFGEdge};
 use crate::control::{
@@ -1445,16 +1446,8 @@ impl SsaArtifact {
         self
     }
 
-    pub fn local_ssa_blocks(&self) -> Vec<LocalSSABlock> {
-        self.function
-            .blocks()
-            .iter()
-            .map(|block| LocalSSABlock {
-                addr: block.addr,
-                size: block.size,
-                ops: block.ops.clone(),
-            })
-            .collect()
+    pub fn local_ssa_blocks(&self) -> &[LocalSSABlock] {
+        self.function.blocks()
     }
 }
 
@@ -2342,19 +2335,6 @@ impl Clone for SSAFunction {
             query_index: RwLock::new(None),
         }
     }
-}
-
-/// A basic block in SSA form.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SSABlock {
-    /// Block address.
-    pub addr: u64,
-    /// Block size in bytes.
-    pub size: u32,
-    /// SSA operations in this block.
-    pub ops: Vec<SSAOp>,
-    /// Phi nodes at the start of this block.
-    pub phis: Vec<PhiNode>,
 }
 
 /// One function's operations after a pass rewrote them, over the function they

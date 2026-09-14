@@ -519,6 +519,7 @@ mod tests {
                     b: r2ssa::SSAVar::constant(1, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let evidence = collect_signature_type_evidence_context(&blocks);
@@ -719,6 +720,7 @@ mod tests {
                     b: r2ssa::SSAVar::new("const:0", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let evidence_ctx = collect_signature_type_evidence_context(&blocks);
         let initial_ty = r2types::CTypeLike::Unknown;
@@ -748,6 +750,7 @@ mod tests {
                     b: r2ssa::SSAVar::new("const:1", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let evidence_ctx = collect_signature_type_evidence_context(&blocks);
         let initial_ty = r2types::CTypeLike::Unknown;
@@ -780,6 +783,7 @@ mod tests {
                 target: r2ssa::SSAVar::new("const:1300", 0, 8),
                 cond: r2ssa::SSAVar::new("dil", 0, 1),
             }],
+            phis: Vec::new(),
         }];
         let evidence_ctx = collect_signature_type_evidence_context(&blocks);
         let initial_ty = r2types::CTypeLike::Unknown;
@@ -817,6 +821,7 @@ mod tests {
                     target: r2ssa::SSAVar::new("tmp:10", 1, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let evidence_ctx = collect_signature_type_evidence_context(&blocks);
         let mut type_inference = r2types::TypeInference::new(64);

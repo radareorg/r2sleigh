@@ -3,9 +3,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use r2ssa::{
-    FunctionSSABlock, FunctionSemanticSummary, InterprocSummarySet, MemoryVersion, ObjectKind,
-    PhiNode, SSABlock, SSAOp, SSAVar, SsaArtifact, SummaryArgEffect, SummaryMemoryEffect,
-    SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
+    FunctionSemanticSummary, InterprocSummarySet, MemoryVersion, ObjectKind, SSABlock, SSAOp,
+    SSAVar, SsaArtifact, SummaryArgEffect, SummaryMemoryEffect, SummaryMemoryEffectKind,
+    SummaryMemoryRegion, SummaryReturnRelation,
 };
 
 use crate::context::{
@@ -3454,7 +3454,7 @@ pub fn build_source_owned_type_writeback_analysis(
         ptr_bits,
         inferred_signature,
         recovered_vars: &recovered_vars,
-        ssa_blocks: &ssa_blocks,
+        ssa_blocks,
         parsed_context,
         local_structs,
         interproc_summary_set: interproc_report,
@@ -3535,14 +3535,7 @@ struct LocalAffineValue {
     constant: i128,
 }
 
-#[derive(Debug, Clone)]
-struct LocalStructInferenceBlock {
-    addr: u64,
-    ops: Vec<SSAOp>,
-    phis: Vec<PhiNode>,
-}
-
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct LocalMemoryVersionFacts {
     stores_by_site: HashMap<(u64, usize), Vec<MemoryVersion>>,
     loads_by_site: HashMap<(u64, usize), Vec<MemoryVersion>>,
@@ -3838,7 +3831,7 @@ fn exact_ssa_const_offset(var: &SSAVar, ptr_bits: u32) -> Option<i64> {
 }
 
 fn local_struct_type_slots(
-    blocks: &[LocalStructInferenceBlock],
+    blocks: &[SSABlock],
     pointer_arg_slot_map: &HashMap<String, usize>,
     ptr_bits: u32,
 ) -> HashMap<SSAVar, usize> {
@@ -3916,7 +3909,7 @@ fn local_struct_type_slots(
 /// aliases, phis, and constant pointer arithmetic without rescanning the
 /// function once per candidate field.
 fn local_pointer_pointee_types(
-    blocks: &[LocalStructInferenceBlock],
+    blocks: &[SSABlock],
     ptr_bits: u32,
     scalar_signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
 ) -> HashMap<SSAVar, BTreeSet<String>> {
@@ -4250,40 +4243,16 @@ fn local_expr_for_memory_versions(
     selected
 }
 
-fn local_struct_inference_from_local_blocks(blocks: &[SSABlock]) -> Vec<LocalStructInferenceBlock> {
-    blocks
-        .iter()
-        .map(|block| LocalStructInferenceBlock {
-            addr: block.addr,
-            ops: block.ops.clone(),
-            phis: Vec::new(),
-        })
-        .collect()
-}
-
-fn local_struct_inference_from_function_blocks(
-    blocks: impl Iterator<Item = FunctionSSABlock>,
-) -> Vec<LocalStructInferenceBlock> {
-    blocks
-        .map(|block| LocalStructInferenceBlock {
-            addr: block.addr,
-            ops: block.ops,
-            phis: block.phis,
-        })
-        .collect()
-}
-
 pub fn infer_local_struct_artifacts_from_ssa(
     ssa_blocks: &[SSABlock],
     architecture: r2ssa::MachineArchitectureFamily,
     ptr_bits: u32,
     diagnostics: &mut TypeWritebackDiagnostics,
 ) -> LocalStructArtifacts {
-    let blocks = local_struct_inference_from_local_blocks(ssa_blocks);
     let arch_name = crate::prepare::architecture_family_name(architecture);
     let pointer_arg_slots = collect_pointer_arg_slot_map(architecture, ptr_bits);
     infer_local_struct_artifacts_from_blocks(
-        &blocks,
+        ssa_blocks,
         None,
         arch_name,
         architecture,
@@ -4299,13 +4268,12 @@ fn infer_local_struct_artifacts_from_prepared_ssa(
     ptr_bits: u32,
     diagnostics: &mut TypeWritebackDiagnostics,
 ) -> LocalStructArtifacts {
-    let blocks =
-        local_struct_inference_from_function_blocks(prepared.function().blocks().iter().cloned());
+    let blocks = prepared.function().blocks();
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
     let architecture = prepared.machine_context().architecture_family();
     let pointer_arg_slots = collect_prepared_pointer_arg_slot_map(prepared);
     let mut artifacts = infer_local_struct_artifacts_from_blocks(
-        &blocks,
+        blocks,
         Some(&memory_versions),
         arch_name,
         architecture,
@@ -4363,7 +4331,7 @@ fn prepared_parameter_indexed_accesses(prepared: &SsaArtifact) -> Vec<ScalarArra
 }
 
 fn infer_local_struct_artifacts_from_blocks(
-    ssa_blocks: &[LocalStructInferenceBlock],
+    ssa_blocks: &[SSABlock],
     memory_versions: Option<&LocalMemoryVersionFacts>,
     arch_name: Option<&str>,
     architecture: r2ssa::MachineArchitectureFamily,
@@ -10006,6 +9974,8 @@ fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use r2ssa::PhiNode;
+
     /// The two type-strength questions, and where they deliberately differ.
     ///
     /// They were named `..._is_generic` and `..._apply_type_name_is_generic`,
@@ -10171,6 +10141,7 @@ mod tests {
                 space: r2il::SpaceId::Ram,
                 addr,
             }],
+            phis: Vec::new(),
         };
 
         let spoofed =
@@ -10518,6 +10489,7 @@ mod tests {
                     addr: custom_addr.clone(),
                 },
             ],
+            phis: Vec::new(),
         }];
         let ram_slot = StackSlotKey {
             base: ExternalStackBase::StackPointer,
@@ -10558,7 +10530,7 @@ mod tests {
     fn local_pointee_type_evidence_requires_exact_ram_space() {
         let ram_addr = SSAVar::new("ram_addr", 1, 8);
         let custom_addr = SSAVar::new("custom_addr", 1, 8);
-        let blocks = [LocalStructInferenceBlock {
+        let blocks = [SSABlock {
             addr: 0x1000,
             phis: Vec::new(),
             ops: vec![
@@ -10573,6 +10545,7 @@ mod tests {
                     val: SSAVar::new("custom_value", 1, 8),
                 },
             ],
+            size: 0,
         }];
 
         let types = local_pointer_pointee_types(&blocks, 64, &HashMap::new());
@@ -10661,6 +10634,7 @@ mod tests {
                     val: SSAVar::new("w8", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let prep_facts = r2ssa::DecompilePrepFacts {
             stack_address_roots: [
@@ -10751,6 +10725,7 @@ mod tests {
                 addr: addr.clone(),
                 val: SSAVar::new("w8", 1, 4),
             }],
+            phis: Vec::new(),
         }];
         let prep_facts = r2ssa::DecompilePrepFacts {
             stack_address_roots: [(
@@ -10867,6 +10842,7 @@ mod tests {
                     src: loaded,
                 },
             ],
+            phis: Vec::new(),
         }];
         let prep_facts = r2ssa::DecompilePrepFacts {
             stack_address_roots: [(
@@ -10971,6 +10947,7 @@ mod tests {
                     val: SSAVar::new("w1", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let prep_facts = r2ssa::DecompilePrepFacts {
             stack_address_roots: [
@@ -14123,6 +14100,7 @@ mod tests {
                     val: SSAVar::new("EDX", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let prep_facts = three_prepared_frame_slot_roots();
@@ -14267,6 +14245,7 @@ mod tests {
                     val: SSAVar::new("EDX", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let recovered_vars = [
             RecoveredVariable {
@@ -14477,6 +14456,7 @@ mod tests {
                     val: SSAVar::new("tmp:spill_v", 1, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let prep_facts = three_prepared_frame_slot_roots();
@@ -14916,6 +14896,7 @@ mod tests {
                     addr: SSAVar::new("field", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
@@ -16817,7 +16798,7 @@ mod tests {
             a: current.clone(),
             b: SSAVar::constant(offset, 8),
         };
-        let blocks = [LocalStructInferenceBlock {
+        let blocks = [SSABlock {
             addr: 0x1000,
             phis: vec![PhiNode {
                 dst: current.clone(),
@@ -16853,6 +16834,7 @@ mod tests {
                     addr: SSAVar::new("next_addr", 1, 8),
                 },
             ],
+            size: 0,
         }];
         let mut diagnostics = TypeWritebackDiagnostics::default();
 
@@ -16890,7 +16872,7 @@ mod tests {
     #[test]
     fn prepared_phi_refuses_conflicting_parameter_type_classes() {
         let merged = SSAVar::new("X0", 1, 8);
-        let blocks = [LocalStructInferenceBlock {
+        let blocks = [SSABlock {
             addr: 0x1000,
             phis: vec![PhiNode {
                 dst: merged.clone(),
@@ -16922,6 +16904,7 @@ mod tests {
                     addr: SSAVar::new("field8", 1, 8),
                 },
             ],
+            size: 0,
         }];
         let mut diagnostics = TypeWritebackDiagnostics::default();
 
@@ -17038,6 +17021,7 @@ mod tests {
                     addr: SSAVar::new("field34", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
         let mut diagnostics = TypeWritebackDiagnostics::default();
 
@@ -17117,6 +17101,7 @@ mod tests {
                         addr: SSAVar::new("flags_addr", 1, 8),
                     },
                 ],
+                phis: Vec::new(),
             },
             SSABlock {
                 addr: 0x1000004c4,
@@ -17143,6 +17128,7 @@ mod tests {
                         addr: SSAVar::new("len_addr", 1, 8),
                     },
                 ],
+                phis: Vec::new(),
             },
             SSABlock {
                 addr: 0x1000004d4,
@@ -17152,6 +17138,7 @@ mod tests {
                     space: r2il::SpaceId::Ram,
                     addr: element,
                 }],
+                phis: Vec::new(),
             },
         ];
         let mut diagnostics = TypeWritebackDiagnostics::default();
@@ -17253,7 +17240,7 @@ mod tests {
         let stack_pointer = SSAVar::new("SP", 1, 8);
         let element = SSAVar::new("element", 1, 8);
         let blocks = [
-            LocalStructInferenceBlock {
+            SSABlock {
                 addr: entry,
                 phis: Vec::new(),
                 ops: vec![
@@ -17312,8 +17299,9 @@ mod tests {
                         addr: SSAVar::new("flags_addr", 1, 8),
                     },
                 ],
+                size: 0,
             },
-            LocalStructInferenceBlock {
+            SSABlock {
                 addr: successor,
                 phis: Vec::new(),
                 ops: vec![
@@ -17358,6 +17346,7 @@ mod tests {
                         addr: SSAVar::new("element_reload", 4, 8),
                     },
                 ],
+                size: 0,
             },
         ];
         let stack_version = MemoryVersion {
@@ -17719,6 +17708,7 @@ mod tests {
                     val: SSAVar::constant(0, 1),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
@@ -17841,6 +17831,7 @@ mod tests {
                     addr: SSAVar::new("RDI", 2, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
@@ -17922,6 +17913,7 @@ mod tests {
                 space: r2il::SpaceId::Ram,
                 addr: SSAVar::new("RDI", 1, 8),
             }],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
@@ -18046,6 +18038,7 @@ mod tests {
                     addr: SSAVar::new("arg_addr", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
@@ -18151,6 +18144,7 @@ mod tests {
                         val: SSAVar::new("RDI", 0, 8),
                     },
                 ],
+                phis: Vec::new(),
             },
             SSABlock {
                 addr: 0x401020,
@@ -18182,6 +18176,7 @@ mod tests {
                         addr: SSAVar::new("elem", 1, 8),
                     },
                 ],
+                phis: Vec::new(),
             },
         ];
 
@@ -18349,6 +18344,7 @@ mod tests {
                     addr: SSAVar::new("elem", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
@@ -18519,6 +18515,7 @@ mod tests {
                     addr: SSAVar::new("field", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         }];
 
         let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {

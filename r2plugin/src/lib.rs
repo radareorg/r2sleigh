@@ -6167,6 +6167,7 @@ mod tests {
                     b: r2ssa::SSAVar::new("const:0", 0, 4),
                 },
             ],
+            phis: Vec::new(),
         }];
         let evidence_ctx = types::collect_signature_type_evidence_context(&blocks);
         let evidence = collect_type_evidence_for_var(
@@ -7162,6 +7163,7 @@ mod integration_tests {
                     addr: r2ssa::SSAVar::new("tmp:base_4", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         };
         let struct_decls = vec![
             StructDeclCandidateJson {
@@ -7234,6 +7236,7 @@ mod integration_tests {
                     addr: r2ssa::SSAVar::new("tmp:base", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         };
         let struct_decls = vec![StructDeclCandidateJson {
             name: "type_0x15a".to_string(),
@@ -7289,6 +7292,7 @@ mod integration_tests {
                     addr: r2ssa::SSAVar::new("tmp:base_b", 1, 8),
                 },
             ],
+            phis: Vec::new(),
         };
         let struct_decls = vec![StructDeclCandidateJson {
             name: "ext_struct".to_string(),
@@ -7848,6 +7852,7 @@ mod integration_tests {
                     addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
                 },
             ],
+            phis: Vec::new(),
         }
     }
 
@@ -8132,6 +8137,7 @@ mod integration_tests {
                     src: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
                 },
             ],
+            phis: Vec::new(),
         }
     }
 
