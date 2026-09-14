@@ -22769,3 +22769,53 @@ surviving as instructions altogether and every use of a stack address is spelled
 from the object model, which deletes `addresses_declared_array`. The four
 `RenderedValueRequired` refusals and at least the three -O0 functions above all
 sit on the answer.
+
+## Phase 0: what the benchmark was actually measuring
+
+Three findings, all from reading the record rather than running anything.
+
+**828 of 4,032 reference cells were unpaired, and most of it was naming.** The
+census of the accepted sweep records 6,483 functions rendered and 330 declined
+with no timeouts and no unreached functions, yet `baseline.json` credits only
+3,204 cells. The adapter filed every result under `_source_name(flag)` --
+radare2's flag with its provenance prefix stripped -- and filtered candidates
+the same way. DecBench spells a function it has no source name for as
+`sub_401165`; radare2 calls that address `fcn.00401165`, and no prefix rule
+turns one into the other, so all 118 such cells were dropped before the
+decompiler was asked. `main` was missing in 24 of 42 cells for the same class of
+reason. The adapter now pairs on the address both sides already agree on --
+`to_file_addr` and `addr_targets_of` were computed for the skip-list and the
+source narrowing anyway -- keeps the name filter as a union rather than a
+replacement, and files renderings, gaps and declines under the benchmark's own
+name. `tests/decbench/test_r2sleigh_raw.py` stands in for the `decbench`
+package so the pairing is testable without the benchmark host.
+
+**One rendering in seven does not compile.** `byte_match` recompiles the
+rendering and compares assembly, so a translation unit the compiler rejects
+scores zero however good the decompilation was -- and the benchmark's own
+`compiles` field is empty on every one of the 6,740 records, so a wrong
+rendering and one that never built are the same number. Against the local
+census, `tests/decbench/compile_census.py` builds each rendering on its own with
+warnings silenced: **211 of 1,413 fail, 14.9%**. That is the same order as the
+571 of 6,483 functions scoring exactly 0.0 on the benchmark.
+
+The causes are specific and none of them is subtle:
+
+| count | first error | rendered text |
+|---|---|---|
+| 72 | variable has incomplete type | `struct type_0x749 n_copy;` -- a synthesized tag used by value, never defined |
+| 32 | type specifier missing | `/* unknown */ sym_imp___isoc23_fscanf(void)` -- a comment where the return type belongs |
+| 21 | expected `)` | `void(*)(void)* func` -- a function-pointer parameter spelled as an abstract declarator with a pointer stuck on |
+| 17 | parameter list without types | `uint64_t dbg_nfmalloc(size_t);` -- `size_t` never declared, so it reads as a parameter name |
+| 14 | unknown type name | `double dbg_uInt64_to_double(UInt64* n)` -- a typedef spelling with no definition |
+| 10 | array subscript is not an integer | `((int8_t*)RSI_1)[RAX_19 + 128] = 1;` |
+| 10 | must use `struct` tag | `varbuf* RDI_8 = (varbuf*)&global_str;` |
+| 8 | redefinition as a different kind of symbol | `extern char __cxa_finalize[];` beside a prototype of the same name |
+
+**The struct-tag worry was wrong, and the prototype worry is a warning.** An
+undefined tag behind a pointer is legal C, so the 715 renderings that name one
+are fine; only the 72 that declare a *value* of an undefined type fail. And
+`void perror(uint64_t)` called with a string literal is an error on a 2024
+compiler and a warning on the GCC that built the corpus, with the same ABI on a
+64-bit target either way -- worth fixing for its own sake, but not what is
+costing the zeros.

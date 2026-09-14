@@ -115,6 +115,36 @@ def _retitle(code: str, flag: str, source_name: str) -> str:
     return re.sub(rf"\b{re.escape(sanitized)}\b", source_name, code)
 
 
+def _requested_by_address(
+    functions: list[tuple[str, int]] | None,
+) -> dict[int, str] | None:
+    """What the benchmark asked for, keyed by address.
+
+    ``None`` when it asked for everything. A duplicate address keeps the first
+    name, because two requests at one address are one function however the
+    benchmark spelled them.
+    """
+    if functions is None:
+        return None
+    by_addr: dict[int, str] = {}
+    for name, addr in functions:
+        by_addr.setdefault(int(addr), name)
+    return by_addr
+
+
+def _requested_name(
+    requested_by_addr: dict[int, str] | None, *addresses: int
+) -> str | None:
+    """The benchmark's own name for a function at one of these addresses."""
+    if requested_by_addr is None:
+        return None
+    for addr in addresses:
+        name = requested_by_addr.get(addr)
+        if name is not None:
+            return name
+    return None
+
+
 def _source_name(flag: str) -> str:
     """The name the source would use for a radare2 function flag."""
     name = flag
@@ -354,19 +384,26 @@ class RawR2SleighDecompiler(Decompiler):
             )
         ]
         stages.append(("after skip-list", len(candidates)))
-        if functions is not None:
-            # Compare on the source's own name, not radare2's flag. radare2
-            # spells a function it learned from DWARF `dbg.slide_hash`, while the
-            # benchmark asks for `slide_hash`, so a raw comparison matches
-            # nothing and silently discards every candidate -- the binary then
-            # reports no functions at all, which reads as a decompiler with
-            # nothing to say rather than a filter that removed the work.
-            requested = {_source_name(name) for (name, _) in functions}
+        # What the benchmark asked for, keyed by the address it asked at. The
+        # address is the only identifier both sides agree on: radare2 spells a
+        # function from wherever it learned the name, and the benchmark spells
+        # one it has no name for as `sub_401165`, which no prefix rule can turn
+        # into radare2's `fcn.00401165`. Matching on names dropped every such
+        # cell -- 118 of 118 in the recorded sweep -- before the decompiler was
+        # ever asked.
+        requested_by_addr = _requested_by_address(functions)
+        if requested_by_addr is not None:
+            # Address or name, not address alone: the two sides may disagree on
+            # which address space they name a function in, and a filter that
+            # empties the list costs a whole sweep to discover.
+            requested_names = {_source_name(name) for (name, _) in functions or []}
             candidates = [
-                (name, addr) for (name, addr) in candidates
-                if _source_name(name) in requested
+                (name, addr)
+                for (name, addr) in candidates
+                if _requested_name(requested_by_addr, to_file_addr(addr), addr)
+                or _source_name(name) in requested_names
             ]
-            stages.append(("after requested-name filter", len(candidates)))
+            stages.append(("after requested filter", len(candidates)))
         # The benchmark hands a stripped binary and names its own targets by
         # DWARF low_pc, so narrowing is by address, not by symbol.
         narrowed = common.narrow_to_source(
@@ -407,6 +444,12 @@ class RawR2SleighDecompiler(Decompiler):
                 harness = _harness_cause(decompile, stopped_at, len(candidates))
 
             for index, (name, addr) in enumerate(candidates):
+                # Filed under the benchmark's own name throughout, so a decline
+                # lands on the same cell a rendering would have.
+                name = _requested_name(
+                    requested_by_addr, to_file_addr(addr), addr
+                ) or _source_name(name)
+                flag = candidates[index][0]
                 body = bodies[index]
                 if body is None:
                     # Skipping quietly here is the whole defect: it makes a dead
@@ -431,11 +474,10 @@ class RawR2SleighDecompiler(Decompiler):
                     continue
                 gaps = [match.groupdict() for match in _GAP.finditer(code)]
                 if gaps:
-                    gapped[_source_name(name)] = gaps
-                source_name = _source_name(name)
-                code = _retitle(code, name, source_name)
-                rendered[source_name] = FunctionDecompilation(
-                    name=source_name,
+                    gapped[name] = gaps
+                code = _retitle(code, flag, name)
+                rendered[name] = FunctionDecompilation(
+                    name=name,
                     address=to_file_addr(addr),
                     decompiled_code=code,
                     line_count=len(code.splitlines()),
