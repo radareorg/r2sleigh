@@ -896,7 +896,9 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         {
             Some(*bits)
         }
-        CTypeLike::Pointer(_) => Some(ptr_bits),
+        // `Function` is this model's spelling for a pointer to function, so it
+        // occupies exactly what a pointer does.
+        CTypeLike::Pointer(_) | CTypeLike::Function { .. } => Some(ptr_bits),
         CTypeLike::Array(element, Some(count)) => {
             declaration_type_width_bits(element, ptr_bits)?.checked_mul(u32::try_from(*count).ok()?)
         }
@@ -915,7 +917,7 @@ pub fn admit_declaration_type(ty: CTypeLike, width_bits: u32, ptr_bits: u32) -> 
     // `size_t`, whose canonical integer spelling differs from its name.
     let ty = crate::signature_infer::resolve_builtin_typedefs(ty, ptr_bits);
     let admissible = match &ty {
-        CTypeLike::Pointer(_) => width_bits == ptr_bits,
+        CTypeLike::Pointer(_) | CTypeLike::Function { .. } => width_bits == ptr_bits,
         CTypeLike::Int { bits, .. } | CTypeLike::Float(bits) => *bits == width_bits,
         CTypeLike::Typedef(name) => {
             crate::parse_external_type_like_spec(name, ptr_bits)

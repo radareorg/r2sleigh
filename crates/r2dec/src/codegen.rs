@@ -235,9 +235,8 @@ impl<'c> CodeGenerator<'c> {
         // Local variable declarations
         for local in &func.locals {
             self.emit_indent();
-            self.emit_type(&local.ty);
-            self.output.push(' ');
-            self.output.push_str(self.symbols.name(local.name));
+            let name = self.symbols.name(local.name).to_owned();
+            self.emit_object_declaration(&local.ty, &name);
             self.output.push_str(";\n");
         }
 
@@ -300,7 +299,19 @@ impl<'c> CodeGenerator<'c> {
         // A reader wants the name; a tool that has to resolve the object --
         // the corpus verifier maps image addresses into a captured blob --
         // needs the number the name replaced, and the name alone hides it.
+        // A name already declared as a function is not also a data object. The
+        // two declarations are a redefinition and the translation unit is
+        // rejected: `__cxa_finalize` arrives as both a callee this function
+        // calls and an address the relocation names.
+        let declared_functions: std::collections::BTreeSet<&str> = func
+            .externs
+            .iter()
+            .map(|declaration| declaration.name.as_str())
+            .collect();
         for object in &func.extern_objects {
+            if declared_functions.contains(object.name.as_str()) {
+                continue;
+            }
             // The address the name stands for travels with the declaration, as
             // a define rather than a comment. A reader wants the name; a tool
             // that has to resolve the object -- the corpus verifier maps image
@@ -831,25 +842,13 @@ impl<'c> CodeGenerator<'c> {
         self.output.push_str(&ty.to_string());
     }
 
-    /// Emit the declarator for a data object. Arrays put their extent after
-    /// the name; the ordinary type renderer has no identifier to place there.
+    /// Emit the declarator for a data object.
+    ///
+    /// C puts the identifier inside the declarator, which only a scalar makes
+    /// look like a type followed by a name.
     fn emit_object_declaration(&mut self, ty: &CType, name: &str) {
-        let mut element = ty;
-        let mut extents = Vec::new();
-        while let CType::Array(inner, extent) = element {
-            extents.push(*extent);
-            element = inner;
-        }
-        self.emit_type(element);
-        self.output.push(' ');
-        self.output.push_str(name);
-        for extent in extents {
-            self.output.push('[');
-            if let Some(extent) = extent {
-                self.output.push_str(&extent.to_string());
-            }
-            self.output.push(']');
-        }
+        self.output
+            .push_str(&r2types::c_object_declaration(ty, name));
     }
 
     /// Emit a type together with the identifier it declares.

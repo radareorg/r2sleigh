@@ -290,6 +290,93 @@ pub fn render_c_type_like(ty: &CTypeLike) -> String {
     }
 }
 
+/// The same type with anything C cannot spell replaced by the storage it names.
+///
+/// `/* unknown */` is a comment, not a type: a declaration carrying one is not
+/// C and the translation unit is rejected. Where the recovery reached no type,
+/// the machine word the value occupies stands, which is the rule a parameter
+/// with no evidence already follows. Behind a pointer the same absence is
+/// `void`, because `void *` is what C spells for a pointer to something
+/// unknown.
+pub fn spellable_c_type_like(ty: &CTypeLike, machine_bits: u32) -> CTypeLike {
+    match ty {
+        CTypeLike::Unknown => CTypeLike::machine_bits(machine_bits),
+        CTypeLike::Pointer(inner) => CTypeLike::Pointer(Box::new(match inner.as_ref() {
+            CTypeLike::Unknown => CTypeLike::Void,
+            other => spellable_c_type_like(other, machine_bits),
+        })),
+        CTypeLike::Array(inner, extent) => CTypeLike::Array(
+            Box::new(spellable_c_type_like(inner, machine_bits)),
+            *extent,
+        ),
+        CTypeLike::Function { ret, params } => CTypeLike::Function {
+            ret: Box::new(spellable_c_type_like(ret, machine_bits)),
+            params: params
+                .iter()
+                .map(|param| spellable_c_type_like(param, machine_bits))
+                .collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// A declaration of `name` at this type, as C spells it.
+///
+/// C puts the identifier *inside* the declarator rather than after the type,
+/// and only a scalar or a pointer to one makes the two look the same. An array
+/// takes its extent after the name, and a function pointer wraps the name --
+/// `void (*handler)(void)`, never `void(*)(void) handler`, which is what
+/// appending the name to the type spelling produced.
+pub fn c_object_declaration(ty: &CTypeLike, name: &str) -> String {
+    let mut declarator = name.to_string();
+    let mut element = ty;
+    loop {
+        match element {
+            CTypeLike::Array(inner, extent) => {
+                declarator.push('[');
+                if let Some(extent) = extent {
+                    declarator.push_str(&extent.to_string());
+                }
+                declarator.push(']');
+                element = inner;
+            }
+            // `Function` is the model's spelling for a pointer to function, so
+            // the name goes where that pointer's `*` is.
+            CTypeLike::Function { ret, params } => {
+                let params = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params
+                        .iter()
+                        .map(render_c_type_like)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                declarator = format!("(*{declarator})({params})");
+                element = ret;
+            }
+            // A pointer binds looser than the array or call that follows it,
+            // so it needs the parentheses C would otherwise read the other way.
+            CTypeLike::Pointer(inner)
+                if matches!(
+                    inner.as_ref(),
+                    CTypeLike::Array(..) | CTypeLike::Function { .. }
+                ) =>
+            {
+                declarator = format!("(*{declarator})");
+                element = inner;
+            }
+            _ => break,
+        }
+    }
+    let base = render_c_type_like(element);
+    if declarator.is_empty() {
+        base
+    } else {
+        format!("{base} {declarator}")
+    }
+}
+
 /// Parse a C type spelling into the model.
 ///
 /// This is the partial inverse of `render_c_type_like`. A spelling is data

@@ -196,7 +196,17 @@ impl<'a> FoldingContext<'a> {
                 .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
             (ret_type, params, cert.variadic)
         };
-        Ok((ret_type, params, variadic))
+        // A recorded prototype can carry a type the recovery never reached, and
+        // `/* unknown */` is not a declaration C accepts.
+        let machine_bits = self.inputs.arch.ptr_size;
+        Ok((
+            r2types::spellable_c_type_like(&ret_type, machine_bits),
+            params
+                .iter()
+                .map(|param| r2types::spellable_c_type_like(param, machine_bits))
+                .collect(),
+            variadic,
+        ))
     }
 
     /// The source declared a call to this callee terminal, so its prototype

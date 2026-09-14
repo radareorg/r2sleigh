@@ -5104,7 +5104,15 @@ pub(crate) fn source_type_like(
             signedness: Signedness::Unsigned,
         },
         r2ssa::SourceTypeKind::Pointer { target_type_id } => {
-            CTypeLike::Pointer(Box::new(source_type_like(graph, target_type_id, visiting)?))
+            let target = source_type_like(graph, target_type_id, visiting)?;
+            // `CTypeLike::Function` already spells a pointer to function,
+            // `ret(*)(params)`, so wrapping it adds an indirection the program
+            // does not have and spells `void(*)(void)*`, which is not C.
+            if matches!(target, CTypeLike::Function { .. }) {
+                target
+            } else {
+                CTypeLike::Pointer(Box::new(target))
+            }
         }
         r2ssa::SourceTypeKind::Struct { aggregate_id } => {
             let aggregate = graph

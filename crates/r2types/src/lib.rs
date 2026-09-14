@@ -44,7 +44,10 @@ pub use context::{
     parse_external_assumption_payload_json, parse_external_context, parse_external_context_json,
     sanitize_c_identifier,
 };
-pub use convert::{CTypeLike, parse_c_type_like, render_c_type_like, to_c_type_like};
+pub use convert::{
+    CTypeLike, c_object_declaration, parse_c_type_like, render_c_type_like, spellable_c_type_like,
+    to_c_type_like,
+};
 pub use data_object::{
     DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
 };

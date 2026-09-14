@@ -22819,3 +22819,45 @@ are fine; only the 72 that declare a *value* of an undefined type fail. And
 compiler and a warning on the GCC that built the corpus, with the same ABI on a
 64-bit target either way -- worth fixing for its own sake, but not what is
 costing the zeros.
+
+### Phase 1, first cut: 211 renderings that would not compile become 152
+
+Four defects, each fixed at the one place that produced it. Census unchanged at
+1,436 of 1,445 with the same nine refusals; gate 54/54.
+
+**A function pointer was pointed at twice.** `source_type_like`
+(`crates/r2types/src/writeback.rs`) turned the capture's `Pointer → CODE` into
+`Pointer(Function)`, but `CTypeLike::Function` is already this model's spelling
+for a pointer to function, `ret(*)(params)`. The parameter therefore rendered
+`void(*)(void)* func`, which is not C. A pointer whose target is `Function` is
+that `Function`. `declaration_type_width_bits` and `admit_declaration_type`
+(`crates/r2types/src/function_facts.rs`) had to learn the same thing, or the
+type was rejected for having no width and fell back to `uint64_t`; with both,
+`dbg_set_error_printer` now declares `void (*func)(void)`, which is what the
+source wrote.
+
+**The identifier goes inside the declarator.** `emit_object_declaration` built a
+declaration as type, space, name, with arrays special-cased. That is right only
+when the declarator has no suffix. `r2types::c_object_declaration` now builds
+the declarator properly -- arrays take their extent after the name, a function
+pointer wraps it, and a pointer to either takes the parentheses C would
+otherwise read the other way -- and codegen uses it for locals as well as
+parameters, which is where the array special case had never reached.
+
+**`/* unknown */` is a comment, not a type.** A recorded prototype can carry a
+return or parameter type the recovery never reached, and it was rendered
+literally: `/* unknown */ sym_imp___isoc23_fscanf(void)`. The rule parameters
+already follow is that absent evidence leaves the machine word, so
+`r2types::spellable_c_type_like` applies it to every type on its way into C, at
+the function's own return type and at every callee declaration. Behind a pointer
+the same absence is `void`, because `void *` is what C spells there.
+
+**One name, one kind.** `__cxa_finalize` arrived both as a callee this function
+calls and as an address a relocation names, so the rendering declared it as a
+function and then as `extern char __cxa_finalize[]`. A name already declared as
+a function is not also a data object.
+
+Remaining, by first compiler error: 75 declare a value of an undefined
+aggregate (`struct type_0x749 n_copy;`), 17 name `size_t` in a prototype with
+nothing that declares it, 14 name a typedef that is never defined, 11 use an
+aggregate tag without its keyword, 10 subscript with a non-integer index.

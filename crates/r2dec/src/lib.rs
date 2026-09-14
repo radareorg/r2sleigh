@@ -3571,9 +3571,14 @@ impl Decompiler {
                 .values()
                 .map(|recorded| recorded.declaration.clone())
                 .collect(),
-            ret_type: render_signature
-                .and_then(|sig| sig.ret_type.clone())
-                .unwrap_or_else(|| inferred_ret_type.clone()),
+            // A recovery that reached no return type still has to declare
+            // one, and `/* unknown */` is a comment rather than C.
+            ret_type: r2types::spellable_c_type_like(
+                &render_signature
+                    .and_then(|sig| sig.ret_type.clone())
+                    .unwrap_or_else(|| inferred_ret_type.clone()),
+                self.config.ptr_size,
+            ),
             params,
             // Program locals are introduced only by the final placement pass
             // from surviving, observed BindingId occurrences.
