@@ -318,10 +318,13 @@ pub fn import_with(
             MachineType::Address { .. } => {
                 address_typed.insert(binding.value());
             }
-            MachineType::Integer { .. } => {
+            MachineType::Integer { .. } | MachineType::Bool { .. } => {
+                // A truth value is read by name like any other. Leaving the
+                // boolean carriers out meant a condition code was embedded in
+                // its reader's term instead of named there, so nothing could
+                // say which values a rewritten term still reads.
                 source_nodes.entry(binding.value()).or_insert(id);
             }
-            MachineType::Bool { .. } => {}
         }
     }
     // A parameter is a pointer because some certified access reads or writes

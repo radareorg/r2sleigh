@@ -23060,3 +23060,27 @@ the discharge set and the seal should all read.
 `demand-closure-attempt.diff` in the session scratchpad has the closure, the
 seeds, the `reads` fields and the instrumentation that produced the numbers
 above.
+
+### A condition code is read by name
+
+`import_with` (`crates/r2rewrite/src/import.rs`) built its `source_nodes` table
+-- the map from a value to the machine expression that reads it by name -- from
+integer-typed `Source` expressions only, dropping boolean ones on the floor with
+an empty match arm. A condition code is boolean, so it had no node to be named
+at, and the importer embedded its producer in the reader's term instead of
+naming it there.
+
+That is why nothing in the pipeline could say which values a rewritten term
+still reads. A relation built from a term's leaves can only see what is a leaf,
+and every flag was structure rather than a leaf. Giving the boolean carriers a
+node makes the relation possible; with it, `TermArena::leaves` accounts for
+every read a canonical term makes, which is the property the measurement now
+confirms: in `uInt64_isZero` the leaves of every canonical root and the values
+they map to are the same number.
+
+Gate 54/54 with all 54 snapshots matching, census unchanged at 1,436 of 1,445
+and 152 of 1,413 renderings still not compiling: the change is behaviour-neutral
+on its own. It is committed on its own for that reason -- the four things that
+build on it were stacked together once, and the gate came back with all 54 cells
+refusing, which said nothing about which of them was wrong. The rest lands one
+at a time, each gated.
