@@ -22105,3 +22105,84 @@ DecBench sweep 3 runs from the committed tree (`4a194c76`, remote run
 sweep 2 failed twice on the tree fingerprint, since the launch tree had
 uncommitted edits the remote copy does not reproduce byte for byte; the old
 interrupted runs were collected with `--gc-force`.
+
+## A variable's name is stored once
+
+The byte map said `SSAVar` was the largest single thing a decompile holds, and
+two attempts to make its comparison cheaper by widening it had already failed:
+an inline eight-byte prefix bought about one percent for eight bytes on every
+variable, and hashing that prefix instead of the name put every temporary
+sharing eight name bytes in one bucket and made the command sixty-five percent
+slower. Both are recorded above as failures. What neither attempt questioned is
+why the name is stored at all in each of the million places a variable appears.
+
+A leaf profile of `a:sla; aaa; pd:s @@F` on bzip2 `-O2`, over 7,713 leaf
+samples, said where the time actually was: the allocator 18.9 percent, SipHash
+10.1, `memcmp` 8.8, `memmove` and `memset` 5.2. Together 43 percent of the
+command, and all four are what a `Box<str>` name costs — one allocation per
+clone, the characters walked on every hash, the characters compared on every
+map probe.
+
+So the name is interned (`crates/r2ssa/src/name.rs`). A spelling is stored once
+for the life of the process and a variable holds `&'static InternedName`, which
+is eight bytes and never freed. Cloning a variable copies a pointer; equality
+compares the pointer; `Hash` feeds the entry's dense identifier. Ordering still
+compares the text, with a pointer-equal fast path, so every `BTreeMap` keyed by
+a variable iterates in exactly the order it did before and no rendering moves.
+`SSAVar` went from forty bytes to thirty-two.
+
+Entries are never freed, which is what makes the `'static` sound. The set is
+bounded by the distinct spellings a program contains — register names, one per
+Sleigh unique offset, one per distinct constant and address — which is data the
+decompiler holds anyway.
+
+Two things follow from interning and are done in the same arc. Everything a
+spelling decides on its own is settled when it is interned rather than
+re-derived at each of the hundreds of thousands of places that ask: the name
+kind (`SSAVarNameKind::classify`, which used to allocate a lowercase copy of
+the name on every call, and is now a prefix comparison) and the register offset
+a `reg:` spelling stands for. And the lifter no longer builds a `String` to
+throw away: `intern_fmt` writes the spelling into a sixty-four byte stack
+buffer and interns from that, `Disassembler::register_spelling` hands back the
+architecture's stored name borrowed instead of cloned, and `SSAContext`'s
+version table is keyed by the interned entry rather than by a second copy of
+the characters.
+
+Measured on `BZ2_decompress` (30,281 instructions, bzip2 `-O2`), rendered text
+byte-identical at every step and the gate at 54 of 54:
+
+                        peak        entry     allocations    render
+    before           177.0 MiB    94.5 MiB      6,653,942     891 ms
+    interned         170.5 MiB    90.1 MiB      6,124,705     861 ms
+    lifter too       170.6 MiB    90.1 MiB      6,112,942     848 ms
+
+The lifter row moves the render's counter barely at all because the strings it
+stops building are spent during capture, which the render's counter does not
+see; its evidence is the thirteen milliseconds and the code that no longer
+formats a name per operand.
+
+One measurement hazard, which cost two wrong readings before it was noticed:
+`R2DEC_TRACE_REFUSAL=1` changes the numbers it is measuring. On this function
+it adds 30,903 allocations to `structure_walk` and takes that stage from 106 ms
+to 1,067 ms. A run compared against an untraced baseline reads as a large
+regression that is entirely the tracing. Compare traced with traced.
+
+### Where the cost is now
+
+Same function, untraced, 848 ms of rendering: no stage is over twelve percent
+(`structure_walk` 12.0, `placement` 11.2, `audit` 10.7, `effect_ledger` 7.5,
+the whole `plan_*` family about 32 together). The render is flat. Capture is
+still the larger half at about 1.6 seconds, so that is where the next block is.
+
+By allocation count the render is not flat: `structure_walk` alone is 1,100,137
+of the 6,112,942, which is thirty-six allocations per instruction spent
+building the C tree. Every recursive edge of `CExpr` is a `Box`, and
+`CExpr::Observed` wraps a child in a second one, so an arena for the rendered
+tree is the campaign that number belongs to. It is still waiting.
+
+Also retired in the same stretch: the lifted block and the renamed block were
+two types differing only in a `phis` field, so `SsaArtifact::local_ssa_blocks`
+deep-copied every operation of the function to hand the type writeback a
+read-only view, and `infer_local_struct_artifacts_from_prepared_ssa` copied
+them again into a third block type of its own. One type now, both copies gone,
+and `LocalStructInferenceBlock` deleted.
