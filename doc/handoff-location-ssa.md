@@ -22985,3 +22985,39 @@ single-reader rule carries is stated separately from the count.
 The three attempts are kept in the session scratchpad as
 `flag-folding-through-leaves.diff`, `flag-equality-and-rendered-readers.diff`
 and `rendered-reader-relation.diff`.
+
+### Demand from required consumers, and the register of what must be emitted
+
+The design above was put to the Codex CLI as an independent check, and its
+answer arrived at the same shape from the other direction: compute *reachable
+demand* from the consumers the rendering must emit whatever the plan decides,
+use it for deadness, and leave the inlining proof alone -- "complete-consumer
+reachability for deadness, while retaining the existing conservative inlining
+proof". It also named the reason attempt two failed in one line: a surviving
+reader is a candidate for placement, not a proof of it, because inlining needs
+dominance and evaluation order as well as a count.
+
+That was built. `unrendered_defined_values` now seeds demand from every
+instruction with no output value -- a store, a branch, a return, a call boundary
+-- plus every certified boundary read, every caller-supplied value and every
+memory access, then closes over what the rewritten terms actually read, and
+keeps the existing purity test so an instruction with an effect is never called
+dead because its result is. It is at `demand-from-required-consumers.diff` in
+the session scratchpad.
+
+It still refuses, and the fourth attempt is what finally names the real
+obstacle. The structurer emits merge writes at a shared exit
+(`crates/r2dec/src/structure/mod.rs:672-693`) and asks the plan for an
+expression for the phi's target and source; those are consumers too, and they
+appear in neither the graph's use table, nor the boundary certificates, nor the
+canonical roots. Every attempt has failed on the same thing from a different
+angle: **there is no register of what the rendering is obliged to emit.** It is
+spread across the SSA graph's output-less instructions, the boundary
+certificates, the structurer's merge writes, the access table and the
+certificates that own stack geometry, and each consumer of that knowledge
+reconstructs its own partial version.
+
+So the work is to build that register once -- an emission demand set every stage
+reads instead of re-deriving -- and only then is the flag class, the largest in
+the output, reachable. Until it exists, the reader question cannot be asked
+without a partial answer, and every partial answer refuses a different function.
