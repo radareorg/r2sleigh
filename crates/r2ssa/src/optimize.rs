@@ -120,6 +120,13 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
             }
         }
 
+        // Before the shape passes and whatever they are configured to do: a
+        // machine comparison is a comparison in the graph, not a flag algebra
+        // for a later stage to undo.
+        if fold_condition_codes_in_function(func, &mut stats) {
+            changed = true;
+        }
+
         if config.enable_inst_combine && inst_combine(func, &mut stats) {
             changed = true;
         }
@@ -1068,6 +1075,143 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
 /// at that position, the narrower value an extension widened, or a slice of
 /// a wider slice (doc/adr-register-identity.md §5). Copies of non-constants
 /// are left alone: a copy is a statement the prepared SSA keeps.
+/// Replace every condition assembled from condition codes with the comparison
+/// the source wrote. Always runs: the graph is what every later stage reads.
+fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
+    let defs = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
+        .collect::<HashMap<_, _>>();
+    let mut changed = false;
+    for addr in func.block_addrs().to_vec() {
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
+        for op in &mut block.ops {
+            let Some(folded) = fold_condition_codes(op, &defs) else {
+                continue;
+            };
+            if &folded == op {
+                continue;
+            }
+            *op = folded;
+            stats.ops_simplified += 1;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A branch condition assembled from condition codes, as the comparison it is.
+///
+/// A machine has no `a <= b`; it subtracts and then tests the flags the
+/// subtraction set, so `cmp a, b; jle` lifts to a sign flag, an overflow flag,
+/// a zero flag and two boolean operations over them. The source wrote one
+/// comparison, and every stage after this one -- the binding plan's reader
+/// counts, the observation journal, the placement audit -- reads the graph, so
+/// the comparison has to be *in* the graph rather than reconstructed later by
+/// the renderer's term rewriter. Folding it there instead leaves the flags with
+/// graph readers the rewritten term no longer has, which is a disagreement no
+/// amount of bookkeeping downstream can settle.
+///
+/// The flag definitions are left where they are. They become unread, and the
+/// passes that remove unread values already know what to do with them.
+fn fold_condition_codes(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+    let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
+    let is_zero = |var: &SSAVar| const_value(var) == Some(0);
+    // `d = a - b`, whether the flag reads the difference by name or the
+    // subtraction was folded into it.
+    let subtraction = |var: &SSAVar| match define(var)? {
+        SSAOp::IntSub { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
+    };
+    // The sign flag: `(a - b) <s 0`.
+    let sign_flag = |var: &SSAVar| match define(var)? {
+        SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+        _ => None,
+    };
+    // The overflow flag: `sborrow(a, b)`.
+    let overflow_flag = |var: &SSAVar| match define(var)? {
+        SSAOp::IntSBorrow { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
+    };
+    // The zero flag: `(a - b) == 0`.
+    let zero_flag = |var: &SSAVar| match define(var)? {
+        SSAOp::IntEqual { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+        _ => None,
+    };
+    // `SF != OF` is `a <s b`, and `SF == OF` is `b <=s a`. Either order.
+    let signed_order = |x: &SSAVar, y: &SSAVar| {
+        sign_flag(x)
+            .zip(overflow_flag(y))
+            .or_else(|| sign_flag(y).zip(overflow_flag(x)))
+            .filter(|(sign, overflow)| sign == overflow)
+            .map(|(sign, _)| sign)
+    };
+    match op {
+        // `jl` / `jge`: the sign and overflow flags alone.
+        SSAOp::IntNotEqual { dst, a, b } => {
+            if let Some((left, right)) = signed_order(a, b) {
+                return Some(SSAOp::IntSLess {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                });
+            }
+            let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
+            Some(SSAOp::IntNotEqual {
+                dst: dst.clone(),
+                a: left,
+                b: right,
+            })
+        }
+        SSAOp::IntEqual { dst, a, b } => {
+            if let Some((left, right)) = signed_order(a, b) {
+                return Some(SSAOp::IntSLessEqual {
+                    dst: dst.clone(),
+                    a: right,
+                    b: left,
+                });
+            }
+            // The zero flag of a subtraction is an equality between its
+            // operands. True of two's complement at any width, and it is what
+            // lets the difference itself go unread.
+            let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
+            Some(SSAOp::IntEqual {
+                dst: dst.clone(),
+                a: left,
+                b: right,
+            })
+        }
+        // `jle` / `jg`: the ordering with the zero flag beside it. The lifter
+        // spells the disjunction of two flags as either an integer or a
+        // boolean or, depending on the instruction it came from.
+        SSAOp::IntOr { dst, a, b } | SSAOp::BoolOr { dst, a, b } => {
+            // The ordering half is either still the flag pair or already the
+            // comparison this pass made of it, because the two are folded in
+            // one walk and the operand may have been reached first.
+            let ordered = |ordering: &SSAVar, zero: &SSAVar| {
+                let (left, right) = match define(ordering)? {
+                    SSAOp::IntNotEqual { a: x, b: y, .. } => signed_order(x, y)?,
+                    SSAOp::IntSLess { a: x, b: y, .. } => (x.clone(), y.clone()),
+                    _ => return None,
+                };
+                let (zero_left, zero_right) = zero_flag(zero)?;
+                (zero_left == left && zero_right == right).then_some((left, right))
+            };
+            let (left, right) = ordered(a, b).or_else(|| ordered(b, a))?;
+            Some(SSAOp::IntSLessEqual {
+                dst: dst.clone(),
+                a: left,
+                b: right,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
     let SSAOp::Subpiece { dst, src, offset } = op else {
         return None;

@@ -23254,3 +23254,54 @@ All twelve attempts are kept in the session scratchpad. The two that matter for
 whoever picks this up are `read-sites-values-and-accesses.diff`, which has the
 mapping and the transitive discharge closure, and `per-occurrence-marking.diff`,
 which has the tree-walking attachment on top of it.
+
+## The fold was in the wrong layer
+
+Twelve attempts to make the rewriter, the observation journal, the binding plan
+and the placement audit agree about a folded condition code all failed, each at
+a different seam. That pattern was the answer and it took too long to read: four
+components disagreeing about one fact is a layering error, not four bugs.
+
+A machine has no `a <= b`. It subtracts and tests the flags the subtraction set,
+so `cmp a, b; jle` lifts to an overflow flag, a sign flag, a zero flag and two
+boolean operations over them. r2sleigh folded that back into a comparison in the
+*renderer's* term rewriter -- after the SSA graph was built, and therefore after
+the point every later stage reads. The graph still said the branch read three
+flags; the rewritten term read one comparison; and no amount of bookkeeping
+downstream could make those two statements the same.
+
+`fold_condition_codes` in `crates/r2ssa/src/optimize.rs` does it in the graph
+instead. It recognises the idiom over `IntSBorrow`, `IntSub`, `IntSLess`,
+`IntEqual`, `IntNotEqual` and the disjunction the lifter spells as either
+`IntOr` or `BoolOr`, and rewrites the condition to `IntSLess` or
+`IntSLessEqual` over the original operands. It also folds a zero flag into the
+equality it is -- `(a - b) == 0` is `a == b` at any width in two's complement --
+which is what lets the difference itself go unread. The flag definitions are
+left exactly where they are; they simply stop being read, and the passes that
+remove unread values already know what to do with that.
+
+It runs unconditionally, before the shape passes, because the graph is what
+every later stage reads. `enable_inst_combine` stays off: this is a separate
+pass, not that one.
+
+Measured over the local census, before and after:
+
+| | before | after |
+|---|---|---|
+| functions rendered | 1,436 of 1,445 | **1,437 of 1,445** |
+| `RenderedValueRequired` refusals | 4 | **2** |
+| statements rendered | 127,668 | **124,860** |
+| source obligations | 306,494 | 303,726 |
+| condition-code mentions in the output | 14,735 | **11,510** |
+
+`uInt64_isZero` in `bzip2` at -O0 is the case the whole arc started from. Its
+loop condition was four statements, three locals and a call to an undefined
+`r2sleigh_int_sborrow_32`; it is now `if (tmp_3e900_2 <= 7)`.
+
+Gate 54 of 54 on generation, raw, differential and every audit; 54 snapshots
+moved and were read and accepted. `r2ssa`'s 511 unit tests pass.
+
+The rewriter's Group E rules stay where they are: they still fold the shapes the
+lifter writes out inline, and there is no longer a second population for them to
+disagree with. The twelve reverted attempts are kept in the session scratchpad
+and are now of historical interest only.
