@@ -490,6 +490,7 @@ pub(super) fn component_eligible_with(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
     inlinable: &BTreeSet<ValueId>,
+    unrendered: &BTreeSet<ValueId>,
 ) -> Result<Vec<bool>, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -522,8 +523,113 @@ pub(super) fn component_eligible_with(
                 && !structural_unused.contains(&value.id)
                 && !inlinable.contains(&value.id)
                 && !unread.contains(&value.id)
+                && !unrendered.contains(&value.id)
         })
         .collect())
+}
+
+/// Values whose every reader stopped reading them when the terms were
+/// rewritten.
+///
+/// The graph's use table is the complete read domain, so this subtracts from it
+/// rather than rebuilding it: a use survives unless the reader's own canonical
+/// term provably no longer mentions the value. One value can be folded into
+/// several readers at once -- the three condition codes of a subtraction
+/// collapse into a single comparison -- and counting the graph's uses then
+/// leaves it bound with nothing to render it, which the seal refuses.
+///
+/// Every uncertainty keeps the value. A reader with no canonical term of its
+/// own says nothing, a certified boundary read still counts, and the definition
+/// itself has to be removable, so an instruction with an effect is never called
+/// dead because its result is.
+pub(super) fn unrendered_defined_values(
+    source: &r2ssa::SsaArtifact,
+    projection: &r2ssa::MachineProjection,
+    canonical: &r2rewrite::CanonicalRoots,
+) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    let certified = certified_value_readers(source);
+    // A merge the structurer writes at a shared exit reads its target and its
+    // sources, and it does so from the control shape rather than from any term,
+    // so no canonical term can speak for those reads. A merge nothing observes
+    // writes nothing and is not one of them.
+    let unobserved_merges = source.unobserved_merges();
+    let merged = graph
+        .insts
+        .iter()
+        .filter(|inst| matches!(inst.payload, r2ssa::InstPayload::Phi { .. }))
+        .filter(|inst| {
+            !inst
+                .output
+                .is_some_and(|output| unobserved_merges.contains(output))
+        })
+        .flat_map(|inst| inst.output.iter().chain(inst.inputs.iter()).copied())
+        .collect::<BTreeSet<_>>();
+    graph
+        .values
+        .iter()
+        .filter(|value| !merged.contains(&value.id))
+        .filter(|value| removable_definition(source, projection, value.id))
+        .filter(|value| canonical.value(value.id).is_some())
+        .filter(|value| !certified.contains_key(&value.id))
+        .filter(|value| !graph.caller_supplied(value.id))
+        .filter(|value| !graph.use_sites(value.id).is_empty())
+        // Only where the reader's own term is a faithful account of what it
+        // reads: a producer the import embedded rather than named leaves no
+        // leaf behind, and its reader's silence then proves nothing. A term
+        // whose leaves do not cover every operand of its instruction is such a
+        // term, and it keeps the value.
+        .filter(|value| {
+            graph.use_sites(value.id).iter().all(|site| {
+                graph
+                    .inst(site.inst)
+                    .and_then(|inst| inst.output)
+                    .and_then(|output| canonical.value(output))
+                    .is_some_and(|reader| {
+                        !reader.reads.contains(&value.id)
+                            && graph.inst(site.inst).is_some_and(|inst| {
+                                inst.inputs.iter().all(|input| {
+                                    graph.value(*input).is_none_or(|operand| {
+                                        operand.var.constant_bits().is_some()
+                                            || reader.reads.contains(input)
+                                    })
+                                })
+                            })
+                    })
+            })
+        })
+        .map(|value| value.id)
+        .collect()
+}
+
+/// Whether removing this value removes its definition: the definition exists
+/// and every cell it touches is an ordinary exact one, so nothing else happens
+/// there that the rendering would lose.
+fn removable_definition(
+    source: &r2ssa::SsaArtifact,
+    projection: &r2ssa::MachineProjection,
+    value: ValueId,
+) -> bool {
+    let Some(definition) = source.graph().def_inst(value) else {
+        return false;
+    };
+    matches!(
+        projection.write_disposition(definition),
+        Some(r2ssa::MachineWriteDisposition::Exact(_))
+    ) && source.graph().inst(definition).is_some_and(|instruction| {
+        (0..instruction.inputs.len()).all(|input_idx| {
+            matches!(
+                projection.use_disposition(r2ssa::UseSite {
+                    inst: definition,
+                    input_idx,
+                }),
+                Some(
+                    r2ssa::MachineUseDisposition::Exact(_)
+                        | r2ssa::MachineUseDisposition::MemoryAddress(_)
+                )
+            )
+        })
+    })
 }
 
 /// Values defined in this function that no graph or certified boundary reads.
@@ -1071,7 +1177,8 @@ pub(super) fn rewrite_inlining_partition(
     crate::stage_timing::mark("plan_seed");
     let conservative = inlinable_core(source_owned, projection, &seed_canonical, &BTreeSet::new());
     crate::stage_timing::mark("plan_inlinable");
-    let eligible = component_eligible_with(source_owned, projection, &conservative)?;
+    let unrendered = unrendered_defined_values(source, projection, &seed_canonical);
+    let eligible = component_eligible_with(source_owned, projection, &conservative, &unrendered)?;
     crate::stage_timing::mark("plan_component_eligible");
     let components = super::construction::binding_components_with(source_owned, &eligible)?;
     crate::stage_timing::mark("plan_components");
@@ -1092,7 +1199,8 @@ pub(super) fn rewrite_inlining_partition(
     // of the peak for nothing.
     drop(seed_canonical);
     crate::stage_timing::mark("plan_conservative");
-    let component_eligible = component_eligible_with(source_owned, projection, &inlinable)?;
+    let component_eligible =
+        component_eligible_with(source_owned, projection, &inlinable, &unrendered)?;
     crate::stage_timing::mark("plan_eligible");
     let canonical =
         r2rewrite::canonicalize_with(source, projection, &|query: &r2rewrite::ExpansionQuery<

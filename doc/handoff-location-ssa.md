@@ -23084,3 +23084,29 @@ on its own. It is committed on its own for that reason -- the four things that
 build on it were stacked together once, and the gate came back with all 54 cells
 refusing, which said nothing about which of them was wrong. The rest lands one
 at a time, each gated.
+
+### A value every reader stopped reading
+
+With the condition codes nameable, `CanonicalValue` and `CanonicalAccess` can
+carry `reads`: the values their canonical term still mentions, built from the
+term's leaves and from the producers expanded into it that the rewrite did not
+discharge. The binding plan now has a second kind of deadness beside "no reader
+in the graph at all" -- `unrendered_defined_values` in
+`crates/r2dec/src/binding_plan/rules.rs` -- and both the plan's construction and
+its seal give such a value the same `DeadUnusedTemporary` elision, because a
+disposition that exists in one and not the other is reported as a missing
+binding certificate.
+
+The rule subtracts from the graph's use table rather than rebuilding the read
+domain, which is what three earlier attempts got wrong. Every uncertainty keeps
+the value: a reader with no canonical term of its own, a certified boundary
+read, a caller-supplied value, a participant in an observed merge, and -- the
+condition that finally made it sound -- **a reader whose term is not a faithful
+account of what it reads.** The import embeds a producer it cannot name instead
+of naming it, and such a term has fewer leaves than the instruction has
+operands; its silence about a value then proves nothing. Requiring the leaves to
+cover every non-constant operand is what separates the two cases.
+
+Gate 54/54 with all snapshots matching, census 1,436 of 1,445, the rewrite rule
+tests green. Behaviour-neutral on its own, which is the point: it is the
+mechanism the flag folding needs, landed before the change that needs it.

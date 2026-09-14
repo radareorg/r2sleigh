@@ -63,6 +63,12 @@ pub struct CanonicalValue {
     /// longer reads. The binding plan decides, per instruction, whether that
     /// rendering is admissible at this site.
     pub discharges: DischargedInstructions,
+    /// The values `canonical` still reads, sorted and distinct.
+    ///
+    /// The graph's use table is the population *before* rewriting. A branch
+    /// that read three condition codes and now reads one comparison still has
+    /// three graph uses, so counting those is how a folded flag stayed bound.
+    pub reads: Box<[ValueId]>,
     pub multiplicity: Multiplicity,
 }
 
@@ -78,6 +84,8 @@ pub struct CanonicalAccess {
     /// Instructions rendering `canonical` at the access renders: the address
     /// producers expanded into the term whose values it no longer reads.
     pub discharges: DischargedInstructions,
+    /// The values `canonical` still reads, sorted and distinct.
+    pub reads: Box<[ValueId]>,
 }
 
 /// A node whose rewriting exceeded its derived budget.
@@ -175,6 +183,44 @@ pub fn discharged_origins(
         return DischargedInstructions::default();
     };
     discharged_from(&imported.substituted, projection, arena, canonical)
+}
+
+/// The values a canonical term still reads, sorted and distinct.
+///
+/// A leaf names a value two ways and both count. It can be a `Source` read of
+/// another value's binding, and it can be the root of an entity -- which is how
+/// a memory read appears, since its expression kind is the read and not a
+/// source. Counting only the first made every load look unread.
+fn values_read(
+    projection: &MachineProjection,
+    value_by_root: &HashMap<MachineExprId, ValueId>,
+    arena: &TermArena,
+    term: TermId,
+    substituted: &BTreeSet<CanonicalInstructionId>,
+    discharges: &DischargedInstructions,
+) -> Box<[ValueId]> {
+    let mut read = Vec::new();
+    for leaf in arena.leaves(term) {
+        if let Some(value) = value_by_root.get(&leaf) {
+            read.push(*value);
+        }
+        if let Some(MachineExprKind::Source { binding, .. }) =
+            projection.expr(leaf).map(|expr| expr.kind())
+        {
+            read.push(binding.value());
+        }
+    }
+    // A producer expanded into this term is read by it just as much as a leaf
+    // is; it simply has no leaf to be found at. The ones the rewrite then
+    // removed are exactly the discharged set, so what is left is still read.
+    for producer in substituted.difference(&discharges.iter().copied().collect()) {
+        if let Some(entity) = projection.entity_for_producer(*producer) {
+            read.push(entity.output().value());
+        }
+    }
+    read.sort_unstable();
+    read.dedup();
+    read.into_boxed_slice()
 }
 
 /// The producers among `substituted` whose values `canonical` no longer
@@ -341,6 +387,11 @@ pub fn canonicalize_with(
             return Err(RewriteError::ValueOutOfRange(value));
         }
     }
+    let value_by_root = projection
+        .entities()
+        .iter()
+        .map(|entity| (entity.root(), entity.output().value()))
+        .collect::<HashMap<_, _>>();
     let mut arena = TermArena::new();
     let import = import_with(artifact, projection, &mut arena, policy);
     // Definitionless constants have no machine entity and therefore no
@@ -400,6 +451,14 @@ pub fn canonicalize_with(
         } else {
             Multiplicity::Once
         };
+        let reads = values_read(
+            projection,
+            &value_by_root,
+            &arena,
+            canonical_term,
+            &imported.substituted,
+            &discharges,
+        );
         if let Some(cell) = values.get_mut(imported.value.0 as usize) {
             *cell = Some(CanonicalValue {
                 value: imported.value,
@@ -407,6 +466,7 @@ pub fn canonicalize_with(
                 canonical: canonical_term,
                 trace: trace.into_boxed_slice(),
                 discharges,
+                reads,
                 multiplicity,
             });
         }
@@ -425,6 +485,7 @@ pub fn canonicalize_with(
             canonical: canonical_term,
             trace: Box::new([]),
             discharges: DischargedInstructions::default(),
+            reads: Box::new([]),
             multiplicity: Multiplicity::Any,
         });
     }
@@ -443,6 +504,14 @@ pub fn canonicalize_with(
                 access: imported.access,
                 canonical: canonical_term,
                 trace: trace.into_boxed_slice(),
+                reads: values_read(
+                    projection,
+                    &value_by_root,
+                    &arena,
+                    canonical_term,
+                    &imported.substituted,
+                    &discharges,
+                ),
                 discharges,
             },
         );

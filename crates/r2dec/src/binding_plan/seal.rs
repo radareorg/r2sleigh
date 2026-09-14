@@ -285,7 +285,12 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
         .ok_or(BindingPlanBuildError::Seal(
             BindingPlanSourceMismatch::Authority,
         ))?;
+    // Both kinds of deadness, derived the same way the plan derives them: no
+    // reader in the graph at all, and every reader having stopped reading it
+    // when the terms were rewritten.
     let unread = super::rules::unread_defined_values(source, machine_projection);
+    let unrendered =
+        super::rules::unrendered_defined_values(source, machine_projection, &partition.canonical);
     let resolved = seal_binding_components_with(
         source_owned,
         machine_projection,
@@ -366,7 +371,7 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
             ));
             continue;
         }
-        if unread.contains(&graph_value.id) {
+        if unread.contains(&graph_value.id) || unrendered.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
                 r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
             ));
@@ -539,6 +544,11 @@ impl BindingPlan {
                 BindingPlanSourceMismatch::Authority,
             ))?;
         let unread = super::rules::unread_defined_values(source, &self.machine_projection);
+        let unrendered = super::rules::unrendered_defined_values(
+            source,
+            &self.machine_projection,
+            &self.partition.canonical,
+        );
         for (index, graph_value) in graph.values.iter().enumerate() {
             if graph_value.id.0 as usize != index {
                 return Err(BindingPlanBuildError::Seal(
@@ -614,7 +624,8 @@ impl BindingPlan {
                         && !stack_frame_values.contains(&value)
                         && !stack_geometry_values.contains(&value)
                         && !structural_unused.contains(&value)
-                        && !unread.contains(&value) => {}
+                        && !unread.contains(&value)
+                        && !unrendered.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
                     if *reason == r2ssa::ledger::ElisionReason::UnobservedMerge
                         && proof.authority == *source.authority()
@@ -665,7 +676,7 @@ impl BindingPlan {
                     if *reason == r2ssa::ledger::ElisionReason::DeadUnusedTemporary
                         && proof.authority == *source.authority()
                         && proof.value == value
-                        && unread.contains(&value) => {}
+                        && (unread.contains(&value) || unrendered.contains(&value)) => {}
                 ValueDisposition::Elided { .. } => {
                     return Err(BindingPlanBuildError::Seal(
                         BindingPlanSourceMismatch::InvalidElisionProof { value },

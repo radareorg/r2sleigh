@@ -599,6 +599,12 @@ impl BindingPlan {
             super::rules::rewrite_inlining_partition(source_owned, &machine_projection)?;
         crate::stage_timing::mark("plan_canonical");
         let canonical = &partition.canonical;
+        // A value every reader stopped reading when the terms were rewritten is
+        // dead, and it needs an elision reason of its own: leaving it merely
+        // ineligible for a binding gives it no disposition at all, which the
+        // plan reports as a missing binding certificate.
+        let unrendered =
+            super::rules::unrendered_defined_values(source, &machine_projection, canonical);
         let inlinable = &partition.inlinable;
         let component_eligible = &partition.component_eligible;
         let mut dispositions = graph
@@ -695,7 +701,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if unread.contains(&graph_value.id) {
+            } else if unread.contains(&graph_value.id) || unrendered.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
                     proof: ValueElisionProof {
