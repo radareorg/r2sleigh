@@ -23110,3 +23110,35 @@ cover every non-constant operand is what separates the two cases.
 Gate 54/54 with all snapshots matching, census 1,436 of 1,445, the rewrite rule
 tests green. Behaviour-neutral on its own, which is the point: it is the
 mechanism the flag folding needs, landed before the change that needs it.
+
+### What is left before a condition code can be folded away
+
+With the two commits above in place, the flag rules were switched on -- read the
+flag operands through their definitions, and treat a flag read by name as the
+truth value it is. On `bzip2` at -O0, `uInt64_isZero` then drops its three flag
+locals and the `r2sleigh_int_sborrow_32` call it had no definition for, and the
+deadness rule correctly gives `OF_2`, `SF_2` and `ZF_2` no binding at all. The
+gate says 53 of 54 cells refuse.
+
+The remaining piece is not deadness and not discharge; it is the **observation
+marker**. Placement audits each rendered name against the markers active at that
+node, and the marker authorising the read of `i` sat on the use site of the
+subtraction that the rewrite folded away. Adding those instructions to the
+canonical term's `discharges` -- soundly now, only where the `reads` relation
+says no other term still reads the value -- moves the *instruction* but not the
+*occurrence*: the journal attaches a discharged instruction's use targets to the
+value being rendered, and the audit needs them on the node that spells the name.
+
+So the last requirement is one sentence: when a rewrite replaces a term, each
+read the old term made must carry its marker to the node the new term spells it
+at. The project's own rule already says this -- a folded obligation's occurrence
+moves with the expression -- and it is implemented for the rewrites that expand
+a producer, because there the occurrence is the producer's. It is not
+implemented for a rewrite that *removes* a read while keeping another: `SF != OF`
+becoming `a < b` keeps the reads of `a` and `b` and drops the two flags, and
+nothing carries the markers for `a` and `b` across.
+
+The full attempt, including the `reads_complete` flag that separates "the import
+never named this" from "the rewrite removed it", is kept at
+`flag-folding-on-the-reads-relation.diff` in the session scratchpad. Everything
+under it is committed and green.
