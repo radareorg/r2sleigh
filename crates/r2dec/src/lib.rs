@@ -2520,6 +2520,24 @@ impl InternalBuildProduct {
         BindingShadowAuditOutcome::from_internal(&outcome)
     }
 
+    /// Whether the shadow audit fails, without building the classification.
+    ///
+    /// The gap loop asks only this: a failure names the cell to mark. Building
+    /// the whole comparison to answer it cost more than every other stage of
+    /// the audit put together and was then dropped.
+    fn binding_shadow_failure(&self) -> Option<BindingShadowAuditFailure> {
+        match self {
+            Self::Native(native) => native.audit_observations().err(),
+            Self::Refused { binding_shadow, .. } => match binding_shadow {
+                BindingShadowAuditOutcome::Failed(failure) => Some(*failure),
+                BindingShadowAuditOutcome::Complete { .. } | BindingShadowAuditOutcome::NotRun => {
+                    None
+                }
+            },
+            Self::Residual(_) => None,
+        }
+    }
+
     fn effect_obligations(&self) -> EffectObligationAudit {
         match self {
             Self::Native(native) => native.effect_obligation_audit(),
@@ -2806,8 +2824,7 @@ impl Decompiler {
                 Self::new(self.config.clone()).with_context(input.context_projection());
             let product =
                 decompiler.build_function_internal_with_control(input, work, &seed_gaps)?;
-            if let BindingShadowAuditOutcome::Failed(failure) =
-                product.binding_shadow(input.source_owned_facts())
+            if let Some(failure) = product.binding_shadow_failure()
                 && let Some(anchor) = gap_anchor_for_native_failure(&failure, input.prepared_ssa())
                 && !seed_gaps.contains_key(&anchor)
             {

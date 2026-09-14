@@ -22489,3 +22489,37 @@ The instrument is the durable part. A count says a stage asked thirty thousand
 times; it never said what for, and a boxed node, a name and an operand list read
 identically. The histogram separates them, and it is what turned a recorded
 campaign into a cancelled one in three runs.
+
+## A whole binding classification, built to read one bit
+
+Chasing the largest remaining stage, `audit` at 606 k allocations, split it in
+two: the part that can fail, and the part that classifies. On `BZ2_decompress`:
+
+    audit_observations   2,754 us    21,867 allocations
+    audit_classify      66,385 us   606,160 allocations
+
+`build_product_from_input_with_control` runs the shadow audit on every render
+inside the gap-planning loop, and reads exactly one thing from it -- whether it
+failed, because a failure names the cell to mark and render again. The
+classification `BindingShadowOutcome::build` produces for the successful case is
+never looked at there. Ninety-six percent of the audit, and a tenth of the whole
+render, was building an answer to a question nobody asked.
+
+The loop now calls `binding_shadow_failure`, which runs `audit_observations`
+and returns its error. The full outcome still runs where it is consumed -- the
+deferred audit's `finalize` and the refusal path -- so the audit the corpus gate
+checks under `R2SLEIGH_BINDING_AUDIT` is unchanged, and it passes 54 of 54.
+
+    render        782,146 us -> 706,174 us   (-9.7%)
+    allocations     6,048,873 -> 5,442,708   (-10.0%)
+    audit stage       606,160 ->    21,867
+
+Rendered text byte-identical, census 1436 of 1446.
+
+This is the third time today the same shape paid: a cheap question answered by
+building the expensive thing whole. `SsaArtifact::local_ssa_blocks` deep-copied
+every operation of the function to hand the type writeback a read-only view;
+`value_id_for_var` binary-searched variable names where a hash answers in one
+probe; and here a binding classification was built to extract a boolean. None
+of the three was a campaign this document had recorded as waiting, and all three
+were found by splitting a stage and reading what each half cost.
