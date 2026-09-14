@@ -1542,7 +1542,15 @@ fn is_local_projection_failure(error: &MachineBuildError, inst: InstId) -> bool 
 
 fn use_refusal_for_error(error: &MachineBuildError) -> MachineUseRefusal {
     match error {
-        MachineBuildError::UnsupportedOperation { .. } => MachineUseRefusal::UnsupportedOperation,
+        MachineBuildError::UnsupportedOperation { inst, op } => {
+            // The flattened refusal keeps only the class, and the operation is
+            // the whole question a reader of it has.
+            r2il::refusal_evidence!(
+                "machine-unsupported-operation",
+                "{inst:?} is outside the machine vocabulary: {op}"
+            );
+            MachineUseRefusal::UnsupportedOperation
+        }
         _ => MachineUseRefusal::IncoherentOperation,
     }
 }
@@ -4438,6 +4446,19 @@ fn value_has_boolean_producer(graph: &crate::graph::SsaGraph, value: ValueId) ->
                 // following both arms is what lets a later BoolNot consume a
                 // selected condition-code value without treating arbitrary
                 // integer truthiness as a boolean.
+                // Bitwise and, or and exclusive-or of booleans are boolean:
+                // {0, 1} is closed under all three. SLEIGH writes a flag the
+                // machine updates under a condition exactly this way, as
+                // `(guard & new) | (!guard & old)`.
+                InstPayload::Op(
+                    SSAOp::IntAnd { .. } | SSAOp::IntOr { .. } | SSAOp::IntXor { .. },
+                ) => {
+                    inst.inputs.len() == 2
+                        && inst
+                            .inputs
+                            .iter()
+                            .all(|input| visit(graph, *input, visiting))
+                }
                 InstPayload::Op(SSAOp::Select { .. }) => {
                     inst.inputs.len() == 3
                         && visit(graph, inst.inputs[1], visiting)

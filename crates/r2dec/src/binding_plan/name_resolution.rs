@@ -452,6 +452,10 @@ impl BindingNameResolution {
                 | MachineUseDisposition::MemoryAddress(_)),
             ) => Ok(disposition),
             Some(MachineUseDisposition::Refused(reason)) => {
+                r2il::refusal_evidence!(
+                    "refused-rendered-use",
+                    "use {site:?} is rendered and the projection refused it: {reason:?}"
+                );
                 Err(RenderedIdentityRefusal::MachineUse { site, reason })
             }
             None => Err(RenderedIdentityRefusal::MissingUseDisposition { site }),

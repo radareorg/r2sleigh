@@ -22253,3 +22253,35 @@ first. The shape is visible in the same evidence: `fcntl`'s tail is decided by
 `cmd`, which is a literal at both sites, exactly as a format string is a
 literal — a rule keyed on a fixed argument's value rather than only on a format
 parameter. Until that exists, the prototype table is better left alone.
+
+## A flag the machine updates under a condition is still a boolean
+
+`minigzip` at `-O2` refused `gzputs` with `missing machine projection
+authorization: OpLowering(lowering.rs:168)`. The refusal said nothing else,
+because two layers each dropped the reason on the way out:
+`BindingNameResolution::require_use` turns a refused projection into
+`RenderedIdentityRefusal::MachineUse { site, reason }` and five callers in
+`lowering.rs` match it as `{ .. }`, and `use_refusal_for_error` flattens
+`MachineBuildError::UnsupportedOperation { inst, op }` to a bare class. Both now
+say what they know before discarding it, which is how the next two runs got
+from `RefusedRenderedUse(UseSite { inst: InstId(122), input_idx: 0 })` to
+`InstId(122) is outside the machine vocabulary: tmp:12800_3 = !ZF_5`.
+
+`ZF_5` is the zero flag after `shr rax, 0x20`, and its definition is the SLEIGH
+idiom for a flag an instruction updates only under a condition:
+
+    ZF_5 = IntOr( IntAnd(BoolNot(count != 0), ZF_4),
+                  IntAnd(count != 0, RAX_3 == 0) )
+
+Every leaf is a comparison or a `BoolNot`. What `value_has_boolean_producer`
+lacked was the closure property: `{0, 1}` is closed under bitwise and, or and
+exclusive-or, so those three produce a boolean whenever all their operands do.
+That is the same statement the rule for `Select` already makes -- a selection is
+boolean when both arms are -- and the masked-arm disjunction above is how the
+lifter writes a selection it has not normalized. With the three admitted,
+`gzputs` renders: 110 source obligations, 71 rendered, 39 elided, none refused.
+
+Census 1434 -> 1435 of 1446, gate 54 of 54. The guard is worth keeping in mind
+for the arms it deliberately excludes: `IntNegate` flips every bit of the width,
+so a boolean's complement is not a boolean and the rule does not admit it. That
+is why `BoolNot` and `IntNegate` are different operations here.

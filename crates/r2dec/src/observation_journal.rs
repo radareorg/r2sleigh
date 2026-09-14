@@ -4218,7 +4218,11 @@ impl LegacyObservationJournal {
             Some(MachineUseDisposition::MemoryAddress(_)) => {
                 Ok(LegacyUseObservation::MemoryAddress)
             }
-            Some(MachineUseDisposition::Refused(_)) => {
+            Some(MachineUseDisposition::Refused(refusal)) => {
+                r2il::refusal_evidence!(
+                    "refused-rendered-use",
+                    "use {site:?} is rendered at the seal and the projection refused it: {refusal:?}"
+                );
                 Err(LegacyObservationJournalError::RefusedRenderedUse(site))
             }
             None => Err(LegacyObservationJournalError::InvalidUse(site)),
