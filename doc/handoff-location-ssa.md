@@ -22320,3 +22320,56 @@ declared arrays. If it is, the stack-pointer versions really are observable
 through an address the program names, and the answer is not absorption at all --
 it is that such a version should render as the frame base the program names,
 which is the frame-object-address path rather than the geometry path.
+
+## An inlined value materialised twice accounts its operands twice, and one set is thrown away
+
+Two of the four `RenderedValueRequired` refusals are the same shape and it is
+not the shape the class name suggests. `minigzip` at `-O0` refuses `fcn_128ab`
+over `ValueId(3)`, which is the constant `8`: `def None`, six uses, disposition
+`Inline { term: TermId(3) }`. Five of its six uses are answered -- three
+`Elided(DeadStackBase)` for the `sub rsp, 8` frame arithmetic and two
+`Elided(UnobservedValue)` -- and exactly one is not:
+
+    use UseSite { inst: InstId(30), input_idx: 1 } answer=Some(None)
+      projection=Some(Exact(..)) output=Some(ValueId(36))
+      output_disposition=Some(Inline { term: TermId(39), .. })
+      -> Op(IntAdd { dst: tmp:6b00_12, .. })
+
+A value cell is accounted only when every use of it is, so one unanswered use
+makes the seal demand a rendering for a constant. `bzip2` at `-O2` refuses
+`fcn_104c0` the same way over the constant `4096`.
+
+Three instrumented runs were needed because each layer discarded what it knew,
+and the two lines that closed that are worth keeping:
+`BindingNameResolution::require_use` now names the `MachineUseRefusal` it turns
+into a `RenderedIdentityRefusal`, and `discharged_instruction_targets` now names
+each operand it accounts. Without the second, "never accounted" and "accounted
+and then lost" are indistinguishable, and they have opposite causes.
+
+The answer is the second. `ValueId(36)`'s definition `InstId(30)` *is* in the
+discharged list, its operand *is* walked, and the log says
+`UseSite { inst: InstId(30), input_idx: 1 } accounted as Exact(..)`. The target
+was allocated. What the trace also shows is that `ValueId(36)` was materialised
+**twice**, as `RenderObservationId(32)` and again as `RenderObservationId(39)`:
+
+    ValueId(36) from PlannedInline discharges [InstId(30)] as
+      Binary { op: Add, left: Observed { id: RenderObservationId(32), .. }, right: IntLit(8) }
+    ValueId(36) from PlannedInline discharges [InstId(30)] as
+      Binary { op: Add, left: Observed { id: RenderObservationId(39), .. }, right: IntLit(8) }
+
+Each materialisation allocates its own target set, which is deliberate --
+`remap_render_observation_ids` exists precisely because an observation id
+belongs to a concrete AST occurrence and cannot be copied. The defect is that
+only one of the two expressions reaches the tree, so the other's targets are
+allocated and never observed, and every use they accounted for stays `None`.
+
+What is not yet found is where the second materialisation is dropped. The
+simplifier is not it: `identity_simplify_binary_semantic` returns the operands
+untouched when either carries observations. That is the next thing to trace, and
+it wants a breakpoint on target allocation for a value already materialised
+rather than more reading -- five readings of this path produced five wrong
+guesses before the instrumentation settled it in one.
+
+Worth weighing before spending more: this class is two of eleven remaining
+refusals in a 1,446-function census, and the three fixes landed this morning
+each cost a fraction of what this one has.

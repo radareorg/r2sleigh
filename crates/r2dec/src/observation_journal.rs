@@ -2870,6 +2870,10 @@ impl LegacyObservationJournal {
                     continue;
                 }
                 let observation = self.rendered_use_observation(site)?;
+                r2il::refusal_evidence!(
+                    "discharged-operand",
+                    "{site:?} accounted as {observation:?} by the expression standing for {rendered:?}"
+                );
                 targets.push(ObservationTarget::Use {
                     site,
                     observation,
