@@ -22583,3 +22583,25 @@ Two things deliberately not done: the sweep was **not** accepted into the
 baseline, because `--accept-baseline` would overwrite the reference and erase
 the signal; and no bisect was launched, because each point costs about three
 hours of a shared host and that is a spend to agree rather than assume.
+
+### The type regression is older than this session
+
+Reproducing the DecBench type decline locally rather than bisecting on the host
+first: the corpus gate records `typed_recovery` per cell, declared signature
+against the source's. At `92d4850d` (today's head) and at `6483e2d1` (this
+session's first commit) the numbers are identical:
+
+    parameters_match  0 of 54        return_matches  32 of 54
+    same_type_casts 145   literal_only_declarations 65   gotos 2   flag_carriers 190
+
+Four independent signals, unchanged across eleven commits. Today's work did not
+cause the regression, and the corpus cannot localise it either, because these
+numbers do not move -- narrowing further needs DecBench itself and therefore
+shared-host time.
+
+Worth separating from the regression, because it is a standing fact rather than
+a change: **no corpus function recovers its parameter types.** Every cell
+declares `uint64_t, uint64_t` where the source has `const uint8_t *, size_t`,
+while returns recover in 32 of 54. Returns work and parameters never do, which
+points at the parameter path specifically rather than at type recovery in
+general, and it is a better lead than the aggregate score.
