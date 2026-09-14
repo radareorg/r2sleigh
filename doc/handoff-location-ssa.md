@@ -23179,3 +23179,48 @@ afterwards from the graph, which is what this attempt did.
 attempt: the `read_sites` field and its derivation, the transitive closure of
 discharges, the unobserved-merge discount in the reader tally, the
 `reads_complete` faithfulness flag, and the two journal call sites.
+
+### Why the mapping cannot be derived, and what has to change instead
+
+The read mapping was extended to memory accesses as well as values, and pushed
+from the one walk every rendering path goes through
+(`discharged_instruction_targets`). It still refuses, and reading the *consumer*
+rather than the producer says why it always would.
+
+`audit_statement` (`crates/r2dec/src/placement.rs:1627`) builds the active
+marker set from the leading `CStmt::Observed` wrappers of **that statement**.
+A marker is therefore active only where its wrapper is, and the wrapper is
+placed around whichever rendering the journal was observing when it allocated
+the marker. The mapping being derived after the fact cannot know which statement
+will end up spelling the name, so it attaches the marker to the root that
+*discharged* the instruction, while the name is spelled by whatever statement
+absorbed that root in turn. Each of the nine attempts moved the marker to a
+different plausible owner and each time the audit was looking somewhere else.
+
+The reason it is underivable is in the arena. `TermKind::Leaf(MachineExprId)` is
+hash-consed, so two reads of one value at two different use sites are the *same
+term*. A rewrite that keeps one read and drops another leaves nothing to say
+which of the two survived: the surviving leaf is indistinguishable from the one
+that went. Every derivation afterwards -- from discharges, from the graph's use
+table, from greedy assignment -- is guessing at an identity the arena threw away
+before the rules ever ran.
+
+So the change the flag class needs is to the arena: **a leaf carries the use
+site it was imported from**, making occurrences distinct terms. Then a rewrite
+that keeps a read keeps its site by construction, one that duplicates a read
+duplicates the site and the existing `Multiplicity` answers for it, and the
+journal marks the node it is actually rendering rather than a root that
+discharged something.
+
+The cost is bounded and known: leaves stop being shared across sites, so the
+arena grows, and the rules that compare operand identity by `TermId` --
+`identity.rs`'s `SUB_SELF`, `AND_SELF`, `OR_SELF`, `XOR_SELF`, and
+`ordering_and_equality` in `flag.rs` -- must compare the value behind the leaf
+instead of the term. That is a mechanical change to five rules and a field on
+one enum variant, against a class that is 5,303 of 6,959 emitted conditions.
+
+Everything attempted is kept in the session scratchpad; the fullest is
+`read-sites-values-and-accesses.diff`, which has the mapping for values and
+accesses, the transitive discharge closure, the unobserved-merge discount and
+the `reads_complete` faithfulness flag, all of which stay useful on top of a
+site-carrying leaf.
