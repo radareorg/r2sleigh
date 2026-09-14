@@ -22285,3 +22285,38 @@ Census 1434 -> 1435 of 1446, gate 54 of 54. The guard is worth keeping in mind
 for the arms it deliberately excludes: `IntNegate` flips every bit of the width,
 so a boolean's complement is not a boolean and the rule does not admit it. That
 is why `BoolNot` and `IntNegate` are different operations here.
+
+### Stack geometry: a measured failure, and what it proves
+
+`bzip2` at `-O2` refuses `fcn_f7a0` with `RenderedValueRequired` over a chain of
+`sub rsp` versions -- `ValueId(31) = IntSub{dst: RSP_5}` bound to `BindingId(4)`
+along with `RSP_6` and `RSP_7` on the same binding, none observed, each demanded
+at the seal. The trace runs back to `collect_structured_dataflow_facts`'s
+geometry membership loop: `ValueId(9)` leaves the geometry because
+`IntAdd(const:0x780, RSP_8)` reads it, and every earlier stack-pointer version
+cascades out behind it. That `IntAdd` is disqualified from the geometry by
+`addresses_declared_array(output)`, since the function declares slots at
+`(StackPointer, -1096)` extent 1028, `-2120` extent 1024 and `-2520` extent 400.
+
+The hypothesis was that the guard conflates two questions -- whether the
+*address* may be absorbed, and whether reading the frame pointer makes the
+*pointer* a program value -- and that only the first should be the array's
+business. Splitting them, so that a structurally rooted address computation
+never counts as a program read of the pointer, was measured and is wrong:
+
+    census 1435 -> 1289 of 1446, and the corpus gate broke
+    (one cell blocked_generation, one snapshot mismatch, one render_refusal)
+
+The two questions are not separable, and the measurement says why. If the
+address derived from the stack pointer is a value the rendering names, the
+pointer is observable *through* that address, so ejecting the pointer from the
+geometry is exactly what stops it being absorbed as dead frame geometry while
+something the program spells still depends on it. The guard is load-bearing in
+both directions and the original code is right. Reverted.
+
+What that leaves for `fcn_f7a0` is a different question, and it is the one to
+probe next: whether `rsp + 0x780` is genuinely attributed to one of those
+declared arrays. If it is, the stack-pointer versions really are observable
+through an address the program names, and the answer is not absorption at all --
+it is that such a version should render as the frame base the program names,
+which is the frame-object-address path rather than the geometry path.
