@@ -22373,3 +22373,44 @@ guesses before the instrumentation settled it in one.
 Worth weighing before spending more: this class is two of eleven remaining
 refusals in a 1,446-function census, and the three fixes landed this morning
 each cost a fraction of what this one has.
+
+## The lint sweep, and which classes were judged worth taking
+
+Asked whether Rust anti-patterns were being removed along the way, the honest
+answer was "partly": duplication and dead types had gone where a fix happened to
+touch them, but no sweep had been run. One was found that mattered.
+
+**Debug switches were read inside loops.** `get_expr` called
+`std::env::var("R2SLEIGH_TRACE_NAME")` on every expression the renderer lowered
+-- an environment-block walk and a `String` allocation per expression, inside a
+diagnostic that is off in every real run. `symbol.rs` asked the same question
+four more times, per name. Twenty-five raw reads across eleven switches now go
+through `crates/r2dec/src/debug.rs`, one `OnceLock` each; one read is left, at
+setup, outside any loop. The pattern already existed --
+`r2il::refusal_evidence::tracing()` -- and simply had not been applied.
+
+**Seventeen redundant clones in library code**, nine of them in
+`fold/op_lower`, which is the per-operand expression path. Removed; census
+unchanged at 1436 of 1446, so they cost nothing to take out.
+
+Two classes were measured and deliberately **not** taken, which is worth
+recording so the triage is not repeated:
+
+- **`needless_pass_by_value`, 113 sites.** Nearly all are bundles of borrows
+  (`StructuredCollectionInputs<'_>`, `VariadicCallsiteRecovery<'_>`,
+  `StackMemoryAccessInput<'_>`) where by-value is the right signature, or `Arc`
+  and error values where it is idiomatic. The few that are owned collections
+  -- `access_summaries`, `tail_call_identities` -- are **moved** by every
+  caller, not cloned. The lint finds signatures that could be references, not
+  clones that are happening, so converting them changes no allocation.
+- **`cast_possible_truncation`, 432 sites.** Each is either a provably bounded
+  index cast or a genuine silent truncation, and only reading the width facts
+  tells them apart. Converting all of them into fallible paths would add error
+  handling everywhere without distinguishing the two, which is the accrete-checks
+  failure this project already has a rule against. It wants a judged pass.
+
+The method note that matters more than any of the counts: `cargo clippy
+--workspace -- -W clippy::redundant_clone` applies the flag only to the final
+crate, so it reports nothing and reads as a clean bill. Run it per crate with
+`-p`, and prefer `--lib` -- the all-targets figure for redundant clones was 89,
+of which 72 were in `#[cfg(test)]` code and only 17 on any real path.
