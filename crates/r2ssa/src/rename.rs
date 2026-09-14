@@ -257,9 +257,7 @@ impl RenameContext {
             *next = next.checked_add(1).expect("rename discriminator exhausted");
         }
         // Start with version 0 on the stack (representing "undefined" or function entry)
-        self.stacks
-            .entry(identity.clone())
-            .or_insert_with(|| vec![0]);
+        self.stacks.entry(identity).or_insert_with(|| vec![0]);
         self.counters.entry(projection).or_insert(0);
     }
 

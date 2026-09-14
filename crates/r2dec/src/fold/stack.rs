@@ -16,7 +16,7 @@ impl<'a> FoldingContext<'a> {
         match names.require_stack(object) {
             Ok(crate::binding_plan::PlannedStackSymbol::Bound(symbol)) => Some(CExpr::Var(symbol)),
             Err(error) => {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!("stack object {object:?} has no program variable: {error:?}");
                 }
                 self.retain_first_lowering_refusal(

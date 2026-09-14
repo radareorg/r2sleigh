@@ -33,6 +33,7 @@ mod binding_plan;
 pub(crate) mod codegen;
 pub(crate) mod consumer_structured;
 pub mod control;
+pub(crate) mod debug;
 mod effect_ledger;
 pub(crate) mod fold;
 pub mod highlight;
@@ -565,8 +566,7 @@ fn debug_log_ledger(prepared: &r2ssa::SsaArtifact, ledger: &r2ssa::ledger::Oblig
         refusals,
         refused_ids,
     );
-    let path = std::env::var("R2SLEIGH_DEBUG_UNOWNED_LOG")
-        .unwrap_or_else(|_| "/tmp/r2sleigh_unowned.log".to_string());
+    let path = crate::debug::unowned_log_path().unwrap_or("/tmp/r2sleigh_unowned.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -585,8 +585,7 @@ fn debug_log_render_contract_error(
     if !unowned_report_requested() {
         return;
     }
-    let path = std::env::var("R2SLEIGH_DEBUG_UNOWNED_LOG")
-        .unwrap_or_else(|_| "/tmp/r2sleigh_unowned.log".to_string());
+    let path = crate::debug::unowned_log_path().unwrap_or("/tmp/r2sleigh_unowned.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -2860,7 +2859,7 @@ impl Decompiler {
         if let Some(declaration) = self.variadic_forwarding_stub(prepared) {
             return Ok(InternalBuildProduct::Residual(declaration));
         }
-        if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
+        if crate::debug::debug_merges() {
             let graph = prepared.graph();
             let live = prepared.live_out();
             let dead = prepared.unobserved_merges();
@@ -3006,7 +3005,7 @@ impl Decompiler {
         // statement can be read back to the instruction that produced it.
         // Every other probe answers one question; this one is for the
         // question nobody has asked yet.
-        if std::env::var_os("R2SLEIGH_DUMP_SSA").is_some() {
+        if crate::debug::dump_ssa() {
             let graph = prepared.graph();
             eprintln!("SSADUMP prepared\n{}", func.dump());
             eprintln!("SSADUMP normalized\n{}", normalized_func.dump());
@@ -3060,7 +3059,7 @@ impl Decompiler {
         ) {
             Ok(plan) => {
                 // Every value's disposition, beside the SSA dump it indexes.
-                if std::env::var_os("R2SLEIGH_DUMP_SSA").is_some() {
+                if crate::debug::dump_ssa() {
                     let canonical = plan.canonical();
                     for value in &prepared.graph().values {
                         let term = canonical.value(value.id).map(|rewrite| {
@@ -3215,7 +3214,7 @@ impl Decompiler {
         };
         crate::stage_timing::mark("plan_journal");
         work.poll()?;
-        if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
+        if crate::debug::debug_merges() {
             eprintln!(
                 "SOURCE_INTERFACE {:?}",
                 prepared.machine_context().function_interface()

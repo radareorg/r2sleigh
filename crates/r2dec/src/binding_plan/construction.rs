@@ -715,7 +715,7 @@ impl BindingPlan {
                         },
                     },
                     None => {
-                        if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                        if r2il::refusal_evidence::tracing() {
                             eprintln!(
                                 "missing literal projection {:?} bits={:?} name={:?} uses={} def={:?} users={users:?}",
                                 graph_value.id,

@@ -394,7 +394,7 @@ pub(crate) fn collect_final_placement_occurrences(
                     // id cost a whole session once. The group that declared
                     // the ambiguity names itself in `record_observation_group`
                     // under the same switch.
-                    if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                    if r2il::refusal_evidence::tracing() {
                         eprintln!("ambiguous observation {index} target {target:?}");
                         if let Some(PlacementObservationTarget::Write { inst, .. }) = target {
                             let output = source.graph().inst(inst).and_then(|inst| inst.output);
@@ -1017,7 +1017,7 @@ fn record_observation_group(
     // refusal reports only the observation, so the caller's line is the one
     // fact that says whether the answer is a call, an assignment, an operand
     // of a binary, or a control statement's own marker.
-    if ambiguous && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+    if ambiguous && r2il::refusal_evidence::tracing() {
         eprintln!(
             "ambiguous group {ids:?} recorded at {}",
             std::panic::Location::caller()
@@ -1289,7 +1289,7 @@ fn collect_expr_observation_scopes(
                 // Which side carries the write, and what the destination is.
                 // An assignment whose destination this cannot order is the
                 // common way a statement becomes ambiguous.
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!(
                         "ambiguous assignment: left_writes={} right_writes={} left={:?}",
                         expression_has_placement_write(left, targets),

@@ -106,7 +106,7 @@ impl<'a> FoldingContext<'a> {
                 OpLoweringRefusal::missing_machine_projection()
             })?;
         let expr = self
-            .finalize_certified_memory_expr_for_fact(fact, elem_ty.clone())
+            .finalize_certified_memory_expr_for_fact(fact, elem_ty)
             .ok_or_else(|| {
                 r2il::refusal_evidence!(
                     "memory-access-expression",

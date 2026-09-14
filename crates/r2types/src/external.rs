@@ -435,7 +435,7 @@ impl ExternalTypeDb {
                     .filter(|name| !name.is_empty())
                 {
                     if let Some(mut st) = self.parse_struct_entry(name, map) {
-                        let key = st.name.clone().to_ascii_lowercase();
+                        let key = st.name.to_ascii_lowercase();
                         self.structs
                             .entry(key)
                             .and_modify(|existing| merge_struct(existing, &st))
@@ -447,7 +447,7 @@ impl ExternalTypeDb {
                             });
                     }
                     if let Some(mut un) = self.parse_union_entry(name, map) {
-                        let key = un.name.clone().to_ascii_lowercase();
+                        let key = un.name.to_ascii_lowercase();
                         self.unions
                             .entry(key)
                             .and_modify(|existing| merge_union(existing, &un))
@@ -459,7 +459,7 @@ impl ExternalTypeDb {
                             });
                     }
                     if let Some(mut en) = self.parse_enum_entry(name, map) {
-                        let key = en.name.clone().to_ascii_lowercase();
+                        let key = en.name.to_ascii_lowercase();
                         self.enums
                             .entry(key)
                             .and_modify(|existing| merge_enum(existing, &en))

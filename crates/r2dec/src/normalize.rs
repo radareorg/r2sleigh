@@ -1412,7 +1412,7 @@ fn materialize_phis_where_with_control<'f>(
                 let Some((op, guarded, incoming_input_idx)) = materialized_phi_edge_op(
                     func, graph, &liveness, *pred, block.addr, &phi.dst, src,
                 ) else {
-                    if std::env::var_os("R2SLEIGH_TRACE_MAT").is_some() {
+                    if crate::debug::trace_materialization() {
                         eprintln!(
                             "MATFAIL block={:#x} pred={pred:#x} dst={} src={}",
                             block.addr,

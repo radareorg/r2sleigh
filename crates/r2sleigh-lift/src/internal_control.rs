@@ -271,7 +271,7 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
     rewritten.push(R2ILOp::IntMult {
         dst: twice_extent.clone(),
         a: extent.clone(),
-        b: widened_direction.clone(),
+        b: widened_direction,
     });
     rewritten.push(R2ILOp::IntMult {
         dst: twice_extent.clone(),
@@ -280,7 +280,7 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
     });
     rewritten.push(R2ILOp::IntSub {
         dst: signed_extent.clone(),
-        a: extent.clone(),
+        a: extent,
         b: twice_extent,
     });
     for pointer in [Some(&destination), source.as_ref()].into_iter().flatten() {

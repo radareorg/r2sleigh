@@ -3591,7 +3591,7 @@ impl SSAFunction {
         // and the edge it disagreed about; discarding it left the reader with
         // "malformed SSA source input" and nothing to look at.
         validate_ssa_function(&function).map_err(|error| {
-            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+            if r2il::refusal_evidence::tracing() {
                 let mut addrs = function.block_order.clone();
                 addrs.sort_unstable();
                 eprintln!("ssa block domain ({}): {addrs:x?}", addrs.len());
@@ -5632,7 +5632,7 @@ fn ensure_value_root_identity(roots: &mut HashMap<SSAVar, SSAVar>, var: SSAVar) 
 fn insert_canonical_root(roots: &mut HashMap<SSAVar, SSAVar>, dst: SSAVar, root: SSAVar) -> bool {
     let root = canonicalize_value_root(&root, roots);
     let changed = !matches!(roots.get(&dst), Some(existing) if *existing == root);
-    roots.insert(dst.clone(), root.clone());
+    roots.insert(dst, root.clone());
     roots.entry(root.clone()).or_insert(root);
     changed
 }

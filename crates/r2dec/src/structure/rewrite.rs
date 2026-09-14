@@ -281,7 +281,7 @@ impl ControlFlowStructurer<'_, '_> {
         {
             let rewritten = CStmt::If {
                 cond: CExpr::binary(BinaryOp::Or, cond, right_cond.clone()),
-                then_body: then_body.clone(),
+                then_body,
                 else_body: None,
             };
             return observations.reapply(rewritten);

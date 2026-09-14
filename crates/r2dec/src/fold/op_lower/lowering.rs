@@ -156,13 +156,13 @@ impl<'a> FoldingContext<'a> {
             | Error::PlannedElidedValueRendered { .. }
             | Error::PlannedRefusedValueRendered { .. }
             | Error::MissingPlannedValue(_) => {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!("refusal from journal error {error:?}");
                 }
                 OpLoweringRefusal::missing_program_variable()
             }
             other => {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!("refusal from journal error {other:?}");
                 }
                 OpLoweringRefusal::missing_machine_projection()
@@ -423,7 +423,7 @@ impl<'a> FoldingContext<'a> {
             );
             return Err(OpLoweringRefusal::missing_program_variable());
         }
-        match self.project_planned_assignment(Some(site), lhs.clone(), rhs.clone()) {
+        match self.project_planned_assignment(Some(site), lhs, rhs) {
             Ok((lhs, rhs)) => Ok(CStmt::Expr(CExpr::assign(lhs, rhs))),
             Err(error) => {
                 let refusal = Self::observation_lowering_refusal(&error);
@@ -1417,7 +1417,7 @@ impl<'a> FoldingContext<'a> {
             // recorded to return, to what the plan declared the object.
             let returned = self
                 .known_signature_for_site(block_addr, op_idx)
-                .map(|signature| CValue::Typed(signature.return_type.clone()));
+                .map(|signature| CValue::Typed(signature.return_type));
             let call = match self
                 .certified_call_result_value((block_addr, op_idx))
                 .and_then(|value| self.value_declaration_type(value))
@@ -1623,7 +1623,7 @@ impl<'a> FoldingContext<'a> {
     fn finish_lowering_transaction(&self, lowered: LoweredOp) -> OpLoweringResult<LoweredOp> {
         match self.pending_lowering_refusal.take() {
             Some(refusal) => {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!("refusal {refusal:?} raised by finish_lowering_transaction");
                 }
                 Err(refusal)

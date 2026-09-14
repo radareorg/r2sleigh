@@ -1241,10 +1241,10 @@ fn inlinable_core(
     // flag copy passes every test in it, and the corpus said it stays bound;
     // the two could only be reconciled by asking the function itself, one
     // value at a time. `R2SLEIGH_TRACE_INLINE=<display name>` or `=all`.
-    let trace = std::env::var("R2SLEIGH_TRACE_INLINE").ok();
+    let trace = crate::debug::traced_inline_name();
     let mut inlinable = BTreeSet::new();
     for value in &graph.values {
-        let traced = trace.as_deref().is_some_and(|want| {
+        let traced = trace.is_some_and(|want| {
             want == "all" || value.var.display_name().eq_ignore_ascii_case(want)
         });
         let rejected = |gate: &str| {
@@ -1694,7 +1694,7 @@ fn insert_elided_use(
 ) -> Result<(), CertificateElidedCellsError> {
     match uses.insert(site, reason) {
         Some(existing) if existing != reason => {
-            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+            if r2il::refusal_evidence::tracing() {
                 eprintln!(
                     "conflicting use {site:?}: certificate reason {existing:?}, new reason {reason:?}"
                 );

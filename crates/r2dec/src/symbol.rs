@@ -176,8 +176,8 @@ impl SymbolTable {
     #[track_caller]
     pub fn declare(&mut self, name: impl Into<String>, ty: CType, role: SymbolRole) -> SymbolId {
         let requested = name.into();
-        if let Ok(want) = std::env::var("R2SLEIGH_TRACE_NAME")
-            && requested.eq_ignore_ascii_case(&want)
+        if let Some(want) = crate::debug::traced_variable_name()
+            && requested.eq_ignore_ascii_case(want)
         {
             eprintln!(
                 "NAMEDECLARE {requested} via {}",
@@ -198,8 +198,8 @@ impl SymbolTable {
         // was made by exactly one caller and this says which. Reading the
         // resolvers found four that could have produced `rcx_4` and none that
         // did, which is how long guessing takes.
-        if let Ok(want) = std::env::var("R2SLEIGH_TRACE_NAME")
-            && name.eq_ignore_ascii_case(&want)
+        if let Some(want) = crate::debug::traced_variable_name()
+            && name.eq_ignore_ascii_case(want)
         {
             eprintln!("NAMEMINT {name} via {}", std::panic::Location::caller());
         }
@@ -207,8 +207,8 @@ impl SymbolTable {
         // have produced a name; spelling the mint site into the name says which
         // one did, because only the spelling that reaches the page survives.
         let marked;
-        let name = match std::env::var("R2SLEIGH_TRACE_NAME") {
-            Ok(want) if name.eq_ignore_ascii_case(&want) => {
+        let name = match crate::debug::traced_variable_name() {
+            Some(want) if name.eq_ignore_ascii_case(want) => {
                 marked = format!("{name}__L{}", std::panic::Location::caller().line());
                 marked.as_str()
             }
@@ -221,7 +221,7 @@ impl SymbolTable {
         // raw SSA name. One that arrives here still wearing its space prefix came
         // from somewhere that handed a machine name straight to the table, and
         // that is how `tmp:25400` reaches the page as `tmp_25400`.
-        if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() && name.contains(':') {
+        if crate::debug::debug_merges() && name.contains(':') {
             eprintln!("RAWMINT name={name}");
         }
         let id = self.id_at(self.symbols.len());
@@ -251,8 +251,8 @@ impl SymbolTable {
                 // Two names cannot become one, or two variables would.
                 continue;
             }
-            if let Ok(want) = std::env::var("R2SLEIGH_TRACE_NAME")
-                && target.eq_ignore_ascii_case(&want)
+            if let Some(want) = crate::debug::traced_variable_name()
+                && target.eq_ignore_ascii_case(want)
             {
                 eprintln!("NAMEFOLLOW {} -> {target}", self.symbols[index].name);
             }
@@ -309,8 +309,8 @@ impl SymbolTable {
     #[track_caller]
     pub fn rename(&mut self, id: SymbolId, name: impl Into<String>) {
         let requested = name.into();
-        if let Ok(want) = std::env::var("R2SLEIGH_TRACE_NAME")
-            && requested.eq_ignore_ascii_case(&want)
+        if let Some(want) = crate::debug::traced_variable_name()
+            && requested.eq_ignore_ascii_case(want)
         {
             eprintln!(
                 "NAMERENAME {} -> {requested} via {}",
@@ -540,8 +540,8 @@ pub fn var_ref(symbols: &RefCell<SymbolTable>, name: impl AsRef<str>) -> CExpr {
 #[inline(always)]
 pub fn declare(symbols: &RefCell<SymbolTable>, name: impl AsRef<str>) -> SymbolId {
     let name = name.as_ref();
-    if let Ok(want) = std::env::var("R2SLEIGH_TRACE_NAME")
-        && name.eq_ignore_ascii_case(&want)
+    if let Some(want) = crate::debug::traced_variable_name()
+        && name.eq_ignore_ascii_case(want)
     {
         eprintln!("NAMEDECL {name} via {}", std::panic::Location::caller());
     }

@@ -2195,7 +2195,7 @@ impl LegacyObservationJournal {
             match elided_uses.insert(site, r2ssa::ledger::ElisionReason::CoalescedCopy) {
                 Some(r2ssa::ledger::ElisionReason::CoalescedCopy) | None => {}
                 Some(existing) => {
-                    if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                    if r2il::refusal_evidence::tracing() {
                         eprintln!(
                             "conflicting use {site:?}: certificate reason {existing:?}, normalization reason CoalescedCopy"
                         );
@@ -2252,7 +2252,7 @@ impl LegacyObservationJournal {
                 {
                     Some(r2ssa::ledger::ElisionReason::CoalescedImmutablePhi) | None => {}
                     Some(existing) => {
-                        if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                        if r2il::refusal_evidence::tracing() {
                             eprintln!(
                                 "conflicting use {site:?}: certificate reason {existing:?}, normalization reason CoalescedImmutablePhi"
                             );
@@ -2456,7 +2456,7 @@ impl LegacyObservationJournal {
         for (site, reason) in elided_uses {
             let slot = self.use_slot_mut(site)?;
             if record_same(slot, LegacyUseObservation::Elided(reason)).is_err() {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!(
                         "conflicting use {site:?}: recorded {slot:?}, elision reason {reason:?}"
                     );
@@ -2513,7 +2513,7 @@ impl LegacyObservationJournal {
         let ids = (0..count)
             .map(|offset| RenderObservationId(first + offset))
             .collect();
-        if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+        if r2il::refusal_evidence::tracing() {
             let origin = std::panic::Location::caller();
             self.target_origins
                 .resize(self.targets.len() + targets.len(), origin);
@@ -3643,7 +3643,7 @@ impl LegacyObservationJournal {
         for (index, observation) in self.values.iter().enumerate() {
             if observation.is_none() {
                 let value = ValueId(index as u32);
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     let graph = self.source.graph();
                     let targets = self
                         .targets
@@ -3787,7 +3787,7 @@ impl LegacyObservationJournal {
         for (inst, row) in self.uses.iter().enumerate() {
             for (input_idx, observation) in row.iter().enumerate() {
                 if observation.is_none() {
-                    if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                    if r2il::refusal_evidence::tracing() {
                         let graph = self.source.graph();
                         let site = UseSite {
                             inst: InstId(inst as u32),
@@ -3857,7 +3857,7 @@ impl LegacyObservationJournal {
             .enumerate()
         {
             if *has_output && observation.is_none() {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     let graph = self.source.graph();
                     eprintln!(
                         "unaccounted write inst={index} payload={:?}",
@@ -4085,7 +4085,7 @@ impl LegacyObservationJournal {
                         Some(LegacyWriteObservation::Refused(_)) => *slot = None,
                         Some(LegacyWriteObservation::Elided(_)) => continue,
                         Some(existing) => {
-                            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                            if r2il::refusal_evidence::tracing() {
                                 eprintln!("gapped write {inst:?}: already recorded {existing:?}");
                             }
                             return Err(conflicting_write(inst));
@@ -4159,7 +4159,7 @@ impl LegacyObservationJournal {
         };
         let slot = self.use_slot_mut(site)?;
         if record_same(slot, observation).is_err() {
-            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+            if r2il::refusal_evidence::tracing() {
                 eprintln!("conflicting use {site:?}: recorded {slot:?}, refusal {observation:?}");
             }
             Err(conflicting_use(site))
@@ -4439,7 +4439,7 @@ impl LegacyObservationJournal {
                         .and_then(|observation| {
                             let slot = &mut values[value.0 as usize];
                             if record_same(slot, observation).is_err() {
-                                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                                if r2il::refusal_evidence::tracing() {
                                     eprintln!(
                                         "conflicting value {value:?}: recorded {slot:?}, rendered \
                                          {observation:?}, disposition={:?}, node={}",
@@ -4461,7 +4461,7 @@ impl LegacyObservationJournal {
                     } => {
                         let slot = &mut uses[site.inst.0 as usize][site.input_idx];
                         if record_same(slot, observation).is_err() {
-                            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                            if r2il::refusal_evidence::tracing() {
                                 eprintln!(
                                     "conflicting use {site:?}: recorded {slot:?}, rendered {observation:?} operands={:?} payload={:?}",
                                     // Which operand this is, by storage: a
@@ -4511,7 +4511,7 @@ impl LegacyObservationJournal {
                         GapCell::Use { site, .. } => {
                             let slot = &mut uses[site.inst.0 as usize][site.input_idx];
                             record_same(slot, LegacyUseObservation::Gap(anchor)).map_err(|()| {
-                                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                                if r2il::refusal_evidence::tracing() {
                                     eprintln!(
                                         "gapped use {site:?} at {anchor:?}: already recorded {slot:?}"
                                     );
@@ -4566,7 +4566,7 @@ impl LegacyObservationJournal {
         })?;
 
         if let Some(error) = binding_failure {
-            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+            if r2il::refusal_evidence::tracing() {
                 eprintln!("observation binding failure: {error:?}");
             }
             return Ok(LegacyObservationSeal::BindingFailure(error));

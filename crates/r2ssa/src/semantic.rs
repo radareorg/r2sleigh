@@ -4849,7 +4849,7 @@ fn collect_source_boundary_facts(
 
     if let Some(machine_context) = machine_context {
         facts.preserved_call_carriers = preserved_call_carriers(function, graph, machine_context);
-        if std::env::var_os("R2SSA_TRACE_CALLDEF").is_some() {
+        if trace_call_definitions() {
             eprintln!(
                 "  preserved across calls to {:#x}: {:?}",
                 function.entry,
@@ -5577,6 +5577,12 @@ fn reaching_abi_value_in_block_with_policy(
         ReachingAbiPath::Reaches(state) => Some(state),
         ReachingAbiPath::Cycle => None,
     }
+}
+
+/// Whether to report how a call's definitions were found, read once.
+fn trace_call_definitions() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("R2SSA_TRACE_CALLDEF").is_some())
 }
 
 fn reaching_abi_value_before(
@@ -9768,7 +9774,7 @@ fn process_call_result_flow_block(
                                 })
                         });
                         let Some(result) = lanes.next() else {
-                            if std::env::var_os("R2SSA_TRACE_CALLDEF").is_some() {
+                            if trace_call_definitions() {
                                 eprintln!(
                                     "  no lane carrier for {value:?} {storage:?} among {:?}",
                                     boundary
@@ -9785,7 +9791,7 @@ fn process_call_result_flow_block(
                         if lanes.next().is_some() {
                             continue;
                         }
-                        if std::env::var_os("R2SSA_TRACE_CALLDEF").is_some() {
+                        if trace_call_definitions() {
                             eprintln!("  lane certified {value:?} from {:?}", result.value);
                         }
                         (result, CallResultValueRelation::Derived)

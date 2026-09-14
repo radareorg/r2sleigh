@@ -34,7 +34,7 @@ pub(crate) enum ControlFlowStructureError {
 impl From<OpLoweringRefusal> for ControlFlowStructureError {
     #[track_caller]
     fn from(error: OpLoweringRefusal) -> Self {
-        if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+        if r2il::refusal_evidence::tracing() {
             eprintln!(
                 "refusal {error:?} left lowering at {}",
                 std::panic::Location::caller()
@@ -740,7 +740,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
 
         if let Some(cond) = self.fold_ctx.extract_condition_from_block(block) {
-            if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
+            if crate::debug::debug_merges() {
                 let table = self.fold_ctx.symbols.borrow();
                 let mut ids = std::collections::HashSet::new();
                 crate::collect_expr_var_names(&cond, &mut ids);

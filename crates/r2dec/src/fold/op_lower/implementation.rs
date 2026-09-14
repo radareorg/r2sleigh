@@ -4,6 +4,18 @@ pub(crate) struct FoldedOpStmt {
     pub(crate) stmt: CStmt,
 }
 
+/// The one variable a run was asked to trace, read once.
+///
+/// This is asked on every expression the renderer lowers, and reading the
+/// environment there allocated a string and walked the environment block for
+/// each one.
+fn traced_variable_name() -> Option<&'static str> {
+    static TRACED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TRACED
+        .get_or_init(|| std::env::var("R2SLEIGH_TRACE_NAME").ok())
+        .as_deref()
+}
+
 impl<'a> FoldingContext<'a> {
     pub(super) fn certified_const_bits(&self, var: &SSAVar) -> Option<u64> {
         let value = var.constant_bits()?;
@@ -246,7 +258,7 @@ impl<'a> FoldingContext<'a> {
         if self.inputs.prepared_ssa.is_some()
             && let Some(kind) = self.use_info().dropped_unkeyed_fact
         {
-            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+            if r2il::refusal_evidence::tracing() {
                 eprintln!("analysis dropped an unkeyed {kind} fact");
             }
             return Err(analysis::PreparedRuntimeFactsError::Lowering(
@@ -364,8 +376,8 @@ impl<'a> FoldingContext<'a> {
         let answer = self.get_expr_inner(var);
         // Trace the sealed exact-value answer, never a spelling-recovered
         // definition candidate.
-        if let Ok(want) = std::env::var("R2SLEIGH_TRACE_NAME")
-            && var.display_name().eq_ignore_ascii_case(&want)
+        if let Some(want) = traced_variable_name()
+            && var.display_name().eq_ignore_ascii_case(want)
         {
             eprintln!("GETEXPR key={} answer={answer:?}", var.display_name());
         }
@@ -1532,7 +1544,7 @@ impl<'a> FoldingContext<'a> {
             }
         }
 
-        let trace = std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some();
+        let trace = crate::debug::debug_merges();
         if trace {
             eprintln!("FOLDPOST block={:#x} built={}", block.addr, stmts.len());
         }
@@ -1621,7 +1633,7 @@ impl<'a> FoldingContext<'a> {
             return Err(OpLoweringRefusal::missing_machine_projection());
         }
         let element = uint_type_from_size(element_size);
-        let pointer = crate::ast::CType::Pointer(Box::new(element.clone()));
+        let pointer = crate::ast::CType::Pointer(Box::new(element));
         let cursor_type = uint_type_from_size(count.size);
         let cursor = self.symbols.borrow_mut().declare(
             "transferred",
@@ -1774,7 +1786,7 @@ impl<'a> FoldingContext<'a> {
                     // produces.
                     let returned = self
                         .known_signature_for_site(source_call.0, source_call.1)
-                        .map(|signature| CValue::Typed(signature.return_type.clone()));
+                        .map(|signature| CValue::Typed(signature.return_type));
                     (self.observed_input(frame, 1, call), returned)
                 } else {
                     self.typed_input(frame, 1, val)?
@@ -2459,7 +2471,7 @@ impl<'a> FoldingContext<'a> {
                 // expression.
                 let returned = self
                     .known_signature_for_site(source_call.0, source_call.1)
-                    .map(|signature| CValue::Typed(signature.return_type.clone()));
+                    .map(|signature| CValue::Typed(signature.return_type));
                 self.assign_typed(lhs, call, returned)
             }
             // The carrier a call left where it found it. Nothing in C says
@@ -2486,7 +2498,7 @@ impl<'a> FoldingContext<'a> {
             // the difference between a class of refused functions and a
             // one-line fix, so the operation is named rather than swallowed.
             unhandled => {
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!(
                         "no statement lowering for {}",
                         format!("{unhandled:?}").chars().take(160).collect::<String>()
@@ -2583,7 +2595,7 @@ impl<'a> FoldingContext<'a> {
             let call_expr = self.observed_input(frame, 1, call_expr);
             let returned = self
                 .known_signature_for_site(left_source.0, left_source.1)
-                .map(|signature| CValue::Typed(signature.return_type.clone()));
+                .map(|signature| CValue::Typed(signature.return_type));
             return self.assign_typed(lhs, call_expr, returned);
         }
         let lhs_expr =

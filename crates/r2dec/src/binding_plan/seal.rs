@@ -387,7 +387,7 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
                 // projection says only that some constant never reached the
                 // machine arena; which constant, and what reads it, is what
                 // tells you why no lowering path asked for it.
-                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                if r2il::refusal_evidence::tracing() {
                     eprintln!(
                         "missing literal projection {:?} bits={:?} name={:?} uses={} defs={:?}",
                         graph_value.id,

@@ -496,7 +496,7 @@ impl ObligationLedger {
             conflicts: self.conflicts.values().sum(),
             ..LedgerClosure::default()
         };
-        let trace = std::env::var_os("R2DEC_TRACE_REFUSAL").is_some();
+        let trace = r2il::refusal_evidence::tracing();
         for (id, outcome) in &self.outcomes {
             match outcome {
                 Outcome::Rendered { .. } => closure.rendered += 1,

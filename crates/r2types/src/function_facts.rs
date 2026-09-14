@@ -4659,7 +4659,7 @@ fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRenderFacts {
                 .filter_map(|switch| switch.selector),
         )
         .collect::<BTreeSet<_>>();
-    let mut observable_values = observable_roots.clone();
+    let mut observable_values = observable_roots;
     let mut pending = observable_values.iter().copied().collect::<Vec<_>>();
     while let Some(value) = pending.pop() {
         let Some(inst) = prepared

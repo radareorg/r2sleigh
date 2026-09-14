@@ -1347,7 +1347,7 @@ impl MachineProjection {
         let graph = artifact.graph();
         let mut failed_outputs = ByValue::over(graph.values.len());
         for failure in &self.failures {
-            if failed_outputs.put(failure.output, failure).is_err()
+            if !failed_outputs.put(failure.output, failure)
                 || entities.get(failure.output).is_some()
             {
                 return Err(MachineBuildError::DuplicateEntity(failure.output));
@@ -2314,7 +2314,7 @@ impl MachineFunction {
             let value = graph
                 .value(entity.output.value)
                 .ok_or(MachineBuildError::MissingGraphValue(entity.output.value))?;
-            if by_output.put(entity.output.value, entity).is_err() {
+            if !by_output.put(entity.output.value, entity) {
                 return Err(MachineBuildError::DuplicateEntity(entity.output.value));
             }
             if binding_for_value(value)? != entity.output {
@@ -4015,14 +4015,17 @@ impl<T> ByValue<T> {
         Self((0..values).map(|_| None).collect())
     }
 
-    /// Record a value's entry, refusing a second one for the same value.
-    fn put(&mut self, value: ValueId, entry: T) -> Result<(), ()> {
-        let slot = self.0.get_mut(value.0 as usize).ok_or(())?;
+    /// Record a value's entry. False when the value is out of range or
+    /// already has one, which is the caller's duplicate.
+    fn put(&mut self, value: ValueId, entry: T) -> bool {
+        let Some(slot) = self.0.get_mut(value.0 as usize) else {
+            return false;
+        };
         if slot.is_some() {
-            return Err(());
+            return false;
         }
         *slot = Some(entry);
-        Ok(())
+        true
     }
 }
 
