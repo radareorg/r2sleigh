@@ -23305,3 +23305,26 @@ The rewriter's Group E rules stay where they are: they still fold the shapes the
 lifter writes out inline, and there is no longer a second population for them to
 disagree with. The twelve reverted attempts are kept in the session scratchpad
 and are now of historical interest only.
+
+### A dead merge edge is still an ordering constraint
+
+With the graph clean, the obvious next step was to stop counting an edge into an
+unobserved merge as a reader, so a condition code with one real reader becomes
+single-use and is spelled at the branch instead of in a local of its own. The
+filter that does this applies only to values in the lifter's `Unique` scratch
+space; a condition code lives in a register, so every flag carrier keeps a
+second reader it does not render.
+
+Widening it fails, and this time the gate says exactly how: `differential`
+reports **three cells producing wrong C**, not merely moved snapshots. The
+reader count is not only a count. Dropping the merge edge makes the value
+single-use, so the plan inlines it, and inlining moves the computation to the
+branch -- across whatever the loop body did in between. The merge renders
+nothing, but it still says *when* the value was computed.
+
+So the rule to derive is not "an unobserved merge is not a reader" but "a value
+whose only rendered reader dominates its definition and reads it before anything
+between them writes what it reads". That is the dominance obligation the
+single-reader rule quietly carries, and it has to be stated explicitly before
+the count can be relaxed. Reverted; the condition-code fold above stands on its
+own.
