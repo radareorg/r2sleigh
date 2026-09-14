@@ -92,6 +92,17 @@ pub(crate) fn empty_function_facts() -> &'static FunctionFacts {
     EMPTY_FUNCTION_FACTS.get_or_init(FunctionFacts::default)
 }
 
+/// A callee's prototype and whether the source supplied it.
+///
+/// Where it came from decides what a second call site may do with it: a
+/// machine-derived arity is a fact about its own call site, so two sites may
+/// prove different ones, while a source prototype is load-bearing.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedCalleeDeclaration {
+    pub(crate) declaration: crate::ast::CExternDecl,
+    pub(crate) from_source_signature: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FoldState {
     pub(crate) analysis_ctx: analysis::DecompilerFacts,
@@ -145,7 +156,7 @@ pub(crate) struct FoldingContext<'a> {
     /// where the callee's interface is in hand. Handed to the function when it
     /// is built.
     pub(crate) callee_declarations:
-        std::cell::RefCell<std::collections::BTreeMap<String, crate::ast::CExternDecl>>,
+        std::cell::RefCell<std::collections::BTreeMap<String, RecordedCalleeDeclaration>>,
     /// Names minted while folding, handed to the function when it is built.
     ///
     /// A cell because the builders take `&self`. Minting has to borrow, insert

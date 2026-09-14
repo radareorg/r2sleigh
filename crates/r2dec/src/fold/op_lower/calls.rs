@@ -202,8 +202,8 @@ impl<'a> FoldingContext<'a> {
     /// The source declared a call to this callee terminal, so its prototype
     /// says it never returns.
     pub(crate) fn mark_callee_noreturn(&self, name: &str) {
-        if let Some(declaration) = self.callee_declarations.borrow_mut().get_mut(name) {
-            declaration.noreturn = true;
+        if let Some(recorded) = self.callee_declarations.borrow_mut().get_mut(name) {
+            recorded.declaration.noreturn = true;
         }
     }
 
@@ -225,6 +225,7 @@ impl<'a> FoldingContext<'a> {
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
         let (ret_type, params, variadic) =
             self.certified_callee_signature(block_addr, op_idx, args)?;
+        let from_source_signature = cert.callee_signature.is_some();
         let declaration = crate::ast::CExternDecl {
             name: name.clone(),
             ret_type,
@@ -251,7 +252,10 @@ impl<'a> FoldingContext<'a> {
                     render_fact.disposition,
                     declaration
                 );
-                slot.insert(declaration);
+                slot.insert(crate::fold::context::RecordedCalleeDeclaration {
+                    declaration,
+                    from_source_signature,
+                });
                 Ok(())
             }
             // Two calls that need different declarations for one name have no
@@ -262,8 +266,26 @@ impl<'a> FoldingContext<'a> {
                 // `noreturn` is a fact one terminal call site established for
                 // the callee; a later call site does not contradict it.
                 let mut agreed = declaration.clone();
-                agreed.noreturn = slot.get().noreturn;
-                if *slot.get() == agreed {
+                agreed.noreturn = slot.get().declaration.noreturn;
+                if slot.get().declaration == agreed {
+                    return Ok(());
+                }
+                // A callee nothing declared takes its arity from each call
+                // site's argument registers, so two sites may prove different
+                // ones without contradicting each other.
+                if !slot.get().from_source_signature
+                    && !from_source_signature
+                    && let Some(reconciled) =
+                        machine_declaration_admitting_both(&slot.get().declaration, &agreed)
+                {
+                    r2il::refusal_evidence!(
+                        "callee-declaration-arity",
+                        "callsite=({block_addr:#x}, {op_idx}) name={} first={:?} this={:?} admitted={reconciled:?}",
+                        declaration.name,
+                        slot.get().declaration,
+                        agreed
+                    );
+                    slot.into_mut().declaration = reconciled;
                     return Ok(());
                 }
                 r2il::refusal_evidence!(
@@ -703,4 +725,36 @@ mod callee_return_tests {
             Some(CType::Void)
         );
     }
+}
+
+/// One declaration that admits both call sites, or none when they disagree on
+/// more than how many arguments they pass.
+///
+/// A variadic tail is what C offers for a callee whose sites pass different
+/// counts, and it claims less than either fixed arity did. The fixed prefix is
+/// what the two agree on, and C has no declaration for a variadic with no
+/// named parameter, so that case still refuses.
+fn machine_declaration_admitting_both(
+    first: &crate::ast::CExternDecl,
+    second: &crate::ast::CExternDecl,
+) -> Option<crate::ast::CExternDecl> {
+    if first.ret_type != second.ret_type || first.noreturn != second.noreturn {
+        return None;
+    }
+    let (first_params, second_params) = (first.params.as_ref()?, second.params.as_ref()?);
+    let shared = first_params
+        .iter()
+        .zip(second_params)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if shared == 0 {
+        return None;
+    }
+    Some(crate::ast::CExternDecl {
+        name: first.name.clone(),
+        ret_type: first.ret_type.clone(),
+        params: Some(first_params[..shared].to_vec()),
+        variadic: true,
+        noreturn: first.noreturn,
+    })
 }

@@ -22186,3 +22186,70 @@ deep-copied every operation of the function to hand the type writeback a
 read-only view, and `infer_local_struct_artifacts_from_prepared_ssa` copied
 them again into a third block type of its own. One type now, both copies gone,
 and `LocalStructInferenceBlock` deleted.
+
+## A machine-derived arity belongs to its call site, not to the callee
+
+`dpkg-divert` at `-O0` refused two functions, `fcn_feb8` and `fcn_e8c0`, both
+with `missing machine projection authorization: OpLowering(calls.rs:291)`. That
+site is the callee-declaration conflict: two call sites in one function need
+different declarations for one name, and keeping the first would declare one
+call's shape and leave the other contradicting it, so the function refuses.
+
+The evidence names the callee and the disagreement exactly:
+
+    callee-declaration-conflict: name=fcntl signature=false fixed_argument_count=Some(3)
+      first= fcntl(uint64_t, uint64_t)
+      this=  fcntl(uint64_t, uint64_t, uint64_t)
+
+`signature=false` is the whole story. radare2 supplied no prototype, so the
+declaration is synthesised from each site's certified register arguments, and
+the synthesis writes `variadic: false` — a claim about the callee that nothing
+established. `fcntl` is `int fcntl(int fd, int cmd, ...)`, and the two arities
+are a two-argument `F_GETFD` call and a three-argument `F_SETFD` call. Both
+recoveries were right; the conflict was manufactured by filing them as one
+fact.
+
+The standing decision already settles what to do: *a call whose signature
+nothing knows takes its arity from the convention's argument registers that are
+provably written before the call and live into it*. That makes an arity a fact
+about a call site. Two sites of an undeclared callee may therefore prove
+different ones without contradicting each other, and the declaration that
+admits both while claiming least is variadic over the prefix they agree on.
+
+So the conflict arm reconciles rather than refuses, and only when neither
+declaration came from a source prototype (`RecordedCalleeDeclaration` now
+carries where it came from). A site that contradicts a source prototype still
+refuses, earlier, at `callee-signature-arity`. A common prefix of nothing still
+refuses, because C has no declaration for a variadic with no named parameter.
+`fcn_feb8` now renders:
+
+    uint64_t fcntl(uint64_t, uint64_t, ...);
+    uint64_t RAX_3  = fcntl((uint64_t)tmp_11f00_1, 1);
+    uint64_t RAX_14 = fcntl((uint64_t)tmp_11f00_4, 2, (uint64_t)tmp_lane_ff18_6_7_1);
+
+Census 1432 -> 1434 of 1446 over thirteen binaries; the twelve-binary subset is
+unchanged at 777 of 787 because both functions are in `dpkg-divert`. Gate 54 of
+54.
+
+### The upstream gap this exposed, and why it is not safe to close yet
+
+radare2 ships 559 prototypes in `libr/anal/d/types.sdb.txt`, and it represents
+a variadic tail as a final `arg.N=,...` (`func.printf.arg.1=,...`). Against
+that table: `fcntl`, `execl`, `execlp`, `dup2` and `mkdir` are absent
+altogether, and `open` and `openat` are present but declared fixed-arity —
+`func.open.args=2`, `func.openat.args=3` — when POSIX makes both variadic.
+
+Adding the missing ones and correcting the two would be a real contribution,
+and it would make this engine *worse* today. The only way a variadic call's
+argument count is proved here is a literal format string:
+`variadic_callsite_argument_count` reads `interface.format_parameter_rule()`
+and returns `MissingFormatParameter` when there is none. `fcntl` and `open`
+have no format parameter, so a corrected prototype would move their call sites
+from a clean machine-derived arity to an unprovable variadic tail —
+`dpkg-divert`'s `fcn_a227` already refuses with exactly that reason.
+
+Proving a non-format variadic's count is the piece of work that has to land
+first. The shape is visible in the same evidence: `fcntl`'s tail is decided by
+`cmd`, which is a literal at both sites, exactly as a format string is a
+literal — a rule keyed on a fixed argument's value rather than only on a format
+parameter. Until that exists, the prototype table is better left alone.

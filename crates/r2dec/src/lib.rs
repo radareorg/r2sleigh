@@ -3510,8 +3510,11 @@ impl Decompiler {
                 &|id| journal.observation_block(id),
                 &label_block,
                 &|stmt| {
-                    structure::certify::stmt_callee_name(stmt)
-                        .is_some_and(|name| declarations.get(name).is_some_and(|d| d.noreturn))
+                    structure::certify::stmt_callee_name(stmt).is_some_and(|name| {
+                        declarations
+                            .get(name)
+                            .is_some_and(|recorded| recorded.declaration.noreturn)
+                    })
                 },
             );
             structure::certify::report(
@@ -3550,7 +3553,7 @@ impl Decompiler {
                 .callee_declarations
                 .borrow()
                 .values()
-                .cloned()
+                .map(|recorded| recorded.declaration.clone())
                 .collect(),
             ret_type: render_signature
                 .and_then(|sig| sig.ret_type.clone())

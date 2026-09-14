@@ -345,8 +345,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             },
             &|name| by_name.get(name).copied(),
             &|stmt| {
-                certify::stmt_callee_name(stmt)
-                    .is_some_and(|name| declarations.get(name).is_some_and(|d| d.noreturn))
+                certify::stmt_callee_name(stmt).is_some_and(|name| {
+                    declarations
+                        .get(name)
+                        .is_some_and(|recorded| recorded.declaration.noreturn)
+                })
             },
         )
     }
