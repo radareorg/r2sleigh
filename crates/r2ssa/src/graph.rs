@@ -204,14 +204,18 @@ pub struct SsaGraph {
     pub(crate) use_offsets: Vec<u32>,
     pub(crate) use_sites: Vec<UseSite>,
     pub block_by_addr: BTreeMap<u64, BlockId>,
-    /// The values in the order their variables sort, so a variable can be
-    /// looked up without a second copy of every variable in the function.
+    /// Each value addressed by its variable's hash, open-addressed over
+    /// `values`: a slot holds a value's identifier plus one, and zero is
+    /// empty.
     ///
-    /// This was an ordered map from the variable to its value, which is the
-    /// variable held twice: once in `values` and once as a key, name and all.
-    /// A search reads the variable back out of `values`, which is where it
-    /// already is.
-    pub(crate) value_by_var: Vec<ValueId>,
+    /// This was an ordered map from the variable to its value, then the values
+    /// in the order their variables sort. Both held the variable twice and
+    /// both answered a lookup by comparing variables, which is comparing
+    /// names: a thirty-thousand-value function paid fifteen of those, each a
+    /// random read into `values`, for every question. A probe reads the
+    /// variable back out of `values`, which is where it already is, and asks
+    /// once.
+    pub(crate) value_index: Vec<u32>,
     pub op_inst_by_site: BTreeMap<(u64, usize), InstId>,
     pub op_site_by_inst: BTreeMap<InstId, (u64, usize)>,
     /// Entry-lane projections by value, valued by the lane's storage
@@ -219,18 +223,28 @@ pub struct SsaGraph {
     pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
 }
 
-/// The start of each value's run of uses, with a final entry for the total.
-/// Every value, in the order its variable sorts.
-pub(crate) fn value_order_of(values: &[GraphValue]) -> Vec<ValueId> {
-    let mut order = values.iter().map(|value| value.id).collect::<Vec<_>>();
-    order.sort_unstable_by(|left, right| {
-        values[left.0 as usize]
-            .var
-            .cmp(&values[right.0 as usize].var)
-    });
-    order
+/// Every value, addressed by its variable's hash.
+pub(crate) fn value_index_of(values: &[GraphValue]) -> Vec<u32> {
+    // Half full at most, so a probe walks a slot or two.
+    let slots = values.len().next_power_of_two().max(4) * 2;
+    let mut index = vec![0u32; slots];
+    for value in values {
+        insert_value_slot(&mut index, value.var.index_hash(), value.id.0);
+    }
+    index
 }
 
+/// Put a value in the first free slot from its variable's hash.
+fn insert_value_slot(index: &mut [u32], hash: u64, id: u32) {
+    let mask = index.len() - 1;
+    let mut at = (hash as usize) & mask;
+    while index[at] != 0 {
+        at = (at + 1) & mask;
+    }
+    index[at] = id + 1;
+}
+
+/// The start of each value's run of uses, with a final entry for the total.
 pub(crate) fn use_offsets_of(uses: &[Vec<UseSite>]) -> Vec<u32> {
     let mut offsets = Vec::with_capacity(uses.len() + 1);
     let mut total = 0u32;
@@ -451,7 +465,7 @@ impl SsaGraph {
             .formal_projection_vars()
             .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
             .collect();
-        let value_order = value_order_of(&values);
+        let value_index = value_index_of(&values);
         Self {
             entry,
             block_order,
@@ -462,7 +476,7 @@ impl SsaGraph {
             use_offsets: use_offsets_of(&uses_of),
             use_sites: uses_of.into_iter().flatten().collect(),
             block_by_addr,
-            value_by_var: value_order,
+            value_index,
             op_inst_by_site,
             op_site_by_inst,
             formal_projections,
@@ -498,11 +512,22 @@ impl SsaGraph {
     }
 
     pub fn value_id_for_var(&self, var: &SSAVar) -> Option<ValueId> {
-        let at = self
-            .value_by_var
-            .binary_search_by(|id| self.values[id.0 as usize].var.cmp(var))
-            .ok()?;
-        self.value_by_var.get(at).copied()
+        if self.value_index.is_empty() {
+            return None;
+        }
+        let mask = self.value_index.len() - 1;
+        let mut at = (var.index_hash() as usize) & mask;
+        loop {
+            let slot = *self.value_index.get(at)?;
+            if slot == 0 {
+                return None;
+            }
+            let id = ValueId(slot - 1);
+            if self.values.get(id.0 as usize)?.var == *var {
+                return Some(id);
+            }
+            at = (at + 1) & mask;
+        }
     }
 
     pub fn inst_id_for_op_site(&self, block_addr: u64, op_idx: usize) -> Option<InstId> {
@@ -550,16 +575,17 @@ impl SsaGraph {
                 .then_some(id);
         }
         let id = ValueId(u32::try_from(self.values.len()).ok()?);
-        let at = self
-            .value_by_var
-            .binary_search_by(|other| self.values[other.0 as usize].var.cmp(&var))
-            .unwrap_or_else(|at| at);
+        let hash = var.index_hash();
         self.values.push(GraphValue {
             id,
             var,
             canonical_storage: Some(storage),
         });
-        self.value_by_var.insert(at, id);
+        if self.values.len() * 2 > self.value_index.len() {
+            self.value_index = value_index_of(&self.values);
+        } else {
+            insert_value_slot(&mut self.value_index, hash, id.0);
+        }
         self.def_of.push(None);
         self.use_offsets.push(self.use_sites.len() as u32);
         Some(id)

@@ -4822,6 +4822,7 @@ mod tests {
                 b: count.var.clone(),
             }),
         };
+        let values = vec![value.clone(), count.clone()];
         let graph = SsaGraph {
             entry: BlockId(0),
             block_order: vec![BlockId(0)],
@@ -4834,7 +4835,7 @@ mod tests {
                 insts: vec![inst.id],
             }],
             insts: vec![inst],
-            values: vec![value.clone(), count],
+            values: values.clone(),
             def_of: vec![None, None],
             use_offsets: vec![0, 1, 2],
             use_sites: vec![
@@ -4848,7 +4849,7 @@ mod tests {
                 },
             ],
             block_by_addr: [(0x1000, BlockId(0))].into(),
-            value_by_var: vec![ValueId(0), ValueId(1)],
+            value_index: crate::graph::value_index_of(&values),
             op_inst_by_site: [((0x1000, 0), InstId(0))].into(),
             op_site_by_inst: [(InstId(0), (0x1000, 0))].into(),
             formal_projections: BTreeMap::new(),

@@ -289,6 +289,27 @@ impl SSAVar {
         }
     }
 
+    /// A hash of the whole identity, for indexing a variable's value.
+    ///
+    /// Not a substitute for equality and not stable across processes: the
+    /// spelling contributes its interned identifier, which is assigned in the
+    /// order spellings are first seen.
+    pub fn index_hash(&self) -> u64 {
+        const ODD: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut mixed = u64::from(self.name.id());
+        for word in [
+            u64::from(self.version),
+            u64::from(self.size),
+            u64::from(self.is_constant),
+            self.constant_bits,
+            u64::from(self.rename_disambiguator),
+        ] {
+            mixed = (mixed ^ word).wrapping_mul(ODD);
+            mixed ^= mixed >> 29;
+        }
+        mixed
+    }
+
     /// The construction-time discriminator that separates two exact storages
     /// which project to the same display name and width.
     ///
