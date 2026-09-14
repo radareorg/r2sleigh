@@ -22861,3 +22861,80 @@ Remaining, by first compiler error: 75 declare a value of an undefined
 aggregate (`struct type_0x749 n_copy;`), 17 name `size_t` in a prototype with
 nothing that declares it, 14 name a typedef that is never defined, 11 use an
 aggregate tag without its keyword, 10 subscript with a non-integer index.
+
+## Reading one function: what `uInt64_isZero` says the defects are
+
+Four lines of bzip2 source:
+
+```c
+static Bool uInt64_isZero ( UInt64* n ) {
+   Int32 i;
+   for (i = 0; i < 8; i++)
+      if (n->b[i] != 0) return 0;
+   return 1;
+}
+```
+
+render as forty, and reading them names the classes far better than any count
+of compiler errors does:
+
+* the loop condition `i < 8` is **flag algebra** -- `OF_2 = sborrow(i, 7)`,
+  `SF_2 = (i-7) <s 0`, `ZF_2 = (i-7) == 0`, `if (OF_2 != SF_2 || ZF_2)` -- four
+  statements, three locals and a call to an undefined helper in place of one
+  comparison
+* `n->b[i]` is `((uint8_t*)n)[i]` through a five-statement copy chain
+* the two `return`s become an `RAX_6` accumulator with `goto L0` and `goto L2`
+* `n = n;` opens the body
+* the `for` is a `for (; ; )` with the condition inside as an if/else
+
+Across the local census, 5,303 of 6,959 emitted conditions test a flag variable
+rather than a comparison, so the first of those is the largest class in the
+output by a wide margin.
+
+### Why the flag rules do not fire, and what it costs to make them
+
+Group E of the rewriter already states every lemma needed:
+`SF != OF` is `a < b`, `SF == OF` is `b <= a`, `x == y || x < y` is `x <= y`.
+They were written for the shape where the flags are written out inside the
+branch condition, and the lifter does not produce that shape: it gives each
+condition code its own eight-bit carrier, so the branch reads `OF_2` and `SF_2`
+by name. Four things have to change together, and the fourth is the problem.
+
+1. `subtraction_flags` reads `arena.term(o).kind` directly; it has to read
+   through `arena.unfold`, as it already does for the difference.
+2. `both_bool` asks whether the *leaf* is a boolean. A flag carrier is typed as
+   its eight-bit register, so the answer is no and `BOOL_NE_IS_XOR` never
+   converts `OF != SF` into the `Xor` the next rule matches. Asking what the
+   leaf stands for fixes it.
+3. `discharged_origins` computes what a canonical term renders from the
+   producers *expanded into* the imported term. A flag folded away was never
+   expanded -- it was a leaf that the rewrite removed -- so nothing recorded
+   that the comparison now renders those two instructions, and placement
+   refused with `unobserved_binding_read`.
+4. The binding plan's reader count is the blocker. `OF_2` has two graph
+   readers: the branch, and an edge into a merge nothing observes. The filter
+   that drops unobserved merge edges applies only to values in the lifter's
+   `Unique` scratch space, and a condition code lives in a register, so every
+   flag looked like a two-reader value and was never single-use.
+
+With all four, `uInt64_isZero` renders twenty-one statements instead of
+twenty-six, the three flag locals and the `r2sleigh_int_sborrow_32` call are
+gone, and the condition reads `(uint32_t)tmp_3ea00_2 == 0 || tmp_3e900_2 < 7`.
+Adding the missing lemma `(a - b) == 0` is `a == b` would finish it as `i <= 7`.
+
+**It is reverted, and the reason is worth more than the change.** The gate falls
+to 51 of 54 with three cells unparsable and refused, and
+`crates/r2rewrite/tests/rules.rs:371` fails on a stated contract: a canonical
+term discharges only the producers it expanded, because a leaf it stopped
+reading may still be read by another term -- there, the zero flag still reads
+the difference the branch folded away. That is the same question the reader
+count asks from the other side. Both are *which canonical terms still read this
+value after rewriting*, and the plan answers it today by counting graph uses,
+which is the pre-rewrite population.
+
+So the piece of work that unblocks the largest class in the output is one
+mechanism: a rendered-reader relation derived from the canonical terms rather
+than from the graph, used by the reader count, by the discharge set and by the
+seal alike. The four changes above are kept at
+`flag-folding-through-leaves.diff` and the further lemma at
+`flag-equality-and-rendered-readers.diff`, both in the session scratchpad.
