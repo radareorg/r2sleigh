@@ -22599,12 +22599,22 @@ cause the regression, and the corpus cannot localise it either, because these
 numbers do not move -- narrowing further needs DecBench itself and therefore
 shared-host time.
 
-Worth separating from the regression, because it is a standing fact rather than
-a change: **no corpus function recovers its parameter types.** Every cell
-declares `uint64_t, uint64_t` where the source has `const uint8_t *, size_t`,
-while returns recover in 32 of 54. Returns work and parameters never do, which
-points at the parameter path specifically rather than at type recovery in
-general, and it is a better lead than the aggregate score.
+**The 0 of 54 is policy, not a defect, and the metric cannot measure type
+quality.** Every corpus cell declares `uint64_t, uint64_t` where the source has
+`const uint8_t *, size_t`, and it was tempting to read that as the parameter
+path being broken. It is not. The hash corpus carries no debug information --
+`iS~debug_info` is empty for `h_x64_O0`, while `bzip2-O2` and `minigzip-O0` both
+have it -- so there is no DWARF to source a parameter type from. radare2 does
+offer one, `sym._fnv1a32 (char *arg1, uint64_t arg2)`, but that is its own
+inference, and this project's standing rule is that only DWARF-sourced
+declarations enter the type graph as exact while radare2's inferred variable
+types stay evidence. Rendering `uint64_t` is that rule holding.
+
+So `typed_recovery` on this corpus is pinned at zero by design and says nothing
+about type quality either way. It cannot be used to localise the DecBench
+regression, which ends the local reproduction path: the projects DecBench builds
+do carry debug information, so its `type_match` is measuring something the
+corpus structurally cannot.
 
 ### Reading the origin sampler: it counts the process, the stages count one render
 
