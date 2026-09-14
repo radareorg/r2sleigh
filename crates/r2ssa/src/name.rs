@@ -19,10 +19,19 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
+use crate::var::SSAVarNameKind;
+
 /// One spelling, stored once for the life of the process.
+///
+/// Everything a spelling decides on its own -- which kind of location it
+/// names, and the register offset it spells when it names one -- is settled
+/// here rather than re-parsed at each of the hundreds of thousands of places
+/// that ask.
 pub struct InternedName {
     id: u32,
     text: &'static str,
+    kind: SSAVarNameKind,
+    register_offset: Option<u64>,
 }
 
 impl InternedName {
@@ -34,6 +43,16 @@ impl InternedName {
     /// A dense identifier, unique to this spelling within the process.
     pub const fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Which kind of location this spelling names.
+    pub const fn kind(&self) -> SSAVarNameKind {
+        self.kind
+    }
+
+    /// The register-space offset this spelling stands for, when it spells one.
+    pub const fn register_offset(&self) -> Option<u64> {
+        self.register_offset
     }
 }
 
@@ -56,7 +75,14 @@ pub fn intern(text: &str) -> &'static InternedName {
     }
     let text: &'static str = Box::leak(text.to_owned().into_boxed_str());
     let id = u32::try_from(names.len()).unwrap_or(u32::MAX);
-    let name: &'static InternedName = Box::leak(Box::new(InternedName { id, text }));
+    let name: &'static InternedName = Box::leak(Box::new(InternedName {
+        id,
+        text,
+        kind: SSAVarNameKind::classify(text),
+        register_offset: text
+            .strip_prefix("reg:")
+            .and_then(|rest| u64::from_str_radix(rest, 16).ok()),
+    }));
     names.insert(text, name);
     name
 }

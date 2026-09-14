@@ -25,27 +25,37 @@ pub enum SSAVarNameKind {
     Ordinary,
 }
 
+fn starts_with_ignore_ascii_case(name: &str, prefix: &str) -> bool {
+    name.len() >= prefix.len()
+        && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
 impl SSAVarNameKind {
+    /// Which kind of location a spelling names.
+    ///
+    /// Compared prefix by prefix rather than by lowercasing the name first:
+    /// this is asked of every variable on every operation, and the copy the
+    /// lowercase made was an allocation for a question about five characters.
     pub fn classify(name: &str) -> Self {
-        let name = name.to_ascii_lowercase();
-        let name = name.as_str();
-        if name.strip_prefix("reg:").is_some() {
+        if starts_with_ignore_ascii_case(name, "reg:") {
             Self::RegisterAlias
-        } else if name.strip_prefix("tmp:").is_some() || name.strip_prefix("unique:").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "tmp:")
+            || starts_with_ignore_ascii_case(name, "unique:")
+        {
             Self::Temporary
-        } else if name.strip_prefix("const:").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "const:") {
             Self::Constant
-        } else if name.strip_prefix("ram:").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "ram:") {
             Self::Memory
-        } else if name.strip_prefix("space").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "space") {
             Self::AddressSpace
-        } else if name.strip_prefix("sym.").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "sym.") {
             Self::Symbol
-        } else if name.strip_prefix("obj.").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "obj.") {
             Self::Object
-        } else if name.strip_prefix("data.").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "data.") {
             Self::Data
-        } else if name.strip_prefix("got.").is_some() {
+        } else if starts_with_ignore_ascii_case(name, "got.") {
             Self::Got
         } else {
             Self::Ordinary
@@ -336,7 +346,7 @@ impl SSAVar {
     }
 
     pub fn name_kind(&self) -> SSAVarNameKind {
-        SSAVarNameKind::classify(self.name())
+        self.name.kind()
     }
 
     /// Check if this is a constant SSA value.
@@ -353,8 +363,7 @@ impl SSAVar {
     /// A varnode the architecture does not name is spelled from its offset, so
     /// that offset is recoverable and is the only thing identifying the storage.
     pub fn register_offset(&self) -> Option<u64> {
-        let rest = self.name().strip_prefix("reg:")?;
-        u64::from_str_radix(rest, 16).ok()
+        self.name.register_offset()
     }
 
     pub fn is_temp(&self) -> bool {
