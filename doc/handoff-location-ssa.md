@@ -23328,3 +23328,39 @@ between them writes what it reads". That is the dominance obligation the
 single-reader rule quietly carries, and it has to be stated explicitly before
 the count can be relaxed. Reverted; the condition-code fold above stands on its
 own.
+
+### What the fold does not reach, and why the next two steps are one problem
+
+Two follow-ons were built on top of the fold and both reverted, and together
+they say the same thing.
+
+**Lifting the loop test into its header.** The structurer builds every loop as
+`for (; ; )` with the test inside, and there is already a cleanup rewrite
+turning `do { if (c) break; rest } while (1)` into `while (!c) { rest }`; it
+never fires because the structurer emits `For { cond: None }` rather than a
+do-while. Extending it to that shape -- both `if (c) break; rest` and
+`if (c) rest else break` -- is a pure tree rewrite in the right layer, and on
+the local corpus it fires **zero times in 137 loops**. Every loop header block
+has a staging copy before the guard: `int32_t tmp_3e900_2 = i;` and then
+`if (tmp_3e900_2 <= 7)`. C has nowhere to put that copy in a `while` header, so
+the loop cannot be lifted while the copy exists.
+
+**Removing the flag operations the fold left unread.** The fold's own note says
+the flag definitions "become unread, and the passes that remove unread values
+already know what to do with them". That is false for the binding plan, which
+counts *graph* use sites: `tmp_3e900_2` still has six readers, all of them
+condition-code operations nothing reads. Removing those operations is easy; what
+keeps them alive is that every flag register merges at the loop header, and a
+merge is a read. Removing the unread merges as well corrupts the rename -- `i`
+splits into `i` and `i_2` and the body gains four copies -- so a phi is not
+removable by retaining a vector.
+
+Both of these, and the `differential` failure from relaxing the reader count,
+are the same missing fact: **when a value may be computed somewhere other than
+where the graph computes it.** The staging copy cannot fold into the loop header
+without it, the flag merges cannot be dropped without it, and the reader count
+cannot be relaxed without it. That is the dominance-and-ordering obligation the
+single-reader rule carries silently today, and stating it explicitly is the next
+piece of architecture, not another rewrite of one of the three symptoms.
+
+`loop-lift-and-flag-dce.diff` in the session scratchpad has both attempts.
