@@ -23393,3 +23393,35 @@ and `flag.signed_lt_from_borrow` no longer fire, because the comparison now
 arrives already folded from the graph. They assert the shape that reaches the
 renderer instead of which rule produced it. The two offline lift fixtures were
 re-blessed for the same reason: the fold changes the SSA, which is the point.
+
+### A format's address is recovered across functions; its text was not
+
+Traced by the user on a stripped distro `bzip2`, under `R2DEC_TRACE_REFUSAL=1`:
+
+    variadic-format-literal at semantic.rs:3807:
+      format argument 2 points at 0x6040, where the source carries no string literal
+
+The walk succeeded and the constant resolved. `source_string_literal(0x6040)`
+returned nothing, and 0x6040 holds `"\tInput file = %s, output file = %s\n"` in
+`.rodata`, which radare2 reads, has meta records for, and has cross references
+to. The references, though, live in *other* functions -- `axt` puts 0x6040's at
+`sub.__fprintf_chk_3390`, not at the function being decompiled.
+
+`function_image_string_literals_collect` walked `r_anal_xrefs_get_from` over the
+snapshotted function's own block bytes only, so a literal radare2 credited to
+another function never entered the table. `r2ssa/src/function.rs:2027` binds one
+flat table from the caller's image and `machine_context.rs:1596` is a plain map
+lookup, so the address was known and the text absent. Not a cap:
+`max_function_successors` is 262,144.
+
+The collector now also decodes each instruction in the image and takes `op.ptr`
+and `op.val` as candidate addresses, through the same acceptance test. It is the
+address the code actually holds, whoever the analysis credited the reference to.
+Strictly a superset of the previous candidate set.
+
+Local corpus: gate 54 of 54, all snapshots matching -- the hash binaries reach
+this class only as "the format is the function's own parameter", which is a
+different stop (a forwarding wrapper, not a missing literal), so the widening is
+invisible here. On the user's measurement the class is
+`format_argument_not_literal` 1,893 and `missing_format_parameter` 646, together
+2,539 of 3,810 gap operations and 107 of 330 whole-function refusals.

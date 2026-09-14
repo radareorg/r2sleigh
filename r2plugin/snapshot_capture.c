@@ -1696,6 +1696,81 @@ static bool function_image_code_pointer_tables_collect(RAnal *anal,
 	}
 	return true;
 }
+/* The string at this address: as the analysis recorded it, as the suffix of a
+ * record it points into, or as the read-only bytes themselves. */
+static const char *snapshot_string_at(RAnal *anal, ut64 addr, char *scratch, size_t scratch_size) {
+	const char *text = r_meta_get_string (anal, R_META_TYPE_STRING, addr);
+	/* A reference into the middle of a string names its suffix, which is a
+	 * string literal of its own. */
+	if (!text) {
+		RIntervalNode *node = r_meta_get_in (anal, addr, R_META_TYPE_STRING);
+		if (node && addr > node->start && addr < node->end
+			&& anal->iob.io && anal->iob.read_at) {
+			const ut64 span = R_MIN (node->end - addr, scratch_size - 1);
+			if (anal->iob.read_at (anal->iob.io, addr, (ut8 *)scratch, (int)span)) {
+				scratch[span] = 0;
+				if (*scratch && r_str_is_printable_incl_newlines (scratch)) {
+					text = scratch;
+				}
+			}
+		}
+	}
+	/* An address in a read-only mapping with no record at all holds a literal
+	 * shorter than the scanner's minimum. The bytes are the fact. */
+	if (!text && anal->iob.io && anal->iob.read_at && anal->iob.map_get_at) {
+		RIOMap *map = anal->iob.map_get_at (anal->iob.io, addr);
+		if (map && !(map->perm & R_PERM_W) && addr >= r_io_map_begin (map)
+			&& addr < r_io_map_end (map)) {
+			const ut64 span = R_MIN (r_io_map_end (map) - addr, scratch_size - 1);
+			if (anal->iob.read_at (anal->iob.io, addr, (ut8 *)scratch, (int)span)) {
+				scratch[span] = 0;
+				if (*scratch && strlen (scratch) < span
+					&& r_str_is_printable_incl_newlines (scratch)) {
+					text = scratch;
+				}
+			}
+		}
+	}
+	return (text && *text)? text: NULL;
+}
+
+static bool snapshot_string_literal_record(RAnalFunctionImageSnapshot *image,
+		const RAnalFunctionSnapshotLimits *limits, ut64 addr, const char *text) {
+	size_t existing;
+	for (existing = 0; existing < image->num_string_literals; existing++) {
+		if (image->string_literals[existing].addr == addr) {
+			return true;
+		}
+	}
+	if (image->num_string_literals >= limits->max_function_successors) {
+		return false;
+	}
+	RAnalSnapshotStringLiteral *grown = realloc (image->string_literals,
+		(image->num_string_literals + 1) * sizeof (*grown));
+	if (!grown) {
+		return false;
+	}
+	image->string_literals = grown;
+	RAnalSnapshotStringLiteral *literal = &image->string_literals[image->num_string_literals];
+	literal->addr = addr;
+	literal->text = strdup (text);
+	if (!literal->text) {
+		return false;
+	}
+	image->num_string_literals++;
+	return true;
+}
+
+/* Every string this function's code can name.
+ *
+ * Two sources, because the first alone loses the largest class in the
+ * decompiler. The analysis records a cross reference where it saw the load,
+ * and those are taken first. But a format argument's address is recovered by
+ * data flow inside *this* function while radare2 may have credited the
+ * reference to another -- a shared `__fprintf_chk` thunk, say -- and the
+ * address then resolves with no text behind it. So the instruction's own
+ * operand is taken too: it is the address the code holds, whoever the analysis
+ * credited the reference to. */
 static bool function_image_string_literals_collect(RAnal *anal,
 		RAnalFunctionImageSnapshot *image,
 		const RAnalFunctionSnapshotLimits *limits) {
@@ -1710,82 +1785,42 @@ static bool function_image_string_literals_collect(RAnal *anal,
 			}
 			RAnalRef *ref;
 			R_VEC_FOREACH (refs, ref) {
-				const char *text = r_meta_get_string (anal, R_META_TYPE_STRING, ref->addr);
-				/* A reference into the middle of a string names its suffix,
-				 * which is a string literal of its own: `" "` at the tail of
-				 * "\n    " is what `fprintf (stderr, " ")` passes. The
-				 * analysis recorded the whole as one string and trimmed the
-				 * text it kept, so the suffix is read from the bytes the
-				 * record covers, up to its end. */
-				char suffix[64] = {0};
-				if (!text) {
-					RIntervalNode *node = r_meta_get_in (anal, ref->addr, R_META_TYPE_STRING);
-					if (node && ref->addr > node->start && ref->addr < node->end
-						&& anal->iob.io && anal->iob.read_at) {
-						const ut64 span = R_MIN (node->end - ref->addr, sizeof (suffix) - 1);
-						if (anal->iob.read_at (anal->iob.io, ref->addr, (ut8 *)suffix, (int)span)) {
-							suffix[span] = 0;
-							if (*suffix && r_str_is_printable_incl_newlines (suffix)) {
-								text = suffix;
-							}
-						}
-					}
-				}
-				/* A referenced address in a read-only mapping with no string
-				 * record at all holds a literal shorter than the analysis
-				 * scanner's minimum: `"ok\n"` is three bytes and the scanner
-				 * starts at four. The bytes are the fact; read them up to the
-				 * terminator, bounded by the mapping. */
-				if (!text && anal->iob.io && anal->iob.read_at && anal->iob.map_get_at) {
-					RIOMap *map = anal->iob.map_get_at (anal->iob.io, ref->addr);
-					if (map && !(map->perm & R_PERM_W) && ref->addr >= r_io_map_begin (map)
-						&& ref->addr < r_io_map_end (map)) {
-						const ut64 span = R_MIN (r_io_map_end (map) - ref->addr, sizeof (suffix) - 1);
-						if (anal->iob.read_at (anal->iob.io, ref->addr, (ut8 *)suffix, (int)span)) {
-							suffix[span] = 0;
-							if (*suffix && strlen (suffix) < span
-								&& r_str_is_printable_incl_newlines (suffix)) {
-								text = suffix;
-							}
-						}
-					}
-				}
-				if (!text || !*text) {
-					continue;
-				}
-				size_t existing;
-				bool known = false;
-				for (existing = 0; existing < image->num_string_literals; existing++) {
-					if (image->string_literals[existing].addr == ref->addr) {
-						known = true;
-						break;
-					}
-				}
-				if (known) {
-					continue;
-				}
-				if (image->num_string_literals >= limits->max_function_successors) {
+				char scratch[64] = {0};
+				const char *text = snapshot_string_at (anal, ref->addr, scratch, sizeof (scratch));
+				if (text && !snapshot_string_literal_record (image, limits, ref->addr, text)) {
 					RVecAnalRef_free (refs);
 					return false;
 				}
-				RAnalSnapshotStringLiteral *grown = realloc (image->string_literals,
-					(image->num_string_literals + 1) * sizeof (*grown));
-				if (!grown) {
-					RVecAnalRef_free (refs);
-					return false;
-				}
-				image->string_literals = grown;
-				RAnalSnapshotStringLiteral *literal =
-					&image->string_literals[image->num_string_literals];
-				literal->addr = ref->addr;
-				literal->text = strdup (text);
-				if (!literal->text) {
-					RVecAnalRef_free (refs);
-					return false;
-				}
-				image->num_string_literals++;
 			}
 			RVecAnalRef_free (refs);
+		}
+		if (!block->bytes || !block->size) {
+			continue;
+		}
+		ut64 cursor = 0;
+		while (cursor < block->size) {
+			RAnalOp op;
+			r_anal_op_init (&op);
+			const int decoded = r_anal_op (anal, &op, block->addr + cursor,
+				block->bytes + cursor, (int)(block->size - cursor),
+				R_ARCH_OP_MASK_BASIC);
+			const ut64 candidates[2] = { op.ptr, (ut64)op.val };
+			const ut64 step = (decoded > 0 && op.size > 0)? (ut64)op.size: 1;
+			r_anal_op_fini (&op);
+			size_t which;
+			for (which = 0; which < 2; which++) {
+				if (candidates[which] == UT64_MAX || !candidates[which]) {
+					continue;
+				}
+				char scratch[64] = {0};
+				const char *text = snapshot_string_at (anal, candidates[which],
+					scratch, sizeof (scratch));
+				if (text && !snapshot_string_literal_record (image, limits,
+						candidates[which], text)) {
+					return false;
+				}
+			}
+			cursor += step;
 		}
 	}
 	return true;
