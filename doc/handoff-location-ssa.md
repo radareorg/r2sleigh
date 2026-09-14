@@ -22439,3 +22439,53 @@ every use. The `discharged-operand` line shows the target being pushed, and the
 is why no surviving materialisation covers that use. That is the next
 hypothesis to form, and it should be formed from a debugger on the seal rather
 than from another reading of the lowering path.
+
+## The rendered tree's arena is not the campaign; the measurement says so
+
+The byte map recorded a campaign waiting: "the rendered tree's arena
+(`structure_walk` retains 24 MB and makes 1.1 M allocations over ~400 k
+individually boxed nodes)". Three measurements moved it, and the third cancels
+it.
+
+**The walk is not where the allocations are.** Splitting `structure_walk` at the
+fold -- a mark either side of `folded_block_entries` in `place.rs` -- gives, on
+`BZ2_decompress`:
+
+    walk_fold    77,959 us   904,981 allocations
+    walk_place   11,881 us   168,304 allocations
+
+Eighty-two percent of the allocations and eighty-seven percent of the time are
+in folding blocks into statements, not in the placement walk. An arena over the
+statement tree would have addressed the smaller sixth.
+
+**The observation wrapper is not it either.** `CExpr::Observed` boxes its child,
+so every observed occurrence costs an allocation, and the seal now reports the
+count: 57,323 observations allocated and 44,840 carried by the emitted tree.
+That is about five percent of the fold.
+
+**The dominant size class is not tree nodes.** The counting allocator now keeps
+a power-of-two histogram (`r2il::allocation::allocations_by_size`), reset per
+render beside the peak, and each stage reports how many of its allocations fell
+in the smallest class. One render of `BZ2_decompress`, 6,048,870 allocations:
+
+    <=16 B  2,614,870   43%        <=128 B    547,466    9%
+    <=64 B  1,255,743   21%        <=512 B    364,459    6%
+    <=32 B    879,826   15%        <=256 B    302,772    5%
+
+`CExpr` is forty-eight bytes and `CStmt` a hundred and twelve, so the boxed tree
+lives in the `<=64` and `<=128` classes -- together thirty percent. The
+dominant class is sixteen bytes or less, eighty-six allocations per instruction,
+and it is spread evenly rather than concentrated: `audit` 325 k, `plan_canonical`
+311 k, `plan_seed` 277 k, `prepare` 267 k, `structure_walk` 256 k.
+
+So there is no single arena to build. The shape -- a few elements per value,
+in every stage -- is the one this tree has already answered twice, with offsets
+and a flat vector: the graph's use lists (`use_offsets`/`use_sites`) and the
+machine projection's use dispositions. Continuing that conversion stage by
+stage, largest first, is the campaign the measurement supports. The arena entry
+above is withdrawn.
+
+The instrument is the durable part. A count says a stage asked thirty thousand
+times; it never said what for, and a boxed node, a name and an operand list read
+identically. The histogram separates them, and it is what turned a recorded
+campaign into a cancelled one in three runs.

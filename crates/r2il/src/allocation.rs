@@ -22,6 +22,46 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 /// thirty bytes, and on this workload the difference shows up as resident
 /// memory the allocator holds above what is live.
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Allocations by size, in powers of two from sixteen bytes.
+///
+/// A count alone says a stage asked thirty thousand times and not what for: a
+/// tree of boxed nodes, a string per name and a vector per operand list all
+/// read the same. The shape says which, and that decides whether an arena, an
+/// interner or a flat vector is the answer.
+const SIZE_CLASSES: usize = 10;
+static BY_SIZE: [AtomicUsize; SIZE_CLASSES] = [const { AtomicUsize::new(0) }; SIZE_CLASSES];
+
+fn size_class(bytes: usize) -> usize {
+    // 0: <=16, 1: <=32, ... 9: larger than 4096.
+    let mut class = 0;
+    let mut bound = 16;
+    while class + 1 < SIZE_CLASSES && bytes > bound {
+        bound <<= 1;
+        class += 1;
+    }
+    class
+}
+
+/// How many allocations of each size class have been made.
+pub fn allocations_by_size() -> [usize; SIZE_CLASSES] {
+    std::array::from_fn(|index| BY_SIZE[index].load(Ordering::Relaxed))
+}
+
+/// Start counting sizes again from zero, for one measured render.
+pub fn reset_size_histogram() {
+    for class in &BY_SIZE {
+        class.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The inclusive upper bound of a size class, or `None` for the last.
+pub const fn size_class_bound(class: usize) -> Option<usize> {
+    if class + 1 == SIZE_CLASSES {
+        None
+    } else {
+        Some(16 << class)
+    }
+}
 
 /// Record an allocation. Called by the counting allocator, not by hand.
 pub fn record_allocation(bytes: usize) {
@@ -29,6 +69,7 @@ pub fn record_allocation(bytes: usize) {
     // zero bytes because nobody remembered to announce the allocator.
     COUNTING.store(1, Ordering::Relaxed);
     ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    BY_SIZE[size_class(bytes)].fetch_add(1, Ordering::Relaxed);
     let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
     PEAK.fetch_max(live, Ordering::Relaxed);
 }

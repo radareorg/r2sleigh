@@ -30,9 +30,10 @@ thread_local! {
     /// shows in the first and not the second, and only the second accumulates
     /// into the render's own peak, so reading one without the other says
     /// nothing about which stage to change.
-    static PEAKS: RefCell<Vec<(&'static str, usize, usize, usize)>> = const { RefCell::new(Vec::new()) };
+    static PEAKS: RefCell<Vec<StageCost>> = const { RefCell::new(Vec::new()) };
     /// The allocation count when the running stage began.
     static ALLOCS: RefCell<usize> = const { RefCell::new(0) };
+    static SMALL: RefCell<usize> = const { RefCell::new(0) };
     /// What was already held when this render began, so a stage's high-water
     /// mark can be read as what the render added rather than as what the
     /// process holds.
@@ -54,8 +55,21 @@ pub(crate) fn begin(instructions: usize) {
     STAGES.with_borrow_mut(Vec::clear);
     PEAKS.with_borrow_mut(Vec::clear);
     r2il::allocation::reset_peak();
+    r2il::allocation::reset_size_histogram();
     ALLOCS.with_borrow_mut(|allocs| *allocs = r2il::allocation::allocation_count());
+    SMALL.with_borrow_mut(|small| *small = r2il::allocation::allocations_by_size()[0]);
     LAST.with_borrow_mut(|last| *last = Some(Instant::now()));
+}
+
+/// What one stage cost: its high-water mark, what it left live, how many
+/// allocations it made and how many of those were in the smallest size class.
+#[derive(Clone, Copy)]
+struct StageCost {
+    stage: &'static str,
+    peak: usize,
+    live: usize,
+    allocs: usize,
+    small: usize,
 }
 
 /// Close the stage that has been running and name it.
@@ -77,14 +91,27 @@ pub(crate) fn mark(stage: &'static str) {
         *allocs = now;
         made
     });
+    let small = SMALL.with_borrow_mut(|small| {
+        let now = r2il::allocation::allocations_by_size()[0];
+        let made = now.saturating_sub(*small);
+        *small = now;
+        made
+    });
     r2il::allocation::reset_peak();
     PEAKS.with_borrow_mut(|peaks| {
-        if let Some(row) = peaks.iter_mut().find(|(name, _, _, _)| *name == stage) {
-            row.1 = row.1.max(peak);
-            row.2 = row.2.max(live);
-            row.3 += allocs;
+        if let Some(row) = peaks.iter_mut().find(|row| row.stage == stage) {
+            row.peak = row.peak.max(peak);
+            row.live = row.live.max(live);
+            row.allocs += allocs;
+            row.small += small;
         } else {
-            peaks.push((stage, peak, live, allocs));
+            peaks.push(StageCost {
+                stage,
+                peak,
+                live,
+                allocs,
+                small,
+            });
         }
     });
     if let Some(elapsed) = elapsed {
@@ -125,16 +152,31 @@ pub(crate) fn report(function: &str) {
     // otherwise read as "this stage allocated nothing", which is a different
     // claim from "nobody measured".
     if r2il::allocation::is_counting() {
-        let high = peaks.iter().map(|(_, peak, _, _)| *peak).max().unwrap_or(0);
+        let high = peaks.iter().map(|row| row.peak).max().unwrap_or(0);
         line.push_str(&format!(
             " entry_bytes={} peak_bytes={high}",
             ENTRY.with_borrow(|entry| *entry)
         ));
-        let made: usize = peaks.iter().map(|(_, _, _, allocs)| *allocs).sum();
+        let made: usize = peaks.iter().map(|row| row.allocs).sum();
         line.push_str(&format!(" allocations={made}"));
-        for (stage, peak, live, allocs) in &peaks {
+        for (class, count) in r2il::allocation::allocations_by_size()
+            .into_iter()
+            .enumerate()
+        {
+            let name = r2il::allocation::size_class_bound(class)
+                .map_or_else(|| "over".to_string(), |bound| bound.to_string());
+            line.push_str(&format!(" alloc_{name}={count}"));
+        }
+        for &StageCost {
+            stage,
+            peak,
+            live,
+            allocs,
+            small,
+        } in &peaks
+        {
             line.push_str(&format!(
-                " {stage}_bytes={peak} {stage}_live={live} {stage}_allocs={allocs}"
+                " {stage}_bytes={peak} {stage}_live={live} {stage}_allocs={allocs} {stage}_small={small}"
             ));
         }
     }
