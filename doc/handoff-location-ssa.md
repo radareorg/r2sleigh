@@ -22938,3 +22938,50 @@ than from the graph, used by the reader count, by the discharge set and by the
 seal alike. The four changes above are kept at
 `flag-folding-through-leaves.diff` and the further lemma at
 `flag-equality-and-rendered-readers.diff`, both in the session scratchpad.
+
+### The rendered-reader relation, and the one thing it is missing
+
+Three attempts at the reader question, each measured, each reverted. Written up
+because the third one names the gap exactly.
+
+**Attempt one -- discharge the leaves a rewrite removed.** `discharged_origins`
+reports only the producers *expanded into* a term, so a flag folded away by a
+rewrite was never reported as rendered, and placement refused with
+`unobserved_binding_read`. Adding the imported term's own leaves to the
+discharge set fixes the flag case and breaks
+`crates/r2rewrite/tests/rules.rs:371`, which states the contract deliberately: a
+leaf one term stops reading may still be read by another -- there, the zero flag
+still reads the difference the branch folded away -- so discharging it renders
+the instruction twice.
+
+**Attempt two -- count only readers whose canonical term still reads the
+value.** `CanonicalValue` and `CanonicalAccess` gained a sorted `reads` list
+built from the canonical term's leaves, and the binding plan's use-site count
+dropped any site whose reader no longer spells the value. Gate: 53 of 54
+snapshots move, five cells unparsable, and `BZ2_decompress` refuses with
+`region_does_not_dominate_occurrence`. The last one is the finding: the
+single-reader rule is not only a count, it is the guarantee that the one
+remaining reader dominates every occurrence, and a reader count derived from
+rewritten terms can leave a survivor that does not.
+
+**Attempt three -- deadness only.** A value no canonical term reads is not read,
+whatever the graph says, so make it ineligible for a binding and let it elide.
+This is the narrowest correct use of the relation and it fails for a reason that
+names the real gap: **`CanonicalRoots` does not hold every root the renderer
+spells.** It holds values and memory accesses. A branch condition has no output
+value, so the condition it reads appears in no `reads` list; the same is true of
+returns, call arguments and switch selectors. Every value read only through one
+of those looks unread, loses its binding, and the renderer then asks for it by
+name -- `missing program-variable authorization` on both `BZ2_decompress` and
+`uInt64_isZero`.
+
+So the work that unblocks the largest class in the output is now one sentence:
+give `CanonicalRoots` the complete set of rendering roots -- values, accesses,
+branch conditions, returns, call arguments and switch selectors -- so that "which
+terms still read this value" can be asked at all. Deadness can use the answer
+immediately. The reader count cannot, until the dominance guarantee the
+single-reader rule carries is stated separately from the count.
+
+The three attempts are kept in the session scratchpad as
+`flag-folding-through-leaves.diff`, `flag-equality-and-rendered-readers.diff`
+and `rendered-reader-relation.diff`.
