@@ -56,6 +56,20 @@ impl InternedName {
     }
 }
 
+impl PartialEq for InternedName {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for InternedName {}
+
+impl std::hash::Hash for InternedName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 impl std::fmt::Debug for InternedName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self.text, f)
@@ -85,6 +99,94 @@ pub fn intern(text: &str) -> &'static InternedName {
     }));
     names.insert(text, name);
     name
+}
+
+/// A spelling written into the stack, so a name the table already holds
+/// costs no allocation at all.
+///
+/// Sixty-four bytes covers every spelling the lifter builds -- the longest is
+/// a space number and a sixteen-digit offset -- and a longer one falls back to
+/// the heap rather than truncating, because a truncated name would silently
+/// merge two locations.
+struct StackSpelling {
+    buffer: [u8; 64],
+    len: usize,
+    spilled: Option<String>,
+}
+
+impl StackSpelling {
+    const fn new() -> Self {
+        Self {
+            buffer: [0; 64],
+            len: 0,
+            spilled: None,
+        }
+    }
+
+    fn push_lowercased(&mut self, text: &str) {
+        if self.spilled.is_none() && self.len + text.len() <= self.buffer.len() {
+            for (slot, byte) in self.buffer[self.len..].iter_mut().zip(text.bytes()) {
+                *slot = byte.to_ascii_lowercase();
+            }
+            self.len += text.len();
+            return;
+        }
+        let mut spilled = String::from(self.as_str());
+        spilled.push_str(&text.to_ascii_lowercase());
+        self.spilled = Some(spilled);
+    }
+
+    fn as_str(&self) -> &str {
+        match self.spilled.as_deref() {
+            Some(spilled) => spilled,
+            // Every write is a `&str`, so the bytes are valid UTF-8.
+            None => std::str::from_utf8(&self.buffer[..self.len]).unwrap_or_default(),
+        }
+    }
+}
+
+impl std::fmt::Write for StackSpelling {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if let Some(spilled) = self.spilled.as_mut() {
+            spilled.push_str(text);
+            return Ok(());
+        }
+        if self.len + text.len() <= self.buffer.len() {
+            self.buffer[self.len..self.len + text.len()].copy_from_slice(text.as_bytes());
+            self.len += text.len();
+            return Ok(());
+        }
+        let mut spilled = String::with_capacity(self.len + text.len());
+        spilled.push_str(self.as_str());
+        spilled.push_str(text);
+        self.spilled = Some(spilled);
+        Ok(())
+    }
+}
+
+/// The entry for a spelling given as a format, written without allocating one.
+pub fn intern_fmt(spelling: std::fmt::Arguments<'_>) -> &'static InternedName {
+    use std::fmt::Write;
+    let mut written = StackSpelling::new();
+    let _ = written.write_fmt(spelling);
+    intern(written.as_str())
+}
+
+/// The entry for a spelling lowercased on the way in.
+///
+/// Lowercasing a byte at a time is exact here because only `A`-`Z` change and
+/// those bytes never appear inside a multi-byte sequence; a name carrying
+/// anything but ASCII takes the Unicode path instead.
+pub fn intern_ascii_lowercase(text: &str) -> &'static InternedName {
+    if !text.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return intern(text);
+    }
+    if !text.is_ascii() {
+        return intern(&text.to_lowercase());
+    }
+    let mut written = StackSpelling::new();
+    written.push_lowercased(text);
+    intern(written.as_str())
 }
 
 #[cfg(test)]

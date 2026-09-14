@@ -1763,12 +1763,20 @@ impl Disassembler {
     /// assert_eq!(name, Some("RSP".to_string()));
     /// ```
     pub fn register_name(&self, vn: &Varnode) -> Option<String> {
+        self.register_spelling(vn).map(std::borrow::Cow::into_owned)
+    }
+
+    /// The register's name, borrowed when the architecture already holds it.
+    ///
+    /// Every varnode the lifter reads asks this, and copying the stored name
+    /// for each was one allocation per operand of every instruction.
+    pub fn register_spelling(&self, vn: &Varnode) -> Option<std::borrow::Cow<'_, str>> {
         if vn.space != SpaceId::Register {
             return None;
         }
 
         if let Some(name) = self.spec.reg_name_map.get(&(vn.offset, vn.size)) {
-            return Some(name.clone());
+            return Some(std::borrow::Cow::Borrowed(name.as_str()));
         }
 
         // Get the register address space
@@ -1778,7 +1786,9 @@ impl Disassembler {
         // Create a VarnodeData to query libsla
         let varnode_data = VarnodeData::new(Address::new(reg_space, vn.offset), vn.size as usize);
 
-        sleigh.register_name(&varnode_data)
+        sleigh
+            .register_name(&varnode_data)
+            .map(std::borrow::Cow::Owned)
     }
 
     /// Format a varnode as a human-readable string, resolving register names.

@@ -244,6 +244,22 @@ impl SSAVar {
         }
     }
 
+    /// A variable on a spelling the table already holds.
+    pub(crate) const fn from_interned(
+        name: &'static InternedName,
+        version: u32,
+        size: u32,
+    ) -> Self {
+        Self {
+            name,
+            constant_bits: 0,
+            version,
+            size,
+            rename_disambiguator: 0,
+            is_constant: false,
+        }
+    }
+
     /// Attach the deterministic source-identity projection selected by SSA
     /// construction while leaving the user-facing name unchanged.
     pub(crate) fn with_rename_disambiguator(mut self, disambiguator: u32) -> Self {
