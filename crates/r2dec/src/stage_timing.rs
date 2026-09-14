@@ -56,6 +56,9 @@ pub(crate) fn begin(instructions: usize) {
     PEAKS.with_borrow_mut(Vec::clear);
     r2il::allocation::reset_peak();
     r2il::allocation::reset_size_histogram();
+    if std::env::var_os("R2SLEIGH_ALLOC_ORIGINS").is_some() {
+        r2il::allocation::enable_origin_sampling();
+    }
     ALLOCS.with_borrow_mut(|allocs| *allocs = r2il::allocation::allocation_count());
     SMALL.with_borrow_mut(|small| *small = r2il::allocation::allocations_by_size()[0]);
     LAST.with_borrow_mut(|last| *last = Some(Instant::now()));
@@ -132,6 +135,21 @@ pub(crate) fn mark(stage: &'static str) {
 pub(crate) fn report(function: &str) {
     if !enabled() {
         return;
+    }
+    for (origin, count) in r2il::allocation::take_sampled_origins()
+        .into_iter()
+        .take(12)
+    {
+        let frames = origin
+            .lines()
+            .filter(|line| {
+                line.contains("r2dec::") || line.contains("r2rewrite::") || line.contains("r2ssa::")
+            })
+            .take(4)
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" <- ");
+        eprintln!("alloc origin x{count}: {frames}");
     }
     let stages = STAGES.with_borrow_mut(std::mem::take);
     let peaks = PEAKS.with_borrow_mut(std::mem::take);

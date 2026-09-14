@@ -47,6 +47,55 @@ pub fn allocations_by_size() -> [usize; SIZE_CLASSES] {
     std::array::from_fn(|index| BY_SIZE[index].load(Ordering::Relaxed))
 }
 
+thread_local! {
+    /// Guards the sampler against its own allocations: capturing a backtrace
+    /// allocates, and counting that would recurse without end.
+    static SAMPLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Where the sampled allocations came from, by captured stack.
+    static SAMPLED: std::cell::RefCell<std::collections::HashMap<String, usize>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// One in this many allocations is attributed to a stack.
+///
+/// A render makes several million, and a backtrace costs far more than the
+/// allocation it describes, so the sampler reads a few thousand of them. That
+/// is enough to rank the sites and far too few to distort the run.
+const SAMPLE_EVERY: usize = 512;
+
+/// Record where an allocation came from, once every `SAMPLE_EVERY`.
+fn sample_origin(count: usize) {
+    if !count.is_multiple_of(SAMPLE_EVERY) || !SAMPLING_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    SAMPLING.with(|guard| {
+        if guard.get() {
+            return;
+        }
+        guard.set(true);
+        let trace = format!("{}", std::backtrace::Backtrace::force_capture());
+        SAMPLED.with_borrow_mut(|sampled| {
+            *sampled.entry(trace).or_insert(0) += 1;
+        });
+        guard.set(false);
+    });
+}
+
+static SAMPLING_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Begin attributing sampled allocations to their stacks.
+pub fn enable_origin_sampling() {
+    SAMPLING_ENABLED.store(true, Ordering::Relaxed);
+}
+
+/// The sampled stacks and how many allocations each accounted for, highest
+/// first, clearing what was collected.
+pub fn take_sampled_origins() -> Vec<(String, usize)> {
+    let mut origins = SAMPLED.with_borrow_mut(|sampled| sampled.drain().collect::<Vec<_>>());
+    origins.sort_by(|left, right| right.1.cmp(&left.1));
+    origins
+}
+
 /// Start counting sizes again from zero, for one measured render.
 pub fn reset_size_histogram() {
     for class in &BY_SIZE {
@@ -70,6 +119,7 @@ pub fn record_allocation(bytes: usize) {
     COUNTING.store(1, Ordering::Relaxed);
     ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     BY_SIZE[size_class(bytes)].fetch_add(1, Ordering::Relaxed);
+    sample_origin(ALLOCATIONS.load(Ordering::Relaxed));
     let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
     PEAK.fetch_max(live, Ordering::Relaxed);
 }

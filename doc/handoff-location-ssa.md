@@ -22523,3 +22523,63 @@ every operation of the function to hand the type writeback a read-only view;
 probe; and here a binding classification was built to extract a boolean. None
 of the three was a campaign this document had recorded as waiting, and all three
 were found by splitting a stage and reading what each half cost.
+
+## Where the allocations come from, at last
+
+The count said how many, the size histogram said what shape, and neither said
+from where -- which is why five readings of the canonicaliser produced five
+wrong guesses in one afternoon. `r2il::allocation` now samples one allocation in
+five hundred and twelve, captures its stack behind a re-entrancy guard, and the
+render reports the ranked sites under `R2SLEIGH_ALLOC_ORIGINS=1`. It needs the
+`probe` profile: a stripped release build gives a backtrace with no symbols,
+which is the same lesson `locked_sample.sh` already carries.
+
+On `BZ2_decompress`, the three largest sites, by sampled count times the
+interval:
+
+    ~441k   Vec<MachineUseDisposition>, filled, from binding_plan::construction
+    ~370k   Vec<ValueId>, one per value, in binding_components_with
+    ~300k   BTreeSet<RenderObservationId> nodes and a FilterMap collect over them
+
+The second is exact and reads plainly in the source: `binding_components_with`
+starts union-find with
+
+    let mut component_members = (0..value_count)
+        .map(|index| vec![ValueId(index as u32)])
+        .collect::<Vec<_>>();
+
+one heap vector per value, 29,837 of them, and seven call sites reach it. Union
+find does not need per-component vectors: a flat `next: Vec<u32>` holding one
+circular list per component merges two rings in O(1) by swapping two links, and
+a root's members are read by walking its ring. Same answer, no allocations.
+
+That is the fifth instance this session of one pattern -- a per-item collection
+where a flat array does -- after `local_ssa_blocks` copying every operation to
+hand over a read-only view, `value_id_for_var` searching names where a hash
+answers, the binding classification built to read one bit, and the graph's own
+use lists converted before this session. It is worth stating as the shape to
+look for rather than as four separate findings.
+
+## DecBench, five projects, witnessing 14cbf9bd
+
+The scoped sweep the plan asked for at the end of the arc ran in 3.1 hours
+(`decbench-20260914T071814-7873`, retained). Only `dpkg` needed an angr leg;
+the baseline already held the others. Paired means over the shared population:
+
+    byte_match   n=2007   0.3058 -> 0.3112   (560 better, 151 worse)
+    type_match   n=1635   0.6072 -> 0.5957   ( 39 better, 115 worse)
+    ged          n= 407  18.6020 -> 18.6216
+    vj_ged       n= 407  19.1474 -> 19.1474
+
+Byte match improved. **Type match regressed**, and that is the metric the last
+sweep showed this engine leading angr on nearly two to one. The decline is
+concentrated -- 75 functions in `diffutils`, 32 in `cronie`, 7 in `bash`, 1 in
+`bzip2` -- with examples like `out_html` 1.000 -> 0.667 and `write_helpfiles`
+0.571 -> 0.286.
+
+The baseline witnesses a tree from several sessions back, so the cause is
+somewhere in the intervening work rather than necessarily in this session's.
+Two things deliberately not done: the sweep was **not** accepted into the
+baseline, because `--accept-baseline` would overwrite the reference and erase
+the signal; and no bisect was launched, because each point costs about three
+hours of a shared host and that is a spend to agree rather than assume.
