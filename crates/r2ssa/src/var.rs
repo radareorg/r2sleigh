@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 pub use r2source::{CanonicalStorageId, CanonicalStorageSpace};
 
+use crate::name::{InternedName, intern};
+
 /// Canonical classification for SSA variable names.
 ///
 /// Raw SSA names still carry prefixes because they originate at the IL/lift
@@ -100,10 +102,10 @@ impl SSAVarNameKind {
 pub struct SSAVar {
     /// The base name of the variable (e.g., "RAX", "tmp:0x1000", "const:0x42").
     ///
-    /// A boxed string rather than a growable one: a variable's name is set
-    /// when it is made and never appended to, and the capacity word is eight
-    /// bytes on every variable of every operation of every function.
-    name: Box<str>,
+    /// Interned rather than owned: the same few hundred spellings are repeated
+    /// across every operation of every function, so a variable points at the
+    /// one copy (see [`crate::name`]) and cloning one copies a pointer.
+    name: &'static InternedName,
     /// Exact source bitvector for constants, zero where `is_constant` is
     /// false so that two non-constants compare equal.
     ///
@@ -145,7 +147,7 @@ struct SSAVarFields {
 impl From<SSAVarFields> for SSAVar {
     fn from(fields: SSAVarFields) -> Self {
         Self {
-            name: fields.name.into_boxed_str(),
+            name: intern(&fields.name),
             constant_bits: fields.constant_bits.unwrap_or(0),
             version: fields.version,
             size: fields.size,
@@ -158,7 +160,7 @@ impl From<SSAVarFields> for SSAVar {
 impl From<SSAVar> for SSAVarFields {
     fn from(var: SSAVar) -> Self {
         Self {
-            name: var.name.into_string(),
+            name: var.name.text().to_owned(),
             version: var.version,
             size: var.size,
             constant_bits: var.is_constant.then_some(var.constant_bits),
@@ -174,7 +176,7 @@ impl PartialEq for SSAVar {
             && self.is_constant == other.is_constant
             && self.constant_bits == other.constant_bits
             && self.rename_disambiguator == other.rename_disambiguator
-            && self.name == other.name
+            && std::ptr::eq(self.name, other.name)
     }
 }
 
@@ -182,8 +184,14 @@ impl Eq for SSAVar {}
 
 impl Ord for SSAVar {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.name
-            .cmp(&other.name)
+        // Two variables that share a spelling share its entry, so the common
+        // case answers without looking at the text at all.
+        let names = if std::ptr::eq(self.name, other.name) {
+            std::cmp::Ordering::Equal
+        } else {
+            self.name.text().cmp(other.name.text())
+        };
+        names
             .then_with(|| self.version.cmp(&other.version))
             .then_with(|| self.size.cmp(&other.size))
             .then_with(|| self.is_constant.cmp(&other.is_constant))
@@ -200,7 +208,7 @@ impl PartialOrd for SSAVar {
 
 impl std::hash::Hash for SSAVar {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
+        self.name.id().hash(state);
         self.version.hash(state);
         self.size.hash(state);
         self.is_constant.hash(state);
@@ -215,9 +223,9 @@ const fn is_zero(value: &u32) -> bool {
 
 impl SSAVar {
     /// Create a new SSA variable.
-    pub fn new(name: impl Into<String>, version: u32, size: u32) -> Self {
+    pub fn new(name: impl AsRef<str>, version: u32, size: u32) -> Self {
         Self {
-            name: name.into().into_boxed_str(),
+            name: intern(name.as_ref()),
             constant_bits: 0,
             version,
             size,
@@ -237,8 +245,8 @@ impl SSAVar {
     ///
     /// Read-only: the name decides the comparison prefix the struct carries,
     /// so a variable's name is set when it is made and never after.
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn name(&self) -> &'static str {
+        self.name.text()
     }
 
     /// The same variable under a different display name.
@@ -248,9 +256,9 @@ impl SSAVar {
     /// fixture that needs a variable whose spelling disagrees with the bits it
     /// carries -- the case the name-versus-identity rule exists for -- builds
     /// it this way.
-    pub fn renamed(&self, name: impl Into<String>) -> Self {
+    pub fn renamed(&self, name: impl AsRef<str>) -> Self {
         Self {
-            name: name.into().into_boxed_str(),
+            name: intern(name.as_ref()),
             ..self.clone()
         }
     }
@@ -273,14 +281,14 @@ impl SSAVar {
     }
 
     /// Create the initial (version 0) variable.
-    pub fn initial(name: impl Into<String>, size: u32) -> Self {
+    pub fn initial(name: impl AsRef<str>, size: u32) -> Self {
         Self::new(name, 0, size)
     }
 
     /// Create a constant SSA variable.
     pub fn constant(value: u64, size: u32) -> Self {
         Self {
-            name: format!("const:{value:x}").into_boxed_str(),
+            name: intern(&format!("const:{value:x}")),
             constant_bits: value,
             version: 0,
             size,
@@ -321,14 +329,14 @@ impl SSAVar {
     pub fn display_name(&self) -> String {
         // Handle special prefixes (hex fallbacks and other spaces)
         if self.name_kind().is_prefixed_display_name() {
-            return format!("{}_{}", self.name, self.version);
+            return format!("{}_{}", self.name(), self.version);
         }
         // Named register - uppercase it
-        format!("{}_{}", self.name.to_uppercase(), self.version)
+        format!("{}_{}", self.name().to_uppercase(), self.version)
     }
 
     pub fn name_kind(&self) -> SSAVarNameKind {
-        SSAVarNameKind::classify(&self.name)
+        SSAVarNameKind::classify(self.name())
     }
 
     /// Check if this is a constant SSA value.
@@ -345,7 +353,7 @@ impl SSAVar {
     /// A varnode the architecture does not name is spelled from its offset, so
     /// that offset is recoverable and is the only thing identifying the storage.
     pub fn register_offset(&self) -> Option<u64> {
-        let rest = self.name.strip_prefix("reg:")?;
+        let rest = self.name().strip_prefix("reg:")?;
         u64::from_str_radix(rest, 16).ok()
     }
 
@@ -516,7 +524,7 @@ mod tests {
         assert_eq!(v0.version, 0);
         assert_eq!(v1.version, 1);
         assert_eq!(v2.version, 2);
-        assert_eq!(v0.name, v1.name);
+        assert_eq!(v0.name(), v1.name());
     }
 
     #[test]
