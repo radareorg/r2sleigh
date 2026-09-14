@@ -23021,3 +23021,42 @@ So the work is to build that register once -- an emission demand set every stage
 reads instead of re-deriving -- and only then is the flag class, the largest in
 the output, reachable. Until it exists, the reader question cannot be asked
 without a partial answer, and every partial answer refuses a different function.
+
+### Why the reads relation cannot be reconstructed from a term's leaves
+
+The demand closure was built as described -- seeded from every output-less
+instruction (`SSAOp::CBranch` and the stores among them), the certified boundary
+readers, the caller-supplied values, every memory access and every phi whose
+merge is observed -- and it still refused, on `bzip2` at -O0 in
+`uInt64_isZero`: `RenderedIdentity(Value { value: ValueId(77), reason:
+MissingBindingCertificate })`, a load the semantic view requires a binding for.
+
+Measuring the relation itself says why. In a function of 152 values and 118
+instructions there are 120 canonical roots, and the reads relation built from
+`TermArena::leaves` plus the machine projection has **87 entries in total, 36 of
+the roots with none at all**. An instruction reads one to three operands, so a
+faithful relation would have well over two hundred. Half the function was
+therefore unreachable from any consumer and was called dead.
+
+The reconstruction is the problem, not the seeds. A leaf is a `MachineExprId`,
+and recovering the value it stands for means recognising it either as a
+`Source` read of another value's binding or as the root of a producing entity.
+Neither holds for every leaf: a memory read's leaf is the read's own expression,
+a projection's leaf is the projection, and a constant has no value at all.
+Leaves are what the *renderer* needs, and they are the wrong place to ask who
+reads whom.
+
+The importer already knows the answer exactly. It decides, per value, whether a
+producer is expanded into the reader's term or left as a leaf the reader names
+-- `ImportedValue::substituted` records the first and the arena's definitions
+the second. What is missing is that it never writes down the second as a
+relation. So the work is in `crates/r2rewrite/src/import.rs`: record, for each
+imported root, the values it reads by name, and carry that through
+`canonicalize_with` to the canonical term, adjusting it exactly where a rewrite
+removes a leaf. That is a consumer graph the rewriter owns rather than one every
+consumer reconstructs differently, and it is what the binding plan's deadness,
+the discharge set and the seal should all read.
+
+`demand-closure-attempt.diff` in the session scratchpad has the closure, the
+seeds, the `reads` fields and the instrumentation that produced the numbers
+above.
