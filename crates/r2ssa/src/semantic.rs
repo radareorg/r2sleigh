@@ -4239,26 +4239,49 @@ struct ConventionCallBoundary {
 /// record, and the position is then unknown.
 fn call_entering_stack_pointer_offset(
     function: &SSAFunction,
+    graph: &SsaGraph,
     block: &crate::function::SSABlock,
     call_op_index: usize,
 ) -> Option<i64> {
-    let Some(entering) = block
+    let recorded = block
         .ops
         .get(call_op_index.checked_add(1)?..)?
         .iter()
         .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
         .find_map(|op| match op {
-            SSAOp::CallRestore { src, .. } => Some(src),
+            SSAOp::CallRestore { src, .. } => Some(src.clone()),
             _ => None,
-        })
-    else {
-        r2il::refusal_evidence!(
-            "call-entering-stack-pointer",
-            "call at ({:#x}, {call_op_index}) has no restore recording the carrier it found",
-            block.addr
-        );
-        return None;
+        });
+    let entering = match recorded {
+        Some(entering) => entering,
+        // A transfer that spends nothing on the carrier records no restore: a
+        // tail call returns nowhere, so there is nothing to bring back, and
+        // the pointer it found is the one reaching it.
+        None => {
+            let Some(storage) = function.stack_pointer_carrier() else {
+                r2il::refusal_evidence!(
+                    "call-entering-stack-pointer",
+                    "call at ({:#x}, {call_op_index}) records no carrier and the machine names no stack pointer",
+                    block.addr
+                );
+                return None;
+            };
+            match reaching_stack_pointer_before(function, graph, storage, block.addr, call_op_index)
+            {
+                Some(ReachingAbiState::PreservedEntry) => return Some(0),
+                Some(ReachingAbiState::Value(value)) => graph.value(value)?.var.clone(),
+                None => {
+                    r2il::refusal_evidence!(
+                        "call-entering-stack-pointer",
+                        "call at ({:#x}, {call_op_index}) records no carrier and no {storage:?} reaches it",
+                        block.addr
+                    );
+                    return None;
+                }
+            }
+        }
     };
+    let entering = &entering;
     let Some(root) = resolve_entry_stack_root(function.decompile_prep_facts(), entering) else {
         r2il::refusal_evidence!(
             "call-entering-stack-pointer",
@@ -4369,7 +4392,8 @@ fn reaching_stack_argument_before_call(
     size_bytes: u32,
 ) -> Option<(ValueId, i64)> {
     let block = function.get_block(block_addr)?;
-    let Some(entering) = call_entering_stack_pointer_offset(function, block, call_op_index) else {
+    let Some(entering) = call_entering_stack_pointer_offset(function, graph, block, call_op_index)
+    else {
         r2il::refusal_evidence!(
             "call-argument-stack-store",
             "callsite ({block_addr:#x}, {call_op_index}) has no entry-relative stack pointer entering the call"
@@ -5480,6 +5504,34 @@ fn storage_is_untouched_on_all_predecessor_paths(
         }));
     }
     reached_entry
+}
+
+/// The stack pointer reaching a boundary, for a caller that has the carrier
+/// but no machine context of its own.
+fn reaching_stack_pointer_before(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    storage: CanonicalStorageId,
+    block_addr: u64,
+    boundary_op_index: usize,
+) -> Option<ReachingAbiState> {
+    let visited = BTreeMap::new();
+    match reaching_abi_value_before(
+        function,
+        graph,
+        block_addr,
+        boundary_op_index,
+        storage,
+        &visited,
+        ReachingAbiPolicy {
+            allow_distinct_phi_inputs: false,
+            calls_are_barriers: true,
+            transfer_carrier: Some(storage),
+        },
+    )? {
+        ReachingAbiPath::Reaches(state) => Some(state),
+        ReachingAbiPath::Cycle => None,
+    }
 }
 
 fn reaching_abi_value_in_block_with_policy(
@@ -12185,7 +12237,7 @@ fn collect_stack_call_argument_values(
     // instruction finds it. Objects are keyed by their entry-relative
     // position, so the boundary is that pointer's entry-relative position:
     // anything below it is this function's own frame, not an argument.
-    let Some(entering) = call_entering_stack_pointer_offset(function, block, op_idx) else {
+    let Some(entering) = call_entering_stack_pointer_offset(function, graph, block, op_idx) else {
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();

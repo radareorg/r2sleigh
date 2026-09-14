@@ -3086,6 +3086,11 @@ fn frame_pointer_restored_across_calls(
 }
 
 impl SSAFunction {
+    /// The architectural stack pointer, as the machine roles name it.
+    pub const fn stack_pointer_carrier(&self) -> Option<CanonicalStorageId> {
+        self.stack_pointer_carrier
+    }
+
     #[cfg(test)]
     pub(crate) fn from_exact_test_blocks(blocks: &[SSABlock], cfg: CFG) -> Self {
         let entry = cfg
