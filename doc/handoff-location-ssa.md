@@ -22605,3 +22605,28 @@ declares `uint64_t, uint64_t` where the source has `const uint8_t *, size_t`,
 while returns recover in 32 of 54. Returns work and parameters never do, which
 points at the parameter path specifically rather than at type recovery in
 general, and it is a better lead than the aggregate score.
+
+### Reading the origin sampler: it counts the process, the stages count one render
+
+Two conversions of the same shape followed from the sampler's ranking. Union
+find stopped keeping a vector per value (`binding_components_with`, above), and
+the machine builder stopped keeping one per instruction: `for_graph` allocated
+`vec![Refused; inputs.len()]` for every instruction, `canonical_machine_use_dispositions`
+rebuilt a second vector per instruction to hand back what it was given, and
+`pack_use_dispositions` flattened the result. One flat table with an offset per
+instruction now runs the whole chain, rewritten in place, which is the shape
+`MachineProjection` already kept at the far end.
+
+    5,442,708 -> 5,382,461   union find rings
+    5,382,461 -> 5,322,044   flat use dispositions
+
+Both byte-identical, census 1436 of 1446, gate 54 of 54.
+
+The numbers are smaller than the sampler suggested -- it ranked these at 370 k
+and 441 k, and each saved about 60 k -- and the discrepancy is not sampling
+error. **The sampler counts the whole process; the stage counters count one
+render.** `MachineBuilder::for_graph` runs during preparation for every callee's
+facts as well as for the rendered function, so its process-wide total is several
+times its share of the measured render. Read the sampler for ordering and the
+stage counters for magnitude; expecting the two to agree wasted a measurement
+here.

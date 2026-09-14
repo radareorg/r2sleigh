@@ -1210,9 +1210,9 @@ impl MachineProjection {
             write_dispositions[inst_index] =
                 Some(machine_write_disposition(artifact, inst, root_expr));
         }
-        let use_dispositions =
-            canonical_machine_use_dispositions(artifact, builder.use_dispositions)?;
-        let packed = pack_use_dispositions(use_dispositions);
+        let mut use_slots = builder.use_slots;
+        canonical_machine_use_dispositions(artifact, &builder.use_offsets, &mut use_slots)?;
+        let packed = pack_use_dispositions(builder.use_offsets, use_slots);
         let projection = Self {
             machine: MachineFunction {
                 arena: MachineExprArena {
@@ -1636,23 +1636,21 @@ struct PackedUseTable {
 
 /// Flatten the per-instruction rows and lift every address certificate out of
 /// the cells into its own vector.
-fn pack_use_dispositions(rows: Vec<Vec<MachineUseDisposition>>) -> PackedUseTable {
-    let mut offsets = Vec::with_capacity(rows.len() + 1);
-    let mut slots = Vec::new();
+fn pack_use_dispositions(
+    offsets: Vec<u32>,
+    dispositions: Vec<MachineUseDisposition>,
+) -> PackedUseTable {
+    let mut slots = Vec::with_capacity(dispositions.len());
     let mut addresses = Vec::new();
-    offsets.push(0u32);
-    for row in rows {
-        for disposition in row {
-            slots.push(match disposition {
-                MachineUseDisposition::Exact(slice) => PackedUseDisposition::Exact(slice),
-                MachineUseDisposition::MemoryAddress(address) => {
-                    addresses.push(address);
-                    PackedUseDisposition::MemoryAddress(addresses.len() as u32 - 1)
-                }
-                MachineUseDisposition::Refused(refusal) => PackedUseDisposition::Refused(refusal),
-            });
-        }
-        offsets.push(slots.len() as u32);
+    for disposition in dispositions {
+        slots.push(match disposition {
+            MachineUseDisposition::Exact(slice) => PackedUseDisposition::Exact(slice),
+            MachineUseDisposition::MemoryAddress(address) => {
+                addresses.push(address);
+                PackedUseDisposition::MemoryAddress(addresses.len() as u32 - 1)
+            }
+            MachineUseDisposition::Refused(refusal) => PackedUseDisposition::Refused(refusal),
+        });
     }
     PackedUseTable {
         offsets: offsets.into_boxed_slice(),
@@ -1661,43 +1659,39 @@ fn pack_use_dispositions(rows: Vec<Vec<MachineUseDisposition>>) -> PackedUseTabl
     }
 }
 
+/// Rewrite every use disposition in place, from the operation's own view of
+/// the slice to the canonical one. In place because the table is already the
+/// shape the projection keeps, and rebuilding it row by row allocated a vector
+/// for every instruction to hand back what it was given.
 fn canonical_machine_use_dispositions(
     artifact: &SsaArtifact,
-    operation_relative: Vec<Vec<MachineUseDisposition>>,
-) -> Result<Vec<Vec<MachineUseDisposition>>, MachineBuildError> {
+    offsets: &[u32],
+    slots: &mut [MachineUseDisposition],
+) -> Result<(), MachineBuildError> {
     let graph = artifact.graph();
-    if operation_relative.len() != graph.insts.len() {
+    if offsets.len() != graph.insts.len() + 1 {
         return Err(MachineBuildError::TopologyMismatch);
     }
-    let mut canonical = Vec::with_capacity(operation_relative.len());
-    for (inst_index, row) in operation_relative.into_iter().enumerate() {
-        let inst = graph
-            .insts
-            .get(inst_index)
-            .ok_or(MachineBuildError::TopologyMismatch)?;
-        if inst.id.0 as usize != inst_index || row.len() != inst.inputs.len() {
+    for (inst_index, inst) in graph.insts.iter().enumerate() {
+        let start = offsets[inst_index] as usize;
+        let end = offsets[inst_index + 1] as usize;
+        if inst.id.0 as usize != inst_index
+            || end < start
+            || end > slots.len()
+            || end - start != inst.inputs.len()
+        {
             return Err(MachineBuildError::TopologyMismatch);
         }
-        let mut canonical_row = Vec::with_capacity(row.len());
-        for (input_idx, disposition) in row.into_iter().enumerate() {
+        for (input_idx, input) in inst.inputs.iter().enumerate() {
             let site = UseSite {
                 inst: inst.id,
                 input_idx,
             };
-            let input = *inst
-                .inputs
-                .get(input_idx)
-                .ok_or(MachineBuildError::MissingUseDisposition(site))?;
-            canonical_row.push(canonical_machine_use_disposition(
-                artifact,
-                site,
-                input,
-                disposition,
-            )?);
+            let at = start + input_idx;
+            slots[at] = canonical_machine_use_disposition(artifact, site, *input, slots[at])?;
         }
-        canonical.push(canonical_row);
     }
-    Ok(canonical)
+    Ok(())
 }
 
 fn canonical_machine_use_disposition(
@@ -2825,22 +2819,50 @@ struct MachineBuilder {
     value_nodes: BTreeMap<(ValueId, MachineType), MachineExprId>,
     address_nodes: BTreeMap<(ValueId, ObjectId, MachineAddressSpace), MachineExprId>,
     store_addresses: BTreeMap<StructuredAccessId, MachineExprId>,
-    use_dispositions: Vec<Vec<MachineUseDisposition>>,
+    /// Every instruction's use dispositions, flat, with `use_offsets` naming
+    /// where each instruction's row starts. This was a vector per instruction,
+    /// rebuilt as a second vector per instruction by the canonical pass and
+    /// flattened by a third -- three shapes and two allocations per
+    /// instruction to arrive at the one the projection keeps.
+    use_slots: Vec<MachineUseDisposition>,
+    use_offsets: Vec<u32>,
 }
 
 impl MachineBuilder {
+    /// Where one instruction's uses sit in the flat table.
+    fn use_row_range(&self, inst: InstId) -> Option<std::ops::Range<usize>> {
+        let start = *self.use_offsets.get(inst.0 as usize)? as usize;
+        let end = *self.use_offsets.get(inst.0 as usize + 1)? as usize;
+        (start <= end && end <= self.use_slots.len()).then_some(start..end)
+    }
+
+    /// Where one use of one instruction sits in the flat table.
+    fn use_slot_index(&self, inst: InstId, input_idx: usize) -> Option<usize> {
+        let row = self.use_row_range(inst)?;
+        let at = row.start.checked_add(input_idx)?;
+        (at < row.end).then_some(at)
+    }
+
     fn for_graph(graph: &SsaGraph) -> Self {
         Self {
-            use_dispositions: graph
-                .insts
-                .iter()
-                .map(|inst| {
-                    vec![
-                        MachineUseDisposition::Refused(MachineUseRefusal::UnsupportedOperation);
-                        inst.inputs.len()
-                    ]
-                })
-                .collect(),
+            use_offsets: {
+                let mut offsets = Vec::with_capacity(graph.insts.len() + 1);
+                let mut total = 0u32;
+                offsets.push(total);
+                for inst in &graph.insts {
+                    total += inst.inputs.len() as u32;
+                    offsets.push(total);
+                }
+                offsets
+            },
+            use_slots: vec![
+                MachineUseDisposition::Refused(MachineUseRefusal::UnsupportedOperation);
+                graph
+                    .insts
+                    .iter()
+                    .map(|inst| inst.inputs.len())
+                    .sum::<usize>()
+            ],
             ..Self::default()
         }
     }
@@ -2868,9 +2890,8 @@ impl MachineBuilder {
         validate_machine_use_slice(slice, source.width_bits)
             .map_err(|_| MachineBuildError::UseDispositionMismatch(site))?;
         let cell = self
-            .use_dispositions
-            .get_mut(inst.id.0 as usize)
-            .and_then(|row| row.get_mut(input_idx))
+            .use_slot_index(inst.id, input_idx)
+            .and_then(|at| self.use_slots.get_mut(at))
             .ok_or(MachineBuildError::MissingUseDisposition(site))?;
         *cell = MachineUseDisposition::Exact(slice);
         Ok(())
@@ -2920,13 +2941,12 @@ impl MachineBuilder {
             }
         }
         let row = self
-            .use_dispositions
-            .get_mut(inst.id.0 as usize)
+            .use_row_range(inst.id)
             .ok_or(MachineBuildError::MissingInstruction(inst.id))?;
         if row.len() != inst.inputs.len() {
             return Err(MachineBuildError::TopologyMismatch);
         }
-        row.fill(MachineUseDisposition::Refused(refusal));
+        self.use_slots[row].fill(MachineUseDisposition::Refused(refusal));
         Ok(())
     }
 
