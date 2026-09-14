@@ -22630,3 +22630,26 @@ facts as well as for the rendered function, so its process-wide total is several
 times its share of the measured render. Read the sampler for ordering and the
 stage counters for magnitude; expecting the two to agree wasted a measurement
 here.
+
+### What the origin sampler is good for, and what it is not
+
+Two limits, both learned by acting on its numbers. It counts the **whole
+process** while the stage counters count **one render**, so a site that also
+runs during preparation reads several times larger than its share of the render.
+And it groups by backtrace string, which in the `probe` profile carries line
+tables rather than full symbols, so distinct call paths collapse into one entry
+and its counts over-attribute badly -- its top entry read 1.7 M for a structure
+built exactly once per render, about thirty thousand allocations.
+
+Use it to find and rank sites, never for magnitude. Every site it named was
+real; none of its numbers survived contact with the stage counters. Confirm the
+size with a mark around the code before deciding whether the change is worth
+making.
+
+That check is what closed this seam. The snapshot `into_snapshot` builds carries
+a boxed row per instruction, which looked like the largest remaining site; a
+counter says it is built once per render, so it is about 0.6 percent, and the
+sixteen-site conversion it would need is not worth making. The allocation work
+for this function is finished at 5,322,044 -- from 6,653,942 this morning, a
+fifth gone -- with no single site left that pays like the discarded
+classification did.
