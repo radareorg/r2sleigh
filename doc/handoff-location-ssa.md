@@ -23142,3 +23142,40 @@ The full attempt, including the `reads_complete` flag that separates "the import
 never named this" from "the rewrite removed it", is kept at
 `flag-folding-on-the-reads-relation.diff` in the session scratchpad. Everything
 under it is committed and green.
+
+### The read mapping has to be per occurrence, not per value
+
+The decision taken is that the rewriter reports where each read moved, rather
+than the journal inferring it from the discharged instructions. That was built:
+`CanonicalValue` gained `read_sites`, a list pairing each value the canonical
+term still reads with the use site in the program where that read was made --
+the root's own instruction or one of the instructions it discharges -- and both
+the inline path (`observe_rendered_replacement_expr`) and the bound path
+(`observe_canonical_assignment_stmt`) push a marker for every entry.
+
+It gets the flag class most of the way. `uInt64_isZero` loses its three flag
+locals and the undefined `r2sleigh_int_sborrow_32`, the deadness rule gives the
+flags no binding, the discharge set closes transitively so a term that absorbs
+a `!=` also absorbs the two flag instructions under it, and the earlier
+`ConflictingUse` and `RenderedValueRequired` refusals are gone.
+
+What it does not get is the last one, and the instrumentation names why.
+`ValueId(37)` and `ValueId(75)` are two different surviving terms, each reading
+`RDX_2`, and the mapping hands both the same use site `InstId(60)#0` because
+that is the first site in their owned instructions that reads that value.
+Claiming a site twice is a conflicting use; claiming it once leaves the other
+term's read unauthorised. Assigning each site at most once globally does not fix
+it either, because the two terms are not reading two different occurrences of
+the same value in any order the assignment can recover.
+
+So the mapping the rewriter has to report is **per occurrence**, not per value:
+which *leaf of which term* stands for which use site, carried through every
+rewrite that moves or duplicates it. That is the form the decision actually
+names -- each rule recording which read moved where -- and it needs the
+provenance threaded through `Rule::apply` and the term arena rather than derived
+afterwards from the graph, which is what this attempt did.
+
+`rewriter-reports-read-sites.diff` in the session scratchpad has the whole
+attempt: the `read_sites` field and its derivation, the transitive closure of
+discharges, the unobserved-merge discount in the reader tally, the
+`reads_complete` faithfulness flag, and the two journal call sites.
