@@ -22710,3 +22710,62 @@ unless the function's own name marks it a partition.
 Census 1446/1436 becomes 1445/1436: `main` moves from refused to rendered and
 `sym.main.cold` from a spurious standalone body to the cold-partition note that
 `doc/adr-*` already specifies. Refusals fall from ten to nine. Gate 54/54.
+
+## The stack geometry predicts the renderer, and that is the refusal
+
+`bzip2` at -O2 refuses `fallbackSort` with `observation journal:
+RenderedValueRequired`, and the trace runs all the way to the prologue. The
+value the seal cannot account for is `ValueId(31)`, one of six `RSP = RSP - 8`
+pushes, planned as `Bound { binding: BindingId(4) }` and carried by nothing the
+renderer emitted. It is unaccounted because the whole push chain left the stack
+geometry, and it left through a cascade whose first domino is one instruction.
+
+The geometry certificate (`collect_stack_geometry_certificate`,
+`crates/r2ssa/src/semantic.rs`) keeps a stack-rooted value while every use of it
+is excused -- a frame round trip, a return control, the address operand of an
+access to an exact stack object, an unobserved use, or an operand of another
+instruction that is itself geometry. `fallbackSort` has `tmp = RSP_phi + const`
+addressing the declared array `ftab`, and that instruction is deliberately *not*
+geometry: `addresses_declared_array` keeps it so the constant survives as the
+subscript. Not being geometry, it counts as a reader of the stack pointer, so
+the merged stack pointer leaves, and with it `RSP_7` through `RSP_1`, six pushes
+and the `sub rsp, 0xb98`.
+
+Four variants were built and measured against gate and census. Excusing the use
+outright fixes `fallbackSort` and breaks `gz_compress`, `gz_uncompress` and
+`fixedtables` in `minigzip` at -O0, because the same excusal certifies a use the
+renderer then spells (`ConflictingUse`, `UnobservedBindingRead`). Closing the
+excusal over the named address's own uses reverses the trade. Restricting it to
+the stack-pointer carrier, then to a base a declared slot contains, then to a
+base that resolves to a stack object, each moves which functions refuse without
+moving the total: census 1436/9 becomes 1434/11 in the best variant. The full
+experiment is kept at `stack-geometry-named-address.diff` in the session
+scratchpad.
+
+The reason no variant wins is that the question the geometry is asking cannot be
+answered where it is asked. Whether a surviving address-forming instruction
+spells the stack pointer is a *rendering* fact. In `fallbackSort` the renderer
+spells the base as the object name -- `RCX_1 = (uint64_t)stack_m3016 + 0xb84` --
+and the geometry's claim holds. In `cleanup_entry_new` (`dpkg-divert` at -O0)
+the same shape has the lowerer call `get_expr` on the base and refuse, because
+the value was certified away. Both bases resolve to a stack object; both sit
+under `addresses_declared_array`; the object model cannot tell them apart before
+the renderer runs. `binding_plan/rules.rs` states the rule the experiment keeps
+breaking: seed only geometry uses "that disappear with their defining
+operation", and let the rendered memory-address marker account for the surviving
+operand. A named address does not disappear, so it has no business in that set,
+and yet without it the base has no disposition at all.
+
+Worth noting on the way past: the guard is not achieving what its comment
+claims. `RCX_1 = (uint64_t)stack_m3016 + 0xb84` is not `&ftab[257]`, so keeping
+the instruction bought base-plus-offset arithmetic over a synthesized object
+name rather than a subscript. The subscript that does appear comes from the
+memory-access renderer, not from this instruction surviving.
+
+This is the fork to settle before more effort goes into the class: either the
+naming decision moves ahead of the certificate (or the certificate is re-derived
+after it) so the two cannot disagree, or stack address arithmetic stops
+surviving as instructions altogether and every use of a stack address is spelled
+from the object model, which deletes `addresses_declared_array`. The four
+`RenderedValueRequired` refusals and at least the three -O0 functions above all
+sit on the answer.
