@@ -23224,3 +23224,33 @@ Everything attempted is kept in the session scratchpad; the fullest is
 accesses, the transitive discharge closure, the unobserved-merge discount and
 the `reads_complete` faithfulness flag, all of which stay useful on top of a
 site-carrying leaf.
+
+### Twelfth attempt, and the honest stop
+
+The mapping was also attached per occurrence -- walking the rendered expression
+and wrapping each `Var` node that spells a read with that read's marker, rather
+than wrapping the whole expression -- which is the half the chosen design was
+missing. It still refuses on the same binding, because the read of `RDX_2` is
+inside the *access's* expression, rendered on its own and spliced into the
+value's, so the value-level walk never sees the node.
+
+That is twelve measured attempts on one class, each reverted, each failing at a
+different join between the rewriter, the journal, the plan and the audit. The
+pattern across all twelve is the finding: **four components each keep their own
+answer to "who reads this value and where", and no two of them agree after a
+rewrite.** Patching any one of them moves the disagreement rather than removing
+it, which is exactly what twelve reverts look like.
+
+The work this needs is therefore not another patch but the thing the ninth
+attempt's write-up named: one occurrence identity, minted where a read is first
+imported and carried unchanged through the arena, the rewrite, the plan and the
+audit. `MachineExprKind::Source` has no use site today, `TermKind::Leaf` is
+hash-consed across sites, `ObservationTarget::Use` is keyed on a graph site, and
+the audit collects markers by tree position -- four representations of one fact.
+Until they are one, the reads a rewrite keeps cannot be authorised where they
+land.
+
+All twelve attempts are kept in the session scratchpad. The two that matter for
+whoever picks this up are `read-sites-values-and-accesses.diff`, which has the
+mapping and the transitive discharge closure, and `per-occurrence-marking.diff`,
+which has the tree-walking attachment on top of it.
