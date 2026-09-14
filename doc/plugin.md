@@ -20,45 +20,77 @@ Reads anal.arch and anal.bits from radare2:
 - riscv + 32 bits -> riscv32
 - mips -> mips
 
-Override with: a:sla.arch x86-64
+Maintainer override: `a:sla.arch x86-64`
 
 Plugin Callbacks
 ----------------
 
+sleigh_init / sleigh_fini: Plugin lifetime; init also registers the pd:s command.
+sleigh_eligible: Whether this plugin answers for the current architecture.
 sleigh_op: Lifts instructions during aaa. Generates ESIL.
-sleigh_recover_vars: Provides SSA-derived variables for afva.
+sleigh_cmd: The a:sla command namespace.
+sleigh_pre_analysis: Installs the register profile before the analysis passes.
 sleigh_analyze_fcn: Per-function SSA analysis after af (also auto-applies DATA xrefs).
-sleigh_get_data_refs: Def-use xrefs callback used by radare2 during aar when supported.
-sleigh_post_analysis: Auto-taint + signature/CC write-back during aaaa.
+sleigh_post_analysis: Native post-analysis enrichment during aa/aaa/aaaa.
 
 Command Reference
 -----------------
 
-Instruction-Level:
-- a:sla -- Status and help
-- a:sla.info -- Architecture info
+Configuration and status:
+- a:sla, a:sla.info -- Status and loaded architecture
 - a:sla.arch [name] -- Get/set architecture
-- a:sla.json -- R2IL ops as JSON
-- a:sla.regs -- Registers read/written
-- a:sla.mem -- Memory accesses
-- a:sla.vars -- All varnodes
-- a:sla.ssa -- SSA for instruction
-- a:sla.defuse -- Def-use analysis
+- a:sla.profilej -- Per-function stage timings
+
+Instruction-Level:
+- a:sla.debug.json -- R2IL ops as JSON
+- a:sla.debug.opvals -- Registers read/written
+- a:sla.debug.mem -- Memory accesses
+- a:sla.debug.ssa -- SSA for instruction
 
 Function-Level:
-- a:sla.ssa.func -- Function SSA with phi nodes
-- a:sla.ssa.func.opt -- Optimized function SSA
-- a:sla.defuse.func -- Function-wide def-use
-- a:sla.dom -- Dominator tree
-- a:sla.cfg -- ASCII CFG
-- a:sla.cfg.json -- CFG as JSON
-- a:sla.taint -- Taint analysis
-- a:sla.sym -- Symbolic execution summary
-- a:sla.sym.paths -- Path exploration
-- a:sla.slice [var] -- Backward slice
-- a:sla.dec -- Decompile to C
+- a:sla.debug.ssa.func -- Function SSA with phi nodes
+- a:sla.debug.ssa.func.opt -- Optimized function SSA
+- a:sla.debug.defuse.func -- Function-wide def-use
+- a:sla.debug.dom -- Dominator tree
+- a:sla.debug.cfg -- ASCII CFG
+- a:sla.debug.cfg.json -- CFG as JSON
+- a:sla.debug.taint -- Taint analysis
+- a:sla.debug.slice [var] -- Backward slice
+- pd:s -- Decompile through r2sleigh's bounded borrowed snapshot
 
-Both a:sla and a:sleigh prefixes work.
+`pd:s` is the only decompile route. It receives one
+ABI-139/snapshot-schema-12 borrowed snapshot through accessor-schema 5,
+deep-copies it synchronously into source-interface-schema 10, and either
+completes from that immutable source or refuses. It never falls back to live
+blocks, names, or detached test metadata. The direct `a:sla.dec` and
+`a:sla.decj` commands, which could not construct source authority and only ever
+refused, are deleted rather than kept as shims.
+
+The `a:sym.*` namespace is gone with the symbolic-execution subsystem it named.
+The plugin no longer answers for that prefix at all.
+
+Executable semantic C is authorized only through the generic source-obligation
+ledger and typed output-node ownership. Every live machine effect from the
+immutable source revision must have exactly one certified typed owner; missing,
+duplicate, unsupported, or foreign ownership residualizes or refuses without
+falling through to legacy C.
+
+Benchmark-shaped branchless guards and struct-array updates are regression
+inputs, not production recognizers or renderer routes. They currently remain
+residual until generic typed expression, return, aggregate-memory, and lvalue
+regions can close their complete ledgers. Consequently,
+`semantic_kernel_render` is present only when a generic certified region owns
+the exact source revision; its absence for those fixtures is expected.
+
+Function signatures, layouts, and calling-convention carriers come only from
+the immutable radare2 function snapshot. DWARF ingestion is a binary-load
+operation in radare2; the plugin never reparses or imports DWARF during
+analysis or decompilation.
+
+Snapshot-owned type inference and writeback are not yet exposed through a
+radare2 host callback, so no detached r2sleigh type-report command is exposed.
+Type/writeback integration must use an equivalent locked snapshot transaction;
+radare2's `afcfj` and `afvj` remain the genuine host-owned inspection path.
 
 DATA xrefs are applied automatically during function analysis (`af`) and reference
 analysis (`aar`) via plugin callbacks.
@@ -75,8 +107,8 @@ pipeline internally:
 - `r2il_block_defuse_json`
 - `r2dec_block`
 
-This keeps CLI and plugin output logic aligned while preserving plugin ABI.
-The external C-ABI signatures are unchanged.
+This keeps CLI and plugin output logic aligned. The supported external C ABI is
+the versioned V2 function table; retired direct legacy exports are not preserved.
 
 The shared action/format policy is:
 
@@ -85,23 +117,30 @@ The shared action/format policy is:
 - `defuse`: `json`, `text`
 - `dec`: `c_like`, `json`, `text`
 
-Endianness Compatibility
-------------------------
+Endianness
+----------
 
-- `r2il_is_big_endian(ctx)` remains ABI-stable.
-- It now derives from `arch.memory_endianness` via legacy shim mapping.
-- New canonical endianness fields live in `ArchSpec` (`instruction_endianness`, `memory_endianness`).
+Canonical endianness fields live in `ArchSpec` (`instruction_endianness`,
+`memory_endianness`). The retired direct `r2il_is_big_endian` export is not part
+of the V2 ABI.
 
 Configuration
 -------------
 
-`a:sla.mem` JSON is backward compatible and keeps legacy keys:
+`a:sla.debug.mem` emits one canonical JSON array. Every access object has:
 
-- `addr`
-- `size`
-- `write`
+- `schema_version` (`1`)
+- `type` (`load`, `store`, `load_linked`, `store_conditional`, `atomic_cas`,
+  `load_guarded`, or `store_guarded`)
+- `size_bytes`
+- `address` (a typed varnode object)
 
-When available, it also emits additive memory semantics/topology fields:
+Stores and atomic/guarded operations add their applicable typed varnodes as
+`value`, `expected`, `replacement`, `result`, or `guard`. A structurally
+resolved stack address is represented only as
+`stack_address: {"base": "RSP", "offset": 0}`.
+
+When available, access objects also emit memory semantics/topology fields:
 
 - `ordering`
 - `atomic_kind`
@@ -117,27 +156,48 @@ SLEIGH_SIG_WRITEBACK_MAX_BLOCKS: Max blocks for automatic signature/CC write-bac
 SLEIGH_SIG_MIN_CONFIDENCE: Minimum confidence for signature overwrite. Default 70.
 SLEIGH_CC_MIN_CONFIDENCE: Minimum confidence for calling convention overwrite. Default 80.
 
-Runtime analysis profile:
+Native analysis depth:
 
-- `anal.sla.mode` (default `balanced`)
-- Accepted values: `full`, `balanced`, `fast`
+| Command | r2sleigh behavior |
+|---|---|
+| `aa` | basic bounded post-analysis |
+| `aaa` | balanced signatures, xrefs, and type facts |
+| `aaaa` | aggressive taint, interproc, and type write-back |
 
-Mode semantics:
+r2sleigh does not expose public `anal.*` tuning keys. `a:sla.profilej` is a
+passive local timing accumulator, cleared at the start of each post-analysis
+sweep and read afterwards. It reports four stages, one per thing the plugin
+spends time on: `proof_us` for the artifacts analysis proves, `lift_us` for a
+function lift, `taint_us` for the taint summary (which needs `aaaa`), and
+`decompile_us` for a `pd:s`. There is no detached type-report command; host
+type state is inspected with radare2's `afcfj` and `afvj` commands until a
+locked snapshot-owned type callback exists.
 
-| Context | `full` | `balanced` | `fast` |
-|---|---|---|---|
-| `aa` / `aaa` callbacks | full behavior | balanced behavior | reduced behavior |
-| `aaaa` post-analysis | full behavior | full behavior (forced) | reduced behavior |
+Kernel smoke harness:
 
-Behavior by mode:
+```bash
+R2SLEIGH_KERNELCACHE=/path/to/kernelcache \
+  scripts/kernel_smoke.py \
+  --r2 /Users/priyanshu/code/radare2/binr/radare2/radare2 \
+  --analysis aaaa \
+  --strict \
+  --out /tmp/r2sleigh-kernel-smoke.json
+```
 
-| Pass | `full` | `balanced` | `fast` |
-|---|---|---|---|
-| semantic comments | on | on | off |
-| recover vars | on | on | off |
-| computed data xrefs | on | on | off |
-| post taint | on | on | off |
-| post signature/callconv write-back | on | on | off |
+The harness is advisory and local-only: no kernel binaries or generated smoke
+reports are committed. It probes representative kernel helpers and records
+normalized decompile and exact-target SSA-function JSON for regression triage. Host type state
+is inspected separately through radare2's `afcfj` and `afvj` commands.
+By default the report keeps hashes, sizes, and line counts while redacting the
+local kernel path and stdout/stderr previews. Use `--include-sensitive` only for
+local triage when full paths and text previews are needed.
+
+Strict mode returns non-zero for missing requested targets, zero discovered
+functions, malformed or wrong-target SSA-function JSON, decompiler fallback comments, and
+radare2 command return failures. The harness mirrors the r2r/e2e plugin
+isolation knobs where practical: `--plugin-dir` defaults to
+`R2SLEIGH_PLUGIN_DIR`, `R2R_PLUGIN_DIR`, or `R2_LIBR_PLUGINS`, and `--tmpdir`
+sets a temporary HOME/XDG/TMP root for radare2 subprocesses.
 
 Automatic Signature Write-Back (aaaa)
 -------------------------------------

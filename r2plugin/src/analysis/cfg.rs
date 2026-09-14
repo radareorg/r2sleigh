@@ -6,9 +6,8 @@ use std::ffi::CString;
 use std::ptr;
 
 /// Generate ASCII CFG for a function.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2cfg_function_ascii(
+/// Internal V2 wrapper immediately adopts the returned CString allocation.
+pub(crate) fn r2cfg_function_ascii(
     ctx: *const R2ILContext,
     blocks: *const *const R2ILBlock,
     num_blocks: usize,
@@ -51,8 +50,8 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                 "├─────────────────────────────────────────────────┤"
             );
 
-            let ops_to_show = std::cmp::min(5, block.ops.len());
-            for op in block.ops.iter().take(ops_to_show) {
+            let ops_to_show = std::cmp::min(5, block.ops().len());
+            for op in block.ops().iter().take(ops_to_show) {
                 let op_str = format_r2il_op_short(op, disasm);
                 let truncated = if op_str.len() > 45 {
                     format!("{}...", &op_str[..42])
@@ -61,11 +60,11 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                 };
                 let _ = writeln!(output, "│ {:<47} │", truncated);
             }
-            if block.ops.len() > ops_to_show {
+            if block.ops().len() > ops_to_show {
                 let _ = writeln!(
                     output,
                     "│ ... ({} more ops)                               │",
-                    block.ops.len() - ops_to_show
+                    block.ops().len() - ops_to_show
                 );
             }
 
@@ -225,9 +224,8 @@ struct CFGEdgeJson {
 }
 
 /// Get CFG as JSON.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2cfg_function_json(
+/// Internal V2 wrapper immediately adopts the returned CString allocation.
+pub(crate) fn r2cfg_function_json(
     _ctx: *const R2ILContext,
     blocks: *const *const R2ILBlock,
     num_blocks: usize,
@@ -260,7 +258,7 @@ pub extern "C" fn r2cfg_function_json(
             json_blocks.push(CFGBlockJson {
                 addr,
                 size: block.size,
-                num_ops: block.ops.len(),
+                num_ops: block.ops().len(),
                 terminator: term_str.to_string(),
                 successors: cfg.successors(addr),
             });

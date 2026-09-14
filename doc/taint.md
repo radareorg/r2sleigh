@@ -114,10 +114,10 @@ idempotent re-analysis.
 Plugin Command
 --------------
 
-`a:sla.taint` outputs JSON taint analysis for the current function.
+`a:sla.debug.taint` outputs JSON taint analysis for the current function.
 
 Example:
 
 ```bash
-r2 -qc 'aaaa; s sym.vulnerable_function; a:sla.taint' ./target
+r2 -qc 'aaaa; s sym.vulnerable_function; a:sla.debug.taint' ./target
 ```

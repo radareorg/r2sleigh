@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::var::SSAVar;
-use r2il::MemoryOrdering;
+use r2il::{MemoryOrdering, SpaceId};
 
 /// An SSA operation representing a single semantic action with versioned variables.
 ///
@@ -16,26 +16,31 @@ use r2il::MemoryOrdering;
 pub enum SSAOp {
     // ========== SSA-specific Operations ==========
     /// Phi function: merges values from different control flow paths.
-    /// dst = phi(sources[0], sources[1], ...)
+    /// `dst = phi(sources[0], sources[1], ...)`
     Phi { dst: SSAVar, sources: Vec<SSAVar> },
 
     // ========== Data Movement ==========
     /// Copy src to dst: dst = src
     Copy { dst: SSAVar, src: SSAVar },
 
-    /// Load from memory: dst = *[space]addr
+    /// Load from memory: `dst = *[space]addr`
     Load {
         dst: SSAVar,
-        space: String,
+        space: SpaceId,
         addr: SSAVar,
     },
 
-    /// Store to memory: *[space]addr = val
+    /// Store to memory: `*[space]addr = val`
     Store {
-        space: String,
+        space: SpaceId,
         addr: SSAVar,
         val: SSAVar,
     },
+
+    /// One repeated string operation, as the block it is
+    /// (`r2il::R2ILOp::BlockTransfer`). It writes only memory; the register
+    /// updates the instruction also performs are ordinary operations beside it.
+    BlockTransfer(Box<BlockTransferOp>),
 
     /// Memory fence/barrier.
     Fence { ordering: MemoryOrdering },
@@ -43,7 +48,7 @@ pub enum SSAOp {
     /// Load-linked from memory.
     LoadLinked {
         dst: SSAVar,
-        space: String,
+        space: SpaceId,
         addr: SSAVar,
         ordering: MemoryOrdering,
     },
@@ -51,26 +56,19 @@ pub enum SSAOp {
     /// Store-conditional to memory.
     StoreConditional {
         result: Option<SSAVar>,
-        space: String,
+        space: SpaceId,
         addr: SSAVar,
         val: SSAVar,
         ordering: MemoryOrdering,
     },
 
     /// Atomic compare-and-swap.
-    AtomicCAS {
-        dst: SSAVar,
-        space: String,
-        addr: SSAVar,
-        expected: SSAVar,
-        replacement: SSAVar,
-        ordering: MemoryOrdering,
-    },
+    AtomicCAS(Box<AtomicCasOp>),
 
     /// Guarded memory load.
     LoadGuarded {
         dst: SSAVar,
-        space: String,
+        space: SpaceId,
         addr: SSAVar,
         guard: SSAVar,
         ordering: MemoryOrdering,
@@ -78,7 +76,7 @@ pub enum SSAOp {
 
     /// Guarded memory store.
     StoreGuarded {
-        space: String,
+        space: SpaceId,
         addr: SSAVar,
         val: SSAVar,
         guard: SSAVar,
@@ -185,7 +183,7 @@ pub enum SSAOp {
     /// Concatenate two values: dst = (hi << lo.size*8) | lo
     Piece { dst: SSAVar, hi: SSAVar, lo: SSAVar },
 
-    /// Extract a portion of a value: dst = src[offset:size]
+    /// Extract a portion of a value: `dst = src[offset:size]`
     Subpiece {
         dst: SSAVar,
         src: SSAVar,
@@ -199,26 +197,79 @@ pub enum SSAOp {
     Lzcount { dst: SSAVar, src: SSAVar },
 
     // ========== Control Flow ==========
-    /// Unconditional branch to target
-    Branch { target: SSAVar },
+    /// Unconditional branch to target.
+    ///
+    /// `instruction` is the native instruction the transfer was lifted from,
+    /// absent for a synthetic transfer. It is the one coordinate of a call or
+    /// tail transfer that every later rewrite of the operation stream leaves
+    /// alone, so it is how a fact recorded against the raw input finds this
+    /// operation again.
+    Branch {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Conditional branch: if (cond) goto target
     CBranch { target: SSAVar, cond: SSAVar },
 
     /// Indirect branch: goto *target
-    BranchInd { target: SSAVar },
+    BranchInd {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Call a subroutine
-    Call { target: SSAVar },
+    Call {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Indirect call: call *target
-    CallInd { target: SSAVar },
+    CallInd {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Fresh unknown register value defined by a call boundary.
     ///
     /// Decompiler-safe SSA emits this after calls for return/caller-saved
     /// registers so later reads cannot reuse pre-call versions.
     CallDefine { dst: SSAVar },
+
+    /// The carrier a call boundary leaves holding the value it found there.
+    ///
+    /// The sibling of `CallDefine`, and the same kind of fact: both say what
+    /// the boundary did to a register, and neither is an operation this
+    /// function's code performs. Where `CallDefine` says the callee left a
+    /// register holding something unknowable, this says the callee put one
+    /// back.
+    ///
+    /// The stack pointer is why it exists. A call instruction's own p-code
+    /// spends whatever the architecture spends to transfer control -- on
+    /// x86-64 `RSP = RSP - 8` and the store of the return address -- and the
+    /// callee's return refunds it. The callee is not part of this function, so
+    /// without this the refund never happens and the caller's stack pointer
+    /// drifts by one return-address slot at every call it makes.
+    CallRestore { dst: SSAVar, src: SSAVar },
+
+    /// A carrier a call boundary may read, as the convention names it.
+    ///
+    /// The third of the same family as `CallDefine` and `CallRestore`, and the
+    /// one that was missing. A call instruction's own p-code names only the
+    /// callee, so nothing downstream could see that a call consumes its
+    /// arguments: liveness could not keep their producers, and the obligation
+    /// inventory had to keep every definition reaching an incomplete boundary
+    /// out of `ProvenDead` by declaring it an unknown effect instead.
+    ///
+    /// This says the true thing in the graph. The carriers are the
+    /// convention's argument registers, so the set is bounded by the
+    /// architecture rather than by the function's size, and a carrier the
+    /// callee does not actually take is a read of a value that is live anyway.
+    CallUse { src: SSAVar },
 
     /// Return from subroutine
     Return { target: SSAVar },
@@ -341,15 +392,80 @@ pub enum SSAOp {
     },
 
     /// Insert (bit field insertion)
-    Insert {
-        dst: SSAVar,
-        src: SSAVar,
-        value: SSAVar,
-        position: SSAVar,
-    },
+    Insert(Box<InsertOp>),
+
+    /// Conditional merge of two values from instruction-local P-code control.
+    Select(Box<SelectOp>),
+}
+
+/// A repeated string operation, as one block move.
+///
+/// Held out of line for the same reason as [`SelectOp`]: four variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransferOp {
+    pub space: SpaceId,
+    pub kind: r2il::BlockTransferKind,
+    pub destination: SSAVar,
+    pub source: SSAVar,
+    pub count: SSAVar,
+    pub direction: SSAVar,
+    pub element_size: u32,
+}
+
+/// A compare-and-swap on one memory cell.
+///
+/// Held out of line for the same reason as [`SelectOp`]: four variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicCasOp {
+    pub dst: SSAVar,
+    pub space: SpaceId,
+    pub addr: SSAVar,
+    pub expected: SSAVar,
+    pub replacement: SSAVar,
+    pub ordering: MemoryOrdering,
+}
+
+/// A field written into a value at a position.
+///
+/// Held out of line for the same reason as [`SelectOp`]: four variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsertOp {
+    pub dst: SSAVar,
+    pub src: SSAVar,
+    pub value: SSAVar,
+    pub position: SSAVar,
+}
+
+/// A conditional choice between two values.
+///
+/// Held out of line: it names four variables where nearly every other
+/// operation names three, and an enum is as wide as its widest variant, so
+/// those four set the width of every operation the function holds, of the
+/// graph's copy of them and of normalization's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectOp {
+    pub dst: SSAVar,
+    pub cond: SSAVar,
+    pub if_true: SSAVar,
+    pub if_false: SSAVar,
 }
 
 impl SSAOp {
+    /// Exact address space touched by a memory operation.
+    pub const fn memory_space(&self) -> Option<SpaceId> {
+        match self {
+            Self::Load { space, .. }
+            | Self::Store { space, .. }
+            | Self::LoadLinked { space, .. }
+            | Self::StoreConditional { space, .. }
+            | Self::LoadGuarded { space, .. }
+            | Self::StoreGuarded { space, .. } => Some(*space),
+            Self::AtomicCAS(swap) => Some(swap.space),
+            Self::BlockTransfer(transfer) => Some(transfer.space),
+            _ => None,
+        }
+    }
+
     /// Get the destination variable if this operation has one.
     pub fn dst(&self) -> Option<&SSAVar> {
         use SSAOp::*;
@@ -358,7 +474,6 @@ impl SSAOp {
             | Copy { dst, .. }
             | Load { dst, .. }
             | LoadLinked { dst, .. }
-            | AtomicCAS { dst, .. }
             | LoadGuarded { dst, .. }
             | IntAdd { dst, .. }
             | IntSub { dst, .. }
@@ -420,14 +535,20 @@ impl SSAOp {
             | New { dst, .. }
             | Cast { dst, .. }
             | Extract { dst, .. }
-            | Insert { dst, .. }
-            | CallDefine { dst } => Some(dst),
+            | CallDefine { dst }
+            | CallRestore { dst, .. } => Some(dst),
+
+            AtomicCAS(swap) => Some(&swap.dst),
+            Insert(insert) => Some(&insert.dst),
+            Select(select) => Some(&select.dst),
 
             CallOther { output, .. } | StoreConditional { result: output, .. } => output.as_ref(),
 
             Store { .. }
+            | BlockTransfer { .. }
             | Fence { .. }
             | StoreGuarded { .. }
+            | CallUse { .. }
             | Branch { .. }
             | CBranch { .. }
             | BranchInd { .. }
@@ -480,15 +601,20 @@ impl SSAOp {
                 f(val);
             }
 
-            AtomicCAS {
-                addr,
-                expected,
-                replacement,
-                ..
-            } => {
-                f(addr);
-                f(expected);
-                f(replacement);
+            BlockTransfer(transfer) => {
+                let (destination, source, count) =
+                    (&transfer.destination, &transfer.source, &transfer.count);
+                let direction = &transfer.direction;
+                f(destination);
+                f(source);
+                f(count);
+                f(direction);
+            }
+
+            AtomicCAS(swap) => {
+                f(&swap.addr);
+                f(&swap.expected);
+                f(&swap.replacement);
             }
 
             LoadGuarded { addr, guard, .. } => {
@@ -551,15 +677,16 @@ impl SSAOp {
                 f(position);
             }
 
-            Insert {
-                src,
-                value,
-                position,
-                ..
-            } => {
-                f(src);
-                f(value);
-                f(position);
+            Insert(insert) => {
+                f(&insert.src);
+                f(&insert.value);
+                f(&insert.position);
+            }
+
+            Select(select) => {
+                f(&select.cond);
+                f(&select.if_true);
+                f(&select.if_false);
             }
 
             PtrAdd { base, index, .. } | PtrSub { base, index, .. } => {
@@ -574,10 +701,10 @@ impl SSAOp {
                 f(offset);
             }
 
-            Branch { target }
-            | BranchInd { target }
-            | Call { target }
-            | CallInd { target }
+            Branch { target, .. }
+            | BranchInd { target, .. }
+            | Call { target, .. }
+            | CallInd { target, .. }
             | Return { target } => f(target),
 
             CBranch { target, cond } => {
@@ -590,6 +717,8 @@ impl SSAOp {
                     f(input);
                 }
             }
+
+            CallRestore { src, .. } | CallUse { src } => f(src),
 
             Fence { .. } | Nop | Unimplemented | Breakpoint | CpuId { .. } | CallDefine { .. } => {}
         }
@@ -631,9 +760,41 @@ impl SSAOp {
         matches!(
             self,
             SSAOp::Store { .. }
+                | SSAOp::BlockTransfer { .. }
                 | SSAOp::StoreConditional { .. }
                 | SSAOp::StoreGuarded { .. }
                 | SSAOp::AtomicCAS { .. }
+        )
+    }
+
+    /// Returns true when removing this operation can change observable behavior.
+    ///
+    /// Ordinary loads are optional because some consumers can prove that a load
+    /// reads only compiler-owned stack plumbing. Atomic and guarded loads remain
+    /// observable regardless of that policy.
+    pub fn has_observable_effects(&self, preserve_memory_reads: bool) -> bool {
+        if self.is_control_flow() || self.is_memory_write() {
+            return true;
+        }
+        if matches!(
+            self,
+            SSAOp::Fence { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+        ) {
+            return true;
+        }
+        if preserve_memory_reads && self.is_memory_read() {
+            return true;
+        }
+        matches!(
+            self,
+            SSAOp::CallOther { .. }
+                | SSAOp::Breakpoint
+                | SSAOp::Unimplemented
+                | SSAOp::CpuId { .. }
+                | SSAOp::New { .. }
+                // The read a call boundary makes. Removing it would delete
+                // the only statement that keeps an argument's producer live.
+                | SSAOp::CallUse { .. }
         )
     }
 
@@ -659,6 +820,25 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
             SSAOp::Load { dst, space, addr } => write!(f, "{} = LOAD [{}]{}", dst, space, addr),
             SSAOp::Store { space, addr, val } => write!(f, "STORE [{}]{} = {}", space, addr, val),
+            SSAOp::BlockTransfer(transfer) => {
+                let (space, kind, destination, source, count, element_size, direction) = (
+                    &transfer.space,
+                    &transfer.kind,
+                    &transfer.destination,
+                    &transfer.source,
+                    &transfer.count,
+                    &transfer.element_size,
+                    &transfer.direction,
+                );
+                write!(
+                    f,
+                    "BLOCK{} [{space}]{destination} <- {source} x {count} ({element_size} bytes each, direction {direction})",
+                    match kind {
+                        r2il::BlockTransferKind::Move => "MOVE",
+                        r2il::BlockTransferKind::Fill => "FILL",
+                    }
+                )
+            }
             SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),
             SSAOp::LoadLinked {
                 dst,
@@ -686,17 +866,10 @@ impl std::fmt::Display for SSAOp {
                     ordering, space, addr, val
                 )
             }
-            SSAOp::AtomicCAS {
-                dst,
-                space,
-                addr,
-                expected,
-                replacement,
-                ordering,
-            } => write!(
+            SSAOp::AtomicCAS(swap) => write!(
                 f,
                 "{} = ATOMIC_CAS({:?}) [{}]{}, {}, {}",
-                dst, ordering, space, addr, expected, replacement
+                swap.dst, swap.ordering, swap.space, swap.addr, swap.expected, swap.replacement
             ),
             SSAOp::LoadGuarded {
                 dst,
@@ -756,12 +929,14 @@ impl std::fmt::Display for SSAOp {
             }
             SSAOp::PopCount { dst, src } => write!(f, "{} = POPCOUNT({})", dst, src),
             SSAOp::Lzcount { dst, src } => write!(f, "{} = LZCOUNT({})", dst, src),
-            SSAOp::Branch { target } => write!(f, "BRANCH {}", target),
+            SSAOp::Branch { target, .. } => write!(f, "BRANCH {}", target),
             SSAOp::CBranch { target, cond } => write!(f, "CBRANCH {} if {}", target, cond),
-            SSAOp::BranchInd { target } => write!(f, "BRANCHIND {}", target),
-            SSAOp::Call { target } => write!(f, "CALL {}", target),
-            SSAOp::CallInd { target } => write!(f, "CALLIND {}", target),
+            SSAOp::BranchInd { target, .. } => write!(f, "BRANCHIND {}", target),
+            SSAOp::Call { target, .. } => write!(f, "CALL {}", target),
+            SSAOp::CallInd { target, .. } => write!(f, "CALLIND {}", target),
             SSAOp::CallDefine { dst } => write!(f, "{} = CALLDEF", dst),
+            SSAOp::CallRestore { dst, src } => write!(f, "{} = CALLRESTORE {}", dst, src),
+            SSAOp::CallUse { src } => write!(f, "CALLUSE {}", src),
             SSAOp::Return { target } => write!(f, "RETURN {}", target),
             SSAOp::FloatAdd { dst, a, b } => write!(f, "{} = {} f+ {}", dst, a, b),
             SSAOp::FloatSub { dst, a, b } => write!(f, "{} = {} f- {}", dst, a, b),
@@ -829,12 +1004,16 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Extract { dst, src, position } => {
                 write!(f, "{} = EXTRACT({}, {})", dst, src, position)
             }
-            SSAOp::Insert {
-                dst,
-                src,
-                value,
-                position,
-            } => write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position),
+            SSAOp::Insert(insert) => write!(
+                f,
+                "{} = INSERT({}, {}, {})",
+                insert.dst, insert.src, insert.value, insert.position
+            ),
+            SSAOp::Select(select) => write!(
+                f,
+                "{} = SELECT({}, {}, {})",
+                select.dst, select.cond, select.if_true, select.if_false
+            ),
         }
     }
 }
@@ -856,6 +1035,32 @@ mod tests {
 
         let op = SSAOp::Nop;
         assert_eq!(op.dst(), None);
+    }
+
+    #[test]
+    fn observable_effect_classification_distinguishes_plain_and_atomic_loads() {
+        let load = SSAOp::Load {
+            dst: SSAVar::new("RAX", 1, 8),
+            space: r2il::SpaceId::Ram,
+            addr: SSAVar::new("RSP", 0, 8),
+        };
+        assert!(!load.has_observable_effects(false));
+        assert!(load.has_observable_effects(true));
+
+        let linked = SSAOp::LoadLinked {
+            dst: SSAVar::new("RAX", 1, 8),
+            space: r2il::SpaceId::Ram,
+            addr: SSAVar::new("RSP", 0, 8),
+            ordering: r2il::MemoryOrdering::Relaxed,
+        };
+        assert!(linked.has_observable_effects(false));
+
+        let call_other = SSAOp::CallOther {
+            output: None,
+            userop: 1,
+            inputs: Vec::new(),
+        };
+        assert!(call_other.has_observable_effects(false));
     }
 
     #[test]
@@ -913,13 +1118,13 @@ mod tests {
     fn test_display_load_store() {
         let load = SSAOp::Load {
             dst: SSAVar::new("RAX", 1, 8),
-            space: "ram".to_string(),
+            space: r2il::SpaceId::Ram,
             addr: SSAVar::new("RSP", 0, 8),
         };
         assert_eq!(format!("{}", load), "RAX_1 = LOAD [ram]RSP_0");
 
         let store = SSAOp::Store {
-            space: "ram".to_string(),
+            space: r2il::SpaceId::Ram,
             addr: SSAVar::new("RSP", 0, 8),
             val: SSAVar::new("RAX", 1, 8),
         };
@@ -939,7 +1144,7 @@ mod tests {
                 b: SSAVar::new("RBX", 0, 8),
             },
             SSAOp::Store {
-                space: "ram".to_string(),
+                space: r2il::SpaceId::Ram,
                 addr: SSAVar::new("RSP", 0, 8),
                 val: SSAVar::new("RAX", 1, 8),
             },

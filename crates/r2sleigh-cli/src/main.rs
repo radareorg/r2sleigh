@@ -20,7 +20,7 @@ use r2sleigh_export::{
     ExportFormat, InstructionAction, InstructionExportInput, export_instruction,
 };
 #[cfg(feature = "sleigh-config")]
-use r2sleigh_lift::{Disassembler, build_arch_spec, userop_map_for_arch};
+use r2sleigh_lift::{Disassembler, build_arch_spec};
 
 /// r2sleigh - Sleigh to r2il compiler for radare2
 #[derive(Parser)]
@@ -63,7 +63,7 @@ enum Commands {
 
     /// Generate a test architecture specification
     TestArch {
-        /// Architecture name (x86-64, arm, riscv64, riscv32)
+        /// Architecture name (x86-64, arm, mips32be, mips32le, riscv64, riscv32)
         arch: String,
 
         /// Output r2il binary file
@@ -125,6 +125,7 @@ enum RunActionArg {
     Lift,
     Ssa,
     Defuse,
+    #[cfg(feature = "decompile")]
     Dec,
 }
 
@@ -135,6 +136,7 @@ impl From<RunActionArg> for InstructionAction {
             RunActionArg::Lift => InstructionAction::Lift,
             RunActionArg::Ssa => InstructionAction::Ssa,
             RunActionArg::Defuse => InstructionAction::Defuse,
+            #[cfg(feature = "decompile")]
             RunActionArg::Dec => InstructionAction::Dec,
         }
     }
@@ -146,6 +148,7 @@ enum RunFormatArg {
     Json,
     Text,
     Esil,
+    #[cfg(feature = "decompile")]
     #[value(name = "c_like")]
     CLike,
     #[value(name = "r2cmd")]
@@ -159,6 +162,7 @@ impl From<RunFormatArg> for ExportFormat {
             RunFormatArg::Json => ExportFormat::Json,
             RunFormatArg::Text => ExportFormat::Text,
             RunFormatArg::Esil => ExportFormat::Esil,
+            #[cfg(feature = "decompile")]
             RunFormatArg::CLike => ExportFormat::CLike,
             RunFormatArg::R2Cmd => ExportFormat::R2Cmd,
         }
@@ -282,21 +286,17 @@ fn cmd_compile(input: &Path, output: Option<&PathBuf>, _variant: &str) -> Result
 fn cmd_info(input: &Path, show_registers: bool, show_spaces: bool) -> Result<(), String> {
     let spec = serialize::load(input).map_err(|e| e.to_string())?;
     validate_archspec(&spec).map_err(|e| format!("Invalid architecture specification: {}", e))?;
-    let (instruction_endianness, memory_endianness, legacy_endianness) =
-        endianness_info_lines(&spec);
+    let (instruction_endianness, memory_endianness) = endianness_info_lines(&spec);
 
     println!("r2il File: {}", input.display());
     println!("Architecture: {}", spec.name);
     println!("Variant: {}", spec.variant);
     println!("{}", instruction_endianness);
     println!("{}", memory_endianness);
-    println!("{}", legacy_endianness);
     println!("Address size: {} bytes", spec.addr_size);
     println!("Alignment: {}", spec.alignment);
     println!("Registers: {}", spec.registers.len());
     println!("Address spaces: {}", spec.spaces.len());
-    println!("User operations: {}", spec.userops.len());
-    println!("Source files: {}", spec.source_files.len());
 
     if show_spaces || !show_registers {
         println!("\nAddress Spaces:");
@@ -326,35 +326,13 @@ fn cmd_info(input: &Path, show_registers: bool, show_spaces: bool) -> Result<(),
         }
     }
 
-    if !spec.userops.is_empty() {
-        println!("\nUser Operations:");
-        for userop in &spec.userops {
-            println!("  {}: {}", userop.index, userop.name);
-        }
-    }
-
-    if !spec.source_files.is_empty() {
-        println!("\nSource Files:");
-        for file in &spec.source_files {
-            println!("  {}", file);
-        }
-    }
-
     Ok(())
 }
 
-fn endianness_info_lines(spec: &r2il::ArchSpec) -> (String, String, String) {
+fn endianness_info_lines(spec: &r2il::ArchSpec) -> (String, String) {
     let instruction = format!("Instruction endianness: {:?}", spec.instruction_endianness);
     let memory = format!("Memory endianness: {:?}", spec.memory_endianness);
-    let legacy = format!(
-        "Endianness (legacy): {}",
-        if spec.memory_endianness.to_legacy_big_endian() {
-            "big"
-        } else {
-            "little"
-        }
-    );
-    (instruction, memory, legacy)
+    (instruction, memory)
 }
 
 fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
@@ -367,6 +345,26 @@ fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
             println!("Generating ARM test specification...");
             create_arm_spec()
         }
+        #[cfg(feature = "mips")]
+        "mips" | "mips32" | "mips32be" | "mipsbe" | "mipseb" => {
+            println!("Generating MIPS32 big-endian test specification...");
+            build_arch_spec(
+                sleigh_config::processor_mips::SLA_MIPS32BE,
+                sleigh_config::processor_mips::PSPEC_MIPS32,
+                "mips32be",
+            )
+            .map_err(|e| e.to_string())?
+        }
+        #[cfg(feature = "mips")]
+        "mipsel" | "mips32le" | "mips32el" => {
+            println!("Generating MIPS32 little-endian test specification...");
+            build_arch_spec(
+                sleigh_config::processor_mips::SLA_MIPS32LE,
+                sleigh_config::processor_mips::PSPEC_MIPS32,
+                "mips32le",
+            )
+            .map_err(|e| e.to_string())?
+        }
         "riscv64" | "rv64" | "rv64gc" => {
             println!("Generating RISC-V RV64 test specification...");
             create_riscv64_spec()
@@ -377,7 +375,7 @@ fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "Unknown architecture: {}. Supported: x86-64, arm, riscv64, riscv32",
+                "Unknown architecture: {}. Supported: x86-64, arm, mips32be, mips32le, riscv64, riscv32",
                 arch
             ));
         }
@@ -401,10 +399,9 @@ fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
 
 fn cmd_version() -> Result<(), String> {
     println!("r2sleigh {}", env!("CARGO_PKG_VERSION"));
-    println!("r2il format version: {}", r2il::FORMAT_VERSION);
     println!(
-        "Magic bytes: {:?}",
-        std::str::from_utf8(r2il::MAGIC).unwrap_or("R2IL")
+        "r2il format: {:?}",
+        std::str::from_utf8(r2il::MAGIC).unwrap_or("invalid discriminator")
     );
 
     #[cfg(feature = "sleigh-config")]
@@ -632,13 +629,12 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
                 "x86-64",
             )
             .map_err(|e| e.to_string())?;
-            let mut disasm = Disassembler::from_sla(
+            let disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86_64,
                 sleigh_config::processor_x86::PSPEC_X86_64,
                 "x86-64",
             )
             .map_err(|e| e.to_string())?;
-            disasm.set_userop_map(userop_map_for_arch("x86-64"));
             Ok((disasm, spec))
         }
         #[cfg(feature = "x86")]
@@ -649,31 +645,108 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
                 "x86",
             )
             .map_err(|e| e.to_string())?;
-            let mut disasm = Disassembler::from_sla(
+            let disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86,
                 sleigh_config::processor_x86::PSPEC_X86,
                 "x86",
             )
             .map_err(|e| e.to_string())?;
-            disasm.set_userop_map(userop_map_for_arch("x86"));
             Ok((disasm, spec))
         }
         #[cfg(feature = "arm")]
         "arm" | "arm32" | "arm-le" => {
             let spec = build_arch_spec(
                 sleigh_config::processor_arm::SLA_ARM8_LE,
-                sleigh_config::processor_arm::PSPEC_ARMCORTEX,
+                sleigh_config::processor_arm::PSPEC_ARMT,
                 "arm",
             )
             .map_err(|e| e.to_string())?;
-            let mut disasm = Disassembler::from_sla(
+            let disasm = Disassembler::from_sla(
                 sleigh_config::processor_arm::SLA_ARM8_LE,
-                // sleigh-config 1.x does not ship an ARM8 pspec; use a Cortex pspec instead.
-                sleigh_config::processor_arm::PSPEC_ARMCORTEX,
+                sleigh_config::processor_arm::PSPEC_ARMT,
                 "ARM",
             )
             .map_err(|e| e.to_string())?;
-            disasm.set_userop_map(userop_map_for_arch("arm"));
+            Ok((disasm, spec))
+        }
+        #[cfg(feature = "arm")]
+        "arm64" | "arm64e" | "aarch64" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+            )
+            .map_err(|e| e.to_string())?;
+            let disasm = Disassembler::from_sla(
+                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((disasm, spec))
+        }
+        #[cfg(feature = "mips")]
+        "mips" | "mips32" | "mips32be" | "mipsbe" | "mipseb" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_mips::SLA_MIPS32BE,
+                sleigh_config::processor_mips::PSPEC_MIPS32,
+                "mips32be",
+            )
+            .map_err(|e| e.to_string())?;
+            let disasm = Disassembler::from_sla(
+                sleigh_config::processor_mips::SLA_MIPS32BE,
+                sleigh_config::processor_mips::PSPEC_MIPS32,
+                "mips32be",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((disasm, spec))
+        }
+        #[cfg(feature = "mips")]
+        "mipsel" | "mips32le" | "mips32el" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_mips::SLA_MIPS32LE,
+                sleigh_config::processor_mips::PSPEC_MIPS32,
+                "mips32le",
+            )
+            .map_err(|e| e.to_string())?;
+            let disasm = Disassembler::from_sla(
+                sleigh_config::processor_mips::SLA_MIPS32LE,
+                sleigh_config::processor_mips::PSPEC_MIPS32,
+                "mips32le",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((disasm, spec))
+        }
+        #[cfg(feature = "mips")]
+        "mips64" | "mips64be" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_mips::SLA_MIPS64BE,
+                sleigh_config::processor_mips::PSPEC_MIPS64,
+                "mips64be",
+            )
+            .map_err(|e| e.to_string())?;
+            let disasm = Disassembler::from_sla(
+                sleigh_config::processor_mips::SLA_MIPS64BE,
+                sleigh_config::processor_mips::PSPEC_MIPS64,
+                "mips64be",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((disasm, spec))
+        }
+        #[cfg(feature = "mips")]
+        "mips64el" | "mips64le" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_mips::SLA_MIPS64LE,
+                sleigh_config::processor_mips::PSPEC_MIPS64,
+                "mips64le",
+            )
+            .map_err(|e| e.to_string())?;
+            let disasm = Disassembler::from_sla(
+                sleigh_config::processor_mips::SLA_MIPS64LE,
+                sleigh_config::processor_mips::PSPEC_MIPS64,
+                "mips64le",
+            )
+            .map_err(|e| e.to_string())?;
             Ok((disasm, spec))
         }
         #[cfg(feature = "riscv")]
@@ -684,13 +757,12 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
                 "riscv64",
             )
             .map_err(|e| e.to_string())?;
-            let mut disasm = Disassembler::from_sla(
+            let disasm = Disassembler::from_sla(
                 sleigh_config::processor_riscv::SLA_RISCV_LP64D,
                 sleigh_config::processor_riscv::PSPEC_RV64GC,
                 "riscv64",
             )
             .map_err(|e| e.to_string())?;
-            disasm.set_userop_map(userop_map_for_arch("riscv64"));
             Ok((disasm, spec))
         }
         #[cfg(feature = "riscv")]
@@ -701,13 +773,12 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
                 "riscv32",
             )
             .map_err(|e| e.to_string())?;
-            let mut disasm = Disassembler::from_sla(
+            let disasm = Disassembler::from_sla(
                 sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
                 sleigh_config::processor_riscv::PSPEC_RV32GC,
                 "riscv32",
             )
             .map_err(|e| e.to_string())?;
-            disasm.set_userop_map(userop_map_for_arch("riscv32"));
             Ok((disasm, spec))
         }
         _ => {
@@ -715,13 +786,15 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
-            supported.push("arm");
+            supported.extend(["arm", "arm64", "aarch64"]);
+            #[cfg(feature = "mips")]
+            supported.extend(["mips32be", "mips32le", "mips64be", "mips64le"]);
             #[cfg(feature = "riscv")]
             supported.extend(["riscv64", "riscv32"]);
 
             if supported.is_empty() {
                 Err(
-                    "No architectures enabled. Build with --features x86, arm, or riscv"
+                    "No architectures enabled. Build with --features x86, arm, mips, or riscv"
                         .to_string(),
                 )
             } else {
@@ -744,6 +817,8 @@ mod tests {
     const X86_BYTES_DEC: &str = "48ffc000000000000000000000000000";
     #[cfg(feature = "arm")]
     const ARM_BYTES: &str = "0100a0e3000000000000000000000000";
+    #[cfg(feature = "arm")]
+    const ARM64_PACIBSP_BYTES: &str = "7f2303d5000000000000000000000000";
     #[cfg(feature = "riscv")]
     const RISCV_BYTES: &str = "13051500000000000000000000000000";
 
@@ -781,6 +856,7 @@ mod tests {
         canonicalize_json(&parsed).to_string()
     }
 
+    #[cfg(feature = "decompile")]
     fn normalize_c_like_output(output: &str) -> String {
         let text = output.replace("\r\n", "\n");
         let mut lines = Vec::new();
@@ -807,11 +883,14 @@ mod tests {
         let text = output.replace("\r\n", "\n");
         let lines: Vec<&str> = text.lines().collect();
         assert!(!lines.is_empty(), "r2cmd output must not be empty");
-        assert_eq!(lines.len() % 2, 0, "r2cmd output must be line-paired");
+        assert!(
+            lines.len().is_multiple_of(2),
+            "r2cmd output must be line-paired"
+        );
         let mut normalized = Vec::new();
         for (idx, line) in lines.iter().enumerate() {
             let line = line.trim_end();
-            if idx % 2 == 0 {
+            if idx.is_multiple_of(2) {
                 assert!(
                     line.starts_with("# "),
                     "expected sidecar comment line at index {}",
@@ -871,9 +950,19 @@ mod tests {
                 assert!(parsed.get("size").is_some(), "lift json must have size");
             }
             InstructionAction::Ssa => {
+                assert_eq!(
+                    parsed
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64),
+                    Some(r2sleigh_export::SSA_JSON_SCHEMA_VERSION.into()),
+                    "ssa json must carry the current document schema"
+                );
                 assert!(
-                    parsed.as_array().is_some_and(|ops| !ops.is_empty()),
-                    "ssa json must contain non-empty array"
+                    parsed
+                        .get("operations")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|operations| !operations.is_empty()),
+                    "ssa json must contain non-empty operations"
                 );
             }
             InstructionAction::Defuse => {
@@ -897,6 +986,9 @@ mod tests {
     }
 
     fn run_matrix_for_arch(arch: &str, bytes_hex: &str, dec_bytes_hex: &str) {
+        #[cfg(not(feature = "decompile"))]
+        let _ = dec_bytes_hex;
+
         for format in [
             ExportFormat::Json,
             ExportFormat::Text,
@@ -978,30 +1070,33 @@ mod tests {
             }
         }
 
-        for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
-            let normalized = assert_deterministic_output(
-                arch,
-                dec_bytes_hex,
-                InstructionAction::Dec,
-                format,
+        #[cfg(feature = "decompile")]
+        {
+            for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
+                let normalized = assert_deterministic_output(
+                    arch,
+                    dec_bytes_hex,
+                    InstructionAction::Dec,
+                    format,
+                    match format {
+                        ExportFormat::CLike => normalize_c_like_output,
+                        ExportFormat::Json => normalize_json_output,
+                        ExportFormat::Text => normalize_text_output,
+                        _ => unreachable!("dec supports c_like/json/text"),
+                    },
+                );
                 match format {
-                    ExportFormat::CLike => normalize_c_like_output,
-                    ExportFormat::Json => normalize_json_output,
-                    ExportFormat::Text => normalize_text_output,
+                    ExportFormat::Json => {
+                        assert_json_shape_for_action(InstructionAction::Dec, &normalized)
+                    }
+                    ExportFormat::CLike | ExportFormat::Text => {
+                        assert!(
+                            !normalized.trim().is_empty(),
+                            "dec output must be non-empty"
+                        )
+                    }
                     _ => unreachable!("dec supports c_like/json/text"),
-                },
-            );
-            match format {
-                ExportFormat::Json => {
-                    assert_json_shape_for_action(InstructionAction::Dec, &normalized)
                 }
-                ExportFormat::CLike | ExportFormat::Text => {
-                    assert!(
-                        !normalized.trim().is_empty(),
-                        "dec output must be non-empty"
-                    )
-                }
-                _ => unreachable!("dec supports c_like/json/text"),
             }
         }
     }
@@ -1050,16 +1145,88 @@ mod tests {
     }
 
     #[test]
-    fn disasm_esil_includes_userop_name_across_instructions() {
+    fn disasm_esil_keeps_numeric_callother_across_instructions() {
         let (disasm, arch_spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
         let bytes = hex::decode("31c00fa2c3ffffffffffffffffffffffff").expect("bytes");
         let lines = render_esil_lines(&disasm, &arch_spec, &bytes, 0x1000).expect("render esil");
+        let callothers = lines
+            .iter()
+            .filter_map(|line| line.split_once("CALLOTHER(").map(|(_, rest)| rest))
+            .map(|rest| rest.split_once(')').expect("closed CALLOTHER").0)
+            .collect::<Vec<_>>();
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("CALLOTHER(") && line.contains("cpuid")),
-            "ESIL should include named CallOther ops across multiple instructions"
+            !callothers.is_empty(),
+            "CPUID must retain CallOther evidence"
         );
+        assert!(
+            callothers
+                .iter()
+                .all(|userop| userop.parse::<u32>().is_ok()),
+            "CallOther labels must remain numeric: {callothers:?}"
+        );
+        let repeated =
+            render_esil_lines(&disasm, &arch_spec, &bytes, 0x1000).expect("repeat render esil");
+        assert_eq!(lines, repeated, "numeric ESIL output must be deterministic");
+    }
+
+    #[test]
+    fn ambient_userop_fixture_child() {
+        if std::env::var_os("R2SLEIGH_AMBIENT_CHILD").is_none() {
+            return;
+        }
+        let output = run_action_output(
+            "x86-64",
+            "0fa2c3ffffffffffffffffffffffffffff",
+            "0x1000",
+            InstructionAction::Lift,
+            ExportFormat::Esil,
+        )
+        .expect("ambient-independent output");
+        println!("R2SLEIGH_AMBIENT_OUTPUT={output:?}");
+    }
+
+    #[test]
+    fn disasm_output_ignores_filesystem_and_environment_userop_names() {
+        fn run_with_fixture(label: &str, userop_name: &str) -> String {
+            let root = std::env::temp_dir().join(format!(
+                "r2sleigh-userop-invariance-{}-{label}",
+                std::process::id()
+            ));
+            let language_dir = root.join("ghidra/Ghidra/Processors/x86/data/languages");
+            std::fs::create_dir_all(&language_dir).expect("fixture directory");
+            std::fs::write(
+                language_dir.join("x86-64.slaspec"),
+                format!("define pcodeop {userop_name};\n"),
+            )
+            .expect("fixture spec");
+
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .arg("--exact")
+                .arg("tests::ambient_userop_fixture_child")
+                .arg("--nocapture")
+                .current_dir(&root)
+                .env("R2SLEIGH_AMBIENT_CHILD", "1")
+                .env("SLEIGH_CONFIG_ROOT", &root)
+                .output()
+                .expect("child test");
+            std::fs::remove_dir_all(&root).expect("remove fixture");
+            assert!(
+                output.status.success(),
+                "child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 output")
+                .lines()
+                .find_map(|line| line.strip_prefix("R2SLEIGH_AMBIENT_OUTPUT="))
+                .expect("output marker")
+                .to_string()
+        }
+
+        let first = run_with_fixture("first", "ambient_first_name");
+        let second = run_with_fixture("second", "ambient_second_name");
+        assert_eq!(first, second);
+        assert!(first.contains("CALLOTHER(") && !first.contains("ambient_"));
     }
 
     #[test]
@@ -1131,6 +1298,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_alias_preserves_zero_pcode_pacibsp() {
+        let out = run_action_output(
+            "arm64",
+            ARM64_PACIBSP_BYTES,
+            "0x1000",
+            InstructionAction::Lift,
+            ExportFormat::Json,
+        )
+        .expect("run output");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(
+            parsed["ops"].as_array().is_some_and(|ops| ops.is_empty()),
+            "zero-P-code PACIBSP must not acquire fabricated operations"
+        );
+    }
+
+    #[test]
     #[cfg(feature = "riscv")]
     fn conformance_matrix_riscv64_deterministic() {
         run_matrix_for_arch("riscv64", RISCV_BYTES, RISCV_BYTES);
@@ -1186,15 +1371,29 @@ mod tests {
     #[test]
     fn storeconditional_esil_uses_zero_success_code() {
         let (disasm, _) = get_disassembler_with_spec("x86-64").expect("disassembler");
+        // Register operands, because a unique has no ESIL spelling on its own:
+        // it only exists once `block_to_esil` has spliced it into a reader.
         let op = r2il::R2ILOp::StoreConditional {
-            result: Some(r2il::Varnode::new(r2il::SpaceId::Unique, 0x10, 1)),
+            result: Some(r2il::Varnode::register(0x00, 8)),
             space: r2il::SpaceId::Ram,
-            addr: r2il::Varnode::new(r2il::SpaceId::Unique, 0x20, 8),
-            val: r2il::Varnode::new(r2il::SpaceId::Unique, 0x30, 8),
+            addr: r2il::Varnode::register(0x08, 8),
+            val: r2il::Varnode::register(0x10, 8),
             ordering: r2il::MemoryOrdering::Relaxed,
         };
         let esil = r2sleigh_lift::op_to_esil(&disasm, &op);
-        assert_eq!(esil, "tmp:0x30,tmp:0x20,=[8],0,tmp:0x10,=");
+        assert_eq!(esil, "rdx,rcx,=[8],0,rax,=");
+    }
+
+    #[test]
+    fn lone_op_refuses_to_spell_a_unique() {
+        let (disasm, _) = get_disassembler_with_spec("x86-64").expect("disassembler");
+        // `tmp:0x30` is neither a number nor a register, so radare2 classifies
+        // it as invalid and drops the operation. Saying so beats printing it.
+        let op = r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::register(0x00, 8),
+            src: r2il::Varnode::new(r2il::SpaceId::Unique, 0x30, 8),
+        };
+        assert_eq!(r2sleigh_lift::op_to_esil(&disasm, &op), "TODO,rax,=");
     }
 
     #[test]
@@ -1239,6 +1438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "decompile")]
     fn run_dec_c_like_success() {
         let out = run_action_output(
             "x86-64",
@@ -1275,18 +1475,16 @@ mod tests {
         let mut spec = r2il::ArchSpec::new("test");
         spec.set_instruction_endianness(r2il::Endianness::Big);
         spec.set_memory_endianness(r2il::Endianness::Little);
-        let (instruction, memory, legacy) = endianness_info_lines(&spec);
+        let (instruction, memory) = endianness_info_lines(&spec);
         assert!(instruction.contains("Instruction endianness: Big"));
         assert!(memory.contains("Memory endianness: Little"));
-        assert!(legacy.contains("Endianness (legacy): little"));
     }
 
     #[test]
-    fn extracted_spec_sets_v2_endianness_and_space_overrides() {
+    fn extracted_spec_sets_exact_endianness_and_space_overrides() {
         let (_, spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
         assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
         assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
-        assert!(!spec.big_endian);
         assert!(
             spec.spaces.iter().any(|space| space.endianness.is_some()),
             "extracted spaces should carry explicit endianness overrides"
@@ -1373,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "riscv")]
+    #[cfg(all(feature = "riscv", feature = "decompile"))]
     fn run_riscv64_dec_c_like_success() {
         let out = run_action_output(
             "riscv64",
