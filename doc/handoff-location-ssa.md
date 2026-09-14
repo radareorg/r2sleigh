@@ -22663,3 +22663,50 @@ sixteen-site conversion it would need is not worth making. The allocation work
 for this function is finished at 5,322,044 -- from 6,653,942 this morning, a
 fifth gone -- with no single site left that pays like the discarded
 classification did.
+
+## A cold partition is found by its own name, not by matching two names
+
+`minigzip` at -O2 refused `main` with `external-edge at
+crates/r2dec/src/structure/place.rs:449: edge 0x2686 -> 0x25a9 leaves the
+function and no certified tail call rendered it`. The edge is a `jmp` into
+`sym.main.cold`, a GCC `-freorder-blocks-and-partition` partition of `main`
+itself, and the capture already has machinery to absorb such a partition into
+its owner's image -- `function_image_block_walk` in
+`r2plugin/snapshot_capture.c`, so that "an edge out of the function does not
+cost the proof its guard". It simply did not fire here.
+
+The cause was lexical. `function_name_is_cold_partition (cold, hot)` asked
+whether `cold` was `hot` with `.cold` appended, comparing radare2's
+*flag-decorated* names. Those names carry a namespace prefix that records where
+radare2 got them, and the two halves of one function can get theirs from
+different places: the symbol table gives `sym.main.cold`, while the entry-point
+detection names the hot half bare `main`. `strncmp ("sym.main.cold", "main", 4)`
+is non-zero, so the pair never matched. The same mismatch would arise between a
+DWARF-named `dbg.foo` and a symtab-named `sym.foo.cold`. Renaming the function
+with `afn sym.main 0x2460` made the refusal disappear, which settled it in one
+command.
+
+The fix is not a better name comparison but a different question. The compiler's
+`.cold` suffix is what says "this is a partition and not a function" -- a C
+symbol cannot contain a dot, so the suffix is never part of a real name -- and
+control flow is what says whose partition it is. So
+`function_name_marks_cold_partition (name)` now takes one name, and
+`cold_partition_owner` returns the single function that branches into the
+partition, treating two claimants as no owner at all. `cold_partition_block_at`
+asks the owner rather than re-deriving it from names. Nothing now depends on how
+radare2 spelled the hot half.
+
+Measured before choosing: across every cold partition in the local corpus
+(`sym.gz_compress.cold`, `sym.file_compress.cold`, `sym.file_uncompress.cold`,
+`sym.main.cold`), each has exactly one function branching into it, and that
+function is the one the base name would have named where the base name worked at
+all. The structural rule therefore agrees with the lexical one everywhere the
+lexical one succeeded, and succeeds where it failed.
+
+The new shape is also cheaper. The old `cold_partition_owner` scanned every
+function's every block for every snapshot; the new one returns on a string test
+unless the function's own name marks it a partition.
+
+Census 1446/1436 becomes 1445/1436: `main` moves from refused to rendered and
+`sym.main.cold` from a spurious standalone body to the cold-partition note that
+`doc/adr-*` already specifies. Refusals fall from ten to nine. Gate 54/54.

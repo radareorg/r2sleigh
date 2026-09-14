@@ -1879,16 +1879,18 @@ static bool function_image_data_symbols_collect(RAnal *anal,
 }
 // GCC's -freorder-blocks-and-partition splits one function across two ranges and
 // names the second `<name>.cold`, which radare2 then lists as its own function.
-static bool function_name_is_cold_partition(const char *cold, const char *hot) {
-	const size_t hot_length = strlen (hot);
-	if (strncmp (cold, hot, hot_length) || cold[hot_length] != '.') {
+static bool function_name_marks_cold_partition(const char *name) {
+	if (!name) {
 		return false;
 	}
-	const char *suffix = cold + hot_length + 1;
-	if (strncmp (suffix, "cold", 4)) {
-		return false;
+	const char *suffix = name;
+	while ((suffix = strstr (suffix, ".cold"))) {
+		suffix += strlen (".cold");
+		if (!*suffix || *suffix == '.') {
+			return true;
+		}
 	}
-	return !suffix[4] || suffix[4] == '.';
+	return false;
 }
 
 static bool block_list_holds_addr(const RList *blocks, ut64 addr) {
@@ -1900,30 +1902,6 @@ static bool block_list_holds_addr(const RList *blocks, ut64 addr) {
 		}
 	}
 	return false;
-}
-
-// The block a cold partition starts at this address, or NULL when no partition
-// of this function owns it.
-static RAnalBlock *cold_partition_block_at(RAnal *anal, const RAnalFunction *fcn, ut64 addr) {
-	RListIter *fcn_iter;
-	RAnalFunction *other;
-	if (!fcn->name) {
-		return NULL;
-	}
-	r_list_foreach (anal->fcns, fcn_iter, other) {
-		if (other == fcn || !other || !other->name || !other->bbs
-			|| !function_name_is_cold_partition (other->name, fcn->name)) {
-			continue;
-		}
-		RListIter *block_iter;
-		RAnalBlock *block;
-		r_list_foreach (other->bbs, block_iter, block) {
-			if (block && block->addr == addr) {
-				return block;
-			}
-		}
-	}
-	return NULL;
 }
 
 // Every target a block can transfer to, so the walk can ask whether each one
@@ -1953,29 +1931,58 @@ static size_t block_successor_count(const RAnalBlock *block) {
 	return (size_t)(cases > 0? cases: 0) + 2;
 }
 
-// The function this one is a cold partition of, when that function branches
-// into it, or NULL when this is a function in its own right.
+static bool function_branches_into(const RAnalFunction *hot, const RAnalFunction *cold) {
+	RListIter *block_iter;
+	const RAnalBlock *block;
+	r_list_foreach (hot->bbs, block_iter, block) {
+		const size_t successors = block? block_successor_count (block): 0;
+		size_t index;
+		for (index = 0; index < successors; index++) {
+			const ut64 target = block_successor_target (block, index);
+			if (target != UT64_MAX && block_list_holds_addr (cold->bbs, target)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// The function this one is a cold partition of. The name says it is a partition
+// and the branch into it says whose; two claimants leave it unowned.
 static RAnalFunction *cold_partition_owner(RAnal *anal, const RAnalFunction *fcn) {
 	RListIter *fcn_iter;
 	RAnalFunction *hot;
-	if (!fcn->name || !fcn->bbs) {
+	RAnalFunction *owner = NULL;
+	if (!fcn->bbs || !function_name_marks_cold_partition (fcn->name)) {
 		return NULL;
 	}
 	r_list_foreach (anal->fcns, fcn_iter, hot) {
-		if (hot == fcn || !hot || !hot->name || !hot->bbs
-			|| !function_name_is_cold_partition (fcn->name, hot->name)) {
+		if (hot == fcn || !hot || !hot->bbs || !function_branches_into (hot, fcn)) {
+			continue;
+		}
+		if (owner) {
+			return NULL;
+		}
+		owner = hot;
+	}
+	return owner;
+}
+
+// The block a cold partition of this function starts at this address, or NULL
+// when the address is not one.
+static RAnalBlock *cold_partition_block_at(RAnal *anal, const RAnalFunction *fcn, ut64 addr) {
+	RListIter *fcn_iter;
+	RAnalFunction *other;
+	r_list_foreach (anal->fcns, fcn_iter, other) {
+		if (other == fcn || !other || !other->bbs
+			|| !function_name_marks_cold_partition (other->name)) {
 			continue;
 		}
 		RListIter *block_iter;
-		const RAnalBlock *block;
-		r_list_foreach (hot->bbs, block_iter, block) {
-			const size_t successors = block? block_successor_count (block): 0;
-			size_t index;
-			for (index = 0; index < successors; index++) {
-				const ut64 target = block_successor_target (block, index);
-				if (target != UT64_MAX && block_list_holds_addr (fcn->bbs, target)) {
-					return hot;
-				}
+		RAnalBlock *block;
+		r_list_foreach (other->bbs, block_iter, block) {
+			if (block && block->addr == addr) {
+				return cold_partition_owner (anal, other) == fcn? block: NULL;
 			}
 		}
 	}
