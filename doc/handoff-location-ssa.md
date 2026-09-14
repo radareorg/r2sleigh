@@ -22414,3 +22414,28 @@ The method note that matters more than any of the counts: `cargo clippy
 crate, so it reports nothing and reads as a clean bill. Run it per crate with
 `-p`, and prefer `--lib` -- the all-targets figure for redundant clones was 89,
 of which 72 were in `#[cfg(test)]` code and only 17 on any real path.
+
+### Allocating an observation and discarding it is normal, so that is not the defect
+
+Chasing the `RenderedValueRequired` class further, the seal now reports every
+allocated observation the emitted tree does not carry
+(`observation-not-placed`, beside the walk in `seal_preserving_effects`). On
+`minigzip` at `-O0`, `fcn_128ab` leaks fifty-five of them, nearly all allocated
+by `get_expr_inner`'s call to `planned_value_expr`.
+
+That looked conclusive: building an expression allocates cells for the value
+and its discharged operands, callers treat `get_expr` as a pure query, and a
+discarded expression would orphan them. The check that matters is whether a
+function that renders does the same, and `gzputs` -- which renders with no
+refusal at all -- leaks **exactly the same fifty-five**. So allocate-then-discard
+is ordinary, `get_expr` having an observation side effect is not the defect,
+and the refactor that argument implied would have been built on a false premise.
+
+What survives is narrower and still unexplained: in `fcn_128ab` the constant's
+use at `(InstId(30), input 1)` is accounted only by expressions that never
+reach the tree, while in a healthy render some surviving expression accounts
+every use. The `discharged-operand` line shows the target being pushed, and the
+`observation-not-placed` line shows the carrier being dropped; what is missing
+is why no surviving materialisation covers that use. That is the next
+hypothesis to form, and it should be formed from a debugger on the seal rather
+than from another reading of the lowering path.

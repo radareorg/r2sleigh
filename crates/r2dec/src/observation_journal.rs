@@ -4375,10 +4375,17 @@ impl LegacyObservationJournal {
         let names = &self.names;
         let symbol_bindings = declared_legacy_bindings(function);
         let mut binding_failure = None;
+        // Which allocated observations the final tree actually carries. One it
+        // does not is a cell that was accounted for by an expression nothing
+        // emitted, and the slot it answered for stays owed to nobody.
+        let mut placed = vec![false; self.targets.len()];
         inspect_render_observations(
             function,
             targets.len(),
             |id, node| -> Result<(), LegacyObservationJournalError> {
+                if let Some(seen) = placed.get_mut(id.index() as usize) {
+                    *seen = true;
+                }
                 let target = targets.get(id.index() as usize).copied().ok_or({
                     LegacyObservationJournalError::Markers(
                         RenderObservationStripError::OutOfRange {
@@ -4564,6 +4571,22 @@ impl LegacyObservationJournal {
             }
             RenderObservationInspectError::Observer(error) => error,
         })?;
+
+        if r2il::refusal_evidence::tracing() {
+            for (index, seen) in placed.iter().enumerate() {
+                if *seen {
+                    continue;
+                }
+                r2il::refusal_evidence!(
+                    "observation-not-placed",
+                    "{:?} was allocated by {} and the emitted tree does not carry it",
+                    self.targets.get(index),
+                    self.target_origins
+                        .get(index)
+                        .map_or_else(|| "an untraced site".to_string(), ToString::to_string)
+                );
+            }
+        }
 
         if let Some(error) = binding_failure {
             if r2il::refusal_evidence::tracing() {
