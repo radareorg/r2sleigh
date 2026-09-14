@@ -3806,7 +3806,8 @@ fn variadic_callsite_argument_count(
         .ok_or_else(|| {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
-                "format argument {format_argument_index} points at {format_literal_address:#x}, where the source carries no string literal"
+                "format argument {format_argument_index} points at {format_literal_address:#x}, where the source carries no string literal; the table holds {} literals",
+                machine_context.source_string_literal_count()
             );
             VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
         })?;
@@ -4039,7 +4040,8 @@ fn merged_format_literal_argument_count(
         let Some(format) = machine_context.source_string_literal(*address) else {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
-                "merged format argument {format_argument_index} reaches {address:#x}, where the source carries no string literal"
+                "merged format argument {format_argument_index} reaches {address:#x}, where the source carries no string literal; the table holds {} literals",
+                machine_context.source_string_literal_count()
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
         };

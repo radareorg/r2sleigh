@@ -23425,3 +23425,32 @@ different stop (a forwarding wrapper, not a missing literal), so the widening is
 invisible here. On the user's measurement the class is
 `format_argument_not_literal` 1,893 and `missing_format_parameter` 646, together
 2,539 of 3,810 gap operations and 107 of 330 whole-function refusals.
+
+## Measured: the first movement on the benchmark's own metrics
+
+A scoped sweep over `bzip2` and `zlib`, both optimisation levels, witnessing the
+tree with the condition-code fold, the aggregate definitions, the declaration
+fixes and the address-based cell pairing. Paired means over the shared
+population, baseline to current:
+
+| metric | n | before | after | better / worse |
+|---|---|---|---|---|
+| byte_match | 1,385 | 0.2544 | **0.2826** | 742 / 218 |
+| ged (lower is better) | 123 | 13.5447 | **12.9756** | 19 / 9 |
+| vj_ged (lower is better) | 123 | 13.5447 | **12.9756** | 19 / 9 |
+| type_match | 1,179 | 0.4261 | **0.4331** | 62 / 28 |
+
+`decbench: no regressions`, and the record was accepted for those cells. Every
+metric moved the right way at once, which is what the shape work predicts: the
+same surplus construct costs an instruction after recompilation, a node in the
+control-flow graph and a variable that answers to no DWARF entry.
+
+`zlib/minigzipsh/O2::error` went from 0.389 to **1.000** -- recompiles to the
+original instruction for instruction. `gz_uncompress` lost six graph edit
+operations, `gz_compress` four. The declines are real and worth reading later:
+`inflateSetDictionary` 0.407 to 0.312 and `file_uncompress` 13 to 16 on `ged`
+are the largest, and both are -O0 functions where a fold changed which values
+stayed bound.
+
+Cost: 3,472 s wall for four cells, of which 2,634 s is evaluation. The full
+26 x 2 sweep extrapolates to 12.5 hours serial, which is why sweeps stay scoped.

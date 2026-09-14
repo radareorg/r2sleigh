@@ -1599,6 +1599,12 @@ impl SourceMachineContext {
             .map(String::as_str)
     }
 
+    /// How many string literals the capture delivered. A refusal to read one
+    /// means something different when the table is empty than when it is full.
+    pub fn source_string_literal_count(&self) -> usize {
+        self.source_string_literals.len()
+    }
+
     pub fn memory_space_at(&self, block_addr: u64, op_index: usize) -> Option<SpaceId> {
         self.memory_spaces_by_op
             .get(&(block_addr, op_index))

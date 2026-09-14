@@ -1803,7 +1803,7 @@ static bool function_image_string_literals_collect(RAnal *anal,
 			r_anal_op_init (&op);
 			const int decoded = r_anal_op (anal, &op, block->addr + cursor,
 				block->bytes + cursor, (int)(block->size - cursor),
-				R_ARCH_OP_MASK_BASIC);
+				R_ARCH_OP_MASK_BASIC | R_ARCH_OP_MASK_VAL);
 			const ut64 candidates[2] = { op.ptr, (ut64)op.val };
 			const ut64 step = (decoded > 0 && op.size > 0)? (ut64)op.size: 1;
 			r_anal_op_fini (&op);
