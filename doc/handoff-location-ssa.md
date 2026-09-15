@@ -24487,24 +24487,50 @@ one to eight afterwards, on the rule that "a measurement is what the program
 did". Gating that on `fcn_context_slot_declared_by_dwarf` does not help: the
 home is radare2's own invention from the spill, not a DWARF-named variable.
 
-**3. radare2's arm64 operand widths do not agree with themselves.** The
-measurement is wrong because the widths it reads are wrong. The body is four
-instructions:
+**3. The measurement read the wrong width, and it was ours.** Per access:
 
 ```
-str  x0, [var_8h]     ; 8 bytes
-str  w1, [var_4h]     ; 4 bytes
-ldr  x8, [var_8h]     ; 8 bytes
-ldrsw x9, [var_4h]    ; 4 bytes, sign-extended into a 64-bit register
+access var_4h @0x100000bd8 refptr=0 dsts=4 srcs=0   str   w1,  [var_4h]
+access var_4h @0x100000be0 refptr=8 dsts=0 srcs=4   ldrsw x9,  [var_4h]
+access var_8h @0x100000bd4 refptr=0 dsts=8 srcs=0   str   x0,  [var_8h]
+access var_8h @0x100000bdc refptr=8 dsts=0 srcs=8   ldr   x8,  [var_8h]
 ```
 
-`op.refptr` is **4 for all four** -- the instruction's own size, not the
-transfer's -- while the operand `memref` scan returns **8 for the `ldrsw`**,
-which is the destination register's width. So one source under-reports the wide
-accesses and the other over-reports the narrow one, and no combination of them
-measures this frame. This is the defect to fix first: with correct widths, (2)
-disappears, and with (1) the whole exact-interface path opens.
+The operand's own `memref` is right every time. `op.refptr` is not: for the
+`ldrsw` it reports 8, the destination register's width, where the transfer is
+4. `fcn_context_slot_measured_extent` took the wider of the two, so the `int`
+parameter's home measured eight bytes and overlapped the pointer's home above
+it. It now takes the operand's `memref` and falls back to `refptr` only where
+no operand carries one.
 
-Until then the `-O0` parameter spill cannot be coalesced with its parameter on
-any Mach-O, which is the shape behind `dec_array_index_uses_real_index` and
-several of its neighbours.
+### Both are fixed
+
+The dSYM base fix is committed to the radare2 fork and raised upstream as
+radareorg/radare2#26738. The width fix is in this tree. Together they turn
+
+```c
+uint32_t sym__test_array_index(uint64_t arr, uint32_t idx) {
+    int32_t stack_m12; uint32_t* stack_m8;
+    stack_m8 = (uint32_t*)arr;
+    stack_m12 = (int32_t)idx;
+    return *(uint32_t*)(((uint64_t)stack_m12 << 2) + (uint64_t)stack_m8);
+}
+```
+
+into
+
+```c
+int32_t dbg_test_array_index(int32_t* arr, int32_t idx) {
+    int32_t tmp_26b00_1 = (int32_t)idx;
+    return (int32_t)(uint32_t)arr[tmp_26b00_1];
+}
+```
+
+against a source of `int test_array_index(int *arr, int idx) { return arr[idx]; }`.
+The spill slots are gone, the signature is the declared one, and the access is a
+subscript. What is left is cosmetic: two self-assignments the placement pass
+keeps (`arr = (int32_t*)arr;`), a temporary that could be inlined, and the
+`(int32_t)(uint32_t)` round trip on the return.
+
+All gates stay green: r2r 66 OK / 18 XX, corpus 60/60 on every column, census
+bzip2-O0 3/152, bzip2-O2 6/112, minigzip-O2 16/161, dpkg-divert-O0 9/651.
