@@ -1771,9 +1771,14 @@ impl<'a> FoldingContext<'a> {
                 if let Some(run) = self.render_certified_member_run_store(addr, val) {
                     return Ok(self.lower_member_run_store(frame, run));
                 }
+                // A width alone carries no signedness. Where nothing recovered
+                // a type for the stored value, the honest carrier is unsigned:
+                // spelling a sixteen-byte store as `__int128_t` claimed a sign
+                // the program never had, and the value crossing into it is
+                // unsigned, which the compiler rejects outright.
                 let elem_ty = self
                     .type_hint_for_var(val)
-                    .unwrap_or_else(|| type_from_size(val.size));
+                    .unwrap_or_else(|| uint_type_from_size(val.size));
                 let certified_lhs =
                     self.render_certified_store_access_expr(addr, val, elem_ty.clone())?;
                 let stored_access = certified_lhs.access();
