@@ -24559,8 +24559,28 @@ keyed by site and a site answers for every obligation on it, including ones
 that legitimately render. That attempt is reverted; the corpus gates stayed
 green throughout, so the census is what caught it.
 
-The missing piece is an answer keyed to the *obligation* rather than the site,
-or a proof that the lane has no other reader before its producer is elided --
-which is what `dead_unused_value_effects` already is, computed by the binding
-plan before lowering. Extending that computation to a value whose only reader
-is an elided store is the shape of the fix.
+Answering it obligation by obligation was tried next, which is what the site
+keying was missing: the lane's producer instruction was walked for its
+`LiveValueProducer` obligations alone, gated on every use of the lane belonging
+to the store being elided. That regressed *further* -- bzip2-O0 to 106
+renderings and dpkg-divert to 480 -- and the second failure is what named the
+real flaw, which is not bookkeeping at all.
+
+**A lane's owner binding is not the claim the elision needs.** The `Bound` case
+is safe because the disposition says the stored value *is* the binding's value:
+storing it back changes nothing. The `Inline` case says only that the lane
+reads *some* value bound to that binding -- a different SSA version of it. The
+shape `x = <lane of some version of x>` is a no-op at a prologue spill, where
+the binding still holds its entry value, and is a real assignment anywhere the
+binding was reassigned in between. Matching widths does not distinguish the
+two.
+
+So the narrow half needs the stored value to be the binding's value *at that
+program point*, which is an SSA-version question rather than a disposition one.
+Until that is proven, `idx = idx;` stays. Both attempts are reverted and the
+coverage is back at 152 and 651.
+
+Worth recording about the method: the eight corpus gates stayed green through
+both regressions. The compile census is what caught them, twice. A change to
+the obligation ledger has to be priced against the census before it is
+believed.
