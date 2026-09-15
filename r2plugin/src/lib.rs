@@ -4916,8 +4916,11 @@ mod tests {
                 && !c_source.contains("r_json_parsedup (diagnostics_text)"),
             "the C wrapper must not reassemble a document the engine already produced"
         );
+        // The executor that owns the response is the one that projects it:
+        // the refusal text the engine returns is read there too, so the plain
+        // `sleigh_engine_execute_v2` above is a wrapper with nothing to free.
         let execute = c_source
-            .find("static char *sleigh_engine_execute_v2(")
+            .find("static char *sleigh_engine_execute_v2_with_error(")
             .expect("V2 executor");
         let project = &c_source[execute..];
         let bytes = project
@@ -5061,7 +5064,7 @@ mod tests {
             );
         }
         assert!(
-            decompile_block.contains("sleigh_engine_execute_v2 (")
+            decompile_block.contains("sleigh_engine_execute_v2_with_error (")
                 && decompile_block.contains("R2SLEIGH_REQUEST_DECOMPILE_V2"),
             "the decompile route must call the versioned engine boundary with decompile-only typed input"
         );
@@ -5095,10 +5098,12 @@ mod tests {
         assert!(
             provider.contains(".snapshot_buffer = held->wire")
                 && provider.contains("R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2")
-                && provider.contains("sleigh_engine_execute_v2 (")
+                && provider.contains("sleigh_engine_execute_v2_with_error (")
         );
+        // The capture that owns the wire is the one that names its refusal;
+        // `sleigh_function_capture` above is a wrapper that discards the name.
         let capture = c_source
-            .split("static const SleighFunctionCapture *sleigh_function_capture(")
+            .split("static const SleighFunctionCapture *sleigh_function_capture_with_reason(")
             .nth(1)
             .expect("the capture that owns the wire buffer");
         assert!(
@@ -5281,7 +5286,7 @@ mod tests {
                 && provider.contains(".snapshot_buffer = held->wire")
                 && provider.contains("R2SLEIGH_REQUEST_DECOMPILE_V2")
                 && provider.contains("R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2")
-                && provider.contains("sleigh_engine_execute_v2 ("),
+                && provider.contains("sleigh_engine_execute_v2_with_error ("),
             "C plugin glue must route borrowed snapshots exclusively through the native V2 boundary"
         );
         assert!(!c_source.contains(concat!(
