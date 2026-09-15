@@ -24584,3 +24584,44 @@ Worth recording about the method: the eight corpus gates stayed green through
 both regressions. The compile census is what caught them, twice. A change to
 the obligation ledger has to be priced against the census before it is
 believed.
+
+### `obj->field` is one gate away, and the gate is not on the member fact
+
+`dec_struct_field_uses_field_access` wants `obj->thirteenth` and gets
+`((uint32_t *)obj)[12]`. The chain was traced end to end and the rendering was
+made to say `obj->thirteenth = v; return obj->thirteenth + obj->first;`
+exactly -- then reverted, because it regressed the census hard: minigzip-O2
+from 16 compile failures to 48, dpkg-divert from 9 to 149.
+
+What was built, and each piece is sound on its own:
+
+- **Member facts for an aggregate reached through a pointer parameter.**
+  `populate_member_access_render_facts_from_declared_slots` keys entirely on
+  `certificates().stack_slots`, so an access through a `DemoStruct *`
+  parameter declines with "the object has no certified source slot". Taking
+  the pointee type from `interface.parameter_logical_value(slot)` when the
+  address is wholly parameter-relative (`addresses().parameter_expression`
+  with no terms) mints the fact.
+- **The declared name replacing a guessed one.** With both passes minting,
+  two facts answered one access -- `f_30` from the external-layout pass and
+  `thirteenth` from the declared one -- and `member_access` requires exactly
+  one match, so the lookup returned `None` and nothing changed. The DWARF name
+  has to replace rather than accompany.
+- **An `AccessSyntax::PtrMember { base, field }`**, decided in `syntax_for`
+  and spelled `base->field` from the plan's own value expression.
+
+**Why it is wrong as placed.** `certified_member_fact_does_not_bypass_the_address_binding_plan`
+fails with "a field label without a base-identity contract must retain the
+exact address binding", and the obvious discriminator does not discriminate:
+`MemberAccessRenderFact::base` is *already* `Some(SemanticId::Parameter(slot))`
+on the facts that test builds. So the contract the renderer needs is not a
+field on the member fact at all -- it is a property of the *address value*,
+namely that the plan bound it as the base, which is what
+`render_certified_load_access_expr` checks today and what `syntax_for` cannot
+see, deciding as it does from facts rather than from the plan's bindings.
+
+So `PtrMember` needs its base proven the way `ParamArray` proves its own --
+`ParamArray { base: ValueId, .. }` carries a value the plan bound, not a
+semantic id -- and the decision has to be made where that binding is visible.
+That is the shape of the fix; the three pieces above are all reusable once the
+base is proven rather than assumed.
