@@ -24648,12 +24648,25 @@ chain, traced end to end:
   while the value cell belongs to a definition that does not exist, so it stays
   unobserved and the seal still demands it.
 
-So the missing piece is one rule: the dead-inline-value rule in
-`observation_journal.rs` closes a value whose every use has an elision reason,
-and a **gapped** use has to count the same way. A use the gap claimed renders
-nothing for the same reason an elided one does, and until it counts, a
-definition-less constant read by an unmodelled operation can never be closed.
+The rule that needed widening was in the gap closure, not the journal, and it
+is now widened: `gap_closure_from_seed` claimed a definition-less value only
+when *every* read of it was inside the gap, and a read a certificate has
+already proved renders nothing is just as accounted. `ValueId(5)` -- the
+four-byte constant with 27 readers -- is claimed now, and the change is
+neutral across the census and all eight corpus columns.
 
-The anchor change on its own was reverted: it fixes nothing without that rule
-and alters anchoring for every definition-less value in the corpus, which is
-exactly the unverified breadth that regressed the census twice today.
+It is still not enough for `test_cpuid`. The next unaccounted value is
+`ValueId(58)`, the constant 8, read by two `IntAdd`s that adjust `RSP`; those
+reads are elided by the journal's own normalization rather than by a
+certificate, and the closure runs before the journal has computed them. So the
+remaining work is an ordering one -- the closure has to be computed where the
+journal's elisions are already known -- rather than another widening of what
+the closure can guess. Each widening buys exactly one value and then meets the
+next constant.
+
+The anchor change was reverted separately: `gap_anchor_for_native_failure`
+maps `RenderedValueRequired` to `def_inst`, which a constant does not have, so
+nothing anchors the gap at all. Anchoring at the unmodelled reader works and
+plans the gap over the `CallOther`'s twelve ops, but it fixes nothing while the
+value cell stays open, and it changes anchoring for every definition-less value
+in the corpus.
