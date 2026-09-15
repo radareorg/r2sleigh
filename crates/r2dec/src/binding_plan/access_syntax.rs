@@ -134,6 +134,16 @@ fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) ->
             return AccessSyntax::SlotBytes { binding, offset };
         }
     }
+    // A member fact blocks the subscript spelling above, because `s.field`
+    // beats `s[3]` when a slot arm can spell it. Where none could -- the base
+    // is a pointer parameter rather than a bound stack object -- the rewriter's
+    // own `base[index]` is still a better answer than casting the whole
+    // address to the pointee's pointer, which applies a byte displacement to a
+    // typed pointer and advances whole objects. `state + 120` reached here
+    // with `Subscript { base, index }` already proven and unused.
+    if let Some(term) = subscript(inputs, fact) {
+        return AccessSyntax::Subscript { term };
+    }
     AccessSyntax::Address {
         address: fact.address,
     }

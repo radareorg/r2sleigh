@@ -763,11 +763,69 @@ impl<'a> FoldingContext<'a> {
         ))))
     }
 
+    /// Report what the arena says this address is, beside what is rendered.
+    ///
+    /// Measurement only, and deliberately so. The byte-offset branch below is
+    /// unreachable -- it tests `matches!(addr_expr, CExpr::Binary { .. })` on
+    /// an expression the observation journal has already wrapped -- so every
+    /// `Address` access is spelled by casting the whole address to the
+    /// pointee's pointer. Where the arena can name a base, that spelling is
+    /// applying a byte displacement to a typed pointer, which advances whole
+    /// objects. This counts those before anything is changed.
+    fn audit_address_form(&self, fact: &r2types::MemoryAccessRenderFact) {
+        if !r2il::refusal_evidence::tracing() {
+            return;
+        }
+        let Some(names) = self.inputs.binding_names else {
+            return;
+        };
+        let canonical = names.plan().canonical();
+        let Some(access) = canonical.access(fact.access) else {
+            r2il::refusal_evidence!(
+                "address-form",
+                "{:#x}:{} no canonical access entry",
+                fact.block_addr,
+                fact.op_index
+            );
+            return;
+        };
+        let arena = canonical.arena();
+        let r2rewrite::TermKind::Load { address, .. } = arena.term(access.canonical).kind else {
+            r2il::refusal_evidence!(
+                "address-form",
+                "{:#x}:{} canonical term is {:?}, not a load",
+                fact.block_addr,
+                fact.op_index,
+                arena.term(access.canonical).kind
+            );
+            return;
+        };
+        match r2rewrite::address::address_form(arena, address) {
+            Some(form) => r2il::refusal_evidence!(
+                "address-form",
+                "{:#x}:{} base={:?} index={} offset={} width={}",
+                fact.block_addr,
+                fact.op_index,
+                form.base,
+                form.index.len(),
+                form.offset,
+                form.width_bits
+            ),
+            None => r2il::refusal_evidence!(
+                "address-form",
+                "{:#x}:{} no provable base",
+                fact.block_addr,
+                fact.op_index
+            ),
+        }
+    }
+
     fn render_certified_memory_address_access(
         &self,
         fact: &r2types::MemoryAccessRenderFact,
         elem_ty: CType,
     ) -> Option<PendingMemoryAccessExpr> {
+        self.audit_address_form(fact);
         let (_, addr_expr) = self.certified_memory_address_expr(fact)?;
         if let Some(rendered) = self.render_certified_structured_memory_expr(fact, &addr_expr) {
             return Some(PendingMemoryAccessExpr::Planned(rendered));
