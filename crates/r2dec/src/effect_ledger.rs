@@ -362,6 +362,10 @@ fn upstream_zero_occurrence_outcome(
     if effects.dead_unused_value_effect(id) {
         return Some(Outcome::Elided(ElisionReason::DeadUnusedTemporary));
     }
+    // A store that put into an object exactly what the object's binding already held.
+    if effects.coalesced_store_effect(id) {
+        return Some(Outcome::Elided(ElisionReason::CoalescedCopy));
+    }
     // Placement removed the statement this obligation's only occurrence sat
     // on, because nothing reads the object that statement wrote. The value,
     // use and write cells are already answered with that same fact; the

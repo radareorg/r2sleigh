@@ -762,6 +762,7 @@ pub(crate) struct EffectOccurrences {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoalescedCarrierEffectElisions {
+    coalesced_store_sites: BTreeSet<(u64, usize)>,
     coalesced_carrier_uses: BTreeSet<UseSite>,
     coalesced_carrier_phis: BTreeSet<InstId>,
     coalesced_copies: BTreeSet<InstId>,
@@ -831,6 +832,15 @@ impl SurvivingEffectObservations {
         self.coalesced_carriers.coalesced_copies.contains(&inst)
     }
 
+    /// Whether a store into an object already holding the value owned this obligation.
+    pub(crate) fn coalesced_store_effect(&self, id: SemanticObligationId) -> bool {
+        matches!(id.instruction.site, r2ssa::CanonicalInstructionSite::Op(op_index)
+            if usize::try_from(op_index).is_ok_and(|op_index| self
+                .coalesced_carriers
+                .coalesced_store_sites
+                .contains(&(id.instruction.block_addr, op_index))))
+    }
+
     /// Whether placement removed the statement carrying this obligation.
     pub(crate) fn placement_removed_effect(&self, id: SemanticObligationId) -> bool {
         self.coalesced_carriers
@@ -864,6 +874,8 @@ pub(crate) struct LegacyObservationJournal {
     /// binding coalescing. Lowering queries this same derived answer before it
     /// suppresses the `x = x` operation.
     coalesced_carrier_copy_sites: BTreeSet<NormalizedOpSite>,
+    /// Stores into an object that already holds the value, by block address and op index.
+    coalesced_store_sites: BTreeSet<(u64, usize)>,
     coalesced_carrier_uses: BTreeSet<UseSite>,
     /// Removed carrier phis for which every incoming edge is already accounted
     /// by SSA identity or one of `coalesced_carrier_copy_sites`.
@@ -2138,6 +2150,7 @@ impl LegacyObservationJournal {
             .into_boxed_slice();
         crate::stage_timing::mark("journal_literals");
         let mut coalesced_carrier_copy_sites = BTreeSet::new();
+        let mut coalesced_store_sites = BTreeSet::<(u64, usize)>::new();
         let mut coalesced_copy_writes = BTreeSet::new();
         let mut coalesced_copy_outputs = BTreeSet::new();
         for block_id in graph.block_order.iter().copied() {
@@ -2221,6 +2234,28 @@ impl LegacyObservationJournal {
                     coalesced_carrier_copy_sites.insert(site);
                     coalesced_copy_outputs.insert(output);
                     coalesced_copy_writes.insert(inst);
+                    continue;
+                }
+                // A store into an object bound to the value's own binding says `x = x`.
+                if let r2ssa::SSAOp::Store { val, .. } = op
+                    && let Some(NormalizedOpOrigin::Original(inst)) = origins.origin(site)
+                    && let Some(object) = stored_stack_object(source.source(), graph, *inst)
+                    && let Some(stored) = graph.value_id_for_var(val)
+                    && let Some(ValueDisposition::Bound {
+                        binding: value_binding,
+                    }) = plan.disposition(stored)
+                    && plan.stack_object_disposition(object)
+                        == Some(StackObjectDisposition::Bound {
+                            binding: *value_binding,
+                        })
+                {
+                    r2il::refusal_evidence!(
+                        "store-elision",
+                        "{site:?} stores {stored:?} into {object:?}, both bound to \
+                         {value_binding:?}; the object already holds it"
+                    );
+                    coalesced_carrier_copy_sites.insert(site);
+                    coalesced_store_sites.insert((block.addr, op_idx));
                     continue;
                 }
                 // A restore is a copy the convention states: construction
@@ -2404,6 +2439,7 @@ impl LegacyObservationJournal {
             names,
             normalized_projections,
             coalesced_carrier_copy_sites,
+            coalesced_store_sites,
             coalesced_carrier_uses,
             coalesced_carrier_phi_writes,
             coalesced_copy_writes,
@@ -4614,6 +4650,7 @@ impl LegacyObservationJournal {
                 .collect(),
             gapped: self.gapped_effects,
             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
+                coalesced_store_sites: self.coalesced_store_sites,
                 coalesced_carrier_uses: self.coalesced_carrier_uses,
                 coalesced_carrier_phis: self.coalesced_carrier_phi_writes,
                 coalesced_copies: self.coalesced_copy_writes,
@@ -5171,6 +5208,7 @@ impl LegacyObservationJournal {
                 .collect(),
             gapped: std::mem::take(&mut self.gapped_effects),
             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
+                coalesced_store_sites: std::mem::take(&mut self.coalesced_store_sites),
                 coalesced_carrier_uses: std::mem::take(&mut self.coalesced_carrier_uses),
                 coalesced_carrier_phis: std::mem::take(&mut self.coalesced_carrier_phi_writes),
                 coalesced_copies: std::mem::take(&mut self.coalesced_copy_writes),
@@ -5644,10 +5682,27 @@ fn visit_stmt_declarations(stmt: &CStmt, visit: &mut impl FnMut(SymbolId)) {
 ///
 /// A load whose value shares its object's binding says `x = x`, and the object
 /// is what says which binding to compare it against.
+fn stored_stack_object(
+    source: &SsaArtifact,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> Option<r2ssa::ObjectId> {
+    accessed_stack_object(source, graph, inst, true)
+}
+
 fn loaded_stack_object(
     source: &SsaArtifact,
     graph: &r2ssa::SsaGraph,
     inst: InstId,
+) -> Option<r2ssa::ObjectId> {
+    accessed_stack_object(source, graph, inst, false)
+}
+
+fn accessed_stack_object(
+    source: &SsaArtifact,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+    is_write: bool,
 ) -> Option<r2ssa::ObjectId> {
     // By op site, never by the instruction's ordinal: an ordinal counts the
     // block's phis first, so in a merge block the two differ and this lands on
@@ -5656,7 +5711,7 @@ fn loaded_stack_object(
     let accesses = source
         .certificates()
         .memory_accesses_by_op
-        .get(&(block_addr, op_idx, false))?;
+        .get(&(block_addr, op_idx, is_write))?;
     let [access] = accesses.as_slice() else {
         return None;
     };

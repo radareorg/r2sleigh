@@ -1760,6 +1760,10 @@ impl<'a> FoldingContext<'a> {
                 transfer.element_size,
             )?,
             SSAOp::Store { addr, val, space } => {
+                // A store the journal sealed as saying nothing: the object already holds it.
+                if self.current_copy_has_coalesced_carrier_elision() {
+                    return Ok(None);
+                }
                 if *space != r2il::SpaceId::Ram {
                     return Ok(Some(self.certified_residual_comment(format!(
                         "unsupported exact memory store space {} at 0x{:x}:{}",

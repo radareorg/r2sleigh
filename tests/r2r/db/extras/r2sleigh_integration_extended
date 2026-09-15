@@ -786,3 +786,17 @@ s `afl~test_array_index$[0]` >/dev/null
 pd:s | jq -Rs 'contains("arr[") and (contains("stack_m")|not) and (contains("<< 2")|not)'
 EOF_CMDS
 RUN
+
+NAME=dec_parameter_spill_store_says_nothing
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~test_array_index$[0]` >/dev/null
+pd:s | jq -Rs '(contains("arr = ")|not) and (contains("arr[")) '
+EOF_CMDS
+RUN
