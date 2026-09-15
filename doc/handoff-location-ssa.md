@@ -24680,11 +24680,26 @@ effect audit is raised downstream in `r2engine`. Wiring the loop to anchor at
 then oscillates, the new gap reopening a value cell and returning the function
 to `RenderedValueRequired`. That attempt is reverted.
 
-So the last link is not another anchor but the interaction between the two:
-a gap planned for a refused effect has to claim the value cells its own ops
-read, or the next attempt loses them again. The gap closure already has the
-rule for that (`GapCell::Value` for a definition-less input); what it lacks is
-being told that the *effect* gap owns those ops.
+A fourth attempt put both halves in at once -- the effect anchor, plus a read
+owned by any *other* planned gap counting as accounted, since that gap renders
+nothing for it either. The oscillation stops and the loop converges, but it
+converges **one refused effect at a time**: `a refused effect named InstId(15)`,
+then `InstId(17)`, each opening a gap over a single op, through sixteen
+obligations that all belong to one `CallOther`. It still ends in
+`RenderedValueRequired`, and the shape of the iteration is the finding.
+
+So the remaining question is not a missing rule but gap **granularity**: a
+`CallOther` is one opaque operation with sixteen effects, and the gap for it
+should be seeded once over its whole closure rather than once per obligation.
+`EffectObligationAudit` reports one refused obligation at a time, so anchoring
+on it necessarily produces the fine-grained loop. Deciding what a gap covers
+for a multi-effect opaque operation is a design choice about the marked-gap
+contract, and the three reverted attempts are all downstream of not having made
+it.
+
+What *did* land from this chain are the two closure widenings above, which are
+independently right and measured neutral, and which moved the refusal from a
+value-cell cascade to a single well-named effect refusal.
 
 The anchor change was reverted separately: `gap_anchor_for_native_failure`
 maps `RenderedValueRequired` to `def_inst`, which a constant does not have, so
