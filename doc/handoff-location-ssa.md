@@ -24790,3 +24790,36 @@ debug view through the trusted snapshot, as every other exact fact already
 travels; guessing argument registers from the architecture is exactly what the
 comment refuses and would be wrong. That is plumbing of the same kind the
 snapshot architecture exists to do, not a change to the taint analysis.
+
+### `char *` is lost because only a typedef's name is kept
+
+`dec_process_string_uses_source_type_spellings` wants `(char *s)` and gets
+`(uint8_t* s)`, while radare2's own `afs` says `int dbg.process_string (char *s)`.
+The cause is one filter. `snapshot_type_note_alias` records a name only when the
+type database holds a **typedef** for it:
+
+```c
+if (!snapshot_type_find_unique_base (builder->base_types, spelling,
+        R_ANAL_BASE_TYPE_KIND_TYPEDEF, &ambiguous) || ambiguous) {
+    return;
+}
+```
+
+`char` is `R_ANAL_BASE_TYPE_KIND_ATOMIC`, so its name never reaches the graph's
+aliases, `source_type_like` finds nothing to wrap, and an 8-bit unsigned base
+type renders as `uint8_t`. On this target `char` is unsigned, so the width is
+right and only the name is lost -- but `char *` and `uint8_t *` are different
+types to a reader and to `-Wpointer-sign`.
+
+Admitting `R_ANAL_BASE_TYPE_KIND_ATOMIC` beside the typedef kind does fix the
+signature -- `int dbg_process_string(char* s)`, the return spelling recovered
+too -- and is **catastrophic** on the census: dpkg-divert from 9 compile
+failures to 440, minigzip-O2 from 16 to 103, bzip2-O0 from 3 to 62. Every
+corpus gate stayed green through it. Reverted.
+
+So the name is worth recovering and the blanket rule is not the way: aliasing
+every atomic puts `int`, `long` and `unsigned` back into renderings that depend
+on the width spelling, and something downstream cannot take them. A narrower
+rule -- `char` alone, whose name carries string-ness that `uint8_t` destroys,
+where `int` and `int32_t` are merely two spellings of one type -- is the shape
+to try, with the census as the judge before anything else.
