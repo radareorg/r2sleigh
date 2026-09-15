@@ -20,8 +20,8 @@ uint32_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
                 RAX_1 = (uint64_t)(uint32_t)tmp_lane_100000610_10_b_1;
                 RCX_1++;
                 uint64_t tmp_3f080_2 = RSI_0;
-                uint8_t ZF_7 = tmp_3f080_2 == RCX_1;
-                if (ZF_7) {
+                uint8_t tmp_12800_2 = tmp_3f080_2 != RCX_1;
+                if (!tmp_12800_2) {
                     break;
                 }
             }

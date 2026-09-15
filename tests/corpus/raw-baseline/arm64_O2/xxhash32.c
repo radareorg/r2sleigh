@@ -4,7 +4,7 @@ struct r2sleigh_bits_256 {
 
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 420 source obligations: 392 rendered, 28 elided, 0 refused; 288 statements rendered */
+    /* r2dec proof: no individual construct is marked; 420 source obligations: 392 rendered, 28 elided, 0 refused; 259 statements rendered */
     {
         struct r2sleigh_bits_256 Z0_1;
         struct r2sleigh_bits_256 Z1_1;
@@ -13,11 +13,9 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         Z0_1 = r2sleigh_bits_zero_extend_64_256(0U);
         Z1_1 = r2sleigh_bits_zero_extend_64_256(0U);
         uint32_t tmp_2a000_2 = 0x165667b1;
-        uint64_t tmp_12380_1 = X1_0;
-        uint64_t tmp_12480_1 = X0_0 + tmp_12380_1;
-        uint64_t X9_1 = tmp_12480_1;
-        uint8_t CY_1 = 16 <= X1_0;
-        if (!CY_1) {
+        uint64_t X9_1 = X1_0 + X0_0;
+        uint8_t tmp_b00_1 = X1_0 < 16;
+        if (tmp_b00_1) {
             uint32_t tmp_12180_2 = tmp_2a000_2;
             uint32_t tmp_lane_1000009f0_1_c6_1 = W2_0;
             uint32_t tmp_12280_2 = tmp_lane_1000009f0_1_c6_1 + tmp_12180_2;
@@ -30,12 +28,10 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             uint32_t tmp_lane_1000009ac_23_75_1;
             uint32_t tmp_lane_1000009ac_24_78_1;
             uint64_t X10_1 = X9_1 - 16;
-            uint32_t tmp_2a000_4 = 0x61c8864f;
-            uint32_t tmp_12180_1 = tmp_2a000_4;
+            uint32_t tmp_12180_1 = 0x61c8864f;
             uint32_t tmp_lane_100000964_6_3_1 = W2_0;
             uint32_t tmp_12280_1 = tmp_lane_100000964_6_3_1 + tmp_12180_1;
-            uint32_t tmp_lane_100000964_c_4_1 = W2_0;
-            Z1_1 = r2sleigh_bits_insert_256_32(Z1_1, tmp_lane_100000964_c_4_1, 64);
+            Z1_1 = r2sleigh_bits_insert_256_32(Z1_1, W2_0, 64);
             Z1_1 = r2sleigh_bits_insert_256_64(Z1_1, 0, 128);
             Z1_1 = r2sleigh_bits_insert_256_64(Z1_1, 0, 192);
             Z1_1 = r2sleigh_bits_insert_256_32(Z1_1, tmp_12280_1, 96);
@@ -114,11 +110,8 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 Z0_17 = r2sleigh_bits_insert_256_32(Z0_17, tmp_lane_1000009ac_24_78_1, 96);
                 Z0_1 = r2sleigh_bits_insert_256_64(Z0_17, 0, 128);
                 Z0_1 = r2sleigh_bits_insert_256_64(Z0_1, 0, 192);
-                uint8_t TMPCY_5 = X10_1 <= X12_1;
-                uint8_t TMPZR_5 = X12_1 == X10_1;
-                uint8_t ZR_3 = TMPZR_5;
-                uint8_t CY_3 = TMPCY_5;
-                if (!(!CY_3 || ZR_3)) {
+                uint8_t tmp_1000_2 = X12_1 <= X10_1;
+                if (!tmp_1000_2) {
                     break;
                 }
             }
@@ -233,39 +226,25 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             uint64_t X11_13;
             uint64_t X13_2;
             uint32_t tmp_2a000_11 = 0xc2b2ae3d;
-            uint32_t tmp_12180_4 = (uint32_t)X1_0;
-            uint32_t tmp_lane_1000009f8_5_c9_1 = (uint32_t)X11_8;
-            uint32_t tmp_12280_4 = tmp_lane_1000009f8_5_c9_1 + tmp_12180_4;
-            X11_13 = (uint64_t)(uint32_t)tmp_12280_4;
-            uint64_t tmp_11f80_1 = X12_4 + 4;
-            uint64_t X13_1 = tmp_11f80_1;
-            uint8_t TMPCY_10 = X9_1 <= X13_1;
-            uint8_t TMPZR_10 = X13_1 == X9_1;
-            uint8_t ZR_5 = TMPZR_10;
-            uint8_t CY_5 = TMPCY_10;
-            if (!CY_5 || ZR_5) {
+            X11_13 = (uint64_t)(uint32_t)((uint32_t)X1_0 + (uint32_t)X11_8);
+            uint64_t X13_1 = X12_4 + 4;
+            uint8_t tmp_1000_4 = X13_1 <= X9_1;
+            if (tmp_1000_4) {
                 uint64_t X12_6;
                 uint32_t tmp_2a000_13 = 0x27d4eb2f;
                 X12_6 = X12_4;
                 for (; ; ) {
-                    uint64_t tmp_11f80_3 = X12_6 + 4;
-                    uint64_t X13_4 = tmp_11f80_3;
+                    uint64_t X13_4 = X12_6 + 4;
                     uint64_t tmp_7400_5 = X12_6;
                     X12_6 += 8;
                     uint32_t tmp_24e00_2 = *(uint32_t*)tmp_7400_5;
-                    uint32_t tmp_28d80_2 = tmp_24e00_2 * tmp_2a000_11;
-                    uint32_t tmp_lane_100000a20_c_cd_1 = (uint32_t)X11_13;
-                    uint32_t tmp_28e80_2 = tmp_lane_100000a20_c_cd_1 + tmp_28d80_2;
-                    uint32_t tmp_31880_2 = tmp_28e80_2 >> 15 | tmp_28e80_2 << 17;
-                    X11_13 = (uint64_t)(uint32_t)(tmp_31880_2 * tmp_2a000_13);
-                    uint8_t TMPCY_14 = X9_1 <= X12_6;
-                    uint8_t TMPZR_13 = X12_6 == X9_1;
-                    uint8_t ZR_7 = TMPZR_13;
-                    uint8_t CY_7 = TMPCY_14;
+                    uint32_t tmp_28e80_2 = tmp_24e00_2 * tmp_2a000_11 + (uint32_t)X11_13;
+                    X11_13 = (uint64_t)(uint32_t)((tmp_28e80_2 >> 15 | tmp_28e80_2 << 17) * tmp_2a000_13);
                     uint64_t X12_8 = X13_4;
+                    uint8_t tmp_1000_6 = X12_6 <= X9_1;
                     X12_6 = X12_8;
                     X13_2 = X13_4;
-                    if (!(!CY_7 || ZR_7)) {
+                    if (!tmp_1000_6) {
                         break;
                     }
                 }
@@ -273,8 +252,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 X13_2 = X12_4;
             }
             {
-                uint8_t TMPCY_16 = X9_1 <= X13_2;
-                uint8_t CY_9 = TMPCY_16;
+                uint8_t CY_9 = X9_1 <= X13_2;
                 if (!CY_9) {
                     uint64_t X9_3;
                     uint64_t tmp_12380_2 = X0_0;
@@ -285,29 +263,22 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         uint64_t tmp_7400_8 = X13_2;
                         X13_2++;
                         uint8_t tmp_25400_2 = *(uint8_t*)tmp_7400_8;
-                        uint64_t X14_5 = (uint64_t)(uint8_t)tmp_25400_2;
-                        uint32_t tmp_28d80_5 = (uint32_t)X14_5 * tmp_2a000_2;
-                        uint32_t tmp_lane_100000a58_5_d4_1 = (uint32_t)X11_13;
-                        uint32_t tmp_28e80_5 = tmp_lane_100000a58_5_d4_1 + tmp_28d80_5;
-                        uint32_t tmp_31880_5 = tmp_28e80_5 >> 21 | tmp_28e80_5 << 11;
-                        X11_13 = (uint64_t)(uint32_t)(tmp_31880_5 * tmp_2a000_16);
+                        uint32_t tmp_28e80_5 = (uint32_t)tmp_25400_2 * tmp_2a000_2 + (uint32_t)X11_13;
+                        X11_13 = (uint64_t)(uint32_t)((tmp_28e80_5 >> 21 | tmp_28e80_5 << 11) * tmp_2a000_16);
                         uint64_t tmp_3e280_2 = X9_3 - 1;
                         uint8_t TMPZR_18 = X9_3 == 1;
                         uint64_t X9_5 = tmp_3e280_2;
-                        uint8_t ZR_11 = TMPZR_18;
+                        uint8_t tmp_a00_2 = !TMPZR_18;
                         X9_3 = X9_5;
-                        if (ZR_11) {
+                        if (!tmp_a00_2) {
                             break;
                         }
                     }
                 }
                 {
                     uint32_t tmp_lane_100000a70_0_d8_1 = (uint32_t)X11_13;
-                    uint32_t tmp_20380_1 = tmp_lane_100000a70_0_d8_1 >> 15 ^ tmp_lane_100000a70_0_d8_1;
-                    uint32_t tmp_2a000_19 = 0x85ebca77;
-                    uint32_t tmp_2b380_7 = tmp_20380_1 * tmp_2a000_19;
-                    uint32_t tmp_20380_2 = tmp_2b380_7 >> 13 ^ tmp_2b380_7;
-                    uint32_t tmp_2b380_8 = tmp_20380_2 * tmp_2a000_11;
+                    uint32_t tmp_2b380_7 = (tmp_lane_100000a70_0_d8_1 >> 15 ^ tmp_lane_100000a70_0_d8_1) * 0x85ebca77;
+                    uint32_t tmp_2b380_8 = tmp_2a000_11 * (tmp_2b380_7 >> 13 ^ tmp_2b380_7);
                     uint32_t tmp_20380_3 = tmp_2b380_8 >> 16 ^ tmp_2b380_8;
                     return tmp_20380_3;
                 }

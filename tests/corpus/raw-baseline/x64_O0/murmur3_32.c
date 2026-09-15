@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 379 source obligations: 254 rendered, 125 elided, 0 refused; 142 statements rendered */
+    /* r2dec proof: no individual construct is marked; 379 source obligations: 254 rendered, 125 elided, 0 refused; 141 statements rendered */
     {
         uint64_t stack_m56;
         uint64_t stack_m48;
@@ -82,7 +82,8 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 uint8_t ZF_11 = stack_m88 == 2;
                 if (!ZF_11) {
                     uint8_t ZF_12 = stack_m88 == 3;
-                    if (!ZF_12) {
+                    uint8_t tmp_12800_1 = !ZF_12;
+                    if (tmp_12800_1) {
                         goto L3;
                     } else {
                         tmp_11f80_13 = stack_m72;
@@ -107,17 +108,15 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             {
                 tmp_11f80_13 = stack_m72;
                 uint8_t tmp_11e00_5 = *(uint8_t*)tmp_11f80_13;
-                uint32_t tmp_lane_100000a72_4_2a_1 = (uint32_t)tmp_11e00_5;
                 tmp_11f00_11 = stack_m76;
-                uint32_t tmp_lane_100000a72_a_2c_1 = tmp_lane_100000a72_4_2a_1 ^ tmp_11f00_11;
+                uint32_t tmp_lane_100000a72_a_2c_1 = (uint32_t)tmp_11e00_5 ^ tmp_11f00_11;
                 stack_m76 = tmp_lane_100000a72_a_2c_1;
                 tmp_11f00_11 = stack_m76;
                 uint64_t tmp_4c780_4 = (uint64_t)(int32_t)tmp_11f00_11 * 0xffffffffcc9e2d51U;
                 uint32_t tmp_lane_100000a72_1a_2f_1 = (uint32_t)tmp_4c780_4;
                 stack_m76 = tmp_lane_100000a72_1a_2f_1;
                 tmp_11f00_11 = stack_m76;
-                uint64_t RDI_4 = (uint64_t)(uint32_t)tmp_11f00_11;
-                uint64_t RAX_41 = (uint64_t)sym__rotl32((uint32_t)RDI_4, 15);
+                uint64_t RAX_41 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_11, 15);
                 stack_m76 = (uint32_t)RAX_41;
                 tmp_11f00_11 = stack_m76;
                 uint64_t tmp_4c780_5 = (uint64_t)(int32_t)tmp_11f00_11 * 0x1b873593;

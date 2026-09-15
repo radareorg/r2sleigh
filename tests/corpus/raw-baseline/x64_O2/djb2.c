@@ -1,6 +1,6 @@
 uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 124 source obligations: 94 rendered, 30 elided, 0 refused; 70 statements rendered */
+    /* r2dec proof: no individual construct is marked; 124 source obligations: 94 rendered, 30 elided, 0 refused; 66 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
@@ -9,8 +9,7 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
         } else {
             uint64_t RAX_1;
             uint64_t RDX_1;
-            uint32_t tmp_lane_1000006c9_0_0_1 = (uint32_t)RSI_0;
-            uint32_t tmp_lane_1000006c9_4_3_1 = tmp_lane_1000006c9_0_0_1 & 3;
+            uint32_t tmp_lane_1000006c9_4_3_1 = (uint32_t)RSI_0 & 3;
             uint64_t RCX_2 = (uint64_t)(uint32_t)tmp_lane_1000006c9_4_3_1;
             uint64_t tmp_3ea80_1 = RSI_0;
             if (4 <= tmp_3ea80_1) {
@@ -22,11 +21,9 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
                 for (; ; ) {
                     uint32_t tmp_lane_1000006f0_0_b_1 = (uint32_t)RAX_2;
                     uint32_t tmp_lane_1000006f0_4_e_1 = tmp_lane_1000006f0_0_b_1 << 5;
-                    uint32_t tmp_lane_1000006f0_28_11_1 = (uint32_t)RAX_2;
-                    uint32_t tmp_lane_1000006f0_2a_12_1 = tmp_lane_1000006f0_4_e_1 + tmp_lane_1000006f0_28_11_1;
+                    uint32_t tmp_lane_1000006f0_2a_12_1 = (uint32_t)RAX_2 + tmp_lane_1000006f0_4_e_1;
                     uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RDX_2];
-                    uint32_t tmp_lane_1000006f0_35_14_1 = (uint32_t)tmp_11e00_2;
-                    uint32_t tmp_lane_1000006f0_39_17_1 = tmp_lane_1000006f0_35_14_1 + tmp_lane_1000006f0_2a_12_1;
+                    uint32_t tmp_lane_1000006f0_39_17_1 = (uint32_t)tmp_11e00_2 + tmp_lane_1000006f0_2a_12_1;
                     uint8_t tmp_11e00_3 = ((uint8_t*)RDI_0)[RDX_2 + 1];
                     uint32_t tmp_lane_1000006f0_45_19_1 = (uint32_t)tmp_11e00_3;
                     uint32_t tmp_lane_1000006f0_49_1c_1 = tmp_lane_1000006f0_45_19_1 + tmp_lane_1000006f0_39_17_1;
@@ -46,9 +43,10 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
                     RDX_2 += 4;
                     uint64_t tmp_3f080_2 = RSI_0;
                     uint8_t ZF_21 = tmp_3f080_2 == RDX_2;
+                    uint8_t tmp_12800_2 = !ZF_21;
                     RAX_1 = RAX_2;
                     RDX_1 = RDX_2;
-                    if (ZF_21) {
+                    if (!tmp_12800_2) {
                         break;
                     }
                 }
@@ -58,24 +56,22 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
             }
             {
                 uint64_t tmp_70500_2 = RCX_2;
-                uint8_t ZF_23 = tmp_70500_2 == 0;
-                if (!ZF_23) {
+                if (tmp_70500_2 != 0) {
                     uint64_t RDX_6;
                     RDI_0 += RDX_1;
                     RDX_6 = (uint64_t)0;
                     for (; ; ) {
                         uint32_t tmp_lane_100000750_0_40_1 = (uint32_t)RAX_1;
                         uint32_t tmp_lane_100000750_4_43_1 = tmp_lane_100000750_0_40_1 << 5;
-                        uint32_t tmp_lane_100000750_28_46_1 = (uint32_t)RAX_1;
-                        uint32_t tmp_lane_100000750_2a_47_1 = tmp_lane_100000750_4_43_1 + tmp_lane_100000750_28_46_1;
+                        uint32_t tmp_lane_100000750_2a_47_1 = (uint32_t)RAX_1 + tmp_lane_100000750_4_43_1;
                         uint8_t tmp_11e00_8 = *(uint8_t*)(RDX_6 + RDI_0);
-                        uint32_t tmp_lane_100000750_35_49_1 = (uint32_t)tmp_11e00_8;
-                        uint32_t tmp_lane_100000750_39_4c_1 = tmp_lane_100000750_35_49_1 + tmp_lane_100000750_2a_47_1;
+                        uint32_t tmp_lane_100000750_39_4c_1 = (uint32_t)tmp_11e00_8 + tmp_lane_100000750_2a_47_1;
                         RAX_1 = (uint64_t)(uint32_t)tmp_lane_100000750_39_4c_1;
                         RDX_6++;
                         uint64_t tmp_3f080_5 = RCX_2;
                         uint8_t ZF_31 = tmp_3f080_5 == RDX_6;
-                        if (ZF_31) {
+                        uint8_t tmp_12800_5 = !ZF_31;
+                        if (!tmp_12800_5) {
                             break;
                         }
                     }

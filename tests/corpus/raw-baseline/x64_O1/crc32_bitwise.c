@@ -1,6 +1,6 @@
 uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 66 source obligations: 41 rendered, 25 elided, 0 refused; 36 statements rendered */
+    /* r2dec proof: no individual construct is marked; 66 source obligations: 41 rendered, 25 elided, 0 refused; 35 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
@@ -14,8 +14,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
             for (; ; ) {
                 uint64_t RDX_5;
                 uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
-                uint32_t tmp_lane_100000730_3_3_1 = (uint32_t)tmp_11e00_2;
-                uint32_t tmp_lane_100000730_7_6_1 = (uint32_t)RAX_1 ^ tmp_lane_100000730_3_3_1;
+                uint32_t tmp_lane_100000730_7_6_1 = (uint32_t)tmp_11e00_2 ^ (uint32_t)RAX_1;
                 RAX_1 = (uint64_t)(uint32_t)tmp_lane_100000730_7_6_1;
                 RDX_5 = 8;
                 for (; ; ) {
@@ -29,16 +28,16 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
                     uint32_t tmp_lane_100000740_35_19_1 = (uint32_t)RDX_5;
                     uint32_t tmp_lane_100000740_36_1a_1 = tmp_lane_100000740_35_19_1 - 1;
                     RDX_5 = (uint64_t)(uint32_t)tmp_lane_100000740_36_1a_1;
-                    uint8_t ZF_11 = tmp_lane_100000740_36_1a_1 == 0;
-                    if (ZF_11) {
+                    uint8_t tmp_12800_3 = tmp_lane_100000740_36_1a_1 != 0;
+                    if (!tmp_12800_3) {
                         break;
                     }
                 }
                 {
                     RCX_1++;
                     uint64_t tmp_3f080_2 = RCX_1;
-                    uint8_t ZF_13 = tmp_3f080_2 == RSI_0;
-                    if (ZF_13) {
+                    uint8_t tmp_12800_4 = tmp_3f080_2 != RSI_0;
+                    if (!tmp_12800_4) {
                         break;
                     }
                 }

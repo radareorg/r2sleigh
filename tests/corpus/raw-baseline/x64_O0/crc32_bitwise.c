@@ -19,13 +19,13 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
                 uint32_t stack_m44;
                 uint64_t RCX_2 = stack_m40;
                 uint8_t tmp_11e00_2 = stack_m16[RCX_2];
-                uint32_t tmp_lane_100000815_9_0_1 = (uint32_t)tmp_11e00_2;
-                uint32_t tmp_lane_100000815_f_2_1 = tmp_lane_100000815_9_0_1 ^ stack_m28;
+                uint32_t tmp_lane_100000815_f_2_1 = (uint32_t)tmp_11e00_2 ^ stack_m28;
                 stack_m28 = tmp_lane_100000815_f_2_1;
                 stack_m44 = 0;
                 for (; ; ) {
                     uint32_t tmp_3e900_3 = stack_m44;
-                    if (8 <= (int32_t)tmp_3e900_3) {
+                    uint8_t tmp_12e80_3 = 8 <= (int32_t)tmp_3e900_3;
+                    if (tmp_12e80_3) {
                         break;
                     } else {
                         uint32_t tmp_lane_100000834_7_7_1 = stack_m28 >> 1;

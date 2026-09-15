@@ -1,6 +1,6 @@
 uint32_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 106 source obligations: 56 rendered, 50 elided, 0 refused; 36 statements rendered */
+    /* r2dec proof: no individual construct is marked; 106 source obligations: 56 rendered, 50 elided, 0 refused; 33 statements rendered */
     {
         uint64_t stack_m40;
         uint32_t stack_m32;
@@ -20,14 +20,11 @@ uint32_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
                 break;
             } else {
                 uint64_t RAX_10;
-                uint64_t RDX_2 = stack_m40;
-                uint8_t tmp_11e00_2 = stack_m16[RDX_2];
-                uint32_t tmp_lane_10000071c_d_1_1 = (uint32_t)tmp_11e00_2;
-                uint32_t tmp_lane_10000071c_11_4_1 = stack_m28 + tmp_lane_10000071c_d_1_1;
+                uint8_t tmp_11e00_2 = stack_m16[stack_m40];
+                uint32_t tmp_lane_10000071c_11_4_1 = (uint32_t)tmp_11e00_2 + stack_m28;
                 uint64_t tmp_43f80_2 = (uint64_t)tmp_lane_10000071c_11_4_1;
                 uint64_t tmp_44200_2 = tmp_43f80_2 % 0xfff1;
-                uint32_t tmp_lane_10000071c_2d_d_1 = (uint32_t)tmp_44200_2;
-                stack_m28 = tmp_lane_10000071c_2d_d_1;
+                stack_m28 = (uint32_t)tmp_44200_2;
                 uint32_t tmp_lane_10000071c_3c_11_1 = stack_m32 + stack_m28;
                 uint64_t tmp_43f80_3 = (uint64_t)tmp_lane_10000071c_3c_11_1;
                 uint64_t tmp_44200_3 = tmp_43f80_3 % 0xfff1;
