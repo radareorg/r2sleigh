@@ -24682,20 +24682,23 @@ to `RenderedValueRequired`. That attempt is reverted.
 
 A fourth attempt put both halves in at once -- the effect anchor, plus a read
 owned by any *other* planned gap counting as accounted, since that gap renders
-nothing for it either. The oscillation stops and the loop converges, but it
-converges **one refused effect at a time**: `a refused effect named InstId(15)`,
-then `InstId(17)`, each opening a gap over a single op, through sixteen
-obligations that all belong to one `CallOther`. It still ends in
-`RenderedValueRequired`, and the shape of the iteration is the finding.
+nothing for it either. The oscillation stops. It was then measured rather than
+assumed, and the measurement corrected the guess: the loop runs **twice**, not
+sixteen times, planning gaps at `InstId(15)` and `InstId(17)` and stopping.
 
-So the remaining question is not a missing rule but gap **granularity**: a
-`CallOther` is one opaque operation with sixteen effects, and the gap for it
-should be seeded once over its whole closure rather than once per obligation.
-`EffectObligationAudit` reports one refused obligation at a time, so anchoring
-on it necessarily produces the fine-grained loop. Deciding what a gap covers
-for a multi-effect opaque operation is a design choice about the marked-gap
-contract, and the three reverted attempts are all downstream of not having made
-it.
+What it stops on is the real shape. Each effect gap claims **one op**, and the
+cells that go missing are far more than one op's worth: after the two gaps,
+`ValueId(5)` is unaccounted again and so are eleven others -- `ValueId(51)`,
+`52`, `56`, `60`, `64` among them, all `Bound`, all defined by the `CallOther`
+and the `Load`s around it. The gap suppresses a whole region of lowering while
+claiming a single instruction's cells, so the rendering loses statements the
+gap never accounted for.
+
+So the fix is that a gap seeded for a refused effect has to take the closure of
+the operation that refused, the way the machine-projection gap at op 46 takes
+twelve ops, rather than the single op the obligation names.
+`gap_closure_from_seed` computed a one-cell closure for `InstId(15)`, and why
+it does not expand there is the next thing to find out.
 
 What *did* land from this chain are the two closure widenings above, which are
 independently right and measured neutral, and which moved the refusal from a
