@@ -265,6 +265,26 @@ pub(crate) struct GapClosure {
     pub(crate) cells: Vec<crate::observation_journal::GapCell>,
 }
 
+/// Whether the instruction at this read renders no statement, so its reads render nothing.
+///
+/// A definition the plan elided has no output to spell, and a read feeding it is
+/// accounted by that elision rather than by any occurrence.
+fn reader_renders_nothing(
+    names: &crate::binding_plan::BindingNameResolution,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> bool {
+    graph
+        .inst(inst)
+        .and_then(|inst| inst.output)
+        .is_some_and(|output| {
+            matches!(
+                names.plan().disposition(output),
+                Some(crate::binding_plan::ValueDisposition::Elided { .. })
+            )
+        })
+}
+
 impl<'a> FoldingContext<'a> {
     pub(crate) fn from_inputs(inputs: FoldInputs<'a>) -> Self {
         Self {
@@ -535,6 +555,7 @@ impl<'a> FoldingContext<'a> {
                         owned.contains(&site.inst)
                             || elided_uses.contains_key(site)
                             || elided_readers.contains(&site.inst)
+                            || reader_renders_nothing(names, graph, site.inst)
                     })
                     && claimed_values.insert(input)
                 {
