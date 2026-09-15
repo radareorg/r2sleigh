@@ -285,6 +285,35 @@ fn reader_renders_nothing(
         })
 }
 
+/// Every instruction of the native machine instruction that `seed` belongs to.
+fn native_span_instructions(
+    prepared: &r2ssa::SsaArtifact,
+    graph: &r2ssa::SsaGraph,
+    seed: InstId,
+) -> Vec<InstId> {
+    let Some((block_addr, op_idx)) = graph.op_site_for_inst(seed) else {
+        return Vec::new();
+    };
+    let op_idx = op_idx as u64;
+    let Some(span) = prepared
+        .obligations()
+        .native_spans()
+        .values()
+        .copied()
+        .find(|span| {
+            span.block_addr() == block_addr
+                && op_idx >= span.first_canonical_op()
+                && op_idx < span.first_canonical_op() + span.canonical_op_count()
+        })
+    else {
+        return Vec::new();
+    };
+    (span.first_canonical_op()..span.first_canonical_op() + span.canonical_op_count())
+        .filter_map(|op| usize::try_from(op).ok())
+        .filter_map(|op| graph.inst_id_for_op_site(block_addr, op))
+        .collect()
+}
+
 impl<'a> FoldingContext<'a> {
     pub(crate) fn from_inputs(inputs: FoldInputs<'a>) -> Self {
         Self {
@@ -463,7 +492,14 @@ impl<'a> FoldingContext<'a> {
         }
         let mut owned: BTreeSet<InstId> = BTreeSet::new();
         owned.insert(seed);
-        let mut worklist = vec![seed];
+        // A native instruction is gapped whole: its p-code ops are one operation, and an
+        // opaque one refuses them together rather than op by op.
+        for inst in native_span_instructions(prepared, graph, seed) {
+            if !already.contains(&inst) {
+                owned.insert(inst);
+            }
+        }
+        let mut worklist = owned.iter().copied().collect::<Vec<_>>();
         while let Some(inst) = worklist.pop() {
             let Some(instruction) = graph.inst(inst) else {
                 continue;

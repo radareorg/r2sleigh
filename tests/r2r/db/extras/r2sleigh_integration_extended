@@ -814,3 +814,17 @@ s `afl~test_struct_field$[0]` >/dev/null
 pd:s | jq -Rs 'contains("obj->thirteenth") and contains("obj->first") and (contains("[12]")|not)'
 EOF_CMDS
 RUN
+
+NAME=dec_unmodelled_instruction_is_a_gap_not_a_refusal
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~test_cpuid$[0]` >/dev/null
+pd:s | jq -Rs 'contains("r2dec gap:") and (contains("r2sleigh refused")|not)'
+EOF_CMDS
+RUN
