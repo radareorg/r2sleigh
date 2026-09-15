@@ -1731,24 +1731,40 @@ fn machine_expr_kind_name(kind: &r2ssa::MachineExprKind) -> &'static str {
 /// shape is still asked here and that expression still keeps its statement.
 fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
     use r2ssa::MachineExprKind as Kind;
-    matches!(
-        kind,
+    // Exhaustive on purpose. This list is a hand-written mirror of what
+    // `materialize_machine_expr` can build, and it has drifted before:
+    // `Constant` was missing, so the plan agreed a literal-only value was
+    // cheap to spell at each reader and then this said the renderer had no
+    // form for it, which is the whole of the literal-only declaration column.
+    // A `matches!` lets a new kind arrive as a silent `false` -- a value that
+    // gets a name instead of being inlined, which is the direction that costs
+    // `byte_match`. A `match` makes the compiler ask.
+    match kind {
         Kind::Constant { .. }
-            | Kind::Arithmetic { .. }
-            | Kind::Bitwise { .. }
-            | Kind::BitwiseNot { .. }
-            | Kind::Boolean { .. }
-            | Kind::BooleanNot { .. }
-            | Kind::Compare { .. }
-            | Kind::Copy { .. }
-            | Kind::Negate { .. }
-            | Kind::Select { .. }
-            | Kind::Shift { .. }
-            | Kind::Cast { .. }
-            | Kind::Extract { .. }
-            | Kind::Concat { .. }
-            | Kind::ArithmeticFlag { .. }
-    )
+        | Kind::Arithmetic { .. }
+        | Kind::Bitwise { .. }
+        | Kind::BitwiseNot { .. }
+        | Kind::Boolean { .. }
+        | Kind::BooleanNot { .. }
+        | Kind::Compare { .. }
+        | Kind::Copy { .. }
+        | Kind::Negate { .. }
+        | Kind::Select { .. }
+        | Kind::Shift { .. }
+        | Kind::Cast { .. }
+        | Kind::Extract { .. }
+        | Kind::Concat { .. }
+        | Kind::ArithmeticFlag { .. } => true,
+        // A read is a memory effect and a merge is not an expression; the
+        // remaining four have no form in the materialiser.
+        Kind::Source { .. }
+        | Kind::MemoryRead { .. }
+        | Kind::Phi { .. }
+        | Kind::InsertLane { .. }
+        | Kind::PopulationCount { .. }
+        | Kind::Divide { .. }
+        | Kind::Remainder { .. } => false,
+    }
 }
 
 /// The canonical forms admitted by `expression_renders_inline`.
