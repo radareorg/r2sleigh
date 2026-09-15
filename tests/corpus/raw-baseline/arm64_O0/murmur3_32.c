@@ -36,7 +36,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             } else {
                 uint32_t stack_m68;
                 uint32_t tmp_24c00_7;
-                uint32_t tmp_25180_2 = *(uint32_t*)((stack_m64 << 2) + stack_m24);
+                uint32_t tmp_25180_2 = ((uint32_t*)stack_m24)[stack_m64];
                 stack_m68 = tmp_25180_2;
                 tmp_24c00_7 = stack_m68;
                 uint32_t tmp_2b380_2 = tmp_24c00_7 * stack_m92;

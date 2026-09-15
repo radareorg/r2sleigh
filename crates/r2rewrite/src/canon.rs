@@ -211,6 +211,24 @@ pub(crate) fn collect_affine(
             *entry = entry.wrapping_add(scale.wrapping_mul(k)) & modulus;
             *atoms += 1;
         }
+        // A left shift by a literal is a multiplication by a power of two,
+        // exactly, whenever the count is below the width -- the one case where
+        // the overshift behaviour cannot decide anything. Reading it as the
+        // multiplication it is, is what lets an index reach its coefficient:
+        // `base + (i << 2)` is `base + 4*i`, and the element size the
+        // subscript rule needs is in the coefficient and nowhere else.
+        TermKind::Shift {
+            kind: r2ssa::MachineShiftKind::Left,
+            value,
+            count,
+            ..
+        } if literal_bits(arena, count).is_some_and(|k| k < u64::from(width)) => {
+            let k = literal_bits(arena, count).expect("checked");
+            let factor = 1u64.wrapping_shl(u32::try_from(k).expect("count below the width"));
+            let entry = coefficients.entry(value).or_insert(0);
+            *entry = entry.wrapping_add(scale.wrapping_mul(factor)) & modulus;
+            *atoms += 1;
+        }
         _ => {
             let entry = coefficients.entry(id).or_insert(0);
             *entry = entry.wrapping_add(scale) & modulus;
