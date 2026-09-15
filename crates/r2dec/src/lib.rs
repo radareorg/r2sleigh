@@ -6740,4 +6740,104 @@ mod tests {
             "release builds must not admit a partially represented region domain"
         );
     }
+
+    /// Every place that spells a C conversion, frozen.
+    ///
+    /// A cast is a claim about what a value *is*, and the session that wrote
+    /// this found three copies of one conversion rule that had silently
+    /// diverged -- one filtered an unknown source type and two did not, so the
+    /// same value crossed into a pointer with a cast on one path and without
+    /// on another. The rule is stated once now, in `convert_optional`.
+    ///
+    /// The guard is the file set, not a count: edits inside these files are
+    /// ordinary, a *new* file spelling a conversion is the drift. The list is
+    /// meant to shrink as the conversion sites move behind one elaborator; it
+    /// is not meant to grow.
+    #[test]
+    fn a_c_conversion_is_spelled_only_where_the_conversion_rules_live() {
+        let sources: &[(&str, &str)] = &[
+            (
+                "fold/op_lower/convert.rs",
+                include_str!("fold/op_lower/convert.rs"),
+            ),
+            (
+                "fold/op_lower/implementation.rs",
+                include_str!("fold/op_lower/implementation.rs"),
+            ),
+            (
+                "fold/op_lower/subscript_renderer.rs",
+                include_str!("fold/op_lower/subscript_renderer.rs"),
+            ),
+            (
+                "fold/op_lower/projection.rs",
+                include_str!("fold/op_lower/projection.rs"),
+            ),
+            (
+                "fold/op_lower/memory_renderer.rs",
+                include_str!("fold/op_lower/memory_renderer.rs"),
+            ),
+            (
+                "fold/op_lower/lowering.rs",
+                include_str!("fold/op_lower/lowering.rs"),
+            ),
+            ("lib.rs", include_str!("lib.rs")),
+            (
+                "analysis/prepared_semantic.rs",
+                include_str!("analysis/prepared_semantic.rs"),
+            ),
+            ("placement.rs", include_str!("placement.rs")),
+            (
+                "observation_journal.rs",
+                include_str!("observation_journal.rs"),
+            ),
+            // Not permitted: these are checked to be free of conversions.
+            ("ast.rs", include_str!("ast.rs")),
+            ("codegen.rs", include_str!("codegen.rs")),
+            ("structure/rewrite.rs", include_str!("structure/rewrite.rs")),
+            ("structure/shape.rs", include_str!("structure/shape.rs")),
+            ("structure/place.rs", include_str!("structure/place.rs")),
+            (
+                "binding_plan/rules.rs",
+                include_str!("binding_plan/rules.rs"),
+            ),
+            (
+                "binding_plan/access_syntax.rs",
+                include_str!("binding_plan/access_syntax.rs"),
+            ),
+            ("fold/stack.rs", include_str!("fold/stack.rs")),
+            (
+                "fold/op_lower/calls.rs",
+                include_str!("fold/op_lower/calls.rs"),
+            ),
+            (
+                "fold/op_lower/typing.rs",
+                include_str!("fold/op_lower/typing.rs"),
+            ),
+        ];
+        let permitted = [
+            "fold/op_lower/convert.rs",
+            "fold/op_lower/implementation.rs",
+            "fold/op_lower/subscript_renderer.rs",
+            "fold/op_lower/projection.rs",
+            "fold/op_lower/memory_renderer.rs",
+            "fold/op_lower/lowering.rs",
+            "lib.rs",
+            "analysis/prepared_semantic.rs",
+            "placement.rs",
+            "observation_journal.rs",
+        ];
+        let spells_a_conversion = |source: &str| {
+            source.contains(concat!("CExpr::", "cast("))
+                || source.contains(concat!("CExpr::", "pointer_width_cast("))
+        };
+        let offenders: Vec<&str> = sources
+            .iter()
+            .filter(|(name, source)| spells_a_conversion(source) && !permitted.contains(name))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "a C conversion is spelled outside the files that own the conversion rules: {offenders:?}"
+        );
+    }
 }
