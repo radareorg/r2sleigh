@@ -15,6 +15,7 @@ use r2types::CTypeLike;
 struct Plan {
     declared: BTreeMap<ValueId, CTypeLike>,
     inlined: BTreeMap<ValueId, TermId>,
+    object_addresses: BTreeMap<r2ssa::ObjectId, CTypeLike>,
 }
 
 impl RenderTypes for Plan {
@@ -24,6 +25,10 @@ impl RenderTypes for Plan {
 
     fn inline_root(&self, value: ValueId) -> Option<TermId> {
         self.inlined.get(&value).copied()
+    }
+
+    fn object_address_type(&self, object: r2ssa::ObjectId) -> Option<CTypeLike> {
+        self.object_addresses.get(&object).cloned()
     }
 }
 

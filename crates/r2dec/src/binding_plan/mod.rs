@@ -1304,6 +1304,21 @@ impl r2rewrite::RenderTypes for BindingPlan {
             _ => None,
         }
     }
+
+    fn object_address_type(&self, object: r2ssa::ObjectId) -> Option<r2types::CTypeLike> {
+        // The same rule `fold::stack::frame_object_address_expr` spells: an
+        // array decays to a pointer to its element, anything else is addressed.
+        let StackObjectDisposition::Bound { binding } = self.stack_object_disposition(object)?
+        else {
+            return None;
+        };
+        let declared = self.binding(binding)?.declaration_type().clone();
+        Some(if declared.is_array() {
+            declared
+        } else {
+            r2types::CTypeLike::ptr(declared)
+        })
+    }
 }
 
 impl BindingPlan {

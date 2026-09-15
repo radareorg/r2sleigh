@@ -46,6 +46,15 @@ pub trait RenderTypes {
 
     /// The canonical term an inlined value renders as, at each of its readers.
     fn inline_root(&self, value: ValueId) -> Option<TermId>;
+
+    /// The C type the rendering of this object's address has.
+    ///
+    /// A pointer to the object, or the array type itself, which decays to one.
+    /// Without it an object address was typed `ptr(Unknown)`, which the
+    /// conversion emitter filters out, so the address reached its reader
+    /// carrying no type and two renderers recovered one from the rendered
+    /// text instead.
+    fn object_address_type(&self, object: r2ssa::ObjectId) -> Option<CTypeLike>;
 }
 
 /// The C type a rendered expression has.
@@ -301,7 +310,11 @@ impl Builder<'_> {
             TermKind::Opaque(expr) => self.produced(*expr),
             TermKind::Literal(_) => CValue::Constant,
             TermKind::Variable(_) => CValue::Typed(own),
-            TermKind::ObjectAddress(_) => CValue::Typed(CTypeLike::ptr(CTypeLike::Unknown)),
+            TermKind::ObjectAddress(object) => CValue::Typed(
+                self.plan
+                    .object_address_type(*object)
+                    .unwrap_or_else(|| CTypeLike::ptr(CTypeLike::Unknown)),
+            ),
             TermKind::Load { address, .. } => {
                 self.term_produced(*address);
                 self.require_term(id, 0, CTypeLike::ptr(own.clone()));
