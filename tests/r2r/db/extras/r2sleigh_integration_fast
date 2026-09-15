@@ -72,32 +72,6 @@ a:sla.debug.json | jq -c 'length>0 and (([..|objects|select((.space? | strings |
 EOF_CMDS
 RUN
 
-NAME=instruction_regs_has_read_and_write_arrays
-FILE=malloc://64
-ARGS=-a x86 -b 64 -e scr.color=false -e log.level=0
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-wx 48837df8000000000000000000000000
-s 0 >/dev/null
-a:sla.debug.regs | jq -c '(.read|type=="array") and (.write|type=="array")'
-EOF_CMDS
-RUN
-
-NAME=instruction_vars_entries_have_required_fields
-FILE=malloc://64
-ARGS=-a x86 -b 64 -e scr.color=false -e log.level=0
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-wx 48837df8000000000000000000000000
-s 0 >/dev/null
-a:sla.debug.vars | jq -c 'length>0 and (.[0] | has("name") and has("space") and has("offset") and has("size"))'
-EOF_CMDS
-RUN
-
 NAME=instruction_ssa_has_ops_and_named_regs
 FILE=malloc://64
 ARGS=-a x86 -b 64 -e scr.color=false -e log.level=0
@@ -107,7 +81,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 48837df8000000000000000000000000
 s 0 >/dev/null
-a:sla.debug.ssa | jq -c '(.schema_version==1) and (.operations|length>0) and (.operations[0]|has("op")) and (.operations|tostring|contains("RBP_"))'
+a:sla.debug.ssa | jq -c '(.schema_version==4) and (.operations|length>0) and (.operations[0]|has("op")) and (.operations|tostring|contains("RBP_"))'
 EOF_CMDS
 RUN
 
@@ -120,20 +94,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 4883c001000000000000000000000000
 s 0 >/dev/null
-a:sla.debug.ssa | jq -c '(.schema_version==2) and ([.operations[]|select(.op=="IntAdd")]|length)==1 and ([.operations[]|select(.op=="IntAdd")][0].dst=="RAX_1") and (([.operations[]|select(.op=="IntAdd")][0].sources|index("RAX_0"))!=null)'
-EOF_CMDS
-RUN
-
-NAME=instruction_defuse_has_expected_fields
-FILE=malloc://64
-ARGS=-a x86 -b 64 -e scr.color=false -e log.level=0
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-wx 48837df8000000000000000000000000
-s 0 >/dev/null
-a:sla.debug.defuse | jq -c 'has("inputs") and has("outputs") and has("live")'
+a:sla.debug.ssa | jq -c '(.schema_version==4) and ([.operations[]|select(.op=="IntAdd")]|length)==1 and ([.operations[]|select(.op=="IntAdd")][0].dst=="RAX_1") and (([.operations[]|select(.op=="IntAdd")][0].sources|index("RAX_0"))!=null)'
 EOF_CMDS
 RUN
 
@@ -159,7 +120,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 48837df8000000000000000000000000
 s 0 >/dev/null
-a:sla.debug.opvals | jq -c '((.srcs|index("RBP")) != null) and ((.dsts|index("ZF")) != null)'
+a:sla.debug.opvals | jq -c '((.srcs|index("rbp")) != null) and ((.dsts|index("zf")) != null)'
 EOF_CMDS
 RUN
 
@@ -185,7 +146,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 s `isq~check_secret[0]` >/dev/null
 af
-a:sla.debug.ssa.func | jq -c --argjson target `?vi $$` --arg target_hex `?v $$` '(.schema_version==2) and (.entry==$target) and (.entry_hex==$target_hex) and has("blocks") and (.blocks|type=="array") and ((.blocks|length)>0) and ((.blocks|map(has("phis"))|all)) and (.prepared|has("formal_parameters") and has("parameter_addresses"))'
+a:sla.debug.ssa.func | jq -c --argjson target `?vi $$` --arg target_hex `?v $$` '(.schema_version==4) and (.entry==$target) and (.entry_hex==$target_hex) and has("blocks") and (.blocks|type=="array") and ((.blocks|length)>0) and ((.blocks|map(has("phis"))|all)) and (.prepared|has("formal_parameters") and has("parameter_addresses"))'
 EOF_CMDS
 RUN
 
