@@ -60,12 +60,7 @@ impl FoldingContext<'_> {
     /// assigned to a pointer-declared object rendered
     /// `uint8_t *X0_9 = sym__rotl32(...)` on exactly that path.
     pub(super) fn convert_from(&self, expr: CExpr, from: Option<&CValue>, to: &CType) -> CExpr {
-        let recorded = from.filter(|from| !matches!(from.as_type(), Some(CType::Unknown)));
-        match recorded {
-            Some(from) => self.convert(expr, from, to),
-            None if matches!(to, CType::Pointer(_)) => CExpr::cast(to.clone(), expr),
-            None => expr,
-        }
+        super::convert::convert_optional(expr, from, to, self.pointer_bits())
     }
 
     /// What a read of `value` renders as, before any use projection.

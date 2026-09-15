@@ -183,6 +183,27 @@ fn respell_literal(expr: CExpr, signed: bool, bits: u32) -> CExpr {
 }
 
 /// Convert `expr`, which has `from`, to `to`.
+/// Convert `expr`, whose type may not be recorded, to `to`.
+///
+/// An absent or `Unknown` source is not a licence to emit nothing: a value of
+/// unknown type crossing into a pointer still needs the cast, or a call with no
+/// recovered prototype renders `uint8_t *X0_9 = sym__rotl32(...)`. That one arm
+/// is the rule three copies of this disagreed about -- the two in `projection`
+/// did not filter `Unknown`, so they skipped the cast the third emitted.
+pub(crate) fn convert_optional(
+    expr: CExpr,
+    from: Option<&CValue>,
+    to: &CType,
+    pointer_bits: u32,
+) -> CExpr {
+    let recorded = from.filter(|from| !matches!(from.as_type(), Some(CType::Unknown)));
+    match recorded {
+        Some(from) => convert(expr, from, to, pointer_bits),
+        None if matches!(to, CType::Pointer(_)) => CExpr::cast(to.clone(), expr),
+        None => expr,
+    }
+}
+
 pub(crate) fn convert(expr: CExpr, from: &CValue, to: &CType, pointer_bits: u32) -> CExpr {
     match from {
         CValue::Constant => spell_constant(expr, to, pointer_bits),

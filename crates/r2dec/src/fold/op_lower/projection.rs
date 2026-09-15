@@ -77,10 +77,8 @@ pub(super) fn project_machine_use_of(
     slice: MachineUseSlice,
     pointer_bits: u32,
 ) -> Result<(CExpr, CValue), MachineUseProjectionError> {
-    let convert = |expr: CExpr, from: Option<&CValue>, to: &CType| match from {
-        Some(from) => super::convert::convert(expr, from, to, pointer_bits),
-        None if matches!(to, CType::Pointer(_)) => CExpr::cast(to.clone(), expr),
-        None => expr,
+    let convert = |expr: CExpr, from: Option<&CValue>, to: &CType| {
+        super::convert::convert_optional(expr, from, to, pointer_bits)
     };
     let whole = slice.bit_offset() == 0 && slice.width_bits() == slice.carrier_width_bits();
     let (projected, projected_type) = if whole {
@@ -206,10 +204,8 @@ pub(super) fn project_machine_write(
     projection: MachineWriteProjection,
     pointer_bits: u32,
 ) -> Result<(CExpr, CExpr, Option<CValue>), MachineWriteProjectionError> {
-    let convert = |expr: CExpr, from: Option<&CValue>, to: &CType| match from {
-        Some(from) => super::convert::convert(expr, from, to, pointer_bits),
-        None if matches!(to, CType::Pointer(_)) => CExpr::cast(to.clone(), expr),
-        None => expr,
+    let convert = |expr: CExpr, from: Option<&CValue>, to: &CType| {
+        super::convert::convert_optional(expr, from, to, pointer_bits)
     };
     match projection {
         MachineWriteProjection::Full => Ok((lhs, rhs, rhs_type.cloned())),
