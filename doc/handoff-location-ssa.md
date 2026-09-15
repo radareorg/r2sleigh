@@ -24694,11 +24694,25 @@ and the `Load`s around it. The gap suppresses a whole region of lowering while
 claiming a single instruction's cells, so the rendering loses statements the
 gap never accounted for.
 
-So the fix is that a gap seeded for a refused effect has to take the closure of
-the operation that refused, the way the machine-projection gap at op 46 takes
-twelve ops, rather than the single op the obligation names.
-`gap_closure_from_seed` computed a one-cell closure for `InstId(15)`, and why
-it does not expand there is the next thing to find out.
+The reason the closure does not expand is now known. `gap_closure_from_seed`
+grows forward from the seed's output to its readers and backward to inline
+producers; an op whose output is an elided flag has neither, so the closure
+stays at one. And the whole function is three machine instructions --
+`xor eax, eax`, `cpuid`, `ret` -- so ops 15, 17 and 46 are all inside the one
+`cpuid`, which is exactly the thing a single gap should cover.
+
+What is missing is the boundary to cover it by. An `SSABlock` is one machine
+instruction (`addr` and `size` are the instruction's), but the graph's
+`GraphBlock` is a basic block: both gaps above report `block_addr`
+`0x100000940`, the function entry, for ops 15 and 46 alike. So "gap the whole
+block" is far too coarse and "gap the seed's dataflow closure" is too fine, and
+there is no p-code-op to machine-instruction mapping at the graph layer to scope
+it by.
+
+That mapping is the piece to build: with it, an unmodelled machine instruction
+is gapped whole and `dec_callother_emitted` follows. Five attempts on this test
+were reverted before the shape was clear, and every one of them was a guess at
+a rule when the missing thing was this boundary.
 
 What *did* land from this chain are the two closure widenings above, which are
 independently right and measured neutral, and which moved the refusal from a
