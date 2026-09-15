@@ -98,11 +98,6 @@ impl ControlFlowStructurer<'_, '_> {
                 Self::cleanup_recurse(symbols, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
                 **body = Self::strip_trailing_continue(taken);
-                let CStmt::DoWhile { body, cond } = std::mem::replace(stmt, CStmt::Empty) else {
-                    unreachable!("the node matched as a do-while");
-                };
-                // Fix C: do { if (c) break; rest } while(1) -> while(!c) { rest }
-                *stmt = Self::try_convert_do_while_to_while(*body, cond);
             }
             CStmt::For { update, body, .. } => {
                 Self::cleanup_recurse(symbols, body);
@@ -1171,10 +1166,6 @@ impl ControlFlowStructurer<'_, '_> {
         )
     }
 
-    fn stmt_is_unconditional_break(stmt: &CStmt) -> bool {
-        matches!(Self::semantic_stmt(stmt), CStmt::Break)
-    }
-
     /// A new semantic statement inside the region markers and observation
     /// chain of an old one.
     fn rewrap(original: &CStmt, semantic: CStmt) -> CStmt {
@@ -1342,78 +1333,6 @@ impl ControlFlowStructurer<'_, '_> {
                 }
             }
             other => other,
-        }
-    }
-
-    /// Remove the implicit terminal edge marker from a post-tested loop body.
-    ///
-    /// The latch condition owns both the backedge and the exit edge. Region
-    /// analysis may classify that exit edge as a `break`, especially when the
-    /// latch is also a singleton loop header. Emitting that marker inside the
-    /// resulting do-while would force the loop to execute only once.
-    fn try_convert_do_while_to_while(body: CStmt, cond: CExpr) -> CStmt {
-        // Only applies when condition is always true (literal 1 or true)
-        let is_infinite = match cond.unobserved() {
-            CExpr::IntLit(v) => *v != 0,
-            _ => false,
-        };
-        if !is_infinite {
-            return CStmt::DoWhile {
-                body: Box::new(body),
-                cond,
-            };
-        }
-
-        // Extract the body statements
-        let stmts = match body.unobserved() {
-            CStmt::Block(stmts) => stmts.clone(),
-            CStmt::If { .. } => vec![body.unobserved().clone()],
-            _ => {
-                return CStmt::DoWhile {
-                    body: Box::new(body),
-                    cond,
-                };
-            }
-        };
-
-        if stmts.is_empty() {
-            return CStmt::DoWhile {
-                body: Box::new(body),
-                cond,
-            };
-        }
-
-        // Check if first statement is `if (c) { break; }` (no else)
-        if let CStmt::If {
-            cond: break_cond,
-            then_body,
-            else_body: None,
-        } = stmts[0].unobserved()
-        {
-            let is_break = Self::stmt_is_unconditional_break(then_body)
-                || matches!(then_body.unobserved(), CStmt::Block(v) if v.len() == 1 && Self::stmt_is_unconditional_break(&v[0]));
-            if is_break {
-                // Negate the condition
-                let negated = CExpr::unary(crate::ast::UnaryOp::Not, break_cond.clone());
-                // Remaining body after the break-guard
-                let rest: Vec<CStmt> = stmts[1..].to_vec();
-                let new_body = if rest.is_empty() {
-                    CStmt::Empty
-                } else if rest.len() == 1 {
-                    rest.into_iter().next().unwrap()
-                } else {
-                    CStmt::Block(rest)
-                };
-                return CStmt::While {
-                    cond: negated,
-                    body: Box::new(new_body),
-                };
-            }
-        }
-
-        CStmt::DoWhile {
-            body: Box::new(body),
-            cond,
         }
     }
 }
