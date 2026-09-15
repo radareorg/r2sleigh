@@ -25,11 +25,12 @@
 
 use std::collections::BTreeMap;
 
-use r2ssa::{MachineArithmeticOp, MachineType, ObjectId, StackAddressBase, StackAddressRoot};
+use r2ssa::{MachineArithmeticOp, ObjectId, StackAddressBase, StackAddressRoot};
 
 use super::literal::{lit, unsigned};
 use super::{DEFAULT_PROOF_WIDTHS, Measure, Rule, RuleGroup};
-use crate::canon::{collect_affine, emit_affine};
+use crate::address::{Affine, affine_of, unique_base};
+use crate::canon::emit_affine;
 use crate::eval::{mask, signed};
 use crate::term::{ObjectPlacement, PointerWalk, Term, TermArena, TermId, TermKind};
 
@@ -48,70 +49,10 @@ macro_rules! subscript_rule {
 }
 
 /// An address as `sum k_i * t_i + c` at its own width.
-struct Affine {
-    coefficients: BTreeMap<TermId, u64>,
-    constant: u64,
-    width: u32,
-    ty: MachineType,
-}
-
-/// The affine form of an address. An address the arena types as an address
-/// rather than an integer -- a leaf that was never expanded -- is one atom.
-fn affine_of(arena: &TermArena, address: TermId) -> Option<Affine> {
-    let term = arena.term(address);
-    let width = term.width_bits();
-    if width == 0 || width > 64 {
-        return None;
-    }
-    let mut coefficients = BTreeMap::new();
-    let mut constant = 0u64;
-    match term.ty {
-        MachineType::Integer { .. } => {
-            let mut atoms = 0usize;
-            collect_affine(
-                arena,
-                address,
-                1,
-                width,
-                &mut coefficients,
-                &mut constant,
-                &mut atoms,
-            );
-        }
-        MachineType::Address { .. } => {
-            coefficients.insert(address, 1);
-        }
-        MachineType::Bool { .. } => return None,
-    }
-    coefficients.retain(|_, k| *k != 0);
-    Some(Affine {
-        coefficients,
-        constant,
-        width,
-        ty: term.ty,
-    })
-}
-
 /// The bytes one element of this load occupies.
 fn stride_of(term: Term) -> Option<u64> {
     let width = term.width_bits();
     (width > 0 && width.is_multiple_of(8)).then(|| u64::from(width / 8))
-}
-
-/// The one atom with a unit coefficient that `is_base` accepts, if exactly
-/// one does.
-fn unique_base(
-    arena: &TermArena,
-    affine: &Affine,
-    is_base: impl Fn(&TermArena, TermId) -> bool,
-) -> Option<TermId> {
-    let mut bases = affine
-        .coefficients
-        .iter()
-        .filter(|(term, k)| **k == 1 && is_base(arena, **term))
-        .map(|(term, _)| *term);
-    let base = bases.next()?;
-    bases.next().is_none().then_some(base)
 }
 
 /// The index the remaining terms and constant spell, in elements of

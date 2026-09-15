@@ -8,6 +8,7 @@
 //! instructions rendering it would discharge. The binding plan decides what
 //! to render; this crate decides what is equal to what.
 
+pub mod address;
 pub mod canon;
 pub mod driver;
 pub mod eval;
