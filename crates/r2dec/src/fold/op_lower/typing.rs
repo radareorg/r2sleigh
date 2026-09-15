@@ -60,6 +60,22 @@ impl FoldingContext<'_> {
     /// assigned to a pointer-declared object rendered
     /// `uint8_t *X0_9 = sym__rotl32(...)` on exactly that path.
     pub(super) fn convert_from(&self, expr: CExpr, from: Option<&CValue>, to: &CType) -> CExpr {
+        if matches!(from, Some(CValue::Constant))
+            && let Some((named, named_type)) = crate::name_of_constant_address(
+                &expr,
+                self.inputs.function_facts.display_names().strings(),
+                self.inputs.function_facts.display_names().symbols(),
+                &self.inputs.function_facts.type_facts().program_data_objects,
+                &mut self.named_data_objects.borrow_mut(),
+            )
+        {
+            return super::convert::convert(
+                named,
+                &CValue::Typed(named_type),
+                to,
+                self.pointer_bits(),
+            );
+        }
         super::convert::convert_optional(expr, from, to, self.pointer_bits())
     }
 

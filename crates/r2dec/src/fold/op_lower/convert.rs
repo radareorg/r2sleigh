@@ -131,20 +131,38 @@ fn spell_constant(expr: CExpr, to: &CType, pointer_bits: u32) -> CExpr {
         return expr;
     }
     let respelled = respell_literal(expr, signed, bits);
-    if !signed && renders_as_signed(&respelled) {
+    if spelling_disagrees_with_reader(&respelled, signed, bits) {
         return CExpr::cast(to.clone(), respelled);
     }
     respelled
 }
 
-/// Whether this expression is a literal whose rendering is a signed constant.
-pub(crate) fn literal_renders_as_signed(expr: &CExpr) -> bool {
-    renders_as_signed(expr)
+/// Whether the type this literal's spelling has is not the type reading it.
+///
+/// A spelling carries a type of its own and the compiler reads that, not what
+/// the renderer meant. `-0x4` is an `int` however wide the mask is, so an
+/// unsigned reader is told; and `0xcbf29ce484222325U` is an
+/// `unsigned long long` whose value no signed type holds, so a signed reader
+/// is told too. Everything else converts exactly and is left alone.
+fn spelling_disagrees_with_reader(expr: &CExpr, reader_is_signed: bool, bits: u32) -> bool {
+    if renders_as_signed(expr) {
+        return !reader_is_signed;
+    }
+    reader_is_signed && literal_bits(expr).is_some_and(|value| sets_the_sign_bit(value, bits))
 }
 
-/// Whether a type is an unsigned integer C would convert to.
-pub(crate) fn is_unsigned_integer(ty: &CType, pointer_bits: u32) -> bool {
-    matches!(integer_meta(ty, pointer_bits), Some((false, _)))
+/// The unsigned value this literal denotes, through the brackets and markers.
+fn literal_bits(expr: &CExpr) -> Option<u64> {
+    match expr {
+        CExpr::Observed { expr, .. } | CExpr::Paren(expr) => literal_bits(expr),
+        CExpr::UIntLit(value) => Some(*value),
+        CExpr::IntLit(value) => u64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn sets_the_sign_bit(value: u64, bits: u32) -> bool {
+    (8..=64).contains(&bits) && value & (1u64 << (bits - 1)) != 0
 }
 
 /// Whether the rendered form of this literal is a signed constant.
@@ -174,12 +192,36 @@ fn respell_literal(expr: CExpr, signed: bool, bits: u32) -> CExpr {
     match expr {
         CExpr::Observed { id, expr } => CExpr::observed(id, respell_literal(*expr, signed, bits)),
         CExpr::Paren(inner) => CExpr::Paren(Box::new(respell_literal(*inner, signed, bits))),
-        CExpr::UIntLit(value) if signed => crate::typed_integer_literal_expr(value, signed, bits),
+        CExpr::UIntLit(value) if signed && reads_as_a_small_negative(value, bits) => {
+            crate::typed_integer_literal_expr(value, signed, bits)
+        }
         CExpr::IntLit(value) if signed && value >= 0 => {
             crate::typed_integer_literal_expr(value as u64, signed, bits)
         }
         other => other,
     }
+}
+
+/// Whether a signed reader would see this value as a small negative number.
+///
+/// That is the whole of what respelling buys: `0xffffffff` read as an
+/// `int32_t` is `-1`, and `-1` is what the program means. A large value with
+/// the sign bit set is a mask or a magic constant -- FNV's basis
+/// `0xcbf29ce484222325` -- and the decimal negative it denotes hides what
+/// every reader recognises in the hex, so the hex stays and the type is cast.
+fn reads_as_a_small_negative(value: u64, bits: u32) -> bool {
+    if !(8..=64).contains(&bits) {
+        return false;
+    }
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let truncated = value & mask;
+    // A narrow type's whole range is small, and every negative in it is near
+    // enough to zero to read as one.
+    truncated > mask.saturating_sub(0x1_0000)
 }
 
 /// Convert `expr`, which has `from`, to `to`.
@@ -199,15 +241,35 @@ pub(crate) fn convert_optional(
     let recorded = from.filter(|from| !matches!(from.as_type(), Some(CType::Unknown)));
     match recorded {
         Some(from) => convert(expr, from, to, pointer_bits),
-        None if matches!(to, CType::Pointer(_)) => CExpr::cast(to.clone(), expr),
-        None => expr,
+        None => convert(expr, &CValue::Constant, to, pointer_bits),
     }
 }
 
 pub(crate) fn convert(expr: CExpr, from: &CValue, to: &CType, pointer_bits: u32) -> CExpr {
+    // A literal has no type but the one its spelling gives it. Whatever was
+    // recorded for the *value* -- a declared object's type, the width of the
+    // machine register it was materialized into -- the compiler reads the
+    // text, and `-0x4` is an `int` there however the arena typed the value.
+    // Trusting the recorded type instead is how `mask & -0x4` reached a
+    // `uint64_t` with nothing spelled: the value was recorded `uint64_t`, the
+    // conversion was therefore a no-op, and `-Wsign-conversion` is what
+    // noticed that the operand was not one.
+    if is_literal(&expr) {
+        return spell_constant(expr, to, pointer_bits);
+    }
     match from {
         CValue::Constant => spell_constant(expr, to, pointer_bits),
         CValue::Typed(from) => convert_typed(expr, from, to, pointer_bits),
+    }
+}
+
+/// Whether this expression is an integer literal, through the brackets and
+/// render markers that do not change what it is.
+fn is_literal(expr: &CExpr) -> bool {
+    match expr {
+        CExpr::Observed { expr, .. } | CExpr::Paren(expr) => is_literal(expr),
+        CExpr::IntLit(_) | CExpr::UIntLit(_) => true,
+        _ => false,
     }
 }
 

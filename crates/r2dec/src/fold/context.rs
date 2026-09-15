@@ -157,6 +157,12 @@ pub(crate) struct FoldingContext<'a> {
     /// is built.
     pub(crate) callee_declarations:
         std::cell::RefCell<std::collections::BTreeMap<String, RecordedCalleeDeclaration>>,
+    /// The data objects the fold named, handed to the function when it is
+    /// built so it can declare them. Collected here because the substitution
+    /// happens at the conversion that states what the address is required to
+    /// be, and that is inside the fold.
+    pub(crate) named_data_objects:
+        std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
     /// Names minted while folding, handed to the function when it is built.
     ///
     /// A cell because the builders take `&self`. Minting has to borrow, insert
@@ -275,6 +281,7 @@ impl<'a> FoldingContext<'a> {
             prepared_semantic_view_cache: OnceCell::new(),
             folded_blocks: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             callee_declarations: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            named_data_objects: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             observation_error: std::cell::RefCell::new(None),
             pending_lowering_refusal: Cell::new(None),
             gapped_sites: std::cell::RefCell::new(std::collections::BTreeSet::new()),

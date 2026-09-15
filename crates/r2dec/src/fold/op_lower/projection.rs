@@ -275,9 +275,12 @@ mod tests {
 
     #[test]
     fn zero_extending_write_uses_both_source_owned_widths() {
+        // A name, not a literal: a literal needs no conversion at all, because
+        // C reads it at whatever type holds it, so it could not show that both
+        // widths were stated.
         let (_, rhs, ty) = project_machine_write(
             binding_expr(),
-            CExpr::UIntLit(7),
+            binding_expr(),
             Some(&CValue::Typed(CType::u64())),
             MachineWriteProjection::ZeroExtend {
                 from_width_bits: 32,

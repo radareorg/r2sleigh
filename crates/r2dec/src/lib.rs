@@ -3602,26 +3602,15 @@ impl Decompiler {
             // is a recovered empty list rather than an unknown one.
             params_known: true,
         };
-        let display = self.context.function_facts.display_names();
-        let strings = display.strings();
-        let data_symbols = display.symbols();
-        let data_object_types = &self
-            .context
-            .function_facts
-            .type_facts()
-            .program_data_objects;
+        // The fold named every constant address it converted, and declaring
+        // the objects is part of naming them.
         let used_objects: std::cell::RefCell<
             std::collections::BTreeMap<u64, crate::ast::CExternObject>,
-        > = std::cell::RefCell::new(std::collections::BTreeMap::new());
+        > = std::cell::RefCell::new(fold_ctx.named_data_objects.borrow().clone());
         crate::stage_timing::mark("structure");
-        name_constant_addresses_in_function(
-            &mut c_function,
-            strings,
-            data_symbols,
-            data_object_types,
-            &used_objects,
-            self.config.ptr_size,
-        );
+        for stmt in &mut c_function.body {
+            simplify_data_object_loads_in_stmt(stmt, self.config.ptr_size, &used_objects);
+        }
         c_function.extern_objects = used_objects.into_inner().into_values().collect();
 
         if let Err(error) = single_evaluation::bind_each_call_site_once(
@@ -4031,37 +4020,6 @@ pub(crate) fn collect_expr_var_names(expr: &CExpr, out: &mut HashSet<crate::symb
 ///
 /// A statement the fold built and the page does not show was removed by one of
 /// the passes that run after structuring, and there are a dozen of them. Naming
-/// Name a constant that turns out to be the address of a string or an object.
-///
-/// A PIC address arrives as two constants -- `adrp` puts a page in a register
-/// and `add` puts the offset on top -- and this used to fold the sum, because
-/// the string table is keyed by address and could not answer for two halves.
-/// The rewriter's affine normal form now folds it in the term arena, before
-/// any of this runs: measured over bzip2, bzip2recover, dpkg-divert and both
-/// minigzips, x86-64 and arm64 alike, the fold here never fired once. So it is
-/// gone, and what is left is the substitution.
-fn name_constant_addresses_in_function(
-    func: &mut CFunction,
-    strings: &std::collections::BTreeMap<u64, String>,
-    symbols: &std::collections::BTreeMap<u64, String>,
-    object_types: &r2types::ProgramDataObjectTypeFacts,
-    used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
-    pointer_bits: u32,
-) {
-    let symbol_table = std::rc::Rc::clone(&func.symbols);
-    for stmt in &mut func.body {
-        name_constant_addresses_in_stmt(
-            stmt,
-            strings,
-            symbols,
-            object_types,
-            used,
-            pointer_bits,
-            Some(&symbol_table),
-        );
-    }
-}
-
 /// Restate the conversions around a constant that turned out to be a string.
 ///
 /// The conversions above a constant address are decided while it is an
@@ -4084,217 +4042,6 @@ fn name_constant_addresses_in_function(
 /// lets it reach a `char *` with nothing spelled.
 fn plain_char_type() -> CType {
     CType::typedef("char")
-}
-
-/// The address a chain of conversions is wrapped around, and what it is.
-///
-/// Two substitutions put an address where a number was. A string literal is
-/// an array of `char` that decays to a `char *` wherever a value is wanted.
-/// The address of a named object is a pointer to the object, and the object
-/// is declared `extern char name[]`, so `&name` is a pointer to an array of
-/// `char` -- not a `char *`, which is why converting it to one is a cast
-/// that C requires rather than noise.
-fn substituted_address_under_conversions<'a>(
-    expr: &'a CExpr,
-    used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
-) -> Option<(&'a CExpr, CType)> {
-    match expr {
-        CExpr::StringLit(_) => Some((expr, CType::ptr(plain_char_type()))),
-        CExpr::AddrOf(inner) => match inner.unobserved() {
-            CExpr::DataObject { address, .. } => {
-                let object_type = used
-                    .borrow()
-                    .get(address)
-                    .and_then(|object| object.type_fact.as_ref())
-                    .map(|fact| fact.ty.clone())
-                    .unwrap_or_else(|| CType::Array(Box::new(plain_char_type()), None));
-                Some((expr, CType::ptr(object_type)))
-            }
-            _ => None,
-        },
-        CExpr::Observed { expr, .. } | CExpr::Paren(expr) | CExpr::Cast { expr, .. } => {
-            substituted_address_under_conversions(expr, used)
-        }
-        _ => None,
-    }
-}
-
-/// Restate the conversions around a substituted address.
-///
-/// `required` is what the place this expression sits in asks of it, for the
-/// places that ask without spelling a cast -- a declaration's initialiser
-/// asks for the declared type, an assignment's right-hand side for the type
-/// of what it is assigned to. Inside an expression the enclosing conversion
-/// is the ask, and the outermost one is what the whole chain amounted to.
-///
-/// The distinction matters because the conversion around a constant address
-/// is often *nothing*: a `uint64_t` constant initialising a `uint64_t` needs
-/// no cast, so after `&progName` is substituted there is no chain to notice
-/// and the rendering assigns a pointer to an integer. That is not noise but
-/// a type error, and `-Wint-conversion` in the corpus's own compile is what
-/// found it.
-fn restate_string_conversions_in_expr(
-    expr: &mut CExpr,
-    pointer_bits: u32,
-    required: Option<&CType>,
-    symbols: Option<&std::rc::Rc<std::cell::RefCell<crate::symbol::SymbolTable>>>,
-    used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
-) {
-    if let Some((address, from)) = substituted_address_under_conversions(expr, used) {
-        let required = match expr.unobserved() {
-            CExpr::Cast { ty, .. } => Some(ty.clone()),
-            _ => required.cloned(),
-        };
-        let Some(required) = required else {
-            return;
-        };
-        let restated = crate::fold::op_lower::convert::convert(
-            address.clone(),
-            &r2rewrite::CValue::Typed(from),
-            &required,
-            pointer_bits,
-        );
-        let source = std::mem::replace(expr, CExpr::IntLit(0));
-        *expr = crate::ast::carry_all_expr_observations(&source, restated);
-        return;
-    }
-    // A literal that the fold above rewrote, or that the renderer will spell
-    // as the negative it stands for, carries no type of its own. `-0x4` is an
-    // `int` whatever value it denotes, so reading it as a `uint64_t` is a
-    // signedness-changing conversion; the constant fold produces exactly that
-    // when it collapses a mask, after every conversion has been decided.
-    if let Some(required) = required
-        && crate::fold::op_lower::convert::literal_renders_as_signed(expr)
-        && crate::fold::op_lower::convert::is_unsigned_integer(required, pointer_bits)
-    {
-        // The cast is built around the literal as it stands, markers and
-        // all, so every occurrence it records is still in the tree exactly
-        // once. Carrying them again would put each one in twice.
-        let source = std::mem::replace(expr, CExpr::IntLit(0));
-        *expr = CExpr::cast(required.clone(), source);
-        return;
-    }
-    // A render marker and a bracket are metadata: what the place asks of the
-    // expression it asks of the expression under them. Falling through to the
-    // generic descent instead dropped the requirement, and every statement
-    // whose right-hand side carries an occurrence marker -- which is most of
-    // them -- was walked as though nothing had been asked of it.
-    if let CExpr::Observed { expr, .. } | CExpr::Paren(expr) = expr {
-        restate_string_conversions_in_expr(expr, pointer_bits, required, symbols, used);
-        return;
-    }
-    // An assignment tells its right-hand side what is wanted: the type of
-    // the object being written. A compound assignment says the same thing:
-    // `x &= m` converts `m` to x's type exactly as `x = x & m` would.
-    if let CExpr::Binary {
-        op:
-            BinaryOp::Assign
-            | BinaryOp::AddAssign
-            | BinaryOp::SubAssign
-            | BinaryOp::MulAssign
-            | BinaryOp::DivAssign
-            | BinaryOp::ModAssign
-            | BinaryOp::BitAndAssign
-            | BinaryOp::BitOrAssign
-            | BinaryOp::BitXorAssign
-            | BinaryOp::ShlAssign
-            | BinaryOp::ShrAssign,
-        left,
-        right,
-    } = expr
-    {
-        let target = match left.unobserved() {
-            CExpr::Var(symbol) => symbols.map(|table| table.borrow().get(*symbol).ty.clone()),
-            _ => None,
-        };
-        restate_string_conversions_in_expr(left, pointer_bits, None, symbols, used);
-        restate_string_conversions_in_expr(right, pointer_bits, target.as_ref(), symbols, used);
-        return;
-    }
-    // Arithmetic on an address is arithmetic on a number. C has one operator
-    // that means anything by a pointer operand, and it counts elements rather
-    // than bytes -- and `&name` is a pointer to an incomplete array, which C
-    // will not do arithmetic on at all. So an address that reaches an
-    // arithmetic operator crosses into the address integer first, and the
-    // conversion back to a pointer is whatever the surrounding place asks
-    // for.
-    if let CExpr::Binary { op, left, right } = expr
-        && matches!(
-            op,
-            BinaryOp::Add
-                | BinaryOp::Sub
-                | BinaryOp::Mul
-                | BinaryOp::Shl
-                | BinaryOp::Shr
-                | BinaryOp::BitAnd
-                | BinaryOp::BitOr
-                | BinaryOp::BitXor
-                | BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::Lt
-                | BinaryOp::Le
-                | BinaryOp::Gt
-                | BinaryOp::Ge
-        )
-    {
-        // An address takes the address integer, because arithmetic on an
-        // address is arithmetic on a number. The operator's own operand rule
-        // is otherwise left alone: restating it from this pass, which knows
-        // the address width and nothing else, would widen a narrow
-        // computation and change what it computes.
-        //
-        // A literal is the exception, and only for the operators whose
-        // operands C converts to the result's type. There the type the whole
-        // expression is read at is the type the operand is read at, so a
-        // literal the renderer spells as a negative -- an `int` to the
-        // compiler whatever value it denotes -- can be given that type. A
-        // shift's count is not such an operand: it keeps its own type, and
-        // saying otherwise would be a claim about a different thing.
-        let address = CType::uint(pointer_bits);
-        let converted_together = !matches!(op, BinaryOp::Shl | BinaryOp::Shr);
-        // A comparison's operands are converted to each other rather than to
-        // the type the comparison is read at, which is a truth value. So the
-        // type a literal takes there is the other operand's, and the only
-        // other operand this pass can ask about is a name.
-        let comparison = matches!(
-            op,
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-        );
-        let peer = |other: &CExpr| match other.unobserved() {
-            CExpr::Var(symbol) => symbols.map(|table| table.borrow().get(*symbol).ty.clone()),
-            _ => None,
-        };
-        let peers = comparison.then(|| (peer(right), peer(left)));
-        for (index, operand) in [&mut *left, &mut *right].into_iter().enumerate() {
-            let peer_type = peers.as_ref().and_then(|(for_left, for_right)| {
-                if index == 0 { for_left } else { for_right }.clone()
-            });
-            let wanted = if substituted_address_under_conversions(operand, used).is_some() {
-                Some(address.clone())
-            } else if !crate::fold::op_lower::convert::literal_renders_as_signed(operand) {
-                None
-            } else if comparison {
-                peer_type
-            } else if index == 0 || converted_together {
-                required.cloned()
-            } else {
-                None
-            };
-            restate_string_conversions_in_expr(
-                operand,
-                pointer_bits,
-                wanted.as_ref(),
-                symbols,
-                used,
-            );
-        }
-        return;
-    }
-    let taken = std::mem::replace(expr, CExpr::IntLit(0));
-    *expr = taken.map_children(&mut |mut child| {
-        restate_string_conversions_in_expr(&mut child, pointer_bits, None, symbols, used);
-        child
-    });
 }
 
 /// Replace a machine-width load through a substituted global address with the
@@ -4393,43 +4140,17 @@ fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
         | CType::Unknown => None,
     }
 }
-
-fn name_constant_addresses_in_stmt(
+/// Walk every expression in `stmt` and simplify the loads through a named
+/// object that radare2 gave a type.
+fn simplify_data_object_loads_in_stmt(
     stmt: &mut CStmt,
-    strings: &std::collections::BTreeMap<u64, String>,
-    symbols: &std::collections::BTreeMap<u64, String>,
-    object_types: &r2types::ProgramDataObjectTypeFacts,
-    used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
     pointer_bits: u32,
-    symbol_table: Option<&std::rc::Rc<std::cell::RefCell<crate::symbol::SymbolTable>>>,
+    used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
 ) {
-    // The substitution and the restatement of what it changed are one visit
-    // of one expression: a conversion can only be restated once the string
-    // it converts is there to be seen.
-    let fold_expr = |expr: &mut CExpr| {
-        name_constant_addresses_in_expr(expr, strings, symbols, object_types, used);
-        restate_string_conversions_in_expr(expr, pointer_bits, None, symbol_table, used);
-        simplify_typed_data_object_loads(expr, pointer_bits, used);
-    };
+    let expr_of = |expr: &mut CExpr| simplify_typed_data_object_loads(expr, pointer_bits, used);
+    let mut inner = |stmt: &mut CStmt| simplify_data_object_loads_in_stmt(stmt, pointer_bits, used);
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } => name_constant_addresses_in_stmt(
-            stmt,
-            strings,
-            symbols,
-            object_types,
-            used,
-            pointer_bits,
-            symbol_table,
-        ),
-        CStmt::Observed { stmt, .. } => name_constant_addresses_in_stmt(
-            stmt,
-            strings,
-            symbols,
-            object_types,
-            used,
-            pointer_bits,
-            symbol_table,
-        ),
+        CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => inner(stmt),
         CStmt::Empty
         | CStmt::Break
         | CStmt::Continue
@@ -4437,76 +4158,32 @@ fn name_constant_addresses_in_stmt(
         | CStmt::Label(_)
         | CStmt::Comment(_)
         | CStmt::Gap(_) => {}
-        CStmt::Expr(expr) => fold_expr(expr),
-        CStmt::Decl { ty, init, .. } => {
+        CStmt::Expr(expr) => expr_of(expr),
+        CStmt::Decl { init, .. } => {
             if let Some(init) = init {
-                name_constant_addresses_in_expr(init, strings, symbols, object_types, used);
-                restate_string_conversions_in_expr(
-                    init,
-                    pointer_bits,
-                    Some(ty),
-                    symbol_table,
-                    used,
-                );
-                simplify_typed_data_object_loads(init, pointer_bits, used);
+                expr_of(init);
             }
         }
         CStmt::Return(expr) => {
             if let Some(expr) = expr {
-                fold_expr(expr);
+                expr_of(expr);
             }
         }
-        CStmt::Block(stmts) => {
-            for stmt in stmts {
-                name_constant_addresses_in_stmt(
-                    stmt,
-                    strings,
-                    symbols,
-                    object_types,
-                    used,
-                    pointer_bits,
-                    symbol_table,
-                );
-            }
-        }
+        CStmt::Block(stmts) => stmts.iter_mut().for_each(inner),
         CStmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            fold_expr(cond);
-            name_constant_addresses_in_stmt(
-                then_body,
-                strings,
-                symbols,
-                object_types,
-                used,
-                pointer_bits,
-                symbol_table,
-            );
+            expr_of(cond);
+            inner(then_body);
             if let Some(else_body) = else_body {
-                name_constant_addresses_in_stmt(
-                    else_body,
-                    strings,
-                    symbols,
-                    object_types,
-                    used,
-                    pointer_bits,
-                    symbol_table,
-                );
+                inner(else_body);
             }
         }
         CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
-            fold_expr(cond);
-            name_constant_addresses_in_stmt(
-                body,
-                strings,
-                symbols,
-                object_types,
-                used,
-                pointer_bits,
-                symbol_table,
-            );
+            expr_of(cond);
+            inner(body);
         }
         CStmt::For {
             init,
@@ -4515,63 +4192,27 @@ fn name_constant_addresses_in_stmt(
             body,
         } => {
             if let Some(init) = init {
-                name_constant_addresses_in_stmt(
-                    init,
-                    strings,
-                    symbols,
-                    object_types,
-                    used,
-                    pointer_bits,
-                    symbol_table,
-                );
+                inner(init);
             }
             if let Some(cond) = cond {
-                fold_expr(cond);
+                expr_of(cond);
             }
             if let Some(update) = update {
-                fold_expr(update);
+                expr_of(update);
             }
-            name_constant_addresses_in_stmt(
-                body,
-                strings,
-                symbols,
-                object_types,
-                used,
-                pointer_bits,
-                symbol_table,
-            );
+            inner(body);
         }
         CStmt::Switch {
             expr,
             cases,
             default,
         } => {
-            fold_expr(expr);
+            expr_of(expr);
             for case in cases {
-                for stmt in &mut case.body {
-                    name_constant_addresses_in_stmt(
-                        stmt,
-                        strings,
-                        symbols,
-                        object_types,
-                        used,
-                        pointer_bits,
-                        symbol_table,
-                    );
-                }
+                case.body.iter_mut().for_each(&mut inner);
             }
             if let Some(default) = default {
-                for stmt in default {
-                    name_constant_addresses_in_stmt(
-                        stmt,
-                        strings,
-                        symbols,
-                        object_types,
-                        used,
-                        pointer_bits,
-                        symbol_table,
-                    );
-                }
+                default.iter_mut().for_each(inner);
             }
         }
     }
@@ -4587,99 +4228,69 @@ fn literal_value(expr: &CExpr) -> Option<u64> {
         _ => None,
     }
 }
-
-fn name_constant_addresses_in_expr(
-    expr: &mut CExpr,
+/// The name this constant is, and the type that name has.
+///
+/// A constant that points at text or at a named object *is* that text or that
+/// object: rendering the number instead loses a name the analysis already had
+/// and that no reader can recover from it. The address is taken rather than
+/// the object's value, because `lea` puts the address of the object in the
+/// register.
+///
+/// The substitution retypes the expression -- a string literal is an array of
+/// `char`, not a number -- so it is asked at the conversion that states what
+/// the boundary requires, and nowhere else. It used to run as a pass over the
+/// finished tree, which meant re-deriving that requirement from the rendered
+/// text: an enclosing cast where there was one, and otherwise a hand-written
+/// walk of assignments, operator promotion rules and comparison peers,
+/// guessing at what the typed boundaries had already stated. Measured over
+/// zlib's arm64 minigzip, that walk supplied the requirement 702 times out of
+/// 756. It is gone.
+///
+/// Recording the object is part of naming it: a rendering that spells
+/// `&progName` has to declare `progName`, and the place that decides to spell
+/// it is the place that knows.
+pub(crate) fn name_of_constant_address(
+    expr: &CExpr,
     strings: &std::collections::BTreeMap<u64, String>,
     symbols: &std::collections::BTreeMap<u64, String>,
     object_types: &r2types::ProgramDataObjectTypeFacts,
-    used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
-) {
-    if let CExpr::Observed { expr, .. } = expr {
-        name_constant_addresses_in_expr(expr, strings, symbols, object_types, used);
-        return;
+    named: &mut std::collections::BTreeMap<u64, crate::ast::CExternObject>,
+) -> Option<(CExpr, CType)> {
+    let value = literal_value(expr)?;
+    if let Some(text) = strings.get(&value) {
+        return Some((
+            crate::ast::carry_all_expr_observations(expr, CExpr::StringLit(text.clone())),
+            CType::ptr(plain_char_type()),
+        ));
     }
-    match expr {
-        CExpr::Unary { operand, .. }
-        | CExpr::Cast { expr: operand, .. }
-        | CExpr::Sizeof(operand)
-        | CExpr::AddrOf(operand)
-        | CExpr::Deref(operand)
-        | CExpr::Paren(operand) => {
-            name_constant_addresses_in_expr(operand, strings, symbols, object_types, used)
-        }
-        CExpr::Binary { left, right, .. } => {
-            name_constant_addresses_in_expr(left, strings, symbols, object_types, used);
-            name_constant_addresses_in_expr(right, strings, symbols, object_types, used);
-        }
-        CExpr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            name_constant_addresses_in_expr(cond, strings, symbols, object_types, used);
-            name_constant_addresses_in_expr(then_expr, strings, symbols, object_types, used);
-            name_constant_addresses_in_expr(else_expr, strings, symbols, object_types, used);
-        }
-        CExpr::Call { func, args, .. } => {
-            name_constant_addresses_in_expr(func, strings, symbols, object_types, used);
-            for arg in args {
-                name_constant_addresses_in_expr(arg, strings, symbols, object_types, used);
-            }
-        }
-        CExpr::Subscript { base, index } => {
-            name_constant_addresses_in_expr(base, strings, symbols, object_types, used);
-            name_constant_addresses_in_expr(index, strings, symbols, object_types, used);
-        }
-        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-            name_constant_addresses_in_expr(base, strings, symbols, object_types, used)
-        }
-        CExpr::Comma(items) => {
-            for item in items {
-                name_constant_addresses_in_expr(item, strings, symbols, object_types, used);
-            }
-        }
-        _ => {}
-    }
-    // The address the rewriter canonicalised is one number, so the string
-    // table can answer for it.
-    if let Some(value) = literal_value(expr)
-        && let Some(text) = strings.get(&value)
-    {
-        let source = std::mem::replace(expr, CExpr::IntLit(0));
-        *expr = crate::ast::carry_all_expr_observations(&source, CExpr::StringLit(text.clone()));
-        return;
-    }
-    // And so can the object table, for an address radare2 has a name for.
-    //
-    // The address is taken rather than the object's value: `lea` puts the
-    // address of the object in the register, so `&progName` is what the
-    // constant is. Rendering the number instead loses a name the analysis
-    // already had and that a reader cannot recover from it.
-    if let Some(value) = literal_value(expr)
-        && let Some(name) = symbols.get(&value)
-    {
-        let source = std::mem::replace(expr, CExpr::IntLit(0));
-        let rendered = c_identifier_for_data_symbol(name);
-        let type_fact = object_types.get(value).cloned();
-        let type_refusal = object_types.refused().get(&value).cloned();
-        used.borrow_mut().insert(
-            value,
-            crate::ast::CExternObject {
-                name: rendered.clone(),
-                address: value,
-                type_fact,
-                type_refusal,
-            },
-        );
-        *expr = crate::ast::carry_all_expr_observations(
-            &source,
+    let flag = symbols.get(&value)?;
+    let rendered = c_identifier_for_data_symbol(flag);
+    let type_fact = object_types.get(value).cloned();
+    // An object radare2 gave no type to is a run of bytes, which is what
+    // `extern char name[]` says and is the honest declaration for it.
+    let object_type = type_fact
+        .as_ref()
+        .map(|fact| fact.ty.clone())
+        .unwrap_or_else(|| CType::Array(Box::new(plain_char_type()), None));
+    named.insert(
+        value,
+        crate::ast::CExternObject {
+            name: rendered.clone(),
+            address: value,
+            type_fact,
+            type_refusal: object_types.refused().get(&value).cloned(),
+        },
+    );
+    Some((
+        crate::ast::carry_all_expr_observations(
+            expr,
             CExpr::addr_of(CExpr::DataObject {
                 address: value,
                 name: rendered,
             }),
-        );
-    }
+        ),
+        CType::ptr(object_type),
+    ))
 }
 
 /// The C name for a radare2 data flag.
@@ -4740,136 +4351,12 @@ fn typed_integer_literal_expr(value: u64, is_signed: bool, bits: u32) -> CExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_extern_objects()
-    -> std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>> {
-        std::cell::RefCell::new(std::collections::BTreeMap::new())
-    }
-
-    #[test]
-    fn a_compared_mask_takes_the_type_of_what_it_is_compared_with() {
-        // `tmp < -0x4` where `tmp` is a `uint64_t`. The comparison is read as
-        // a truth value, so the type the mask needs is not the statement's --
-        // it is the other operand's, and `-0x4` is an `int` until something
-        // says otherwise.
-        let mut symbols = crate::symbol::SymbolTable::new();
-        let name = symbols.reserve_binding(
-            "tmp_3ea80_2".to_string(),
-            CType::u64(),
-            crate::symbol::SymbolRole::Carrier,
-        );
-        let table = std::rc::Rc::new(std::cell::RefCell::new(symbols));
-        let mut owner = crate::ast::RenderObservationOwner::new();
-        let (_, marked) = owner
-            .observe_expr(CExpr::binary(
-                BinaryOp::Lt,
-                CExpr::Var(name),
-                CExpr::UIntLit(0xffff_ffff_ffff_fffc),
-            ))
-            .expect("the statement's own occurrence marker");
-        let mut expr = marked;
-        restate_string_conversions_in_expr(
-            &mut expr,
-            64,
-            Some(&CType::u8()),
-            Some(&table),
-            &no_extern_objects(),
-        );
-        let CExpr::Observed { expr: inner, .. } = &expr else {
-            panic!("the marker must survive: {expr:?}");
-        };
-        let CExpr::Binary { right, .. } = inner.as_ref() else {
-            panic!("expected the comparison, got {inner:?}");
-        };
-        assert!(
-            matches!(right.as_ref(), CExpr::Cast { ty, .. } if *ty == CType::u64()),
-            "the mask takes the compared operand's type, not the flag's: {right:?}"
-        );
-    }
-
-    #[test]
-    fn a_mask_under_a_render_marker_still_takes_the_type_that_reads_it() {
-        // The shape every statement has in production: the right-hand side
-        // carries an occurrence marker. `X1_0 & -0x4` on a `uint64_t` is a
-        // signedness-changing conversion, because `-0x4` is an `int`
-        // whatever value it denotes, and the marker must not hide the ask.
-        let mut symbols = crate::symbol::SymbolTable::new();
-        let name = symbols.reserve_binding(
-            "X1_0".to_string(),
-            CType::u64(),
-            crate::symbol::SymbolRole::Carrier,
-        );
-        let table = std::rc::Rc::new(std::cell::RefCell::new(symbols));
-        let mask = CExpr::UIntLit(0xffff_ffff_ffff_fffc);
-        let mut owner = crate::ast::RenderObservationOwner::new();
-        let (_, marked) = owner
-            .observe_expr(CExpr::binary(BinaryOp::BitAnd, CExpr::Var(name), mask))
-            .expect("the statement's own occurrence marker");
-        let mut expr = marked;
-        restate_string_conversions_in_expr(
-            &mut expr,
-            64,
-            Some(&CType::u64()),
-            Some(&table),
-            &no_extern_objects(),
-        );
-        let CExpr::Observed { expr: inner, .. } = &expr else {
-            panic!("the marker must survive: {expr:?}");
-        };
-        let CExpr::Binary { right, .. } = inner.as_ref() else {
-            panic!("expected the masking, got {inner:?}");
-        };
-        assert!(
-            matches!(right.as_ref(), CExpr::Cast { ty, .. } if *ty == CType::u64()),
-            "the mask must say it is a uint64_t, got {right:?}"
-        );
-    }
-
-    #[test]
-    fn a_string_address_drops_the_conversions_spelled_for_its_number() {
-        // A string reaches a `char *` as itself: the conversions above the
-        // constant were spelled while it was a number, and substituting the
-        // string makes every one of them a statement about a type the
-        // expression no longer has.
-        let text = CExpr::StringLit("usage: %s\n".to_string());
-        let char_ptr = CType::ptr(plain_char_type());
-        let mut expr = CExpr::cast(
-            char_ptr.clone(),
-            CExpr::cast(
-                CType::Int {
-                    bits: 64,
-                    signedness: r2types::Signedness::Unsigned,
-                },
-                text.clone(),
-            ),
-        );
-        restate_string_conversions_in_expr(&mut expr, 64, None, None, &no_extern_objects());
-        assert_eq!(expr, text, "got {expr:?}");
-
-        // Converted to a number, the string is still an address, so the
-        // conversion that is C's own is the one that survives -- and it is
-        // recorded as the address-width step, so a round trip collapses.
-        let mut as_number = CExpr::cast(
-            CType::Int {
-                bits: 64,
-                signedness: r2types::Signedness::Unsigned,
-            },
-            text.clone(),
-        );
-        restate_string_conversions_in_expr(&mut as_number, 64, None, None, &no_extern_objects());
-        assert!(
-            matches!(
-                &as_number,
-                CExpr::Cast {
-                    ty: CType::Int { bits: 64, .. },
-                    role: crate::ast::CastRole::PointerWidthStep,
-                    ..
-                }
-            ),
-            "got {as_number:?}"
-        );
-        let _ = char_ptr;
-    }
+    use r2il::{
+        ArchSpec, R2ILBlock, R2ILOp, RegisterBitSlice, RegisterDef, RegisterProjection,
+        RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
+    };
+    use r2types::{FunctionParamSpec, FunctionSignatureSpec};
+    use std::collections::{BTreeMap, HashMap};
 
     /// What the two type models lose when a type crosses between them.
     ///
@@ -4878,13 +4365,6 @@ mod tests {
     /// -- with nothing to catch it. Before the two are folded into one model,
     /// this records exactly which types do not survive the trip, so the fold is
     /// closing a measured gap rather than an assumed one.
-    use r2il::{
-        ArchSpec, R2ILBlock, R2ILOp, RegisterBitSlice, RegisterDef, RegisterProjection,
-        RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
-    };
-    use r2types::{FunctionParamSpec, FunctionSignatureSpec};
-    use std::collections::{BTreeMap, HashMap};
-
     fn empty_fold_context_for_linearization<'a>() -> FoldingContext<'a> {
         let arch = Box::leak(Box::new(FoldArchConfig {
             ptr_size: 8,
@@ -4974,6 +4454,63 @@ mod tests {
 
     /// A comparison written directly into the logical low byte of the ABI
     /// result carrier, rendered through the complete source-owned pipeline.
+    #[test]
+    fn a_constant_that_names_a_string_or_an_object_is_that_name() {
+        let strings = BTreeMap::from([(0x2000, "usage: %s\n".to_string())]);
+        let symbols = BTreeMap::from([(0x7000, "obj.progName".to_string())]);
+        let object_types = r2types::ProgramDataObjectTypeFacts::default();
+        let mut named = std::collections::BTreeMap::new();
+
+        let (text, ty) = name_of_constant_address(
+            &CExpr::UIntLit(0x2000),
+            &strings,
+            &symbols,
+            &object_types,
+            &mut named,
+        )
+        .expect("the string table answers for the address");
+        assert_eq!(text, CExpr::StringLit("usage: %s\n".to_string()));
+        assert_eq!(ty, CType::ptr(plain_char_type()));
+        assert!(named.is_empty(), "a string literal declares nothing");
+
+        // Through the conversions above it: the value is what the literal
+        // denotes, whatever was spelled around it while it was a number.
+        let (object, ty) = name_of_constant_address(
+            &CExpr::cast(CType::u64(), CExpr::UIntLit(0x7000)),
+            &strings,
+            &symbols,
+            &object_types,
+            &mut named,
+        )
+        .expect("the symbol table answers for the address");
+        assert_eq!(
+            object,
+            CExpr::addr_of(CExpr::DataObject {
+                address: 0x7000,
+                name: "progName".to_string(),
+            })
+        );
+        // An object with no recovered type is a run of bytes, so its address
+        // is a pointer to an array of `char` rather than a `char *`.
+        assert_eq!(
+            ty,
+            CType::ptr(CType::Array(Box::new(plain_char_type()), None))
+        );
+        assert_eq!(named.len(), 1, "spelling the name declares the object");
+
+        // A number nothing names stays a number.
+        assert!(
+            name_of_constant_address(
+                &CExpr::UIntLit(0x20),
+                &strings,
+                &symbols,
+                &object_types,
+                &mut named,
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn a_logical_low_byte_return_renders() {
         let mut arch = test_arch_for_decompile();
@@ -5510,14 +5047,16 @@ mod tests {
 
         let no_symbols = BTreeMap::new();
         let no_object_types = r2types::ProgramDataObjectTypeFacts::default();
-        let unused_objects = std::cell::RefCell::new(std::collections::BTreeMap::new());
-        name_constant_addresses_in_expr(
-            &mut expr,
+        let mut unused_objects = std::collections::BTreeMap::new();
+        let (named, _) = name_of_constant_address(
+            &expr,
             &strings,
             &no_symbols,
             &no_object_types,
-            &unused_objects,
-        );
+            &mut unused_objects,
+        )
+        .expect("the string table answers for the address");
+        expr = named;
         let mut function = CFunction::new(
             "folded",
             CType::Pointer(Box::new(CType::Int {
@@ -5538,27 +5077,18 @@ mod tests {
         assert!(reachable.contains(root_id));
         assert!(reachable.contains(inner_id));
         assert!(reachable.contains(leaf_id));
-        // The casts above it are left standing: what the address is converted
-        // to is a different question, answered by the restatement pass once
-        // the substitution has changed what the expression's type is.
+        // The conversions the address was wrapped in while it was a number
+        // are gone with it: what the boundary requires of the string is the
+        // conversion the caller then applies, and it is decided from the
+        // typed boundaries rather than from what stood here.
         assert_eq!(
             function.body,
-            vec![CStmt::Return(Some(CExpr::cast(
-                CType::u64(),
-                CExpr::cast(CType::u32(), CExpr::StringLit("text".to_string())),
-            )))]
+            vec![CStmt::Return(Some(CExpr::StringLit("text".to_string())))]
         );
     }
 
     #[test]
     fn radare_typed_global_renders_as_its_type_and_direct_value() {
-        let mut function =
-            CFunction::new("read_counter", CType::i32()).with_body(vec![CStmt::Return(Some(
-                CExpr::deref(CExpr::cast(
-                    CType::ptr(CType::u32()),
-                    CExpr::UIntLit(0x7000),
-                )),
-            ))]);
         let strings = BTreeMap::new();
         let symbols = BTreeMap::from([(0x7000, "obj.global_counter".to_string())]);
         let object_types = r2types::ProgramDataObjectTypeFacts::from_radare2(
@@ -5566,16 +5096,30 @@ mod tests {
             64,
             &r2types::ExternalTypeDb::default(),
         );
-        let used = std::cell::RefCell::new(std::collections::BTreeMap::new());
-
-        name_constant_addresses_in_function(
-            &mut function,
+        let mut used = std::collections::BTreeMap::new();
+        // What the fold spells for `*(uint32_t *)0x7000`: the constant is the
+        // object, and the load's own requirement converts it.
+        let (address, address_type) = name_of_constant_address(
+            &CExpr::UIntLit(0x7000),
             &strings,
             &symbols,
             &object_types,
-            &used,
-            64,
-        );
+            &mut used,
+        )
+        .expect("the symbol table answers for the address");
+        let mut function =
+            CFunction::new("read_counter", CType::i32()).with_body(vec![CStmt::Return(Some(
+                CExpr::deref(crate::fold::op_lower::convert::convert(
+                    address,
+                    &r2rewrite::CValue::Typed(address_type),
+                    &CType::ptr(CType::u32()),
+                    64,
+                )),
+            ))]);
+        let used = std::cell::RefCell::new(used);
+        for stmt in &mut function.body {
+            simplify_data_object_loads_in_stmt(stmt, 64, &used);
+        }
         function.extern_objects = used.into_inner().into_values().collect();
         note_unproven_constructs(&mut function, None, 0, 0);
         let ready = crate::codegen::prepare_function_for_emission(function);
@@ -5603,23 +5147,34 @@ mod tests {
 
     #[test]
     fn unplaceable_global_type_keeps_the_honest_byte_declaration() {
-        let mut function = CFunction::new("read_counter", CType::u32())
-            .with_body(vec![CStmt::Return(Some(CExpr::UIntLit(0x7000)))]);
         let symbols = BTreeMap::from([(0x7000, "obj.global_counter".to_string())]);
         let object_types = r2types::ProgramDataObjectTypeFacts::from_radare2(
             [(0x7000, Some("looks_specific_t"))],
             64,
             &r2types::ExternalTypeDb::default(),
         );
-        let used = std::cell::RefCell::new(std::collections::BTreeMap::new());
-        name_constant_addresses_in_function(
-            &mut function,
+        let mut used = std::collections::BTreeMap::new();
+        let (address, address_type) = name_of_constant_address(
+            &CExpr::UIntLit(0x7000),
             &BTreeMap::new(),
             &symbols,
             &object_types,
-            &used,
-            64,
-        );
+            &mut used,
+        )
+        .expect("the symbol table answers for the address");
+        let mut function =
+            CFunction::new("read_counter", CType::u32()).with_body(vec![CStmt::Return(Some(
+                crate::fold::op_lower::convert::convert(
+                    address,
+                    &r2rewrite::CValue::Typed(address_type),
+                    &CType::u32(),
+                    64,
+                ),
+            ))]);
+        let used = std::cell::RefCell::new(used);
+        for stmt in &mut function.body {
+            simplify_data_object_loads_in_stmt(stmt, 64, &used);
+        }
         function.extern_objects = used.into_inner().into_values().collect();
         note_unproven_constructs(&mut function, None, 0, 0);
         let ready = crate::codegen::prepare_function_for_emission(function);
