@@ -840,3 +840,16 @@ s `afl~process_string$[0]` >/dev/null
 pd:s | jq -Rs 'test("char ?\\* ?s") and (contains("typedef int8_t char")|not)'
 EOF_CMDS
 RUN
+NAME=dec_test_piece_does_not_define_a_name_as_itself
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~test_piece$[0]` > /dev/null
+pd:s | jq -Rs '(contains("typedef uint64_t uint64_t;")|not) and contains("uint64_t dbg_test_piece(")'
+EOF_CMDS
+RUN

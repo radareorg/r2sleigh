@@ -1571,6 +1571,11 @@ impl SealedNativeFunction {
             let Some(target) = target else {
                 continue;
             };
+            // A name that stands for itself declares nothing: `typedef uint64_t
+            // uint64_t;` is the graph saying it knows the name and no more.
+            if target.to_string() == name {
+                continue;
+            }
             targets.insert(name, target);
         }
         // A name has to stand before any name declared through it, so the

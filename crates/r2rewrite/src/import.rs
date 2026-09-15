@@ -619,13 +619,92 @@ impl Importer<'_> {
                     substituted,
                 ))
             }
-            // A lane insert keeps its statement: it is the root's definition,
-            // not an expression to fold into a reader.
             MachineExprKind::Phi { .. }
-            | MachineExprKind::InsertLane { .. }
             | MachineExprKind::PopulationCount { .. }
             | MachineExprKind::Divide { .. }
             | MachineExprKind::Remainder { .. } => None,
+            // A lane insert is the root with one window replaced, which is what
+            // joining the parts either side of that window says.
+            MachineExprKind::InsertLane {
+                root,
+                lane,
+                lsb_bits,
+                width_bits: lane_bits,
+                ..
+            } => {
+                let (r, l, trace, substituted) = self.import_pair(root, lane)?;
+                let end = lsb_bits.checked_add(lane_bits)?;
+                if self.width_of(r) != width || self.width_of(l) != lane_bits || end > width {
+                    return None;
+                }
+                let unsigned = |bits: u32| MachineType::Integer {
+                    width_bits: bits,
+                    signedness: MachineSignedness::Unsigned,
+                };
+                // Written over nothing but zeroes, the lane is the whole value
+                // zero-extended, and that is one node rather than three.
+                if lsb_bits == 0
+                    && crate::canon::literal_bits(self.arena, r) == Some(0)
+                    && lane_bits < width
+                {
+                    return Some((
+                        self.arena.intern(
+                            ty,
+                            TermKind::Cast {
+                                kind: r2ssa::MachineCastKind::ZeroExtend,
+                                input: l,
+                            },
+                        ),
+                        trace,
+                        substituted,
+                    ));
+                }
+                // A part C has no scalar for cannot be spelled, and joining it
+                // would render a cast to an aggregate. The machine renderer's
+                // mask arithmetic still spells those.
+                let spellable = |bits: u32| matches!(bits, 8 | 16 | 32 | 64);
+                if !spellable(lane_bits)
+                    || (lsb_bits > 0 && !spellable(lsb_bits))
+                    || (end < width && !spellable(width - end))
+                {
+                    return None;
+                }
+                let mut term = l;
+                let mut joined = lane_bits;
+                if lsb_bits > 0 {
+                    let low = self.arena.intern(
+                        unsigned(lsb_bits),
+                        TermKind::Extract {
+                            input: r,
+                            lsb_bits: 0,
+                        },
+                    );
+                    joined += lsb_bits;
+                    let joined_ty = if joined == width {
+                        ty
+                    } else {
+                        unsigned(joined)
+                    };
+                    term = self
+                        .arena
+                        .intern(joined_ty, TermKind::Concat { high: term, low });
+                }
+                if end < width {
+                    let high = self.arena.intern(
+                        unsigned(width - end),
+                        TermKind::Extract {
+                            input: r,
+                            lsb_bits: end,
+                        },
+                    );
+                    joined = width;
+                    term = self.arena.intern(ty, TermKind::Concat { high, low: term });
+                }
+                if joined != width {
+                    return None;
+                }
+                Some((term, trace, substituted))
+            }
             MachineExprKind::Arithmetic {
                 op,
                 mode,
