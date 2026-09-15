@@ -24724,3 +24724,37 @@ nothing anchors the gap at all. Anchoring at the unmodelled reader works and
 plans the gap over the `CallOther`'s twelve ops, but it fixes nothing while the
 value cell stays open, and it changes anchoring for every definition-less value
 in the corpus.
+
+### The `tmp_lane_*` chain, and why one rule does not clear it
+
+`pd:s renders C for a function the kernel did not certify` is not a stale
+expectation. Its expected text is
+
+```c
+int dbg.complex_check(int a, int b)
+{
+    return (a + b ^ 100 | a - b ^ 20) == 0;
+}
+```
+
+and the rendering is ten statements of `tmp_lane_100000790_*`. The identifier
+and type spellings in the expectation are older than the exact-type work, but
+the *shape* it asserts is the one to reach.
+
+One cause is stated in the code: `inlinable_core` refuses a value outright when
+`graph.formal_projection_storage(value.id).is_some()` -- "a lane of an entry
+register is the formal it was minted for: the declaration is its only spelling,
+so it is never folded into a reader". With exact types, a lane exactly as wide
+as the declared formal *is* the parameter, and folding it spells `a` rather
+than a temporary standing in for `a`. Exempting that case was tried and changed
+nothing observable, so the predicate or the premise is wrong and it was
+reverted rather than left in.
+
+And it would not be enough regardless. Only two of the ten statements are
+formal lanes (`(uint32_t)a`, `(uint32_t)b`); the rest -- the subtract, the two
+xors, the or, the flag -- are ordinary single-read temporaries that stay bound
+for some other reason. So this test wants general inlining of single-read
+temporaries into their one reader, which is a policy question about expression
+size and readability rather than a missing certificate. It is the same shape as
+`tmp_26b00_1 = (int32_t)idx; arr[tmp_26b00_1]` in the array tests, which is why
+those four failures move together.
