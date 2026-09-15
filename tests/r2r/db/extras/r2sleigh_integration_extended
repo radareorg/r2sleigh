@@ -698,7 +698,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~authenticate$[0]` > /dev/null
-pd:s | jq -Rs '([match("sym\\.imp\\.strcmp\\("; "g")] | length) == 1'
+pd:s | jq -Rs '([match("= strcmp\\("; "g")] | length) == 1'
 EOF_CMDS
 RUN
 
@@ -726,7 +726,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~authenticate$[0]` > /dev/null
-pd:s | jq -Rs '((split("sym.imp.strcmp(") | length) == 2) and test("= sym\\.imp\\.strcmp\\(")'
+pd:s | jq -Rs '(([match("= strcmp\\("; "g")] | length) == 1) and test("= strcmp\\(")'
 EOF_CMDS
 RUN
 
