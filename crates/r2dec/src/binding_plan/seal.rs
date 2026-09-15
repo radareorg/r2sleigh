@@ -1453,10 +1453,10 @@ fn stack_object_declaration_agrees(
     width_bits: u32,
     ptr_bits: u32,
 ) -> bool {
-    if matches!(
-        planned.declaration_type,
-        r2types::CTypeLike::Struct(_) | r2types::CTypeLike::Union(_)
-    ) {
+    // Asked through any name the source gave the type: a named aggregate is
+    // still an aggregate, and an aggregate has no scalar width to measure, so
+    // what vouches for it is that the rule would decide it the same way again.
+    if planned.declaration_type.is_aggregate() {
         return planned.declaration_type
             == super::rules::declaration_type_for_stack_object(
                 source_owned,

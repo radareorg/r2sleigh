@@ -627,8 +627,8 @@ impl<'a> FoldingContext<'a> {
         let literal =
             |bits: r2ssa::MachineBitVector| wide_aware_literal(bits.bits(), bits.width_bits());
         Ok(match node.kind {
-            Kind::Leaf(expr) => {
-                self.materialize_machine_expr(names, value, term, expr, depth + 1)?
+            Kind::Leaf(read) => {
+                self.materialize_machine_expr(names, value, term, read.expr, depth + 1)?
             }
             Kind::Literal(bits) => literal(bits),
             Kind::Arithmetic { op, left, right } => CExpr::binary(

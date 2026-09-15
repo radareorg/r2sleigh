@@ -24,8 +24,8 @@ pub use r2source::{
     SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
     SourceMachineRolesError, SourceParameterLocation, SourceStackAllocationContract,
-    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeGraph,
-    SourceTypeGraphError, SourceTypeKind, StackAddressBase,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeAlias,
+    SourceTypeGraph, SourceTypeGraphError, SourceTypeKind, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 24;
@@ -774,6 +774,7 @@ fn write_type_graph(writer: &mut MachineContextIdentityWriter, graph: Option<&So
                 writer.u8(4);
                 writer.u32(aggregate_id);
             }
+            SourceTypeKind::Float => writer.u8(9),
             SourceTypeKind::Void => writer.u8(5),
             SourceTypeKind::Code => writer.u8(6),
             SourceTypeKind::Union { aggregate_id } => {
@@ -805,6 +806,13 @@ fn write_type_graph(writer: &mut MachineContextIdentityWriter, graph: Option<&So
             writer.u64(member.offset_bits());
             writer.u64(member.size_bits());
         }
+    }
+    // A name is semantically inert and still decides what the rendering
+    // spells, so two graphs that differ only in names are different inputs.
+    writer.usize(graph.aliases().len());
+    for alias in graph.aliases() {
+        writer.bytes(alias.name().as_bytes());
+        writer.u32(alias.type_id());
     }
 }
 
@@ -861,7 +869,15 @@ fn write_function_interface(
     }
     writer.usize(interface.parameter_logical_values().len());
     for value in interface.parameter_logical_values() {
-        writer.logical_value(*value);
+        // Absence is part of the identity: a parameter the capture could not
+        // place renders differently from one it could.
+        match value {
+            Some(value) => {
+                writer.u8(1);
+                writer.logical_value(*value);
+            }
+            None => writer.u8(0),
+        }
     }
     match interface.return_logical_value() {
         Some(value) => {
@@ -3310,12 +3326,12 @@ mod tests {
             },
             [],
             [
-                SourceLogicalValue::new(
+                Some(SourceLogicalValue::new(
                     2,
                     SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-                ),
-                SourceLogicalValue::new(1, low_i32),
-                SourceLogicalValue::new(1, low_i32),
+                )),
+                Some(SourceLogicalValue::new(1, low_i32)),
+                Some(SourceLogicalValue::new(1, low_i32)),
             ],
             Some(SourceLogicalValue::new(1, low_i32)),
             Some(demo_struct_type_graph()),
@@ -3326,9 +3342,19 @@ mod tests {
             interface.schema_version(),
             SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION
         );
-        assert_eq!(interface.parameter_logical_values()[0].type_id(), 2);
         assert_eq!(
-            interface.parameter_logical_values()[1].carrier().kind(),
+            interface
+                .parameter_logical_value(0)
+                .expect("placed")
+                .type_id(),
+            2
+        );
+        assert_eq!(
+            interface
+                .parameter_logical_value(1)
+                .expect("placed")
+                .carrier()
+                .kind(),
             SourceCarrierKind::LowBits
         );
         let graph = interface.type_graph().expect("retained exact graph");
@@ -3347,15 +3373,15 @@ mod tests {
             },
             [],
             [
-                SourceLogicalValue::new(
+                Some(SourceLogicalValue::new(
                     2,
                     SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-                ),
-                SourceLogicalValue::new(
+                )),
+                Some(SourceLogicalValue::new(
                     1,
                     SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 32),
-                ),
-                SourceLogicalValue::new(1, low_i32),
+                )),
+                Some(SourceLogicalValue::new(1, low_i32)),
             ],
             Some(SourceLogicalValue::new(1, low_i32)),
             Some(demo_struct_type_graph()),
@@ -3390,8 +3416,8 @@ mod tests {
             },
             [],
             [
-                SourceLogicalValue::new(1, full64),
-                SourceLogicalValue::new(2, full64),
+                Some(SourceLogicalValue::new(1, full64)),
+                Some(SourceLogicalValue::new(2, full64)),
             ],
             Some(SourceLogicalValue::new(2, full64)),
             Some(graph),

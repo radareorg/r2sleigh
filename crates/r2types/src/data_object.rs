@@ -183,7 +183,7 @@ fn data_object_type_is_placeable(
         CTypeLike::Enum(name) => {
             type_db.resolve_aggregate_kind(name) == Some(ExternalAggregateKind::Enum)
         }
-        CTypeLike::Typedef(name) => type_db.declares_typedef(name),
+        CTypeLike::Typedef { name, .. } => type_db.declares_typedef(name),
         CTypeLike::Function { .. } | CTypeLike::Unknown => false,
     }
 }

@@ -4,9 +4,11 @@ use r2ssa::ObjectId;
 use super::context::FoldingContext;
 
 fn frame_object_address_expr(object_expr: CExpr, ty: CType) -> (CExpr, CType) {
-    match ty {
-        CType::Array(_, _) => (object_expr, ty),
-        _ => (CExpr::addr_of(object_expr), CType::Pointer(Box::new(ty))),
+    // An array name decays where the array does: the name is transparent.
+    if ty.is_array() {
+        (object_expr, ty)
+    } else {
+        (CExpr::addr_of(object_expr), CType::Pointer(Box::new(ty)))
     }
 }
 

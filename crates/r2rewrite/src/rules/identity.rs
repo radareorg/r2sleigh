@@ -74,7 +74,9 @@ fn same_operands(arena: &TermArena, id: TermId) -> Option<(TermKind, TermId)> {
     let (Some(left), Some(right)) = (children.next(), children.next()) else {
         return None;
     };
-    (left == right).then_some((kind, left))
+    // Two occurrences of one value are two terms, so this asks what the
+    // operands read rather than which node they are.
+    arena.same_value(left, right).then_some((kind, left))
 }
 
 identity_rule!(

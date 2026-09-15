@@ -2252,11 +2252,23 @@ impl From<crate::fold::op_lower::OpLoweringRefusal> for DecompileRenderRefusal {
             ) => Self::MissingMachineProjectionAuthorization(
                 MachineProjectionRefusalOrigin::OpLowering(origin.site()),
             ),
-            crate::fold::op_lower::OpLoweringRefusal::MissingProgramVariableAuthorization(..) => {
-                Self::MissingProgramVariableAuthorization
-            }
-            crate::fold::op_lower::OpLoweringRefusal::UnrepresentableOperation(..) => {
-                Self::UnrepresentableOperation
+            crate::fold::op_lower::OpLoweringRefusal::MissingProgramVariableAuthorization(..)
+            | crate::fold::op_lower::OpLoweringRefusal::UnrepresentableOperation(..) => {
+                // These two categories drop their origin here, and a whole-
+                // function refusal has no gap marker to carry it instead, so
+                // the site is reported before it is lost.
+                r2il::refusal_evidence!(
+                    "op-lowering",
+                    "{} refused at {}",
+                    refusal.kind(),
+                    refusal.origin_site()
+                );
+                match refusal {
+                    crate::fold::op_lower::OpLoweringRefusal::UnrepresentableOperation(..) => {
+                        Self::UnrepresentableOperation
+                    }
+                    _ => Self::MissingProgramVariableAuthorization,
+                }
             }
             crate::fold::op_lower::OpLoweringRefusal::VariadicCallsiteArgumentCount(refusal) => {
                 Self::VariadicCallsiteArgumentCount(refusal)
@@ -3564,6 +3576,7 @@ impl Decompiler {
             symbols: std::rc::Rc::clone(&symbol_table),
             name: crate::ast::c_identifier(&func_name),
             declaration_only: None,
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             externs: fold_ctx
@@ -3676,6 +3689,7 @@ impl Decompiler {
         };
         crate::stage_timing::mark("seal");
         native.define_declared_aggregates(prepared);
+        native.define_declared_typedefs(prepared);
         let ledger = effect_ledger::build_obligation_ledger(
             prepared,
             &normalization_origins,
@@ -4069,7 +4083,7 @@ fn fold_constant_arithmetic_in_function(
 /// asks for. A string literal is an array of `char`, and saying so is what
 /// lets it reach a `char *` with nothing spelled.
 fn plain_char_type() -> CType {
-    CType::Typedef("char".to_string())
+    CType::typedef("char")
 }
 
 /// The address a chain of conversions is wrapped around, and what it is.
@@ -4362,7 +4376,8 @@ fn pointer_target_under_conversions(expr: &CExpr) -> Option<CType> {
 }
 
 fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
-    match ty {
+    // A name occupies whatever it names.
+    match ty.unaliased() {
         CType::Bool => Some(8),
         CType::Int { bits, .. } | CType::Float(bits) | CType::BitVector(bits) => Some(*bits),
         CType::Pointer(_) | CType::Function { .. } => Some(pointer_bits),
@@ -4374,7 +4389,7 @@ fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
         | CType::Struct(_)
         | CType::Union(_)
         | CType::Enum(_)
-        | CType::Typedef(_)
+        | CType::Typedef { .. }
         | CType::Unknown => None,
     }
 }
@@ -5024,7 +5039,7 @@ mod tests {
                 storage: storage(0, 8),
             },
             [],
-            [logical_u64],
+            [Some(logical_u64)],
             Some(logical_u8),
             Some(type_graph),
         )
@@ -6227,7 +6242,7 @@ mod tests {
                     storage: storage(0),
                 },
                 [],
-                [logical_u64],
+                [Some(logical_u64)],
                 Some(logical_u64),
                 Some(type_graph),
             )

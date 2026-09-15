@@ -209,6 +209,15 @@ pub enum SourceTypeKind {
         element_type_id: u32,
         count: u64,
     },
+    /// An IEEE binary floating-point object.
+    ///
+    /// Not an integer of the same width: the bits mean something else, a cast
+    /// between the two is a conversion rather than a reinterpretation, and the
+    /// value travels in a different register class. Leaving it out did not
+    /// make a `double` unrepresentable in isolation -- it refused the whole
+    /// graph, so one `double` in a signature cost the function every exact
+    /// type and every source name it had.
+    Float,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -402,11 +411,39 @@ impl SourceAggregateLayout {
     }
 }
 
+/// A name the source gave one of this graph's types.
+///
+/// Compilation destroys the name but the producer's own type database keeps
+/// it, and a rendering that writes `UInt16 *p` has to say what `UInt16` is --
+/// a pointer to an undeclared tag is legal C, a pointer to an undeclared
+/// typedef name is not. The binding is exact rather than inferred: the capture
+/// resolved this spelling to this type while it was building the graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceTypeAlias {
+    name: String,
+    type_id: u32,
+}
+
+impl SourceTypeAlias {
+    pub const fn new(name: String, type_id: u32) -> Self {
+        Self { name, type_id }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn type_id(&self) -> u32 {
+        self.type_id
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceTypeGraph {
     schema_version: u32,
     types: Box<[SourceType]>,
     aggregates: Box<[SourceAggregateLayout]>,
+    aliases: Box<[SourceTypeAlias]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +451,7 @@ pub enum SourceTypeGraphError {
     InvalidType,
     InvalidAggregate,
     InvalidMember,
+    InvalidAlias,
 }
 
 impl std::fmt::Display for SourceTypeGraphError {
@@ -433,12 +471,22 @@ fn source_align_up(value: u64, alignment: u64) -> Option<u64> {
 }
 
 impl SourceTypeGraph {
+    /// A graph that carries no source names for its types.
     pub fn new(
         types: impl IntoIterator<Item = SourceType>,
         aggregates: impl IntoIterator<Item = SourceAggregateLayout>,
     ) -> Result<Self, SourceTypeGraphError> {
+        Self::new_with_aliases(types, aggregates, [])
+    }
+
+    pub fn new_with_aliases(
+        types: impl IntoIterator<Item = SourceType>,
+        aggregates: impl IntoIterator<Item = SourceAggregateLayout>,
+        aliases: impl IntoIterator<Item = SourceTypeAlias>,
+    ) -> Result<Self, SourceTypeGraphError> {
         let types = types.into_iter().collect::<Vec<_>>();
         let aggregates = aggregates.into_iter().collect::<Vec<_>>();
+        let aliases = aliases.into_iter().collect::<Vec<_>>();
         // A function that mentions no type has an empty graph. That is a
         // complete account of the types it uses, not an absent one, and
         // rejecting it refused every function whose body needs nothing named.
@@ -469,6 +517,15 @@ impl SourceTypeGraph {
             match source_type.kind {
                 SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger => {
                     if !matches!(source_type.size_bits, 8 | 16 | 32 | 64)
+                        || source_type.align_bits != source_type.size_bits
+                    {
+                        return Err(SourceTypeGraphError::InvalidType);
+                    }
+                }
+                SourceTypeKind::Float => {
+                    // binary32, binary64, and whatever the target makes `long
+                    // double`, which is sixteen bytes on every target here.
+                    if !matches!(source_type.size_bits, 32 | 64 | 128)
                         || source_type.align_bits != source_type.size_bits
                     {
                         return Err(SourceTypeGraphError::InvalidType);
@@ -646,15 +703,41 @@ impl SourceTypeGraph {
         {
             return Err(SourceTypeGraphError::InvalidAggregate);
         }
+        // A name binds one of this graph's types and binds it once. A name
+        // that resolved to two types would make the rendering's declaration of
+        // it a coin toss, which is worse than not spelling the name at all.
+        let mut named = BTreeSet::new();
+        for alias in &aliases {
+            if alias.name.is_empty()
+                || !alias
+                    .name
+                    .starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic())
+                || !alias
+                    .name
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+                || usize::try_from(alias.type_id)
+                    .ok()
+                    .is_none_or(|id| id >= types.len())
+                || !named.insert(alias.name.clone())
+            {
+                return Err(SourceTypeGraphError::InvalidAlias);
+            }
+        }
         Ok(Self {
             schema_version: SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
             types: types.into_boxed_slice(),
             aggregates: aggregates.into_boxed_slice(),
+            aliases: aliases.into_boxed_slice(),
         })
     }
 
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    pub const fn aliases(&self) -> &[SourceTypeAlias] {
+        &self.aliases
     }
 
     pub const fn types(&self) -> &[SourceType] {
@@ -739,6 +822,7 @@ impl SourceTypeGraph {
                 }
                 SourceTypeKind::SignedInteger
                 | SourceTypeKind::UnsignedInteger
+                | SourceTypeKind::Float
                 | SourceTypeKind::Void
                 | SourceTypeKind::Code => {}
             }
@@ -1310,7 +1394,14 @@ pub struct SourceFunctionInterface {
     role_register_names: SourceRoleRegisterNames,
     return_mechanism: Option<SourceReturnMechanism>,
     stack_slots: Box<[SourceStackSlotSpec]>,
-    parameter_logical_values: Box<[SourceLogicalValue]>,
+    /// One entry per parameter, absent where the capture could not place that
+    /// parameter's type.
+    ///
+    /// Dense and non-optional until a root that would not place cost the
+    /// function its *whole* graph -- every exact type, every layout and every
+    /// source name, because one `double` in a signature had nowhere to go.
+    /// A local already survived its own failure; a parameter does now too.
+    parameter_logical_values: Box<[Option<SourceLogicalValue>]>,
     return_logical_value: Option<SourceLogicalValue>,
     type_graph: Option<SourceTypeGraph>,
     stack_slot_roles_complete: bool,
@@ -1404,7 +1495,7 @@ impl SourceFunctionInterface {
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
-        parameter_logical_values: impl IntoIterator<Item = SourceLogicalValue>,
+        parameter_logical_values: impl IntoIterator<Item = Option<SourceLogicalValue>>,
         return_logical_value: Option<SourceLogicalValue>,
         type_graph: Option<SourceTypeGraph>,
     ) -> Result<Self, SourceFunctionInterfaceError> {
@@ -1428,7 +1519,7 @@ impl SourceFunctionInterface {
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
-        parameter_logical_values: impl IntoIterator<Item = SourceLogicalValue>,
+        parameter_logical_values: impl IntoIterator<Item = Option<SourceLogicalValue>>,
         return_logical_value: Option<SourceLogicalValue>,
         type_graph: Option<SourceTypeGraph>,
     ) -> Result<Self, SourceFunctionInterfaceError> {
@@ -1452,7 +1543,7 @@ impl SourceFunctionInterface {
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
-        parameter_logical_values: impl IntoIterator<Item = SourceLogicalValue>,
+        parameter_logical_values: impl IntoIterator<Item = Option<SourceLogicalValue>>,
         return_logical_value: Option<SourceLogicalValue>,
         type_graph: Option<SourceTypeGraph>,
         require_exact_stack_slot_roles: bool,
@@ -1620,7 +1711,9 @@ impl SourceFunctionInterface {
         let parameter_logical_values = parameter_logical_values.into_iter().collect::<Vec<_>>();
         match type_graph.as_ref() {
             None => {
-                if !parameter_logical_values.is_empty() || return_logical_value.is_some() {
+                if parameter_logical_values.iter().any(Option::is_some)
+                    || return_logical_value.is_some()
+                {
                     return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
                         reason: "logical values without a type graph",
                     });
@@ -1641,7 +1734,9 @@ impl SourceFunctionInterface {
                     .iter()
                     .zip(&parameters)
                     .any(|(value, parameter)| {
-                        !graph.validates_logical_value(*value, parameter.location.size_bytes())
+                        value.is_some_and(|value| {
+                            !graph.validates_logical_value(value, parameter.location.size_bytes())
+                        })
                     })
                 {
                     return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
@@ -1649,7 +1744,11 @@ impl SourceFunctionInterface {
                     });
                 }
                 match (return_kind, return_logical_value) {
-                    (SourceFunctionReturn::Void, None) => {}
+                    // A register return whose type the capture could not place
+                    // carries no logical value, the same as such a parameter.
+                    // A void return never has one.
+                    (SourceFunctionReturn::Void, None)
+                    | (SourceFunctionReturn::Register { .. }, None) => {}
                     (SourceFunctionReturn::Register { storage }, Some(value)) => {
                         if !graph.validates_logical_value(value, storage.size) {
                             return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
@@ -1657,9 +1756,9 @@ impl SourceFunctionInterface {
                             });
                         }
                     }
-                    _ => {
+                    (SourceFunctionReturn::Void, Some(_)) => {
                         return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                            reason: "return kind and return logical value disagree",
+                            reason: "a void return has no logical value",
                         });
                     }
                 }
@@ -1669,7 +1768,7 @@ impl SourceFunctionInterface {
                 if !graph.all_types_reachable(
                     parameter_logical_values
                         .iter()
-                        .map(|value| value.type_id())
+                        .filter_map(|value| value.map(SourceLogicalValue::type_id))
                         .chain(return_logical_value.map(SourceLogicalValue::type_id))
                         .chain(stack_slots.iter().filter_map(|slot| slot.logical_type)),
                 ) {
@@ -1678,7 +1777,7 @@ impl SourceFunctionInterface {
                         "roots {:?} return {:?} slots {:?} against a graph of {} types",
                         parameter_logical_values
                             .iter()
-                            .map(|value| value.type_id())
+                            .filter_map(|value| value.map(SourceLogicalValue::type_id))
                             .collect::<Vec<_>>(),
                         return_logical_value.map(SourceLogicalValue::type_id),
                         stack_slots
@@ -2152,8 +2251,13 @@ impl SourceFunctionInterface {
         &self.stack_slots
     }
 
-    pub const fn parameter_logical_values(&self) -> &[SourceLogicalValue] {
+    pub const fn parameter_logical_values(&self) -> &[Option<SourceLogicalValue>] {
         &self.parameter_logical_values
+    }
+
+    /// The exact type of one parameter, when the capture placed it.
+    pub fn parameter_logical_value(&self, index: usize) -> Option<SourceLogicalValue> {
+        self.parameter_logical_values.get(index).copied().flatten()
     }
 
     pub const fn return_logical_value(&self) -> Option<SourceLogicalValue> {

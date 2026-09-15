@@ -74,6 +74,18 @@ impl EmissionReadyFunction {
         self.function.aggregates = aggregates;
     }
 
+    pub(crate) fn set_typedef_definitions(&mut self, typedefs: Vec<crate::ast::CTypedefDef>) {
+        self.function.typedefs = typedefs;
+    }
+
+    /// The function as the named-type pass reads and repairs it.
+    ///
+    /// No observation assertion, for the same reason the aggregate pass has
+    /// none: it runs before the markers are discarded and touches only types.
+    pub(crate) fn function_mut_for_type_declarations(&mut self) -> &mut CFunction {
+        &mut self.function
+    }
+
     pub(crate) fn function(&self) -> &CFunction {
         assert!(
             !has_render_observations(&self.function),
@@ -137,6 +149,7 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             locals: func.locals,
             params_known: func.params_known,
             externs: func.externs,
+            typedefs: func.typedefs,
             aggregates: func.aggregates,
             extern_objects: func.extern_objects,
             declaration_only: func.declaration_only,
@@ -194,6 +207,26 @@ impl<'c> CodeGenerator<'c> {
         true
     }
 
+    /// Declare the named types this rendering spells.
+    ///
+    /// A pointer to an undeclared tag is legal C; a pointer to an undeclared
+    /// typedef name is not, so a rendering that writes `UInt16 *p` has to say
+    /// what `UInt16` is. These precede the aggregates: a typedef may name a tag
+    /// defined below it, and a member may be declared at a typedef name.
+    fn emit_typedef_declarations(&mut self, func: &CFunction) {
+        for typedef in &func.typedefs {
+            self.output.push_str("typedef ");
+            self.output.push_str(&r2types::c_object_declaration(
+                &typedef.target,
+                &typedef.name,
+            ));
+            self.output.push_str(";\n");
+        }
+        if !func.typedefs.is_empty() {
+            self.output.push('\n');
+        }
+    }
+
     /// Generate code for a function.
     pub(crate) fn generate_function(&mut self, ready: &EmissionReadyFunction) -> String {
         let func = ready.function();
@@ -206,9 +239,12 @@ impl<'c> CodeGenerator<'c> {
             self.output.push_str("/* ");
             self.output.push_str(reason);
             self.output.push_str(" */\n");
+            self.emit_typedef_declarations(func);
             self.emit_extern_declarations(func, true);
             return self.output.clone();
         }
+
+        self.emit_typedef_declarations(func);
 
         // A value of an aggregate needs that aggregate defined; a pointer to one
         // does not. Only what the rendering actually declares is defined here.
@@ -1269,6 +1305,7 @@ mod tests {
                 variadic: true,
                 noreturn: false,
             }],
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "snprintf".to_string(),
@@ -1290,12 +1327,54 @@ mod tests {
         assert!(!code.contains('}'), "{code}");
     }
 
+    /// A pointer to an undeclared tag is legal C; a pointer to an undeclared
+    /// typedef name is not, so the name has to be declared above the function
+    /// that spells it.
+    #[test]
+    fn a_spelled_name_is_declared_above_the_function() {
+        let symbols = test_table();
+        let func = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: vec![
+                crate::ast::CTypedefDef {
+                    name: "UInt16".to_string(),
+                    target: CType::u16(),
+                },
+                crate::ast::CTypedefDef {
+                    name: "BZFILE".to_string(),
+                    target: CType::Void,
+                },
+            ],
+            aggregates: Vec::new(),
+            extern_objects: Vec::new(),
+            name: "f".to_string(),
+            ret_type: CType::Void,
+            params: vec![CParam {
+                ty: CType::ptr(CType::typedef("UInt16")),
+                name: crate::symbol::declare(&symbols, "q"),
+            }],
+            locals: Vec::new(),
+            body: Vec::new(),
+            params_known: true,
+            symbols: std::rc::Rc::new(symbols),
+        };
+        let code = generate(&func);
+        assert!(code.contains("typedef uint16_t UInt16;"), "{code}");
+        assert!(code.contains("typedef void BZFILE;"), "{code}");
+        assert!(
+            code.find("typedef uint16_t UInt16;") < code.find("void f("),
+            "{code}"
+        );
+    }
+
     #[test]
     fn test_generate_simple_function() {
         let symbols = test_table();
         let func = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "add".to_string(),
@@ -1332,6 +1411,7 @@ mod tests {
         let func = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "uses_stack_buffer".to_string(),
@@ -1369,6 +1449,7 @@ mod tests {
                     variadic,
                     noreturn: false,
                 }],
+                typedefs: Vec::new(),
                 aggregates: Vec::new(),
                 extern_objects: Vec::new(),
                 name: "caller".to_string(),
@@ -1419,6 +1500,7 @@ mod tests {
         let plain = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "observed".to_string(),
@@ -1708,6 +1790,7 @@ mod tests {
         let func = CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "test".to_string(),

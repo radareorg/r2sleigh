@@ -22,8 +22,18 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 14;
-const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = 1;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 15;
+/// The reader speaks exactly the format the writer writes.
+///
+/// Producer and consumer are one build: `r2plugin/snapshot_wire.c` writes the
+/// buffer, this reads it, they compile into one shared object installed
+/// together, and the buffer never leaves the process or reaches a file. A
+/// buffer of any other format therefore cannot exist, and the ladder of
+/// compatibility branches that once read fourteen of them was code no test
+/// could reach against the real plugin -- which is exactly where a silently
+/// wrong path hides. The schema versions beside it were always checked for
+/// equality; this now matches them.
+const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = SNAPSHOT_WIRE_FORMAT_VERSION;
 
 /// Bytes of fixed header preceding the string table.
 pub const SNAPSHOT_WIRE_HEADER_BYTES: usize = 24;
@@ -353,8 +363,8 @@ use crate::contracts::{
     SourceConventionSlots, SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue,
     SourceMachineRoles, SourceParameterLocation, SourceRegisterName, SourceReturnMechanism,
     SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackArgumentPlacement,
-    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeGraph,
-    SourceTypeKind, StackAddressBase,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeAlias,
+    SourceTypeGraph, SourceTypeKind, StackAddressBase,
 };
 use crate::{
     AdvisoryCallPrototype, AdvisoryCallSite, AdvisoryCallTransfer, AdvisorySuccessor,
@@ -401,57 +411,6 @@ fn write_abi_class(writer: &mut SnapshotWireWriter, abi_class: SourceAbiClass) {
         SourceAbiClass::Thiscall => ABI_THISCALL,
         SourceAbiClass::Vectorcall => ABI_VECTORCALL,
     });
-}
-
-fn read_abi_class(
-    reader: &mut SnapshotWireReader<'_>,
-) -> Result<SourceAbiClass, SnapshotWireError> {
-    match reader.u8()? {
-        ABI_UNKNOWN => Ok(SourceAbiClass::Unknown),
-        ABI_OTHER => Ok(SourceAbiClass::Other),
-        ABI_MICROSOFT => Ok(SourceAbiClass::Microsoft),
-        ABI_MICROSOFT_X64 => Ok(SourceAbiClass::MicrosoftX64),
-        ABI_SYSTEM_V => Ok(SourceAbiClass::SystemV),
-        ABI_SYSTEM_V_AMD64 => Ok(SourceAbiClass::SystemVAMD64),
-        ABI_AAPCS => Ok(SourceAbiClass::Aapcs),
-        ABI_AAPCS64 => Ok(SourceAbiClass::Aapcs64),
-        ABI_RISCV32 => Ok(SourceAbiClass::RiscV32),
-        ABI_RISCV64 => Ok(SourceAbiClass::RiscV64),
-        ABI_CDECL => Ok(SourceAbiClass::Cdecl),
-        ABI_STDCALL => Ok(SourceAbiClass::Stdcall),
-        ABI_FASTCALL => Ok(SourceAbiClass::Fastcall),
-        ABI_THISCALL => Ok(SourceAbiClass::Thiscall),
-        ABI_VECTORCALL => Ok(SourceAbiClass::Vectorcall),
-        tag => Err(SnapshotWireError::UnknownDiscriminant {
-            record: "source ABI class",
-            tag: u64::from(tag),
-        }),
-    }
-}
-
-fn read_recorded_abi_class(
-    reader: &mut SnapshotWireReader<'_>,
-) -> Result<Option<SourceAbiClass>, SnapshotWireError> {
-    // Version 2 briefly recorded both the spelling and a derived ABI class.
-    // Later formats keep the spelling as the sole transported fact and let
-    // SourceAbiClass classify it once at the source contract boundary.
-    (reader.format_version() == 2)
-        .then(|| read_abi_class(reader))
-        .transpose()
-}
-
-fn verify_recorded_abi_class(
-    recorded: Option<SourceAbiClass>,
-    classified: SourceAbiClass,
-    contract: &'static str,
-) -> Result<(), SnapshotWireError> {
-    if recorded.is_some_and(|recorded| recorded != classified) {
-        return Err(SnapshotWireError::RejectedContract {
-            contract,
-            reason: "calling-convention spelling and typed ABI class disagree".to_string(),
-        });
-    }
-    Ok(())
 }
 
 pub fn write_machine_profile(
@@ -521,22 +480,16 @@ pub fn read_function_identity(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<FunctionIdentity, SnapshotWireError> {
     let address = reader.u64()?;
-    // Format 11 added the loader role; an older producer simply did not
-    // record one, which is what `None` means.
-    let loader_role = if reader.format_version() >= 11 {
-        match reader.u8()? {
-            LOADER_ROLE_NONE => None,
-            LOADER_ROLE_INIT => Some(crate::SourceLoaderRole::Init),
-            LOADER_ROLE_FINI => Some(crate::SourceLoaderRole::Fini),
-            tag => {
-                return Err(SnapshotWireError::UnknownDiscriminant {
-                    record: "loader role",
-                    tag: u64::from(tag),
-                });
-            }
+    let loader_role = match reader.u8()? {
+        LOADER_ROLE_NONE => None,
+        LOADER_ROLE_INIT => Some(crate::SourceLoaderRole::Init),
+        LOADER_ROLE_FINI => Some(crate::SourceLoaderRole::Fini),
+        tag => {
+            return Err(SnapshotWireError::UnknownDiscriminant {
+                record: "loader role",
+                tag: u64::from(tag),
+            });
         }
-    } else {
-        None
     };
     Ok(FunctionIdentity {
         address,
@@ -649,7 +602,7 @@ fn read_named_optional_storage(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<(Option<CanonicalStorageId>, Option<SourceRegisterName>), SnapshotWireError> {
     let storage = read_optional_storage(reader)?;
-    if storage.is_some() && reader.format_version() >= 5 {
+    if storage.is_some() {
         let name = SourceRegisterName::new(reader.string()?);
         return Ok((storage, name));
     }
@@ -921,30 +874,25 @@ fn write_machine_roles_for_format(
 pub fn read_machine_roles(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<SourceMachineRoles, SnapshotWireError> {
-    read_machine_roles_with_legacy_contract(reader, None)
+    read_machine_roles_inner(reader)
 }
 
-fn read_machine_roles_with_legacy_contract(
+fn read_machine_roles_inner(
     reader: &mut SnapshotWireReader<'_>,
-    legacy_contract: Option<SourceStackAllocationContract>,
 ) -> Result<SourceMachineRoles, SnapshotWireError> {
     let (return_address_storage, return_address_name) = read_named_optional_storage(reader)?;
     let (stack_pointer_storage, stack_pointer_name) = read_named_optional_storage(reader)?;
-    let contract = if reader.format_version() >= 3 {
-        if reader.bool()? {
-            Some(read_stack_allocation(reader)?)
-        } else {
-            None
-        }
+    let contract = if reader.bool()? {
+        Some(read_stack_allocation(reader)?)
     } else {
-        legacy_contract
+        None
     };
-    let direction_flag_name = if reader.format_version() >= 13 && reader.bool()? {
+    let direction_flag_name = if reader.bool()? {
         Some(reader.string()?.to_string())
     } else {
         None
     };
-    let carriers = if reader.format_version() >= 4 && reader.bool()? {
+    let carriers = if reader.bool()? {
         Some(SourceCallPreservedCarriers::new(
             reader.bool()?,
             reader.bool()?,
@@ -1020,7 +968,6 @@ pub fn read_convention_slots(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<SourceConventionSlots, SnapshotWireError> {
     let calling_convention = reader.string()?.to_string();
-    let recorded_abi_class = read_recorded_abi_class(reader)?;
     let count = reader.u32()? as usize;
     let mut argument_slots = Vec::with_capacity(count.min(64));
     for _ in 0..count {
@@ -1029,7 +976,7 @@ pub fn read_convention_slots(
     let result_slot = read_optional_storage(reader)?;
     // Where the convention puts arguments past its registers. Absent before
     // version 12, and absent in a convention that never spills to the stack.
-    let stack_arguments = if reader.format_version() >= 12 && reader.bool()? {
+    let stack_arguments = if reader.bool()? {
         let first_offset = reader.i64()?;
         let stride_bytes = reader.u32()?;
         Some(
@@ -1052,11 +999,6 @@ pub fn read_convention_slots(
             reason: format!("{error:?}"),
         })?;
     let slots = slots.with_stack_arguments(stack_arguments);
-    verify_recorded_abi_class(
-        recorded_abi_class,
-        slots.abi_class(),
-        "SourceConventionSlots ABI class",
-    )?;
     Ok(slots)
 }
 
@@ -1246,11 +1188,7 @@ pub fn read_image(
     for _ in 0..symbol_count {
         let addr = reader.u64()?;
         let name = reader.string()?;
-        let type_spelling = if reader.format_version() >= 8 {
-            reader.optional_string()?
-        } else {
-            None
-        };
+        let type_spelling = reader.optional_string()?;
         data_symbols.push(SourceDataObject::new(addr, name, type_spelling));
     }
     let table_count = reader.u32()? as usize;
@@ -1383,22 +1321,16 @@ pub fn read_call_site(
     let instruction_address = reader.u64()?;
     let target_address = reader.u64()?;
     let target_name = reader.string()?;
-    // Before version 7 every site radare2 reported was a call instruction, so
-    // an older buffer says so without carrying the byte.
-    let transfer = if reader.format_version() >= 7 {
-        match reader.u8()? {
-            CALL_TRANSFER_CALL => AdvisoryCallTransfer::Call,
-            CALL_TRANSFER_TAIL_JUMP => AdvisoryCallTransfer::TailJump,
-            CALL_TRANSFER_TAIL_SLOT => AdvisoryCallTransfer::TailSlot,
-            tag => {
-                return Err(SnapshotWireError::UnknownDiscriminant {
-                    record: "call transfer",
-                    tag: u64::from(tag),
-                });
-            }
+    let transfer = match reader.u8()? {
+        CALL_TRANSFER_CALL => AdvisoryCallTransfer::Call,
+        CALL_TRANSFER_TAIL_JUMP => AdvisoryCallTransfer::TailJump,
+        CALL_TRANSFER_TAIL_SLOT => AdvisoryCallTransfer::TailSlot,
+        tag => {
+            return Err(SnapshotWireError::UnknownDiscriminant {
+                record: "call transfer",
+                tag: u64::from(tag),
+            });
         }
-    } else {
-        AdvisoryCallTransfer::Call
     };
     let prototype = if reader.bool()? {
         Some(read_call_prototype(reader)?)
@@ -1446,9 +1378,32 @@ pub fn read_carrier(
     Ok(SourceCarrierProjection::new(kind, offset_bits, size_bits))
 }
 
+/// The producer's sentinel for a type the graph does not carry.
+///
+/// A parameter whose type would not place keeps its slot and loses only its
+/// own type, so the record is still one entry per parameter.
+const LOGICAL_TYPE_ABSENT: u32 = u32::MAX;
+
 pub fn write_logical_value(writer: &mut SnapshotWireWriter, value: SourceLogicalValue) {
     writer.u32(value.type_id());
     write_carrier(writer, value.carrier());
+}
+
+/// One parameter's logical value, or its absence.
+pub fn write_optional_logical_value(
+    writer: &mut SnapshotWireWriter,
+    value: Option<SourceLogicalValue>,
+) {
+    match value {
+        Some(value) => write_logical_value(writer, value),
+        None => {
+            writer.u32(LOGICAL_TYPE_ABSENT);
+            write_carrier(
+                writer,
+                SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 0),
+            );
+        }
+    }
 }
 
 pub fn read_logical_value(
@@ -1457,6 +1412,14 @@ pub fn read_logical_value(
     let type_id = reader.u32()?;
     let carrier = read_carrier(reader)?;
     Ok(SourceLogicalValue::new(type_id, carrier))
+}
+
+pub fn read_optional_logical_value(
+    reader: &mut SnapshotWireReader<'_>,
+) -> Result<Option<SourceLogicalValue>, SnapshotWireError> {
+    let type_id = reader.u32()?;
+    let carrier = read_carrier(reader)?;
+    Ok((type_id != LOGICAL_TYPE_ABSENT).then(|| SourceLogicalValue::new(type_id, carrier)))
 }
 
 const LOCATION_REGISTER: u8 = 0;
@@ -1489,9 +1452,6 @@ pub fn write_parameter_location(
 pub fn read_parameter_location(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<SourceParameterLocation, SnapshotWireError> {
-    if reader.format_version() < 10 {
-        return Ok(SourceParameterLocation::Register(read_storage(reader)?));
-    }
     match reader.u8()? {
         LOCATION_REGISTER => Ok(SourceParameterLocation::Register(read_storage(reader)?)),
         LOCATION_STACK => {
@@ -1499,11 +1459,7 @@ pub fn read_parameter_location(
             let size_bytes = reader.u32()?;
             // Before the callee's view was carried, the caller's was the only
             // coordinate, which is what a transfer that pushes nothing gives.
-            let callee_offset = if reader.format_version() < 14 {
-                offset
-            } else {
-                reader.i64()?
-            };
+            let callee_offset = reader.i64()?;
             Ok(SourceParameterLocation::Stack {
                 offset,
                 size_bytes,
@@ -1563,6 +1519,7 @@ const TYPE_VOID: u8 = 4;
 const TYPE_CODE: u8 = 5;
 const TYPE_UNION: u8 = 6;
 const TYPE_ARRAY: u8 = 7;
+const TYPE_FLOAT: u8 = 8;
 
 pub fn write_type(writer: &mut SnapshotWireWriter, source_type: &SourceType) {
     writer.u32(source_type.id());
@@ -1577,6 +1534,7 @@ pub fn write_type(writer: &mut SnapshotWireWriter, source_type: &SourceType) {
             writer.u8(TYPE_STRUCT);
             writer.u32(aggregate_id);
         }
+        SourceTypeKind::Float => writer.u8(TYPE_FLOAT),
         SourceTypeKind::Void => writer.u8(TYPE_VOID),
         SourceTypeKind::Code => writer.u8(TYPE_CODE),
         SourceTypeKind::Union { aggregate_id } => {
@@ -1616,6 +1574,7 @@ pub fn read_type(reader: &mut SnapshotWireReader<'_>) -> Result<SourceType, Snap
             element_type_id: reader.u32()?,
             count: reader.u64()?,
         },
+        TYPE_FLOAT => SourceTypeKind::Float,
         // Signedness and indirection are not recoverable from anything else in
         // the record, so an unknown kind is refused.
         tag => {
@@ -1709,6 +1668,13 @@ pub fn write_type_graph(
     for aggregate in graph.aggregates() {
         write_aggregate(writer, aggregate)?;
     }
+    let aliases =
+        u32::try_from(graph.aliases().len()).map_err(|_| SnapshotWireError::ValueTooWide)?;
+    writer.u32(aliases);
+    for alias in graph.aliases() {
+        writer.string(alias.name())?;
+        writer.u32(alias.type_id());
+    }
     Ok(())
 }
 
@@ -1725,13 +1691,24 @@ pub fn read_type_graph(
     for _ in 0..aggregate_count {
         aggregates.push(read_aggregate(reader)?);
     }
+    // Names arrived with format 15. An older producer carried none, which is a
+    // graph that named nothing rather than one that is missing something.
+    let alias_count = reader.u32()? as usize;
+    let mut aliases = Vec::with_capacity(alias_count.min(4096));
+    for _ in 0..alias_count {
+        let name = reader.string()?.to_string();
+        let type_id = reader.u32()?;
+        aliases.push(SourceTypeAlias::new(name, type_id));
+    }
     // new() revalidates dense ids, sizes and member bounds, so a buffer cannot
     // mint a graph the in-crate constructor would have rejected. Every
     // downstream projection resolves type identities against this graph, so it
     // is the last place that may accept something unchecked.
-    SourceTypeGraph::new(types, aggregates).map_err(|error| SnapshotWireError::RejectedContract {
-        contract: "SourceTypeGraph::new",
-        reason: format!("{error:?}"),
+    SourceTypeGraph::new_with_aliases(types, aggregates, aliases).map_err(|error| {
+        SnapshotWireError::RejectedContract {
+            contract: "SourceTypeGraph::new",
+            reason: format!("{error:?}"),
+        }
     })
 }
 
@@ -1872,7 +1849,7 @@ pub fn read_stack_slot(
                 home_storage,
             )
         }
-        ROLE_PARAMETER if reader.format_version() >= 10 => {
+        ROLE_PARAMETER => {
             let parameter_index = reader.u32()?;
             SourceStackSlotSpec::new_parameter(
                 base,
@@ -1891,11 +1868,9 @@ pub fn read_stack_slot(
     };
     // A slot's declared type is a node of the function's type graph from
     // format 9 on; the invalid id says the graph does not carry it.
-    let logical_type = if reader.format_version() >= 9 {
+    let logical_type = {
         let id = reader.u32()?;
         (id != u32::MAX).then_some(id)
-    } else {
-        None
     };
     Ok(match logical_type {
         Some(type_id) => slot.with_logical_type(type_id),
@@ -1957,7 +1932,7 @@ fn write_interface_for_format(
         .map_err(|_| SnapshotWireError::ValueTooWide)?;
     writer.u32(logical);
     for value in interface.parameter_logical_values() {
-        write_logical_value(writer, *value);
+        write_optional_logical_value(writer, *value);
     }
     match interface.return_logical_value() {
         Some(value) => {
@@ -2029,30 +2004,15 @@ fn write_interface_for_format(
 pub fn read_interface(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<SourceFunctionInterface, SnapshotWireError> {
-    let (interface, legacy_stack_allocation) = read_interface_record(reader)?;
-    if legacy_stack_allocation.is_some() {
-        return Err(SnapshotWireError::RejectedContract {
-            contract: "legacy interface stack allocation",
-            reason: "decode the whole snapshot to migrate this fact to SourceMachineRoles"
-                .to_string(),
-        });
-    }
-    Ok(interface)
+    read_interface_record(reader)
 }
 
 fn read_interface_record(
     reader: &mut SnapshotWireReader<'_>,
-) -> Result<
-    (
-        SourceFunctionInterface,
-        Option<SourceStackAllocationContract>,
-    ),
-    SnapshotWireError,
-> {
+) -> Result<SourceFunctionInterface, SnapshotWireError> {
     let variant = reader.u8()?;
     let revision = reader.bytes()?.to_vec();
     let calling_convention = reader.string()?.to_string();
-    let recorded_abi_class = read_recorded_abi_class(reader)?;
 
     let parameter_count = reader.u32()? as usize;
     let mut parameters = Vec::with_capacity(parameter_count.min(256));
@@ -2070,7 +2030,7 @@ fn read_interface_record(
     let logical_count = reader.u32()? as usize;
     let mut logical_parameters = Vec::with_capacity(logical_count.min(256));
     for _ in 0..logical_count {
-        logical_parameters.push(read_logical_value(reader)?);
+        logical_parameters.push(read_optional_logical_value(reader)?);
     }
     let return_logical = if reader.bool()? {
         Some(read_logical_value(reader)?)
@@ -2090,11 +2050,6 @@ fn read_interface_record(
     let (frame_pointer_storage, frame_pointer_name) = read_named_optional_storage(reader)?;
     let return_mechanism = if reader.bool()? {
         Some(read_return_mechanism(reader)?)
-    } else {
-        None
-    };
-    let legacy_stack_allocation = if reader.format_version() < 3 && reader.bool()? {
-        Some(read_stack_allocation(reader)?)
     } else {
         None
     };
@@ -2153,11 +2108,6 @@ fn read_interface_record(
         contract: "SourceFunctionInterface::new",
         reason: format!("{error:?}"),
     })?;
-    verify_recorded_abi_class(
-        recorded_abi_class,
-        interface.abi_class(),
-        "SourceFunctionInterface ABI class",
-    )?;
 
     interface =
         interface.with_preserved_call_carriers(stack_pointer_preserved, frame_pointer_preserved);
@@ -2209,7 +2159,7 @@ fn read_interface_record(
                 reason: format!("{error:?}"),
             })?;
     }
-    Ok((interface, legacy_stack_allocation))
+    Ok(interface)
 }
 
 /// Serialize one whole snapshot into a single buffer.
@@ -2392,19 +2342,13 @@ fn decode_snapshot_inner(
         advisory_calls.push(read_call_site(&mut reader)?);
     }
     let source_revision_identity: Box<[u8]> = Box::from(reader.bytes()?);
-    let source_content_identity: Option<Box<[u8]>> = if reader.format_version() >= 6 {
-        Some(Box::from(reader.bytes()?))
+    let source_content_identity: Option<Box<[u8]>> = Some(Box::from(reader.bytes()?));
+    let function_interface = if reader.bool()? {
+        Some(read_interface_record(&mut reader)?)
     } else {
         None
     };
-    let (function_interface, legacy_stack_allocation) = if reader.bool()? {
-        let (interface, contract) = read_interface_record(&mut reader)?;
-        (Some(interface), contract)
-    } else {
-        (None, None)
-    };
-    let machine_roles =
-        read_machine_roles_with_legacy_contract(&mut reader, legacy_stack_allocation)?;
+    let machine_roles = read_machine_roles_inner(&mut reader)?;
     let convention_slots = read_convention_slots(&mut reader)?;
     let captured_fields = read_captured_fields(&mut reader)?;
     let diagnostics = read_diagnostic_identity(&mut reader)?;
@@ -2645,6 +2589,7 @@ mod tests {
         writer.u32(7);
         writer.u64(64);
         writer.u64(64);
+        writer.u32(0);
         writer.u32(0);
         let buffer = writer.finish().expect("finish");
         let mut reader = SnapshotWireReader::new(&buffer).expect("header");
@@ -3342,6 +3287,41 @@ mod tests {
     }
 
     #[test]
+    fn the_names_a_graph_carries_round_trip() {
+        let graph = SourceTypeGraph::new_with_aliases(
+            vec![SourceType::new(0, SourceTypeKind::UnsignedInteger, 16, 16)],
+            Vec::new(),
+            vec![SourceTypeAlias::new("UInt16".to_string(), 0)],
+        )
+        .expect("a named integer is a valid type graph");
+        let mut writer = SnapshotWireWriter::new();
+        write_type_graph(&mut writer, &graph).expect("write");
+        let buffer = writer.finish().expect("finish");
+        let mut reader = SnapshotWireReader::new(&buffer).expect("header");
+        assert_eq!(read_type_graph(&mut reader).expect("read"), graph);
+        reader.finish().expect("consumed exactly");
+    }
+
+    #[test]
+    fn a_name_that_binds_no_type_is_refused() {
+        // The rendering would declare the name against a type that is not
+        // there, which is worse than not spelling the name at all.
+        let mut writer = SnapshotWireWriter::new();
+        writer.u32(1);
+        write_type(
+            &mut writer,
+            &SourceType::new(0, SourceTypeKind::UnsignedInteger, 16, 16),
+        );
+        writer.u32(0);
+        writer.u32(1);
+        writer.string("UInt16").expect("name");
+        writer.u32(7);
+        let buffer = writer.finish().expect("finish");
+        let mut reader = SnapshotWireReader::new(&buffer).expect("header");
+        assert!(read_type_graph(&mut reader).is_err());
+    }
+
+    #[test]
     fn a_graph_the_constructor_would_reject_is_refused() {
         // ids must be dense from zero; this buffer declares one type with id 3
         let mut writer = SnapshotWireWriter::new();
@@ -3350,6 +3330,7 @@ mod tests {
             &mut writer,
             &SourceType::new(3, SourceTypeKind::SignedInteger, 32, 32),
         );
+        writer.u32(0);
         writer.u32(0);
         let buffer = writer.finish().expect("finish");
         let mut reader = SnapshotWireReader::new(&buffer).expect("header");
@@ -3459,6 +3440,44 @@ mod tests {
         .expect("graph")
     }
 
+    /// A parameter the capture could not place loses its own type and nothing
+    /// else. The whole graph used to go with it -- every exact type, every
+    /// layout and every source name -- because one root that would not place
+    /// failed the interface.
+    #[test]
+    fn a_parameter_with_no_placed_type_keeps_the_graph() {
+        let value = SourceLogicalValue::new(
+            1,
+            SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
+        );
+        let interface = SourceFunctionInterface::new_with_logical_types(
+            vec![9u8],
+            "amd64",
+            vec![
+                SourceAbiParameterSpec::new(0, reg(0x38, 8)),
+                SourceAbiParameterSpec::new(1, reg(0x30, 8)),
+            ],
+            // A register return whose type would not place carries none either.
+            SourceFunctionReturn::Register { storage: reg(0, 8) },
+            Vec::new(),
+            vec![Some(value), None],
+            None,
+            Some(reachable_graph()),
+        )
+        .expect("a parameter with no placed type is not a reason to refuse");
+        assert_eq!(interface.parameter_logical_value(0), Some(value));
+        assert_eq!(interface.parameter_logical_value(1), None);
+        assert_eq!(interface.type_graph().expect("graph").types().len(), 2);
+
+        let mut writer = SnapshotWireWriter::new();
+        write_interface(&mut writer, &interface).expect("write");
+        let buffer = writer.finish().expect("finish");
+        let mut reader = SnapshotWireReader::new(&buffer).expect("header");
+        let decoded = read_interface(&mut reader).expect("read");
+        assert_eq!(decoded.parameter_logical_values(), [Some(value), None]);
+        assert_eq!(decoded.return_logical_value(), None);
+    }
+
     #[test]
     fn every_interface_variant_round_trips() {
         // Two register parameters and one the convention passes on the
@@ -3478,20 +3497,13 @@ mod tests {
                 2,
             ),
         ];
-        let logical = vec![
-            SourceLogicalValue::new(
-                1,
-                SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-            ),
-            SourceLogicalValue::new(
-                1,
-                SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-            ),
-            SourceLogicalValue::new(
-                1,
-                SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-            ),
-        ];
+        let value = SourceLogicalValue::new(
+            1,
+            SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
+        );
+        // The middle parameter is one the capture could not place, so absence
+        // travels on the wire beside the values that are there.
+        let logical = vec![Some(value), None, Some(value)];
         let interfaces = vec![
             SourceFunctionInterface::new(
                 vec![1u8, 2, 3],
@@ -3516,7 +3528,7 @@ mod tests {
                 SourceFunctionReturn::Register { storage: reg(0, 8) },
                 slots.clone(),
                 logical.clone(),
-                Some(logical[0]),
+                logical[0],
                 Some(reachable_graph()),
             )
             .expect("logical"),
@@ -3527,7 +3539,7 @@ mod tests {
                 SourceFunctionReturn::Register { storage: reg(0, 8) },
                 slots,
                 logical.clone(),
-                Some(logical[1]),
+                logical[2],
                 Some(reachable_graph()),
             )
             .expect("exact both"),
@@ -3853,14 +3865,14 @@ mod tests {
             SourceFunctionReturn::Register { storage: reg(0, 8) },
             Vec::new(),
             vec![
-                SourceLogicalValue::new(
+                Some(SourceLogicalValue::new(
                     1,
                     SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-                ),
-                SourceLogicalValue::new(
+                )),
+                Some(SourceLogicalValue::new(
                     1,
                     SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-                ),
+                )),
             ],
             Some(SourceLogicalValue::new(
                 1,

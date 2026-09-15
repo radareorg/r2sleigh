@@ -90,6 +90,14 @@ fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) ->
         && i64::try_from(member.field_offset).ok() == Some(offset)
         && declared
         && let Some(binding) = bound
+        // Only when the slot is actually declared as that aggregate. The plan
+        // falls back to the slot's bytes for a tag the rendering cannot
+        // define, and spelling `.st_mode` against a byte array is a rendering
+        // that does not compile -- which scores nothing at all.
+        && inputs
+            .bindings
+            .get(binding.index())
+            .is_some_and(|binding| binding.declaration_type().is_aggregate())
     {
         return AccessSyntax::SlotMember {
             binding,
@@ -107,7 +115,7 @@ fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) ->
         let declared_type = inputs
             .bindings
             .get(binding.index())
-            .map(|binding| binding.declaration_type());
+            .map(|binding| binding.declaration_type().unaliased());
         let whole = fact.object_offset.is_none_or(|offset| offset == 0)
             && declared_type.is_none_or(|ty| {
                 !matches!(
@@ -179,12 +187,7 @@ fn name_may_be_subscripted(inputs: &AccessSyntaxInputs<'_>, value: ValueId) -> b
             let Some(binding) = inputs.bindings.get(binding.index()) else {
                 return true;
             };
-            matches!(
-                binding.declaration_type(),
-                r2types::CTypeLike::Pointer(_)
-                    | r2types::CTypeLike::Array(..)
-                    | r2types::CTypeLike::Unknown
-            )
+            binding.declaration_type().may_be_subscripted()
         }
         _ => true,
     }
@@ -219,7 +222,7 @@ fn subscript(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) -> 
 fn term_renderable(inputs: &AccessSyntaxInputs<'_>, arena: &TermArena, term: TermId) -> bool {
     let child = |child: TermId| term_renderable(inputs, arena, child);
     match arena.term(term).kind {
-        TermKind::Leaf(expr) => match inputs.projection.expr(expr).map(|expr| expr.kind()) {
+        TermKind::Leaf(read) => match inputs.projection.expr(read.expr).map(|expr| expr.kind()) {
             Some(MachineExprKind::Source { binding, .. }) => matches!(
                 inputs.dispositions.get(binding.value().0 as usize),
                 Some(ValueDisposition::Bound { .. })

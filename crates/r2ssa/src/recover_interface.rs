@@ -1001,7 +1001,10 @@ fn mint_recovered_interface_inner(
         .iter()
         .zip(parameter_slot_widths.iter())
         .map(|(bits, carrier_bits)| logical(*bits, *carrier_bits))
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
         (Some(result), Some(bits)) => (
             SourceFunctionReturn::Register {

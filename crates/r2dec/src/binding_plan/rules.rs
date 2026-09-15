@@ -182,7 +182,7 @@ fn term_is_parameter(
 ) -> bool {
     use r2rewrite::TermKind;
     match canonical.arena().term(term).kind {
-        TermKind::Leaf(expr) => match projection.expr(expr).map(|expr| expr.kind()) {
+        TermKind::Leaf(read) => match projection.expr(read.expr).map(|expr| expr.kind()) {
             Some(r2ssa::MachineExprKind::Source { binding, .. }) => value_is_parameter(
                 projection,
                 canonical,
@@ -332,8 +332,7 @@ pub(super) fn parameter_candidates(
             // answer where the interface states no narrower lane.
             let carrier_bytes = parameter.location().size_bytes();
             let width_bytes = interface
-                .parameter_logical_values()
-                .get(position)
+                .parameter_logical_value(position)
                 .and_then(|logical| match logical.carrier().kind() {
                     r2ssa::SourceCarrierKind::LowBits => {
                         u32::try_from(logical.carrier().size_bits() / 8).ok()
@@ -820,12 +819,29 @@ pub(super) fn declaration_type_for_stack_object(
     }) {
         // An aggregate has no scalar width to check, so what vouches for it is
         // the slot's own extent: the declaration and the extent share a source.
-        if matches!(
-            ty,
-            r2types::CTypeLike::Struct(_) | r2types::CTypeLike::Union(_)
-        ) && size.and_then(|bytes| bytes.checked_mul(8)) == Some(width_bits)
-        {
-            return ty.clone();
+        // Asked through the name, because a named type is still the type it
+        // names: `bz_stream` reaching here as a name is the same aggregate.
+        if ty.is_aggregate() && size.and_then(|bytes| bytes.checked_mul(8)) == Some(width_bits) {
+            // Only if the rendering will be able to define the tag. Declaring
+            // a value of one it cannot define does not compile, and a
+            // rendering that does not compile scores nothing -- six of the
+            // fifteen `bzip2` functions that fail to compile are exactly this,
+            // `storage size of X isn't known`. The slot's bytes are the honest
+            // fallback: same extent, always definable.
+            let definable = ty.aggregate_tag().is_some_and(|tag| {
+                source
+                    .machine_context()
+                    .function_interface()
+                    .and_then(r2ssa::SourceFunctionInterface::type_graph)
+                    .is_some_and(|graph| r2types::aggregate_is_definable(graph, tag))
+            });
+            if definable {
+                return ty.clone();
+            }
+            return r2types::CTypeLike::Array(
+                Box::new(r2types::CTypeLike::uint(8)),
+                Some((width_bits / 8) as usize),
+            );
         }
         return admit_declaration(ty.clone(), width_bits, ptr_bits);
     }
@@ -1392,6 +1408,14 @@ fn inlinable_core(
                     Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. }))
                 )
             })
+            // A merge nothing observes renders nothing, so it reads nothing.
+            // That is a fact about the merge rather than about where the value
+            // is kept, and restricting it to the lifter's own scratch space is
+            // what makes a condition code look multi-reader: a flag register
+            // merges at every loop header, and the merge was counted as a read
+            // of it. Across the local census 5,303 of 6,959 emitted conditions
+            // test a flag variable rather than a comparison, and this gate is
+            // why each of them keeps a name.
             .filter(|site| {
                 value
                     .canonical_storage
@@ -1470,7 +1494,7 @@ fn inlinable_core(
             .and_then(|root| projection.expr(*root))
             .is_some_and(|expr| expression_renders_inline(expr.kind()))
             && canonical.value(value.id).is_some_and(|value| {
-                term_renders_inline(&canonical.arena().term(value.canonical).kind)
+                term_renders_inline_transitively(canonical.arena(), value.canonical)
             });
         if !renderable {
             let term = canonical
@@ -1732,6 +1756,28 @@ fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
 /// Keep this list identical to `materialize_term`. A machine `Copy` imports as
 /// its child and the three unary machine kinds import as the corresponding
 /// unary term kinds, so the two enums do not have identical spellings.
+/// Whether the whole term renders inline, not just its root.
+///
+/// `materialize_term` descends into every child, so a root of an admitted kind
+/// over an `Opaque` child is a term the plan admits and the renderer refuses --
+/// `InvalidPlannedInline`. Nothing had noticed while the reader count kept such
+/// values bound anyway.
+fn term_renders_inline_transitively(arena: &r2rewrite::TermArena, root: r2rewrite::TermId) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let kind = arena.term(id).kind;
+        if !term_renders_inline(&kind) {
+            return false;
+        }
+        stack.extend(kind.children());
+    }
+    true
+}
+
 fn term_renders_inline(kind: &r2rewrite::TermKind) -> bool {
     use r2rewrite::TermKind as Kind;
     matches!(

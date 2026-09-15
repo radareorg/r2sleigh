@@ -1571,7 +1571,7 @@ fn c_uint_type() -> CTypeLike {
 }
 
 fn typedef_type(name: &str) -> CTypeLike {
-    CTypeLike::Typedef(name.to_string())
+    CTypeLike::typedef(name)
 }
 
 fn mark_projection_out_param(
@@ -1630,7 +1630,7 @@ fn semantic_role_param_name_is_weak(name: &str) -> bool {
 }
 
 fn heap_allocation_return_type() -> CTypeLike {
-    CTypeLike::Typedef("allocation_ptr".to_string())
+    CTypeLike::typedef("allocation_ptr")
 }
 
 struct VarTypeCandidateContext<'a> {
@@ -2220,7 +2220,7 @@ fn type_is_authoritative_named_scalar_role(
 ) -> bool {
     match ty {
         CTypeLike::Bool | CTypeLike::Enum(_) => true,
-        CTypeLike::Typedef(name) => type_db_resolves_type_name(type_db, name, ptr_bits),
+        CTypeLike::Typedef { name, .. } => type_db_resolves_type_name(type_db, name, ptr_bits),
         _ => false,
     }
 }
@@ -5099,6 +5099,18 @@ pub fn source_type_like(
         .get(usize::try_from(type_id).ok()?)
         .filter(|source_type| source_type.id() == type_id)?;
     let bits = u32::try_from(source_type.size_bits()).ok()?;
+    // What the source called this type, when it called it anything. The name
+    // renders and the structure stands behind it, so a rendering keeps the
+    // spelling the program was written with without any consumer losing the
+    // width. Compilation destroys names; this is the only place one survives.
+    let named = |ty: CTypeLike| match graph
+        .aliases()
+        .iter()
+        .find(|alias| alias.type_id() == type_id)
+    {
+        Some(alias) => CTypeLike::named(alias.name(), ty),
+        None => ty,
+    };
     let ty = match source_type.kind() {
         r2ssa::SourceTypeKind::SignedInteger => CTypeLike::Int {
             bits,
@@ -5144,6 +5156,7 @@ pub fn source_type_like(
             Box::new(source_type_like(graph, element_type_id, visiting)?),
             Some(usize::try_from(count).ok()?),
         ),
+        r2ssa::SourceTypeKind::Float => CTypeLike::Float(bits),
         r2ssa::SourceTypeKind::Void => CTypeLike::Void,
         // A function whose signature the graph does not carry; spelled with
         // an empty parameter list, which in C is an unspecified one.
@@ -5153,7 +5166,7 @@ pub fn source_type_like(
         },
     };
     visiting.remove(&type_id);
-    Some(ty)
+    Some(named(ty))
 }
 
 /// Project exact, revision-bound source aggregate accesses into the canonical
@@ -6124,7 +6137,7 @@ fn scalar_element_stride(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
         CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => {
             estimate_type_like_size_bytes(ty, ptr_bits).filter(|size| *size > 0)
         }
-        CTypeLike::Typedef(name) => {
+        CTypeLike::Typedef { name, .. } => {
             let normalized = normalize_external_type_name(name);
             parse_c_type_like(&normalized, ptr_bits).and_then(|parsed| match parsed {
                 CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => {
@@ -6838,7 +6851,7 @@ fn collect_aggregate_type_names(ty: &CTypeLike, out: &mut Vec<String>) {
         CTypeLike::Struct(name) | CTypeLike::Union(name) | CTypeLike::Enum(name) => {
             push_unique_type_name(out, name);
         }
-        CTypeLike::Typedef(name) => {
+        CTypeLike::Typedef { name, .. } => {
             push_unique_type_name(out, name);
             push_unique_type_name(out, &format!("struct {name}"));
             push_unique_type_name(out, &format!("union {name}"));
@@ -7625,7 +7638,7 @@ fn visible_binding_type_specificity(ty: &CTypeLike) -> u8 {
         CTypeLike::Void => 1,
         CTypeLike::Function { .. } | CTypeLike::BitVector(_) => 2,
         CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => 4,
-        CTypeLike::Typedef(_) | CTypeLike::Enum(_) => 5,
+        CTypeLike::Typedef { .. } | CTypeLike::Enum(_) => 5,
         CTypeLike::Struct(_) | CTypeLike::Union(_) => 6,
         CTypeLike::Array(inner, _) => 12 + visible_binding_type_specificity(inner).min(12),
         CTypeLike::Pointer(inner) => 10 + visible_binding_type_specificity(inner).min(12),
@@ -8265,7 +8278,7 @@ fn signature_param_allows_local_struct_override(
 
     if matches!(
         param.ty.as_ref(),
-        Some(CTypeLike::Pointer(inner)) if matches!(inner.as_ref(), CTypeLike::Typedef(_))
+        Some(CTypeLike::Pointer(inner)) if matches!(inner.as_ref(), CTypeLike::Typedef { .. })
     ) {
         return false;
     }
@@ -8363,7 +8376,7 @@ fn generated_local_struct_name_from_override(raw_ty: &str, ptr_bits: u32) -> Opt
         return None;
     };
     match inner.as_ref() {
-        CTypeLike::Struct(name) | CTypeLike::Typedef(name)
+        CTypeLike::Struct(name) | CTypeLike::Typedef { name, .. }
             if is_generated_local_struct_name(name) =>
         {
             Some(name.clone())
@@ -8393,7 +8406,8 @@ pub fn type_db_resolves_type_name(type_db: &ExternalTypeDb, name: &str, ptr_bits
     if matches!(name.trim(), "allocation_ptr" | "memory_ptr") {
         return true;
     }
-    if parse_c_type_like(name, ptr_bits).is_some_and(|ty| !matches!(ty, CTypeLike::Typedef(_))) {
+    if parse_c_type_like(name, ptr_bits).is_some_and(|ty| !matches!(ty, CTypeLike::Typedef { .. }))
+    {
         return true;
     }
     if external_named_aggregate_has_real_layout(type_db, name) {
@@ -8454,7 +8468,7 @@ fn unresolved_named_struct_target_for_param(
     };
     match inner.as_ref() {
         CTypeLike::Struct(name) => unresolved_named_struct_target(name, type_db),
-        CTypeLike::Typedef(name) if !type_db_resolves_type_name(type_db, name, ptr_bits) => {
+        CTypeLike::Typedef { name, .. } if !type_db_resolves_type_name(type_db, name, ptr_bits) => {
             unresolved_named_struct_target(name, type_db)
         }
         _ => None,
@@ -8589,7 +8603,7 @@ fn signature_param_blocks_generated_local_struct_override(
         CTypeLike::Pointer(inner) => match inner.as_ref() {
             CTypeLike::Unknown | CTypeLike::Void => false,
             CTypeLike::Struct(name) => external_named_aggregate_has_real_layout(type_db, name),
-            CTypeLike::Typedef(name) => {
+            CTypeLike::Typedef { name, .. } => {
                 type_db_resolves_type_name(type_db, name, ptr_bits)
                     || external_named_aggregate_has_real_layout(type_db, name)
             }
@@ -9388,9 +9402,10 @@ fn estimate_type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
         CTypeLike::Array(inner, Some(count)) => estimate_type_like_size_bytes(inner, ptr_bits)
             .map(|inner_size| inner_size.saturating_mul(*count as u64)),
         CTypeLike::Array(inner, None) => estimate_type_like_size_bytes(inner, ptr_bits),
-        CTypeLike::Struct(_) | CTypeLike::Union(_) | CTypeLike::Enum(_) | CTypeLike::Typedef(_) => {
-            None
-        }
+        CTypeLike::Struct(_)
+        | CTypeLike::Union(_)
+        | CTypeLike::Enum(_)
+        | CTypeLike::Typedef { .. } => None,
     }
 }
 
@@ -12883,14 +12898,14 @@ mod tests {
             }]),
             register_params: vec![crate::context::ExternalRegisterParamSpec {
                 name: "n".to_string(),
-                ty: Some(CTypeLike::Typedef("size_t".to_string())),
+                ty: Some(CTypeLike::typedef("size_t")),
                 reg: "rsi".to_string(),
             }],
             merged_signature: Some(FunctionSignatureSpec {
-                ret_type: Some(CTypeLike::Typedef("size_t".to_string())),
+                ret_type: Some(CTypeLike::typedef("size_t")),
                 params: vec![FunctionParamSpec {
                     name: "n".to_string(),
-                    ty: Some(CTypeLike::Typedef("size_t".to_string())),
+                    ty: Some(CTypeLike::typedef("size_t")),
                 }],
             }),
             ..ParsedExternalContext::default()
@@ -13087,7 +13102,7 @@ mod tests {
                 .merged_signature
                 .as_ref()
                 .and_then(|sig| sig.ret_type.clone()),
-            Some(CTypeLike::Typedef("allocation_ptr".to_string()))
+            Some(CTypeLike::typedef("allocation_ptr"))
         );
     }
 
@@ -15073,8 +15088,8 @@ mod tests {
                 .merged_signature
                 .as_ref()
                 .and_then(|signature| signature.params[0].ty.as_ref()),
-            Some(&CTypeLike::Pointer(Box::new(CTypeLike::Typedef(
-                "DemoStruct".to_string()
+            Some(&CTypeLike::Pointer(Box::new(CTypeLike::typedef(
+                "DemoStruct"
             ))))
         );
         let external = analysis
@@ -15638,7 +15653,7 @@ mod tests {
                 .merged_signature
                 .as_ref()
                 .and_then(|sig| sig.ret_type.as_ref()),
-            Some(&CTypeLike::Typedef("allocation_ptr".to_string()))
+            Some(&CTypeLike::typedef("allocation_ptr"))
         );
         assert_eq!(analysis.type_facts.interproc_diagnostics.scope_size, 1);
     }
@@ -17800,7 +17815,7 @@ mod tests {
                 },
                 crate::context::ExternalRegisterParamSpec {
                     name: "n".to_string(),
-                    ty: Some(CTypeLike::Typedef("size_t".to_string())),
+                    ty: Some(CTypeLike::typedef("size_t")),
                     reg: "RSI".to_string(),
                 },
             ],
@@ -17819,7 +17834,7 @@ mod tests {
                     },
                     FunctionParamSpec {
                         name: "n".to_string(),
-                        ty: Some(CTypeLike::Typedef("size_t".to_string())),
+                        ty: Some(CTypeLike::typedef("size_t")),
                     },
                 ],
             }),

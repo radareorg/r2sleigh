@@ -128,6 +128,9 @@ pub(crate) enum PlacementObservationTarget {
         binding: BindingId,
         symbol: crate::symbol::SymbolId,
         is_write: bool,
+        /// Where the statement spelling this access is emitted, when that is
+        /// not the access instruction's own block.
+        rendered_block: Option<u64>,
     },
     ObjectAddress {
         value: r2ssa::ValueId,
@@ -275,6 +278,7 @@ pub(crate) fn collect_final_placement_occurrences(
             binding,
             symbol,
             is_write,
+            rendered_block: _,
         } = target
         {
             if !stack_access_matches(source, names, access, object, binding, symbol, is_write) {
@@ -335,9 +339,10 @@ pub(crate) fn collect_final_placement_occurrences(
                 );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             };
-            let is_array = names.plan().binding(binding).is_some_and(|binding| {
-                matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
-            });
+            let is_array = names
+                .plan()
+                .binding(binding)
+                .is_some_and(|binding| binding.declaration_type().is_array());
             if !frame_object_address_expr_matches(expr, symbol, is_array) {
                 r2il::refusal_evidence!(
                     "object-address-unobserved",
@@ -548,6 +553,7 @@ pub(crate) fn collect_final_placement_occurrences(
                 binding,
                 symbol: _,
                 is_write,
+                rendered_block,
             } => {
                 let inst = graph
                     .inst(access.inst)
@@ -557,15 +563,21 @@ pub(crate) fn collect_final_placement_occurrences(
                             input_idx: 0,
                         },
                     })?;
-                let block = graph
-                    .block(inst.block)
-                    .ok_or(PlacementAnalysisError::InvalidUse {
-                        site: UseSite {
-                            inst: access.inst,
-                            input_idx: 0,
-                        },
-                    })?
-                    .addr;
+                // Where the text is, not where the machine read.
+                let block = match rendered_block {
+                    Some(block) => block,
+                    None => {
+                        graph
+                            .block(inst.block)
+                            .ok_or(PlacementAnalysisError::InvalidUse {
+                                site: UseSite {
+                                    inst: access.inst,
+                                    input_idx: 0,
+                                },
+                            })?
+                            .addr
+                    }
+                };
                 if is_write {
                     writes.push(FinalBindingWrite {
                         binding,
@@ -2241,6 +2253,7 @@ fn target_authorizes_binding(
                 binding: stack_binding,
                 symbol,
                 is_write,
+                rendered_block: _,
             },
             SymbolAccess::Write,
         ) => {
@@ -2263,6 +2276,7 @@ fn target_authorizes_binding(
                 binding: stack_binding,
                 symbol,
                 is_write,
+                rendered_block: _,
             },
             SymbolAccess::Read,
         ) => {
@@ -2669,13 +2683,62 @@ pub(crate) enum PlacementApplicationError {
 /// and a binding the derivation never called dead can lose its last reader to
 /// another binding's removal -- so what is reported is what happened, not what
 /// was planned.
+/// Where a declaration must sit for the rendering to recompile to the frame the
+/// binary actually has.
+///
+/// At `-O0` a local's frame offset is decided by its declaration order, so two
+/// renderings differing only in that order compile to different code: on a
+/// forty-eight instruction probe at the corpus's own producer flags, permuting
+/// the scalars scored 0.655 against itself. The order is recoverable rather
+/// than guessed, because the offsets are in the binary -- scalars ascend from
+/// the lowest offset in declaration order. An aggregate's position is free:
+/// `-fstack-protector` hoists arrays above the scalars wherever they were
+/// written, and both placements reproduce the original exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DeclarationOrder {
+    /// A scalar the frame places, ordered by the offset it was placed at.
+    FrameScalar(i64),
+    /// An aggregate, whose position among the declarations does not reach the
+    /// frame. Ordered after the scalars so the rendering states one shape.
+    FrameAggregate(i64),
+    /// A declaration no frame slot backs. It has no offset to answer to, so it
+    /// keeps the plan's own order.
+    Unplaced(BindingId),
+}
+
+fn declaration_order(
+    names: &BindingNameResolution,
+    slots: &BTreeMap<r2ssa::ObjectId, r2ssa::StackSlotCertificate>,
+) -> BTreeMap<BindingId, DeclarationOrder> {
+    let plan = names.plan();
+    let mut order = BTreeMap::new();
+    for (object, slot) in slots {
+        let Some(crate::binding_plan::StackObjectDisposition::Bound { binding }) =
+            plan.stack_object_disposition(*object)
+        else {
+            continue;
+        };
+        // A slot wider than a machine word is an aggregate, which is what the
+        // frame hoists. The width is the slot's own, not a declaration type
+        // chosen later.
+        let key = match slot.size {
+            Some(size) if size > 8 => DeclarationOrder::FrameAggregate(slot.offset),
+            _ => DeclarationOrder::FrameScalar(slot.offset),
+        };
+        order.insert(binding, key);
+    }
+    order
+}
+
 pub(crate) fn apply_placement_decisions(
     function: &mut CFunction,
     regions: &SealedStructuredRegionArtifact,
     names: &BindingNameResolution,
     decisions: &PlacementDecisions,
     writes: &[FinalBindingWrite],
+    slots: &BTreeMap<r2ssa::ObjectId, r2ssa::StackSlotCertificate>,
 ) -> Result<PlacementRemovals, PlacementApplicationError> {
+    let declaration_order = declaration_order(names, slots);
     // Inlining a write moves the binding's declaration to wherever that write
     // is written, and whether the result is in scope for the reads is a fact
     // about the emitted tree, not about the occurrence set the decisions were
@@ -2692,14 +2755,21 @@ pub(crate) fn apply_placement_decisions(
     let original = function.clone();
     let mut demoted = BTreeMap::<BindingId, PlacementDecision>::new();
     loop {
-        let removals =
-            match apply_decisions_once(function, regions, names, decisions, writes, &demoted) {
-                Ok(removals) => removals,
-                Err(error) => {
-                    *function = original;
-                    return Err(error);
-                }
-            };
+        let removals = match apply_decisions_once(
+            function,
+            regions,
+            names,
+            decisions,
+            writes,
+            &demoted,
+            &declaration_order,
+        ) {
+            Ok(removals) => removals,
+            Err(error) => {
+                *function = original;
+                return Err(error);
+            }
+        };
         let undeclared = crate::unrendered::names_mentioned_without_a_declaration(function);
         let mut progressed = false;
         for symbol in undeclared {
@@ -2737,6 +2807,7 @@ fn apply_decisions_once(
     decisions: &PlacementDecisions,
     writes: &[FinalBindingWrite],
     demoted: &BTreeMap<BindingId, PlacementDecision>,
+    declaration_order: &BTreeMap<BindingId, DeclarationOrder>,
 ) -> Result<PlacementRemovals, PlacementApplicationError> {
     // The caller hands over a copy it discards unless the whole application
     // succeeds, and it is the caller that writes the result back to the real
@@ -2970,7 +3041,15 @@ fn apply_decisions_once(
     }
 
     for (region, declarations) in &mut declarations {
-        declarations.sort_by_key(|(binding, _, _)| *binding);
+        declarations.sort_by_key(|(binding, _, _)| {
+            (
+                declaration_order
+                    .get(binding)
+                    .copied()
+                    .unwrap_or(DeclarationOrder::Unplaced(*binding)),
+                *binding,
+            )
+        });
         let statements = declarations
             .iter()
             .map(|(_, ty, name)| CStmt::Decl {
@@ -5210,6 +5289,7 @@ mod tests {
                 binding,
                 symbol,
                 is_write: true,
+                rendered_block: None,
             }),
             Some(PlacementObservationTarget::Other),
             Some(PlacementObservationTarget::Use {
@@ -5279,6 +5359,7 @@ mod tests {
                 binding,
                 symbol,
                 is_write: true,
+                rendered_block: None,
             }),
             Some(PlacementObservationTarget::Use {
                 site: UseSite {

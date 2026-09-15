@@ -127,7 +127,7 @@ fn intern_render_type(arena: &mut TypeArena, ty: &CTypeLike) -> TypeId {
             let inner = intern_render_type(arena, inner);
             arena.array(inner, *len, None)
         }
-        CTypeLike::Struct(name) | CTypeLike::Typedef(name) => {
+        CTypeLike::Struct(name) | CTypeLike::Typedef { name, .. } => {
             arena.struct_named_or_existing(name.clone())
         }
         CTypeLike::Union(name) | CTypeLike::Enum(name) => arena.unknown_alias(name.clone()),
@@ -807,9 +807,9 @@ impl<'a> EvidenceBuilder<'a> {
             CTypeLike::Struct(name) => Some(self.arena.unknown_alias(format!("struct {name}"))),
             CTypeLike::Union(name) => Some(self.arena.unknown_alias(format!("union {name}"))),
             CTypeLike::Enum(name) => Some(self.arena.unknown_alias(format!("enum {name}"))),
-            CTypeLike::Typedef(name) => {
+            CTypeLike::Typedef { name, .. } => {
                 let resolved = crate::parse_c_type_like(name, self.ptr_bits)?;
-                if matches!(resolved, CTypeLike::Typedef(_)) {
+                if matches!(resolved, CTypeLike::Typedef { .. }) {
                     return Some(self.arena.unknown_alias(name.clone()));
                 }
                 self.intern_structural(&resolved)
@@ -1096,7 +1096,7 @@ mod tests {
         let source = empty_artifact();
         let mut builder = EvidenceBuilder::new(&source, 64);
         let size_t = builder
-            .intern_structural(&CTypeLike::Typedef("size_t".to_string()))
+            .intern_structural(&CTypeLike::typedef("size_t"))
             .expect("size_t resolves");
         let unsigned_long = builder
             .intern_structural(&CTypeLike::Int {
@@ -1490,7 +1490,7 @@ mod tests {
             "one scalar memory cell must carry the use-proven type both ways"
         );
 
-        let signed = CTypeLike::Typedef("int64_t".to_string());
+        let signed = CTypeLike::typedef("int64_t");
         let signature = crate::FunctionSignatureSpec {
             ret_type: Some(CTypeLike::Void),
             params: vec![crate::FunctionParamSpec {

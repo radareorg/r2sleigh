@@ -46,7 +46,7 @@ pub use context::{
 };
 pub use convert::{
     CTypeLike, c_object_declaration, parse_c_type_like, render_c_type_like, spellable_c_type_like,
-    to_c_type_like,
+    spelling_names_a_type, to_c_type_like,
 };
 pub use data_object::{
     DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
@@ -86,8 +86,8 @@ pub use function_facts::{
     PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnValueRenderFact,
     SourceOwnedCalleeSignature, SourceOwnedFunctionFacts, StackCallArgumentLocationFact,
     StackSlotOwnerRenderAuthorization, SummaryEffectRollup, SummaryHelperView, SummaryOutParamFact,
-    SwitchSelectorFact, admit_declaration_type, declaration_type_width_bits,
-    exact_source_return_type,
+    SwitchSelectorFact, admit_declaration_type, aggregate_is_definable,
+    declaration_type_width_bits, exact_source_return_type,
 };
 pub use inference::{CombinedTypeOracle, TypeInference, register_alias_names};
 pub use model::{Signedness, StructField, StructShape, Type, TypeArena, TypeId};

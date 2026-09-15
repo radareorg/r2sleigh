@@ -224,10 +224,10 @@ static void snapshot_type_strip_qualifiers(char *spec);
 static char *snapshot_type_member_element_spec(const char *spec, ut64 *count);
 static bool snapshot_type_spec_rejected(const char *spec);
 static SnapshotTypeGraphResult snapshot_type_unalias( const SnapshotTypeGraphBuilder *builder, const char *type, char **result);
-static bool snapshot_type_integer_width_supported(ut64 bits);
-static SnapshotIntegerSyntax snapshot_type_integer_syntax(const char *spec);
-static SnapshotTypeGraphResult snapshot_type_integer_spec( const SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeKind *kind, ut64 *bits);
-static SnapshotTypeGraphResult snapshot_type_add_integer( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
+static bool snapshot_type_scalar_width_supported(ut64 bits);
+static SnapshotScalarSyntax snapshot_type_scalar_syntax(const char *spec);
+static SnapshotTypeGraphResult snapshot_type_scalar_spec( const SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeKind *kind, ut64 *bits);
+static SnapshotTypeGraphResult snapshot_type_add_scalar( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
 static bool snapshot_type_align_up(ut64 value, ut64 alignment, ut64 *result);
 static SnapshotTypeGraphResult snapshot_type_resolve_struct( const SnapshotTypeGraphBuilder *builder, const char *type, const RAnalBaseType **result_base);
 static SnapshotTypeGraphResult snapshot_type_add_struct( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
@@ -239,6 +239,7 @@ static void snapshot_type_root_report(const char *stage, const char *type, const
 static SnapshotTypeGraphResult snapshot_type_add_pointer( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
 static SnapshotTypeGraphResult snapshot_type_finish_pointer( SnapshotTypeGraphBuilder *builder, RAnalSnapshotTypeId target_id, RAnalSnapshotTypeId *result_id);
 static SnapshotTypeGraphResult snapshot_type_add_root( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
+static void snapshot_type_note_alias( SnapshotTypeGraphBuilder *builder, const char *spelling, RAnalSnapshotTypeId type_id);
 static bool snapshot_type_carrier_project( const RAnalSnapshotTypeGraph *graph, RAnalSnapshotTypeId type_id, const RAnalSnapshotRegisterStorage *storage, RAnalSnapshotCarrierProjection *projection);
 static SnapshotTypeGraphResult function_type_graph_snapshot_collect( RAnal *anal, const RAnalFcnContext *ctx, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits);
 static int call_site_interface_snapshot_compare(const void *left, const void *right);
@@ -2244,6 +2245,10 @@ static void snapshot_type_graph_fini(RAnalSnapshotTypeGraph *graph) {
 		free (aggregate->members);
 		free (aggregate->name);
 	}
+	for (i = 0; i < graph->num_aliases; i++) {
+		free (graph->aliases[i].name);
+	}
+	free (graph->aliases);
 	free (graph->aggregates);
 	free (graph->types);
 	memset (graph, 0, sizeof (*graph));
@@ -2428,6 +2433,11 @@ static ut64 function_snapshot_hash_type_graph(ut64 hash, const RAnalSnapshotType
 			hash = function_context_hash_string (hash, member->name);
 		}
 		hash = function_context_hash_mix (hash, aggregate->complete? 1: 0);
+	}
+	hash = function_context_hash_mix (hash, graph->num_aliases);
+	for (i = 0; i < graph->num_aliases; i++) {
+		hash = function_context_hash_string (hash, graph->aliases[i].name);
+		hash = function_context_hash_mix (hash, graph->aliases[i].type_id);
 	}
 	return function_context_hash_mix (hash, graph->complete? 1: 0);
 }
@@ -4194,11 +4204,17 @@ static SnapshotTypeGraphResult snapshot_type_unalias(
 	free (current);
 	return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 }
-static bool snapshot_type_integer_width_supported(ut64 bits) {
+static bool snapshot_type_scalar_width_supported(ut64 bits) {
 	return bits == 8 || bits == 16 || bits == 32 || bits == 64;
 }
-static SnapshotIntegerSyntax snapshot_type_integer_syntax(const char *spec) {
-	SnapshotIntegerSyntax syntax = {0};
+/* `float` and `double` are IEEE binary32 and binary64 everywhere this runs;
+ * `long double` is what the target makes it, which is sixteen bytes on both
+ * x86-64 and AArch64 and is what the base type records. */
+static bool snapshot_type_float_width_supported(ut64 bits) {
+	return bits == 32 || bits == 64 || bits == 128;
+}
+static SnapshotScalarSyntax snapshot_type_scalar_syntax(const char *spec) {
+	SnapshotScalarSyntax syntax = {0};
 	const char *digits = NULL;
 	if (r_str_startswith (spec, "uint")) {
 		syntax.kind = R_ANAL_SNAPSHOT_TYPE_UNSIGNED_INTEGER;
@@ -4216,7 +4232,7 @@ static SnapshotIntegerSyntax snapshot_type_integer_syntax(const char *spec) {
 			}
 			bits = bits * 10 + (ut64)(*cursor++ - '0');
 		}
-		if (!strcmp (cursor, "_t") && snapshot_type_integer_width_supported (bits)) {
+		if (!strcmp (cursor, "_t") && snapshot_type_scalar_width_supported (bits)) {
 			syntax.valid = true;
 			syntax.required_bits = bits;
 		}
@@ -4232,6 +4248,19 @@ static SnapshotIntegerSyntax snapshot_type_integer_syntax(const char *spec) {
 	if (!strcmp (spec, "_Bool") || !strcmp (spec, "bool")) {
 		syntax.valid = true;
 		syntax.kind = R_ANAL_SNAPSHOT_TYPE_UNSIGNED_INTEGER;
+		return syntax;
+	}
+	// Floating point is checked before the integer specifiers, because `long
+	// double` shares the word `long` with them and is not an integer.
+	if (!strcmp (spec, "float") || !strcmp (spec, "double")
+		|| !strcmp (spec, "long double")) {
+		syntax.valid = true;
+		syntax.kind = R_ANAL_SNAPSHOT_TYPE_FLOAT;
+		// `float` is binary32 by the language; the wider two take their width
+		// from the base type, which is where the target's choice is recorded.
+		if (!strcmp (spec, "float")) {
+			syntax.required_bits = 32;
+		}
 		return syntax;
 	}
 	static const char *specifiers[] = {
@@ -4284,7 +4313,7 @@ static SnapshotIntegerSyntax snapshot_type_integer_syntax(const char *spec) {
 		: R_ANAL_SNAPSHOT_TYPE_SIGNED_INTEGER;
 	return syntax;
 }
-static SnapshotTypeGraphResult snapshot_type_integer_spec(
+static SnapshotTypeGraphResult snapshot_type_scalar_spec(
 	const SnapshotTypeGraphBuilder *builder, const char *type,
 	RAnalSnapshotTypeKind *kind, ut64 *bits) {
 	char *current = r_str_trim_dup (type);
@@ -4302,7 +4331,7 @@ static SnapshotTypeGraphResult snapshot_type_integer_spec(
 			|| r_str_startswith (current, "union ")) {
 			break;
 		}
-		SnapshotIntegerSyntax syntax = snapshot_type_integer_syntax (current);
+		SnapshotScalarSyntax syntax = snapshot_type_scalar_syntax (current);
 		// Plain char is an integer type of its own, distinct from both signed
 		// and unsigned char, so the syntax table cannot name its kind. Take it
 		// from the target when the target's choice is known.
@@ -4352,7 +4381,7 @@ static SnapshotTypeGraphResult snapshot_type_integer_spec(
 		// signedness is not a target choice like plain char: it follows from the
 		// values, since a negative enumerator can only be held by a signed type.
 		if (base->kind == R_ANAL_BASE_TYPE_KIND_ENUM) {
-			if (!snapshot_type_integer_width_supported (base->size)
+			if (!snapshot_type_scalar_width_supported (base->size)
 				|| (required_bits && required_bits != base->size)) {
 				break;
 			}
@@ -4376,7 +4405,10 @@ static SnapshotTypeGraphResult snapshot_type_integer_spec(
 			return SNAPSHOT_TYPE_GRAPH_VALID;
 		}
 		if (base->kind == R_ANAL_BASE_TYPE_KIND_ATOMIC) {
-			if (!have_kind || !snapshot_type_integer_width_supported (base->size)
+			const bool width_ok = *kind == R_ANAL_SNAPSHOT_TYPE_FLOAT
+				? snapshot_type_float_width_supported (base->size)
+				: snapshot_type_scalar_width_supported (base->size);
+			if (!have_kind || !width_ok
 				|| (required_bits && required_bits != base->size)) {
 				break;
 			}
@@ -4399,16 +4431,16 @@ static SnapshotTypeGraphResult snapshot_type_integer_spec(
 	free (current);
 	return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 }
-static SnapshotTypeGraphResult snapshot_type_add_integer(
+static SnapshotTypeGraphResult snapshot_type_add_scalar(
 	SnapshotTypeGraphBuilder *builder, const char *type,
 	RAnalSnapshotTypeId *result_id) {
 	RAnalSnapshotTypeKind kind;
 	ut64 bits;
-	SnapshotTypeGraphResult result = snapshot_type_integer_spec (
+	SnapshotTypeGraphResult result = snapshot_type_scalar_spec (
 		builder, type, &kind, &bits);
 	// Integer width is bounded by what the graph can describe, not by pointer
 	// width. An int64_t on a 32-bit target is wider than a pointer and entirely
-	// ordinary, and snapshot_type_integer_width_supported already fixed the
+	// ordinary, and snapshot_type_scalar_width_supported already fixed the
 	// real ceiling when the width was resolved.
 	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 		return result;
@@ -4539,18 +4571,14 @@ static SnapshotTypeGraphResult snapshot_type_declare_struct(
 		&builder->graph->aggregates[aggregate_index];
 	aggregate->id = (ut32)aggregate_index;
 	aggregate->type_id = snapshot_type->id;
-	const char *presentation_name = type;
-	if (r_str_startswith (presentation_name, "struct ")) {
-		presentation_name = r_str_trim_head_ro (
-			presentation_name + strlen ("struct "));
-	} else if (r_str_startswith (presentation_name, "union ")) {
-		presentation_name = r_str_trim_head_ro (
-			presentation_name + strlen ("union "));
-	}
-	if (R_STR_ISEMPTY (presentation_name) || strchr (presentation_name, '*')) {
-		presentation_name = base->name;
-	}
-	aggregate->name = strdup (r_str_get (presentation_name));
+	// An aggregate is named by its own tag, never by the spelling that
+	// happened to reach it. `bz_stream` is a typedef of an anonymous struct,
+	// so rooting it by that name called the layout `bz_stream` here and
+	// `type_0x5e55` in a callee that rooted it another way -- one layout with
+	// two tags, and a rendering that met both declared a value of the one it
+	// had not defined. A name for the type is a name, and the alias table is
+	// where names belong.
+	aggregate->name = strdup (r_str_get (base->name));
 	builder->aggregate_sources[aggregate_index] = base;
 	if (!aggregate->name) {
 		return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
@@ -4799,16 +4827,14 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			snapshot_type_root_report ("pointee unalias", type,
 				spelled_pointee, result);
-		}
-		free (spelled_pointee);
-		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			free (spelled_pointee);
 			return result;
 		}
 		if (!strcmp (pointee, "void")) {
 			// `void *` points at an object the graph does not describe.
 			result = snapshot_type_add_opaque (builder, R_ANAL_SNAPSHOT_TYPE_VOID, &target_id);
 		} else {
-			result = snapshot_type_add_integer (builder, pointee, &target_id);
+			result = snapshot_type_add_scalar (builder, pointee, &target_id);
 			if (result == SNAPSHOT_TYPE_GRAPH_UNSUPPORTED) {
 				if (strchr (pointee, '*')) {
 					result = snapshot_type_add_pointer (builder, pointee, &target_id);
@@ -4835,7 +4861,12 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 		}
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			snapshot_type_root_report ("pointee", type, pointee, result);
+		} else {
+			// `UInt16 *` is how the name usually reaches the page, so the
+			// pointee spelling is where most bindings are found.
+			snapshot_type_note_alias (builder, spelled_pointee, target_id);
 		}
+		free (spelled_pointee);
 		free (pointee);
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			return result;
@@ -4891,12 +4922,14 @@ static const char *snapshot_type_report_function = NULL;
 typedef struct {
 	size_t num_types;
 	size_t num_aggregates;
+	size_t num_aliases;
 } SnapshotTypeGraphMark;
 
 static SnapshotTypeGraphMark snapshot_type_graph_mark(const SnapshotTypeGraphBuilder *builder) {
 	SnapshotTypeGraphMark mark = {
 		.num_types = builder->graph->num_types,
 		.num_aggregates = builder->graph->num_aggregates,
+		.num_aliases = builder->graph->num_aliases,
 	};
 	return mark;
 }
@@ -4920,6 +4953,14 @@ static void snapshot_type_graph_rollback(SnapshotTypeGraphBuilder *builder, Snap
 	for (i = mark.num_types; i < graph->num_types; i++) {
 		memset (&graph->types[i], 0, sizeof (graph->types[i]));
 	}
+	// A name that bound a type this rollback discarded binds nothing. The
+	// table is only ever appended to, so truncating it is exact.
+	for (i = mark.num_aliases; i < graph->num_aliases; i++) {
+		free (graph->aliases[i].name);
+		memset (&graph->aliases[i], 0, sizeof (graph->aliases[i]));
+	}
+	graph->num_aliases = mark.num_aliases > graph->num_aliases
+		? graph->num_aliases: mark.num_aliases;
 	graph->num_aggregates = mark.num_aggregates;
 	graph->num_types = mark.num_types;
 	// A queued layout for an aggregate this rollback discarded has nothing left
@@ -5036,12 +5077,74 @@ static SnapshotTypeGraphResult snapshot_type_add_array(
 	return SNAPSHOT_TYPE_GRAPH_VALID;
 }
 
+/* Record that the source called this type by this name.
+ *
+ * Compilation destroys the name and the type database keeps it, so a rendering
+ * that writes `UInt16 *p` has nothing to declare `UInt16` with unless the
+ * binding travels with the graph. Only a bare name the database holds a
+ * typedef for is recorded: a spelling with a star, a bracket or a keyword in
+ * it is C syntax rather than a name, and the language already resolves it.
+ *
+ * A name that would bind a second type is dropped rather than replaced. The
+ * graph's contract is one type per name, and a name whose meaning depends on
+ * where it was met is not a name the rendering can declare. */
+static void snapshot_type_note_alias(SnapshotTypeGraphBuilder *builder,
+		const char *spelling, RAnalSnapshotTypeId type_id) {
+	if (!builder || !builder->graph || R_STR_ISEMPTY (spelling)
+		|| type_id >= builder->graph->num_types) {
+		return;
+	}
+	const char *cursor = spelling;
+	if (!(*cursor == '_' || IS_UPPER (*cursor) || IS_LOWER (*cursor))) {
+		return;
+	}
+	for (; *cursor; cursor++) {
+		if (*cursor != '_' && !IS_UPPER (*cursor) && !IS_LOWER (*cursor)
+			&& (*cursor < '0' || *cursor > '9')) {
+			return;
+		}
+	}
+	bool ambiguous = false;
+	if (!snapshot_type_find_unique_base (builder->base_types, spelling,
+			R_ANAL_BASE_TYPE_KIND_TYPEDEF, &ambiguous) || ambiguous) {
+		return;
+	}
+	RAnalSnapshotTypeGraph *graph = builder->graph;
+	size_t i;
+	for (i = 0; i < graph->num_aliases; i++) {
+		if (!strcmp (graph->aliases[i].name, spelling)) {
+			if (graph->aliases[i].type_id != type_id) {
+				/* Two meanings is no meaning: drop the binding entirely. */
+				free (graph->aliases[i].name);
+				graph->aliases[i] = graph->aliases[graph->num_aliases - 1];
+				memset (&graph->aliases[graph->num_aliases - 1], 0,
+					sizeof (graph->aliases[0]));
+				graph->num_aliases--;
+			}
+			return;
+		}
+	}
+	if (graph->num_aliases >= builder->alias_capacity) {
+		return;
+	}
+	char *name = strdup (spelling);
+	if (!name) {
+		return;
+	}
+	graph->aliases[graph->num_aliases].name = name;
+	graph->aliases[graph->num_aliases].type_id = type_id;
+	graph->num_aliases++;
+}
+
 static SnapshotTypeGraphResult snapshot_type_add_root(
 	SnapshotTypeGraphBuilder *builder, const char *type,
 	RAnalSnapshotTypeId *result_id) {
-	SnapshotTypeGraphResult result = snapshot_type_add_integer (
+	SnapshotTypeGraphResult result = snapshot_type_add_scalar (
 		builder, type, result_id);
 	if (result != SNAPSHOT_TYPE_GRAPH_UNSUPPORTED) {
+		if (result == SNAPSHOT_TYPE_GRAPH_VALID) {
+			snapshot_type_note_alias (builder, type, *result_id);
+		}
 		return result;
 	}
 	char *spec = NULL;
@@ -5054,6 +5157,8 @@ static SnapshotTypeGraphResult snapshot_type_add_root(
 		result = snapshot_type_add_array (builder, spec, result_id);
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			snapshot_type_root_report ("array", type, spec, result);
+		} else {
+			snapshot_type_note_alias (builder, type, *result_id);
 		}
 		free (spec);
 		return result;
@@ -5063,6 +5168,8 @@ static SnapshotTypeGraphResult snapshot_type_add_root(
 		result = snapshot_type_add_pointer (builder, type, result_id);
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			snapshot_type_root_report ("pointer", type, spec, result);
+		} else {
+			snapshot_type_note_alias (builder, type, *result_id);
 		}
 		free (spec);
 		return result;
@@ -5074,6 +5181,8 @@ static SnapshotTypeGraphResult snapshot_type_add_root(
 	result = snapshot_type_add_struct (builder, type, result_id);
 	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 		snapshot_type_root_report ("struct", type, spec, result);
+	} else {
+		snapshot_type_note_alias (builder, type, *result_id);
 	}
 	free (spec);
 	return result;
@@ -5182,6 +5291,18 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		snapshot_type_graph_fini (graph);
 		return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
 	}
+	// One slot per captured base type: only a name the database holds a
+	// typedef for is ever bound, so the table can hold no more than that.
+	if (base_count && r_mul_overflow_size_t (
+			base_count, sizeof (RAnalSnapshotTypeAlias), &allocation_size)) {
+		snapshot_type_graph_fini (graph);
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	graph->aliases = base_count? calloc (1, allocation_size): NULL;
+	if (base_count && !graph->aliases) {
+		snapshot_type_graph_fini (graph);
+		return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
+	}
 	const RAnalBaseType **aggregate_sources = NULL;
 	if (base_count && r_mul_overflow_size_t (
 			base_count, sizeof (RAnalBaseType *), &allocation_size)) {
@@ -5217,6 +5338,7 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		.aggregate_sources = aggregate_sources,
 		.type_capacity = type_capacity,
 		.aggregate_capacity = base_count,
+		.alias_capacity = base_count,
 		.pointer_bits = pointer_bits,
 		.char_kind = char_kind,
 		.char_kind_known = char_kind_known,
@@ -5234,14 +5356,18 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 			break;
 		}
 		RAnalSnapshotParameter *snapshot_parameter = &interface->parameters[index];
-		result = snapshot_type_add_root (
-			&builder, parameter->type, &snapshot_parameter->logical_type_id);
 		/* A stack parameter's carrier is its argument slot. */
 		const RAnalSnapshotRegisterStorage stack_carrier = {
 			.size = snapshot_parameter->stack_size,
 		};
 		const RAnalSnapshotRegisterStorage *carrier = snapshot_parameter->on_stack
 			? &stack_carrier: &snapshot_parameter->storage;
+		const SnapshotTypeGraphMark mark = snapshot_type_graph_mark (&builder);
+		result = snapshot_type_add_root (
+			&builder, parameter->type, &snapshot_parameter->logical_type_id);
+		if (result == SNAPSHOT_TYPE_GRAPH_NO_MEMORY) {
+			break;
+		}
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID
 			|| !snapshot_type_carrier_project (graph,
 				snapshot_parameter->logical_type_id, carrier,
@@ -5249,10 +5375,16 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 			snapshot_type_graph_report (result == SNAPSHOT_TYPE_GRAPH_VALID
 				? "parameter type does not project onto its carrier"
 				: "parameter type cannot be rooted", parameter->type, result);
-			if (result == SNAPSHOT_TYPE_GRAPH_VALID) {
-				result = SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
-			}
-			break;
+			/* One parameter loses its own type, not the function's graph. A
+			 * root that would not place used to cost every exact type, every
+			 * layout and every source name the function had -- one `double`
+			 * in a signature and the whole graph went. A local already
+			 * survived its own failure; a parameter does too. */
+			snapshot_type_graph_rollback (&builder, mark);
+			snapshot_parameter->logical_type_id = R_ANAL_SNAPSHOT_TYPE_ID_INVALID;
+			memset (&snapshot_parameter->carrier, 0,
+				sizeof (snapshot_parameter->carrier));
+			result = SNAPSHOT_TYPE_GRAPH_VALID;
 		}
 		index++;
 	}
@@ -5261,17 +5393,22 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 	}
 	if (result == SNAPSHOT_TYPE_GRAPH_VALID
 		&& interface->return_kind == R_ANAL_SNAPSHOT_RETURN_REGISTER) {
+		const SnapshotTypeGraphMark mark = snapshot_type_graph_mark (&builder);
 		result = snapshot_type_add_root (
 			&builder, ctx->signature->ret_type, &interface->return_type_id);
-		if (result == SNAPSHOT_TYPE_GRAPH_VALID
-			&& !snapshot_type_carrier_project (graph, interface->return_type_id,
-				&interface->return_storage, &interface->return_carrier)) {
-			result = SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
-			snapshot_type_graph_report ("return type does not project onto its carrier",
-				ctx->signature->ret_type, result);
-		} else if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
-			snapshot_type_graph_report ("return type cannot be rooted",
-				ctx->signature->ret_type, result);
+		if (result != SNAPSHOT_TYPE_GRAPH_NO_MEMORY
+			&& (result != SNAPSHOT_TYPE_GRAPH_VALID
+				|| !snapshot_type_carrier_project (graph, interface->return_type_id,
+					&interface->return_storage, &interface->return_carrier))) {
+			snapshot_type_graph_report (result == SNAPSHOT_TYPE_GRAPH_VALID
+				? "return type does not project onto its carrier"
+				: "return type cannot be rooted", ctx->signature->ret_type, result);
+			/* The return loses its own type, for the same reason a parameter
+			 * does: the rest of the graph still describes what it describes. */
+			snapshot_type_graph_rollback (&builder, mark);
+			interface->return_type_id = R_ANAL_SNAPSHOT_TYPE_ID_INVALID;
+			memset (&interface->return_carrier, 0, sizeof (interface->return_carrier));
+			result = SNAPSHOT_TYPE_GRAPH_VALID;
 		}
 	} else if (result == SNAPSHOT_TYPE_GRAPH_VALID
 		&& interface->return_kind != R_ANAL_SNAPSHOT_RETURN_VOID) {
@@ -5703,6 +5840,17 @@ static bool snapshot_interface_within_limits(const RAnalFunctionSnapshot *snapsh
 					limits->max_interface_string_bytes, &strings)) {
 				return false;
 			}
+		}
+	}
+	// A name is bound only for a captured base type, so the alias table is
+	// bounded by that count; its text is charged against the same budget.
+	if (graph->num_aliases > limits->max_base_types) {
+		return false;
+	}
+	for (i = 0; i < graph->num_aliases; i++) {
+		if (!snapshot_string_budget_add (graph->aliases[i].name,
+				limits->max_interface_string_bytes, &strings)) {
+			return false;
 		}
 	}
 	return true;

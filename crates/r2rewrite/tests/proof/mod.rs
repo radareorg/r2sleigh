@@ -183,7 +183,8 @@ impl<'a> Encoder<'a> {
                 let address = base.bvadd(index.bvmul(stride));
                 self.select(&address, width)
             }
-            TermKind::Leaf(expr) | TermKind::Opaque(expr) => {
+            TermKind::Leaf(read) => self.variable(0x8000_0000 | read.expr.index() as u32, term.ty),
+            TermKind::Opaque(expr) => {
                 // A base node in a proof term is a free variable keyed by
                 // its id; templates do not build these, but nothing forbids
                 // a fixture from encoding a real term.

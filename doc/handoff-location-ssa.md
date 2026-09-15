@@ -23454,3 +23454,829 @@ stayed bound.
 
 Cost: 3,472 s wall for four cells, of which 2,634 s is evaluation. The full
 26 x 2 sweep extrapolates to 12.5 hours serial, which is why sweeps stay scoped.
+
+## The occurrence split, landed
+
+`TermKind::Leaf` now carries a `LeafRead { expr, occurrence }` and leaves are
+minted by `TermArena::leaf_from` rather than interned, so two reads of one value
+at two sites are two terms. Each occurrence records the `LeafOrigin { inst,
+ordinal }` the importer minted it under, the ordinal counting reads in operand
+order, so the graph use site an occurrence names comes from the arena rather
+than from a later reconstruction. Per-value facts -- the definition a leaf
+stands for, pointer typing, stack roots, walk certificates -- normalise through
+a new `canonical`, because they are properties of the value and not of which
+read it is. `same_value` compares what two operands read rather than which node
+they are, and the five rules the ninth attempt named -- `identity.rs`'s
+`SUB_SELF`, `AND_SELF`, `OR_SELF`, `XOR_SELF` and `ordering_and_equality` in
+`flag.rs` -- use it.
+
+The whole workspace is green on it, Z3 rule proofs included. One test moved
+rather than broke: `and_of_one_value_reads_one_leaf_twice` is now
+`..._two_occurrences_of_one_leaf` and asserts the opposite -- two terms, one
+value, ordinals 0 and 1 of one instruction.
+
+A first attempt at this concluded the split itself broke
+`lifted_x86_sum_array`. That was wrong, and the mistake is worth recording: the
+bisect disabled the split while an experimental inline-load path was still in
+the tree, so the failure was attributed to the wrong change. The split is
+clean on its own.
+
+## What a load costs today, and the four defects on the way to admitting it
+
+`MemoryRead`, `Load` and `Subscript` are absent from both inline lists
+(`crates/r2dec/src/binding_plan/rules.rs`), and `materialize_term` rejects them
+outright. So every frame-slot read is given a name. That is the register mirror:
+on `bzip2` at `-O0` the rendering declares 10,332 locals against a handful of
+real frame slots, and the recompiled instruction mass is about twice the source
+function's.
+
+Admitting one was carried end to end against `lifted_x86_sum_array`, which is a
+fast local reproduction of the whole class. Four real defects were found and
+fixed, each one a separate thing that was wrong before this work and would be
+wrong after it:
+
+1. **The inlined read was not observed where it landed**, which
+   `unobserved_binding_read` refused. An observation that marks the read alone
+   closes it.
+2. **An access was looked up by term alone.** A store has no value of its own,
+   so its cell is imported as the load that would read it back -- one term is
+   the cell of both a read and a write, and the lookup has to say which it
+   wants. It was silently taking the write.
+3. **`ObservationTarget::StackAccess` takes its block from the access
+   instruction.** A read spelled at its reader lands with that reader, and
+   placement dominates over where the text is. Measured directly: `InstId(38)`
+   is read at block `0x100000629` and renders in `0x100000631`.
+4. **Placement re-derives that block a second time** from `graph.block(inst.block)`,
+   so carrying it on the journal target alone is not enough; the placement-side
+   target has to carry it too.
+
+With all four fixed, placement applies and the refusal moves to the effect
+ledger: `2 unaccounted (live-value-producer at 0x100000631:op:12), 2 conflicts
+(live-value-producer at 0x100000631:op:2)`. The producers folded into an inlined
+read's address are owed exactly once; today one is claimed twice and one not at
+all. `inlined_address_producers` returns empty for every inlined read here,
+which is the thread to pull.
+
+That is where the switch stands: one line, off, with this beside it. The four
+fixes above are not speculative and should be re-applied with it.
+
+## A tag the rendering cannot define is not a tag it may declare
+
+The first change of this arc that is both measured and safe. A rendering that
+does not compile scores nothing, so raising the compile rate cannot cost
+correctness on anything that already compiled -- and the differential oracle
+confirms it: 54 of 54, unchanged.
+
+The rule is a consistency one. `define_declared_aggregates` already declines to
+define a tag whose layout the type graph cannot project, but
+`declaration_type_for_stack_object` went on returning `struct stat` for the
+slot, so the rendering declared a value of a tag nothing defined. Six of the
+fifteen `bzip2` compile failures were exactly that: `storage size of X isn't
+known`.
+
+The predicate is now `r2types::aggregate_is_definable`, stated once where both
+callers can reach it, deliberately -- the emitter and the plan asking the same
+question in two places is the shape of defect `term_renders_inline` and
+`materialize_term` already had. A slot whose tag is not definable is declared as
+its own bytes, which has the same extent and always compiles.
+
+Fixing the declaration alone only moved the error: the slot became a byte array
+while `AccessSyntax` went on spelling `.st_mode` against it. A member is now
+spelled only when the binding really is declared as that aggregate, which is the
+same fact asked at the other end.
+
+    compile failures  15 -> 9   (9.8% -> 5.9%)
+    byte_match    0.1342 -> 0.1347   (5 better, 1 worse)
+    refusals           1 -> 1
+    differential   54/54 pass, and every other gate matches HEAD
+
+The nine that remain: two `UInt64` and one `FILE` (a typedef named with nothing
+declaring it -- the same class at the scalar end, and `spellable_c_type_like`
+passes `CTypeLike::Typedef` through untouched), one array assigned wholesale,
+one callee prototype conflicting with its use, and one member read from a
+non-aggregate.
+
+## The safest lever left: a named type spelled with nothing declaring it
+
+A rendering that does not compile scores zero on `byte_match`, so fixing one
+converts a zero into a real number and cannot change the semantics of anything
+that already compiled. That makes it the one lever that needs no differential
+argument.
+
+Measured over `bzip2` at `-O0`, compiling each rendered function on its own at
+the flags DWARF records as the producer's: **138 compile, 15 do not, 9.8 per
+cent.** Ten of the fifteen are one shape -- a type named but never declared:
+
+    6  storage size of X isn't known      a struct declared by value, undefined
+    2  unknown type name UInt64
+    1  unknown type name UInt16
+    1  unknown type name FILE / BZFILE
+
+The cause is in `spellable_c_type_like` (`crates/r2types/src/convert.rs:301`).
+It substitutes `Unknown` for a machine type and passes everything else through
+by `other => other.clone()`, so `CTypeLike::Typedef("UInt64")` reaches the page
+verbatim. `Typedef`, `Struct`, `Union` and `Enum` carry a name and no width, so
+the fallback that rule needs -- spell the width instead -- is not available
+where the decision is currently made.
+
+Which says where the fix belongs. Whether a named type can be spelled is a
+question about the rendering, not about the type: it depends on what
+`define_declared_aggregates` managed to define, and that set is only known at
+emission. A named type the rendering does not define should fall back to the
+carrier's machine type, and the check has to sit where both facts are in hand.
+
+The remaining five are singletons: an array assigned wholesale, a member read
+from a non-aggregate, and a callee prototype that conflicts with its use.
+
+## What the safe tree costs, gate by gate
+
+Every correctness gate on the tree that remains matches `HEAD` exactly:
+
+    generation  54 present | raw 54 pass | diagnostic 46 pass 8 wrong (same as HEAD)
+    differential 54 pass   | binding_audit 54 | effect_obligations 54
+    placement_audit 54     | render_refusal 54
+    snapshot     6 match, 48 mismatch
+
+Only the snapshots move, and disabling each change in turn says which:
+
+    occurrence split        36 of the 48
+    declaration ordering    12 of the 48
+    transitive inline gate   0 -- it never fires on this corpus
+
+Two things follow. The occurrence split is **not** output-neutral: giving two
+reads of one value two terms changes what the partition does with them, on
+two thirds of the corpus, while leaving every semantic gate passing. And the
+transitive gate is free here, which is why the defect it fixes had gone
+unnoticed -- nothing in the corpus inlines a term of that shape yet.
+
+Accepting this tree means re-blessing 48 snapshots for a change with no measured
+`byte_match` movement of its own. That is a real cost and it is the reason the
+numbers are set out this way rather than summarised.
+
+## Two apparent wins, both semantically unsafe -- and how that was missed
+
+Two changes were made, measured, and reported as wins. Both were wrong, and the
+way they were wrong is the most useful thing in this entry.
+
+**The unobserved-merge discount.** The reader count discounted a use that is an
+unobserved merge only when the value's storage was Sleigh `Unique`. Dropping
+that restriction looked right -- a merge nothing observes renders nothing, so it
+reads nothing -- and measured well: flag carriers 1,642 to 234, statements
+20,759 to 19,693, `byte_match` 0.1342 to 0.1396 with no coverage change.
+
+**The rendered-reader fixpoint.** `instructions_that_render` computes which
+instructions reach the page, from the ledger's roots, transitively through
+operands. Discounting a use outside that set measured far better still:
+statements 19,693 to 9,687, lane temporaries 2,847 to 540, flag carriers to
+zero, `byte_match` to 0.1464 corpus-wide.
+
+Both break the program. Run against the corpus differential oracle:
+
+    HEAD                            differential 54/54 pass
+    merge discount alone            differential  3 failed
+    fixpoint alone                  differential  3 failed, 2 unparsable
+    both removed                    differential 54/54 pass
+
+`xxhash32` computes the wrong digest on `x64_O2`, `arm64_O1` and `arm64_O2` --
+`boundary:2 expected b8050526, actual ca0646dd`. Removing both restores 54/54,
+and with them goes the entire measured gain: `byte_match` is 0.1342 again,
+statements 20,759 again.
+
+The shared error is one sentence. **"Renders nothing" was treated as "means
+nothing."** A merge no observation depends on is still the thing that selects
+between two values, and an instruction whose result reaches no statement can
+still be the reason a later value is what it is. Discounting such a read makes a
+value look single-reader, it is then spelled at that one reader, and one path's
+value is written where a merged one belonged. Both changes make exactly that
+substitution by different routes, which is why each breaks the same three cells
+on its own.
+
+The second lesson is about method rather than semantics. Both changes passed the
+whole `cargo test` suite, the 54-cell binding and placement audits, and moved
+`byte_match` in a scored harness. None of that checks what the program computes.
+The corpus differential oracle does, it was there the whole time, and it was not
+run until after both had been reported as wins. A `byte_match` number is not
+evidence of correctness, and on this project it is not evidence of anything
+until the differential passes.
+
+## Nine graph readers, one on the page
+
+`p[7] = (char)(x >> 24)` renders as two statements:
+
+```c
+uint32_t tmp_lane_25e9_13_4_1 = tmp_11f00_1 >> 24;
+*(int8_t*)((uint64_t)tmp_11f80_1 + 7) = (int8_t)tmp_lane_25e9_13_4_1;
+```
+
+The lane temporary has an inlinable shape and exactly one reader on the page,
+so it should be spelled there. The inline trace says why it is not:
+
+    tmp:lane:25e9:13:4_1 stays bound: 9 readers; root Shift;
+    sites [i25#0 i42#0 i43#0 i48#0 i53#0 i61#0 i62#0 i63#0 i68#0]
+
+Nine graph readers. Following them in the SSA dump, `InstId(25)` defines
+`RAX_2` with `uses=[]` and `InstId(42)` defines another lane temporary with
+`uses=[]` -- at `-O0` a sub-register write reads the whole register to rebuild
+it, and the rebuilt value is usually dead. Eight of the nine reads render
+nothing.
+
+This is the pre-rewrite reader count caught in the act, and it is the clearest
+statement of what the occurrence relation is for: the gate needs *rendered*
+readers, and it has the graph's.
+
+Two attempts at it as a filter, both recorded because both are informative. A
+direct test -- the reading instruction's output has no uses and the instruction
+owes no obligation -- inlines a value the renderer then cannot spell
+(`MissingProgramVariableAuthorization` at `implementation.rs:914`), so it is too
+broad. Reusing `structural_unused_values`, the set this file already trusts for
+the same question, changes nothing, because it requires
+`StructuralControlOnly` and a dead lane write is not that.
+
+So the deadness this needs is transitive and render-aware: a read is not a read
+if what it feeds is not rendered, all the way down. That is a fixpoint over the
+rendered occurrence set rather than a predicate on one instruction, and it is
+the next piece of architecture rather than another filter.
+
+## What the rendered statements are, after the merge discount -- measured on an unsafe tree
+
+The composition below was measured with the unobserved-merge discount in place,
+which is a change that breaks `xxhash32`. The proportions are still the best
+inventory of the output there is -- what names what, and in what share -- but
+the absolute counts are from a tree that computes some programs wrongly.
+
+
+Over `bzip2` at `-O0`, 18,808 classified statements:
+
+    50.4%  a name and an initialiser   `uint64_t tmp_X = ...;`
+    14.8%  a call or a lifter helper
+    12.1%  a bare copy                 `a = b;`
+    10.0%  other
+     6.8%  a bare declaration
+     3.9%  a computed assignment
+
+Nearly two thirds of every statement exists to name something. Splitting the
+9,475 named-value statements by what they name:
+
+    65.9%  lifter temporary        tmp_
+    17.3%  lifter lane temporary   tmp_lane_
+    14.9%  register mirror         RAX_2
+     1.9%  a name radare2 or DWARF supplied
+     0.0%  a frame slot
+
+**98.1 per cent of the names in the output are for things the source never
+had.** That is the 1.07-statements-per-instruction ratio restated in terms of
+what to do about it, and it is the inventory to work against.
+
+The inline trace ranks what keeps them. The largest shape-blocked class is
+`MemoryRead`, about 11,700 rejections -- a load never renders inline, which is
+the entry this document already covers. The largest count-blocked class is a
+value with several readers, about 6,000. Those two are the whole of it.
+
+A caution the load-inlining entry earns: a lifter temporary with two readers
+has a real justification for its name, because the machine computed it once and
+spelling it twice is two computations. The single-reader rule is not simply too
+strict. What is missing is the distinction between a temporary the machine
+computed once and a cell the program can read twice for nothing, which is why
+mobility -- not the reader count -- is the fact the load case needs.
+
+## An unobserved merge reads nothing, whatever space the value is kept in -- WRONG
+
+This entry is kept for its measurements and its error. The change it describes
+breaks `xxhash32` on three configurations; see "Two apparent wins, both
+semantically unsafe". The numbers are real and the conclusion is not.
+
+
+The reader count in `inlinable_core` discounted a use that is an unobserved
+merge, but only when the value's canonical storage was Sleigh `Unique`. That
+restriction is what kept every condition code named. A flag register merges at
+every loop header, the merge was counted as a read of it, and a value with two
+readers is never spelled at its reader -- which is why 5,303 of 6,959 emitted
+conditions tested a flag variable rather than a comparison.
+
+Dropping the storage-class restriction states the rule the comment above the
+merge candidate collection already gives: a merge nothing observes writes
+nothing, so it reads nothing. That is a fact about the merge, not about where
+the value is kept.
+
+Measured over `bzip2` at `-O0`, whole binary, no coverage change:
+
+    flag carriers   1,642 -> 234      (-86%)
+    statements     20,759 -> 19,693   (-5.1%)
+    refusals            1 -> 1
+    byte_match     0.1342 -> 0.1396   (n=152, 56 better, 7 worse)
+
+The whole workspace stays green. This is the first movement on the metric in
+this arc, and it follows the chain measured above exactly: fewer statements,
+higher score. It is also a much smaller change than any of the three attempts
+that preceded it -- one filter condition, removing a restriction rather than
+adding a mechanism.
+
+Worth noting against the earlier entries: the load-inlining work and the
+mirror-coalescing work were both built and both measured flat or negative,
+while this was four lines. The difference is that this one was aimed at the
+quantity the measurement named -- statements -- rather than at a proxy for it.
+
+## One statement per machine instruction, and the arithmetic of the gap
+
+    functions                      107
+    original machine instructions  18,787
+    rendered statements            20,139   (1.07 per machine instruction)
+    rendered declarations           1,258   (0.06 of statements)
+    corr(machine instructions, rendered statements) = 0.998
+
+The renderer emits one C statement per machine instruction. The source emitted
+one per several. That single fact closes the arithmetic of the whole gap: N
+machine instructions become N statements, each statement recompiles at `-O0`
+into its own frame slot with a store and a load around its operation, so the
+rendering costs about 2.4N instructions -- which is the uniform 2.36 times
+measured over a different population by a different method.
+
+Declarations are six per cent of statements, so they were never the unit, and
+the register mirror is one instance of a rule that applies to every statement.
+
+This is the complete chain from metric to mechanism, and every link is measured:
+
+    byte_match is low
+      because surplus instructions are 2.36x the original
+      because mov is 79% of the surplus
+      because each rendered statement buys a frame slot and a round trip
+      because there is one rendered statement per machine instruction
+      because the statement decomposition is the machine's, not the source's
+
+The fix named at the top of this arc was right and the reason given for it was
+wrong. It is not "fold less" and not "remove the mirror". It is **emit one
+statement per source statement**, and the measurable target is the ratio above:
+1.07 statements per machine instruction has to fall toward the source's own,
+and 2.36 has to fall toward 1.
+
+## What the instruction-mass gap is actually made of
+
+Ninety-three `bzip2` functions that render were recompiled at the flags DWARF
+records as the producer's and diffed against the original as normalised
+instruction multisets -- the same normalisation `byte_match` uses.
+
+    original                       15,832 instructions
+    emitted, not in the original   37,358   (2.36x original)
+    in the original, not emitted   10,191   (0.64x original)
+
+    surplus by mnemonic: mov 29,664 | add 2,663 | cmp 1,651 | movzx 800 | sete 546
+
+`mov` is 79 per cent of the surplus. At `-O0` every named local costs a store
+and a load per use, so surplus `mov` traffic is what surplus naming looks like
+after recompilation.
+
+The correlations say where that naming comes from, and they overturn the
+reading that the register mirror is the lever:
+
+    corr(declarations, surplus instructions)  = 0.963
+    corr(original size,  surplus instructions) = 0.998
+    corr(declarations, jaccard)               = -0.306
+    surplus per declaration                    = 35.2
+
+Surplus is predicted almost perfectly by the **size of the original function**,
+and only incidentally by the declaration count -- declarations correlate because
+they themselves scale with size. Thirty-five surplus instructions per
+declaration is far too many for a declaration to be the unit. The over-emission
+is uniform: about 2.36 times the source's instruction mass, spread across the
+whole function rather than concentrated in a removable set of locals.
+
+So the defect is per-statement, not per-variable. The rendering emits roughly
+one statement per machine operation where the source emitted one per source
+statement, and every one of those costs its own frame slot and its own
+round trip once recompiled. The mirror is one visible instance of that, which
+is why removing mirrors alone moved nothing.
+
+This reconciles the two readings that have competed in this document. The
+earlier claim that `-O0` is over-emission rather than lost decomposition is
+right about the symptom and wrong about the cause: **we over-emit because the
+statement decomposition is ours rather than the source's.** Folding exactly
+where the source folded is the target after all, and the right unit to measure
+against is the ratio above -- 2.36, uniform -- rather than a declaration count.
+
+## Load inlining, measured: the mirror is not the metric
+
+The switch was turned on end to end and measured, which had not been done
+before. `lifted_x86_sum_array` renders rather than refusing, and the shape is
+what the mirror argument predicted:
+
+```c
+int32_t stack_m28;  uint32_t stack_m24;  int32_t stack_m20;  uint32_t* stack_m16;
+stack_m16 = (uint32_t*)RDI_0;   stack_m20 = ESI_0;
+stack_m24 = 0;                  stack_m28 = 0;
+for (; ; ) { int32_t tmp_3f680_2 = stack_m20;
+    if (tmp_3f680_2 <= stack_m28) { break; }
+```
+
+Four frame slots, four source variables, the slots read directly rather than
+through a register that ferried them.
+
+Over `bzip2` at `-O0` the whole-file numbers look like a large win --
+declarations 10,332 to 2,453 -- and they are not. Restricted to the **116
+functions that render both ways**, declarations go 2,463 to 2,455: unchanged.
+The drop is almost entirely the 39 functions that stopped rendering. On the
+shared population `byte_match` is 0.1486 before and after, exactly, and
+corpus-wide the score falls from 0.1342 to about 0.1115 because the functions
+that stopped rendering were the low-scoring ones.
+
+Two conclusions, and the second is the one worth keeping.
+
+**The mobility condition is too narrow to reach the mirror.** It asks for a
+single reader, the same block, and no store or call between. The `-O0` mirror
+population mostly fails it, so the rule fires on few values and leaves the
+declarations it was built to remove.
+
+**Removing the mirror would not, by itself, move `byte_match`.** This is the
+measurement that matters, and it contradicts the projection this work was
+started on. A declaration removed is a frame slot removed, but the statements
+that remain still differ from the source's, and the score is computed over
+instructions rather than over locals. The declaration count is not the metric
+and should stop being used as a proxy for it.
+
+The new refusals are dominated by `observation journal: ConflictingValue` (24 of
+39), which is the ledger question again.
+
+## Binding-sharing cannot remove the mirror, and that leaves one road
+
+The obvious alternative to spelling a read at its reader is to make the
+register and the slot one binding. The mechanism is already there --
+`shared_reload_binding` in `crates/r2dec/src/binding_plan/construction.rs`,
+"the binding a slot shares with its reloads, when that binding holds nothing
+else" -- and `mirror.rs` already states the test for when a register is only
+ferrying: the loop writes the carrier to an object and reads that same object
+again.
+
+It was widened and measured. The rule refuses on three conditions: the slot is
+not an aggregate, the reloads agree on one binding, and that binding holds
+nothing but the reloads. The third is too strict at `-O0`, where a slot is
+loaded, computed on and stored back, so the register also holds the stored
+value -- which is the same variable at a later moment, not a second one.
+Widening it to count values stored back into the same object is correct and
+changes nothing: over `bzip2` the declaration count stays at 10,332 exactly.
+
+The second condition is why, and it is not a narrowness that can be widened.
+Traced over the whole binary, 437 refusals: 126 slots have no reload at all,
+and every other case fails because **the reloads do not agree on one binding**.
+At `-O0` each reload of one slot lands in a different register version --
+`RAX_2`, `RAX_8`, `RCX_2` -- and each is its own binding by construction. A
+slot reloaded into several registers can never share one binding with them,
+because there is no one binding to share.
+
+So binding-sharing cannot express the mirror. Removing it means spelling a
+reload as its slot at the place that reads it, which is the load-inlining path
+above. There is one road, and its one remaining obstacle is the effect ledger.
+`memory_mirrored_carriers` is worth knowing about here: it detects the loop
+case and its only consumer is a debug print, so the detection exists and the
+consumer never did.
+
+## Declarations are ordered by the frame they must reproduce
+
+At `-O0` a local's frame offset is decided by its declaration order, so two
+renderings differing only in that order compile to different code. Measured on a
+forty-eight instruction probe at the corpus's own producer flags: permuting the
+scalars scores 0.655 against itself, twenty of forty-eight normalised
+instructions differing. An aggregate's position is free -- `-fstack-protector`
+hoists arrays above the scalars wherever they were written, and both placements
+scored 1.0000 with no difference at all.
+
+So the order is recoverable rather than guessed: scalars ascend from the lowest
+offset in declaration order, and the offsets are in the binary. `total, buf[32],
+i, wide` lands as `total -80, i -76, wide -72, buf -64`. Placement sorted
+declarations by `BindingId`; it now sorts by `DeclarationOrder`, taking the
+offset and the width from the `StackSlotCertificate` that already carried both.
+
+Measured alone it buys nothing: 62 of 155 `bzip2` functions change text and
+`byte_match` stays at 0.1342. That is expected and is the point of recording it
+here -- ordering the real locals cannot pay while four fifths of the declared
+locals are not program variables. It pays after the mirror goes.
+
+## The metric is reachable, and the harness does not cap it
+
+Two identical builds of `bzip2` at the flags DWARF records as the producer's,
+compared function by function through `byte_match`'s own normaliser: **108 of
+108 perfect, mean 1.0000**. A perfect answer scores exactly 1.0, address-
+dependent operands and all. Whatever stands between the engine and that score,
+it is not the benchmark.
+
+## A name the rendering cannot declare is not a name it may spell
+
+The scalar half of the aggregate rule, and the whole named-type compile class
+with it: **9 failures to 4, 5.9 per cent to 2.6**. Every gate matches `HEAD`
+exactly, differential included.
+
+The five were all the same shape. A pointer to an undeclared *tag* is legal C;
+a pointer to an undeclared *typedef name* is not, and the renderings wrote
+`UInt16 *`, `UChar *`, `BZFILE *`, `UInt64 *` with nothing declaring any of
+them. The name is worth keeping -- `type_match` aligns variables before it
+compares types -- so the fix declares the name rather than erasing it.
+
+### Where the name was, and where it was not
+
+radare2 knows what these names mean: `tt UInt16` answers `short unsigned int`,
+`tt BZFILE` answers `void`, `tt UInt64` answers `type_0x749`. The engine did
+not, and the reason is worth recording because two plausible sources were both
+dead ends.
+
+`ExternalTypeDb::typedefs` is **empty in production**. It is filled only by
+`external_type_db_from_base_types`, whose only caller outside tests is the
+external-context JSON path, and production takes the trusted snapshot instead:
+`trusted_external_type_db` (`crates/r2engine/src/lib.rs:1756`) fills `structs`
+from the type graph's aggregates and nothing else. So
+`type_db_resolves_type_name` -- the admission gate that decides whether a name
+is concrete enough to keep -- answers "no" for every name on every binary, and
+the spelling reaches the page anyway, because a parameter's type comes from
+`SourceSignatureParameter::type_spelling()` and that path never asks.
+
+That is the first defect: **a name reached the page through a route that never
+asked whether anything could declare it.**
+
+### The binding travels with the type graph
+
+The capture already resolves these names -- `snapshot_type_unalias` is how
+`BZFILE *` gets rooted at all -- it just threw the association away. So the
+graph now carries it: `SourceTypeAlias { name, type_id }`, minted in
+`snapshot_type_note_alias` wherever a bare name becomes a type id, which is
+`snapshot_type_add_root`'s four arms and the pointee branch of
+`snapshot_type_add_pointer`. Wire format 14 to 15; older producers carry no
+names, which is a graph that named nothing rather than one that is missing
+something.
+
+Three properties are enforced rather than assumed. A name binds one type: a
+second, different binding drops the entry instead of replacing it, because a
+name whose meaning depends on where it was met is not one a rendering can
+declare. A rollback truncates the table with the types it discards. The
+constructor revalidates -- non-identifier, duplicate, or out-of-range binding
+is `InvalidAlias` -- so a buffer cannot mint one the in-crate constructor would
+reject.
+
+`define_declared_typedefs` declares every name the rendering spells that the
+graph binds, and runs **before** `define_declared_aggregates`, which now
+follows a value declared at a name through to the tag behind it: a value of
+`UInt64` is a value of `struct type_0x749`, and the aggregate pass only ever
+saw the spelling.
+
+### The second defect, and a workaround that had to be deleted
+
+The first cut also *rewrote out* any name the graph did not bind -- `void *` in
+pointer position. It closed the class and it was wrong, and the way it was
+wrong is the useful part.
+
+`dbg_uInt64_to_double` returns `double`. **`SourceTypeKind` had no
+floating-point kind**, so that root would not place, and the graph is refused
+*whole*: `graph_complete=0`, no logical widths, no aggregate layouts, no names.
+Meanwhile `UInt64 *n` still reached the page from radare2's signature, with
+nothing to declare it. The rewrite turned that into `void *n` -- compiling by
+destroying the one thing the function knew.
+
+So the fix is the missing kind, not the erasure. `SourceTypeKind::Float`,
+`R_ANAL_SNAPSHOT_TYPE_FLOAT`, wire tag 8, widths 32/64/128 -- binary32,
+binary64, and whatever the target makes `long double`, which is sixteen bytes
+on both targets here and is what the base type records. `float`/`double`/`long
+double` are recognised ahead of the integer specifiers, because `long double`
+shares the word `long` with them and is not an integer. The five resolvers that
+handle this are named for scalars now rather than integers, which is what they
+always did.
+
+With the kind present, `dbg_uInt64_to_double` reports `graph_complete=1
+exact_types=1 logical_complete=1` and its parameter renders as
+`struct type_0x749 *` -- the graph's own exact answer.
+
+Then the rewrite was measured with it switched off: **the census is identical,
+4 failures either way.** It existed only to paper over the float gap, so it is
+deleted, along with the mutable type visitors it needed. A name nothing
+declares now reaches the page and fails to compile, visibly, pointing at
+whatever refused the graph -- which is the behaviour this project wants.
+
+    compile failures  9 -> 4   (5.9% -> 2.6%)
+    5 typedef declarations emitted across the 152 renderings
+    differential 54 pass | raw 54 | generation 54 | diagnostic 46/8 (= HEAD)
+    binding_audit 54 | effect_obligations 54 | placement_audit 54 | render_refusal 54
+    snapshot 6 match, 48 mismatch (the same 48; this change moves none)
+
+The four that remain: an array assigned wholesale, a callee prototype that
+conflicts with its use, a hex escape out of range, and a member read from a
+non-aggregate.
+
+### A name is a spelling that carries what it stands for
+
+`UInt64 *n` first became `struct type_0x749 *n` -- exact, compiling, and
+missing a name the source had, which `type_match` aligns on before it compares
+anything. Putting the name back was not a spelling change, because the next
+defect down is that **`CTypeLike::Typedef(String)` was a name carrying no
+width**: `declaration_type_width_bits` re-parsed the name text, only standard
+spellings survived, and `admit_declaration_type` replaced every other named
+type with the machine word. A name in the exact path would have been undone one
+layer later. Recovering it at emission does not work either -- an alias binds a
+*type id*, and keying the reverse lookup on `uint16_t` would rename every plain
+`uint16_t` in the function.
+
+So the variant is now `Typedef { name, ty }`, a transparent alias: width,
+signedness and indirection come from `ty`, the name is for spelling, and
+`Typedef { name, ty: Unknown }` is exactly what the old variant meant. Two
+constructors say which is which -- `CTypeLike::typedef(name)` for a name the
+capture could not resolve, `CTypeLike::named(name, ty)` for one it could -- and
+`unaliased()` answers what a type *is* through any number of names.
+
+`source_type_like` now spells a graph type by the name the graph binds to it,
+so the name survives the exact path rather than being replaced by it. The
+rendering of `dbg_uInt64_to_double` went from
+
+    uint64_t dbg_uInt64_to_double(void* n)     { int32_t i; uint64_t base; ... }
+
+to
+
+    typedef int32_t Int32;
+    typedef struct type_0x749 UInt64;
+
+    double dbg_uInt64_to_double(UInt64* n)     { Int32 i; double base; ... }
+
+against a source that reads `double uInt64_to_double(UInt64* n) { Int32 i;
+double base; double sum; ... }`.
+
+### What the refactor cost, which is the useful part
+
+A name in the type system means **every structural test has to ask through
+it**, and each one that did not was a measured regression rather than a
+hypothetical. They were found by re-running the census after each step:
+
+- `admit_declaration_type` kept a named type it could now measure, so names
+  reached extern prototypes with nothing declaring them: 4 failures to 19.
+  `define_declared_typedefs` was asking the graph for a target the type was
+  already carrying; asking the type first fixed 11 of them.
+- `typedef uint32_t unsigned int;` -- `source_spelled_type` wrapped *every*
+  spelling in a name, including the ones that are the type written out.
+  `spelling_names_a_type` is the language's own test: one identifier, and not a
+  specifier keyword.
+- `__time_t` inside an emitted `struct utimbuf` -- aggregate members are types
+  too, so the aggregate pass has to run *before* the naming pass, not after.
+  It no longer needs the declarations to exist first, because a name carries
+  its target.
+- `struct r2sleigh_bits_640 strm;` where `bz_stream` belonged --
+  `declaration_type_for_stack_object` matched `Struct(_) | Union(_)` and a
+  named aggregate is not that spelling. Four functions then refused with
+  `missing program-variable authorization`, which was
+  `stack_object_declaration_agrees` making the same mistake at the seal.
+- Six more in the fold and the plan: `c_object_storage_bits`, the array-decay
+  test in `fold/stack.rs`, `name_may_be_subscripted` in two places, the
+  array-to-pointer cast rule, and the subscript renderer.
+
+A whole-function refusal has no gap marker, so `MissingProgramVariableAuthorization`
+and `UnrepresentableOperation` dropped their origin on the way out and the
+refusal said only its category. They now report `kind` and `origin_site` through
+`refusal_evidence!` before the origin is lost; that is what turned a four-
+function refusal into one line naming `stack_object_declaration_agrees`.
+
+### One layout, two tags -- a defect the names exposed
+
+`typedef struct type_0x5e55 bz_stream;` stood beside `struct bz_stream { ... };`
+in the same rendering: the typedef named a tag nothing defined while a different
+tag held the layout. radare2 is unambiguous -- `tt bz_stream` answers
+`type_0x5e55` and there is no struct of that name -- so the second tag was ours.
+
+`snapshot_type_declare_struct` named an aggregate after **the spelling that
+rooted it**: `const char *presentation_name = type;`. Reaching the layout
+through the typedef name called it `bz_stream`; a callee that reached it another
+way called it `type_0x5e55`; one rendering met both. That predates all of this
+work and was invisible only because nothing spelled the typedef name before.
+
+An aggregate is now named by its own tag, `base->name`, always. Naming it after
+the spelling was the old way of keeping the source's name, and the alias table
+is where a name belongs.
+
+    compile failures  9 -> 4   (5.9% -> 2.6%), 152 renderings, 1 refusal
+    differential 54 pass | raw 54 | generation 54 | diagnostic 46/8 (= HEAD)
+    binding_audit 54 | effect_obligations 54 | placement_audit 54 | render_refusal 54
+
+The four that remain are unchanged in kind: an array assigned wholesale, a
+callee prototype that conflicts with its use, a hex escape out of range, and a
+member read from a non-aggregate.
+
+### The type graph is no longer refused whole
+
+Named in the section above as the amplifier behind every unrepresentable type,
+and now removed. A root that will not place loses **its own** logical type; the
+graph keeps everything else it described.
+
+`snapshot_type_add_root` failing on a parameter used to `break` out of the
+loop, and the whole collection then ran
+`snapshot_type_graph_fini` + `function_logical_types_clear` -- every type, every
+aggregate layout, every alias, and every slot's node, gone because one
+signature spelling had nowhere to go. The mechanism for doing better was
+already there and already used one loop further down: locals take a
+`snapshot_type_graph_mark`, roll back on failure and keep
+`R_ANAL_SNAPSHOT_TYPE_ID_INVALID`, because "a local is not what the interface
+rests on". A parameter and the return now do exactly the same.
+
+Carrying that through cost one contract change:
+`parameter_logical_values` is `Box<[Option<SourceLogicalValue>]>` rather than a
+dense `Box<[SourceLogicalValue]>`, with `parameter_logical_value(index)` as the
+accessor. The wire needed no new field -- `R_ANAL_SNAPSHOT_TYPE_ID_INVALID` is
+the sentinel and the record is still one entry per parameter -- and the
+validation now checks only the values that are present, roots reachability from
+those, and accepts a register return that carries none.
+
+Eight consumers handle the absence, and every one of them takes the path a
+function with no graph at all already took: the ABI storage stands where the
+projection would have narrowed it, radare2's spelling stands where the exact
+signature would have. One is stricter on purpose --
+`exact_signature_from_interface` refuses outright if *any* parameter is
+unplaced, because an exact signature is exact in every parameter, and the rest
+of the graph still serves that function's slots, members and names.
+
+**Measured neutral, and that is the expected result.** A per-function census of
+`bzip2` at `-O0` after the float kind landed found **no function losing its
+graph to a root failure at all** -- the 477 `interface incomplete` reports are
+import thunks with no signature, which is a different condition. So this is
+architecture rather than a score: it removes the amplification for the next
+unrepresentable type rather than fixing one that is present today. Census
+identical at 4 compile failures over 152 renderings with 1 refusal, and every
+gate matches `HEAD`.
+
+### `unaliased()` is now answered in one place
+
+The ten structural tests that had to learn about names one regression at a time
+ask `CTypeLike` instead: `aggregate_tag()`, `is_aggregate()`, `is_union()`,
+`is_array()`, `subscript_element()` and `may_be_subscripted()` all look through
+any number of names by construction, so a new call site cannot get it wrong.
+`unaliased()` remains for the two places that match the shape exhaustively.
+
+One of those conversions was nearly a silent behaviour change and is worth
+recording: `may_be_subscripted()` admits `Unknown`, which is right for
+`AccessSyntax` -- nothing has said the value is not a pointer -- and wrong for
+the memory renderer, which refuses a declaration that is present and not a
+pointer. That one asks `subscript_element().is_some()` and keeps `None` (no
+declaration at all) as its own answer.
+
+Census and gates identical across the conversion, which is the point.
+
+### Every name on the page is a name the rendering declares
+
+The invariant the sections above establish, made total and then checked against
+a wider corpus than `bzip2`, which is where it stopped holding.
+
+**A correction first.** A run that counted undeclarable names across four
+binaries reported zero, and that count was wrong -- the loop put every function
+of a 659-function binary on one `r2` command line. The single-function probe
+fires immediately: `dpkg-divert` renders `dbg_parse_warn(parsedb_state*, ...)`
+beside four prototypes spelling `struct parsedb_state*`, and `parsedb_state`
+alone names nothing, because C keeps tags and typedef names in separate
+namespaces. Measure one function directly before believing a sweep.
+
+Three defects came out of that corpus, each the same rule at a different place.
+
+**A bare name this rendering spells as a tag is that tag.** radare2's signature
+text drops the `struct` keyword in some prototypes and not others, so one
+translation unit gave one identifier two meanings. The evidence is the
+rendering's own other spellings, and the repair *adds* the keyword rather than
+removing the name, so nothing the capture knew is lost. A name no spelling here
+calls a tag is left alone, so a real typedef is never turned into a struct.
+
+**A tag this decompiler synthesises, it defines.** `CTypeLike::BitVector`
+renders as `struct r2sleigh_bits_192` -- storage C has no scalar for, which on
+x86-64 is every `va_list`. The comment said those "use the limb-backed external
+prelude"; no prelude is emitted, so the tag was incomplete at every use. The
+rendering now defines it as the whole bytes of its extent, which is exact, keeps
+the type distinct from an integer so no arithmetic is emitted for it, and always
+compiles. This also fixed the reason it was invisible: `define_declared_aggregates`
+returned early when the function had no *source* type graph, and a synthesised
+tag needs none.
+
+**Every tag the rendering spells, not only the ones it holds by value.** A
+pointer to an undefined tag is legal C right up to the first `p + n` or `p[i]`,
+and `minigzip` did that on 82 `z_stream *` and 56 `struct gzFile_s *`: the
+compiler needs an element size and an incomplete type has none. The pass now
+walks through pointers as well as arrays, and `aggregate_is_definable` still
+refuses anything the graph cannot lay out.
+
+    bzip2-O0          4 / 152   2.6%
+    bzip2-O2          7 / 112   6.2%
+    bzip2recover-O0   0 /  36   0.0%
+    dpkg-divert-O0   10 / 651   1.5%    (was 54, 8.3%)
+    minigzip-O2      23 / 161  14.3%    (was 76, 47.2%)
+    ----------------------------------
+    total            44 / 1112  3.9%
+
+`bzip2-O0` began this session at 15 of 154 (9.8%). Every gate matches `HEAD`:
+differential 54 pass, raw 54, generation 54, diagnostic 46/8, and the four
+audits at 54 each.
+
+A name the rendering cannot declare is now *reported* through
+`refusal_evidence!` rather than repaired, naming the gap so it can be traced
+rather than hidden -- which is what the earlier `void *` rewrite got wrong.
+
+### Still open
+
+**Pointer arithmetic on a tag no graph can lay out.** Ten `gz_state`
+(`struct type_0x4116`), three `ct_data` and one `gz_header` remain in
+`minigzip`: the tag is named but its layout lives in a *callee's* capture, not
+this function's graph. The plumbing that would close it is callee type facts
+reaching the caller's graph. The alternative worth weighing first is that
+`p + n` on a pointer whose layout is unknown should render as byte arithmetic on
+`uint8_t *`, which is what the machine did -- at `-O2` the compiler has already
+turned member access into byte offsets, so the byte spelling may be the more
+faithful one. That needs the differential gate and a design decision, not a
+patch.
+
+**The remaining 23 failures across the five binaries** are singletons of
+distinct kinds: incompatible initialisers, a non-integer subscript, an array
+assigned wholesale, a conflicting callee prototype, a hex escape out of range,
+a member read from a non-aggregate. Each is its own trace.

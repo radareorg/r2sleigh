@@ -2219,10 +2219,10 @@ mod tests {
                 [r2ssa::SourceAbiParameterSpec::new(0, storage(0))],
                 r2ssa::SourceFunctionReturn::Void,
                 [],
-                [r2ssa::SourceLogicalValue::new(
+                [Some(r2ssa::SourceLogicalValue::new(
                     1,
                     r2ssa::SourceCarrierProjection::new(r2ssa::SourceCarrierKind::Full, 0, 64),
-                )],
+                ))],
                 None,
                 Some(graph),
             )

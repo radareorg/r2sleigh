@@ -1732,7 +1732,14 @@ fn source_spelled_type(spelling: &str, ptr_bits: u32) -> Option<r2types::CTypeLi
             | r2types::CTypeLike::Union(_)
             | r2types::CTypeLike::Enum(_)),
         ) => structural,
-        Some(_) => r2types::CTypeLike::Typedef(base_spelling),
+        // The name is what renders and the parse is what it stands for, so
+        // width-aware analysis keeps working through the name instead of
+        // having to re-read the text. A spelling that parses to nothing more
+        // than itself carries no target, and a spelling that is the type
+        // written out rather than a name for one carries no name.
+        Some(r2types::CTypeLike::Typedef { .. }) => r2types::CTypeLike::typedef(base_spelling),
+        Some(parsed) if !r2types::spelling_names_a_type(&base_spelling) => parsed,
+        Some(parsed) => r2types::CTypeLike::named(base_spelling, parsed),
         None => return None,
     };
     for _ in 0..pointers {
@@ -1864,6 +1871,9 @@ fn source_member_type_spelling(
         r2ssa::SourceTypeKind::SignedInteger => format!("int{bits}_t"),
         r2ssa::SourceTypeKind::UnsignedInteger => format!("uint{bits}_t"),
         r2ssa::SourceTypeKind::Pointer { .. } => "void *".to_string(),
+        r2ssa::SourceTypeKind::Float if bits == 32 => "float".to_string(),
+        r2ssa::SourceTypeKind::Float if bits == 64 => "double".to_string(),
+        r2ssa::SourceTypeKind::Float => "long double".to_string(),
         // An inline aggregate member has no scalar width to check an access
         // against, and an opaque kind is never a member at all.
         r2ssa::SourceTypeKind::Struct { .. }

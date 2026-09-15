@@ -17,24 +17,24 @@ use crate::symbol::SymbolTable;
 #[test]
 fn declaration_admission_accepts_placeable_target_sized_typedefs_only() {
     assert_eq!(
-        super::admit_declaration(CType::Typedef("size_t".to_string()), 64, 64),
-        CType::Typedef("size_t".to_string())
+        super::admit_declaration(CType::typedef("size_t"), 64, 64),
+        CType::typedef("size_t")
     );
     assert_eq!(
-        super::admit_declaration(CType::Typedef("unplaceable_t".to_string()), 64, 64),
+        super::admit_declaration(CType::typedef("unplaceable_t"), 64, 64),
         CType::u64()
     );
     assert_eq!(
-        super::admit_declaration(CType::Typedef("size_t".to_string()), 32, 64),
+        super::admit_declaration(CType::typedef("size_t"), 32, 64),
         CType::u32()
     );
     assert!(super::rules::declaration_type_describes_width(
-        &CType::Typedef("size_t".to_string()),
+        &CType::typedef("size_t"),
         64,
         64
     ));
     assert!(!super::rules::declaration_type_describes_width(
-        &CType::Typedef("unplaceable_t".to_string()),
+        &CType::typedef("unplaceable_t"),
         64,
         64
     ));
@@ -459,6 +459,13 @@ fn copy_of_bound_load_survives_temporary_storage_reuse_inline() {
             dst: Varnode::register(0, 8),
             src: Varnode::unique(0x10, 8),
         },
+        // A second reader, so the load keeps a name. A load with one reader
+        // and nothing between is now spelled at that reader instead. This
+        // test is about storage reuse, so it keeps the load bound.
+        R2ILOp::Copy {
+            dst: Varnode::register(0x8, 8),
+            src: Varnode::unique(0x10, 8),
+        },
         R2ILOp::Load {
             dst: Varnode::unique(0x10, 8),
             space: SpaceId::Ram,
@@ -486,7 +493,7 @@ fn copy_of_bound_load_survives_temporary_storage_reuse_inline() {
     };
     let load = output_at(0);
     let copy = output_at(1);
-    let replacement_load = output_at(2);
+    let replacement_load = output_at(3);
 
     let plan = BindingPlan::build_shadow(&source_owned).expect("bound-source copy plan");
     assert!(matches!(

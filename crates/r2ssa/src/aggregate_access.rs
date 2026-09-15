@@ -194,10 +194,7 @@ pub(crate) fn collect_aggregate_access_projections(
         let Some(parameter) = interface.parameters().get(expression.parameter) else {
             continue;
         };
-        let Some(logical_value) = interface
-            .parameter_logical_values()
-            .get(expression.parameter)
-        else {
+        let Some(logical_value) = interface.parameter_logical_value(expression.parameter) else {
             continue;
         };
         if parameter.index() != parameter_index {
@@ -397,12 +394,12 @@ mod tests {
             SourceFunctionReturn::Void,
             [],
             [
-                SourceLogicalValue::new(
+                Some(SourceLogicalValue::new(
                     2,
                     SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
-                ),
-                SourceLogicalValue::new(1, scalar_carrier),
-                SourceLogicalValue::new(1, scalar_carrier),
+                )),
+                Some(SourceLogicalValue::new(1, scalar_carrier)),
+                Some(SourceLogicalValue::new(1, scalar_carrier)),
             ],
             None,
             Some(demo_struct_graph()),

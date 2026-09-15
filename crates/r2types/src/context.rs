@@ -346,11 +346,11 @@ pub fn canonical_main_signature_spec() -> FunctionSignatureSpec {
     }));
     let char_pp = CTypeLike::Pointer(Box::new(char_ptr));
     FunctionSignatureSpec {
-        ret_type: Some(CTypeLike::Typedef("int".to_string())),
+        ret_type: Some(CTypeLike::typedef("int")),
         params: vec![
             FunctionParamSpec {
                 name: "argc".to_string(),
-                ty: Some(CTypeLike::Typedef("int".to_string())),
+                ty: Some(CTypeLike::typedef("int")),
             },
             FunctionParamSpec {
                 name: "argv".to_string(),
@@ -735,7 +735,7 @@ fn resolve_type_alias_from_type_db(ty: &mut CTypeLike, type_db: &ExternalTypeDb)
         CTypeLike::Pointer(inner) | CTypeLike::Array(inner, _) => {
             resolve_type_alias_from_type_db(inner, type_db);
         }
-        CTypeLike::Typedef(name) => {
+        CTypeLike::Typedef { name, .. } => {
             if type_db.is_aggregate_typedef(name) {
                 return;
             }
@@ -925,19 +925,15 @@ fn parse_context_type_spec(spec: &str, ptr_bits: u32) -> Option<CTypeLike> {
         .to_ascii_lowercase();
 
     let mut base = match normalized_key.as_str() {
-        "short" | "short int" => Some(CTypeLike::Typedef("short".to_string())),
-        "unsigned short" | "unsigned short int" => {
-            Some(CTypeLike::Typedef("unsigned short".to_string()))
-        }
-        "long" | "long int" => Some(CTypeLike::Typedef("long".to_string())),
-        "unsigned long" | "unsigned long int" => {
-            Some(CTypeLike::Typedef("unsigned long".to_string()))
-        }
-        "size_t" => Some(CTypeLike::Typedef("size_t".to_string())),
-        "ssize_t" => Some(CTypeLike::Typedef("ssize_t".to_string())),
-        "ptrdiff_t" => Some(CTypeLike::Typedef("ptrdiff_t".to_string())),
-        "uintptr_t" => Some(CTypeLike::Typedef("uintptr_t".to_string())),
-        "intptr_t" => Some(CTypeLike::Typedef("intptr_t".to_string())),
+        "short" | "short int" => Some(CTypeLike::typedef("short")),
+        "unsigned short" | "unsigned short int" => Some(CTypeLike::typedef("unsigned short")),
+        "long" | "long int" => Some(CTypeLike::typedef("long")),
+        "unsigned long" | "unsigned long int" => Some(CTypeLike::typedef("unsigned long")),
+        "size_t" => Some(CTypeLike::typedef("size_t")),
+        "ssize_t" => Some(CTypeLike::typedef("ssize_t")),
+        "ptrdiff_t" => Some(CTypeLike::typedef("ptrdiff_t")),
+        "uintptr_t" => Some(CTypeLike::typedef("uintptr_t")),
+        "intptr_t" => Some(CTypeLike::typedef("intptr_t")),
         _ => parse_c_type_like(&normalized, ptr_bits),
     }?;
 
@@ -1215,9 +1211,10 @@ fn type_like_size_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
         CTypeLike::Array(inner, Some(len)) => type_like_size_bits(inner, ptr_bits)
             .and_then(|elem_bits| elem_bits.checked_mul(*len as u64)),
         CTypeLike::Array(_, None) => None,
-        CTypeLike::Struct(_) | CTypeLike::Union(_) | CTypeLike::Enum(_) | CTypeLike::Typedef(_) => {
-            None
-        }
+        CTypeLike::Struct(_)
+        | CTypeLike::Union(_)
+        | CTypeLike::Enum(_)
+        | CTypeLike::Typedef { .. } => None,
     }
 }
 
@@ -1430,9 +1427,7 @@ mod tests {
         let merged = ctx.merged_signature.expect("merged signature");
         assert_eq!(
             merged.ret_type,
-            Some(CTypeLike::Pointer(Box::new(CTypeLike::Typedef(
-                "FILE".to_string()
-            ))))
+            Some(CTypeLike::Pointer(Box::new(CTypeLike::typedef("FILE"))))
         );
         assert_eq!(merged.params.len(), 2);
         assert_eq!(ctx.register_params.len(), 2);
@@ -1579,8 +1574,8 @@ mod tests {
         let merged = ctx.merged_signature.expect("merged signature");
         assert_eq!(
             merged.params.first().and_then(|param| param.ty.as_ref()),
-            Some(&CTypeLike::Pointer(Box::new(CTypeLike::Typedef(
-                "DemoStruct".to_string()
+            Some(&CTypeLike::Pointer(Box::new(CTypeLike::typedef(
+                "DemoStruct"
             ))))
         );
         let alias = ctx
@@ -1795,7 +1790,7 @@ mod tests {
     #[test]
     fn apply_main_signature_override_canonicalizes_main_shaped_signature() {
         let mut merged = Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::Typedef("int".into())),
+            ret_type: Some(CTypeLike::typedef("int")),
             params: vec![
                 FunctionParamSpec {
                     name: "argc".to_string(),
@@ -1819,7 +1814,7 @@ mod tests {
         let merged = merged.expect("main signature");
         assert_eq!(merged.params.len(), 3);
         assert_eq!(merged.params[0].name, "argc");
-        assert_eq!(merged.params[0].ty, Some(CTypeLike::Typedef("int".into())));
+        assert_eq!(merged.params[0].ty, Some(CTypeLike::typedef("int")));
         assert_eq!(merged.params[1].name, "argv");
         assert_eq!(merged.params[2].name, "envp");
     }
@@ -1851,12 +1846,9 @@ mod tests {
         );
         assert!(certificate.authorizes_signature_writeback());
         let signature = facts.merged_signature.expect("main signature");
-        assert_eq!(signature.ret_type, Some(CTypeLike::Typedef("int".into())));
+        assert_eq!(signature.ret_type, Some(CTypeLike::typedef("int")));
         assert_eq!(signature.params[0].name, "argc");
-        assert_eq!(
-            signature.params[0].ty,
-            Some(CTypeLike::Typedef("int".into()))
-        );
+        assert_eq!(signature.params[0].ty, Some(CTypeLike::typedef("int")));
         assert_eq!(
             render_signature_type(signature.params[1].ty.as_ref().unwrap(), 64),
             "int8_t**"
@@ -1954,7 +1946,7 @@ mod tests {
                     },
                     FunctionParamSpec {
                         name: "can_mode".to_string(),
-                        ty: Some(CTypeLike::Typedef("canonicalize_mode_t".to_string())),
+                        ty: Some(CTypeLike::typedef("canonicalize_mode_t")),
                     },
                 ],
             }),

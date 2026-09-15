@@ -509,6 +509,7 @@ bool r2sleigh_wire_write_snapshot_prefix(R2SleighWireWriter *writer, const void 
 #define WALK_TYPE_CODE 5
 #define WALK_TYPE_UNION 6
 #define WALK_TYPE_ARRAY 7
+#define WALK_TYPE_FLOAT 8
 #define WALK_ROLE_UNCLASSIFIED 0
 #define WALK_ROLE_LOCAL 1
 #define WALK_ROLE_PARAMETER_HOME 2
@@ -788,6 +789,9 @@ static bool walk_type_graph(R2SleighWireWriter *writer, const RAnalFunctionSnaps
 			r2sleigh_wire_u32 (writer, type->target_type_id);
 			r2sleigh_wire_u64 (writer, type->array_count);
 			break;
+		case R_ANAL_SNAPSHOT_TYPE_FLOAT:
+			r2sleigh_wire_u8 (writer, WALK_TYPE_FLOAT);
+			break;
 		default:
 			/* Signedness and indirection are not recoverable elsewhere. */
 			WIRE_REFUSE ();
@@ -822,6 +826,19 @@ static bool walk_type_graph(R2SleighWireWriter *writer, const RAnalFunctionSnaps
 				WIRE_REFUSE ();
 			}
 		}
+	}
+	/* The names the producer gave these types. A pointer to an undeclared tag
+	 * is legal C; a pointer to an undeclared typedef name is not, so the
+	 * rendering needs the binding to declare what it spells. */
+	if (graph->num_aliases > UINT32_MAX) {
+		WIRE_REFUSE ();
+	}
+	r2sleigh_wire_u32 (writer, (uint32_t)graph->num_aliases);
+	for (size_t i = 0; i < graph->num_aliases; i++) {
+		if (!walk_string (writer, graph->aliases[i].name)) {
+			WIRE_REFUSE ();
+		}
+		r2sleigh_wire_u32 (writer, graph->aliases[i].type_id);
 	}
 	return true;
 }
@@ -898,7 +915,10 @@ static bool walk_interface(R2SleighWireWriter *writer,
 				WIRE_REFUSE ();
 			}
 		}
-		if (interface->return_kind == R_ANAL_SNAPSHOT_RETURN_REGISTER) {
+		/* A register return whose type would not place carries no logical
+		 * value, the same as a parameter that would not place. */
+		if (interface->return_kind == R_ANAL_SNAPSHOT_RETURN_REGISTER
+			&& interface->return_type_id != R_ANAL_SNAPSHOT_TYPE_ID_INVALID) {
 			r2sleigh_wire_bool (writer, true);
 			r2sleigh_wire_u32 (writer, interface->return_type_id);
 			if (!walk_carrier (writer, &interface->return_carrier)) {

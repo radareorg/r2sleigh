@@ -227,6 +227,10 @@ typedef enum {
 	R_ANAL_SNAPSHOT_TYPE_UNION,
 	/* A run of `array_count` elements of `target_type_id`. */
 	R_ANAL_SNAPSHOT_TYPE_ARRAY,
+	/* An IEEE binary floating-point object. Distinct from an integer of the
+	 * same width: the bits mean something else and a cast between them is a
+	 * conversion rather than a reinterpretation. */
+	R_ANAL_SNAPSHOT_TYPE_FLOAT,
 } RAnalSnapshotTypeKind;
 
 typedef enum {
@@ -392,11 +396,21 @@ typedef struct r_anal_snapshot_aggregate_layout_t {
 	bool complete;
 } RAnalSnapshotAggregateLayout;
 
+/* A name the producer's type database gave one of this graph's types.
+ * Compilation destroys the name, the database keeps it, and a rendering that
+ * writes `UInt16 *p` has to be able to say what `UInt16` is. */
+typedef struct r_anal_snapshot_type_alias_t {
+	char *name;
+	RAnalSnapshotTypeId type_id;
+} RAnalSnapshotTypeAlias;
+
 typedef struct r_anal_snapshot_type_graph_t {
 	RAnalSnapshotType *types;
 	size_t num_types;
 	RAnalSnapshotAggregateLayout *aggregates;
 	size_t num_aggregates;
+	RAnalSnapshotTypeAlias *aliases;
+	size_t num_aliases;
 	bool complete;
 } RAnalSnapshotTypeGraph;
 
@@ -669,6 +683,7 @@ typedef struct {
 	bool *aggregate_in_progress;
 	ut32 *pending_aggregates;
 	size_t num_pending;
+	size_t alias_capacity;
 } SnapshotTypeGraphBuilder;
 
 typedef enum {
@@ -690,7 +705,7 @@ typedef struct {
 	bool valid;
 	RAnalSnapshotTypeKind kind;
 	ut64 required_bits;
-} SnapshotIntegerSyntax;
+} SnapshotScalarSyntax;
 
 typedef struct {
 	size_t base_types;

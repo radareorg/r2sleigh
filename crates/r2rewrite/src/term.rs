@@ -35,11 +35,51 @@ impl TermId {
 /// The widest term the rewriter models. Wider machine nodes stay opaque.
 pub const MAX_TERM_WIDTH_BITS: u32 = MachineBitVector::MAX_LITERAL_BITS;
 
+/// Which read of a value a leaf is.
+///
+/// Identity has to be minted here rather than derived later: the arena is
+/// hash-consed, so without it two reads of one value at two sites are the same
+/// term and a rewrite that keeps one of them leaves nothing to say which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct OccurrenceId(u32);
+
+impl OccurrenceId {
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// Where a leaf was imported from: the instruction whose expression was being
+/// built, and which read within that expression this was. Together with the
+/// graph's operand list for that instruction this names a use site exactly,
+/// without any later pass having to guess which read survived a rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LeafOrigin {
+    pub inst: r2ssa::InstId,
+    /// Which read of this value within that instruction's expression, counted
+    /// in the order the importer descends, which is operand order.
+    pub ordinal: u32,
+}
+
+/// One read of one value, at one site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct LeafRead {
+    /// The value read. Every fact about the value is keyed on this.
+    pub expr: MachineExprId,
+    /// Which read this is. Distinguishes occurrences; carries no meaning of
+    /// its own and is never rendered.
+    pub occurrence: OccurrenceId,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum TermKind {
     /// A read of one prepared value: a `Source` or `Constant` node of the base
     /// arena, rendered by the binding plan's answer for that value.
-    Leaf(MachineExprId),
+    ///
+    /// Two reads of one value at two use sites are two leaves, because a
+    /// rewrite that keeps one read and drops the other has to leave something
+    /// behind that says which one survived.
+    Leaf(LeafRead),
     /// An instruction root the rewriter does not model -- a memory read, a
     /// merge, a division, a population count, checked arithmetic, or anything
     /// wider than [`MAX_TERM_WIDTH_BITS`] -- rendered by the base path.
@@ -147,6 +187,65 @@ impl Iterator for Children {
 }
 
 impl TermKind {
+    /// This kind with every child replaced by the same placeholder, so two
+    /// kinds compare equal exactly when they are the same operation over the
+    /// same non-child payload.
+    fn erase_children(&self) -> Self {
+        let p = TermId(0);
+        match *self {
+            Self::Negate(_) => Self::Negate(p),
+            Self::BitwiseNot(_) => Self::BitwiseNot(p),
+            Self::BooleanNot(_) => Self::BooleanNot(p),
+            Self::Cast { kind, .. } => Self::Cast { kind, input: p },
+            Self::Extract { lsb_bits, .. } => Self::Extract { lsb_bits, input: p },
+            Self::Load { object, .. } => Self::Load { object, address: p },
+            Self::Arithmetic { op, .. } => Self::Arithmetic {
+                op,
+                left: p,
+                right: p,
+            },
+            Self::Bitwise { op, .. } => Self::Bitwise {
+                op,
+                left: p,
+                right: p,
+            },
+            Self::Boolean { op, .. } => Self::Boolean {
+                op,
+                left: p,
+                right: p,
+            },
+            Self::Compare {
+                op, interpretation, ..
+            } => Self::Compare {
+                op,
+                interpretation,
+                left: p,
+                right: p,
+            },
+            Self::Flag { op, .. } => Self::Flag {
+                op,
+                left: p,
+                right: p,
+            },
+            Self::Shift {
+                kind, overshift, ..
+            } => Self::Shift {
+                kind,
+                overshift,
+                value: p,
+                count: p,
+            },
+            Self::Concat { .. } => Self::Concat { high: p, low: p },
+            Self::Subscript { .. } => Self::Subscript { base: p, index: p },
+            Self::Select { .. } => Self::Select {
+                condition: p,
+                if_true: p,
+                if_false: p,
+            },
+            other => other,
+        }
+    }
+
     pub fn children(&self) -> Children {
         let placeholder = TermId(0);
         let (items, len) = match *self {
@@ -348,6 +447,16 @@ pub struct TermArena {
     /// The walk certificate of a leaf that reads a pointer carried round a
     /// loop.
     walks: HashMap<TermId, PointerWalk>,
+    /// The first leaf minted for each value. Occurrences differ; what they
+    /// read does not, so every fact about a value is keyed on this one and
+    /// every other occurrence is normalised to it before a lookup.
+    canonical_leaves: HashMap<MachineExprId, TermId>,
+    /// The next occurrence to mint.
+    occurrences: u32,
+    /// Where each occurrence was imported from, for the occurrences the
+    /// importer could name one for. A leaf minted for a certificate rather
+    /// than for a read has none.
+    origins: HashMap<OccurrenceId, LeafOrigin>,
 }
 
 /// An open-addressed table of term identifiers, compared against the arena.
@@ -415,7 +524,85 @@ impl TermArena {
         Self::default()
     }
 
+    /// A fresh read of `expr`.
+    ///
+    /// Leaves are not interned. Two reads of one value are two occurrences by
+    /// construction, which is what lets a rewrite that keeps one of them say
+    /// which one it kept.
+    pub fn leaf(&mut self, ty: MachineType, expr: MachineExprId) -> TermId {
+        self.leaf_from(ty, expr, None)
+    }
+
+    /// A fresh read of `expr` at a named site.
+    pub fn leaf_from(
+        &mut self,
+        ty: MachineType,
+        expr: MachineExprId,
+        origin: Option<LeafOrigin>,
+    ) -> TermId {
+        let occurrence = OccurrenceId(self.occurrences);
+        self.occurrences += 1;
+        let id = TermId(self.nodes.len() as u32);
+        self.nodes.push(Term {
+            ty,
+            kind: TermKind::Leaf(LeafRead { expr, occurrence }),
+        });
+        self.canonical_leaves.entry(expr).or_insert(id);
+        if let Some(origin) = origin {
+            self.origins.insert(occurrence, origin);
+        }
+        id
+    }
+
+    /// Where this occurrence was imported from, when it names a read.
+    pub fn origin(&self, occurrence: OccurrenceId) -> Option<LeafOrigin> {
+        self.origins.get(&occurrence).copied()
+    }
+
+    /// The occurrence every fact about this term's value is keyed on: the
+    /// first leaf minted for that value, or the term itself when it is not a
+    /// leaf.
+    pub fn canonical(&self, id: TermId) -> TermId {
+        match self.term(id).kind {
+            TermKind::Leaf(read) => self.canonical_leaves.get(&read.expr).copied().unwrap_or(id),
+            _ => id,
+        }
+    }
+
+    /// Whether two terms read the same value, ignoring which occurrence each
+    /// read is. This is the equality a rule means when it asks whether both
+    /// operands are the same thing.
+    pub fn same_value(&self, left: TermId, right: TermId) -> bool {
+        if left == right {
+            return true;
+        }
+        let (a, b) = (self.term(left), self.term(right));
+        if a.ty != b.ty {
+            return false;
+        }
+        match (a.kind, b.kind) {
+            (TermKind::Leaf(x), TermKind::Leaf(y)) => x.expr == y.expr,
+            _ => {
+                if a.kind.erase_children() != b.kind.erase_children() {
+                    return false;
+                }
+                let (mut xs, mut ys) = (a.kind.children(), b.kind.children());
+                loop {
+                    match (xs.next(), ys.next()) {
+                        (None, None) => return true,
+                        (Some(x), Some(y)) if self.same_value(x, y) => {}
+                        _ => return false,
+                    }
+                }
+            }
+        }
+    }
+
     pub fn intern(&mut self, ty: MachineType, kind: TermKind) -> TermId {
+        debug_assert!(
+            !matches!(kind, TermKind::Leaf(_)),
+            "a leaf is minted by `leaf`, which gives it an occurrence"
+        );
         let term = Term { ty, kind };
         if let Some(id) = self.interned.find(&term, &self.nodes) {
             return id;
@@ -432,12 +619,13 @@ impl TermArena {
 
     /// Record that `leaf` stands for `definition`.
     pub fn define(&mut self, leaf: TermId, definition: TermId) {
+        let leaf = self.canonical(leaf);
         self.definitions.insert(leaf, definition);
     }
 
     /// The term `leaf` stands for, if its defining instruction is modelled.
     pub fn definition(&self, leaf: TermId) -> Option<TermId> {
-        self.definitions.get(&leaf).copied()
+        self.definitions.get(&self.canonical(leaf)).copied()
     }
 
     /// `id`, or what it stands for when it is a leaf with a definition.
@@ -448,24 +636,26 @@ impl TermArena {
     /// Record that the certificates type `leaf` as a pointer.
     pub fn declare_pointer(&mut self, leaf: TermId) {
         debug_assert!(self.term(leaf).kind.is_nullary());
+        let leaf = self.canonical(leaf);
         self.pointer_leaves.insert(leaf);
     }
 
     /// Whether the certificates type this term as a pointer.
     pub fn is_pointer(&self, id: TermId) -> bool {
-        self.pointer_leaves.contains(&id)
+        self.pointer_leaves.contains(&self.canonical(id))
     }
 
     /// Record that `leaf` holds the frame position `root`.
     pub fn declare_stack_root(&mut self, leaf: TermId, root: StackAddressRoot) {
         debug_assert!(self.term(leaf).kind.is_nullary());
+        let leaf = self.canonical(leaf);
         self.stack_roots.insert(leaf, root);
     }
 
     /// The frame position this term holds, if the certificates say it holds
     /// one.
     pub fn stack_root(&self, id: TermId) -> Option<StackAddressRoot> {
-        self.stack_roots.get(&id).copied()
+        self.stack_roots.get(&self.canonical(id)).copied()
     }
 
     /// Record where `object` is placed.
@@ -481,12 +671,13 @@ impl TermArena {
     /// Record the walk certificate of `leaf`.
     pub fn declare_walk(&mut self, leaf: TermId, walk: PointerWalk) {
         debug_assert!(self.term(leaf).kind.is_nullary());
+        let leaf = self.canonical(leaf);
         self.walks.insert(leaf, walk);
     }
 
     /// The walk certificate of this term, if it reads a walked pointer.
     pub fn walk(&self, id: TermId) -> Option<PointerWalk> {
-        self.walks.get(&id).copied()
+        self.walks.get(&self.canonical(id)).copied()
     }
 
     /// Whether any term under `root` reads memory.
@@ -535,7 +726,8 @@ impl TermArena {
         let kind = format!("{:?}", term.kind);
         let name = kind.split(['(', ' ']).next().unwrap_or("?");
         match term.kind {
-            TermKind::Leaf(expr) | TermKind::Opaque(expr) => format!("{name}({expr:?})"),
+            TermKind::Leaf(read) => format!("{name}({:?})", read.expr),
+            TermKind::Opaque(expr) => format!("{name}({expr:?})"),
             TermKind::Literal(bits) => format!("{}", bits.bits()),
             TermKind::ObjectAddress(object) => format!("&{object:?}"),
             _ => format!("{name}({})", children.join(", ")),
@@ -567,7 +759,12 @@ impl TermArena {
                 continue;
             }
             match self.term(id).kind {
-                TermKind::Leaf(expr) | TermKind::Opaque(expr) => {
+                TermKind::Leaf(read) => {
+                    if !out.contains(&read.expr) {
+                        out.push(read.expr);
+                    }
+                }
+                TermKind::Opaque(expr) => {
                     if !out.contains(&expr) {
                         out.push(expr);
                     }

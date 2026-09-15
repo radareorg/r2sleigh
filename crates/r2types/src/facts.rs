@@ -917,7 +917,7 @@ pub fn signature_hint_can_replace_existing(
                 bits,
                 signedness: Signedness::Signed | Signedness::Unsigned | Signedness::Unknown,
             },
-            CTypeLike::Typedef(name),
+            CTypeLike::Typedef { name, .. },
         ) => {
             let normalized = name.trim().to_ascii_lowercase();
             crate::writeback::type_db_resolves_type_name(type_db, &normalized, ptr_bits)
@@ -971,25 +971,37 @@ pub fn signature_hint_can_replace_existing(
                 ))
                 || (matches!(
                     new_inner.as_ref(),
-                    CTypeLike::Typedef(_)
+                    CTypeLike::Typedef { .. }
                         | CTypeLike::Struct(_)
                         | CTypeLike::Union(_)
                         | CTypeLike::Enum(_)
                 ) && !matches!(
                     inner.as_ref(),
-                    CTypeLike::Typedef(_)
+                    CTypeLike::Typedef { .. }
                         | CTypeLike::Struct(_)
                         | CTypeLike::Union(_)
                         | CTypeLike::Enum(_)
                 ))
         }
-        (CTypeLike::Typedef(existing_name), CTypeLike::Typedef(hint_name)) => {
+        (
+            CTypeLike::Typedef {
+                name: existing_name,
+                ..
+            },
+            CTypeLike::Typedef {
+                name: hint_name, ..
+            },
+        ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
                 && crate::writeback::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
         }
-        (CTypeLike::Typedef(existing_name), CTypeLike::Pointer(_)) => {
-            is_weak_pointer_sized_storage_typedef(existing_name, ptr_bits)
-        }
+        (
+            CTypeLike::Typedef {
+                name: existing_name,
+                ..
+            },
+            CTypeLike::Pointer(_),
+        ) => is_weak_pointer_sized_storage_typedef(existing_name, ptr_bits),
         _ => false,
     }
 }
@@ -1037,13 +1049,25 @@ pub fn summary_hint_can_replace_weak_existing(
             },
             CTypeLike::Pointer(_),
         ) => *bits == ptr_bits,
-        (CTypeLike::Typedef(existing_name), CTypeLike::Typedef(hint_name)) => {
+        (
+            CTypeLike::Typedef {
+                name: existing_name,
+                ..
+            },
+            CTypeLike::Typedef {
+                name: hint_name, ..
+            },
+        ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
                 && crate::writeback::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
         }
-        (CTypeLike::Typedef(existing_name), CTypeLike::Pointer(_)) => {
-            is_weak_pointer_sized_storage_typedef(existing_name, ptr_bits)
-        }
+        (
+            CTypeLike::Typedef {
+                name: existing_name,
+                ..
+            },
+            CTypeLike::Pointer(_),
+        ) => is_weak_pointer_sized_storage_typedef(existing_name, ptr_bits),
         _ => false,
     }
 }
@@ -1054,7 +1078,7 @@ pub fn type_is_generated_local_struct_pointer(ty: &CTypeLike) -> bool {
         CTypeLike::Pointer(inner)
             if matches!(
                 inner.as_ref(),
-                CTypeLike::Struct(name) | CTypeLike::Typedef(name)
+                CTypeLike::Struct(name) | CTypeLike::Typedef { name, .. }
                     if generated_local_struct_name(name)
             )
     )
@@ -1063,7 +1087,7 @@ pub fn type_is_generated_local_struct_pointer(ty: &CTypeLike) -> bool {
 pub fn is_weak_storage_scalar_type(ty: &CTypeLike, ptr_bits: u32) -> bool {
     match ty {
         CTypeLike::Int { .. } => true,
-        CTypeLike::Typedef(name) => is_weak_storage_scalar_typedef(name, ptr_bits),
+        CTypeLike::Typedef { name, .. } => is_weak_storage_scalar_typedef(name, ptr_bits),
         _ => false,
     }
 }
@@ -1298,7 +1322,7 @@ fn pointer_hint_is_authoritative(
         | CTypeLike::Union(_)
         | CTypeLike::Enum(_)
         | CTypeLike::Pointer(_) => true,
-        CTypeLike::Typedef(name) => {
+        CTypeLike::Typedef { name, .. } => {
             crate::writeback::type_db_resolves_type_name(type_db, name, ptr_bits)
         }
         _ => false,
@@ -1491,7 +1515,7 @@ mod tests {
     }
 
     fn test_typedef(name: &str) -> CTypeLike {
-        CTypeLike::Typedef(name.to_string())
+        CTypeLike::typedef(name)
     }
 
     fn test_ptr(inner: CTypeLike) -> CTypeLike {

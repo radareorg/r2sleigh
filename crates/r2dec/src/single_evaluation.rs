@@ -219,6 +219,7 @@ mod tests {
         CFunction {
             declaration_only: None,
             externs: Vec::new(),
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             name: "f".to_string(),

@@ -773,6 +773,280 @@ impl CExpr {
     }
 }
 
+impl CExpr {
+    /// Every type this expression spells, in pre-order.
+    ///
+    /// A cast and a `sizeof` write a type into the page just as a declaration
+    /// does, so any question about what the rendering names has to ask them
+    /// too. Answering it from the tree rather than from the emitted text is
+    /// what keeps the answer stable when the spelling changes.
+    pub fn visit_types(&self, f: &mut impl FnMut(&CType)) {
+        self.visit(&mut |expr| match expr {
+            Self::Cast { ty, .. } | Self::SizeofType(ty) => f(ty),
+            _ => {}
+        });
+    }
+}
+
+impl CExpr {
+    /// Every type this expression spells, for rewriting one in place.
+    pub fn visit_types_mut(&mut self, f: &mut impl FnMut(&mut CType)) {
+        match self {
+            Self::Cast { ty, expr, .. } => {
+                f(ty);
+                expr.visit_types_mut(f);
+            }
+            Self::SizeofType(ty) => f(ty),
+            Self::Unary { operand, .. } => operand.visit_types_mut(f),
+            Self::Sizeof(operand)
+            | Self::AddrOf(operand)
+            | Self::Deref(operand)
+            | Self::Paren(operand) => operand.visit_types_mut(f),
+            Self::Observed { expr, .. } => expr.visit_types_mut(f),
+            Self::Binary { left, right, .. } => {
+                left.visit_types_mut(f);
+                right.visit_types_mut(f);
+            }
+            Self::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                cond.visit_types_mut(f);
+                then_expr.visit_types_mut(f);
+                else_expr.visit_types_mut(f);
+            }
+            Self::Call { func, args, .. } => {
+                func.visit_types_mut(f);
+                args.iter_mut().for_each(|arg| arg.visit_types_mut(f));
+            }
+            Self::Subscript { base, index } => {
+                base.visit_types_mut(f);
+                index.visit_types_mut(f);
+            }
+            Self::Member { base, .. } | Self::PtrMember { base, .. } => base.visit_types_mut(f),
+            Self::Comma(items) => items.iter_mut().for_each(|item| item.visit_types_mut(f)),
+            Self::IntLit(_)
+            | Self::UIntLit(_)
+            | Self::FloatLit(_)
+            | Self::StringLit(_)
+            | Self::CharLit(_)
+            | Self::Var(_)
+            | Self::External { .. }
+            | Self::DataObject { .. } => {}
+        }
+    }
+}
+
+impl CStmt {
+    /// Every type this statement and its descendants spell, for rewriting.
+    pub fn visit_types_mut(&mut self, f: &mut impl FnMut(&mut CType)) {
+        match self {
+            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+                stmt.visit_types_mut(f);
+            }
+            Self::Decl { ty, init, .. } => {
+                f(ty);
+                if let Some(init) = init {
+                    init.visit_types_mut(f);
+                }
+            }
+            Self::Expr(expr) => expr.visit_types_mut(f),
+            Self::Block(stmts) => stmts.iter_mut().for_each(|stmt| stmt.visit_types_mut(f)),
+            Self::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                cond.visit_types_mut(f);
+                then_body.visit_types_mut(f);
+                if let Some(body) = else_body {
+                    body.visit_types_mut(f);
+                }
+            }
+            Self::While { cond, body } | Self::DoWhile { body, cond } => {
+                cond.visit_types_mut(f);
+                body.visit_types_mut(f);
+            }
+            Self::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    init.visit_types_mut(f);
+                }
+                if let Some(cond) = cond {
+                    cond.visit_types_mut(f);
+                }
+                if let Some(update) = update {
+                    update.visit_types_mut(f);
+                }
+                body.visit_types_mut(f);
+            }
+            Self::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                expr.visit_types_mut(f);
+                for case in cases {
+                    case.body
+                        .iter_mut()
+                        .for_each(|stmt| stmt.visit_types_mut(f));
+                }
+                if let Some(default) = default {
+                    default.iter_mut().for_each(|stmt| stmt.visit_types_mut(f));
+                }
+            }
+            Self::Return(expr) => {
+                if let Some(expr) = expr {
+                    expr.visit_types_mut(f);
+                }
+            }
+            Self::Empty
+            | Self::Break
+            | Self::Continue
+            | Self::Goto(_)
+            | Self::Label(_)
+            | Self::Comment(_)
+            | Self::Gap(_) => {}
+        }
+    }
+}
+
+impl CStmt {
+    /// Every type this statement and its descendants spell, in pre-order.
+    pub fn visit_types(&self, f: &mut impl FnMut(&CType)) {
+        match self {
+            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+                stmt.visit_types(f);
+            }
+            Self::Decl { ty, init, .. } => {
+                f(ty);
+                if let Some(init) = init {
+                    init.visit_types(f);
+                }
+            }
+            Self::Expr(expr) => expr.visit_types(f),
+            Self::Block(stmts) => stmts.iter().for_each(|stmt| stmt.visit_types(f)),
+            Self::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                cond.visit_types(f);
+                then_body.visit_types(f);
+                if let Some(body) = else_body {
+                    body.visit_types(f);
+                }
+            }
+            Self::While { cond, body } | Self::DoWhile { body, cond } => {
+                cond.visit_types(f);
+                body.visit_types(f);
+            }
+            Self::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    init.visit_types(f);
+                }
+                if let Some(cond) = cond {
+                    cond.visit_types(f);
+                }
+                if let Some(update) = update {
+                    update.visit_types(f);
+                }
+                body.visit_types(f);
+            }
+            Self::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                expr.visit_types(f);
+                for case in cases {
+                    case.body.iter().for_each(|stmt| stmt.visit_types(f));
+                }
+                if let Some(default) = default {
+                    default.iter().for_each(|stmt| stmt.visit_types(f));
+                }
+            }
+            Self::Return(expr) => {
+                if let Some(expr) = expr {
+                    expr.visit_types(f);
+                }
+            }
+            Self::Empty
+            | Self::Break
+            | Self::Continue
+            | Self::Goto(_)
+            | Self::Label(_)
+            | Self::Comment(_)
+            | Self::Gap(_) => {}
+        }
+    }
+}
+
+impl CFunction {
+    /// Every type this rendering spells, for rewriting one in place.
+    pub fn visit_types_mut(&mut self, f: &mut impl FnMut(&mut CType)) {
+        f(&mut self.ret_type);
+        for param in &mut self.params {
+            f(&mut param.ty);
+        }
+        for local in &mut self.locals {
+            f(&mut local.ty);
+        }
+        for decl in &mut self.externs {
+            f(&mut decl.ret_type);
+            for param in decl.params.iter_mut().flatten() {
+                f(param);
+            }
+        }
+        for aggregate in &mut self.aggregates {
+            for (ty, _) in &mut aggregate.members {
+                f(ty);
+            }
+        }
+        for typedef in &mut self.typedefs {
+            f(&mut typedef.target);
+        }
+        self.body
+            .iter_mut()
+            .for_each(|stmt| stmt.visit_types_mut(f));
+    }
+
+    pub fn visit_types(&self, f: &mut impl FnMut(&CType)) {
+        f(&self.ret_type);
+        for param in &self.params {
+            f(&param.ty);
+        }
+        for local in &self.locals {
+            f(&local.ty);
+        }
+        for decl in &self.externs {
+            f(&decl.ret_type);
+            for param in decl.params.iter().flatten() {
+                f(param);
+            }
+        }
+        for aggregate in &self.aggregates {
+            for (ty, _) in &aggregate.members {
+                f(ty);
+            }
+        }
+        for typedef in &self.typedefs {
+            f(&typedef.target);
+        }
+        self.body.iter().for_each(|stmt| stmt.visit_types(f));
+    }
+}
+
 fn transparent_expr_slices_eq(left: &[CExpr], right: &[CExpr]) -> bool {
     left.len() == right.len()
         && left
@@ -1210,6 +1484,11 @@ pub struct CFunction {
     /// and C has no syntax for that, so the honest rendering names what the
     /// address resolves to and defines nothing.
     pub declaration_only: Option<String>,
+    /// Named types the rendering spells, declared so the names resolve.
+    ///
+    /// Emitted above the aggregates: a typedef may name a tag defined below it,
+    /// and an aggregate member may be declared at a typedef name.
+    pub typedefs: Vec<CTypedefDef>,
     /// Aggregate definitions the rendering declares a value of.
     ///
     /// A pointer to an undefined tag is legal C; a value of one is not. The
@@ -1222,6 +1501,18 @@ pub struct CFunction {
     /// An accepted type remains marked with its radare2 provenance. Without
     /// one, the emitter keeps the honest incomplete-byte-array declaration.
     pub extern_objects: Vec<CExternObject>,
+}
+
+/// One named type this rendering declares, so the name it spells resolves.
+///
+/// A pointer to an undeclared *tag* is legal C; a pointer to an undeclared
+/// *typedef name* is not, so a rendering that writes `UInt16 *p` has to say
+/// what `UInt16` is. The target comes from the same type database that
+/// admitted the name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CTypedefDef {
+    pub name: String,
+    pub target: CType,
 }
 
 /// One aggregate this rendering defines, so a value of it can be declared.
@@ -1323,6 +1614,7 @@ impl CFunction {
             name: name.into(),
             ret_type,
             externs: Vec::new(),
+            typedefs: Vec::new(),
             aggregates: Vec::new(),
             extern_objects: Vec::new(),
             params: Vec::new(),

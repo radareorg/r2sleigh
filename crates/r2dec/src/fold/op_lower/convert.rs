@@ -25,7 +25,7 @@ fn integer_meta(ty: &CType, pointer_bits: u32) -> Option<(bool, u32)> {
         CType::Int { bits, signedness } => Some((*signedness == Signedness::Signed, *bits)),
         CType::Bool => Some((false, 1)),
         CType::Enum(_) => Some((true, 32)),
-        CType::Typedef(name) => typedef_integer_meta(name, pointer_bits),
+        CType::Typedef { name, .. } => typedef_integer_meta(name, pointer_bits),
         _ => None,
     }
 }
@@ -81,7 +81,7 @@ fn same_type(from: &CType, to: &CType, pointer_bits: u32) -> bool {
     ) {
         return from == to;
     }
-    match (from, to) {
+    match (from.unaliased(), to.unaliased()) {
         // An array decays to a pointer to its element.
         (CType::Array(element, _), CType::Pointer(pointee)) => element == pointee,
         _ => false,
@@ -314,14 +314,14 @@ mod tests {
         let value = name(CType::u64());
         let converted = convert(
             value.clone(),
-            &typed(CType::Typedef("size_t".to_string())),
+            &typed(CType::typedef("size_t")),
             &CType::u64(),
             64,
         );
         assert_eq!(converted, value);
         let converted = convert(
             value.clone(),
-            &typed(CType::Typedef("size_t".to_string())),
+            &typed(CType::typedef("size_t")),
             &CType::u64(),
             32,
         );

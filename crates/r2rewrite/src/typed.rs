@@ -297,7 +297,8 @@ impl Builder<'_> {
     fn term_boundary(&mut self, id: TermId, ty: &MachineType, kind: &TermKind) -> CValue {
         let own = c_type_of(ty);
         match kind {
-            TermKind::Leaf(expr) | TermKind::Opaque(expr) => self.produced(*expr),
+            TermKind::Leaf(read) => self.produced(read.expr),
+            TermKind::Opaque(expr) => self.produced(*expr),
             TermKind::Literal(_) => CValue::Constant,
             TermKind::Variable(_) => CValue::Typed(own),
             TermKind::ObjectAddress(_) => CValue::Typed(CTypeLike::ptr(CTypeLike::Unknown)),

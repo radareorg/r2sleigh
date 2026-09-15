@@ -3107,7 +3107,7 @@ fn estimate_parsed_c_type_size_bytes(ty: &r2types::CTypeLike, ptr_bits: u32) -> 
         r2types::CTypeLike::Enum(_) => Some(4),
         r2types::CTypeLike::Struct(_)
         | r2types::CTypeLike::Union(_)
-        | r2types::CTypeLike::Typedef(_)
+        | r2types::CTypeLike::Typedef { .. }
         | r2types::CTypeLike::Unknown => None,
     }
 }
@@ -6523,6 +6523,7 @@ mod integration_tests {
                         r2ssa::SourceLogicalValue::new(1, scalar_carrier)
                     }
                 })
+                .map(Some)
                 .collect::<Vec<_>>();
             let type_graph = r2ssa::SourceTypeGraph::new(
                 [
@@ -6592,6 +6593,7 @@ mod integration_tests {
                         r2ssa::SourceCarrierProjection::new(kind, 0, width_bits),
                     )
                 })
+                .map(Some)
                 .collect::<Vec<_>>();
             let scalar_carrier =
                 r2ssa::SourceCarrierProjection::new(r2ssa::SourceCarrierKind::LowBits, 0, 32);

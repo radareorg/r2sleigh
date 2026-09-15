@@ -110,6 +110,11 @@ enum ObservationTarget {
         binding: crate::binding_plan::BindingId,
         symbol: SymbolId,
         is_write: bool,
+        /// The block the statement spelling this access is emitted in, when
+        /// that is not the access instruction's own block. A read spelled at
+        /// the operation that uses it lands with that operation, and placement
+        /// dominates over where the text is.
+        rendered_block: Option<u64>,
     },
     /// One spelled occurrence of a frame object's base address, inside the
     /// rendering of `value`. It tells placement that the object's declaration
@@ -1335,6 +1340,7 @@ impl MarkedNativeDraft {
             &placement.names,
             &decisions,
             occurrences.writes(),
+            &source.source().certificates().stack_slots,
         )
         .map_err(NativePlacementFailure::Application)?;
         self.journal
@@ -1504,19 +1510,152 @@ impl SealedNativeFunction {
         &self.plan
     }
 
+    /// Declare the named types this rendering spells, and unspell the rest.
+    ///
+    /// A pointer to an undeclared tag is legal C; a pointer to an undeclared
+    /// typedef name is not, and five `bzip2` renderings were exactly that --
+    /// `UInt16 *`, `UChar *`, `BZFILE *`. A rendering that does not compile
+    /// scores nothing at all, so a name it spells has to come with what it
+    /// stands for, or stop being spelled.
+    ///
+    /// Both halves live here on purpose. Compilation destroys the name and the
+    /// producer's type database keeps it, so the binding travels with the type
+    /// graph: the capture resolved this spelling to this type while building
+    /// the graph, which makes the declaration exact rather than inferred. But
+    /// the graph is refused whole -- one unrepresentable return type and there
+    /// are no bindings at all -- while the spelling reaches the page from
+    /// radare2's signature either way. Whichever component decided what may be
+    /// declared must therefore also decide what may be spelled, or the two
+    /// answers drift and the rendering names something nothing defines.
+    pub(crate) fn define_declared_typedefs(&mut self, prepared: &r2ssa::SsaArtifact) {
+        self.resolve_names_that_are_tags();
+        let graph = prepared
+            .machine_context()
+            .function_interface()
+            .and_then(r2ssa::SourceFunctionInterface::type_graph);
+        let mut spelled = Vec::new();
+        self.ready
+            .function_for_aggregate_definitions()
+            .visit_types(&mut |ty| collect_named_types(ty, &mut spelled));
+        // A named type carries what it stands for, so the declaration is
+        // usually already in hand. The graph is asked only for a name that
+        // reached the page carrying nothing -- a spelling radare2 supplied
+        // that the parser could make no more of than an identifier.
+        let mut targets = std::collections::BTreeMap::new();
+        for (name, carried) in spelled {
+            if targets.contains_key(&name) {
+                continue;
+            }
+            let target = match carried {
+                r2types::CTypeLike::Unknown => {
+                    graph.and_then(|graph| named_type_target(graph, &name))
+                }
+                resolved => Some(resolved),
+            };
+            let Some(target) = target else {
+                continue;
+            };
+            targets.insert(name, target);
+        }
+        // A name has to stand before any name declared through it, so the
+        // order is the dependency order and not the order they were met.
+        let mut wanted = Vec::new();
+        let mut placed = std::collections::BTreeSet::new();
+        for name in targets.keys() {
+            place_typedef(name, &targets, &mut placed, &mut wanted);
+        }
+        if r2il::refusal_evidence::tracing() {
+            for entry in &wanted {
+                r2il::refusal_evidence!(
+                    "named-type",
+                    "declare {} = {:?}",
+                    entry.name,
+                    entry.target
+                );
+            }
+        }
+        self.ready.set_typedef_definitions(wanted);
+        self.report_names_nothing_declares(&targets);
+    }
+
+    /// A bare name this rendering spells as a tag elsewhere is that tag.
+    ///
+    /// radare2 spells a `struct parsedb_state *` parameter as `parsedb_state *`
+    /// in some signatures and `struct parsedb_state *` in others, so one
+    /// rendering declared `dbg_parse_warn(parsedb_state*, ...)` beside four
+    /// prototypes using the keyword. C has separate namespaces for tags and
+    /// typedef names, so the bare one named nothing and the translation unit
+    /// contradicted itself.
+    ///
+    /// The evidence is the rendering's own other spellings, and the repair adds
+    /// the keyword rather than removing the name -- nothing the capture knew is
+    /// lost. A name no spelling here calls a tag is left alone, so this cannot
+    /// turn a typedef into a struct.
+    fn resolve_names_that_are_tags(&mut self) {
+        let mut tags = std::collections::BTreeMap::new();
+        self.ready
+            .function_for_aggregate_definitions()
+            .visit_types(&mut |ty| collect_tag_spellings(ty, &mut tags));
+        if tags.is_empty() {
+            return;
+        }
+        self.ready
+            .function_mut_for_type_declarations()
+            .visit_types_mut(&mut |ty| resolve_tag_spelling(ty, &tags));
+    }
+
+    /// Name every type this rendering spells that it could not declare.
+    ///
+    /// The invariant is that a name on the page is a name the rendering
+    /// declares, and the two halves above establish it from the type's own
+    /// target or from the graph's alias table. Where neither answers, the
+    /// rendering will not compile and scores nothing, and the cause is
+    /// upstream: radare2 knows what `Cell` means and the capture did not carry
+    /// it this far.
+    ///
+    /// This reports rather than repairs, deliberately. An earlier version
+    /// rewrote such a name out of the page, which made the translation unit
+    /// build by destroying the one thing the function knew -- and the name was
+    /// only undeclarable because a `double` in the signature had refused the
+    /// whole type graph. Substituting for a missing fact hides the gap that
+    /// produced it; naming the gap is what gets it closed.
+    fn report_names_nothing_declares(
+        &self,
+        declared: &std::collections::BTreeMap<String, crate::ast::CType>,
+    ) {
+        if !r2il::refusal_evidence::tracing() {
+            return;
+        }
+        let mut spelled = Vec::new();
+        self.ready
+            .function_for_aggregate_definitions()
+            .visit_types(&mut |ty| collect_named_types(ty, &mut spelled));
+        let mut reported = std::collections::BTreeSet::new();
+        for (name, _) in spelled {
+            if declared.contains_key(&name) || !reported.insert(name.clone()) {
+                continue;
+            }
+            r2il::refusal_evidence!(
+                "named-type",
+                "{name} is spelled with nothing to declare it: no target on the type, no alias in the graph, and no tag of that name in this rendering"
+            );
+        }
+    }
+
     /// Define the aggregates this rendering declares a value of.
     ///
     /// A pointer to an undefined tag is legal C and needs nothing; a value of
     /// one is not, and seventy-five renderings declared exactly that. The
     /// layout comes from the same type graph the declaration's type came from.
     pub(crate) fn define_declared_aggregates(&mut self, prepared: &r2ssa::SsaArtifact) {
-        let Some(graph) = prepared
+        // The graph is what a *source* aggregate's layout comes from. A tag
+        // this decompiler synthesised needs none, so its absence is not a
+        // reason to skip the pass -- doing that left every `va_list` local
+        // declared at a tag nothing defined.
+        let graph = prepared
             .machine_context()
             .function_interface()
-            .and_then(r2ssa::SourceFunctionInterface::type_graph)
-        else {
-            return;
-        };
+            .and_then(r2ssa::SourceFunctionInterface::type_graph);
         let function = self.ready.function_for_aggregate_definitions();
         let mut wanted = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -1529,12 +1668,53 @@ impl SealedNativeFunction {
         // `locals`, which production never fills.
         collect_declared_types(&function.body, &mut pending);
         while let Some(ty) = pending.pop() {
-            // By value only: an array of them is still by value, a pointer to
-            // one is not.
+            // Every tag this rendering spells, not only the ones it holds by
+            // value. A pointer to an undefined tag is legal C right up to the
+            // first `p + n` or `p[i]`, and 82 `z_stream *` and 56
+            // `struct gzFile_s *` renderings did exactly that -- the compiler
+            // needs the element size and an incomplete type has none. A
+            // definition the graph can lay out is more information at the cost
+            // of text, and `aggregate_is_definable` already refuses the rest.
             let name = match &ty {
                 crate::ast::CType::Struct(name) | crate::ast::CType::Union(name) => name.clone(),
-                crate::ast::CType::Array(inner, _) => {
+                crate::ast::CType::Array(inner, _) | crate::ast::CType::Pointer(inner) => {
                     pending.push(inner.as_ref().clone());
+                    continue;
+                }
+                // A value declared at a name is a value of what the name
+                // stands for, so the tag behind it is one this rendering has
+                // to define. The name carries its target, so this does not
+                // depend on the declarations having been decided yet.
+                crate::ast::CType::Typedef { ty, .. } => {
+                    pending.push(ty.as_ref().clone());
+                    continue;
+                }
+                // Storage this decompiler synthesised a tag for, because C has
+                // no scalar of that width. Nothing outside the rendering can
+                // define it, so the rendering does: whole bytes of the extent
+                // the carrier has, which is exactly what the tag claims and
+                // keeps the type distinct from an integer so no arithmetic is
+                // emitted for it.
+                crate::ast::CType::BitVector(bits) => {
+                    let bits = *bits;
+                    let name = format!("r2sleigh_bits_{bits}");
+                    if seen.insert(name.clone())
+                        && let Some(bytes) = usize::try_from(bits.div_ceil(8))
+                            .ok()
+                            .filter(|bytes| *bytes > 0)
+                    {
+                        wanted.push(crate::ast::CAggregateDef {
+                            is_union: false,
+                            name,
+                            members: vec![(
+                                crate::ast::CType::Array(
+                                    Box::new(crate::ast::CType::uint(8)),
+                                    Some(bytes),
+                                ),
+                                "bytes".to_string(),
+                            )],
+                        });
+                    }
                     continue;
                 }
                 _ => continue,
@@ -1542,11 +1722,13 @@ impl SealedNativeFunction {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            let Some(layout) = graph
-                .aggregates()
-                .iter()
-                .find(|aggregate| aggregate.name() == name)
-            else {
+            let Some((graph, layout)) = graph.and_then(|graph| {
+                graph
+                    .aggregates()
+                    .iter()
+                    .find(|aggregate| aggregate.name() == name)
+                    .map(|layout| (graph, layout))
+            }) else {
                 continue;
             };
             let mut members = Vec::new();
@@ -1603,6 +1785,11 @@ impl SealedNativeFunction {
                 name,
                 members,
             });
+        }
+        if r2il::refusal_evidence::tracing() {
+            for entry in &wanted {
+                r2il::refusal_evidence!("declared-aggregate", "define {}", entry.name);
+            }
         }
         self.ready.set_aggregate_definitions(wanted);
     }
@@ -1740,7 +1927,11 @@ impl LegacyObservationJournal {
             ObservationTarget::Use { block, .. } | ObservationTarget::Write { block, .. } => {
                 Some(*block)
             }
-            ObservationTarget::StackAccess { access, .. } => inst_block(access.inst),
+            ObservationTarget::StackAccess {
+                access,
+                rendered_block,
+                ..
+            } => rendered_block.or_else(|| inst_block(access.inst)),
             ObservationTarget::ObjectAddress { block, .. } => Some(*block),
             ObservationTarget::Gapped { anchor, .. } => Some(anchor.block_addr),
             ObservationTarget::Effect(id) => match id.instruction.site {
@@ -1842,12 +2033,14 @@ impl LegacyObservationJournal {
                 binding,
                 symbol,
                 is_write,
+                rendered_block,
             } => Some(crate::placement::PlacementObservationTarget::StackAccess {
                 access: *access,
                 object: *object,
                 binding: *binding,
                 symbol: *symbol,
                 is_write: *is_write,
+                rendered_block: *rendered_block,
             }),
             ObservationTarget::ObjectAddress {
                 value,
@@ -3069,9 +3262,10 @@ impl LegacyObservationJournal {
             .names
             .symbol_for_binding(binding)
             .ok_or(LegacyObservationJournalError::MissingPlannedValue(value))?;
-        let is_array = self.plan.binding(binding).is_some_and(|binding| {
-            matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
-        });
+        let is_array = self
+            .plan
+            .binding(binding)
+            .is_some_and(|binding| binding.declaration_type().is_array());
         if !crate::placement::frame_object_address_expr_matches(&expr, symbol, is_array) {
             r2il::refusal_evidence!(
                 "object-address",
@@ -3323,6 +3517,7 @@ impl LegacyObservationJournal {
             binding,
             symbol,
             is_write,
+            rendered_block: None,
         }];
         targets.extend(self.discharged_instruction_targets(None, &discharged, Some(&expr))?);
         // The statements went here, and so did the obligations they owed: a
@@ -5471,6 +5666,166 @@ fn loaded_stack_object(
     (access.space == r2il::SpaceId::Ram).then_some(access.object)
 }
 
+/// Every type a declaration statement in this body introduces.
+/// What the type graph says a name stands for, when it says anything.
+///
+/// A name that resolves to itself stands for nothing: `source_type_like`
+/// spells a named aggregate by its tag, so this is the shape where the graph
+/// held a name and no structure behind it.
+fn named_type_target(graph: &r2ssa::SourceTypeGraph, name: &str) -> Option<r2types::CTypeLike> {
+    let alias = graph.aliases().iter().find(|alias| alias.name() == name)?;
+    let mut visiting = std::collections::BTreeSet::new();
+    // The projection spells this type by its own name, which is the name being
+    // declared; the declaration needs what stands behind it.
+    match r2types::source_type_like(graph, alias.type_id(), &mut visiting)? {
+        r2types::CTypeLike::Typedef { name: other, ty } if other == *name => match ty.as_ref() {
+            r2types::CTypeLike::Unknown => None,
+            resolved => Some(resolved.clone()),
+        },
+        target => Some(target),
+    }
+}
+
+/// Every struct or union tag a spelled type names, at any depth.
+///
+/// The value says which keyword introduced it, because a tag is spelled with
+/// the one the program used and `union` is not interchangeable with `struct`.
+fn collect_tag_spellings(
+    ty: &crate::ast::CType,
+    out: &mut std::collections::BTreeMap<String, bool>,
+) {
+    match ty {
+        r2types::CTypeLike::Struct(name) => {
+            out.insert(name.clone(), false);
+        }
+        r2types::CTypeLike::Union(name) => {
+            out.insert(name.clone(), true);
+        }
+        r2types::CTypeLike::Typedef { ty, .. }
+        | r2types::CTypeLike::Pointer(ty)
+        | r2types::CTypeLike::Array(ty, _) => collect_tag_spellings(ty, out),
+        r2types::CTypeLike::Function { ret, params } => {
+            collect_tag_spellings(ret, out);
+            params
+                .iter()
+                .for_each(|param| collect_tag_spellings(param, out));
+        }
+        _ => {}
+    }
+}
+
+/// Spell a name that is one of this rendering's tags as that tag.
+fn resolve_tag_spelling(
+    ty: &mut crate::ast::CType,
+    tags: &std::collections::BTreeMap<String, bool>,
+) {
+    match ty {
+        r2types::CTypeLike::Typedef { name, ty: target }
+            if matches!(target.as_ref(), r2types::CTypeLike::Unknown) =>
+        {
+            match tags.get(name.as_str()) {
+                Some(true) => *ty = r2types::CTypeLike::Union(name.clone()),
+                Some(false) => *ty = r2types::CTypeLike::Struct(name.clone()),
+                None => {}
+            }
+        }
+        r2types::CTypeLike::Typedef { ty, .. }
+        | r2types::CTypeLike::Pointer(ty)
+        | r2types::CTypeLike::Array(ty, _) => resolve_tag_spelling(ty, tags),
+        r2types::CTypeLike::Function { ret, params } => {
+            resolve_tag_spelling(ret, tags);
+            params
+                .iter_mut()
+                .for_each(|param| resolve_tag_spelling(param, tags));
+        }
+        _ => {}
+    }
+}
+
+/// Every typedef name a spelled type mentions, at any depth.
+fn collect_named_types(ty: &crate::ast::CType, out: &mut Vec<(String, crate::ast::CType)>) {
+    match ty {
+        r2types::CTypeLike::Typedef { name, ty } => {
+            out.push((name.clone(), ty.as_ref().clone()));
+            collect_named_types(ty, out);
+        }
+        r2types::CTypeLike::Pointer(inner) | r2types::CTypeLike::Array(inner, _) => {
+            collect_named_types(inner, out);
+        }
+        r2types::CTypeLike::Function { ret, params } => {
+            collect_named_types(ret, out);
+            params
+                .iter()
+                .for_each(|param| collect_named_types(param, out));
+        }
+        _ => {}
+    }
+}
+
+/// Emit one name after every name it is declared through.
+///
+/// The graph is acyclic: a name's target comes from the type it was minted
+/// over, which was built before it.
+fn place_typedef(
+    name: &str,
+    targets: &std::collections::BTreeMap<String, crate::ast::CType>,
+    placed: &mut std::collections::BTreeSet<String>,
+    out: &mut Vec<crate::ast::CTypedefDef>,
+) {
+    let Some(target) = targets.get(name) else {
+        return;
+    };
+    if !placed.insert(name.to_string()) {
+        return;
+    }
+    let mut dependencies = Vec::new();
+    collect_named_types(target, &mut dependencies);
+    for (dependency, _) in dependencies {
+        place_typedef(&dependency, targets, placed, out);
+    }
+    out.push(crate::ast::CTypedefDef {
+        name: name.to_string(),
+        target: target.clone(),
+    });
+}
+
+fn collect_declared_types(body: &[CStmt], out: &mut Vec<crate::ast::CType>) {
+    fn walk(stmt: &CStmt, out: &mut Vec<crate::ast::CType>) {
+        match stmt {
+            CStmt::Decl { ty, .. } => out.push(ty.clone()),
+            CStmt::Block(stmts) => stmts.iter().for_each(|child| walk(child, out)),
+            CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => walk(stmt, out),
+            CStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                walk(then_body, out);
+                if let Some(body) = else_body {
+                    walk(body, out);
+                }
+            }
+            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk(body, out),
+            CStmt::For { init, body, .. } => {
+                if let Some(init) = init {
+                    walk(init, out);
+                }
+                walk(body, out);
+            }
+            CStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    case.body.iter().for_each(|child| walk(child, out));
+                }
+                if let Some(default) = default {
+                    default.iter().for_each(|child| walk(child, out));
+                }
+            }
+            _ => {}
+        }
+    }
+    body.iter().for_each(|stmt| walk(stmt, out));
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -5491,6 +5846,57 @@ mod tests {
         StructuredRegionKind, StructuredRegionMarker, seal_structured_body,
     };
     use crate::symbol::{ExternalKind, SymbolRole};
+
+    /// radare2 spells the same struct parameter with and without the keyword,
+    /// and C has separate namespaces for tags and typedef names, so the bare
+    /// one named nothing. The rendering's own other spellings say which it is.
+    #[test]
+    fn a_bare_name_this_rendering_spells_as_a_tag_is_that_tag() {
+        let tags = std::collections::BTreeMap::from([
+            ("parsedb_state".to_string(), false),
+            ("anon".to_string(), true),
+        ]);
+
+        let mut bare = CType::ptr(CType::typedef("parsedb_state"));
+        resolve_tag_spelling(&mut bare, &tags);
+        assert_eq!(bare, CType::ptr(CType::Struct("parsedb_state".to_string())));
+
+        let mut union_name = CType::ptr(CType::typedef("anon"));
+        resolve_tag_spelling(&mut union_name, &tags);
+        assert_eq!(union_name, CType::ptr(CType::Union("anon".to_string())));
+
+        // A name no spelling here calls a tag is left alone, so a real typedef
+        // is never turned into a struct.
+        let mut typedef = CType::ptr(CType::typedef("size_t"));
+        resolve_tag_spelling(&mut typedef, &tags);
+        assert_eq!(typedef, CType::ptr(CType::typedef("size_t")));
+
+        // A name that already carries what it stands for is already answered.
+        let named = CType::named(
+            "parsedb_state",
+            CType::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed,
+            },
+        );
+        let mut carried = named.clone();
+        resolve_tag_spelling(&mut carried, &tags);
+        assert_eq!(carried, named);
+    }
+
+    /// Storage C has no scalar for gets a tag this decompiler invents, and
+    /// nothing outside the rendering can define it.
+    #[test]
+    fn a_synthesised_tag_is_defined_by_the_rendering() {
+        let mut tags = std::collections::BTreeMap::new();
+        collect_tag_spellings(&CType::ptr(CType::Struct("s".to_string())), &mut tags);
+        assert_eq!(tags.get("s"), Some(&false));
+        collect_tag_spellings(
+            &CType::named("u", CType::Union("u_tag".to_string())),
+            &mut tags,
+        );
+        assert_eq!(tags.get("u_tag"), Some(&true));
+    }
 
     #[test]
     fn exact_zero_occurrence_answer_precedes_refusal_per_use() {
@@ -6106,6 +6512,7 @@ mod tests {
             &names,
             &decisions,
             &[],
+            &std::collections::BTreeMap::new(),
         );
 
         assert!(
@@ -7623,42 +8030,4 @@ mod tests {
             "a replacement cannot absorb a producer the plan still renders separately"
         );
     }
-}
-
-/// Every type a declaration statement in this body introduces.
-fn collect_declared_types(body: &[CStmt], out: &mut Vec<crate::ast::CType>) {
-    fn walk(stmt: &CStmt, out: &mut Vec<crate::ast::CType>) {
-        match stmt {
-            CStmt::Decl { ty, .. } => out.push(ty.clone()),
-            CStmt::Block(stmts) => stmts.iter().for_each(|child| walk(child, out)),
-            CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => walk(stmt, out),
-            CStmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                walk(then_body, out);
-                if let Some(body) = else_body {
-                    walk(body, out);
-                }
-            }
-            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk(body, out),
-            CStmt::For { init, body, .. } => {
-                if let Some(init) = init {
-                    walk(init, out);
-                }
-                walk(body, out);
-            }
-            CStmt::Switch { cases, default, .. } => {
-                for case in cases {
-                    case.body.iter().for_each(|child| walk(child, out));
-                }
-                if let Some(default) = default {
-                    default.iter().for_each(|child| walk(child, out));
-                }
-            }
-            _ => {}
-        }
-    }
-    body.iter().for_each(|stmt| walk(stmt, out));
 }

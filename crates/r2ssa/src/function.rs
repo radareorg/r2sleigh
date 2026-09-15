@@ -2024,6 +2024,11 @@ impl TrustedSsaArtifact {
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
             );
+        r2il::refusal_evidence!(
+            "snapshot-literals",
+            "the decoded image delivers {} string literals",
+            source.image().string_literals().len()
+        );
         machine_context.bind_source_string_literals(source.image().string_literals());
         let mut function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks.as_slice(),

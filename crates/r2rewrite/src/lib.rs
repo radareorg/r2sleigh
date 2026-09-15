@@ -30,7 +30,8 @@ pub use rules::{
     DEFAULT_PROOF_WIDTHS, Measure, MeasureVector, RULES, Rule, RuleGroup, RuleId, measure,
 };
 pub use term::{
-    MAX_TERM_WIDTH_BITS, ObjectPlacement, PointerWalk, Term, TermArena, TermId, TermKind,
+    LeafOrigin, LeafRead, MAX_TERM_WIDTH_BITS, ObjectPlacement, OccurrenceId, PointerWalk, Term,
+    TermArena, TermId, TermKind,
 };
 pub use typed::{CValue, RenderTypes, TypedBoundaries, c_type_of, promoted, typed_boundaries};
 

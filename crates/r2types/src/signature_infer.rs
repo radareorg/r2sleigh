@@ -552,7 +552,7 @@ pub fn materialize_signature_type_like(ty: CTypeLike, ptr_bits: u32) -> CTypeLik
         CTypeLike::Enum(name) if is_unmaterialized_aggregate_name(&name) => {
             fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
         }
-        CTypeLike::Typedef(name) if name.trim().is_empty() => {
+        CTypeLike::Typedef { name, .. } if name.trim().is_empty() => {
             fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
         }
         other => other,
@@ -626,15 +626,15 @@ fn normalized_signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
 /// `int32_t`.
 pub(crate) fn resolve_builtin_typedefs(ty: CTypeLike, ptr_bits: u32) -> CTypeLike {
     match ty {
-        CTypeLike::Typedef(name) => {
+        CTypeLike::Typedef { name, ty } => {
             let Some(parsed) = crate::convert::parse_c_type_like(&name, ptr_bits) else {
-                return CTypeLike::Typedef(name);
+                return CTypeLike::Typedef { name, ty };
             };
             let is_plain_c_int = matches!(name.trim().to_ascii_lowercase().as_str(), "int");
-            if matches!(parsed, CTypeLike::Typedef(_))
+            if matches!(parsed, CTypeLike::Typedef { .. })
                 || (!is_plain_c_int && render_signature_type(&parsed, ptr_bits) != name)
             {
-                CTypeLike::Typedef(name)
+                CTypeLike::Typedef { name, ty }
             } else {
                 parsed
             }
@@ -725,7 +725,7 @@ pub fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
         CTypeLike::Struct(name) => format!("struct {name}"),
         CTypeLike::Union(name) => format!("union {name}"),
         CTypeLike::Enum(name) => format!("enum {name}"),
-        CTypeLike::Typedef(name) => name,
+        CTypeLike::Typedef { name, .. } => name,
         CTypeLike::Function { .. } => "void (*)()".to_string(),
         CTypeLike::Unknown => "int64_t".to_string(),
     }
@@ -812,7 +812,10 @@ pub fn resolve_evidence_driven_signature_type(
     }
 
     match initial_ty {
-        CTypeLike::Struct(_) | CTypeLike::Union(_) | CTypeLike::Enum(_) | CTypeLike::Typedef(_) => {
+        CTypeLike::Struct(_)
+        | CTypeLike::Union(_)
+        | CTypeLike::Enum(_)
+        | CTypeLike::Typedef { .. } => {
             if pointer_score > scalar_score.saturating_add(1) {
                 return CTypeLike::Pointer(Box::new(CTypeLike::Void));
             }
@@ -1584,7 +1587,7 @@ mod tests {
 
     #[test]
     fn plain_int_and_canonical_int32_are_equivalent() {
-        let source_spelling = CTypeLike::Typedef("int".to_string());
+        let source_spelling = CTypeLike::typedef("int");
         let canonical = CTypeLike::Int {
             bits: 32,
             signedness: Signedness::Signed,
@@ -1619,11 +1622,11 @@ mod tests {
             CTypeLike::Float(64),
             CTypeLike::Struct("Demo".to_string()),
             CTypeLike::Union("Demo".to_string()),
-            CTypeLike::Typedef("demo_t".to_string()),
+            CTypeLike::typedef("demo_t"),
             // The collision worth naming: a typedef whose spelling is exactly a
             // built-in type's spelling.
-            CTypeLike::Typedef("int32_t".to_string()),
-            CTypeLike::Typedef("size_t".to_string()),
+            CTypeLike::typedef("int32_t"),
+            CTypeLike::typedef("size_t"),
         ];
         for bits in [8u32, 16, 32, 64] {
             for signedness in [

@@ -378,7 +378,8 @@ fn ordering_and_equality(
         if o != ordering || e != equality {
             return None;
         }
-        ((p == x && q == y) || (p == y && q == x)).then_some((interpretation, x, y))
+        let same = |a, b| arena.same_value(a, b);
+        ((same(p, x) && same(q, y)) || (same(p, y) && same(q, x))).then_some((interpretation, x, y))
     };
     pick(left, right).or_else(|| pick(right, left))
 }

@@ -21,7 +21,20 @@ pub enum CTypeLike {
     Struct(String),
     Union(String),
     Enum(String),
-    Typedef(String),
+    /// A name the source gave a type, with what the name stands for.
+    ///
+    /// The name is presentation and the target is the type: width, signedness
+    /// and indirection all come from `ty`, so a named type is not a hole in
+    /// the width machinery. It was one -- the variant carried a name alone,
+    /// every consumer that needed a width re-parsed the text, that only worked
+    /// for standard spellings, and `admit_declaration_type` replaced every
+    /// other named type with the machine word. A name the capture could not
+    /// resolve carries `Unknown`, which is exactly what the variant used to
+    /// mean everywhere.
+    Typedef {
+        name: String,
+        ty: Box<CTypeLike>,
+    },
     /// A function type, with the signature it was recovered with.
     ///
     /// This carried no signature until the two type models were folded
@@ -124,6 +137,79 @@ impl CTypeLike {
     }
 
     /// The width in bits, where the type has one.
+    /// A name whose target the capture did not resolve.
+    pub fn typedef(name: impl Into<String>) -> Self {
+        CTypeLike::Typedef {
+            name: name.into(),
+            ty: Box::new(CTypeLike::Unknown),
+        }
+    }
+
+    /// A name over the type it stands for.
+    pub fn named(name: impl Into<String>, ty: CTypeLike) -> Self {
+        CTypeLike::Typedef {
+            name: name.into(),
+            ty: Box::new(ty),
+        }
+    }
+
+    /// This type with every name resolved away, which is the type it is.
+    pub fn unaliased(&self) -> &CTypeLike {
+        match self {
+            CTypeLike::Typedef { ty, .. } if !matches!(ty.as_ref(), CTypeLike::Unknown) => {
+                ty.unaliased()
+            }
+            other => other,
+        }
+    }
+
+    /// The aggregate tag this type is, through any number of names.
+    ///
+    /// A name is transparent: `bz_stream` naming `struct type_0x5e55` is that
+    /// struct. Ten structural tests had to learn this one regression at a
+    /// time, so the questions they ask live here and look through names by
+    /// construction rather than by each caller remembering to.
+    pub fn aggregate_tag(&self) -> Option<&str> {
+        match self.unaliased() {
+            CTypeLike::Struct(name) | CTypeLike::Union(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a struct or union, through any names.
+    pub fn is_aggregate(&self) -> bool {
+        self.aggregate_tag().is_some()
+    }
+
+    /// Whether this is a union rather than a struct, through any names.
+    pub fn is_union(&self) -> bool {
+        matches!(self.unaliased(), CTypeLike::Union(_))
+    }
+
+    /// Whether this is an array, through any names.
+    pub fn is_array(&self) -> bool {
+        matches!(self.unaliased(), CTypeLike::Array(..))
+    }
+
+    /// What `name[i]` reaches: a pointer's target or an array's element.
+    ///
+    /// The two are one question at a subscript, because an array decays to a
+    /// pointer to its element exactly where it is subscripted.
+    pub fn subscript_element(&self) -> Option<&CTypeLike> {
+        match self.unaliased() {
+            CTypeLike::Pointer(inner) | CTypeLike::Array(inner, _) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// Whether `name[i]` is legal on this type, through any names.
+    ///
+    /// `Unknown` is admitted: nothing has said the value is not a pointer, and
+    /// refusing on no evidence is not a claim this model makes.
+    pub fn may_be_subscripted(&self) -> bool {
+        self.subscript_element().is_some() || matches!(self.unaliased(), CTypeLike::Unknown)
+    }
+
     pub fn bits(&self, ptr_bits: u32) -> Option<u32> {
         match self {
             CTypeLike::Bool => Some(1),
@@ -131,6 +217,8 @@ impl CTypeLike {
                 Some(*bits)
             }
             CTypeLike::Pointer(_) => Some(ptr_bits),
+            // A name stands for its target, so it is as wide as the target is.
+            CTypeLike::Typedef { ty, .. } => ty.bits(ptr_bits),
             _ => None,
         }
     }
@@ -195,7 +283,7 @@ pub fn to_c_type_like(arena: &TypeArena, ty: TypeId) -> CTypeLike {
         Type::UnknownAlias(name) if name.starts_with("enum ") => {
             CTypeLike::Enum(name.trim_start_matches("enum ").to_string())
         }
-        Type::UnknownAlias(name) => CTypeLike::Typedef(name.clone()),
+        Type::UnknownAlias(name) => CTypeLike::typedef(name.clone()),
     }
 }
 
@@ -270,7 +358,7 @@ pub fn render_c_type_like(ty: &CTypeLike) -> String {
         CTypeLike::Struct(name) => format!("struct {name}"),
         CTypeLike::Union(name) => format!("union {name}"),
         CTypeLike::Enum(name) => format!("enum {name}"),
-        CTypeLike::Typedef(name) => name.clone(),
+        CTypeLike::Typedef { name, .. } => name.clone(),
         CTypeLike::Function { ret, params } => {
             // A function proven to take nothing is spelled `(void)`. An empty
             // list says the arguments are unspecified, which is a weaker claim
@@ -461,8 +549,36 @@ fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
         "double" | "long double" => Some(CTypeLike::Float(64)),
         _ => named_integer_bits(&classification, ptr_bits)
             .map(|(bits, signedness)| CTypeLike::Int { bits, signedness })
-            .or_else(|| is_c_type_identifier(&collapsed).then_some(CTypeLike::Typedef(collapsed))),
+            .or_else(|| is_c_type_identifier(&collapsed).then(|| CTypeLike::typedef(collapsed))),
     }
+}
+
+/// Whether a spelling *names* a type rather than being a way of writing one.
+///
+/// `size_t` is a name: it renders as itself and a declaration can say what it
+/// stands for. `unsigned int` is not -- it is the type, written out, and
+/// treating it as a name produced `typedef uint32_t unsigned int;`, which no
+/// compiler accepts. The test is the language's: one identifier, and not one
+/// of the specifier keywords.
+pub fn spelling_names_a_type(spelling: &str) -> bool {
+    let trimmed = spelling.trim();
+    is_c_type_identifier(trimmed)
+        && !matches!(
+            trimmed,
+            "void"
+                | "char"
+                | "short"
+                | "int"
+                | "long"
+                | "float"
+                | "double"
+                | "signed"
+                | "unsigned"
+                | "_Bool"
+                | "bool"
+                | "const"
+                | "volatile"
+        )
 }
 
 fn is_c_type_identifier(name: &str) -> bool {
@@ -551,7 +667,7 @@ mod tests {
         );
         assert_eq!(
             parse_c_type_like("type.Foo", 64),
-            Some(CTypeLike::Typedef("Foo".to_string()))
+            Some(CTypeLike::typedef("Foo"))
         );
     }
 
@@ -591,9 +707,7 @@ mod tests {
     fn external_typedef_pointer_is_structurally_placeable() {
         assert_eq!(
             parse_c_type_like("FILE *", 64),
-            Some(CTypeLike::Pointer(Box::new(CTypeLike::Typedef(
-                "FILE".to_string()
-            ))))
+            Some(CTypeLike::Pointer(Box::new(CTypeLike::typedef("FILE"))))
         );
     }
 
@@ -622,7 +736,7 @@ mod tests {
             CTypeLike::Struct("Demo".to_string()),
             CTypeLike::Union("Demo".to_string()),
             CTypeLike::Enum("Demo".to_string()),
-            CTypeLike::Typedef("demo_t".to_string()),
+            CTypeLike::typedef("demo_t"),
             CTypeLike::Unknown,
             CTypeLike::Function {
                 ret: Box::new(CTypeLike::Unknown),

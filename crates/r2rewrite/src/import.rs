@@ -288,6 +288,11 @@ struct Importer<'a> {
     /// and found not to walk, and a value being asked about, so that a
     /// counter that is somehow its own pointer does not recurse.
     walks: BTreeMap<ValueId, Option<PointerWalk>>,
+    /// The instruction whose expression is being imported, so every leaf
+    /// minted under it can name the site it was read at.
+    reading_for: Option<InstId>,
+    /// How many reads have been minted under `reading_for` so far.
+    reads_so_far: u32,
 }
 
 /// Import under [`default_expansion_policy`].
@@ -353,6 +358,8 @@ pub fn import_with(
         pointer_parameters,
         source_nodes,
         walks: BTreeMap::new(),
+        reading_for: None,
+        reads_so_far: 0,
     };
     let mut values: Vec<Option<ImportedValue>> = vec![None; graph.values.len()];
     let mut accesses = BTreeMap::new();
@@ -406,6 +413,18 @@ impl Importer<'_> {
         if let Some(done) = self.roots.get(&root) {
             return done.clone();
         }
+        // Every leaf minted below belongs to this instruction's expression,
+        // and the descent is in operand order, so the ordinal plus the graph's
+        // operand list names the read.
+        let outer = (self.reading_for.replace(inst), self.reads_so_far);
+        self.reads_so_far = 0;
+        let done = self.import_root_inner(root, inst);
+        self.reading_for = outer.0;
+        self.reads_so_far = outer.1;
+        done
+    }
+
+    fn import_root_inner(&mut self, root: MachineExprId, inst: InstId) -> RootImport {
         let ty = self
             .projection
             .expr(root)
@@ -529,12 +548,14 @@ impl Importer<'_> {
             return None;
         }
         let kind = expr.kind().clone();
+        // The ordinal counts reads, not visits, so it is taken only where a
+        // leaf is actually minted.
+        let origin = self.reading_for.map(|inst| crate::term::LeafOrigin {
+            inst,
+            ordinal: self.reads_so_far,
+        });
         let leaf = |arena: &mut TermArena| {
-            Some((
-                arena.intern(ty, TermKind::Leaf(id)),
-                Vec::new(),
-                BTreeSet::new(),
-            ))
+            Some((arena.leaf_from(ty, id, origin), Vec::new(), BTreeSet::new()))
         };
         match kind {
             MachineExprKind::Source { binding, .. } => match self.try_substitute(binding.value()) {
@@ -550,6 +571,7 @@ impl Importer<'_> {
                         return Some((term, Vec::new(), BTreeSet::new()));
                     }
                     let leaf = leaf(self.arena);
+                    self.reads_so_far += 1;
                     if let Some((leaf_id, _, _)) = &leaf {
                         if let Some(definition) = self.definition_of(binding.value()) {
                             self.arena.define(*leaf_id, definition);
@@ -566,7 +588,11 @@ impl Importer<'_> {
                         Vec::new(),
                         BTreeSet::new(),
                     )),
-                    _ => leaf(self.arena),
+                    _ => {
+                        let minted = leaf(self.arena);
+                        self.reads_so_far += 1;
+                        minted
+                    }
                 }
             }
             MachineExprKind::Copy { input } => self.import_expr(input),
@@ -925,9 +951,9 @@ impl Importer<'_> {
         cell_ty: MachineType,
     ) -> Option<TermId> {
         let address_value = match self.arena.term(imported_address).kind {
-            TermKind::Leaf(address_node) => {
+            TermKind::Leaf(address_read) => {
                 let MachineExprKind::Source { binding, .. } =
-                    self.projection.expr(address_node)?.kind()
+                    self.projection.expr(address_read.expr)?.kind()
                 else {
                     return None;
                 };
@@ -1131,7 +1157,7 @@ impl Importer<'_> {
         if ty.width_bits() != width_bits {
             return None;
         }
-        let leaf = self.arena.intern(ty, TermKind::Leaf(node));
+        let leaf = self.arena.leaf(ty, node);
         if let Some(definition) = self.definition_of(value) {
             self.arena.define(leaf, definition);
         }

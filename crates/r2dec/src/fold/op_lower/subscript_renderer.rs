@@ -91,7 +91,7 @@ impl<'a> FoldingContext<'a> {
         arena: &TermArena,
         index: TermId,
     ) -> Option<r2ssa::ValueId> {
-        let TermKind::Leaf(node) = arena.term(index).kind else {
+        let TermKind::Leaf(read) = arena.term(index).kind else {
             return None;
         };
         let r2ssa::MachineExprKind::Source { binding, .. } = self
@@ -99,7 +99,7 @@ impl<'a> FoldingContext<'a> {
             .binding_names?
             .plan()
             .machine_projection()
-            .expr(node)?
+            .expr(read.expr)?
             .kind()
         else {
             return None;
@@ -148,10 +148,10 @@ impl<'a> FoldingContext<'a> {
             }
             _ => None,
         };
-        let already_typed = match declared {
-            Some(CType::Pointer(pointee)) | Some(CType::Array(pointee, _)) => *pointee == *elem_ty,
-            _ => false,
-        };
+        let already_typed = declared
+            .as_ref()
+            .and_then(CType::subscript_element)
+            .is_some_and(|pointee| *pointee == *elem_ty);
         if already_typed {
             rendered
         } else {
@@ -199,10 +199,10 @@ impl<'a> FoldingContext<'a> {
         };
         let child = |child: TermId| self.render_subscript_term(arena, child);
         Some(match term.kind {
-            TermKind::Leaf(expr) => {
+            TermKind::Leaf(read) => {
                 let names = self.inputs.binding_names?;
                 let plan = names.plan();
-                match plan.machine_projection().expr(expr)?.kind() {
+                match plan.machine_projection().expr(read.expr)?.kind() {
                     r2ssa::MachineExprKind::Source { binding, .. } => {
                         let value = binding.value();
                         let crate::binding_plan::ValueDisposition::Bound { binding } =

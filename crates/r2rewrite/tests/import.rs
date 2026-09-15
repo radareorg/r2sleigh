@@ -14,7 +14,7 @@ fn ret() -> R2ILOp {
 }
 
 #[test]
-fn and_of_one_value_reads_one_leaf_twice() {
+fn and_of_one_value_reads_two_occurrences_of_one_leaf() {
     let artifact = artifact(vec![
         R2ILOp::IntAnd {
             dst: tmp(0x100, 8),
@@ -37,8 +37,28 @@ fn and_of_one_value_reads_one_leaf_twice() {
             roots.arena().term(imported.term)
         );
     };
-    assert_eq!(left, right, "one value read twice is one leaf");
+    // One value read twice is two leaves, because a rewrite that keeps one of
+    // the reads has to leave behind which one it kept. They still read the
+    // same value, which is what every rule asking for equal operands means.
+    assert_ne!(left, right, "two reads are two occurrences");
+    assert!(
+        roots.arena().same_value(left, right),
+        "both occurrences read one value"
+    );
     assert!(matches!(roots.arena().term(left).kind, TermKind::Leaf(_)));
+    assert!(matches!(roots.arena().term(right).kind, TermKind::Leaf(_)));
+    let site_of = |id| {
+        let TermKind::Leaf(read) = roots.arena().term(id).kind else {
+            panic!("leaf")
+        };
+        roots
+            .arena()
+            .origin(read.occurrence)
+            .expect("an imported read names its site")
+    };
+    let (first, second) = (site_of(left), site_of(right));
+    assert_eq!(first.inst, second.inst, "both reads are in one instruction");
+    assert_eq!((first.ordinal, second.ordinal), (0, 1), "operand order");
     assert!(
         imported.trace.is_empty(),
         "import records only copy elisions"

@@ -486,6 +486,7 @@ mod tests {
         .expect("valid exact DemoStruct source type graph");
         let parameter_types = std::iter::once(r2ssa::SourceLogicalValue::new(2, scalar_carrier))
             .chain((1..parameters.len()).map(|_| r2ssa::SourceLogicalValue::new(1, scalar_carrier)))
+            .map(Some)
             .collect::<Vec<_>>();
         let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
             b"r2dec-fold-pipeline-demo-struct-v1".to_vec(),
@@ -1288,6 +1289,15 @@ mod tests {
             space: SpaceId::Ram,
             addr: Varnode::constant(0x2000, 8),
             val: Varnode::unique(0x110, 8),
+        });
+        // Both adds are stored, so both are readers of the widening. Leaving
+        // the second one dead made the widening look like a two-reader value
+        // while only one of the reads rendered, which is exactly the shape the
+        // rendered-reader count now sees through.
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2008, 8),
+            val: Varnode::unique(0x118, 8),
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("signed_borrow_projection");

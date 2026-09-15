@@ -39,6 +39,7 @@ pub(crate) mod liveout;
 pub(crate) mod machine;
 pub(crate) mod machine_context;
 pub(crate) mod mirror;
+pub mod mobility;
 pub mod name;
 mod naming;
 pub(crate) mod obligation;
@@ -134,7 +135,7 @@ pub use machine_context::{
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
     SourceMachineRoles, SourceMachineRolesError, SourceParameterLocation,
     SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceType, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
+    SourceType, SourceTypeAlias, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationCoverageReport,

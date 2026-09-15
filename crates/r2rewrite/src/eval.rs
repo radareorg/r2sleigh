@@ -52,7 +52,8 @@ pub fn eval(
     let width = term.width_bits();
     let m = mask(width);
     let value = match term.kind {
-        TermKind::Leaf(expr) | TermKind::Opaque(expr) => leaf(LeafRef::Expr(expr), &term.ty),
+        TermKind::Leaf(read) => leaf(LeafRef::Expr(read.expr), &term.ty),
+        TermKind::Opaque(expr) => leaf(LeafRef::Expr(expr), &term.ty),
         TermKind::Variable(index) => leaf(LeafRef::Variable(index), &term.ty),
         TermKind::Literal(bits) => u128::from(bits.bits()),
         TermKind::ObjectAddress(object) => leaf(LeafRef::ObjectAddress(object), &term.ty),

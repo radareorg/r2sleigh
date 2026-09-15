@@ -16,6 +16,14 @@ fn traced_variable_name() -> Option<&'static str> {
         .as_deref()
 }
 
+/// Whether this operator compares rather than computes.
+const fn comparison_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    )
+}
+
 impl<'a> FoldingContext<'a> {
     pub(super) fn certified_const_bits(&self, var: &SSAVar) -> Option<u64> {
         let value = var.constant_bits()?;
@@ -2608,10 +2616,7 @@ impl<'a> FoldingContext<'a> {
             rhs_expr,
             (dst.size > 0).then_some(dst.size),
         );
-        let comparison = matches!(
-            op,
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-        );
+        let comparison = comparison_op(op);
         let rhs = if comparison {
             self.resolve_predicate_rhs_for_var(dst, rhs_raw)
         } else {

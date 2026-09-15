@@ -3948,6 +3948,23 @@ impl FormatForwardingLookup<'_> {
         let (block_addr, op_index) = graph.op_site_for_inst(definition)?;
         let block = function.get_block(block_addr)?;
         if !matches!(block.ops.get(op_index)?, SSAOp::CallDefine { .. }) {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "{definition:?} at {block_addr:#x}:{op_index} defines the format but the block spells it {}, while the graph spells it {}",
+                block
+                    .ops
+                    .get(op_index)
+                    .map_or("nothing".to_string(), |op| format!("{op:?}")
+                        .chars()
+                        .take(28)
+                        .collect::<String>()),
+                graph
+                    .inst(definition)
+                    .map_or("nothing".to_string(), |inst| format!("{:?}", inst.payload)
+                        .chars()
+                        .take(28)
+                        .collect::<String>())
+            );
             return None;
         }
         let mut index = op_index;
@@ -3955,7 +3972,14 @@ impl FormatForwardingLookup<'_> {
             index -= 1;
             if !matches!(block.ops.get(index)?, SSAOp::CallDefine { .. }) {
                 let inst = graph.inst_id_for_op_site(block_addr, index)?;
-                return self.call_sites.by_inst.get(&inst).copied();
+                let site = self.call_sites.by_inst.get(&inst).copied();
+                if site.is_none() {
+                    r2il::refusal_evidence!(
+                        "variadic-format-literal",
+                        "the call at {block_addr:#x}:{index} defining the format correlates to no call site"
+                    );
+                }
+                return site;
             }
         }
         None
@@ -5045,16 +5069,16 @@ pub(crate) fn source_formal_parameter_projections(
                 );
                 return None;
             }
-            let logical_value = interface
-                .parameter_logical_values()
-                .get(parameter_position)
-                .copied();
+            // A parameter the capture could not place keeps its ABI storage
+            // and no exact type, which is what a function with no graph at all
+            // already gets. It is not a reason to refuse the parameter.
+            let logical_value = interface.parameter_logical_value(parameter_position);
             let graph_storage = match (logical_value, interface.type_graph()) {
                 (Some(logical_value), Some(type_graph)) => {
                     projected_logical_register_storage(abi_storage, logical_value, type_graph)?
                 }
-                (None, None) => abi_storage,
-                (Some(_), None) | (None, Some(_)) => return None,
+                (None, _) => abi_storage,
+                (Some(_), None) => return None,
             };
             Some(SourceFormalParameterProjection {
                 index: parameter.index(),
@@ -7829,8 +7853,7 @@ fn collect_declared_stack_slots(
             // The slot is declared at the parameter's own width, not the
             // convention's: `int` in an eight-byte slot is a four-byte slot.
             let size_bytes = interface
-                .parameter_logical_values()
-                .get(position)
+                .parameter_logical_value(position)
                 .and_then(|logical| u32::try_from(logical.carrier().size_bits() / 8).ok())
                 .filter(|bytes| *bytes > 0)
                 .unwrap_or(slot_bytes);

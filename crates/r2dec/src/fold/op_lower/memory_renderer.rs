@@ -386,10 +386,11 @@ impl<'a> FoldingContext<'a> {
     /// here: nothing has said it is not a pointer.
     fn name_may_be_subscripted(&self, base: &CExpr) -> bool {
         match self.declared_type_of_name(base) {
-            Some(declared) => match declared.as_type() {
-                Some(CType::Pointer(_) | CType::Array(_, _)) | None => true,
-                Some(_) => false,
-            },
+            // A declaration that is present has to be a pointer or an array;
+            // one that is absent says nothing and is not a refusal.
+            Some(declared) => declared
+                .as_type()
+                .is_none_or(|ty| ty.subscript_element().is_some()),
             None => true,
         }
     }

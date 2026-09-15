@@ -878,10 +878,60 @@ pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64>
             type_like_size_bytes(inner, ptr_bits).map(|size| size.saturating_mul(*count as u64))
         }
         CTypeLike::Array(inner, None) => type_like_size_bytes(inner, ptr_bits),
-        CTypeLike::Struct(_) | CTypeLike::Union(_) | CTypeLike::Enum(_) | CTypeLike::Typedef(_) => {
-            None
+        CTypeLike::Struct(_)
+        | CTypeLike::Union(_)
+        | CTypeLike::Enum(_)
+        | CTypeLike::Typedef { .. } => None,
+    }
+}
+
+/// Whether a rendering can emit a definition for this aggregate.
+///
+/// A rendering that declares a value of a tag it cannot define does not
+/// compile, and a rendering that does not compile scores nothing. The plan
+/// therefore has to ask the same question the emitter will ask later, and this
+/// is that question in one place so the two cannot drift apart -- which is the
+/// shape of defect that `term_renders_inline` and `materialize_term` already
+/// had once.
+///
+/// The requirements are the emitter's: the graph carries a layout, every member
+/// projects to a spellable type, each member's width either matches its size or
+/// divides it exactly so the member can be rebuilt as an array, and the members
+/// together account for the size the capture measured.
+pub fn aggregate_is_definable(graph: &r2ssa::SourceTypeGraph, name: &str) -> bool {
+    let Some(layout) = graph
+        .aggregates()
+        .iter()
+        .find(|aggregate| aggregate.name() == name)
+    else {
+        return false;
+    };
+    if layout.members().is_empty() {
+        return false;
+    }
+    for member in layout.members() {
+        let mut visiting = std::collections::BTreeSet::<u32>::new();
+        let Some(member_ty) =
+            crate::writeback::source_type_like(graph, member.type_id(), &mut visiting)
+        else {
+            return false;
+        };
+        match declaration_type_width_bits(&member_ty, 64) {
+            Some(width) if u64::from(width) == member.size_bits() => {}
+            Some(width)
+                if width > 0
+                    && member.size_bits() % u64::from(width) == 0
+                    && usize::try_from(member.size_bits() / u64::from(width)).is_ok() => {}
+            _ => return false,
         }
     }
+    let covered = layout
+        .members()
+        .iter()
+        .map(|member| member.offset_bits() + member.size_bits())
+        .max()
+        .unwrap_or(0);
+    covered == layout.size_bits()
 }
 
 /// The exact storage width a C declaration type describes.
@@ -903,8 +953,15 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
             declaration_type_width_bits(element, ptr_bits)?.checked_mul(u32::try_from(*count).ok()?)
         }
         CTypeLike::BitVector(bits) if *bits > 128 => Some(*bits),
-        CTypeLike::Typedef(name) => crate::parse_external_type_like_spec(name, ptr_bits)
-            .and_then(|parsed| parsed.bits(ptr_bits)),
+        // A name is as wide as what it stands for. The target is asked first
+        // because it is evidence -- the capture resolved it -- and the name
+        // text is only a fallback for a spelling C itself defines.
+        CTypeLike::Typedef { name, ty } => {
+            declaration_type_width_bits(ty, ptr_bits).or_else(|| {
+                crate::parse_external_type_like_spec(name, ptr_bits)
+                    .and_then(|parsed| parsed.bits(ptr_bits))
+            })
+        }
         _ => None,
     }
 }
@@ -919,11 +976,7 @@ pub fn admit_declaration_type(ty: CTypeLike, width_bits: u32, ptr_bits: u32) -> 
     let admissible = match &ty {
         CTypeLike::Pointer(_) | CTypeLike::Function { .. } => width_bits == ptr_bits,
         CTypeLike::Int { bits, .. } | CTypeLike::Float(bits) => *bits == width_bits,
-        CTypeLike::Typedef(name) => {
-            crate::parse_external_type_like_spec(name, ptr_bits)
-                .and_then(|parsed| parsed.bits(ptr_bits))
-                == Some(width_bits)
-        }
+        CTypeLike::Typedef { .. } => declaration_type_width_bits(&ty, ptr_bits) == Some(width_bits),
         // A sized array describes the storage when its own extent is that
         // storage: the element width times the count, which is exactly what
         // `declaration_type_width_bits` computes for it.
@@ -952,8 +1005,7 @@ fn function_type_matches_source_interface(
             return false;
         };
         let expected_bits = interface
-            .parameter_logical_values()
-            .get(index)
+            .parameter_logical_value(index)
             .map(|logical| logical.carrier().size_bits())
             .or_else(|| {
                 interface
@@ -3140,7 +3192,7 @@ impl FunctionFacts {
                 })
                 .and_then(|interface| {
                     let graph = interface.type_graph()?;
-                    let logical = interface.parameter_logical_values().get(slot as usize)?;
+                    let logical = interface.parameter_logical_value(slot as usize)?;
                     crate::writeback::source_type_like(
                         graph,
                         logical.type_id(),
@@ -3392,6 +3444,13 @@ impl FunctionFacts {
             });
         let mut params = Vec::with_capacity(logical.len());
         for (index, value) in logical.iter().enumerate() {
+            // An exact signature is exact in every parameter. One the capture
+            // could not place leaves the signature to radare2's spelling,
+            // which is what a function with no graph already falls back to --
+            // and the rest of the graph still serves its slots and members.
+            let Some(value) = value else {
+                return false;
+            };
             let Some(ty) =
                 crate::writeback::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
             else {
@@ -3754,7 +3813,9 @@ fn recovered_type_is_evidence(ty: &CTypeLike, ptr_bits: u32) -> bool {
         | CTypeLike::Struct(_)
         | CTypeLike::Union(_)
         | CTypeLike::Enum(_) => true,
-        CTypeLike::Typedef(name) => !crate::facts::is_weak_storage_scalar_typedef(name, ptr_bits),
+        CTypeLike::Typedef { name, .. } => {
+            !crate::facts::is_weak_storage_scalar_typedef(name, ptr_bits)
+        }
         _ => false,
     }
 }
@@ -3767,7 +3828,7 @@ fn recovered_scalar_signedness_outranks(
 ) -> bool {
     let scalar = |ty: &CTypeLike| match ty {
         CTypeLike::Int { bits, signedness } => Some((*bits, *signedness)),
-        CTypeLike::Typedef(name) => match crate::parse_c_type_like(name, ptr_bits) {
+        CTypeLike::Typedef { name, .. } => match crate::parse_c_type_like(name, ptr_bits) {
             Some(CTypeLike::Int { bits, signedness }) => Some((bits, signedness)),
             _ => None,
         },
@@ -3788,7 +3849,7 @@ fn struct_name_from_pointer_type(ty: Option<&CTypeLike>) -> Option<&str> {
         return None;
     };
     match inner.as_ref() {
-        CTypeLike::Struct(name) | CTypeLike::Typedef(name) => Some(name),
+        CTypeLike::Struct(name) | CTypeLike::Typedef { name, .. } => Some(name),
         _ => None,
     }
 }
@@ -5369,7 +5430,7 @@ mod tests {
             [r2ssa::SourceAbiParameterSpec::new(0, storage)],
             r2ssa::SourceFunctionReturn::Void,
             [],
-            [logical],
+            [Some(logical)],
             None,
             Some(type_graph),
         )
@@ -5985,18 +6046,51 @@ mod tests {
         ));
     }
 
+    /// A name carries what it stands for, so a width can be measured through
+    /// it. Before the target travelled with the name every consumer re-parsed
+    /// the text, which only worked for standard spellings, and any other named
+    /// type was replaced here by the machine word.
+    #[test]
+    fn a_named_type_is_as_wide_as_what_it_names() {
+        let named = CTypeLike::named(
+            "UInt16",
+            CTypeLike::Int {
+                bits: 16,
+                signedness: crate::Signedness::Unsigned,
+            },
+        );
+        assert_eq!(declaration_type_width_bits(&named, 64), Some(16));
+        assert_eq!(admit_declaration_type(named.clone(), 16, 64), named);
+        // A name with nothing behind it still has no width, so the storage
+        // stands instead -- which is what this rule did for every name before.
+        let opaque = CTypeLike::typedef("Opaque");
+        assert_eq!(declaration_type_width_bits(&opaque, 64), None);
+        assert_eq!(
+            admit_declaration_type(opaque, 32, 64),
+            CTypeLike::machine_bits(32)
+        );
+    }
+
+    /// A name is transparent: what the type *is* is asked through it.
+    #[test]
+    fn a_named_aggregate_is_still_an_aggregate() {
+        let named = CTypeLike::named("bz_stream", CTypeLike::Struct("type_0x5e55".to_string()));
+        assert!(matches!(named.unaliased(), CTypeLike::Struct(tag) if tag == "type_0x5e55"));
+        assert_eq!(crate::render_c_type_like(&named), "bz_stream");
+    }
+
     #[test]
     fn declaration_admission_canonicalizes_only_builtin_scalar_spellings() {
         assert_eq!(
-            admit_declaration_type(CTypeLike::Typedef("int64_t".to_string()), 64, 64),
+            admit_declaration_type(CTypeLike::typedef("int64_t"), 64, 64),
             CTypeLike::Int {
                 bits: 64,
                 signedness: crate::Signedness::Signed,
             }
         );
         assert_eq!(
-            admit_declaration_type(CTypeLike::Typedef("size_t".to_string()), 64, 64),
-            CTypeLike::Typedef("size_t".to_string()),
+            admit_declaration_type(CTypeLike::typedef("size_t"), 64, 64),
+            CTypeLike::typedef("size_t"),
             "a semantic alias keeps its source-owned identity"
         );
     }
@@ -6010,7 +6104,7 @@ mod tests {
                 signedness: crate::Signedness::Signed,
             },
             CTypeLike::Pointer(Box::new(CTypeLike::Void)),
-            CTypeLike::Typedef("int64_t".to_string()),
+            CTypeLike::typedef("int64_t"),
         ] {
             assert!(
                 !recovered_type_outranks(
@@ -6026,7 +6120,7 @@ mod tests {
 
     #[test]
     fn a_recovered_type_that_renders_the_same_is_not_a_replacement() {
-        let existing = CTypeLike::Typedef("int32_t".to_string());
+        let existing = CTypeLike::typedef("int32_t");
         let recovered = CTypeLike::Int {
             bits: 32,
             signedness: crate::Signedness::Signed,
@@ -6074,7 +6168,7 @@ mod tests {
         let known_function_signatures = HashMap::from([(
             "strlen".to_string(),
             crate::FunctionType {
-                return_type: CTypeLike::Typedef("size_t".to_string()),
+                return_type: CTypeLike::typedef("size_t"),
                 params: vec![pointer.clone()],
                 variadic: false,
             },
@@ -6534,7 +6628,7 @@ mod tests {
             [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
             r2ssa::SourceFunctionReturn::Void,
             [],
-            [logical_parameter],
+            [Some(logical_parameter)],
             None,
             Some(
                 r2ssa::SourceTypeGraph::new(

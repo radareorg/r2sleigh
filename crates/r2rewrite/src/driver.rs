@@ -137,6 +137,16 @@ impl CanonicalRoots {
         self.values.iter().flatten()
     }
 
+    /// Every access this term is the cell of. A store has no value of its
+    /// own, so its cell is imported as the load that would read it back, and
+    /// one term can therefore be the cell of both a read and a write.
+    pub fn accesses_of_term(&self, term: TermId) -> impl Iterator<Item = StructuredAccessId> + '_ {
+        self.accesses
+            .values()
+            .filter(move |access| access.canonical == term)
+            .map(|access| access.access)
+    }
+
     pub fn access(&self, access: StructuredAccessId) -> Option<&CanonicalAccess> {
         self.accesses.get(&access)
     }
