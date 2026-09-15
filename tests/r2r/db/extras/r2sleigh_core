@@ -31,9 +31,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 48837df8000000000000000000000000
 s 0 >/dev/null
-a:sla.debug.regs > /tmp/r2sleigh_core_regs.json
+a:sla.debug.opvals > /tmp/r2sleigh_core_opvals.json
 a:sla.debug.mem > /tmp/r2sleigh_core_mem.json
-jq -n -c --slurpfile regs /tmp/r2sleigh_core_regs.json --slurpfile mem /tmp/r2sleigh_core_mem.json '($regs[0].write | index("ZF") != null) and ($regs[0].write | index("CF") != null) and (($mem[0] | map(select(.type == "load" and .stack_address.offset == -8)) | length) == 1)'
+jq -n -c --slurpfile ops /tmp/r2sleigh_core_opvals.json --slurpfile mem /tmp/r2sleigh_core_mem.json '($ops[0].dsts | index("zf") != null) and ($ops[0].dsts | index("cf") != null) and (($mem[0] | map(select(.type == "load" and .stack_address.offset == -8)) | length) == 1)'
 EOF_CMDS
 RUN
 
@@ -46,9 +46,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 74050000000000000000000000000000
 s 0 >/dev/null
-a:sla.debug.regs > /tmp/r2sleigh_core_regs.json
+a:sla.debug.opvals > /tmp/r2sleigh_core_opvals.json
 a:sla.debug.mem > /tmp/r2sleigh_core_mem.json
-jq -n -c --slurpfile regs /tmp/r2sleigh_core_regs.json --slurpfile mem /tmp/r2sleigh_core_mem.json '($regs[0].read == ["ZF"]) and ($regs[0].write == []) and ($mem[0] == [])'
+jq -n -c --slurpfile ops /tmp/r2sleigh_core_opvals.json --slurpfile mem /tmp/r2sleigh_core_mem.json '($ops[0].srcs == ["zf"]) and ($ops[0].dsts == []) and ($mem[0] == [])'
 EOF_CMDS
 RUN
 
@@ -61,9 +61,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 488b45fc000000000000000000000000
 s 0 >/dev/null
-a:sla.debug.regs > /tmp/r2sleigh_core_regs.json
+a:sla.debug.opvals > /tmp/r2sleigh_core_opvals.json
 a:sla.debug.mem > /tmp/r2sleigh_core_mem.json
-jq -n -c --slurpfile regs /tmp/r2sleigh_core_regs.json --slurpfile mem /tmp/r2sleigh_core_mem.json '($regs[0].write | index("RAX") != null) and (($mem[0] | map(select(.type == "load" and .stack_address.offset == -4)) | length) == 1)'
+jq -n -c --slurpfile ops /tmp/r2sleigh_core_opvals.json --slurpfile mem /tmp/r2sleigh_core_mem.json '($ops[0].dsts | index("rax") != null) and (($mem[0] | map(select(.type == "load" and .stack_address.offset == -4)) | length) == 1)'
 EOF_CMDS
 RUN
 
@@ -166,6 +166,6 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 wx 000050e30ef0a0e100000000000000
 s 0 >/dev/null
-a:sla.debug.regs | jq -c '(.read | index("r0") != null) and (.write | index("OV") != null) and (.write | index("CY") != null) and (.write | index("r0") == null)'
+a:sla.debug.opvals | jq -c '(.srcs | index("r0") != null) and (.dsts | index("ov") != null) and (.dsts | index("cy") != null) and (.dsts | index("r0") == null)'
 EOF_CMDS
 RUN
