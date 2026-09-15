@@ -24416,3 +24416,46 @@ callee result types (`dec_alloc_and_copy_uses_callee_result_type`).
 
 Census at this point: bzip2-O0 3/152, bzip2-O2 6/112, minigzip-O2 16/161,
 dpkg-divert-O0 9/651. All corpus gates 60/60.
+
+## Why no function's prototype is ever address-linked on a Mach-O with a dSYM
+
+Traced from `dec_array_index_uses_real_index`, which wants `arr[idx]` and gets
+`stack_m8[stack_m12]`. The chain, each link measured:
+
+1. The `-O0` prologue spills each parameter to a stack slot and the body reads
+   it back. The slot and the parameter are two objects in the rendering.
+2. `CertifiedEntity::coalescing_values` excludes a parameter's home slot from
+   the stack-slot side, with the comment "the parameter entity owns those
+   values and decides there" -- and the parameter entity does not carry them.
+   Making it carry them is *not* the fix on its own: it regressed 72 of
+   bzip2-O0's 152 renderings to `missing program-variable authorization`, so
+   the union needs the same licence the other coalescing proposals get. That
+   attempt is reverted.
+3. It would have been inert anyway. The join needs a slot whose role is
+   `ParameterHome`, and no slot has any role: the snapshot's function interface
+   carries **zero** stack slots, even though the plugin collects two.
+4. The interface carries none because `function_interface.complete` is false,
+   and the plugin prints exactly why:
+   `R2SLEIGH_INTERFACE addr=0x100000bd0 signature=1 address_linked=0`. radare2
+   has a signature but it is not linked to the function's address, so the
+   capture takes the early exit whose comment already calls it "the largest
+   refusal cause in the benchmark".
+5. radare2 *does* register the complete DWARF prototype --
+   `func.test_array_index.ret=int`, `.arg.0=int *,arr`, `.arg.1=int,idx` -- and
+   `prototype_complete` is true (`addresses=1 ranges=0 formals=1`). What is
+   missing is the `fcnlink.<addr>` key, because it is written at the wrong
+   address.
+6. **The address is one image base too high.** `dwarfdump` on the dSYM says
+   `DW_AT_low_pc (0x0000000100000bd0)`, which is exactly where radare2 has the
+   function, and radare2's DWARF processor reports `addr=0x200000bd0`.
+   `dwarf_relocate_address` adds `bf->bo->baddr_shift` to every DWARF address.
+   For a Mach-O read through its `.dSYM` companion the shift is computed
+   against the dSYM's own base, which is zero, so it comes out as the whole
+   image base -- and the addresses it is added to are already the executable's
+   absolute addresses.
+
+So on every Mach-O with a dSYM, no function's prototype is address-linked, no
+exact interface is built, no source stack slot travels, and no parameter spill
+can be coalesced. This is a radare2 defect and belongs in its own upstream pull
+request; the r2sleigh side needs nothing until it is fixed, beyond the
+coalescing licence that step 2 showed is still missing.
