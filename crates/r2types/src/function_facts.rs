@@ -1283,6 +1283,17 @@ pub struct MemberAccessRenderFact {
     /// for a member reached through a pointer; `None` when the member is the
     /// object's own declared slot and the slot's name is the base.
     pub base: Option<r2ssa::SemanticId>,
+    /// Where the field name came from.
+    pub source: MemberAccessSource,
+}
+
+/// Where a member fact's field name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberAccessSource {
+    /// The source's own type graph named this field at this offset and width.
+    DeclaredType,
+    /// An external layout matched the base's spelling to a known structure.
+    ExternalLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2122,6 +2133,28 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
 }
 
 /// The aggregate a type node names, when it names one.
+/// The parameter slot an address is wholly relative to.
+fn parameter_base_of(prepared: &r2ssa::SsaArtifact, address: r2ssa::ValueId) -> Option<usize> {
+    let expression = prepared.addresses().parameter_expression(address)?;
+    expression.terms.is_empty().then_some(expression.parameter)
+}
+
+/// The aggregate a pointer parameter points at.
+fn parameter_pointee_type(
+    interface: &r2ssa::SourceFunctionInterface,
+    parameter: usize,
+) -> Option<u32> {
+    let logical = interface.parameter_logical_value(parameter)?;
+    let graph = interface.type_graph()?;
+    let ty = graph
+        .types()
+        .get(usize::try_from(logical.type_id()).ok()?)?;
+    match ty.kind() {
+        r2ssa::SourceTypeKind::Pointer { target_type_id } => Some(target_type_id),
+        _ => None,
+    }
+}
+
 fn aggregate_layout_for_type(
     graph: &r2ssa::SourceTypeGraph,
     type_id: u32,
@@ -2644,22 +2677,31 @@ impl FunctionFacts {
                     memory.width
                 );
             };
-            let Some(slot) = prepared
+            // A declared stack slot, or the aggregate a pointer parameter points at.
+            let slot_type = prepared
                 .certificates()
                 .stack_slots
                 .get(&memory.object)
                 .and_then(|certificate| certificate.source_slot.as_ref())
+                .and_then(|slot| slot.logical_type());
+            let pointer_base = slot_type
+                .is_none()
+                .then(|| parameter_base_of(prepared, memory.address))
+                .flatten();
+            let declared_type =
+                slot_type.or_else(|| parameter_pointee_type(interface, pointer_base?));
+            let Some(aggregate) =
+                declared_type.and_then(|type_id| aggregate_layout_for_type(graph, type_id))
             else {
-                declined("the object has no certified source slot");
+                declined("neither a declared slot nor a pointer parameter names an aggregate");
                 continue;
             };
-            let Some(aggregate) = slot
-                .logical_type()
-                .and_then(|type_id| aggregate_layout_for_type(graph, type_id))
-            else {
-                declined("the slot's declared type has no aggregate layout");
+            // A tag the rendering cannot define names nothing it can spell, and the fact
+            // would retype the access to it as well as label it.
+            if !aggregate_is_definable(graph, aggregate.name()) {
+                declined("the rendering cannot define that aggregate");
                 continue;
-            };
+            }
             let width_bits = u64::from(memory.width).saturating_mul(8);
             // The member has to be the whole of what the access reads, or its
             // name would stand for more or less than the machine touched.
@@ -2683,15 +2725,21 @@ impl FunctionFacts {
                     &mut BTreeSet::new(),
                 ),
                 access_width: memory.width,
-                base: None,
+                base: pointer_base.and_then(r2ssa::SemanticId::parameter),
+                source: MemberAccessSource::DeclaredType,
             });
         }
         for fact in member_facts {
             let key = (fact.block_addr, fact.op_index, fact.is_write);
             let facts = self.render.member_accesses_by_op.entry(key).or_default();
-            if !facts.contains(&fact) {
-                facts.push(fact);
-            }
+            // The declared name replaces one an external layout guessed: two facts for one
+            // access are no fact at all, because the lookup requires exactly one.
+            facts.retain(|existing| {
+                !(existing.access == fact.access
+                    && existing.object == fact.object
+                    && existing.access_width == fact.access_width)
+            });
+            facts.push(fact);
         }
     }
 
@@ -2827,6 +2875,7 @@ impl FunctionFacts {
                 base: u32::try_from(cert.slot)
                     .ok()
                     .map(r2ssa::SemanticId::Parameter),
+                source: MemberAccessSource::ExternalLayout,
             })
             .collect()
     }

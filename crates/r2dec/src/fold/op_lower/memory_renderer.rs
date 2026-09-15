@@ -706,6 +706,27 @@ impl<'a> FoldingContext<'a> {
                     })
                 })
             }
+            AccessSyntax::PtrMember { base, field } => {
+                let field = field.to_string();
+                let rendered = match self.planned_value_expr(*base) {
+                    Ok(expr) => expr,
+                    Err(error) => {
+                        self.retain_first_observation_error(error);
+                        return None;
+                    }
+                };
+                let rendered =
+                    self.observe_certified_address_read_expr(*base, fact.access, rendered);
+                Some(PendingMemoryAccessExpr::Replacement(
+                    PendingReplacementExpr::canonical_access(
+                        fact,
+                        CExpr::PtrMember {
+                            base: Box::new(rendered),
+                            member: field,
+                        },
+                    ),
+                ))
+            }
             AccessSyntax::SlotName { binding } => self
                 .planned_binding_expr(*binding)
                 .map(PendingMemoryAccessExpr::Planned),

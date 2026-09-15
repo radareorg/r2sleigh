@@ -82,7 +82,7 @@ pub use function_facts::{
     DecompileRouteFacts, DecompileRouteKind, ExpressionRenderFact, FunctionCallRenderFacts,
     FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts, FunctionFacts,
     FunctionInputQualityFacts, FunctionRenderFacts, InterprocSummaryView, LoopStructureFact,
-    MemberAccessRenderFact, MemoryAccessRenderFact, MemoryOpSiteKey, OpSiteKey,
+    MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact, MemoryOpSiteKey, OpSiteKey,
     PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnValueRenderFact,
     SourceOwnedCalleeSignature, SourceOwnedFunctionFacts, StackCallArgumentLocationFact,
     StackSlotOwnerRenderAuthorization, SummaryEffectRollup, SummaryHelperView, SummaryOutParamFact,

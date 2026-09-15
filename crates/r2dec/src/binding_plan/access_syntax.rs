@@ -30,6 +30,8 @@ pub(crate) enum AccessSyntax {
         index: ValueId,
         field: Option<Box<str>>,
     },
+    /// A declared member of the aggregate a pointer parameter points at.
+    PtrMember { base: ValueId, field: Box<str> },
     /// The rewriter's proven `base[index]`.
     Subscript { term: TermId },
     /// The address itself, dereferenced or decomposed; either way it is rendered.
@@ -44,6 +46,8 @@ pub(super) struct AccessSyntaxInputs<'a> {
     pub dispositions: &'a [ValueDisposition],
     pub stack_objects: &'a BTreeMap<ObjectId, StackObjectDisposition>,
     pub bindings: &'a [Binding],
+    /// The source's own type graph, for asking whether a tag can be defined.
+    pub type_graph: Option<&'a r2ssa::SourceTypeGraph>,
     pub ptr_bits: u32,
 }
 
@@ -74,6 +78,15 @@ fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) ->
         // Where it is not, the address stands: claiming no shape is always
         // true, and the alternative is refusing a function over a spelling.
         return syntax;
+    }
+    // A member the source's own type graph named, on a base the plan can spell.
+    if let Some(member) = member
+        && let Some(base) = declared_member_base(inputs, fact, member)
+    {
+        return AccessSyntax::PtrMember {
+            base,
+            field: member.field_name.clone().into_boxed_str(),
+        };
     }
     if member.is_none()
         && let Some(term) = subscript(inputs, fact)
@@ -186,6 +199,53 @@ fn param_array(
     };
     let _ = fact;
     Some(AccessSyntax::ParamArray { base, index, field })
+}
+
+/// The parameter a declared member is reached through, proven as `param_array` proves its own.
+///
+/// Only a name the source's type graph gave: an external layout matched a
+/// spelling rather than a declaration, and its label must not replace the
+/// address the plan bound.
+fn declared_member_base(
+    inputs: &AccessSyntaxInputs<'_>,
+    fact: &MemoryAccessRenderFact,
+    member: &MemberAccessRenderFact,
+) -> Option<ValueId> {
+    if member.source != r2types::MemberAccessSource::DeclaredType {
+        return None;
+    }
+    // An address the plan bound is read somewhere else too, and the label would
+    // spell the member without spelling that binding.
+    if matches!(
+        inputs.dispositions.get(fact.address.0 as usize),
+        Some(ValueDisposition::Bound { .. })
+    ) {
+        return None;
+    }
+    let r2ssa::SemanticId::Parameter(slot) = member.base? else {
+        return None;
+    };
+    let base = inputs
+        .render
+        .parameter_values(usize::try_from(slot).ok()?)
+        .next()?;
+    if !value_has_expression(inputs, base) || !name_may_be_subscripted(inputs, base) {
+        return None;
+    }
+    // And only where the rendering can define the aggregate: `p->field` against a
+    // tag it only forward-declares is `incomplete definition of type`.
+    let ValueDisposition::Bound { binding } = inputs.dispositions.get(base.0 as usize)? else {
+        return None;
+    };
+    let declared = inputs.bindings.get(binding.index())?.declaration_type();
+    let r2types::CTypeLike::Pointer(pointee) = declared.unaliased() else {
+        return None;
+    };
+    let tag = pointee.aggregate_tag()?;
+    inputs
+        .type_graph
+        .is_some_and(|graph| r2types::aggregate_is_definable(graph, tag))
+        .then_some(base)
 }
 
 /// The rendered name's declared type admits `name[i]`: a pointer, an array,

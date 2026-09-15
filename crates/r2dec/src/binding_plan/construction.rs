@@ -1313,6 +1313,10 @@ impl BindingPlan {
                     dispositions: &dispositions,
                     stack_objects: &stack_objects,
                     bindings: &bindings,
+                    type_graph: source
+                        .machine_context()
+                        .function_interface()
+                        .and_then(r2ssa::SourceFunctionInterface::type_graph),
                     ptr_bits: source
                         .machine_context()
                         .memory_model()
