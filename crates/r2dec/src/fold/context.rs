@@ -346,6 +346,15 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn gap_closure_from_seed(&self, seed: InstId) -> Option<GapClosure> {
         let prepared = self.inputs.prepared_ssa?;
         let names = self.inputs.binding_names?;
+        // Reads a certificate already proved render nothing: the cells it names, and
+        // every read of an instruction the frame and control certificates elide whole.
+        let elided_uses = crate::binding_plan::certificate_elided_cells(
+            prepared,
+            names.plan().machine_projection(),
+        )
+        .map(|cells| cells.uses)
+        .unwrap_or_default();
+        let elided_readers = crate::binding_plan::certified_elided_read_instructions(prepared);
         let graph = prepared.graph();
         let block_addr = graph
             .inst(seed)
@@ -518,13 +527,15 @@ impl<'a> FoldingContext<'a> {
                 });
                 // A value the caller supplied has no defining statement to
                 // answer for it; its cell is answered wherever it is read. If
-                // every one of those reads is inside the gap, the gap is the
-                // only place left that can account for it.
+                // every one of those reads is inside the gap, or elided and so
+                // renders nothing, the gap is the only place left that can
+                // account for it.
                 if graph.def_inst(input).is_none()
-                    && graph
-                        .use_sites(input)
-                        .iter()
-                        .all(|site| owned.contains(&site.inst))
+                    && graph.use_sites(input).iter().all(|site| {
+                        owned.contains(&site.inst)
+                            || elided_uses.contains_key(site)
+                            || elided_readers.contains(&site.inst)
+                    })
                     && claimed_values.insert(input)
                 {
                     cells.push(crate::observation_journal::GapCell::Value(input));
