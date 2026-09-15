@@ -141,6 +141,7 @@ python3 - "$artifact_root/results" "$script_dir/raw-baseline-sha256.json" \
     "$accept_baseline" "$gate" "$artifact_root/repeat/results" <<'PY'
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -214,6 +215,19 @@ if accept_baseline:
         raise SystemExit("refusing to write a partial raw baseline")
     payload = {"schema_version": 1, "raw_sha256": dict(sorted(raw_hashes.items()))}
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    # The text beside the hash, so a mismatch can be read rather than
+    # re-measured. Auditing one used to mean building the previous plugin and
+    # running the whole matrix again to get something to diff against, which
+    # is half an hour to answer "what changed", and the answer is the only
+    # thing that says whether a difference is an improvement.
+    text_root = baseline_path.parent / "raw-baseline"
+    if text_root.exists():
+        shutil.rmtree(text_root)
+    for entry in entries:
+        section = Path(entry["generation"]["section_path"])
+        destination = text_root / entry["config"] / f"{entry['function']}.c"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(section.read_text())
     with tempfile.NamedTemporaryFile(
         "w", dir=baseline_path.parent, prefix=".raw-baseline.", delete=False
     ) as temporary:

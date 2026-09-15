@@ -2436,6 +2436,11 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             "expected_sha256": expected_hash,
             "actual_sha256": section_hash,
         }
+        # Where the blessed text is, so a mismatch is a diff rather than a
+        # rebuild of the previous plugin and a second run of the matrix.
+        blessed = args.baseline.parent / "raw-baseline" / args.config / f"{name}.c"
+        if entry["snapshot"]["status"] == "mismatch" and blessed.exists():
+            entry["snapshot"]["blessed_path"] = str(blessed)
         raw_source, extraction_error = extract_function(exact_section, name)
         if extraction_error or raw_source is None:
             terminal_status = (
