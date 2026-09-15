@@ -3614,7 +3614,7 @@ impl Decompiler {
             std::collections::BTreeMap<u64, crate::ast::CExternObject>,
         > = std::cell::RefCell::new(std::collections::BTreeMap::new());
         crate::stage_timing::mark("structure");
-        fold_constant_arithmetic_in_function(
+        name_constant_addresses_in_function(
             &mut c_function,
             strings,
             data_symbols,
@@ -4031,16 +4031,16 @@ pub(crate) fn collect_expr_var_names(expr: &CExpr, out: &mut HashSet<crate::symb
 ///
 /// A statement the fold built and the page does not show was removed by one of
 /// the passes that run after structuring, and there are a dozen of them. Naming
-/// Fold arithmetic between integer literals, and name the result when it names
-/// a string.
+/// Name a constant that turns out to be the address of a string or an object.
 ///
-/// A PIC address arrives as two constants: `adrp` puts a page in a register and
-/// `add` puts the offset on top, so the renderer had `0x100002000U + 0xbbc`
-/// where the program has one address. The sum is strictly more readable folded,
-/// and folding it is also what lets the string table answer: the table is keyed
-/// by address, and until the two halves are one number there is no address to
-/// look up.
-fn fold_constant_arithmetic_in_function(
+/// A PIC address arrives as two constants -- `adrp` puts a page in a register
+/// and `add` puts the offset on top -- and this used to fold the sum, because
+/// the string table is keyed by address and could not answer for two halves.
+/// The rewriter's affine normal form now folds it in the term arena, before
+/// any of this runs: measured over bzip2, bzip2recover, dpkg-divert and both
+/// minigzips, x86-64 and arm64 alike, the fold here never fired once. So it is
+/// gone, and what is left is the substitution.
+fn name_constant_addresses_in_function(
     func: &mut CFunction,
     strings: &std::collections::BTreeMap<u64, String>,
     symbols: &std::collections::BTreeMap<u64, String>,
@@ -4050,7 +4050,7 @@ fn fold_constant_arithmetic_in_function(
 ) {
     let symbol_table = std::rc::Rc::clone(&func.symbols);
     for stmt in &mut func.body {
-        fold_constant_arithmetic_in_stmt(
+        name_constant_addresses_in_stmt(
             stmt,
             strings,
             symbols,
@@ -4394,7 +4394,7 @@ fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
     }
 }
 
-fn fold_constant_arithmetic_in_stmt(
+fn name_constant_addresses_in_stmt(
     stmt: &mut CStmt,
     strings: &std::collections::BTreeMap<u64, String>,
     symbols: &std::collections::BTreeMap<u64, String>,
@@ -4407,12 +4407,12 @@ fn fold_constant_arithmetic_in_stmt(
     // of one expression: a conversion can only be restated once the string
     // it converts is there to be seen.
     let fold_expr = |expr: &mut CExpr| {
-        fold_constant_arithmetic_in_expr(expr, strings, symbols, object_types, used);
+        name_constant_addresses_in_expr(expr, strings, symbols, object_types, used);
         restate_string_conversions_in_expr(expr, pointer_bits, None, symbol_table, used);
         simplify_typed_data_object_loads(expr, pointer_bits, used);
     };
     match stmt {
-        CStmt::StructuredRegion { stmt, .. } => fold_constant_arithmetic_in_stmt(
+        CStmt::StructuredRegion { stmt, .. } => name_constant_addresses_in_stmt(
             stmt,
             strings,
             symbols,
@@ -4421,7 +4421,7 @@ fn fold_constant_arithmetic_in_stmt(
             pointer_bits,
             symbol_table,
         ),
-        CStmt::Observed { stmt, .. } => fold_constant_arithmetic_in_stmt(
+        CStmt::Observed { stmt, .. } => name_constant_addresses_in_stmt(
             stmt,
             strings,
             symbols,
@@ -4440,7 +4440,7 @@ fn fold_constant_arithmetic_in_stmt(
         CStmt::Expr(expr) => fold_expr(expr),
         CStmt::Decl { ty, init, .. } => {
             if let Some(init) = init {
-                fold_constant_arithmetic_in_expr(init, strings, symbols, object_types, used);
+                name_constant_addresses_in_expr(init, strings, symbols, object_types, used);
                 restate_string_conversions_in_expr(
                     init,
                     pointer_bits,
@@ -4458,7 +4458,7 @@ fn fold_constant_arithmetic_in_stmt(
         }
         CStmt::Block(stmts) => {
             for stmt in stmts {
-                fold_constant_arithmetic_in_stmt(
+                name_constant_addresses_in_stmt(
                     stmt,
                     strings,
                     symbols,
@@ -4475,7 +4475,7 @@ fn fold_constant_arithmetic_in_stmt(
             else_body,
         } => {
             fold_expr(cond);
-            fold_constant_arithmetic_in_stmt(
+            name_constant_addresses_in_stmt(
                 then_body,
                 strings,
                 symbols,
@@ -4485,7 +4485,7 @@ fn fold_constant_arithmetic_in_stmt(
                 symbol_table,
             );
             if let Some(else_body) = else_body {
-                fold_constant_arithmetic_in_stmt(
+                name_constant_addresses_in_stmt(
                     else_body,
                     strings,
                     symbols,
@@ -4498,7 +4498,7 @@ fn fold_constant_arithmetic_in_stmt(
         }
         CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
             fold_expr(cond);
-            fold_constant_arithmetic_in_stmt(
+            name_constant_addresses_in_stmt(
                 body,
                 strings,
                 symbols,
@@ -4515,7 +4515,7 @@ fn fold_constant_arithmetic_in_stmt(
             body,
         } => {
             if let Some(init) = init {
-                fold_constant_arithmetic_in_stmt(
+                name_constant_addresses_in_stmt(
                     init,
                     strings,
                     symbols,
@@ -4531,7 +4531,7 @@ fn fold_constant_arithmetic_in_stmt(
             if let Some(update) = update {
                 fold_expr(update);
             }
-            fold_constant_arithmetic_in_stmt(
+            name_constant_addresses_in_stmt(
                 body,
                 strings,
                 symbols,
@@ -4549,7 +4549,7 @@ fn fold_constant_arithmetic_in_stmt(
             fold_expr(expr);
             for case in cases {
                 for stmt in &mut case.body {
-                    fold_constant_arithmetic_in_stmt(
+                    name_constant_addresses_in_stmt(
                         stmt,
                         strings,
                         symbols,
@@ -4562,7 +4562,7 @@ fn fold_constant_arithmetic_in_stmt(
             }
             if let Some(default) = default {
                 for stmt in default {
-                    fold_constant_arithmetic_in_stmt(
+                    name_constant_addresses_in_stmt(
                         stmt,
                         strings,
                         symbols,
@@ -4588,7 +4588,7 @@ fn literal_value(expr: &CExpr) -> Option<u64> {
     }
 }
 
-fn fold_constant_arithmetic_in_expr(
+fn name_constant_addresses_in_expr(
     expr: &mut CExpr,
     strings: &std::collections::BTreeMap<u64, String>,
     symbols: &std::collections::BTreeMap<u64, String>,
@@ -4596,10 +4596,9 @@ fn fold_constant_arithmetic_in_expr(
     used: &std::cell::RefCell<std::collections::BTreeMap<u64, crate::ast::CExternObject>>,
 ) {
     if let CExpr::Observed { expr, .. } = expr {
-        fold_constant_arithmetic_in_expr(expr, strings, symbols, object_types, used);
+        name_constant_addresses_in_expr(expr, strings, symbols, object_types, used);
         return;
     }
-    let mut replacement = None;
     match expr {
         CExpr::Unary { operand, .. }
         | CExpr::Cast { expr: operand, .. }
@@ -4607,61 +4606,43 @@ fn fold_constant_arithmetic_in_expr(
         | CExpr::AddrOf(operand)
         | CExpr::Deref(operand)
         | CExpr::Paren(operand) => {
-            fold_constant_arithmetic_in_expr(operand, strings, symbols, object_types, used)
+            name_constant_addresses_in_expr(operand, strings, symbols, object_types, used)
         }
-        CExpr::Binary { op, left, right } => {
-            fold_constant_arithmetic_in_expr(left, strings, symbols, object_types, used);
-            fold_constant_arithmetic_in_expr(right, strings, symbols, object_types, used);
-            if let (Some(lhs), Some(rhs)) = (literal_value(left), literal_value(right)) {
-                // Wrapping, because the program's arithmetic wraps; a fold that
-                // disagreed with the machine would be worse than no fold.
-                let folded = match op {
-                    BinaryOp::Add => Some(lhs.wrapping_add(rhs)),
-                    BinaryOp::Sub => Some(lhs.wrapping_sub(rhs)),
-                    _ => None,
-                };
-                if let Some(folded) = folded {
-                    replacement = Some(CExpr::UIntLit(folded));
-                }
-            }
+        CExpr::Binary { left, right, .. } => {
+            name_constant_addresses_in_expr(left, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(right, strings, symbols, object_types, used);
         }
         CExpr::Ternary {
             cond,
             then_expr,
             else_expr,
         } => {
-            fold_constant_arithmetic_in_expr(cond, strings, symbols, object_types, used);
-            fold_constant_arithmetic_in_expr(then_expr, strings, symbols, object_types, used);
-            fold_constant_arithmetic_in_expr(else_expr, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(cond, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(then_expr, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(else_expr, strings, symbols, object_types, used);
         }
         CExpr::Call { func, args, .. } => {
-            fold_constant_arithmetic_in_expr(func, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(func, strings, symbols, object_types, used);
             for arg in args {
-                fold_constant_arithmetic_in_expr(arg, strings, symbols, object_types, used);
+                name_constant_addresses_in_expr(arg, strings, symbols, object_types, used);
             }
         }
         CExpr::Subscript { base, index } => {
-            fold_constant_arithmetic_in_expr(base, strings, symbols, object_types, used);
-            fold_constant_arithmetic_in_expr(index, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(base, strings, symbols, object_types, used);
+            name_constant_addresses_in_expr(index, strings, symbols, object_types, used);
         }
         CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-            fold_constant_arithmetic_in_expr(base, strings, symbols, object_types, used)
+            name_constant_addresses_in_expr(base, strings, symbols, object_types, used)
         }
         CExpr::Comma(items) => {
             for item in items {
-                fold_constant_arithmetic_in_expr(item, strings, symbols, object_types, used);
+                name_constant_addresses_in_expr(item, strings, symbols, object_types, used);
             }
         }
         _ => {}
     }
-    if let Some(replacement) = replacement {
-        let source = std::mem::replace(expr, CExpr::IntLit(0));
-        // Every marker in the collapsed subtree, not only the outermost:
-        // folding a cast chain down to one literal deletes the nodes the inner
-        // markers sat on, and the one literal is what renders them now.
-        *expr = crate::ast::carry_all_expr_observations(&source, replacement);
-    }
-    // Once the address is one number the string table can answer for it.
+    // The address the rewriter canonicalised is one number, so the string
+    // table can answer for it.
     if let Some(value) = literal_value(expr)
         && let Some(text) = strings.get(&value)
     {
@@ -5514,23 +5495,23 @@ mod tests {
     }
 
     #[test]
-    fn folded_constant_keeps_every_observation_it_collapsed() {
+    fn a_named_constant_keeps_every_observation_it_collapsed() {
         let mut observations = crate::ast::RenderObservationOwner::new();
-        let (left_id, left) = observations
-            .observe_expr(CExpr::UIntLit(0x1000))
-            .expect("left operand observation");
-        let (right_id, right) = observations
-            .observe_expr(CExpr::UIntLit(4))
-            .expect("right operand observation");
+        let (leaf_id, leaf) = observations
+            .observe_expr(CExpr::UIntLit(0x1004))
+            .expect("literal observation");
+        let (inner_id, inner) = observations
+            .observe_expr(CExpr::cast(CType::u32(), leaf))
+            .expect("inner cast observation");
         let (root_id, mut expr) = observations
-            .observe_expr(CExpr::binary(BinaryOp::Add, left, right))
+            .observe_expr(CExpr::cast(CType::u64(), inner))
             .expect("root observation");
         let strings = BTreeMap::from([(0x1004, "text".to_string())]);
 
         let no_symbols = BTreeMap::new();
         let no_object_types = r2types::ProgramDataObjectTypeFacts::default();
         let unused_objects = std::cell::RefCell::new(std::collections::BTreeMap::new());
-        fold_constant_arithmetic_in_expr(
+        name_constant_addresses_in_expr(
             &mut expr,
             &strings,
             &no_symbols,
@@ -5549,17 +5530,23 @@ mod tests {
             crate::ast::strip_render_observations(&mut function, observations.expected_count())
                 .expect("constant folding preserves a valid marker domain");
 
-        // The one rendered node stands for everything the fold collapsed, so
-        // it owns every occurrence those nodes owned. Keeping only the root
-        // silently discarded the operands' occurrences, and an obligation
-        // whose only rendered occurrence sat on a folded operand was then
-        // scored refused for an effect the program does render.
+        // The one rendered node stands for everything the substitution
+        // collapsed, so it owns every occurrence those nodes owned. Keeping
+        // only the root silently discarded the inner occurrences, and an
+        // obligation whose only rendered occurrence sat on a collapsed cast
+        // was then scored refused for an effect the program does render.
         assert!(reachable.contains(root_id));
-        assert!(reachable.contains(left_id));
-        assert!(reachable.contains(right_id));
+        assert!(reachable.contains(inner_id));
+        assert!(reachable.contains(leaf_id));
+        // The casts above it are left standing: what the address is converted
+        // to is a different question, answered by the restatement pass once
+        // the substitution has changed what the expression's type is.
         assert_eq!(
             function.body,
-            vec![CStmt::Return(Some(CExpr::StringLit("text".to_string())))]
+            vec![CStmt::Return(Some(CExpr::cast(
+                CType::u64(),
+                CExpr::cast(CType::u32(), CExpr::StringLit("text".to_string())),
+            )))]
         );
     }
 
@@ -5581,7 +5568,7 @@ mod tests {
         );
         let used = std::cell::RefCell::new(std::collections::BTreeMap::new());
 
-        fold_constant_arithmetic_in_function(
+        name_constant_addresses_in_function(
             &mut function,
             &strings,
             &symbols,
@@ -5625,7 +5612,7 @@ mod tests {
             &r2types::ExternalTypeDb::default(),
         );
         let used = std::cell::RefCell::new(std::collections::BTreeMap::new());
-        fold_constant_arithmetic_in_function(
+        name_constant_addresses_in_function(
             &mut function,
             &BTreeMap::new(),
             &symbols,
