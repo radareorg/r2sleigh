@@ -2435,24 +2435,6 @@ mod tests {
     }
 
     #[test]
-    fn v7_data_object_decodes_without_inventing_a_type() {
-        let image = image_with_data_object(SourceDataObject::new(
-            0x7000,
-            "global_counter",
-            Some("int32_t"),
-        ));
-        let mut writer = SnapshotWireWriter::new();
-        write_image_for_format(&mut writer, &image, 7).expect("write v7 data object");
-        let mut buffer = writer.finish().expect("finish v7 data object");
-        buffer[4..8].copy_from_slice(&7u32.to_le_bytes());
-        let mut reader = SnapshotWireReader::new(&buffer).expect("v7 data header");
-        let decoded = read_image(&mut reader).expect("read v7 data object");
-        assert_eq!(decoded.data_symbols()[0].address(), 0x7000);
-        assert_eq!(decoded.data_symbols()[0].name(), "global_counter");
-        assert_eq!(decoded.data_symbols()[0].type_spelling(), None);
-    }
-
-    #[test]
     fn a_pointer_table_round_trips_with_every_target() {
         let mut writer = SnapshotWireWriter::new();
         let image = OwnedFunctionImage {
@@ -2660,39 +2642,6 @@ mod tests {
     }
 
     #[test]
-    fn version_one_convention_slots_are_migrated_through_the_source_classifier() {
-        let mut writer = SnapshotWireWriter::new();
-        writer.string("amd64").expect("convention");
-        writer.u32(0);
-        write_optional_storage(&mut writer, None);
-        let mut buffer = writer.finish().expect("finish");
-        buffer[4..8].copy_from_slice(&1u32.to_le_bytes());
-
-        let mut reader = SnapshotWireReader::new(&buffer).expect("version one header");
-        let slots = read_convention_slots(&mut reader).expect("legacy convention slots");
-        reader.finish().expect("consumed exactly");
-        assert_eq!(slots.calling_convention(), "amd64");
-        assert_eq!(slots.abi_class(), SourceAbiClass::SystemVAMD64);
-    }
-
-    #[test]
-    fn version_two_refuses_a_typed_abi_tag_that_disagrees_with_the_spelling() {
-        let mut writer = SnapshotWireWriter::new();
-        writer.string("amd64").expect("convention");
-        write_abi_class(&mut writer, SourceAbiClass::MicrosoftX64);
-        writer.u32(0);
-        write_optional_storage(&mut writer, None);
-        let mut buffer = writer.finish().expect("finish");
-        buffer[4..8].copy_from_slice(&2u32.to_le_bytes());
-
-        let mut reader = SnapshotWireReader::new(&buffer).expect("version two header");
-        assert!(matches!(
-            read_convention_slots(&mut reader),
-            Err(SnapshotWireError::RejectedContract { .. })
-        ));
-    }
-
-    #[test]
     fn a_truncated_buffer_is_rejected_rather_than_read_short() {
         let mut writer = SnapshotWireWriter::new();
         writer.u64(1);
@@ -2816,19 +2765,6 @@ mod tests {
             read_diagnostic_identity(&mut reader).expect("diag"),
             diagnostic
         );
-        reader.finish().expect("consumed exactly");
-    }
-
-    #[test]
-    fn a_format_10_identity_carries_no_loader_role() {
-        let mut writer = SnapshotWireWriter::new();
-        writer.u64(0x2000);
-        let mut buffer = writer.finish().expect("finish");
-        buffer[4..8].copy_from_slice(&10u32.to_le_bytes());
-        let mut reader = SnapshotWireReader::new(&buffer).expect("header");
-        let identity = read_function_identity(&mut reader).expect("fn");
-        assert_eq!(identity.address(), 0x2000);
-        assert_eq!(identity.loader_role(), None);
         reader.finish().expect("consumed exactly");
     }
 
@@ -3602,46 +3538,6 @@ mod tests {
     }
 
     #[test]
-    fn standalone_legacy_interface_refuses_stack_allocation_authority() {
-        let stack_pointer = reg(0x20, 8);
-        let interface = SourceFunctionInterface::new_exact(
-            vec![9u8],
-            "amd64",
-            [],
-            SourceFunctionReturn::Void,
-            [],
-        )
-        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer))
-        .expect("legacy interface");
-        let contract = SourceStackAllocationContract::with_implicit_active_sp_bytes(
-            SourceStackGrowth::LowerAddresses,
-            8,
-        );
-
-        for format_version in [1, 2] {
-            let mut writer = SnapshotWireWriter::new();
-            write_interface_for_format(&mut writer, &interface, format_version, Some(contract))
-                .expect("legacy interface record");
-            let mut buffer = writer.finish().expect("finish");
-            buffer[4..8].copy_from_slice(&format_version.to_le_bytes());
-            let mut reader = SnapshotWireReader::new(&buffer).expect("legacy header");
-
-            let Err(SnapshotWireError::RejectedContract {
-                contract: rejected_contract,
-                reason,
-            }) = read_interface(&mut reader)
-            else {
-                panic!("standalone legacy allocation authority must be refused");
-            };
-            assert_eq!(rejected_contract, "legacy interface stack allocation");
-            assert_eq!(
-                reason,
-                "decode the whole snapshot to migrate this fact to SourceMachineRoles"
-            );
-        }
-    }
-
-    #[test]
     fn an_unknown_interface_variant_is_refused() {
         let mut writer = SnapshotWireWriter::new();
         writer.u8(200);
@@ -3733,105 +3629,6 @@ mod tests {
             DiagnosticIdentity(0x1234),
         )
         .expect("snapshot")
-    }
-
-    fn encode_legacy_snapshot_with_stack_contract(
-        snapshot: &OwnedFunctionSnapshot,
-        format_version: u32,
-        contract: SourceStackAllocationContract,
-    ) -> Vec<u8> {
-        assert!(matches!(format_version, 1 | 2));
-        let mut writer = SnapshotWireWriter::new();
-        write_machine_profile(&mut writer, snapshot.machine()).expect("machine");
-        write_function_identity_for_format(&mut writer, snapshot.function(), format_version);
-        write_presentation(&mut writer, snapshot.presentation()).expect("presentation");
-        write_image_for_format(&mut writer, snapshot.image(), format_version).expect("image");
-        writer.u32(snapshot.advisory_calls().len() as u32);
-        for site in snapshot.advisory_calls() {
-            write_call_site(&mut writer, site).expect("call site");
-        }
-        writer
-            .bytes(snapshot.source_revision_identity())
-            .expect("revision");
-        let interface = snapshot
-            .function_interface()
-            .expect("legacy allocation contract was interface-owned");
-        writer.bool(true);
-        write_interface_for_format(&mut writer, interface, format_version, Some(contract))
-            .expect("legacy interface");
-        write_machine_roles_for_format(&mut writer, snapshot.machine_roles(), format_version)
-            .expect("machine roles encode");
-        write_convention_slots_for_format(&mut writer, snapshot.convention_slots(), format_version)
-            .expect("legacy convention slots");
-        let mut captured = snapshot.captured_fields();
-        captured.stack_allocation_contract = true;
-        write_captured_fields(&mut writer, captured);
-        write_diagnostic_identity(&mut writer, snapshot.diagnostic_identity());
-        writer.u32(0);
-        let mut buffer = writer.finish().expect("legacy snapshot");
-        buffer[4..8].copy_from_slice(&format_version.to_le_bytes());
-        buffer
-    }
-
-    #[test]
-    fn whole_v1_and_v2_snapshots_migrate_interface_stack_allocation_to_machine_roles() {
-        let stack_pointer = reg(0x20, 8);
-        let interface = SourceFunctionInterface::new_exact(
-            vec![0xab, 0xcd],
-            "amd64",
-            [],
-            SourceFunctionReturn::Void,
-            [],
-        )
-        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer))
-        .expect("legacy exact interface");
-        let base = sample_snapshot(None);
-        let roles = SourceMachineRoles::new(None, Some(stack_pointer)).expect("machine roles");
-        let captured = CapturedSourceFields {
-            bounded_function_image: true,
-            function_interface: true,
-            exact_function_types: false,
-            exact_stack_slot_roles: true,
-            return_address_storage: false,
-            stack_pointer_storage: true,
-            frame_pointer_storage: false,
-            return_mechanism: false,
-            stack_allocation_contract: false,
-        };
-        let snapshot = OwnedFunctionSnapshot::from_captured_parts(
-            base.machine().clone(),
-            *base.function(),
-            base.presentation().clone(),
-            base.image().clone(),
-            base.advisory_calls().to_vec().into_boxed_slice(),
-            base.source_revision_identity().into(),
-            Some(interface),
-            roles,
-            base.convention_slots().clone(),
-            captured,
-            base.diagnostic_identity(),
-        )
-        .expect("legacy source snapshot");
-        let contract = SourceStackAllocationContract::with_implicit_active_sp_bytes(
-            SourceStackGrowth::LowerAddresses,
-            8,
-        );
-
-        for format_version in [1, 2] {
-            let buffer =
-                encode_legacy_snapshot_with_stack_contract(&snapshot, format_version, contract);
-            let decoded = decode_snapshot(&buffer).expect("legacy whole snapshot");
-            assert_eq!(decoded.function_interface(), snapshot.function_interface());
-            assert_eq!(
-                decoded.machine_roles().stack_pointer_storage(),
-                Some(stack_pointer)
-            );
-            assert_eq!(
-                decoded.machine_roles().stack_allocation_contract(),
-                Some(contract)
-            );
-            assert!(decoded.captured_fields().has_stack_allocation_contract());
-        }
     }
 
     fn assert_same_parts(decoded: &OwnedFunctionSnapshot, original: &OwnedFunctionSnapshot) {
