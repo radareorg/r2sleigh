@@ -5115,9 +5115,17 @@ static void snapshot_type_note_alias(SnapshotTypeGraphBuilder *builder,
 			return;
 		}
 	}
+	// A typedef's name, or `char`. Every other atomic name is one spelling of a width
+	// the rendering already spells -- `int` and `int32_t` are one type -- but `char` is
+	// a third type distinct from both signed and unsigned char, and a `char *` that
+	// renders `uint8_t *` has lost what the program said about it.
 	bool ambiguous = false;
-	if (!snapshot_type_find_unique_base (builder->base_types, spelling,
-			R_ANAL_BASE_TYPE_KIND_TYPEDEF, &ambiguous) || ambiguous) {
+	if ((!snapshot_type_find_unique_base (builder->base_types, spelling,
+			R_ANAL_BASE_TYPE_KIND_TYPEDEF, &ambiguous) || ambiguous)
+		&& !(!strcmp (spelling, "char")
+			&& snapshot_type_find_unique_base (builder->base_types, spelling,
+				R_ANAL_BASE_TYPE_KIND_ATOMIC, &ambiguous)
+			&& !ambiguous)) {
 		return;
 	}
 	RAnalSnapshotTypeGraph *graph = builder->graph;

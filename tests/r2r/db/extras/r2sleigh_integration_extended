@@ -812,3 +812,17 @@ s `afl~test_cpuid$[0]` >/dev/null
 pd:s | jq -Rs 'contains("r2dec gap:") and (contains("r2sleigh refused")|not)'
 EOF_CMDS
 RUN
+
+NAME=dec_char_keeps_the_name_the_source_wrote
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~process_string$[0]` >/dev/null
+pd:s | jq -Rs 'test("char ?\\* ?s") and (contains("typedef int8_t char")|not)'
+EOF_CMDS
+RUN

@@ -1555,6 +1555,10 @@ impl SealedNativeFunction {
         // that the parser could make no more of than an identifier.
         let mut targets = std::collections::BTreeMap::new();
         for (name, carried) in spelled {
+            // A builtin already means itself: `typedef int8_t char;` is not C.
+            if name_is_a_c_builtin_type(&name) {
+                continue;
+            }
             if targets.contains_key(&name) {
                 continue;
             }
@@ -5798,6 +5802,24 @@ fn resolve_tag_spelling(
 }
 
 /// Every typedef name a spelled type mentions, at any depth.
+/// Whether this spelling is a type the language already defines.
+fn name_is_a_c_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "void"
+            | "signed"
+            | "unsigned"
+            | "_Bool"
+            | "bool"
+    )
+}
+
 fn collect_named_types(ty: &crate::ast::CType, out: &mut Vec<(String, crate::ast::CType)>) {
     match ty {
         r2types::CTypeLike::Typedef { name, ty } => {
