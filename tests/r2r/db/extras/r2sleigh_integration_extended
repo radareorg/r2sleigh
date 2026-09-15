@@ -419,6 +419,20 @@ pd:s | jq -Rs '(contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
+NAME=dec_process_string_names_the_dwarf_stack_slot
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~process_string$[0]` > /dev/null
+pd:s | jq -Rs '(contains("size_t len;")) and (contains("var_8h")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_process_string_keeps_single_strlen_owner
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

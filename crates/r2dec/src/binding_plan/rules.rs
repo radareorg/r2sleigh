@@ -1191,9 +1191,15 @@ pub(super) fn rewrite_inlining_partition(
     let seed_canonical = r2rewrite::canonicalize_with(source, projection, &|_| false)
         .map_err(BindingPlanBuildError::Canonicalisation)?;
     crate::stage_timing::mark("plan_seed");
-    let conservative = inlinable_core(source_owned, projection, &seed_canonical, &BTreeSet::new());
-    crate::stage_timing::mark("plan_inlinable");
     let unrendered = unrendered_defined_values(source, projection, &seed_canonical);
+    let conservative = inlinable_core(
+        source_owned,
+        projection,
+        &seed_canonical,
+        &BTreeSet::new(),
+        &unrendered,
+    );
+    crate::stage_timing::mark("plan_inlinable");
     let eligible = component_eligible_with(source_owned, projection, &conservative, &unrendered)?;
     crate::stage_timing::mark("plan_component_eligible");
     let components = super::construction::binding_components_with(source_owned, &eligible)?;
@@ -1207,7 +1213,13 @@ pub(super) fn rewrite_inlining_partition(
     let inlinable = if admitted.is_empty() {
         conservative
     } else {
-        inlinable_core(source_owned, projection, &seed_canonical, &admitted)
+        inlinable_core(
+            source_owned,
+            projection,
+            &seed_canonical,
+            &admitted,
+            &unrendered,
+        )
     };
     // The seed's term arena interns every term in the function, and the pass
     // below builds a second one. Nothing reads the seed after this point, so
@@ -1322,6 +1334,7 @@ fn inlinable_core(
     projection: &r2ssa::MachineProjection,
     canonical: &r2rewrite::CanonicalRoots,
     admitted: &BTreeSet<ValueId>,
+    unrendered: &BTreeSet<ValueId>,
 ) -> BTreeSet<ValueId> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -1332,6 +1345,17 @@ fn inlinable_core(
     // arguments look dead here before that case was fixed; counting only that
     // certificate kind would make the same mistake for the other three.
     let certified_readers = certified_value_readers(source);
+    // A certificate on a value nothing reads states a read that renders nothing.
+    let dead_readers = unread_defined_values(source, projection);
+    // A read is a read only if what it feeds reaches the page. At -O0 and again
+    // under x86-64's flag lanes a value carries several graph readers and one
+    // rendered one, and counting the graph's is what keeps it named.
+    let renders_nothing = |inst: InstId| {
+        graph
+            .inst(inst)
+            .and_then(|node| node.output)
+            .is_some_and(|output| dead_readers.contains(&output) || unrendered.contains(&output))
+    };
     // Of those graphless reads, call arguments are the one kind the renderer
     // can currently consume from an inline expression. Return, switch and
     // derived-result markers require a binding symbol, so they count as reads
@@ -1430,11 +1454,23 @@ fn inlinable_core(
             .get(&value.id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let reader_count = distinct_reader_count(&use_sites, boundary_readers);
-        if reader_count == 0 {
+        let all_reader_count = distinct_reader_count(&use_sites, boundary_readers);
+        if all_reader_count == 0 {
             rejected("no readers");
             continue;
         }
+        // Deadness counts every read; every rule below counts rendered ones.
+        let boundary_readers = boundary_readers
+            .iter()
+            .copied()
+            .filter(|reader| !renders_nothing(*reader))
+            .collect::<Vec<_>>();
+        let boundary_readers = boundary_readers.as_slice();
+        let use_sites = use_sites
+            .into_iter()
+            .filter(|site| !renders_nothing(site.inst))
+            .collect::<Vec<_>>();
+        let reader_count = distinct_reader_count(&use_sites, boundary_readers);
         // A value that reads nothing but literals is the same at every reader
         // and costs nothing to spell there, so the single-reader rule does not
         // apply to it. The broader question `r2rewrite` answers for expansion,
@@ -1474,8 +1510,8 @@ fn inlinable_core(
         // edges on lowering temporaries are absent above.
         if !literal_only && reader_count != 1 {
             rejected(&format!(
-                "{reader_count} readers ({} of them certified boundary reads), of which {} sit in a \
-                 certificate-elided instruction; root {root_kind}; sites [{}]",
+                "{reader_count} of {all_reader_count} readers rendered ({} of them certified boundary reads), of which {} sit in a \
+                 certificate-elided instruction; root {root_kind}; sites [{}]; boundary [{}]",
                 boundary_readers.len(),
                 use_sites
                     .iter()
@@ -1484,6 +1520,27 @@ fn inlinable_core(
                 use_sites
                     .iter()
                     .map(|site| format!("i{}#{}", site.inst.0, site.input_idx))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                boundary_readers
+                    .iter()
+                    .map(|inst| {
+                        let out = graph.inst(*inst).and_then(|inst| inst.output);
+                        format!(
+                            "i{}={}[{} uses]{}",
+                            inst.0,
+                            out.and_then(|out| graph.value(out))
+                                .map_or("-".to_string(), |v| v.var.display_name().to_string()),
+                            out.map_or(0, |out| graph.use_sites(out).len()),
+                            graph.inst(*inst).map_or(String::new(), |inst| format!(
+                                " {:?}",
+                                inst.payload
+                            )
+                            .chars()
+                            .take(70)
+                            .collect::<String>()),
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" "),
             ));
@@ -1680,13 +1737,49 @@ fn inlinable_core(
                         .and_then(|v| v.canonical_storage)
                         .is_some_and(|s| read_locations.contains(&s.location()))
             });
+        // A merge this block feeds is copied to its carrier at the block's end,
+        // so a read moved to the terminator reads the next iteration's value:
+        // `ZF = R8 == 1` folded into the branch below `R8 = R8 - 1` ends the
+        // loop one turn late.
+        let carried = !rewritten
+            && (transfers_control(use_inst)
+                && graph.insts.iter().any(|inst| {
+                    matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
+                        && inst.inputs.iter().any(|input| {
+                            graph
+                                .def_inst(*input)
+                                .and_then(|def| graph.inst(def))
+                                .is_some_and(|def| def.block == def_inst.block)
+                        })
+                        && inst
+                            .output
+                            .and_then(|o| graph.value(o))
+                            .and_then(|v| v.canonical_storage)
+                            .is_some_and(|s| read_locations.contains(&s.location()))
+                }));
         if rewritten {
             rejected("a location the expression reads is written between definition and reader");
+        } else if carried {
+            rejected("a merge this block feeds carries a location the expression reads");
         } else {
             inlinable.insert(value.id);
         }
     }
     inlinable
+}
+
+/// Whether this instruction leaves its block, so a merge's carrier copy is
+/// already written when it runs.
+fn transfers_control(inst: &r2ssa::GraphInst) -> bool {
+    matches!(
+        inst.payload,
+        r2ssa::InstPayload::Op(
+            r2ssa::SSAOp::Branch { .. }
+                | r2ssa::SSAOp::CBranch { .. }
+                | r2ssa::SSAOp::BranchInd { .. }
+                | r2ssa::SSAOp::Return { .. }
+        )
+    )
 }
 
 /// The name of a machine expression's kind, for the inlining probe.

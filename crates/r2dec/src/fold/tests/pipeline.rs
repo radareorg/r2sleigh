@@ -3836,25 +3836,58 @@ mod tests {
         let (_, address_expr) = ctx
             .certified_memory_address_expr(memory)
             .expect("source-owned address expression");
-        let address_symbol = names
-            .symbol_for_value(memory.address)
-            .expect("the exact address value has one sealed binding");
-        // The address is marked as the read it is, so the expression is the
-        // binding's symbol under an observation marker rather than a bare
-        // variable. What the test is about is unchanged: the address comes from
-        // the sealed binding and not from a bypass.
-        assert!(matches!(address_expr, CExpr::Observed { .. }));
-        assert_eq!(*address_expr.unobserved(), CExpr::Var(address_symbol));
+        // The address comes from the plan and not from a bypass. Read once, it
+        // may be folded into the load, and then the plan answers with its own
+        // canonical term rather than a binding; either answer is the plan's.
+        match names.resolve_value(memory.address) {
+            crate::binding_plan::PlannedValueSymbol::Bound(symbol) => {
+                assert!(matches!(address_expr, CExpr::Observed { .. }));
+                assert_eq!(*address_expr.unobserved(), CExpr::Var(symbol));
+            }
+            crate::binding_plan::PlannedValueSymbol::Inline(term) => {
+                assert_eq!(
+                    names
+                        .plan()
+                        .canonical()
+                        .value(memory.address)
+                        .map(|value| value.canonical),
+                    Some(term),
+                    "an inlined address is spelled from its own canonical term"
+                );
+            }
+            other => panic!("the exact address value has a sealed disposition: {other:?}"),
+        }
         let access = ctx
             .render_certified_load_access_expr(dst, addr, CType::Int { bits: 64, signedness: r2types::Signedness::Unsigned })
             .expect("exact memory and field facts must render");
         assert_eq!(access.access(), memory.access);
         let expr = access.expr();
 
-        assert!(
-            matches!(expr, CExpr::Deref(_)),
-            "a field label without a base-identity contract must retain the exact address binding: {expr:?}"
-        );
+        // Either the address stands as its own dereference, or the member is
+        // spelled against a base the plan named. What is refused is a label on
+        // a base that came from nowhere.
+        match expr.unobserved() {
+            CExpr::Deref(_) => {}
+            CExpr::PtrMember { base, member } => {
+                assert_eq!(&**member, "hash");
+                let parameter = prepared
+                    .function_facts()
+                    .render()
+                    .and_then(|render| render.parameter_values(0).next())
+                    .expect("the fixture's pointer parameter has a value");
+                assert_eq!(
+                    *base.unobserved(),
+                    CExpr::Var(
+                        names
+                            .symbol_for_value(parameter)
+                            .expect("the base is the parameter's own binding")
+                    )
+                );
+            }
+            other => panic!(
+                "a field label without a base-identity contract must retain the exact address binding: {other:?}"
+            ),
+        }
     }
     #[test]
     fn forged_block_assumption_cannot_replace_the_exact_branch_use() {

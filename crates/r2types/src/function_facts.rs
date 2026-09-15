@@ -6843,6 +6843,7 @@ mod tests {
             field_type: None,
             access_width: 32,
             base: None,
+            source: MemberAccessSource::ExternalLayout,
         };
         let existing_render = FunctionRenderFacts {
             string_literals_by_value: BTreeMap::from([(
@@ -8076,6 +8077,7 @@ mod tests {
                     field_type: None,
                     access_width: 8,
                     base: None,
+                    source: MemberAccessSource::ExternalLayout,
                 }],
             )]),
             array_accesses_by_op: BTreeMap::from([(
