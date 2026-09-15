@@ -1345,9 +1345,10 @@ fn inlinable_core(
     // arguments look dead here before that case was fixed; counting only that
     // certificate kind would make the same mistake for the other three.
     let certified_readers = certified_value_readers(source);
-    // A certificate that reads a value as an address or a lane is answered from
-    // that value's binding symbol, so it must keep one.
-    let certified_read_values = super::certified_read_values(source);
+    // A certificate that reads a value as a lane is answered from that value's
+    // binding symbol, so it must keep one. An address read is not: a folded
+    // address is spelled by its own expression.
+    let certified_read_values = super::certified_lane_read_values(source);
     // A certificate on a value nothing reads states a read that renders nothing.
     let dead_readers = unread_defined_values(source, projection);
     // A read is a read only if what it feeds reaches the page. At -O0 and again
@@ -1415,7 +1416,7 @@ fn inlinable_core(
             continue;
         }
         if certified_read_values.contains(&value.id) {
-            rejected("a certified address or lane read is answered from a binding");
+            rejected("a certified lane read is answered from a binding");
             continue;
         }
         // A dead phi has no rendered statement and therefore makes no program

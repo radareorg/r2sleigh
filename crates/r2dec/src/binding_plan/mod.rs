@@ -381,37 +381,14 @@ pub(crate) fn term_spells_binding(
     }
 }
 
-/// Every value a certificate reads as an address or a lane.
+/// Every value a certificate reads as a decomposed store's lane.
 ///
 /// The journal answers such a read from the value's binding symbol, so a value
-/// in here cannot be folded into its reader. The membership question is the
-/// two predicates below and nothing else: this only enumerates the candidates
-/// each certificate could name, so there is no second answer to drift from.
-pub(crate) fn certified_read_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
+/// in here cannot be folded into its reader. The membership question is
+/// `certified_lane_read` and nothing else: this only enumerates the candidates
+/// a certificate could name, so there is no second answer to drift from.
+pub(crate) fn certified_lane_read_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
     let mut values = BTreeSet::new();
-    for (access, memory) in &source.certificates().memory_accesses {
-        let Some(address) = source.addresses().parameter_expression(memory.address) else {
-            continue;
-        };
-        let candidates = address
-            .terms
-            .iter()
-            .map(|term| term.value)
-            .chain(
-                source
-                    .facts()
-                    .boundaries
-                    .parameters
-                    .values()
-                    .map(|p| p.value),
-            )
-            .collect::<BTreeSet<_>>();
-        for value in candidates {
-            if certified_address_read(source, value, *access) {
-                values.insert(value);
-            }
-        }
-    }
     for run in source.structured().member_run_stores.values() {
         for member in &run.members {
             if let r2ssa::MemberRunSource::Lane(value) = member.source

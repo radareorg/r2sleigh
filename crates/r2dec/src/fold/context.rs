@@ -1053,6 +1053,17 @@ impl<'a> FoldingContext<'a> {
         let Some(journal) = self.inputs.observation_journal else {
             return expr;
         };
+        // A folded address read is spelled by its own expression, whose leaves
+        // carry the reads. There is no binding here for placement to check,
+        // because the read is not of one.
+        if matches!(
+            self.inputs
+                .binding_names
+                .and_then(|names| names.disposition_for_value(value)),
+            Some(crate::binding_plan::ValueDisposition::Inline { .. })
+        ) {
+            return expr;
+        }
         let fallback = expr.clone();
         let Some(symbol) = self
             .inputs
