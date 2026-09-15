@@ -586,23 +586,37 @@ impl Builder<'_> {
                 self.require(id, 0, CTypeLike::u64());
                 CValue::Typed(CTypeLike::int(32))
             }
-            // A merge is not an expression; each of its edges is a copy,
-            // typed as one.
             // The root and the lane are both brought to their own unsigned
             // widths; the mask and shift the spelling uses promote like any
             // other integer operator, and the assignment narrows back.
-            MachineExprKind::InsertLane { root, lane, .. } => {
+            MachineExprKind::InsertLane {
+                root,
+                lane,
+                position,
+                ..
+            } => {
                 self.produced(*root);
                 self.produced(*lane);
+                self.produced(*position);
                 let root_width = self.width(*root);
                 let lane_width = self.width(*lane);
+                let position_width = self.width(*position);
                 self.require(id, 0, unsigned(root_width));
                 self.require(id, 1, unsigned(lane_width));
+                // The position is read as the shift count of the spelling, so
+                // it takes a shift count's rule. Leaving it unstated let the
+                // operand reach the page at whatever type it happened to have.
+                self.require(id, 2, unsigned(position_width));
                 CValue::Typed(promoted(&own))
             }
+            // A merge is not an expression; each of its edges is a copy, and
+            // takes a copy's rule -- the edge converts nothing and the
+            // declared type is met at the assignment that writes it.
             MachineExprKind::Phi { inputs } => {
-                for input in inputs.iter() {
-                    self.produced(*input);
+                for (index, input) in inputs.iter().enumerate() {
+                    let input_type = self.produced(*input);
+                    let required = input_type.as_type().cloned().unwrap_or_else(|| own.clone());
+                    self.require(id, index, required);
                 }
                 CValue::Typed(own)
             }
