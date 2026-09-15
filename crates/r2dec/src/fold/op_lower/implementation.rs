@@ -1933,9 +1933,9 @@ impl<'a> FoldingContext<'a> {
                     CExpr::StringLit(memory_ordering_name(ordering).to_string()),
                 ],
             ))),
-            SSAOp::IntAdd { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Add),
-            SSAOp::IntSub { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Sub),
-            SSAOp::IntMult { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Mul),
+            SSAOp::IntAdd { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::Add),
+            SSAOp::IntSub { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::Sub),
+            SSAOp::IntMult { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::Mul),
             SSAOp::IntDiv { dst, a, b } => self.binary_stmt_typed(
                 frame,
                 dst,
@@ -1968,10 +1968,10 @@ impl<'a> FoldingContext<'a> {
                 BinaryOp::Mod,
                 Some(type_from_size(dst.size)),
             ),
-            SSAOp::IntAnd { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::BitAnd),
-            SSAOp::IntOr { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::BitOr),
-            SSAOp::IntXor { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::BitXor),
-            SSAOp::IntLeft { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Shl),
+            SSAOp::IntAnd { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::BitAnd),
+            SSAOp::IntOr { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::BitOr),
+            SSAOp::IntXor { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::BitXor),
+            SSAOp::IntLeft { dst, a, b } => self.unsigned_binary_stmt(frame, dst, a, b, BinaryOp::Shl),
             SSAOp::IntRight { dst, a, b } => self.binary_stmt_typed(
                 frame,
                 dst,
@@ -2532,6 +2532,28 @@ impl<'a> FoldingContext<'a> {
         op: BinaryOp,
     ) -> Option<CStmt> {
         self.binary_stmt_typed(frame, dst, a, b, op, None)
+    }
+
+    /// A machine integer operation, computed in the unsigned carrier its
+    /// result has.
+    ///
+    /// The machine's add, subtract, multiply, and, or, xor and shift are
+    /// defined on bit patterns at one width, and the C that says so is the
+    /// one whose operands are unsigned at that width: signed overflow is
+    /// undefined, and a signed operand promoted past its own width computes
+    /// something else. The shifts, divisions and comparisons beside these
+    /// already state it; these stated nothing, so where the arena had no
+    /// requirement of its own an operand crossed with nothing decided about
+    /// it at all.
+    fn unsigned_binary_stmt(
+        &self,
+        frame: &LowerFrame,
+        dst: &SSAVar,
+        a: &SSAVar,
+        b: &SSAVar,
+        op: BinaryOp,
+    ) -> Option<CStmt> {
+        self.binary_stmt_typed(frame, dst, a, b, op, Some(uint_type_from_size(dst.size)))
     }
 
     /// Render a typed machine arithmetic flag through the external C prelude.
