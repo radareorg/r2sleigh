@@ -151,10 +151,22 @@ accept_baseline = sys.argv[3] == "1"
 gate = sys.argv[4]
 repeat_result_dir = Path(sys.argv[5])
 configs = ("x64_O0", "x64_O1", "x64_O2", "arm64_O0", "arm64_O1", "arm64_O2")
-functions = (
-    "fnv1a32", "fnv1a64", "djb2", "sdbm", "adler32", "crc32_bitwise",
-    "murmur3_32", "xxhash32", "pearson",
+# One answerer for what the corpus is made of. A second copy here drifts, and
+# a function added to the specs but not to this list was measured as `missing`
+# for a reason that had nothing to do with the decompiler.
+import subprocess
+
+functions = tuple(
+    subprocess.run(
+        [sys.executable, str(baseline_path.parent / "corpus_names.py"), "hashes"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    .stdout.splitlines()[0]
+    .split()
 )
+expected_entries = len(configs) * len(functions)
 reports = [json.loads((result_dir / f"{config}.json").read_text()) for config in configs]
 entries = [entry for report in reports for entry in report["entries"]]
 repeat_entries = {}
@@ -168,8 +180,10 @@ if gate == "cutover":
         for report in repeat_reports
         for entry in report["entries"]
     }
-if len(entries) != 54:
-    raise SystemExit(f"matrix is incomplete: expected 54 entries, found {len(entries)}")
+if len(entries) != expected_entries:
+    raise SystemExit(
+        f"matrix is incomplete: expected {expected_entries} entries, found {len(entries)}"
+    )
 keys = {(entry["config"], entry["function"]) for entry in entries}
 expected_keys = {(config, function) for config in configs for function in functions}
 if keys != expected_keys:
@@ -177,7 +191,7 @@ if keys != expected_keys:
     unexpected = sorted(keys - expected_keys)
     raise SystemExit(f"matrix key mismatch: missing={missing} unexpected={unexpected}")
 if gate == "cutover" and (
-    len(repeat_entries) != 54 or set(repeat_entries) != expected_keys
+    len(repeat_entries) != expected_entries or set(repeat_entries) != expected_keys
 ):
     missing = sorted(expected_keys - set(repeat_entries))
     unexpected = sorted(set(repeat_entries) - expected_keys)
@@ -219,7 +233,7 @@ if accept_baseline:
             json.dumps(report, indent=2, sort_keys=True) + "\n"
         )
 
-combined = {"schema_version": 1, "expected_entries": 54, "entries": entries}
+combined = {"schema_version": 1, "expected_entries": expected_entries, "entries": entries}
 (result_dir / "matrix.json").write_text(json.dumps(combined, indent=2, sort_keys=True) + "\n")
 
 for score in (
