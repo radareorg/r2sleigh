@@ -138,12 +138,6 @@ fn spell_constant(expr: CExpr, to: &CType, pointer_bits: u32) -> CExpr {
 }
 
 /// Whether the type this literal's spelling has is not the type reading it.
-///
-/// A spelling carries a type of its own and the compiler reads that, not what
-/// the renderer meant. `-0x4` is an `int` however wide the mask is, so an
-/// unsigned reader is told; and `0xcbf29ce484222325U` is an
-/// `unsigned long long` whose value no signed type holds, so a signed reader
-/// is told too. Everything else converts exactly and is left alone.
 fn spelling_disagrees_with_reader(expr: &CExpr, reader_is_signed: bool, bits: u32) -> bool {
     if renders_as_signed(expr) {
         return !reader_is_signed;
@@ -202,13 +196,7 @@ fn respell_literal(expr: CExpr, signed: bool, bits: u32) -> CExpr {
     }
 }
 
-/// Whether a signed reader would see this value as a small negative number.
-///
-/// That is the whole of what respelling buys: `0xffffffff` read as an
-/// `int32_t` is `-1`, and `-1` is what the program means. A large value with
-/// the sign bit set is a mask or a magic constant -- FNV's basis
-/// `0xcbf29ce484222325` -- and the decimal negative it denotes hides what
-/// every reader recognises in the hex, so the hex stays and the type is cast.
+/// Whether a signed reader sees this value as a small negative rather than a magic constant.
 fn reads_as_a_small_negative(value: u64, bits: u32) -> bool {
     if !(8..=64).contains(&bits) {
         return false;
@@ -246,14 +234,7 @@ pub(crate) fn convert_optional(
 }
 
 pub(crate) fn convert(expr: CExpr, from: &CValue, to: &CType, pointer_bits: u32) -> CExpr {
-    // A literal has no type but the one its spelling gives it. Whatever was
-    // recorded for the *value* -- a declared object's type, the width of the
-    // machine register it was materialized into -- the compiler reads the
-    // text, and `-0x4` is an `int` there however the arena typed the value.
-    // Trusting the recorded type instead is how `mask & -0x4` reached a
-    // `uint64_t` with nothing spelled: the value was recorded `uint64_t`, the
-    // conversion was therefore a no-op, and `-Wsign-conversion` is what
-    // noticed that the operand was not one.
+    // A literal has no type but the one its spelling gives it.
     if is_literal(&expr) {
         return spell_constant(expr, to, pointer_bits);
     }

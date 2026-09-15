@@ -2534,17 +2534,7 @@ impl<'a> FoldingContext<'a> {
         self.binary_stmt_typed(frame, dst, a, b, op, None)
     }
 
-    /// A machine integer operation, computed in the unsigned carrier its
-    /// result has.
-    ///
-    /// The machine's add, subtract, multiply, and, or, xor and shift are
-    /// defined on bit patterns at one width, and the C that says so is the
-    /// one whose operands are unsigned at that width: signed overflow is
-    /// undefined, and a signed operand promoted past its own width computes
-    /// something else. The shifts, divisions and comparisons beside these
-    /// already state it; these stated nothing, so where the arena had no
-    /// requirement of its own an operand crossed with nothing decided about
-    /// it at all.
+    /// A machine integer operation, computed in the unsigned carrier its result has.
     fn unsigned_binary_stmt(
         &self,
         frame: &LowerFrame,

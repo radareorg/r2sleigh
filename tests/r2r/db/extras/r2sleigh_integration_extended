@@ -759,3 +759,30 @@ s `afl~alloc_and_copy$[0]` > /dev/null
 pd:s | jq -Rs 'contains("return buf;") and (contains("- 0x8")|not) and (test("\\*\\(buf \\+")|not)'
 EOF_CMDS
 RUN
+
+NAME=dwarf_prototype_reaches_its_own_function
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s `afl~test_array_index$[0]` >/dev/null
+afs | jq -Rs 'contains("int *") and contains("arr") and contains("idx")'
+EOF_CMDS
+RUN
+
+NAME=dec_array_index_spill_coalesces_with_its_parameter
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~test_array_index$[0]` >/dev/null
+pd:s | jq -Rs 'contains("arr[") and (contains("stack_m")|not) and (contains("<< 2")|not)'
+EOF_CMDS
+RUN

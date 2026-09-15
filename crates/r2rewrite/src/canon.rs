@@ -211,12 +211,7 @@ pub(crate) fn collect_affine(
             *entry = entry.wrapping_add(scale.wrapping_mul(k)) & modulus;
             *atoms += 1;
         }
-        // A left shift by a literal is a multiplication by a power of two,
-        // exactly, whenever the count is below the width -- the one case where
-        // the overshift behaviour cannot decide anything. Reading it as the
-        // multiplication it is, is what lets an index reach its coefficient:
-        // `base + (i << 2)` is `base + 4*i`, and the element size the
-        // subscript rule needs is in the coefficient and nowhere else.
+        // A left shift by a literal below the width is a multiplication by a power of two.
         TermKind::Shift {
             kind: r2ssa::MachineShiftKind::Left,
             value,

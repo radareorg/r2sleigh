@@ -1,17 +1,4 @@
-//! What a statement that updates a variable by itself looks like, and how it
-//! is spelled.
-//!
-//! `x = x + 1`, `x += 1` and `x++` are one thing said three ways, and until
-//! this module there were three answerers: the rewriter below had the ten-operator
-//! table, a second recognizer beside it accepted a different set of shapes, and
-//! the printer carried a third that knew only addition and subtraction and ran
-//! after the tree was sealed. A rewrite in the printer cannot move the markers
-//! of what it collapses, so a run of updates coalesced into one statement left
-//! every marker it absorbed unaccounted -- which is the ledger reporting that
-//! the program's effects went unrendered when they did not.
-//!
-//! So the recognizing and the rewriting live here, before sealing, and the
-//! printer prints the node it is given.
+//! `x = x + 1`, `x += 1` and `x++`, recognized and rewritten in one place before sealing.
 
 use crate::ast::{BinaryOp, CExpr, CStmt, UnaryOp};
 use crate::symbol::SymbolId;
@@ -103,10 +90,7 @@ fn literal_i64(expr: &CExpr) -> Option<i64> {
     }
 }
 
-/// The shortest C for adding `delta` to `name`.
-///
-/// A delta of zero has no spelling: dropping the statement would drop the
-/// definitions it stands for, so the caller keeps what it had.
+/// The shortest C for adding `delta` to `name`; zero has no spelling.
 pub(crate) fn update_expr(name: SymbolId, delta: i64) -> Option<CExpr> {
     match delta {
         0 => None,
@@ -129,10 +113,7 @@ pub(crate) fn update_expr(name: SymbolId, delta: i64) -> Option<CExpr> {
     }
 }
 
-/// Shorten an expression that adds one or subtracts one to `++` or `--`.
-///
-/// Every marker the expression owned moves onto the shorter spelling: it is
-/// the same occurrence, said in fewer characters.
+/// Shorten an expression that adds or subtracts one to `++` or `--`, markers and all.
 pub(crate) fn shorten_unit_update(expr: CExpr) -> CExpr {
     let Some((name, delta)) = self_update_delta(&expr) else {
         return expr;
@@ -146,11 +127,7 @@ pub(crate) fn shorten_unit_update(expr: CExpr) -> CExpr {
     crate::ast::carry_all_expr_observations(&expr, shorter)
 }
 
-/// Collapse the run of updates to one variable that starts at `stmts[0]`.
-///
-/// Returns how many statements it consumed and the one that replaces them,
-/// carrying every marker they owned. A run of one is still rewritten, because
-/// `x += 1` is `x++`.
+/// Collapse the run of updates at `stmts[0]`, carrying every marker it absorbs.
 pub(crate) fn coalesce_run(stmts: &[CStmt]) -> Option<(usize, CStmt)> {
     let (name, first) = stmt_self_update_delta(stmts.first()?)?;
     let mut total = first;

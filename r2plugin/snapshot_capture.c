@@ -556,16 +556,7 @@ static ut32 fcn_context_slot_measured_extent(RAnal *anal, RAnalFunction *fcn, RA
 			if (dereferenced) {
 				*dereferenced = true;
 			}
-			// How many bytes this instruction moves through its memory
-			// operand, which is the claim the access makes about the slot.
-			//
-			// The operand's own `memref` is that claim. `op.refptr` is not:
-			// for `ldrsw x9, [sp, 4]` radare2 reports refptr 8 and memref 4,
-			// because the destination register is eight bytes wide and the
-			// transfer is four. Taking the wider of the two made an `int`
-			// parameter's home eight bytes, overlapping the home above it and
-			// refusing the whole interface. So refptr answers only where no
-			// operand carries a memref at all.
+			// The operand's memref is the transfer's width; op.refptr is the destination register's.
 			const ut32 operands = fcn_context_widest_memref (&op.srcs,
 				fcn_context_widest_memref (&op.dsts, 0));
 			if (operands > 0) {

@@ -4228,27 +4228,7 @@ fn literal_value(expr: &CExpr) -> Option<u64> {
         _ => None,
     }
 }
-/// The name this constant is, and the type that name has.
-///
-/// A constant that points at text or at a named object *is* that text or that
-/// object: rendering the number instead loses a name the analysis already had
-/// and that no reader can recover from it. The address is taken rather than
-/// the object's value, because `lea` puts the address of the object in the
-/// register.
-///
-/// The substitution retypes the expression -- a string literal is an array of
-/// `char`, not a number -- so it is asked at the conversion that states what
-/// the boundary requires, and nowhere else. It used to run as a pass over the
-/// finished tree, which meant re-deriving that requirement from the rendered
-/// text: an enclosing cast where there was one, and otherwise a hand-written
-/// walk of assignments, operator promotion rules and comparison peers,
-/// guessing at what the typed boundaries had already stated. Measured over
-/// zlib's arm64 minigzip, that walk supplied the requirement 702 times out of
-/// 756. It is gone.
-///
-/// Recording the object is part of naming it: a rendering that spells
-/// `&progName` has to declare `progName`, and the place that decides to spell
-/// it is the place that knows.
+/// The name this constant address is, the type that name has, and the object it declares.
 pub(crate) fn name_of_constant_address(
     expr: &CExpr,
     strings: &std::collections::BTreeMap<u64, String>,
