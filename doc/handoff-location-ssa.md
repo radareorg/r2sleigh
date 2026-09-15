@@ -24459,3 +24459,52 @@ exact interface is built, no source stack slot travels, and no parameter spill
 can be coalesced. This is a radare2 defect and belongs in its own upstream pull
 request; the r2sleigh side needs nothing until it is fixed, beyond the
 coalescing licence that step 2 showed is still missing.
+
+### Three radare2 defects stand between here and `arr[idx]`
+
+Continuing the trace above, each confirmed by measurement and then reverted so
+the tree stays as committed. All three belong upstream, one pull request each.
+
+**1. A dSYM's DWARF addresses are shifted by a whole image base.**
+`load_mach0_dsym_file` (`libr/core/cfile.c`) opens the companion with
+`r_bin_file_options_init (&opt, dsym_fd, r_bin_file_get_baddr (main_bf), ...)`.
+The dSYM's own plugin-reported base is zero, so
+`baddr_shift = 0x100000000 - 0`, and `dwarf_relocate_address` adds that to
+every address the DWARF carries -- which are already the executable's absolute
+addresses. Measured: 107 addresses shifted, `DW_AT_low_pc (0x100000bd0)` in the
+dSYM arriving as `0x200000bd0`. Passing `UT64_MAX` instead -- the sentinel that
+means "the file's own base" -- fixes it, and the function's DWARF name reaches
+it (`sym._test_array_index` becomes `dbg.test_array_index`) and the plugin's
+interface goes from `address_linked=0` to
+`parameters=1 return=1 return_address=1 stack_pointer=1`.
+
+**2. With the interface populated, the two parameter homes overlap.**
+`SourceFunctionInterface::new` then refuses `OverlappingStackSlots`: the home
+at SP-12 is eight bytes and the one at SP-8 is eight, so the first runs into
+the second. The plugin collects them correctly -- `var_4h type=signed int
+size=4 offset=-12` -- and `fcn_context_slot_measured_extent` widens the narrow
+one to eight afterwards, on the rule that "a measurement is what the program
+did". Gating that on `fcn_context_slot_declared_by_dwarf` does not help: the
+home is radare2's own invention from the spill, not a DWARF-named variable.
+
+**3. radare2's arm64 operand widths do not agree with themselves.** The
+measurement is wrong because the widths it reads are wrong. The body is four
+instructions:
+
+```
+str  x0, [var_8h]     ; 8 bytes
+str  w1, [var_4h]     ; 4 bytes
+ldr  x8, [var_8h]     ; 8 bytes
+ldrsw x9, [var_4h]    ; 4 bytes, sign-extended into a 64-bit register
+```
+
+`op.refptr` is **4 for all four** -- the instruction's own size, not the
+transfer's -- while the operand `memref` scan returns **8 for the `ldrsw`**,
+which is the destination register's width. So one source under-reports the wide
+accesses and the other over-reports the narrow one, and no combination of them
+measures this frame. This is the defect to fix first: with correct widths, (2)
+disappears, and with (1) the whole exact-interface path opens.
+
+Until then the `-O0` parameter spill cannot be coalesced with its parameter on
+any Mach-O, which is the shape behind `dec_array_index_uses_real_index` and
+several of its neighbours.
