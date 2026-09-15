@@ -24758,3 +24758,35 @@ temporaries into their one reader, which is a policy question about expression
 size and readability rather than a missing certificate. It is the same shape as
 `tmp_26b00_1 = (int32_t)idx; arr[tmp_26b00_1]` in the array tests, which is why
 those four failures move together.
+
+### Two call tests passed once the assertion counted the right thing
+
+`dec_authenticate_evaluates_the_call_once` and `dec_authenticate_binds_one_strcmp`
+were not defects. They asserted `sym.imp.strcmp(` -- a flag spelling that is not
+a C identifier and that the renderer has not produced since it began emitting
+compilable C -- and on `vuln_test_x86` the callee is simply `strcmp`. Corrected
+to that, they still failed on a count: the rendering mentions `strcmp(` twice,
+once as the call and once as `uint64_t strcmp(uint64_t, uint64_t);`, the extern
+declaration the C needs to compile. Counting `= strcmp(` asserts single
+evaluation without counting the declaration, and both pass.
+
+### The taint view cannot answer what its test asks
+
+`taint_vuln_memcpy_call_sinks_include_arg_regs` wants a `Call` sink hit whose
+tainted variables include an argument register. The analysis has the mechanism
+-- `sink_sources_for_op` extends a call's sources with
+`collect_call_arg_vars`, which reads `callsite.argument_values` from the
+callsite certificate -- but `a:sla.debug.taint` reaches it through
+`r2taint_function_json`, which takes raw FFI blocks and constructs
+`TaintAnalysis::new` with no artifact. Both call sites say so in comments: "this
+legacy block-only endpoint has no source snapshot or exact callsite interface"
+and "the raw FFI shape carries no source-owned callsite certificate. Keep
+implicit call arguments unavailable instead of guessing them from the
+architecture and register names."
+
+So the seven sink hits report `Call` with the *target* address tainted
+(`ram:100002464_0`) and never an argument register. The fix is to route the
+debug view through the trusted snapshot, as every other exact fact already
+travels; guessing argument registers from the architecture is exactly what the
+comment refuses and would be wrong. That is plumbing of the same kind the
+snapshot architecture exists to do, not a change to the taint analysis.
