@@ -475,10 +475,19 @@ impl<'a> FoldingContext<'a> {
             crate::observation_journal::LegacyObservationJournalError,
         > {
             let rendered = self.materialize_machine_expr(names, value, term, id, depth + 1)?;
-            Ok(match typed.required(expr, index) {
-                Some(required) => self.convert_from(rendered, typed.produced(id), required),
-                None => rendered,
-            })
+            // An operand that exists has a requirement: every kind with
+            // children states one. `None` here is not "no conversion needed",
+            // it is "nobody decided", and rendering the operand at whatever
+            // type it happened to have is how a byte offset reached a typed
+            // pointer. Refuse instead.
+            let Some(required) = typed.required(expr, index) else {
+                r2il::refusal_evidence!(
+                    "operand-requirement",
+                    "machine {expr:?} operand {index} has no stated requirement"
+                );
+                return Err(invalid());
+            };
+            Ok(self.convert_from(rendered, typed.produced(id), required))
         };
         Ok(match machine_expr.kind() {
             Kind::Constant {
@@ -619,10 +628,14 @@ impl<'a> FoldingContext<'a> {
             crate::observation_journal::LegacyObservationJournalError,
         > {
             let rendered = self.materialize_term(names, value, id, depth + 1)?;
-            Ok(match typed.term_required(term, index) {
-                Some(required) => self.convert_from(rendered, typed.term_produced(id), required),
-                None => rendered,
-            })
+            let Some(required) = typed.term_required(term, index) else {
+                r2il::refusal_evidence!(
+                    "operand-requirement",
+                    "term {term:?} operand {index} has no stated requirement"
+                );
+                return Err(invalid());
+            };
+            Ok(self.convert_from(rendered, typed.term_produced(id), required))
         };
         let literal =
             |bits: r2ssa::MachineBitVector| wide_aware_literal(bits.bits(), bits.width_bits());
