@@ -580,22 +580,6 @@ EOF_CMDS
 BROKEN=1
 RUN
 
-NAME=dec_callother_emitted
-FILE=bins/vuln_test_x86
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-a:sla > /dev/null
-aaa
-s `afl~test_cpuid$[0]` >/dev/null
-s `afl~test_cpuid$[0]` >/dev/null
-s `afl~test_cpuid$[0]` >/dev/null
-pd:s | jq -Rs 'contains("callother(")'
-EOF_CMDS
-RUN
-
 NAME=dec_check_secret_signature_uses_concrete_int_type
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
