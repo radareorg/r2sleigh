@@ -24655,14 +24655,36 @@ already proved renders nothing is just as accounted. `ValueId(5)` -- the
 four-byte constant with 27 readers -- is claimed now, and the change is
 neutral across the census and all eight corpus columns.
 
-It is still not enough for `test_cpuid`. The next unaccounted value is
-`ValueId(58)`, the constant 8, read by two `IntAdd`s that adjust `RSP`; those
-reads are elided by the journal's own normalization rather than by a
-certificate, and the closure runs before the journal has computed them. So the
-remaining work is an ordering one -- the closure has to be computed where the
-journal's elisions are already known -- rather than another widening of what
-the closure can guess. Each widening buys exactly one value and then meets the
-next constant.
+A second widening followed and closed the cascade entirely: a read whose
+instruction's own output the plan elided renders nothing either, which the
+closure can ask the plan directly without waiting for the journal. That is the
+ordering problem answered -- the plan's dispositions are settled before folding
+-- and `test_cpuid` stopped refusing for an unaccounted value at all. Both
+widenings measured neutral across the census and all eight corpus columns.
+
+**Where it stands now.** The refusal has moved a whole stage, to
+`native effect obligations refused: 16 refused (volatile-or-unknown at
+0x100000940:op:15)`. The value cells are accounted; what is left is that a
+`CallOther`'s effects are refused outright by `effect_ledger.rs`:
+
+```rust
+if matches!(id.kind, VolatileOrUnknownEffect | Trap) {
+    return Some(Outcome::Refused { layer: Ssa, reason: UnsupportedEffect });
+}
+```
+
+before any gap can answer them, and no gap is planned for a refused effect: the
+retry loop in `lib.rs` only anchors on `binding_shadow_failure()`, while the
+effect audit is raised downstream in `r2engine`. Wiring the loop to anchor at
+`EffectObligationAudit::refused_obligation` does plan the gap -- and the loop
+then oscillates, the new gap reopening a value cell and returning the function
+to `RenderedValueRequired`. That attempt is reverted.
+
+So the last link is not another anchor but the interaction between the two:
+a gap planned for a refused effect has to claim the value cells its own ops
+read, or the next attempt loses them again. The gap closure already has the
+rule for that (`GapCell::Value` for a definition-less input); what it lacks is
+being told that the *effect* gap owns those ops.
 
 The anchor change was reverted separately: `gap_anchor_for_native_failure`
 maps `RenderedValueRequired` to `def_inst`, which a constant does not have, so
