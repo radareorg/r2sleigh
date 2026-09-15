@@ -24534,3 +24534,33 @@ keeps (`arr = (int32_t*)arr;`), a temporary that could be inlined, and the
 
 All gates stay green: r2r 66 OK / 18 XX, corpus 60/60 on every column, census
 bzip2-O0 3/152, bzip2-O2 6/112, minigzip-O2 16/161, dpkg-divert-O0 9/651.
+
+### The narrow half of the spill store, and why it is still open
+
+The store elision that landed covers the case where the stored value is
+`Bound` to the object's own binding: `str x0, [var_8h]` after `arr` and its
+home are one binding. The narrow half does not. `str w1, [var_4h]` stores the
+32-bit lane of `x1`, and the lane's disposition is `Inline`, not `Bound`, so
+`x = x` is not visible at the disposition level. `idx = idx;` is what survives.
+
+Resolving the lane is straightforward -- the inline term is
+`Leaf(LeafRead { expr })` and the machine expression behind it is
+`Source { binding: { value, width_bits: 32 } }`, so the binding it reads is one
+hop away, and requiring `width_bits` to equal the binding's declared storage
+width keeps a genuinely narrowing write out. Eliding the store on that basis
+works and renders the function in three statements.
+
+What does not work is answering the lane's own producer obligation. With the
+store gone the lane has no rendered reader, and the `live-value-producer`
+obligation at its site goes unaccounted. Adding the producer's site to the same
+elided-store set answers it -- and **regresses 170 functions**: bzip2-O0 drops
+from 152 renderings to 114 and dpkg-divert from 651 to 521, because the set is
+keyed by site and a site answers for every obligation on it, including ones
+that legitimately render. That attempt is reverted; the corpus gates stayed
+green throughout, so the census is what caught it.
+
+The missing piece is an answer keyed to the *obligation* rather than the site,
+or a proof that the lane has no other reader before its producer is elided --
+which is what `dead_unused_value_effects` already is, computed by the binding
+plan before lowering. Extending that computation to a value whose only reader
+is an elided store is the shape of the fix.
