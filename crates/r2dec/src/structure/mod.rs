@@ -5,6 +5,7 @@
 pub(crate) mod certify;
 mod place;
 mod rewrite;
+pub(crate) mod self_update;
 mod shape;
 
 use std::cell::Cell;

@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 use crate::ast::stmt_has_render_observations;
-use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp, has_render_observations};
+use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType, has_render_observations};
 use crate::observation_journal::ObservationSealAuthority;
 
 /// Threshold for detecting 64-bit negative values stored as unsigned.
@@ -439,11 +439,7 @@ impl<'c> CodeGenerator<'c> {
             CStmt::Empty => {}
             CStmt::Expr(expr) => {
                 self.emit_indent();
-                if let Some(compact) = scalar_update_expr(expr) {
-                    self.emit_expr(&compact, 0);
-                } else {
-                    self.emit_expr(expr, 0);
-                }
+                self.emit_expr(expr, 0);
                 self.output.push_str(";\n");
             }
             CStmt::Decl { ty, name, init } => {
@@ -523,11 +519,7 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push_str("; ");
 
                 if let Some(update_expr) = update {
-                    if let Some(compact) = scalar_update_expr(update_expr) {
-                        self.emit_expr(&compact, 0);
-                    } else {
-                        self.emit_expr(update_expr, 0);
-                    }
+                    self.emit_expr(update_expr, 0);
                 }
                 self.output.push_str(") ");
                 self.emit_stmt_body(body);
@@ -662,11 +654,7 @@ impl<'c> CodeGenerator<'c> {
         let stmt = stmt.unobserved();
         match stmt {
             CStmt::Expr(expr) => {
-                if let Some(compact) = scalar_update_expr(expr) {
-                    self.emit_expr(&compact, 0);
-                } else {
-                    self.emit_expr(expr, 0);
-                }
+                self.emit_expr(expr, 0);
             }
             CStmt::Decl { ty, name, init } => {
                 self.emit_named_declaration(ty, *name);
@@ -956,22 +944,7 @@ fn generate(func: &CFunction) -> String {
 }
 
 fn prepare_stmt_sequence_for_emission(stmts: Vec<CStmt>) -> Vec<CStmt> {
-    let mut nested = stmts
-        .into_iter()
-        .map(prepare_stmt_for_emission)
-        .collect::<Vec<_>>();
-    let mut prepared = Vec::with_capacity(nested.len());
-    let mut index = 0;
-    while index < nested.len() {
-        if let Some((run_len, stmt)) = coalesced_scalar_update_run(&nested[index..]) {
-            prepared.push(stmt);
-            index += run_len;
-        } else {
-            prepared.push(std::mem::replace(&mut nested[index], CStmt::Empty));
-            index += 1;
-        }
-    }
-    prepared
+    stmts.into_iter().map(prepare_stmt_for_emission).collect()
 }
 
 fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
@@ -1025,137 +998,6 @@ fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
             default: default.map(prepare_stmt_sequence_for_emission),
         },
         other => other,
-    }
-}
-
-fn coalesced_scalar_update_run(stmts: &[CStmt]) -> Option<(usize, CStmt)> {
-    let (name, first_delta) = scalar_self_update_delta(stmts.first()?)?;
-    let mut total = first_delta;
-    let mut run_len = 1;
-
-    for stmt in &stmts[1..] {
-        let Some((next_name, delta)) = scalar_self_update_delta(stmt) else {
-            break;
-        };
-        if next_name != name {
-            break;
-        }
-        total = total.checked_add(delta)?;
-        run_len += 1;
-    }
-
-    if run_len < 2 {
-        return None;
-    }
-
-    let stmt = scalar_update_stmt(name, total)?;
-    // Coalescing multiple updates creates a new occurrence. None of the source
-    // statement/use/write markers has an exact position in it, so the ledger
-    // must report them unaccounted instead of transferring them to synthetic C.
-    Some((run_len, stmt))
-}
-
-fn scalar_update_stmt(name: crate::symbol::SymbolId, delta: i64) -> Option<CStmt> {
-    if delta == 0 {
-        // Removing the whole run would also remove the source definitions it
-        // represents. Keep the original statements until an explicit elision
-        // proof, rather than carrying exact render observations onto an empty
-        // statement that emits no C.
-        return None;
-    }
-    let (op, amount) = if delta < 0 {
-        (BinaryOp::SubAssign, delta.checked_abs()?)
-    } else {
-        (BinaryOp::AddAssign, delta)
-    };
-    Some(CStmt::Expr(CExpr::binary(
-        op,
-        CExpr::Var(name),
-        CExpr::IntLit(amount),
-    )))
-}
-
-fn scalar_update_expr(expr: &CExpr) -> Option<CExpr> {
-    let (name, delta) = scalar_self_update_delta_expr(expr)?;
-    match delta {
-        1 => Some(CExpr::Unary {
-            op: UnaryOp::PostInc,
-            operand: Box::new(CExpr::Var(name)),
-        }),
-        -1 => Some(CExpr::Unary {
-            op: UnaryOp::PostDec,
-            operand: Box::new(CExpr::Var(name)),
-        }),
-        0 => None,
-        _ => match scalar_update_stmt(name, delta)? {
-            CStmt::Expr(expr) => Some(expr),
-            _ => None,
-        },
-    }
-}
-
-fn scalar_self_update_delta(stmt: &CStmt) -> Option<(crate::symbol::SymbolId, i64)> {
-    let stmt = stmt.unobserved();
-    let CStmt::Expr(expr) = stmt else {
-        return None;
-    };
-    scalar_self_update_delta_expr(expr)
-}
-
-fn scalar_self_update_delta_expr(expr: &CExpr) -> Option<(crate::symbol::SymbolId, i64)> {
-    let expr = expr.unobserved();
-    let CExpr::Binary { op, left, right } = expr else {
-        return None;
-    };
-    let CExpr::Var(lhs_name) = left.unobserved() else {
-        return None;
-    };
-    match op {
-        BinaryOp::Assign => update_delta_for_rhs(*lhs_name, right),
-        BinaryOp::AddAssign => literal_i64(right).map(|delta| (*lhs_name, delta)),
-        BinaryOp::SubAssign => {
-            literal_i64(right).and_then(|delta| delta.checked_neg().map(|v| (*lhs_name, v)))
-        }
-        _ => None,
-    }
-}
-
-fn update_delta_for_rhs(
-    lhs_name: crate::symbol::SymbolId,
-    rhs: &CExpr,
-) -> Option<(crate::symbol::SymbolId, i64)> {
-    let rhs = rhs.unobserved();
-    let CExpr::Binary { op, left, right } = rhs else {
-        return None;
-    };
-
-    match op {
-        BinaryOp::Add => {
-            if expr_is_var(left, lhs_name) {
-                literal_i64(right).map(|delta| (lhs_name, delta))
-            } else if expr_is_var(right, lhs_name) {
-                literal_i64(left).map(|delta| (lhs_name, delta))
-            } else {
-                None
-            }
-        }
-        BinaryOp::Sub if expr_is_var(left, lhs_name) => {
-            literal_i64(right).and_then(|delta| delta.checked_neg().map(|v| (lhs_name, v)))
-        }
-        _ => None,
-    }
-}
-
-fn expr_is_var(expr: &CExpr, name: crate::symbol::SymbolId) -> bool {
-    matches!(expr.unobserved(), CExpr::Var(candidate) if *candidate == name)
-}
-
-fn literal_i64(expr: &CExpr) -> Option<i64> {
-    let expr = expr.unobserved();
-    match expr {
-        CExpr::IntLit(value) => Some(*value),
-        CExpr::UIntLit(value) => i64::try_from(*value).ok(),
-        _ => None,
     }
 }
 
@@ -1560,52 +1402,6 @@ mod tests {
     }
 
     #[test]
-    fn coalesced_updates_drop_observations_without_exact_occurrences() {
-        let symbols = test_table();
-        let value = crate::symbol::declare(&symbols, "value");
-        let update = |amount| {
-            CStmt::Expr(CExpr::assign(
-                CExpr::var(value),
-                CExpr::binary(BinaryOp::Add, CExpr::var(value), CExpr::int(amount)),
-            ))
-        };
-        let plain_updates = vec![update(1), update(2)];
-        let (_, plain_update) =
-            coalesced_scalar_update_run(&plain_updates).expect("plain scalar run");
-        let mut owner = crate::ast::RenderObservationOwner::new();
-        let mut observed_updates = Vec::new();
-        let mut expected_ids = Vec::new();
-        for amount in [1, 2] {
-            let (expr_id, expr) = owner
-                .observe_expr(CExpr::assign(
-                    CExpr::var(value),
-                    CExpr::binary(BinaryOp::Add, CExpr::var(value), CExpr::int(amount)),
-                ))
-                .expect("allocate update observation");
-            let (stmt_id, stmt) = owner
-                .observe_stmt(CStmt::Expr(expr))
-                .expect("allocate update statement observation");
-            expected_ids.extend([expr_id, stmt_id]);
-            observed_updates.push(stmt);
-        }
-        let (_, observed_update) =
-            coalesced_scalar_update_run(&observed_updates).expect("observed scalar run");
-        let mut transformed =
-            CFunction::new("updates", CType::Void).with_body(vec![observed_update]);
-        let reachable =
-            crate::ast::strip_render_observations(&mut transformed, owner.expected_count())
-                .expect("coalescing preserved a valid observation domain");
-
-        assert_eq!(transformed.body, vec![plain_update]);
-        for id in expected_ids {
-            assert!(
-                !reachable.contains(id),
-                "a coalesced update has no exact source occurrence for marker {id:?}"
-            );
-        }
-    }
-
-    #[test]
     fn test_generate_if_else() {
         let symbols = test_table();
         let sym_x = crate::symbol::declare(&symbols, "x");
@@ -1645,11 +1441,11 @@ mod tests {
         let code = codegen.generate_stmt(&stmt);
 
         assert!(code.contains("while (i < 10)"));
-        assert!(code.contains("i++"));
+        assert!(code.contains("i += 1"));
     }
 
     #[test]
-    fn test_generate_compound_unit_updates_as_inc_dec() {
+    fn test_generate_prints_the_update_node_it_is_given() {
         let symbols = test_table();
         let sym_i = crate::symbol::declare(&symbols, "i");
         let i = sym_i;
@@ -1664,13 +1460,14 @@ mod tests {
             )),
             "i += 1"
         );
+        // `i += 1` is shortened to `i++` by the structure rewriter, which
+        // owns the markers that move with it; the printer prints the node.
         assert!(
             codegen
-                .generate_stmt(&CStmt::expr(CExpr::binary(
-                    BinaryOp::AddAssign,
-                    CExpr::var(i),
-                    CExpr::int(1),
-                )))
+                .generate_stmt(&CStmt::expr(CExpr::Unary {
+                    op: crate::ast::UnaryOp::PostInc,
+                    operand: Box::new(CExpr::var(i)),
+                }))
                 .contains("i++;")
         );
     }
@@ -1821,113 +1618,5 @@ mod tests {
         assert!(code.contains("int8_t* p;"));
         assert!(code.contains("x = 1;"));
         assert!(!code.contains("int32_t x = 1;"));
-    }
-
-    #[test]
-    fn test_coalesces_adjacent_scalar_self_updates() {
-        let symbols = test_table();
-        let mut func = CFunction::new("updates", CType::Void).with_body(vec![
-            CStmt::expr(CExpr::assign(
-                CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                CExpr::binary(
-                    BinaryOp::Add,
-                    CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                    CExpr::int(3),
-                ),
-            )),
-            CStmt::expr(CExpr::assign(
-                CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                CExpr::binary(
-                    BinaryOp::Add,
-                    CExpr::int(4),
-                    CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                ),
-            )),
-            CStmt::expr(CExpr::assign(
-                CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                CExpr::binary(
-                    BinaryOp::Sub,
-                    CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                    CExpr::int(2),
-                ),
-            )),
-            CStmt::Return(None),
-        ]);
-        func.symbols = std::rc::Rc::new(symbols);
-
-        let code = generate(&func);
-
-        assert!(
-            code.contains("acc += 5;"),
-            "expected collapsed scalar update, got:\n{code}"
-        );
-        assert_eq!(code.matches("acc = acc").count(), 0, "{code}");
-    }
-
-    #[test]
-    fn test_scalar_self_update_coalesce_stops_at_observable_statement() {
-        let symbols = test_table();
-        let mut func = CFunction::new("updates", CType::Void).with_body(vec![
-            CStmt::expr(CExpr::assign(
-                CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                CExpr::binary(
-                    BinaryOp::Add,
-                    CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                    CExpr::int(1),
-                ),
-            )),
-            CStmt::expr(CExpr::call(
-                CExpr::var(crate::symbol::declare(&symbols, "observe")),
-                vec![CExpr::var(crate::symbol::declare(&symbols, "acc"))],
-            )),
-            CStmt::expr(CExpr::assign(
-                CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                CExpr::binary(
-                    BinaryOp::Add,
-                    CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                    CExpr::int(2),
-                ),
-            )),
-            CStmt::expr(CExpr::assign(
-                CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                CExpr::binary(
-                    BinaryOp::Add,
-                    CExpr::var(crate::symbol::declare(&symbols, "acc")),
-                    CExpr::int(3),
-                ),
-            )),
-        ]);
-        func.symbols = std::rc::Rc::new(symbols);
-
-        let code = generate(&func);
-
-        assert!(
-            code.contains("acc++;\n    observe(acc);\n    acc += 5;"),
-            "observable call should break the update run, got:\n{code}"
-        );
-    }
-
-    #[test]
-    fn zero_sum_scalar_updates_remain_explicit() {
-        let symbols = test_table();
-        let acc = crate::symbol::declare(&symbols, "acc");
-        let mut func = CFunction::new("updates", CType::Void).with_body(vec![
-            CStmt::expr(CExpr::assign(
-                CExpr::var(acc),
-                CExpr::binary(BinaryOp::Add, CExpr::var(acc), CExpr::int(1)),
-            )),
-            CStmt::expr(CExpr::assign(
-                CExpr::var(acc),
-                CExpr::binary(BinaryOp::Sub, CExpr::var(acc), CExpr::int(1)),
-            )),
-        ]);
-        func.symbols = std::rc::Rc::new(symbols);
-
-        let code = generate(&func);
-
-        assert!(
-            code.contains("acc++;\n    acc--;"),
-            "zero-sum definitions must not disappear without an elision proof:\n{code}"
-        );
     }
 }

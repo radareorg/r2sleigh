@@ -2493,6 +2493,45 @@ pub(crate) fn carry_all_expr_observations(source: &CExpr, mut replacement: CExpr
     replacement
 }
 
+/// Move every marker in `source` onto the statement that replaces it, keeping
+/// each at its own kind of position.
+///
+/// The statement analogue of [`carry_all_expr_observations`], for a rewrite
+/// that collapses several statements into one. The survivor renders what they
+/// all rendered, so it owns what they all owned; leaving the markers behind
+/// scores their obligations refused for effects the program does render.
+///
+/// The split matters: the placement pass asks an expression marker which
+/// expression it is on, and answering "a statement" is a refusal. A marker
+/// that was on an expression is therefore put back on the replacement's
+/// expression, and only a statement's own chain wraps the statement.
+pub(crate) fn carry_all_stmt_observations(source: &[CStmt], replacement: CStmt) -> CStmt {
+    let mut statement_ids = Vec::new();
+    let mut expression_ids = Vec::new();
+    for stmt in source {
+        let mut cursor = stmt;
+        while let CStmt::Observed { id, stmt: inner } = cursor {
+            statement_ids.push(*id);
+            cursor = inner;
+        }
+        let _ = visit_stmt_observations::<std::convert::Infallible>(cursor, &mut |id| {
+            expression_ids.push(id);
+            Ok(())
+        });
+    }
+    let mut replacement = match (replacement, expression_ids.is_empty()) {
+        (CStmt::Expr(expr), false) => CStmt::Expr(rewrap_observations(&expression_ids, expr)),
+        (replacement, _) => {
+            statement_ids.extend(expression_ids);
+            replacement
+        }
+    };
+    for id in statement_ids.into_iter().rev() {
+        replacement = CStmt::observed(id, replacement);
+    }
+    replacement
+}
+
 fn strip_stmt_observations(stmt: &mut CStmt) {
     while let CStmt::Observed { id, stmt: inner } = stmt {
         let _ = id;

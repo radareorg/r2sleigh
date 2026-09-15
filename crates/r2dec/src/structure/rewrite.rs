@@ -60,6 +60,7 @@ impl ControlFlowStructurer<'_, '_> {
                 let cleaned = Self::rewrite_block_tail_guard_clauses(cleaned);
                 let cleaned = Self::rewrite_guarded_switch_if_else(cleaned);
                 let cleaned = Self::rewrite_continue_tail_merges(symbols, cleaned);
+                let cleaned = super::self_update::coalesce_sequence(cleaned);
                 let mut cleaned = Self::truncate_dead_straight_line_tail(cleaned);
                 *stmt = if cleaned.is_empty() {
                     CStmt::Empty
@@ -100,6 +101,11 @@ impl ControlFlowStructurer<'_, '_> {
                 **body = Self::strip_trailing_continue(taken);
             }
             CStmt::For { update, body, .. } => {
+                if let Some(update) = update.as_mut() {
+                    let taken = std::mem::replace(update, CExpr::IntLit(0));
+                    let compound = Self::rewrite_compound_assignment_expr(taken);
+                    *update = super::self_update::shorten_unit_update(compound);
+                }
                 Self::cleanup_recurse(symbols, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
                 let cleaned = Self::strip_trailing_continue(taken);
@@ -123,7 +129,8 @@ impl ControlFlowStructurer<'_, '_> {
             }
             CStmt::Expr(expr) => {
                 let taken = std::mem::replace(expr, CExpr::IntLit(0));
-                *expr = Self::rewrite_compound_assignment_expr(taken);
+                let compound = Self::rewrite_compound_assignment_expr(taken);
+                *expr = super::self_update::shorten_unit_update(compound);
             }
             _ => {}
         }
@@ -138,6 +145,7 @@ impl ControlFlowStructurer<'_, '_> {
             Self::cleanup_recurse(symbols, stmt);
         }
         cleaned.retain(|stmt| !matches!(stmt.unobserved(), CStmt::Empty));
+        let cleaned = super::self_update::coalesce_sequence(cleaned);
         Self::truncate_dead_straight_line_tail(cleaned)
     }
 
@@ -188,7 +196,7 @@ impl ControlFlowStructurer<'_, '_> {
         let CExpr::Binary { op, left, right } = rhs.unobserved() else {
             return None;
         };
-        let compound_op = Self::compound_assignment_op(*op)?;
+        let compound_op = super::self_update::compound_assignment_op(*op)?;
 
         if Self::expr_is_var(left, target) && crate::fold::op_lower::expr_is_side_effect_free(right)
         {
@@ -209,22 +217,6 @@ impl ControlFlowStructurer<'_, '_> {
         let semantic = rhs.clone_without_render_observations();
         let (op, retained, _) = Self::compound_assignment_parts(target, &semantic)?;
         Some((op, retained.clone()))
-    }
-
-    fn compound_assignment_op(op: BinaryOp) -> Option<BinaryOp> {
-        match op {
-            BinaryOp::Add => Some(BinaryOp::AddAssign),
-            BinaryOp::Sub => Some(BinaryOp::SubAssign),
-            BinaryOp::Mul => Some(BinaryOp::MulAssign),
-            BinaryOp::Div => Some(BinaryOp::DivAssign),
-            BinaryOp::Mod => Some(BinaryOp::ModAssign),
-            BinaryOp::BitAnd => Some(BinaryOp::BitAndAssign),
-            BinaryOp::BitOr => Some(BinaryOp::BitOrAssign),
-            BinaryOp::BitXor => Some(BinaryOp::BitXorAssign),
-            BinaryOp::Shl => Some(BinaryOp::ShlAssign),
-            BinaryOp::Shr => Some(BinaryOp::ShrAssign),
-            _ => None,
-        }
     }
 
     fn binary_op_is_commutative_for_compound(op: BinaryOp) -> bool {
@@ -881,7 +873,7 @@ impl ControlFlowStructurer<'_, '_> {
             return None;
         };
 
-        if Self::is_compound_assign_op(*op) {
+        if super::self_update::is_compound_assignment_op(*op) {
             return Some((*name, *op, right.as_ref().clone()));
         }
 
@@ -912,7 +904,7 @@ impl ControlFlowStructurer<'_, '_> {
                 let CExpr::Var(name) = left.unobserved() else {
                     return false;
                 };
-                if Self::is_compound_assign_op(*op) {
+                if super::self_update::is_compound_assignment_op(*op) {
                     return true;
                 }
                 if *op != BinaryOp::Assign {
@@ -1141,22 +1133,6 @@ impl ControlFlowStructurer<'_, '_> {
             }
             _ => None,
         }
-    }
-
-    fn is_compound_assign_op(op: BinaryOp) -> bool {
-        matches!(
-            op,
-            BinaryOp::AddAssign
-                | BinaryOp::SubAssign
-                | BinaryOp::MulAssign
-                | BinaryOp::DivAssign
-                | BinaryOp::ModAssign
-                | BinaryOp::BitAndAssign
-                | BinaryOp::BitOrAssign
-                | BinaryOp::BitXorAssign
-                | BinaryOp::ShlAssign
-                | BinaryOp::ShrAssign
-        )
     }
 
     fn stmt_is_unconditional_terminator(stmt: &CStmt) -> bool {
