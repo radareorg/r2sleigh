@@ -14,7 +14,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaaa
 s `afl~test_bool_carrier_chain$[0]` > /dev/null
-pdd | python3 normalize_snapshot.py decompiler
+pd:s | python3 normalize_snapshot.py decompiler
 EOF_CMDS
 BROKEN=1
 RUN
@@ -44,7 +44,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~complex_check$[0]` > /dev/null
-pdd | python3 normalize_snapshot.py decompiler
+pd:s | python3 normalize_snapshot.py decompiler
 EOF_CMDS
 BROKEN=1
 RUN

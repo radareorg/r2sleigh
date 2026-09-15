@@ -350,7 +350,7 @@ jq -n -c --slurpfile cfg /tmp/r2sleigh_large_block_cfg.json --slurpfile ssa /tmp
 EOF_CMDS
 RUN
 
-NAME=pdd renders C for a function the kernel did not certify
+NAME=pd:s renders C for a function the kernel did not certify
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
@@ -366,11 +366,11 @@ CMDS=<<EOF
 a:sla
 aaa
 s dbg.complex_check
-pdd
+pd:s
 EOF
 RUN
 
-NAME=pdd says when a render produced no statements rather than showing empty braces
+NAME=pd:s says when a render produced no statements rather than showing empty braces
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
@@ -385,6 +385,6 @@ CMDS=<<EOF
 a:sla
 aaa
 s 0x1000019bc
-pdd
+pd:s
 EOF
 RUN

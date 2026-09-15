@@ -22,7 +22,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s main
-pdd | jq -Rs 'contains("r2dec fallback: skipped decompilation")'
+pd:s | jq -Rs 'contains("r2dec fallback: skipped decompilation")'
 EOF_CMDS
 RUN
 
@@ -49,7 +49,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~parse_number$[0]` > /dev/null
-pdd | jq -Rs 'contains("parse_number") or contains("dbg.parse_number") or contains("sub_")'
+pd:s | jq -Rs 'contains("parse_number") or contains("dbg.parse_number") or contains("sub_")'
 EOF_CMDS
 RUN
 
@@ -63,7 +63,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s dbg.nonexistent_symbol > /dev/null
-pdd | jq -Rs 'contains("may be inlined or stripped")'
+pd:s | jq -Rs 'contains("may be inlined or stripped")'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -148,7 +148,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~test_boolxor$[0]` > /dev/null
-pdd | jq -Rs 'contains("^") and (contains("of_")|not)'
+pd:s | jq -Rs 'contains("^") and (contains("of_")|not)'
 EOF_CMDS
 RUN
 
@@ -162,7 +162,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~test_loop_switch$[0]` > /dev/null
-pdd | jq -Rs 'contains("switch (")'
+pd:s | jq -Rs 'contains("switch (")'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -179,7 +179,7 @@ aaa
 s `afl~test_struct_field$[0]` >/dev/null
 s `afl~test_struct_field$[0]` >/dev/null
 s `afl~test_struct_field$[0]` >/dev/null
-pdd | jq -Rs 'contains("test_struct_field") and contains("->") and (contains("f_30") or contains("thirteenth")) and (contains("f_0") or contains("first")) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not)'
+pd:s | jq -Rs 'contains("test_struct_field") and contains("->") and (contains("f_30") or contains("thirteenth")) and (contains("f_0") or contains("first")) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not)'
 EOF_CMDS
 RUN
 
@@ -193,7 +193,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~check_secret$[0]` >/dev/null
-pdd | jq -Rs '(contains("check_secret") or contains("sym.check_secret")) and contains("return") and (contains("r2dec fallback:")|not)'
+pd:s | jq -Rs '(contains("check_secret") or contains("sym.check_secret")) and contains("return") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 RUN
 
@@ -207,7 +207,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~solve_equation$[0]` > /dev/null
-pdd | jq -Rs '(contains("solve_equation") or contains("sym.solve_equation")) and contains("return") and (contains("r2dec fallback:")|not)'
+pd:s | jq -Rs '(contains("solve_equation") or contains("sym.solve_equation")) and contains("return") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 RUN
 
@@ -220,7 +220,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
-pdd `afl~solve_equation$[0]` | jq -Rs '(contains("solve_equation") or contains("sym.solve_equation") or contains("sub_")) and contains("return") and (contains("r2dec fallback:")|not)'
+pd:s `afl~solve_equation$[0]` | jq -Rs '(contains("solve_equation") or contains("sym.solve_equation") or contains("sub_")) and contains("return") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 RUN
 
@@ -249,7 +249,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~check_secret$[0]` > /dev/null
-pdd | jq -Rs 'test("(^|[^A-Za-z0-9_])(int|long|short|size_t|u?int(8|16|32|64)_t)([^A-Za-z0-9_]|$)")'
+pd:s | jq -Rs 'test("(^|[^A-Za-z0-9_])(int|long|short|size_t|u?int(8|16|32|64)_t)([^A-Za-z0-9_]|$)")'
 EOF_CMDS
 RUN
 
@@ -263,7 +263,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~check_secret$[0]` > /dev/null
-pdd | jq -Rs 'contains("if") and contains("return")'
+pd:s | jq -Rs 'contains("if") and contains("return")'
 EOF_CMDS
 RUN
 
@@ -277,7 +277,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~solve_equation$[0]` > /dev/null
-pdd | jq -Rs 'contains("{") and contains("}")'
+pd:s | jq -Rs 'contains("{") and contains("}")'
 EOF_CMDS
 RUN
 
@@ -291,7 +291,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~test_guard_inversion_goto$[0]` > /dev/null
-pdd | jq -Rs 'contains("if (") and contains("return")'
+pd:s | jq -Rs 'contains("if (") and contains("return")'
 EOF_CMDS
 RUN
 
@@ -307,7 +307,7 @@ aaa
 s `afl~test_array_index_neg$[0]` >/dev/null
 s `afl~test_array_index_neg$[0]` >/dev/null
 s `afl~test_array_index_neg$[0]` >/dev/null
-pdd | jq -Rs 'contains("test_array_index_neg") and (contains("[-idx]") or contains("[0 - idx]") or contains("[-arg2]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+pd:s | jq -Rs 'contains("test_array_index_neg") and (contains("[-idx]") or contains("[0 - idx]") or contains("[-arg2]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
@@ -323,7 +323,7 @@ aaa
 s `afl~test_array_index$[0]` >/dev/null
 s `afl~test_array_index$[0]` >/dev/null
 s `afl~test_array_index$[0]` >/dev/null
-pdd | jq -Rs 'contains("test_array_index") and (contains("[idx]") or contains("[arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not)'
+pd:s | jq -Rs 'contains("test_array_index") and (contains("[idx]") or contains("[arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not)'
 EOF_CMDS
 RUN
 
@@ -339,7 +339,7 @@ aaaa
 s `afl~test_struct_array_index$[0]` >/dev/null
 s `afl~test_struct_array_index$[0]` >/dev/null
 s `afl~test_struct_array_index$[0]` >/dev/null
-pdd | jq -Rs 'contains("test_struct_array_index") and (contains("arr[idx].f_8 = v;") or contains("arr[idx].third = v;")) and ((contains("return arr[idx].f_34 + arr[idx].f_8;")) or contains("return arr[idx].f_8 + arr[idx].f_34;") or contains("return arr[idx].fourteenth + arr[idx].third;") or contains("return arr[idx].third + arr[idx].fourteenth;")) and (contains("var_ch")|not) and (contains("var_10h")|not) and (contains("local_")|not) and (contains("(int64_t)")|not) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not) and (contains("*(arg1 +")|not) and (contains("*(rbp")|not)'
+pd:s | jq -Rs 'contains("test_struct_array_index") and (contains("arr[idx].f_8 = v;") or contains("arr[idx].third = v;")) and ((contains("return arr[idx].f_34 + arr[idx].f_8;")) or contains("return arr[idx].f_8 + arr[idx].f_34;") or contains("return arr[idx].fourteenth + arr[idx].third;") or contains("return arr[idx].third + arr[idx].fourteenth;")) and (contains("var_ch")|not) and (contains("var_10h")|not) and (contains("local_")|not) and (contains("(int64_t)")|not) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not) and (contains("*(arg1 +")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
@@ -353,7 +353,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~test_guard_tail_return$[0]` > /dev/null
-pdd | jq -Rs 'contains("if (") and contains("global_tail") and contains("global_counter") and contains("return")'
+pd:s | jq -Rs 'contains("if (") and contains("global_tail") and contains("global_counter") and contains("return")'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -370,7 +370,7 @@ aaa
 s `afl~check_secret$[0]` >/dev/null
 s `afl~check_secret$[0]` >/dev/null
 s `afl~check_secret$[0]` >/dev/null
-pdd | jq -Rs 'contains("0xdead") and contains("return 0;") and contains("return 1;") and (contains("return rax")|not) and (contains("0 != 57005")|not)'
+pd:s | jq -Rs 'contains("0xdead") and contains("return 0;") and contains("return 1;") and (contains("return rax")|not) and (contains("0 != 57005")|not)'
 EOF_CMDS
 RUN
 
@@ -384,7 +384,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s entry0 > /dev/null
-pdd | jq -Rs '(contains(" = eax ^ eax;")|not) and (contains(" = rax ^ rax;")|not)'
+pd:s | jq -Rs '(contains(" = eax ^ eax;")|not) and (contains(" = rax ^ rax;")|not)'
 EOF_CMDS
 RUN
 
@@ -400,7 +400,7 @@ aaa
 s `afl~solve_equation$[0]` >/dev/null
 s `afl~solve_equation$[0]` >/dev/null
 s `afl~solve_equation$[0]` >/dev/null
-pdd | jq -Rs '(contains("*(rbp")|not) and (contains("!= 19") or contains("== 19"))'
+pd:s | jq -Rs '(contains("*(rbp")|not) and (contains("!= 19") or contains("== 19"))'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -415,7 +415,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pdd | jq -Rs '(contains("*(rbp")|not)'
+pd:s | jq -Rs '(contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
@@ -429,7 +429,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pdd | jq -Rs '(contains("len = sym.imp.strlen(s);")) and ((split("sym.imp.strlen(s)") | length) == 2) and contains("if (len > 100)") and (contains("if (len > 4)") or contains("if (len < 5)")) and contains("return -1;") and contains("return -2;") and contains("return len;")'
+pd:s | jq -Rs '(contains("len = sym.imp.strlen(s);")) and ((split("sym.imp.strlen(s)") | length) == 2) and contains("if (len > 100)") and (contains("if (len > 4)") or contains("if (len < 5)")) and contains("return -1;") and contains("return -2;") and contains("return len;")'
 EOF_CMDS
 RUN
 
@@ -443,7 +443,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pdd | jq -Rs '(contains("tmp:")|not) and (test("(^|[^A-Za-z0-9_])t[0-9a-f]+(_[0-9]+)?([^A-Za-z0-9_]|$)")|not)'
+pd:s | jq -Rs '(contains("tmp:")|not) and (test("(^|[^A-Za-z0-9_])t[0-9a-f]+(_[0-9]+)?([^A-Za-z0-9_]|$)")|not)'
 EOF_CMDS
 RUN
 
@@ -457,7 +457,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~authenticate$[0]` > /dev/null
-pdd | jq -Rs 'contains("sym.imp.strcmp(password, \"secret123\")") and ((contains("!= 0")) or (contains("== 0"))) and (contains("0 != 0")|not) and (contains("0 == 0")|not)'
+pd:s | jq -Rs 'contains("sym.imp.strcmp(password, \"secret123\")") and ((contains("!= 0")) or (contains("== 0"))) and (contains("0 != 0")|not) and (contains("0 == 0")|not)'
 EOF_CMDS
 RUN
 
@@ -471,7 +471,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~alloc_and_copy$[0]` > /dev/null
-pdd | jq -Rs 'contains("buf = sym.imp.malloc(len + 1);") and (contains("if (buf == 0)") or contains("if (!buf)")) and contains("return 0;") and contains("sym.imp.memcpy(buf, src, len);") and contains("buf[len] = 0;") and contains("return buf;") and (contains("sym.imp.malloc(sym.imp")|not)'
+pd:s | jq -Rs 'contains("buf = sym.imp.malloc(len + 1);") and (contains("if (buf == 0)") or contains("if (!buf)")) and contains("return 0;") and contains("sym.imp.memcpy(buf, src, len);") and contains("buf[len] = 0;") and contains("return buf;") and (contains("sym.imp.malloc(sym.imp")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -486,7 +486,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~test_setlocale_wrapper$[0]` > /dev/null
-pdd | jq -Rs 'contains("loc = sym.imp.setlocale(6, \"C\");") and (contains("if (loc != 0)") or contains("if (!loc)")) and (contains("return (int32_t)*loc;") or contains("return *loc;") or contains("return loc[0];") or contains("return (int32_t)loc[0];")) and (contains("return (int32_t)loc;")|not)'
+pd:s | jq -Rs 'contains("loc = sym.imp.setlocale(6, \"C\");") and (contains("if (loc != 0)") or contains("if (!loc)")) and (contains("return (int32_t)*loc;") or contains("return *loc;") or contains("return loc[0];") or contains("return (int32_t)loc[0];")) and (contains("return (int32_t)loc;")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -501,7 +501,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~vuln_memcpy$[0]` > /dev/null
-pdd | jq -Rs 'contains("sym.imp.memcpy(buf, user_input, user_len);") and contains("sym.imp.printf(\"Copied: %s\\n\", buf);") and (contains("arg1")|not) and (contains("arg2")|not) and (contains("tmp:")|not) and (contains("*(rbp")|not)'
+pd:s | jq -Rs 'contains("sym.imp.memcpy(buf, user_input, user_len);") and contains("sym.imp.printf(\"Copied: %s\\n\", buf);") and (contains("arg1")|not) and (contains("arg2")|not) and (contains("tmp:")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -516,7 +516,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~vuln_memcpy$[0]` > /dev/null
-pdd | jq -Rs 'contains("int64_t dbg.vuln_memcpy") and contains("sym.imp.memcpy(buf, user_input, user_len);") and contains("sym.imp.printf(\"Copied: %s\\n\", buf);") and (contains("r2dec fallback:")|not)'
+pd:s | jq -Rs 'contains("int64_t dbg.vuln_memcpy") and contains("sym.imp.memcpy(buf, user_input, user_len);") and contains("sym.imp.printf(\"Copied: %s\\n\", buf);") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -531,7 +531,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~my_strdup$[0]` > /dev/null
-pdd | jq -Rs 'contains("len = sym.imp.strlen(s);") and ((split("sym.imp.strlen(s)") | length) == 2) and ((contains("var_10h = sym.imp.malloc(len + 1);")) or contains("dup = sym.imp.malloc(len + 1);")) and ((contains("if (var_10h == 0)")) or contains("if (dup == 0)") or contains("if (!dup)")) and ((contains("sym.imp.memcpy(var_10h, s, len + 1);")) or contains("sym.imp.memcpy(dup, s, len + 1);")) and ((contains("return var_10h;")) or contains("return dup;")) and (contains("tmp:11f80")|not) and (contains("sym.imp.malloc(sym.imp")|not)'
+pd:s | jq -Rs 'contains("len = sym.imp.strlen(s);") and ((split("sym.imp.strlen(s)") | length) == 2) and ((contains("var_10h = sym.imp.malloc(len + 1);")) or contains("dup = sym.imp.malloc(len + 1);")) and ((contains("if (var_10h == 0)")) or contains("if (dup == 0)") or contains("if (!dup)")) and ((contains("sym.imp.memcpy(var_10h, s, len + 1);")) or contains("sym.imp.memcpy(dup, s, len + 1);")) and ((contains("return var_10h;")) or contains("return dup;")) and (contains("tmp:11f80")|not) and (contains("sym.imp.malloc(sym.imp")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -546,7 +546,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~my_strdup$[0]` > /dev/null
-pdd | jq -Rs '(contains("rax =")|not) and (contains("tmp:")|not) and (contains("t3")|not)'
+pd:s | jq -Rs '(contains("rax =")|not) and (contains("tmp:")|not) and (contains("t3")|not)'
 EOF_CMDS
 RUN
 
@@ -560,7 +560,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~main$[0]` > /dev/null
-pdd | jq -Rs 'contains("return 1;") and contains("switch (") and contains("check_secret") and contains("process_string") and contains("authenticate") and contains("alloc_and_copy") and (contains("r2dec fallback:")|not)'
+pd:s | jq -Rs 'contains("return 1;") and contains("switch (") and contains("check_secret") and contains("process_string") and contains("authenticate") and contains("alloc_and_copy") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -575,7 +575,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaaa
 s `afl~main$[0]` > /dev/null
-pdd | jq -Rs 'contains("return 1;") and contains("switch (") and contains("check_secret") and contains("process_string") and contains("authenticate") and contains("alloc_and_copy") and (contains("r2dec fallback:")|not)'
+pd:s | jq -Rs 'contains("return 1;") and contains("switch (") and contains("check_secret") and contains("process_string") and contains("authenticate") and contains("alloc_and_copy") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -592,7 +592,7 @@ aaa
 s `afl~test_cpuid$[0]` >/dev/null
 s `afl~test_cpuid$[0]` >/dev/null
 s `afl~test_cpuid$[0]` >/dev/null
-pdd | jq -Rs 'contains("callother(")'
+pd:s | jq -Rs 'contains("callother(")'
 EOF_CMDS
 RUN
 
@@ -606,7 +606,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~check_secret$[0]` > /dev/null
-pdd | head -n1 | jq -Rs 'test("^(int|long|short|unsigned|signed|char|u?int(8|16|32|64)_t)[^A-Za-z0-9_]") and (contains("void ")|not) and (contains("unknown")|not)'
+pd:s | head -n1 | jq -Rs 'test("^(int|long|short|unsigned|signed|char|u?int(8|16|32|64)_t)[^A-Za-z0-9_]") and (contains("void ")|not) and (contains("unknown")|not)'
 EOF_CMDS
 RUN
 
@@ -620,7 +620,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~solve_equation$[0]` > /dev/null
-pdd | head -n1 | jq -Rs '((contains("void ")|not) and test("^(int|long|short|unsigned|signed|char|u?int(8|16|32|64)_t)[^A-Za-z0-9_]"))'
+pd:s | head -n1 | jq -Rs '((contains("void ")|not) and test("^(int|long|short|unsigned|signed|char|u?int(8|16|32|64)_t)[^A-Za-z0-9_]"))'
 EOF_CMDS
 RUN
 
@@ -686,7 +686,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pdd | jq -Rs 'test("\\(char ?\\* ?s\\)") and test("size_t len") and (contains("int8_t")|not) and (contains("uint64_t len")|not)'
+pd:s | jq -Rs 'test("\\(char ?\\* ?s\\)") and test("size_t len") and (contains("int8_t")|not) and (contains("uint64_t len")|not)'
 EOF_CMDS
 RUN
 
@@ -700,7 +700,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~alloc_and_copy$[0]` > /dev/null
-pdd | jq -Rs 'test("char ?\\* ?buf = sym\\.imp\\.malloc") and test("size_t len") and (contains("sym.imp.__memcpy_chk(buf, src, len")) '
+pd:s | jq -Rs 'test("char ?\\* ?buf = sym\\.imp\\.malloc") and test("size_t len") and (contains("sym.imp.__memcpy_chk(buf, src, len")) '
 EOF_CMDS
 RUN
 
@@ -714,7 +714,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~authenticate$[0]` > /dev/null
-pdd | jq -Rs '([match("sym\\.imp\\.strcmp\\("; "g")] | length) == 1'
+pd:s | jq -Rs '([match("sym\\.imp\\.strcmp\\("; "g")] | length) == 1'
 EOF_CMDS
 RUN
 
@@ -728,7 +728,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~alloc_and_copy$[0]` > /dev/null
-pdd | jq -Rs 'test("return buf;") and (test("buf \\+ 32")|not)'
+pd:s | jq -Rs 'test("return buf;") and (test("buf \\+ 32")|not)'
 EOF_CMDS
 RUN
 
@@ -742,7 +742,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~authenticate$[0]` > /dev/null
-pdd | jq -Rs '((split("sym.imp.strcmp(") | length) == 2) and test("= sym\\.imp\\.strcmp\\(")'
+pd:s | jq -Rs '((split("sym.imp.strcmp(") | length) == 2) and test("= sym\\.imp\\.strcmp\\(")'
 EOF_CMDS
 RUN
 
@@ -756,6 +756,6 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~alloc_and_copy$[0]` > /dev/null
-pdd | jq -Rs 'contains("return buf;") and (contains("- 0x8")|not) and (test("\\*\\(buf \\+")|not)'
+pd:s | jq -Rs 'contains("return buf;") and (contains("- 0x8")|not) and (test("\\*\\(buf \\+")|not)'
 EOF_CMDS
 RUN
