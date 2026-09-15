@@ -24354,3 +24354,65 @@ It passes today, which is itself informative: the byte-address route it was
 written to reach is dead (see the `A5` note), so it is currently taking the
 scalar cast and is correct there. Its value is as the regression guard for when
 that route is repaired.
+
+## The typed elaborator arc, and what the r2r suite says is still missing
+
+The plan in `~/.claude/plans/floating-wobbling-alpaca.md` is finished. What
+landed, in order:
+
+- The rendered-tree constant fold is gone. It never fired once across bzip2,
+  bzip2recover, dpkg-divert and both minigzips, x86-64 and arm64 alike: the
+  rewriter's affine normal form already folds the `adrp`+`add` pair the fold
+  was written for.
+- A constant address is named where the conversion states what it must be.
+  The post-fold pass re-derived that requirement from the rendered tree, by a
+  hand-written walk of assignments, operator promotion rules and comparison
+  peers; measured on zlib's arm64 minigzip, the walk supplied it 702 times out
+  of 756. The walk is deleted.
+- A literal's C type is its spelling, stated once in `convert`. The recorded
+  type of the *value* is a claim about the value; the compiler reads the text,
+  and `-0x4` is an `int` there. This was found by the differential gate, which
+  fell back from the raw rendering to the widened diagnostic one because
+  `-Wsign-conversion -Werror` rejected `mask & -0x4`.
+- A magic constant keeps its hex and states its type. `respell_literal` turned
+  `0xcbf29ce484222325` into `-3750763034362895579`, which is the same number
+  and hides what every reader recognises. Respelling now happens only where the
+  signed reading is a small negative.
+- The machine's add, subtract, multiply, and, or, xor and shift state the
+  unsigned carrier they compute in, as the divisions and comparisons beside
+  them already did.
+- The self-update rewrite has one owner, `structure/self_update.rs`, and it
+  runs before sealing rather than inside the printer. A run that coalesces now
+  carries the markers it absorbs -- each at its own kind of position, because
+  the placement pass asks an expression marker which expression it is on and
+  answering "a statement" is a refusal.
+- A left shift by a literal is read as the multiplication it is, so the element
+  size an index carries reaches the subscript rule. `*(uint32_t*)((i << 2) + p)`
+  is now `((uint32_t *)p)[i]`.
+- The blessed rendering is stored beside its hash under
+  `tests/corpus/raw-baseline/`. Auditing one mismatch used to mean building the
+  previous plugin and running the whole matrix again for something to diff
+  against; the first mismatch after this landed was read with one `diff`.
+
+### The r2r suite is a list of quality facts, not a stale expectation set
+
+`make -C tests/r2r run` was 43 OK / 44 XX when this session started, and the
+gate was therefore off. Most of the failures were tests pointed at things the
+plugin deliberately dropped, and those are fixed: `pdd` became `pd:s` (the
+plugin does not register as radare2's decompiler provider), the `vars`, `regs`
+and bare `defuse` views were deleted by commits that believed nothing called
+them, and the lift facts they carried are now asked of `a:sla.debug.opvals`,
+which still reports them.
+
+It is 66 OK / 18 XX now, and the remaining eighteen are **real quality gaps**,
+each a named fact the decompiler does not currently deliver. They are the
+natural next campaign. `dec_array_index_uses_real_index` is representative and
+half-closed: the subscript now renders, but the test wants `arr[idx]` and gets
+`stack_m8[(int64_t)(int32_t)stack_m12]` -- the parameter's name does not reach
+the stack slot it is spilled to, and the index carries two casts that say
+nothing. The others cluster around member access (`dec_struct_field_uses_field_access`),
+single-evaluation of calls (`dec_authenticate_evaluates_the_call_once`) and
+callee result types (`dec_alloc_and_copy_uses_callee_result_type`).
+
+Census at this point: bzip2-O0 3/152, bzip2-O2 6/112, minigzip-O2 16/161,
+dpkg-divert-O0 9/651. All corpus gates 60/60.
