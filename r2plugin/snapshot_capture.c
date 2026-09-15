@@ -1770,8 +1770,13 @@ static bool snapshot_string_literal_record(RAnalFunctionImageSnapshot *image,
  * data flow inside *this* function while radare2 may have credited the
  * reference to another -- a shared `__fprintf_chk` thunk, say -- and the
  * address then resolves with no text behind it. So the instruction's own
- * operand is taken too: it is the address the code holds, whoever the analysis
- * credited the reference to. */
+ * pointer operand is taken too: it is the address the code holds, whoever the
+ * analysis credited the reference to.
+ *
+ * `op.val` is not such an address and is not consulted. It is the plain
+ * immediate, so `mov w0, #0x20` asked what string lives at 0x20, radare2's
+ * whole-image scan answered with bytes inside the ELF header, and a shift
+ * count rendered as a string literal. */
 static bool function_image_string_literals_collect(RAnal *anal,
 		RAnalFunctionImageSnapshot *image,
 		const RAnalFunctionSnapshotLimits *limits) {
@@ -1805,19 +1810,13 @@ static bool function_image_string_literals_collect(RAnal *anal,
 			const int decoded = r_anal_op (anal, &op, block->addr + cursor,
 				block->bytes + cursor, (int)(block->size - cursor),
 				R_ARCH_OP_MASK_BASIC | R_ARCH_OP_MASK_VAL);
-			const ut64 candidates[2] = { op.ptr, (ut64)op.val };
+			const ut64 pointer = op.ptr;
 			const ut64 step = (decoded > 0 && op.size > 0)? (ut64)op.size: 1;
 			r_anal_op_fini (&op);
-			size_t which;
-			for (which = 0; which < 2; which++) {
-				if (candidates[which] == UT64_MAX || !candidates[which]) {
-					continue;
-				}
+			if (pointer != UT64_MAX && pointer) {
 				char scratch[64] = {0};
-				const char *text = snapshot_string_at (anal, candidates[which],
-					scratch, sizeof (scratch));
-				if (text && !snapshot_string_literal_record (image, limits,
-						candidates[which], text)) {
+				const char *text = snapshot_string_at (anal, pointer, scratch, sizeof (scratch));
+				if (text && !snapshot_string_literal_record (image, limits, pointer, text)) {
 					return false;
 				}
 			}
@@ -1868,8 +1867,17 @@ static bool function_image_data_symbols_collect(RAnal *anal,
 					continue;
 				}
 				// Strings have their own table, and a code label is not data.
+				//
+				// A segment or a section is not a program datum either: it is
+				// a load command or a section header, and radare2 flags the
+				// whole image's first byte `segment.LOAD0`. A reference to
+				// address zero -- which is every null pointer the code
+				// materialises -- then found that flag and the renderer
+				// spelled `p == &LOAD0` where the program says `p == 0`.
 				if (!strncmp (flag->name, "str.", 4) || !strncmp (flag->name, "fcn.", 4)
-					|| !strncmp (flag->name, "loc.", 4)) {
+					|| !strncmp (flag->name, "loc.", 4)
+					|| !strncmp (flag->name, "segment.", 8)
+					|| !strncmp (flag->name, "section.", 8)) {
 					continue;
 				}
 				size_t existing;
