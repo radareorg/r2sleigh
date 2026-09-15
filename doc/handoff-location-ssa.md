@@ -24625,3 +24625,35 @@ So `PtrMember` needs its base proven the way `ParamArray` proves its own --
 semantic id -- and the decision has to be made where that binding is visible.
 That is the shape of the fix; the three pieces above are all reusable once the
 base is proven rather than assumed.
+
+### `dec_callother_emitted` is a gap that cannot be anchored
+
+`test_cpuid` refuses whole: `observation journal: RenderedValueRequired`. The
+chain, traced end to end:
+
+- `SSAOp::CallOther` and `SSAOp::CpuId` refuse by decision, and a test in
+  `fold/op_lower/implementation.rs` states it: "opaque operations must never
+  manufacture an executable AST node". So rendering `callother(...)` as a call
+  is not the fix; `dec_callother_emitted` asks for something the project
+  decided against, and the recorded ruling is that an unprovable cell becomes a
+  *marked gap* rather than a whole-function refusal.
+- The gap is never planned. `gap_anchor_for_native_failure` maps
+  `RenderedValueRequired { value }` to `graph.def_inst(value)`, and the value
+  here is `ValueId(5)` -- a four-byte **constant**, `def None`, with 27
+  readers. A constant has no defining instruction, so there is no anchor and
+  the function refuses instead of gapping.
+- Anchoring at a reader does plan the gap, and anchoring at the *unmodelled*
+  reader plans it over the twelve ops of the `CallOther`. The refusal survives
+  anyway: a gap claims the cells its own ops own -- the use sites among them --
+  while the value cell belongs to a definition that does not exist, so it stays
+  unobserved and the seal still demands it.
+
+So the missing piece is one rule: the dead-inline-value rule in
+`observation_journal.rs` closes a value whose every use has an elision reason,
+and a **gapped** use has to count the same way. A use the gap claimed renders
+nothing for the same reason an elided one does, and until it counts, a
+definition-less constant read by an unmodelled operation can never be closed.
+
+The anchor change on its own was reverted: it fixes nothing without that rule
+and alters anchoring for every definition-less value in the corpus, which is
+exactly the unverified breadth that regressed the census twice today.
