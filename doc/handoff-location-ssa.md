@@ -24823,3 +24823,56 @@ on the width spelling, and something downstream cannot take them. A narrower
 rule -- `char` alone, whose name carries string-ness that `uint8_t` destroys,
 where `int` and `int32_t` are merely two spellings of one type -- is the shape
 to try, with the census as the judge before anything else.
+
+### `char` was lost for one reason and the fix was in a different file
+
+Recorded because the mistake repeated. `dec_process_string_uses_source_type_spellings`
+wanted `(char *s)` and got `(uint8_t* s)`: `snapshot_type_note_alias` records a
+name only when the type database holds a **typedef** for it, and `char` is
+`R_ANAL_BASE_TYPE_KIND_ATOMIC`, so the source's own spelling never reached the
+graph.
+
+Admitting every atomic name was catastrophic -- dpkg-divert from 9 compile
+failures to 440. A paragraph then went into this document explaining *why*
+breadth was the problem: `int` and `int32_t` are two spellings of one type,
+`char` is not. That explanation was invented. Narrowing to `char` alone was
+**also** catastrophic, 386 failures, which is what finally prompted reading the
+compiler's own words:
+
+```
+typedef int8_t char;
+```
+
+380 of them. Breadth was never the problem. `define_declared_typedefs` emits a
+definition for every named type it meets, and a builtin already means itself.
+The fix is two lines in two files -- admit `char` at the capture, and never
+define a name the language defines -- and the census lands exactly on baseline.
+
+The lesson is the cheap one: the census says *that* something broke, and the
+first move is to read the failing output, not to explain the number.
+
+### `len` is named but the value is not in its slot
+
+`dec_process_string_keeps_single_strlen_owner` wants `len = strlen(s);` and
+`if (len > 100)`. Two things are in the way and only the first is ours.
+
+radare2 reports `var size_t len @ sp` for this function, alongside
+`var_8h @ sp+0x8`, and the rendering stores the `strlen` result into `var_8h`.
+So the DWARF name `len` sits at frame offset 0 while the code keeps the value
+at offset 8, and the name never reaches the value. Whether that is a location
+this pass mis-rebases, or two genuine slots, is the thing to establish -- and it
+is next to the dSYM base defect already fixed upstream, so the same rebasing
+question should be asked of variable locations as was asked of `DW_AT_low_pc`.
+
+The second is the condition. The source's `if (len > 100)` renders as the flag
+algebra it was lifted from:
+
+```c
+uint8_t TMPCY_2 = 100 <= var_8h;
+uint8_t TMPZR_2 = var_8h == 100;
+if (!CY_1 || ZR_1) { ... }
+```
+
+which is `len <= 100` spelled through carry and zero. Recovering the comparison
+from the flag pair is its own piece of work and is what
+`dec_check_secret_keeps_hex_compare` and the `return -1` shape also wait on.
