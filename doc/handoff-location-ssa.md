@@ -24876,3 +24876,162 @@ if (!CY_1 || ZR_1) { ... }
 which is `len <= 100` spelled through carry and zero. Recovering the comparison
 from the flag pair is its own piece of work and is what
 `dec_check_secret_keeps_hex_compare` and the `return -1` shape also wait on.
+
+### radare2 lost every arm64 frame variable, and the fix is two lines
+
+`dec_process_string_keeps_single_strlen_owner` wanted `len` and got `var_8h`.
+radare2 reported `var size_t len @ sp` while the code kept the value at
+`sp+0x8`, so the DWARF name sat on a slot the program never used.
+
+`map_dwarf_reg_to_arm64_reg` returns `"sp"` for DWARF register 31 and `"x29"`
+for 29 without setting `LOCATION_SP` / `LOCATION_BP`, which
+`map_dwarf_reg_to_x86_64_reg` and `map_dwarf_reg_to_ppc64_reg` both do. Every
+`DW_OP_breg31` location -- which is what clang emits for an arm64 local -- was
+therefore stored as if the value lived *in* `sp`, and its offset was dropped.
+The same omission made `DW_AT_frame_base (DW_OP_reg29)` unusable, so a
+`DW_OP_fbreg` variable lost its offset too.
+
+Beside it, `integrate_dwarf_var` open-coded `offset - fcn->maxstack` where
+`r_anal_var_raw_delta` is the conversion, which is wrong under
+`anal.var.newstack`.
+
+Upstream PR radareorg/radare2#26739. `test/bins` has no aarch64 binary carrying
+DWARF variable locations, so the PR carries no test and offers one for
+radare2-testbins.
+
+### A read is a read only when what it feeds reaches the page
+
+`inlinable_core` counted every graph reader. At `-O0`, and again under
+x86-64's flag lanes, a value carries several graph readers and one rendered
+one: `mov w8, w1` feeds a subtraction and two flag computations that nothing
+reads. Counting the graph's readers is what kept `tmp_lane_100000790_8_1_1` and
+its four neighbours named, which is the whole of `complex_check` rendering ten
+statements where the source has one expression.
+
+The fix filters both the graph use sites and the certified boundary readers
+through the plan's own two "renders nothing" sets -- `unread_defined_values`
+and `unrendered_defined_values` -- before the single-reader rule looks. Deadness
+still counts every reader, because a value nothing reads at all is elided for a
+different reason.
+
+Two guards had to arrive with it, and both were found by the differential gate
+rather than reasoned out first.
+
+The first is the one this document should have predicted. Folding a value into
+its reader moves the read, and the existing hazard scan only looked at writes
+*between* the definition and the reader inside the block. A merge this block
+feeds is copied to its carrier at the block's end, after every statement and
+before the transfer, so `ZF = R8 == 1` folded into the branch below
+`R8 = R8 - 1` reads the next iteration's value and the loop runs one turn late.
+`unaligned_words` and `xxhash32` computed wrong digests on three configurations.
+The guard refuses the fold when the reader transfers control and an outgoing
+merge carries a location the expression reads.
+
+The second is that the reader set must be *exact*, not merely plausible. Three
+progressively better approximations of "renders nothing" were tried:
+
+| approximation | result |
+|---|---|
+| transitive closure from non-removable definitions | 12 of 60 corpus cells refused |
+| the same with merges and caller-supplied values as roots | 10 refused |
+| `source.obligations()` as the root set | 60/60, and every cell smaller |
+
+The third is the module's own instruction: `instructions_that_render` says "the
+roots are the instructions that owe a semantic obligation: the ledger is the
+authority on what must be accounted for". It was written for exactly this, and
+had no callers.
+
+And yet the ledger-authority version is *not* what landed. It renders
+`complex_check` as the two statements the source has, shrinks every one of the
+sixty corpus cells, and drops `diagnostic wrong` from eight to six -- and it
+loses `dbg_fallbackSort` to `RenderedValueRequired`, adds seven compile failures
+across the census, and hangs eight corpus cells under the differential gate. The
+reason is stated plainly once it is seen: *the ledger says what must be
+accounted for, and the renderer renders more than that*. A bound value's
+assignment is a statement whether or not its instruction owes an obligation, so
+an instruction can render while owing nothing, and a reader of it is a real
+reader. Closing that needs the plan's own notion of what renders, which is
+circular with the plan, and is the same cycle §"one typed elaborator" describes.
+
+What landed is the one-level version: readers filtered through `unread` and
+`unrendered`, which the dispositions are already built from and which the
+journal therefore agrees with. It is worth having on its own -- every corpus
+cell is smaller, flag algebra collapses into comparisons across the board, and
+the census is flat to better -- and it leaves the transitive question open with
+its answer narrowed to one sentence.
+
+### A lane insert is a concatenation, and `typedef uint64_t uint64_t;` is not C
+
+`MachineExprKind::InsertLane` was refused by the term import on the ground that
+"a lane insert keeps its statement", so every sub-register write rendered as
+the machine renderer's mask arithmetic:
+
+```c
+RAX_2 = (0 & ~((uint64_t)~(uint8_t)0U << 0U)) | (uint64_t)(x == 0) << 0;
+```
+
+It is a concatenation of the parts either side of the window, which the arena
+already has kinds for, and the literal rules then fold the parts. Two details
+decide whether it helps or hurts:
+
+- A part C has no scalar for cannot be spelled. Importing a 56-bit `Extract`
+  produced `(struct r2sleigh_bits_56)(RAX_5 >> 8) << 8 | ...` in four dpkg
+  functions -- a cast to an aggregate, which does not compile. Parts are
+  restricted to 8, 16, 32 and 64 bits, and anything else falls back to the
+  machine renderer as before.
+- `Concat(0, x)` is `(T)x`, and that is a *spelling* rather than a rewrite: the
+  node count does not drop, so `rule_proofs` refuses it as a rule -- correctly,
+  since it decreases no declared measure. It belongs in `materialize_term`'s
+  `Concat` arm, which is where it now lives.
+
+Two corpus cells stopped needing `struct r2sleigh_bits_256` altogether.
+
+Beside it, `define_declared_typedefs` emitted `typedef uint64_t uint64_t;`
+whenever the type graph resolved a fixed-width name to the integer it spells.
+The builtin guard added earlier caught `char` and the language keywords; the
+general statement is that a target whose spelling *is* the name declares
+nothing.
+
+### `idx = idx;` was a store of a folded value into its own slot
+
+The store-elision rule required the stored value to be `Bound` with the slot's
+binding. A parameter's home store writes a lane of the parameter register, and
+that lane is folded rather than bound, so `idx = idx;` and `hi = hi;` and
+`ps = ps;` survived in every `-O0` function with parameters.
+
+A folded value spells its own term, so the rule now asks whether the term *is*
+the binding's value and no more: width-preserving conversions are transparent,
+and anything that computes is not.
+
+The condition that matters is the one that was missing on the first attempt.
+Eliding the store removes the statement the folded value's occurrence lived in,
+so what that occurrence owed goes with it -- and a term that absorbed a producer
+owes that producer's obligation too. Carrying only the value's own definition
+lost **168 functions** across the census to `live-value-producer unaccounted`,
+with the corpus gates still 60/60 green. Restricting the rule to a term that
+discharges nothing puts the census back exactly on baseline and keeps the
+elision.
+
+### What `arr[idx]` still waits on
+
+`test_array_index` now renders
+
+```c
+int32_t tmp_26b00_1 = (int32_t)idx;
+uint32_t tmp_25180_1 = (uint32_t)arr[tmp_26b00_1];
+```
+
+and the index stays bound because a certified address read is answered from the
+value's binding symbol: `observe_certified_read_expr` refuses any disposition
+but `Bound`, and `ObservationTarget::CertifiedValueRead` carries the binding and
+the symbol for the placement audit to check. The binding plan now states the
+same rule up front, in `certified_read_values`, rather than letting the journal
+refuse the function afterwards -- one question with one answer, which is also
+what stops the ledger-authority experiment above from losing `fallbackSort`.
+
+So `arr[idx]` needs the journal to accept a certified address read answered by
+an inline expression rather than by a symbol: a marker that records the read as
+discharged by the expression standing for the value, the way an ordinary folded
+operand already is, and a placement audit that checks it that way. That is the
+same layer the "one typed elaborator" plan reaches for, and it is the next
+thing between this tree and the three array-index tests.
