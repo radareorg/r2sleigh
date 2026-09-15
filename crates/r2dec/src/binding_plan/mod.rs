@@ -347,6 +347,40 @@ pub(crate) fn certified_value_read(
     }
 }
 
+/// The binding a term spells, when the term is that binding's value and no more.
+///
+/// Width-preserving conversions are transparent here: `(int32_t)idx` denotes
+/// what `idx` denotes, so a store of it into `idx`'s own slot is `idx = idx`.
+/// Anything that computes -- an arithmetic node, a load, a narrowing -- is not
+/// the binding's value and answers `None`.
+pub(crate) fn term_spells_binding(
+    plan: &BindingPlan,
+    term: r2rewrite::TermId,
+) -> Option<BindingId> {
+    let arena = plan.canonical().arena();
+    let mut id = term;
+    loop {
+        match arena.term(id).kind {
+            r2rewrite::TermKind::Cast { input, .. }
+                if arena.term(input).width_bits() == arena.term(id).width_bits() =>
+            {
+                id = input;
+            }
+            r2rewrite::TermKind::Leaf(read) => {
+                let value = match plan.machine_projection().expr(read.expr)?.kind() {
+                    r2ssa::MachineExprKind::Source { binding, .. } => binding.value(),
+                    _ => return None,
+                };
+                return match plan.disposition(value) {
+                    Some(ValueDisposition::Bound { binding }) => Some(*binding),
+                    _ => None,
+                };
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Every value a certificate reads as an address or a lane.
 ///
 /// The journal answers such a read from the value's binding symbol, so a value

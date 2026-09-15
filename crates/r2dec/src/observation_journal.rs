@@ -2250,12 +2250,26 @@ impl LegacyObservationJournal {
                     && let Some(NormalizedOpOrigin::Original(inst)) = origins.origin(site)
                     && let Some(object) = stored_stack_object(source.source(), graph, *inst)
                     && let Some(stored) = graph.value_id_for_var(val)
-                    && let Some(ValueDisposition::Bound {
-                        binding: value_binding,
-                    }) = plan.disposition(stored)
+                    && let Some(value_binding) = match plan.disposition(stored) {
+                        Some(ValueDisposition::Bound { binding }) => Some(*binding),
+                        // A folded value spells its own term, and a term that is
+                        // a binding's value and no more is that binding.
+                        // Only where the term stands for nothing but its own
+                        // definition: an absorbed producer owes an obligation
+                        // that this statement was answering for.
+                        Some(ValueDisposition::Inline { term, .. })
+                            if plan
+                                .canonical()
+                                .value(stored)
+                                .is_some_and(|value| value.discharges.is_empty()) =>
+                        {
+                            crate::binding_plan::term_spells_binding(&plan, *term)
+                        }
+                        _ => None,
+                    }
                     && plan.stack_object_disposition(object)
                         == Some(StackObjectDisposition::Bound {
-                            binding: *value_binding,
+                            binding: value_binding,
                         })
                 {
                     r2il::refusal_evidence!(
@@ -2265,7 +2279,34 @@ impl LegacyObservationJournal {
                     );
                     coalesced_carrier_copy_sites.insert(site);
                     coalesced_store_sites.insert((block.addr, op_idx));
+                    // A folded value's occurrence lived in the statement this
+                    // removes, so what it owed goes with it.
+                    if matches!(
+                        plan.disposition(stored),
+                        Some(ValueDisposition::Inline { .. })
+                    ) {
+                        coalesced_copy_outputs.insert(stored);
+                        if let Some(definition) = graph.def_inst(stored) {
+                            coalesced_copy_writes.insert(definition);
+                        }
+                    }
                     continue;
+                }
+                if r2il::refusal_evidence::tracing()
+                    && let r2ssa::SSAOp::Store { val, .. } = op
+                    && let Some(NormalizedOpOrigin::Original(inst)) = origins.origin(site)
+                {
+                    r2il::refusal_evidence!(
+                        "store-elision",
+                        "{site:?} not elided: object={:?} stored={:?} value_disposition={:?}                          object_disposition={:?}",
+                        stored_stack_object(source.source(), graph, *inst),
+                        graph.value_id_for_var(val),
+                        graph
+                            .value_id_for_var(val)
+                            .and_then(|v| plan.disposition(v)),
+                        stored_stack_object(source.source(), graph, *inst)
+                            .and_then(|object| plan.stack_object_disposition(object)),
+                    );
                 }
                 // A restore is a copy the convention states: construction
                 // mints it only for the carrier the callee brings back, so
