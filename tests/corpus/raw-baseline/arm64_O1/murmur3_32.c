@@ -1,6 +1,6 @@
 uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 137 source obligations: 122 rendered, 15 elided, 0 refused; 74 statements rendered */
+    /* r2dec proof: no individual construct is marked; 137 source obligations: 122 rendered, 15 elided, 0 refused; 73 statements rendered */
     {
         uint64_t X2_0_2;
         X2_0_2 = (uint64_t)(uint32_t)W2_0;
@@ -34,8 +34,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         }
         {
             uint64_t X2_4;
-            uint64_t X11_4 = X1_0 & (uint64_t)-0x4;
-            uint8_t* X11_5 = (uint8_t*)(X11_4 + X0_0);
+            uint8_t* X11_5 = (uint8_t*)((X1_0 & (uint64_t)-0x4) + X0_0);
             uint64_t X12_5 = X1_0 & 3;
             uint8_t TMPOV_8 = r2sleigh_int_sborrow_64(X12_5, 1);
             uint8_t TMPNG_8 = (int64_t)(X12_5 - 1) < 0;
