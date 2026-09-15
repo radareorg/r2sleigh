@@ -209,6 +209,22 @@ NOINL uint64_t combined(const uint8_t *p, size_t n) {
     return acc;
 }
 
+/* ---- 15. unaligned_words: stride 7, displacement +1, access width 4.
+   Neither 7 nor 1 divides 4, so the subscript rule cannot fire and the
+   address must be spelled as a byte offset. No existing corpus function
+   reaches that route. ---- */
+NOINL uint32_t unaligned_words(const uint8_t *p, size_t n) {
+    uint32_t h = 0x9e3779b9u;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 7) {
+        uint32_t w;
+        memcpy(&w, p + i + 1, 4);
+        h = (h ^ w) * 0x01000193u;
+    }
+    for (; i < n; i++) h = (h ^ p[i]) * 0x01000193u;
+    return h;
+}
+
 int main(void) {
     static const char msg[] = "The quick brown fox jumps over the lazy dog, 0123456789abcdef";
     const uint8_t *p = (const uint8_t *)msg;
@@ -227,5 +243,6 @@ int main(void) {
     printf("siphash24   %016llx\n", (unsigned long long)siphash24(p, n, 0x0706050403020100ull, 0x0f0e0d0c0b0a0908ull));
     printf("pearson     %02x\n", pearson(p, n));
     printf("combined    %016llx\n", (unsigned long long)combined(p, n));
+    printf("unaligned   %08x\n", unaligned_words(p, n));
     return 0;
 }

@@ -364,6 +364,7 @@ SPECS: dict[str, FunctionSpec] = {
     "murmur3_32": FunctionSpec(32, 3, 0x9747B28C),
     "xxhash32": FunctionSpec(32, 3, 0),
     "pearson": FunctionSpec(8, 2),
+    "unaligned_words": FunctionSpec(32, 2),
 }
 
 # One argument vector set for every shape. The values are chosen so that the
@@ -2350,12 +2351,13 @@ def load_baseline(path: Path, specs: dict[str, Any] | None = None) -> dict[str, 
     expected = {
         f"{config}/{function}" for config in CONFIGS for function in specs
     }
-    if set(baseline) != expected:
-        missing = sorted(expected - set(baseline))
-        unexpected = sorted(set(baseline) - expected)
-        raise ValueError(
-            f"baseline key mismatch: missing={missing} unexpected={unexpected}"
-        )
+    # A key the specs have and the baseline does not is a function that was
+    # just added: it has nothing to compare against yet, so it mismatches and
+    # is blessed like any other change. A key the baseline has and the specs do
+    # not is a cell that vanished, which is a mistake and stays fatal.
+    unexpected = sorted(set(baseline) - expected)
+    if unexpected:
+        raise ValueError(f"baseline names cells the corpus does not have: {unexpected}")
     malformed = sorted(
         key
         for key, value in baseline.items()

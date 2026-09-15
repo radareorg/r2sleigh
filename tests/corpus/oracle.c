@@ -28,12 +28,13 @@ enum oracle_function {
     ORACLE_PEARSON,
     ORACLE_MURMUR3_32,
     ORACLE_XXHASH32,
+    ORACLE_UNALIGNED_WORDS,
 };
 
 static void usage(const char *program) {
     fprintf(stderr, "usage: %s FUNCTION HEX_BYTES [SEED]\n", program);
     fputs("functions: fnv1a32 fnv1a64 djb2 sdbm adler32 crc32_bitwise "
-          "pearson murmur3_32 xxhash32\n",
+          "pearson murmur3_32 xxhash32 unaligned_words\n",
           stderr);
     fputs("HEX_BYTES is an even-length hexadecimal string, or '-' for empty input.\n",
           stderr);
@@ -59,6 +60,8 @@ static int parse_function(const char *name, enum oracle_function *function) {
         *function = ORACLE_PEARSON;
     } else if (strcmp(name, "murmur3_32") == 0) {
         *function = ORACLE_MURMUR3_32;
+    } else if (strcmp(name, "unaligned_words") == 0) {
+        *function = ORACLE_UNALIGNED_WORDS;
     } else if (strcmp(name, "xxhash32") == 0) {
         *function = ORACLE_XXHASH32;
     } else {
@@ -190,6 +193,9 @@ static void dispatch(enum oracle_function function, const uint8_t *bytes,
         break;
     case ORACLE_XXHASH32:
         printf("%08" PRIx32 "\n", xxhash32(bytes, length, seed));
+        break;
+    case ORACLE_UNALIGNED_WORDS:
+        printf("%08" PRIx32 "\n", unaligned_words(bytes, length));
         break;
     }
 }

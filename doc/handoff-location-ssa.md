@@ -24280,3 +24280,77 @@ patch.
 distinct kinds: incompatible initialisers, a non-integer subscript, an array
 assigned wholesale, a conflicting callee prototype, a hex escape out of range,
 a member read from a non-aggregate. Each is its own trace.
+
+## Two stack objects over one storage range, and a store that writes one of them
+
+Found by adding `hdr_fold` to the corpus — a struct reached through a pointer,
+built with `memcpy` and read member by member. It is the first corpus function
+with an aggregate, and it failed on its first run.
+
+The frame holds both of these:
+
+    uint8_t  stack_m48[16];   // the struct, written whole by the 16-byte store
+    uint16_t stack_m44;       // h.flags, a separate object at offset 4 of it
+
+`-48 + 16 = -32`, so `-44` is **inside** `stack_m48`. The rendering then reads
+`h.magic` correctly through the array -- `*(uint32_t*)(uint8_t*)stack_m48` --
+and reads `h.flags` from `stack_m44`, which nothing ever wrote:
+
+    *(__uint128_t*)(uint8_t*)stack_m48 = tmp_lane_100001c60_6_5_1;
+    ...
+    uint32_t tmp_20380_2 = (uint32_t)stack_m44 ^ tmp_24c00_1;   // uninitialised
+
+`clang -Werror` rejects it as `variable 'stack_m44' is uninitialized when used
+here`, which is how it was caught. The defect is not the diagnostic: the
+rendering genuinely claims a read of storage the program had written, so the
+value is wrong wherever a compiler does not object.
+
+**The rule that is missing: a store covers a range, not an object.** A write
+that spans several declared slots writes all of them. `ranges_overlap`
+(`crates/r2ssa/src/defuse.rs:262`) already exists for alias analysis, so the
+geometry is computable; what is absent is either a refusal to admit two objects
+over one range, or a store that marks every object its range covers as written.
+`render_certified_member_run_store` / `lower_member_run_store` handle the
+adjacent case -- "one store whose bytes cover a run of declared members
+exactly" -- and did not fire here.
+
+This is an `r2ssa` object-model defect, not a `fold` one, so it is its own arc
+rather than part of the typed-elaborator work. The corpus function that finds it
+is kept here so re-adding it is one paste:
+
+```c
+struct hdr {
+    uint32_t magic; uint16_t flags; uint8_t kind; uint8_t pad;
+    uint64_t seq;   const uint8_t *tail;
+};
+
+NOINL uint32_t hdr_fold(const uint8_t *p, size_t n) {
+    struct hdr h;
+    uint32_t acc = 0x811c9dc5u;
+    size_t i;
+    if (n < sizeof(struct hdr) + 1) return acc;
+    memcpy(&h, p, sizeof h);
+    h.tail = p + sizeof(struct hdr);
+    acc = (acc ^ h.magic) * 0x01000193u;
+    acc = (acc ^ h.flags) * 0x01000193u;
+    acc = (acc ^ h.kind) * 0x01000193u;
+    acc = (acc ^ (uint32_t)(h.seq & 0xffffffffu)) * 0x01000193u;
+    acc = (acc ^ (uint32_t)(h.seq >> 32)) * 0x01000193u;
+    for (i = 0; i + sizeof(struct hdr) < n; i++) acc = (acc ^ h.tail[i]) * 0x01000193u;
+    return acc;
+}
+```
+
+It also found, and this part is fixed, that a store with no recovered type was
+spelled through a *signed* carrier: a sixteen-byte move rendered as
+`*(__int128_t *)` taking a `__uint128_t`, which is a sign the program never had
+and which the compiler rejects outright. A width alone carries no signedness,
+so the fallback is unsigned now. Measured neutral over 1,112 renderings on
+`bzip2`, `dpkg-divert` and `minigzip`.
+
+`unaligned_words` -- stride 7, displacement +1, access width 4, so neither
+divides the width and the subscript rule cannot fire -- is kept in the corpus.
+It passes today, which is itself informative: the byte-address route it was
+written to reach is dead (see the `A5` note), so it is currently taking the
+scalar cast and is correct there. Its value is as the regression guard for when
+that route is repaired.
