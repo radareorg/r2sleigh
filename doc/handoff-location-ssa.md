@@ -26167,3 +26167,63 @@ trade for now.
 0xfff1;`. The constant-false conditional is in the blessed baseline too, so it
 predates this work; a division guard lowers to a conditional whose condition is
 a literal zero and nothing folds it away.
+
+### The merge through a frame slot becomes a conditional expression
+
+`rewrite_two_way_assignment` had been landed with two restrictions that between
+them kept it away from every slot: the arms' lvalues had to be bare `Var`s and
+neither arm's assignment could carry a marker. A promoted frame slot fails the
+second, so `process_string` and `bitwise_check` -- the two functions the rule
+exists for -- never reached it. Removing the restriction meant answering, in
+three different layers, what the text says once a conditional becomes an
+expression.
+
+**Control.** The certificate read a conditional's arms through only when an arm
+was a single block that rendered nothing and passed control on. A converted
+conditional leaves a whole subtree rendering nothing, `process_string`'s being a
+branch with a branch inside it, so four blocks went missing and the cleanup
+stage was declined outright. `contracted_region` replaces `passes_through`: a
+region entered at one block, every block of which renders nothing, none of which
+leaves the function, all converging on one block, is read through to that block.
+The single pass-through block is its degenerate case. That is the same claim the
+text makes -- it performs none of that control -- and what catches a region that
+rendered nothing because code was *lost* is the obligation ledger, which the
+rewrite gate already requires to be intact.
+
+**Exclusivity.** An obligation rendered twice is a duplicate unless the region
+tree proves the copies exclude one another, and the region tree is built from
+statements, so it cannot see that `c ? a : b` has two arms. `bitwise_check`
+renders one block on two exclusive paths, and folding both into one conditional
+made them look like two executions of one write. `ObservationScope` now records,
+beside the region, the arm of each conditional expression an observation is
+written inside; two scopes exclude one another if they take opposite arms of one
+conditional, or if their regions do. It is computed by the same post-hoc walk
+over the final tree that computed the region alone, so nothing new is trusted.
+
+**Which marker goes where.** An arm's markers split in two. The value the arm
+computed is still computed in that arm, so its markers move inside the arm --
+and being inside is exactly what makes the exclusivity above visible. The write
+both arms performed is the one store the merged assignment makes, so every arm's
+write marker rides on the assignment: a write marker left inside the right-hand
+side is an order the placement pass cannot resolve, and `bitwise_check` refused
+with `ambiguous_observation_execution_order` until the split was made. The
+rewrite asks the journal which markers are writes, the same way it already asks
+the journal which block an observation belongs to.
+
+The result, on the two functions the rule was written for:
+
+```c
+stack_m4 = (x & 240) != 80 ? 0 : (x & 15) != 10 ? 0 : 1;
+stack_m20 = len <= 100 ? 5 <= len ? (uint32_t)len : 0xfffffffe : 0xffffffff;
+```
+
+`bitwise_check` is three statements where it was seven; `process_string` is nine
+where it was thirteen and eighteen before that. The corpus is unchanged on every
+column, which is expected: nine hash functions of one shape contain no merge
+through a frame slot.
+
+Two things this leaves. `stack_m20` is declared `uint32_t` because the slot is
+four bytes, so the negative returns print as `0xfffffffe` rather than `-2`; the
+return spells `(int32_t)` around it, and taking the signedness from the return
+type is the remaining step. And the slot has one reader, the return, so the
+whole conditional should inline into it.

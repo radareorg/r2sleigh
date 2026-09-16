@@ -881,6 +881,20 @@ pd:s | jq -Rs 'contains("arr[idx]") and (contains("idx = idx;")|not)'
 EOF_CMDS
 RUN
 
+NAME=dec_bitwise_check_merges_the_slot_into_a_conditional
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~bitwise_check$[0]` >/dev/null
+pd:s | jq -Rs '(contains("? 0 :")) and (test("\\bif\\b")|not) and (contains("r2sleigh refused")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_bitwise_check_promotes_the_private_frame_slot
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

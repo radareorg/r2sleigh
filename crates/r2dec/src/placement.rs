@@ -806,34 +806,105 @@ pub(crate) fn final_observation_regions(
     statements: &[CStmt],
     regions: &SealedStructuredRegionArtifact,
     count: usize,
-) -> Vec<Option<RegionId>> {
+) -> Vec<Option<ObservationScope>> {
     let mut scoped = vec![None; count];
+    let mut conditionals = 0;
     for statement in statements {
-        collect_stmt_observation_regions(statement, None, regions, &mut scoped);
+        collect_stmt_observation_regions(statement, None, regions, &mut conditionals, &mut scoped);
     }
     scoped
+}
+
+/// Where one observation finally sits: its lexical region, and the arm of each
+/// conditional expression it is written inside.
+///
+/// The region tree is built from statements, so it cannot say that the two arms
+/// of a `c ? a : b` exclude one another -- and they do, exactly as the two arms
+/// of an `if` do. Since a two-way merge may now render as a conditional
+/// expression, an obligation rendered once in each arm would otherwise count as
+/// two executions. Recording the arms keeps that a property of the emitted text
+/// rather than of whichever rewrite produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObservationScope {
+    region: Option<RegionId>,
+    arms: Vec<(u32, bool)>,
+}
+
+impl ObservationScope {
+    /// Whether no execution reaches both of these.
+    pub(crate) fn excludes(&self, other: &Self, regions: &SealedStructuredRegionArtifact) -> bool {
+        if self.arms.iter().any(|(conditional, arm)| {
+            other.arms.iter().any(|(other_conditional, other_arm)| {
+                conditional == other_conditional && arm != other_arm
+            })
+        }) {
+            return true;
+        }
+        matches!(
+            (self.region, other.region),
+            (Some(left), Some(right)) if regions.regions_are_exclusive(left, right)
+        )
+    }
 }
 
 fn record_observation_region(
     id: RenderObservationId,
     region: Option<RegionId>,
-    scoped: &mut [Option<RegionId>],
+    scoped: &mut [Option<ObservationScope>],
 ) {
-    if let (Some(region), Some(slot)) = (region, scoped.get_mut(id.index() as usize)) {
-        *slot = Some(region);
+    if let Some(slot) = scoped.get_mut(id.index() as usize) {
+        *slot = Some(ObservationScope {
+            region,
+            arms: Vec::new(),
+        });
     }
 }
 
 fn collect_expr_observation_regions(
     expr: &CExpr,
     region: Option<RegionId>,
-    scoped: &mut [Option<RegionId>],
+    conditionals: &mut u32,
+    scoped: &mut [Option<ObservationScope>],
 ) {
-    let mut ids = Vec::new();
-    visit_expr_observations(expr, &mut |id| ids.push(id));
-    for id in ids {
-        record_observation_region(id, region, scoped);
+    fn walk(
+        expr: &CExpr,
+        region: Option<RegionId>,
+        arms: &mut Vec<(u32, bool)>,
+        conditionals: &mut u32,
+        scoped: &mut [Option<ObservationScope>],
+    ) {
+        match expr {
+            CExpr::Observed { id, expr } => {
+                if let Some(slot) = scoped.get_mut(id.index() as usize) {
+                    *slot = Some(ObservationScope {
+                        region,
+                        arms: arms.clone(),
+                    });
+                }
+                walk(expr, region, arms, conditionals, scoped);
+            }
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let conditional = *conditionals;
+                *conditionals += 1;
+                walk(cond, region, arms, conditionals, scoped);
+                for (expr, arm) in [(then_expr, true), (else_expr, false)] {
+                    arms.push((conditional, arm));
+                    walk(expr, region, arms, conditionals, scoped);
+                    arms.pop();
+                }
+            }
+            other => {
+                for child in other.children() {
+                    walk(child, region, arms, conditionals, scoped);
+                }
+            }
+        }
     }
+    walk(expr, region, &mut Vec::new(), conditionals, scoped);
 }
 
 /// The region a loop sits in, where `current` is the loop's own.
@@ -856,11 +927,12 @@ fn collect_stmt_observation_regions(
     statement: &CStmt,
     current: Option<RegionId>,
     regions: &SealedStructuredRegionArtifact,
-    scoped: &mut [Option<RegionId>],
+    conditionals: &mut u32,
+    scoped: &mut [Option<ObservationScope>],
 ) {
     if let CStmt::StructuredRegion { marker, stmt } = statement {
         let entered = regions.node_for_marker(marker).map(|(id, _)| id);
-        collect_stmt_observation_regions(stmt, entered.or(current), regions, scoped);
+        collect_stmt_observation_regions(stmt, entered.or(current), regions, conditionals, scoped);
         return;
     }
     let mut semantic = statement;
@@ -870,14 +942,14 @@ fn collect_stmt_observation_regions(
     }
     match semantic {
         CStmt::StructuredRegion { .. } => {
-            collect_stmt_observation_regions(semantic, current, regions, scoped);
+            collect_stmt_observation_regions(semantic, current, regions, conditionals, scoped);
         }
         CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
-            collect_expr_observation_regions(expr, current, scoped);
+            collect_expr_observation_regions(expr, current, conditionals, scoped);
         }
         CStmt::Decl { init, .. } => {
             if let Some(init) = init {
-                collect_expr_observation_regions(init, current, scoped);
+                collect_expr_observation_regions(init, current, conditionals, scoped);
             }
         }
         CStmt::If {
@@ -885,19 +957,19 @@ fn collect_stmt_observation_regions(
             then_body,
             else_body,
         } => {
-            collect_expr_observation_regions(cond, current, scoped);
-            collect_stmt_observation_regions(then_body, current, regions, scoped);
+            collect_expr_observation_regions(cond, current, conditionals, scoped);
+            collect_stmt_observation_regions(then_body, current, regions, conditionals, scoped);
             if let Some(else_body) = else_body {
-                collect_stmt_observation_regions(else_body, current, regions, scoped);
+                collect_stmt_observation_regions(else_body, current, regions, conditionals, scoped);
             }
         }
         CStmt::While { cond, body } => {
-            collect_expr_observation_regions(cond, current, scoped);
-            collect_stmt_observation_regions(body, current, regions, scoped);
+            collect_expr_observation_regions(cond, current, conditionals, scoped);
+            collect_stmt_observation_regions(body, current, regions, conditionals, scoped);
         }
         CStmt::DoWhile { body, cond } => {
-            collect_stmt_observation_regions(body, current, regions, scoped);
-            collect_expr_observation_regions(cond, current, scoped);
+            collect_stmt_observation_regions(body, current, regions, conditionals, scoped);
+            collect_expr_observation_regions(cond, current, conditionals, scoped);
         }
         CStmt::For {
             init,
@@ -914,15 +986,16 @@ fn collect_stmt_observation_regions(
                     init,
                     enclosing_region_of_loop(current, regions),
                     regions,
+                    conditionals,
                     scoped,
                 );
             }
             if let Some(cond) = cond {
-                collect_expr_observation_regions(cond, current, scoped);
+                collect_expr_observation_regions(cond, current, conditionals, scoped);
             }
-            collect_stmt_observation_regions(body, current, regions, scoped);
+            collect_stmt_observation_regions(body, current, regions, conditionals, scoped);
             if let Some(update) = update {
-                collect_expr_observation_regions(update, current, scoped);
+                collect_expr_observation_regions(update, current, conditionals, scoped);
             }
         }
         CStmt::Switch {
@@ -930,22 +1003,34 @@ fn collect_stmt_observation_regions(
             cases,
             default,
         } => {
-            collect_expr_observation_regions(expr, current, scoped);
+            collect_expr_observation_regions(expr, current, conditionals, scoped);
             for case in cases {
-                collect_expr_observation_regions(&case.value, current, scoped);
+                collect_expr_observation_regions(&case.value, current, conditionals, scoped);
                 for statement in &case.body {
-                    collect_stmt_observation_regions(statement, current, regions, scoped);
+                    collect_stmt_observation_regions(
+                        statement,
+                        current,
+                        regions,
+                        conditionals,
+                        scoped,
+                    );
                 }
             }
             if let Some(default) = default {
                 for statement in default {
-                    collect_stmt_observation_regions(statement, current, regions, scoped);
+                    collect_stmt_observation_regions(
+                        statement,
+                        current,
+                        regions,
+                        conditionals,
+                        scoped,
+                    );
                 }
             }
         }
         CStmt::Block(statements) => {
             for statement in statements {
-                collect_stmt_observation_regions(statement, current, regions, scoped);
+                collect_stmt_observation_regions(statement, current, regions, conditionals, scoped);
             }
         }
         CStmt::Observed { .. } => unreachable!("leading observations were consumed"),
@@ -4646,9 +4731,16 @@ mod tests {
             .expect("marker tree")
             .into_marked_parts();
         let mut scoped = vec![None; 2];
-        collect_stmt_observation_regions(&marked, None, &regions, &mut scoped);
-        let init_region = scoped[0].expect("the initializer was scoped");
-        let body_region = scoped[1].expect("the body was scoped");
+        let mut conditionals = 0;
+        collect_stmt_observation_regions(&marked, None, &regions, &mut conditionals, &mut scoped);
+        let init_region = scoped[0]
+            .as_ref()
+            .and_then(|scope| scope.region)
+            .expect("the initializer was scoped");
+        let body_region = scoped[1]
+            .as_ref()
+            .and_then(|scope| scope.region)
+            .expect("the body was scoped");
         assert_ne!(
             init_region, body_region,
             "the initializer runs before the loop and the body runs inside it"

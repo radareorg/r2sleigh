@@ -817,22 +817,46 @@ pub(crate) fn stmt_callee_name(stmt: &CStmt) -> Option<&str> {
     }
 }
 
-/// A block whose only way out is one unconditional transfer.
-fn passes_through(cfg: &CFG, addr: u64) -> bool {
-    cfg.get_block(addr).is_some_and(|block| {
-        matches!(
-            block.terminator,
-            BlockTerminator::Fallthrough { .. }
-                | BlockTerminator::Branch { .. }
-                | BlockTerminator::Call {
-                    fallthrough: Some(_),
-                    ..
-                }
-                | BlockTerminator::IndirectCall {
-                    fallthrough: Some(_)
-                }
-        )
-    }) && cfg.successors(addr).len() == 1
+/// The one block a nothing-rendering region entered here leaves through.
+///
+/// A single pass-through block is the degenerate case of this, and it was the
+/// only case until a conditional could become an expression. When it does, the
+/// arms stop rendering and the whole subtree between the branch and the join is
+/// control the text no longer performs: the text reads it through exactly as it
+/// reads one empty block through. A region qualifies only if every block in it
+/// renders nothing, none of them leaves the function, and they all converge on
+/// one block -- anything else is code that went missing rather than control that
+/// was converted, and the obligation ledger is what catches that.
+fn contracted_region(
+    cfg: &CFG,
+    count: &BTreeMap<u64, usize>,
+    entry: u64,
+) -> Option<(BTreeSet<u64>, u64)> {
+    let mut region = BTreeSet::new();
+    let mut exits = BTreeSet::new();
+    let mut pending = vec![entry];
+    while let Some(addr) = pending.pop() {
+        if count.get(&addr).copied().unwrap_or(0) != 0 {
+            exits.insert(addr);
+            continue;
+        }
+        if !region.insert(addr) {
+            continue;
+        }
+        cfg.get_block(addr)?;
+        let successors = cfg.successors(addr);
+        if successors.is_empty() {
+            return None;
+        }
+        for next in successors {
+            cfg.get_block(next)?;
+            pending.push(next);
+        }
+    }
+    let [exit] = exits.iter().copied().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    Some((region, exit))
 }
 
 /// The edges a block's terminator promises, each target read through the
@@ -1009,12 +1033,15 @@ pub(crate) fn certify(
             return Target::External;
         }
         let mut seen = BTreeSet::new();
-        while count.get(&addr).copied().unwrap_or(0) == 0 && passes_through(cfg, addr) {
+        while count.get(&addr).copied().unwrap_or(0) == 0 {
             if !seen.insert(addr) {
                 break;
             }
-            contracted.borrow_mut().insert(addr);
-            addr = cfg.successors(addr)[0];
+            let Some((region, exit)) = contracted_region(cfg, &count, addr) else {
+                break;
+            };
+            contracted.borrow_mut().extend(region);
+            addr = exit;
             if cfg.get_block(addr).is_none() {
                 return Target::External;
             }

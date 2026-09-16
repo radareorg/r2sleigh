@@ -916,9 +916,10 @@ pub(crate) struct LegacyObservationJournal {
     write_has_output: Box<[bool]>,
     writes: Box<[Option<LegacyWriteObservation>]>,
     effect_occurrences: BTreeMap<SemanticObligationId, usize>,
-    /// Regions the sealing walk found each effect obligation rendered in.
+    /// Where the sealing walk found each effect obligation rendered: one scope
+    /// per occurrence, so two occurrences in one place stay two.
     effect_occurrence_regions:
-        BTreeMap<SemanticObligationId, BTreeSet<crate::structured_region::RegionId>>,
+        BTreeMap<SemanticObligationId, Vec<crate::placement::ObservationScope>>,
     /// Obligations whose duplicate occurrences the region tree proved to
     /// exclude one another.
     exclusive_duplicate_effects: BTreeSet<SemanticObligationId>,
@@ -1936,6 +1937,23 @@ impl LegacyObservationJournal {
 
     /// The block whose text one observed statement was emitted in, for the
     /// control certificate; read-side targets say nothing about placement.
+    /// Whether this marker stands for a write rather than for a value or read.
+    ///
+    /// A rewrite that merges two arms into one assignment has to know: the
+    /// value each arm computed stays inside its arm, while the write they both
+    /// performed is the one store the merged assignment makes, and a write
+    /// marker inside the right-hand side is an ordering the placement pass
+    /// cannot resolve.
+    pub(crate) fn observation_is_write(&self, id: RenderObservationId) -> bool {
+        matches!(
+            self.targets.get(id.index() as usize),
+            Some(
+                ObservationTarget::Write { .. }
+                    | ObservationTarget::StackAccess { is_write: true, .. }
+            )
+        )
+    }
+
     pub(crate) fn observation_block(&self, id: RenderObservationId) -> Option<u64> {
         let graph = self.source.graph();
         let inst_block = |inst: InstId| {
@@ -4973,14 +4991,15 @@ impl LegacyObservationJournal {
                         *occurrences = occurrences
                             .checked_add(1)
                             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-                        if let Some(region) = observation_regions
+                        if let Some(scope) = observation_regions
                             .as_ref()
-                            .and_then(|scoped| scoped.get(id.index() as usize).copied().flatten())
+                            .and_then(|scoped| scoped.get(id.index() as usize))
+                            .and_then(Option::as_ref)
                         {
                             effect_occurrence_regions
                                 .entry(effect)
                                 .or_default()
-                                .insert(region);
+                                .push(scope.clone());
                         }
                         return Ok(());
                     }
@@ -5050,10 +5069,11 @@ impl LegacyObservationJournal {
                         .get(*effect)
                         .is_some_and(|count| *count > 1)
                         && occupied.len() == self.effect_occurrences[*effect]
-                        && occupied.iter().all(|left| {
-                            occupied.iter().all(|right| {
-                                left == right || regions.regions_are_exclusive(*left, *right)
-                            })
+                        && occupied.iter().enumerate().all(|(at, left)| {
+                            occupied
+                                .iter()
+                                .skip(at + 1)
+                                .all(|right| left.excludes(right, regions))
                         })
                 })
                 .map(|(effect, _)| *effect)

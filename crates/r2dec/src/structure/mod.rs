@@ -197,8 +197,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let shaped =
             self.rewrite_stage("shape", &placed, stmt, |tree| Self::shape(fold_ctx, tree))?;
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);
+        let journal = self.fold_ctx.inputs.observation_journal;
         let stmt = self.rewrite_stage("cleanup", &placed, shaped, |tree| {
-            Self::cleanup(&symbols, tree)
+            Self::cleanup(
+                &symbols,
+                &|id| journal.is_some_and(|journal| journal.borrow().observation_is_write(id)),
+                tree,
+            )
         })?;
         crate::stage_timing::mark("structure_cleanup");
         let sealed =

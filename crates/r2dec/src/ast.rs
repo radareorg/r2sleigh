@@ -716,6 +716,37 @@ impl CExpr {
         }
     }
 
+    /// The immediate child expressions, in the order they are written.
+    ///
+    /// The borrowing twin of [`Self::map_children`], for a walk that has to
+    /// carry state down the tree and cannot rebuild it on the way back.
+    pub fn children(&self) -> Vec<&CExpr> {
+        match self {
+            Self::Observed { expr, .. }
+            | Self::Unary { operand: expr, .. }
+            | Self::Cast { expr, .. }
+            | Self::Sizeof(expr)
+            | Self::AddrOf(expr)
+            | Self::Deref(expr)
+            | Self::Paren(expr)
+            | Self::Member { base: expr, .. }
+            | Self::PtrMember { base: expr, .. } => vec![expr],
+            Self::Binary { left, right, .. }
+            | Self::Subscript {
+                base: left,
+                index: right,
+            } => vec![left, right],
+            Self::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => vec![cond, then_expr, else_expr],
+            Self::Call { func, args, .. } => std::iter::once(&**func).chain(args.iter()).collect(),
+            Self::Comma(items) => items.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Visit this expression and all descendants in pre-order.
     pub fn visit(&self, f: &mut impl FnMut(&CExpr)) {
         if let Self::Observed { expr, .. } = self {
@@ -1313,6 +1344,24 @@ impl StmtObservationChain {
     /// owned, so the survivor carries both chains.
     pub(crate) fn extend(&mut self, other: Self) {
         self.outer_to_inner.extend(other.outer_to_inner);
+    }
+
+    /// Split the markers this predicate selects out of the chain, keeping both
+    /// sides in order.
+    pub(crate) fn split_out(
+        self,
+        select: &dyn Fn(RenderObservationId) -> bool,
+    ) -> (Vec<RenderObservationId>, Self) {
+        let (selected, rest) = self
+            .outer_to_inner
+            .into_iter()
+            .partition::<Vec<_>, _>(|id| select(*id));
+        (
+            selected,
+            Self {
+                outer_to_inner: rest,
+            },
+        )
     }
 
     /// Reattach this chain to the semantic statement at the same position.
