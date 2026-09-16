@@ -25331,3 +25331,63 @@ Two things that are already built wait on this and nothing else: the AST
 duplication of a lone returning tail (route 1 above, reverted), and the
 single-reader inlining that landed earlier this session, which together turn
 `X0 = φ(1, 0)` into `if (c) { return 1; } else { return 0; }`.
+
+### Promotion moved to the right layer, and the lift stopped being edited
+
+The first cut of `promote_private_stack_slots` rewrote the lifted `R2ILBlock`s
+-- `Store` became `Copy`, `Load` became `Copy`, and the address computation left
+behind was replaced by a `Nop`. That is editing the evidence, and every problem
+it caused was a downstream layer noticing: the seal reported one cell claimed
+twice, declaration placement reported a region that could not dominate, and an
+orphaned `sp + K` had to be deleted by hand.
+
+The lift is evidence. The graph is derived. So the promotion now leaves the
+lifted text alone and applies in two places inside construction:
+
+- `collect_defs_from_cfg_with_names_storage_and_control` gives a promoted slot
+  its own `RenameIdentity` and records a definition site at each block that
+  stores to it, so the builder's own phi placement merges it at a join exactly
+  as it does a register;
+- `rename_op` emits `SSAOp::Copy` for a promoted access -- reading the slot for
+  a load, writing it for a store -- while the `R2ILOp` it came from is still the
+  machine's own load or store.
+
+The analysis that decides *which* slots qualify is unchanged and still runs on
+the lifted text before construction, which is right: it is asking what the
+machine did.
+
+One thing had to be fixed with it. `record_renamed_op_storage` pairs the lifted
+operation's varnodes with the renamed operation's variables by position, and a
+promoted access is not positional -- its copy reads or writes the slot, not the
+address the machine computed. Pairing them gave the slot the *address's* storage
+beside its own, which marked the identity ambiguous, dropped it from
+`canonical_storage_by_var`, and the integrity check then reported
+`PhiStorageMismatch` with `retained: None`. A promoted access now records the
+two pairs it actually has.
+
+`check_secret` renders with the slot gone and the merge coming from the builder:
+
+```c
+uint32_t space21249_3e584_1;
+if ((uint32_t)x != 0xdead) { space21249_3e584_1 = 0; } else { space21249_3e584_1 = 1; }
+{ uint32_t tmp_24c00_2 = space21249_3e584_1; return (int32_t)tmp_24c00_2; }
+```
+
+Fifty-two of the sixty corpus cells pass every column. The name is the synthetic
+space showing through and wants the slot's own `stack_*` spelling; that is
+presentation and comes after the last refusal.
+
+Which is still one cause, and the same one in all eight:
+
+```
+BindingId(13) is read 1 times and never written;
+reads [(CertifiedValue { value: ValueId(145), at: InstId(120) }, ...)]
+```
+
+The value the return certificate reads is the promoted carrier's last version,
+and every write of its binding was elided as a coalesced copy, so placement
+finds an object read and never assigned. That is the hazard the binding plan
+already names elsewhere -- "spelling the constant at each reader deletes that
+definition, and placement then finds the object read before it is assigned" --
+met here by a carrier whose writes are all copies within one binding. One of
+them has to survive, and which one is the question to answer next.
