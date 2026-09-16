@@ -25391,3 +25391,54 @@ already names elsewhere -- "spelling the constant at each reader deletes that
 definition, and placement then finds the object read before it is assigned" --
 met here by a carrier whose writes are all copies within one binding. One of
 them has to survive, and which one is the question to answer next.
+
+### What the eight refusals actually were
+
+The hypothesis above was wrong, and tracing it out found three separate faults,
+all of them consequences of promotion rather than of the binding plan.
+
+The first and largest is the memory-space map. `SourceMachineContext` builds
+`memory_spaces_by_op` from the lifted blocks and then calls
+`remap_memory_sites_to_prepared` to rebind it to the prepared operation sites.
+That remap requires the prepared operations to hold the same memory operations,
+in the same order, as the lifted text did; anything else clears the whole map so
+certification fails closed. Promotion turns a `Load`/`Store` into a `Copy`, so
+the counts stopped matching and **one promoted slot deleted the memory context
+for the entire function**. Every remaining access then lost its address
+certificate: `memory_address_for_use` refused with `MachineContextMismatch`, the
+canonical import dropped the access because it demands
+`MachineUseDisposition::MemoryAddress`, and the load of `data[i]` refused as
+`UnsupportedOperation` and opened a gap that swallowed 133 cells -- including
+the definition placement then reported missing. The fix is that the function now
+carries `promoted_slot_sites`, and the remap drops those sites before it
+compares, because a promoted access is no longer one of the function's memory
+operations.
+
+The second showed up once the eight rendered: all eight failed the raw compile
+with `-Wself-assign` on
+
+```c
+for (space21249_3e788_1 = 0; ; space21249_3e788_1 = space21249_3e788_1)
+```
+
+The increment's sum is coalesced into the slot's own binding, so the promoted
+store that follows it copies the object to itself. The copy survived because the
+coalescing test requires both sides to be `Bound` and this source is `Inline`:
+`nothing_wrote_the_object_between` returns false for an inlined value, so the
+site was skipped before the binding comparison. An inlined source is an
+expression read where the copy stands, so when it spells the destination the
+copy is an identity wherever it sits and no interval question applies --
+`term_spells_binding` already answers exactly that, and the elision now accounts
+for the folded source the way the store elision does.
+
+The third is that promotion was taking slots it must not. The callee-saved
+save/reload in `frame_round_trip_certifies_through_a_merge_no_observation_depends_on`
+is a single-width private slot, so it qualified, and the round-trip certificate
+then had no store to attach to. The parameter-home exclusion already knew the
+shape -- a slot the prologue fills from a value the call brought in is that
+value's home -- but it only looked at a register stored directly. It now follows
+copies back to the carrier, which covers the callee-saved spill as well.
+
+With those three, the corpus is 60/60 on every column and the raw compile passes
+for all sixty. The synthetic `space21249_*` name is still the promoted space
+showing through and wants the slot's own `stack_*` spelling.

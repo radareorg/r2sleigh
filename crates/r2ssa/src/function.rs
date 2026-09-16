@@ -2267,6 +2267,12 @@ pub struct SSAFunction {
     /// source publishes it for functions whose interface it withholds, and
     /// those are the ones that need it.
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
+    /// The lifted memory operations promotion took out of memory.
+    ///
+    /// A promoted slot access is a copy of a variable in the prepared
+    /// operations, so it is no longer one of the function's memory
+    /// operations, and every layer that counts those has to agree.
+    promoted_slot_sites: BTreeSet<(u64, usize)>,
     /// The architectural stack pointer, as the machine roles name it.
     ///
     /// The roles know it for every function, including one whose signature
@@ -2346,6 +2352,7 @@ impl Clone for SSAFunction {
     fn clone(&self) -> Self {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
+            promoted_slot_sites: self.promoted_slot_sites.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
@@ -3130,6 +3137,7 @@ impl SSAFunction {
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
+            promoted_slot_sites: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,
             entry,
@@ -3632,6 +3640,7 @@ impl SSAFunction {
         cfg.release_operations();
         let mut function = Self {
             call_preserved_carriers: None,
+            promoted_slot_sites: promoted.keys().copied().collect(),
             stack_pointer_carrier: None,
             name: None,
             entry,
@@ -3665,6 +3674,11 @@ impl SSAFunction {
     /// Build raw SSA without architecture metadata.
     pub fn from_blocks_raw_no_arch(blocks: &[R2ILBlock]) -> Option<Self> {
         Self::from_blocks_raw(blocks, None)
+    }
+
+    /// Which lifted memory operations promotion took out of memory.
+    pub fn promoted_slot_sites(&self) -> &BTreeSet<(u64, usize)> {
+        &self.promoted_slot_sites
     }
 
     /// Set the function name.
@@ -13192,21 +13206,38 @@ fn promote_private_stack_slots(
                 continue;
             };
             // A register the prologue spills before anything wrote it came in
-            // with the call, so the slot is that value's home. Asked of the
-            // text rather than of an ABI, because a recovered interface often
-            // names no argument placement at all and the machine still says
-            // plainly that nothing in this function produced the value.
-            let entered_with_the_call = val.space == r2il::SpaceId::Register
+            // with the call, so the slot is that value's home -- a parameter's
+            // or a callee-saved register's. Asked of the text rather than of
+            // an ABI, because a recovered interface often names no argument
+            // placement at all and the machine still says plainly that nothing
+            // in this function produced the value. Copies on the way to the
+            // store do not change whose home the slot is, so the walk follows
+            // them back to the carrier they read.
+            let mut root = val.clone();
+            let mut index = at;
+            while index > 0 {
+                index -= 1;
+                let earlier = &entry.ops[index];
+                if earlier.output() != Some(&root) {
+                    continue;
+                }
+                match earlier {
+                    R2ILOp::Copy { src, .. } if src.size == root.size => root = src.clone(),
+                    _ => break,
+                }
+            }
+            let entered_with_the_call = root.space == r2il::SpaceId::Register
                 && !entry.ops[..at].iter().any(|earlier| {
                     earlier.output().is_some_and(|dst| {
-                        dst.space == val.space
-                            && dst.offset < val.offset + u64::from(val.size)
-                            && val.offset < dst.offset + u64::from(dst.size)
+                        dst.space == root.space
+                            && dst.offset < root.offset + u64::from(root.size)
+                            && root.offset < dst.offset + u64::from(dst.size)
                     })
                 });
             let is_argument = entered_with_the_call
                 || argument_carriers.iter().any(|carrier| {
-                    carrier.space == CanonicalStorageSpace::Register && carrier.offset == val.offset
+                    carrier.space == CanonicalStorageSpace::Register
+                        && carrier.offset == root.offset
                 });
             if !is_argument {
                 continue;
