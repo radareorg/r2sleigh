@@ -25310,7 +25310,24 @@ single-reader inlining that landed earlier this session.
 It is one pass with a clear shape: private object, uniform offset and width,
 iterated dominance frontier of the store blocks, rename down the dominator tree,
 and the object then has no access left to render. `crates/r2ssa/src/domtree.rs`
-is already there and `private_stack_objects` already names the objects. What it
-has to respect is the order the artifact is built in: the promotion has to
-happen before the structured facts, obligations and certificates are collected
-from the graph, because every one of them is derived from it.
+is already there and `private_stack_objects` already names the objects.
+
+Where it goes is the part worth settling before anyone writes it, and it is not
+a post-pass. Everything the artifact holds -- the structured accesses, the
+obligations, the certificates, the object model -- is derived from the graph
+once and sealed, so a pass that inserts phis afterwards would have to invalidate
+and rebuild all of it. A slot that behaves like a variable *is* a variable, and
+the place a builder turns variables into values with phis is the builder. So
+the shape is: the SSA construction treats a proven-private, uniformly accessed
+stack slot as one more variable beside the registers, and the object never
+reaches the object model at all.
+
+The escape proof construction needs is weaker than `private_stack_objects` and
+available to it: the slot's address value is used only as the address of loads
+and stores of that slot -- never passed to a call, never stored, never in
+arithmetic. That is a local check over the graph's use table.
+
+Two things that are already built wait on this and nothing else: the AST
+duplication of a lone returning tail (route 1 above, reverted), and the
+single-reader inlining that landed earlier this session, which together turn
+`X0 = φ(1, 0)` into `if (c) { return 1; } else { return 0; }`.
