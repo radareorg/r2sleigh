@@ -25535,6 +25535,16 @@ ancestor repeats together -- and is wrong for exactly this reason: the nearest
 common ancestor is a `Block`, and the order really is unproven because the
 attribution is.
 
+Bypassing the order predicate does not exonerate it: the refusal becomes
+`read_before_assignment`, which is the dominator-tree answer to the same
+question, so the rendering really does read the object before anything assigns
+it. And the region tree says `0xea8` is not dominated by the loop header at all
+-- its block region hangs off `0xd3c` beside the loop rather than inside it --
+so no SSA value defined there can reach a use in the header. One of the two is
+therefore lying: either the use's text is in a block whose region is not where
+it was emitted, or the binding holds more than the one member the placement
+decision reports.
+
 So the next step is the pass that moves a test into a loop header:
 `rotate_pre_test` peels the body's trailing `if` and makes it the loop's
 condition. It already refuses when the body's prefix renders anything, so the
