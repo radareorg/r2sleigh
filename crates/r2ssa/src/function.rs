@@ -3210,6 +3210,9 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
+        let promoted =
+            promote_private_stack_slots(blocks, stack_pointer_carrier, questions.interface);
+        let blocks = promoted.as_deref().unwrap_or(blocks);
         // The convention says the callee leaves this carrier where it found
         // it, and the machine's own p-code moved it to transfer control. Both
         // halves have to be in hand before SSA construction, because it is
@@ -12867,4 +12870,401 @@ mod tests {
             certificate.argument_certificates
         );
     }
+}
+
+/// The `(base register, displacement)` an address computed in this block names.
+fn resolved_stack_address(
+    block: &R2ILBlock,
+    upto: usize,
+    addr: &r2il::Varnode,
+) -> Option<(r2il::Varnode, i64)> {
+    if addr.space == r2il::SpaceId::Register {
+        return Some((addr.clone(), 0));
+    }
+    let mut current = addr.clone();
+    let mut displacement = 0i64;
+    let mut at = upto;
+    while at > 0 {
+        at -= 1;
+        let op = &block.ops[at];
+        let Some(dst) = op.output() else { continue };
+        if *dst != current {
+            continue;
+        }
+        match op {
+            R2ILOp::Copy { src, .. } => current = src.clone(),
+            R2ILOp::IntAdd { a, b, .. } => match (a.space, b.space) {
+                (r2il::SpaceId::Const, _) => {
+                    displacement += a.offset as i64;
+                    current = b.clone();
+                }
+                (_, r2il::SpaceId::Const) => {
+                    displacement += b.offset as i64;
+                    current = a.clone();
+                }
+                _ => return None,
+            },
+            R2ILOp::IntSub { a, b, .. } if b.space == r2il::SpaceId::Const => {
+                displacement -= b.offset as i64;
+                current = a.clone();
+            }
+            _ => return None,
+        }
+        if current.space == r2il::SpaceId::Register {
+            return Some((current, displacement));
+        }
+    }
+    None
+}
+
+/// The space promoted stack slots live in: not memory, and not the lifter's
+/// scratch either.
+const PROMOTED_SLOT_SPACE: u32 = 0x5301;
+
+/// A stack slot promoted out of memory, keyed by where it sits in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PromotedSlot {
+    displacement: i64,
+    width: u32,
+}
+
+/// One access to a promoted slot.
+struct SlotAccess {
+    block: usize,
+    op: usize,
+    slot: PromotedSlot,
+}
+
+/// Promote a private stack slot to a variable before construction runs.
+///
+/// A slot the program only ever writes and reads whole, whose address never
+/// leaves the accesses that name it, behaves exactly like a register: `-O0`
+/// spills a value into it and reads it back, and the C that says so has one
+/// variable rather than a slot and a copy. Turning its stores and loads into
+/// copies of one synthetic varnode lets the builder's own phi placement merge
+/// it at joins, which is what a value that is one thing on one path and another
+/// on a second needs and what no certificate can supply after the fact.
+///
+/// Every condition is checked here because construction is what decides which
+/// value each read sees. A slot the source named is left alone: the name is
+/// what the rendering is for, and a promoted slot carries none.
+fn promote_private_stack_slots(
+    blocks: &[R2ILBlock],
+    stack_pointer: Option<CanonicalStorageId>,
+    interface: Option<&SourceFunctionInterface>,
+) -> Option<Vec<R2ILBlock>> {
+    r2il::refusal_evidence!("promote-stack-slot", "asked over {} blocks", blocks.len());
+    let Some(stack_pointer) = stack_pointer else {
+        r2il::refusal_evidence!("promote-stack-slot", "no stack pointer carrier");
+        return None;
+    };
+    if stack_pointer.space != CanonicalStorageSpace::Register {
+        r2il::refusal_evidence!("promote-stack-slot", "the stack pointer is not a register");
+        return None;
+    }
+    let is_stack_pointer = |varnode: &r2il::Varnode| {
+        varnode.space == r2il::SpaceId::Register && varnode.offset == stack_pointer.offset
+    };
+    let entry = blocks.first()?;
+    // The prologue: the one subtraction that opens the frame every access
+    // counts from. Without it there is no frame and nothing to promote.
+    let Some((prologue_at, frame_size)) =
+        entry.ops.iter().enumerate().find_map(|(at, op)| match op {
+            R2ILOp::IntSub { dst, a, b }
+                if is_stack_pointer(dst)
+                    && is_stack_pointer(a)
+                    && b.space == r2il::SpaceId::Const =>
+            {
+                Some((at, b.offset as i64))
+            }
+            _ => None,
+        })
+    else {
+        r2il::refusal_evidence!("promote-stack-slot", "no prologue frame subtraction");
+        return None;
+    };
+    // Every other write of the stack pointer is the epilogue of a returning
+    // block, after that block's accesses. Anything else moves the frame under
+    // the accesses and the displacement they share stops meaning one place.
+    for (index, block) in blocks.iter().enumerate() {
+        let returns = block
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Return { .. }));
+        for (at, op) in block.ops.iter().enumerate() {
+            let writes_stack_pointer = op.output().is_some_and(is_stack_pointer);
+            if !writes_stack_pointer {
+                continue;
+            }
+            if index == 0 && at == prologue_at {
+                continue;
+            }
+            if !returns {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x} writes the stack pointer and does not return",
+                    block.addr
+                );
+                return None;
+            }
+            let accesses_after = block.ops[at + 1..]
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. }));
+            if accesses_after {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x} accesses the frame after moving the stack pointer",
+                    block.addr
+                );
+                return None;
+            }
+        }
+    }
+    // Which displacements the source named, in the coordinate the accesses use.
+    let declared = interface
+        .map(|interface| {
+            interface
+                .stack_slots()
+                .iter()
+                .filter(|slot| slot.base() == StackAddressBase::StackPointer)
+                .map(|slot| slot.offset() + frame_size)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut accesses = Vec::new();
+    let mut widths = BTreeMap::<i64, BTreeSet<u32>>::new();
+    for (index, block) in blocks.iter().enumerate() {
+        // Everything this block derives from the stack pointer. A derived value
+        // used as anything but the address of an access has escaped, and then
+        // nothing here can say which slot a later access reaches.
+        let mut derived = Vec::<r2il::Varnode>::new();
+        let holds =
+            |set: &Vec<r2il::Varnode>, want: &r2il::Varnode| set.iter().any(|held| held == want);
+        for (at, op) in block.ops.iter().enumerate() {
+            // A read of the stack pointer itself is not a read of a slot: the
+            // epilogue computes its own flags from it. What may not happen is a
+            // *derived* address reaching anything but an access below.
+            let reads_derived = op.inputs().into_iter().any(|input| holds(&derived, input));
+            match op {
+                R2ILOp::Load { dst, addr, .. } => {
+                    if holds(&derived, addr) || is_stack_pointer(addr) {
+                        let Some((base, displacement)) = resolved_stack_address(block, at, addr)
+                        else {
+                            r2il::refusal_evidence!(
+                                "promote-stack-slot",
+                                "{:#x}:{at} loads through an address that resolves to no place",
+                                block.addr
+                            );
+                            return None;
+                        };
+                        if !is_stack_pointer(&base) {
+                            return None;
+                        }
+                        widths.entry(displacement).or_default().insert(dst.size);
+                        accesses.push(SlotAccess {
+                            block: index,
+                            op: at,
+                            slot: PromotedSlot {
+                                displacement,
+                                width: dst.size,
+                            },
+                        });
+                    }
+                }
+                R2ILOp::Store { addr, val, .. } => {
+                    if holds(&derived, val) || is_stack_pointer(val) {
+                        return None;
+                    }
+                    if holds(&derived, addr) || is_stack_pointer(addr) {
+                        let Some((base, displacement)) = resolved_stack_address(block, at, addr)
+                        else {
+                            r2il::refusal_evidence!(
+                                "promote-stack-slot",
+                                "{:#x}:{at} stores through an address that resolves to no place",
+                                block.addr
+                            );
+                            return None;
+                        };
+                        if !is_stack_pointer(&base) {
+                            return None;
+                        }
+                        widths.entry(displacement).or_default().insert(val.size);
+                        accesses.push(SlotAccess {
+                            block: index,
+                            op: at,
+                            slot: PromotedSlot {
+                                displacement,
+                                width: val.size,
+                            },
+                        });
+                    }
+                }
+                R2ILOp::Copy { dst, src } if holds(&derived, src) || is_stack_pointer(src) => {
+                    derived.push(dst.clone());
+                }
+                R2ILOp::IntAdd { dst, a, b }
+                    if (holds(&derived, a) || is_stack_pointer(a))
+                        && b.space == r2il::SpaceId::Const
+                        || (holds(&derived, b) || is_stack_pointer(b))
+                            && a.space == r2il::SpaceId::Const =>
+                {
+                    derived.push(dst.clone());
+                }
+                R2ILOp::IntSub { dst, a, b }
+                    if (holds(&derived, a) || is_stack_pointer(a))
+                        && b.space == r2il::SpaceId::Const =>
+                {
+                    derived.push(dst.clone());
+                }
+                _ if reads_derived => {
+                    r2il::refusal_evidence!(
+                        "promote-stack-slot",
+                        "{:#x}:{at} reads a frame address it does not access through",
+                        block.addr
+                    );
+                    return None;
+                }
+                _ => {}
+            }
+            // A frame address that lands in a register leaves this block. The
+            // stack pointer's own prologue and epilogue writes are not that:
+            // the discipline check above has already accounted for them.
+            if let Some(dst) = op.output()
+                && holds(&derived, dst)
+                && dst.space != r2il::SpaceId::Unique
+                && !is_stack_pointer(dst)
+            {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x}:{at} puts a frame address in a register",
+                    block.addr
+                );
+                return None;
+            }
+        }
+    }
+    // One width per place, no place overlapping another, and nothing the source
+    // named.
+    let mut promotable = BTreeSet::<PromotedSlot>::new();
+    for (displacement, sizes) in &widths {
+        if sizes.len() != 1 || declared.contains(displacement) {
+            continue;
+        }
+        let width = *sizes.iter().next().expect("one width");
+        let overlaps = widths.iter().any(|(other, other_sizes)| {
+            other != displacement
+                && other_sizes.iter().any(|other_width| {
+                    *other < displacement + i64::from(width)
+                        && *displacement < other + i64::from(*other_width)
+                })
+        });
+        if !overlaps {
+            promotable.insert(PromotedSlot {
+                displacement: *displacement,
+                width,
+            });
+        }
+    }
+    if promotable.is_empty() {
+        r2il::refusal_evidence!(
+            "promote-stack-slot",
+            "no slot qualifies of {} places, {} declared",
+            widths.len(),
+            declared.len()
+        );
+        return None;
+    }
+    // A fresh unique for each slot, above everything the lift already used, so
+    // the synthetic name cannot collide with a temporary.
+    let mut next_unique = blocks
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .flat_map(|op| op.inputs().into_iter().chain(op.output()))
+        .filter(|varnode| varnode.space == r2il::SpaceId::Unique)
+        .map(|varnode| varnode.offset + u64::from(varnode.size))
+        .max()
+        .unwrap_or(0);
+    let mut varnode_for = BTreeMap::<PromotedSlot, r2il::Varnode>::new();
+    for slot in &promotable {
+        varnode_for.insert(
+            *slot,
+            r2il::Varnode {
+                // Its own space, not `Unique`. A lowering temporary is
+                // block-local scratch and several rules read the space to say
+                // so; a promoted slot is a variable of the function and its
+                // declaration has to dominate every region that reads it.
+                space: r2il::SpaceId::Custom(PROMOTED_SLOT_SPACE),
+                offset: next_unique,
+                size: slot.width,
+                meta: None,
+            },
+        );
+        next_unique += u64::from(slot.width);
+    }
+    let mut rewrites = BTreeMap::<(usize, usize), r2il::Varnode>::new();
+    for access in &accesses {
+        if let Some(varnode) = varnode_for.get(&access.slot) {
+            rewrites.insert((access.block, access.op), varnode.clone());
+        }
+    }
+    if rewrites.is_empty() {
+        return None;
+    }
+    r2il::refusal_evidence!(
+        "promote-stack-slot",
+        "{} slots promoted out of memory across {} accesses",
+        promotable.len(),
+        rewrites.len()
+    );
+    let mut out = blocks.to_vec();
+    // The addresses these accesses were reached through. Each is left behind
+    // computing a value nothing reads, and two rules then answer for its read
+    // of the stack pointer -- the certificate calls it a dead stack base and
+    // normalisation calls it a coalesced copy. The address is part of the
+    // access, so it goes with it.
+    let mut addresses = BTreeMap::<usize, Vec<r2il::Varnode>>::new();
+    for ((block, at), varnode) in rewrites {
+        let op = &mut out[block].ops[at];
+        let address = match op {
+            R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. } => addr.clone(),
+            _ => continue,
+        };
+        *op = match op {
+            R2ILOp::Load { dst, .. } => R2ILOp::Copy {
+                dst: dst.clone(),
+                src: varnode,
+            },
+            R2ILOp::Store { val, .. } => R2ILOp::Copy {
+                dst: varnode,
+                src: val.clone(),
+            },
+            _ => continue,
+        };
+        addresses.entry(block).or_default().push(address);
+    }
+    for (index, addresses) in addresses {
+        let block = &mut out[index];
+        for at in 0..block.ops.len() {
+            let Some(dst) = block.ops[at].output().cloned() else {
+                continue;
+            };
+            if dst.space != r2il::SpaceId::Unique
+                || !addresses.contains(&dst)
+                || !matches!(
+                    block.ops[at],
+                    R2ILOp::IntAdd { .. } | R2ILOp::IntSub { .. } | R2ILOp::Copy { .. }
+                )
+            {
+                continue;
+            }
+            let read_elsewhere = block.ops.iter().enumerate().any(|(other, op)| {
+                other != at && op.inputs().into_iter().any(|input| *input == dst)
+            });
+            if !read_elsewhere {
+                block.ops[at] = R2ILOp::Nop;
+            }
+        }
+    }
+    Some(out)
 }

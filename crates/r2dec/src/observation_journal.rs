@@ -2574,6 +2574,13 @@ impl LegacyObservationJournal {
             .copied()
             .collect::<Vec<_>>();
         for site in coalesced_carrier_uses {
+            // A cell a certificate already answered for keeps that answer. Two
+            // tables saying one read renders nothing do not disagree, and the
+            // certificate is the one with the authority; what the seal is for
+            // is a cell two tables render *differently*.
+            if elided_uses.contains_key(&site) {
+                continue;
+            }
             match elided_uses.insert(site, r2ssa::ledger::ElisionReason::CoalescedCopy) {
                 Some(r2ssa::ledger::ElisionReason::CoalescedCopy) | None => {}
                 Some(existing) => {
