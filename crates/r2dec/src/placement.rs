@@ -441,7 +441,7 @@ pub(crate) fn collect_final_placement_occurrences(
                 {
                     r2il::refusal_evidence!(
                         "use-region-mismatch",
-                        "{site:?} at block {block:#x} rendered in {region:?} entry {:#x} statement {statement:?}",
+                        "{observation:?} {site:?} at block {block:#x} rendered in {region:?} entry {:#x} statement {statement:?}",
                         regions.node(region).map_or(0, |node| node.entry())
                     );
                 }

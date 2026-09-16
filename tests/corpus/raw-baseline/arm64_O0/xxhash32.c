@@ -2,10 +2,8 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 574 source obligations: 396 rendered, 178 elided, 0 refused; 178 statements rendered */
+    /* r2dec proof: no individual construct is marked; 502 source obligations: 393 rendered, 109 elided, 0 refused; 148 statements rendered */
     {
-        uint32_t stack_m96;
-        uint32_t stack_m92;
         uint32_t stack_m52;
         uint64_t stack_m48;
         uint32_t stack_m36;
@@ -13,10 +11,8 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         uint64_t stack_m24;
         uint64_t X8_5;
         uint64_t X9_1;
-        uint32_t tmp_24c00_1;
-        uint32_t tmp_24c00_2;
-        stack_m96 = 0x9e3779b1;
-        stack_m92 = 0x85ebca77;
+        uint32_t stack_m96 = 0x9e3779b1;
+        uint32_t stack_m92 = 0x85ebca77;
         stack_m24 = X0_0;
         stack_m32 = X1_0;
         stack_m36 = W2_0;
@@ -36,70 +32,54 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 uint32_t tmp_12280_13 = tmp_24d00_1 + tmp_12180_13;
                 stack_m52 = tmp_12280_13;
             } else {
-                uint32_t stack_m80;
-                uint32_t stack_m76;
-                uint32_t stack_m72;
                 uint32_t stack_m68;
-                uint64_t stack_m64;
-                tmp_24c00_1 = stack_m92;
-                tmp_24c00_2 = stack_m96;
+                uint32_t stack_m72;
+                uint32_t stack_m80;
+                uint32_t tmp_24c00_1 = stack_m92;
+                uint32_t tmp_24c00_2 = stack_m96;
                 uint64_t tmp_3e280_2 = stack_m48 - 16;
-                stack_m64 = tmp_3e280_2;
+                uint64_t stack_m64 = tmp_3e280_2;
                 tmp_24d00_1 = stack_m36;
                 uint32_t tmp_12280_1 = tmp_24c00_2 + tmp_24d00_1;
                 stack_m68 = tmp_24c00_1 + tmp_12280_1;
                 tmp_24d00_1 = stack_m36;
                 stack_m72 = tmp_24c00_1 + tmp_24d00_1;
                 tmp_24d00_1 = stack_m36;
-                stack_m76 = tmp_24d00_1;
                 tmp_24d00_1 = stack_m36;
                 uint32_t tmp_2a000_6 = 0x61c8864f;
                 uint32_t tmp_12180_4 = tmp_2a000_6;
                 uint32_t tmp_12280_4 = tmp_24d00_1 + tmp_12180_4;
                 stack_m80 = tmp_12280_4;
                 for (; ; ) {
-                    uint32_t stack_m100;
-                    uint32_t stack_m84;
-                    uint32_t tmp_24c00_7;
-                    tmp_24c00_1 = stack_m92;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_5 = *(uint32_t*)X8_5;
-                    stack_m84 = tmp_24c00_5;
-                    tmp_24c00_7 = stack_m84;
-                    stack_m100 = 13;
-                    uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_7 * tmp_24c00_1 + stack_m68), 13);
-                    tmp_24c00_1 = stack_m92;
-                    tmp_24c00_2 = stack_m96;
-                    stack_m68 = (uint32_t)X0_3 * tmp_24c00_2;
+                    uint32_t tmp_24c00_6 = stack_m68;
+                    uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_6 + stack_m92 * tmp_24c00_5), 13);
+                    uint64_t X1_4 = (uint64_t)13;
+                    stack_m68 = stack_m96 * (uint32_t)X0_3;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_11 = *(uint32_t*)X8_5;
-                    stack_m84 = tmp_24c00_11;
-                    tmp_24c00_7 = stack_m84;
-                    uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_7 * tmp_24c00_1 + stack_m72), (uint8_t)stack_m100);
-                    tmp_24c00_1 = stack_m92;
-                    tmp_24c00_2 = stack_m96;
-                    stack_m72 = (uint32_t)X0_5 * tmp_24c00_2;
+                    uint32_t tmp_24c00_12 = stack_m72;
+                    uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_12 + stack_m92 * tmp_24c00_11), (uint8_t)X1_4);
+                    uint64_t X1_6 = (uint64_t)13;
+                    stack_m72 = stack_m96 * (uint32_t)X0_5;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_17 = *(uint32_t*)X8_5;
-                    stack_m84 = tmp_24c00_17;
-                    tmp_24c00_7 = stack_m84;
-                    uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_7 * tmp_24c00_1 + stack_m76), (uint8_t)stack_m100);
-                    tmp_24c00_1 = stack_m92;
-                    tmp_24c00_2 = stack_m96;
-                    stack_m76 = (uint32_t)X0_7 * tmp_24c00_2;
+                    uint32_t tmp_24c00_18 = tmp_24d00_1;
+                    uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_18 + stack_m92 * tmp_24c00_17), (uint8_t)X1_6);
+                    uint64_t X1_8 = (uint64_t)13;
+                    tmp_24d00_1 = stack_m96 * (uint32_t)X0_7;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_23 = *(uint32_t*)X8_5;
-                    stack_m84 = tmp_24c00_23;
-                    tmp_24c00_7 = stack_m84;
-                    uint64_t X0_9 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_7 * tmp_24c00_1 + stack_m80), (uint8_t)stack_m100);
-                    tmp_24c00_2 = stack_m96;
-                    stack_m80 = (uint32_t)X0_9 * tmp_24c00_2;
+                    uint32_t tmp_24c00_24 = stack_m80;
+                    uint64_t X0_9 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_24 + stack_m92 * tmp_24c00_23), (uint8_t)X1_8);
+                    stack_m80 = stack_m96 * (uint32_t)X0_9;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     {
@@ -116,21 +96,16 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     }
                 }
                 {
-                    uint32_t stack_m112;
-                    uint32_t stack_m108;
-                    uint32_t stack_m104;
                     uint64_t X0_11 = (uint64_t)sym__rotl32((uint32_t)stack_m68, 1);
-                    stack_m112 = (uint32_t)X0_11;
                     uint64_t X0_13 = (uint64_t)sym__rotl32((uint32_t)stack_m72, 7);
                     uint64_t X8_56 = X0_13;
-                    uint32_t tmp_12280_10 = (uint32_t)X8_56 + stack_m112;
-                    stack_m108 = tmp_12280_10;
-                    uint64_t X0_16 = (uint64_t)sym__rotl32((uint32_t)stack_m76, 12);
-                    uint32_t tmp_12280_11 = (uint32_t)X0_16 + stack_m108;
-                    stack_m104 = tmp_12280_11;
+                    uint32_t tmp_12280_10 = (uint32_t)X0_11 + (uint32_t)X8_56;
+                    uint64_t X0_16 = (uint64_t)sym__rotl32((uint32_t)tmp_24d00_1, 12);
+                    uint32_t tmp_12280_11 = tmp_12280_10 + (uint32_t)X0_16;
                     uint64_t X0_18 = (uint64_t)sym__rotl32((uint32_t)stack_m80, 18);
+                    uint32_t tmp_24c00_33 = tmp_12280_11;
                     uint32_t tmp_12180_12 = (uint32_t)X0_18;
-                    uint32_t tmp_12280_12 = stack_m104 + tmp_12180_12;
+                    uint32_t tmp_12280_12 = tmp_24c00_33 + tmp_12180_12;
                     stack_m52 = tmp_12280_12;
                 }
             }
@@ -152,13 +127,10 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 if (tmp_e80_2) {
                     break;
                 } else {
-                    uint32_t stack_m88;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_36 = *(uint32_t*)X8_5;
-                    stack_m88 = tmp_24c00_36;
                     uint32_t tmp_24d00_9 = stack_m52;
-                    uint32_t tmp_24c00_37 = stack_m88;
-                    uint64_t X0_22 = (uint64_t)sym__rotl32((uint32_t)(tmp_24d00_9 - tmp_24c00_37 * 0x3d4d51c3), 17);
+                    uint64_t X0_22 = (uint64_t)sym__rotl32((uint32_t)(tmp_24d00_9 - tmp_24c00_36 * 0x3d4d51c3), 17);
                     stack_m52 = (uint32_t)X0_22 * 0x27d4eb2f;
                     X8_5 = stack_m24;
                     uint64_t tmp_11f80_10 = X8_5 + 4;
@@ -177,20 +149,18 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         X8_5 = stack_m24;
                         uint8_t tmp_25500_2 = *(uint8_t*)X8_5;
                         uint64_t X0_25 = (uint64_t)sym__rotl32((uint32_t)(tmp_24d00_11 + (uint32_t)tmp_25500_2 * 0x165667b1), 11);
-                        tmp_24c00_2 = stack_m96;
-                        stack_m52 = (uint32_t)X0_25 * tmp_24c00_2;
+                        stack_m52 = stack_m96 * (uint32_t)X0_25;
                         X8_5 = stack_m24;
                         uint64_t tmp_11f80_12 = X8_5 + 1;
                         stack_m24 = tmp_11f80_12;
                     }
                 }
                 {
-                    tmp_24c00_1 = stack_m92;
                     uint32_t tmp_24d00_12 = stack_m52;
                     uint32_t tmp_24d00_13 = stack_m52;
                     stack_m52 = tmp_24d00_12 >> 15 ^ tmp_24d00_13;
                     uint32_t tmp_24d00_14 = stack_m52;
-                    stack_m52 = tmp_24d00_14 * tmp_24c00_1;
+                    stack_m52 = stack_m92 * tmp_24d00_14;
                     uint32_t tmp_24d00_15 = stack_m52;
                     uint32_t tmp_24d00_16 = stack_m52;
                     stack_m52 = tmp_24d00_15 >> 13 ^ tmp_24d00_16;

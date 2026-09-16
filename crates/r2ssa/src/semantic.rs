@@ -5697,7 +5697,7 @@ fn reaching_abi_value_before(
             // no implicit register-merge semantics, so it must fail closed.
             r2il::refusal_evidence!(
                 "reaching-abi-value",
-                "({block_addr:#x}, {op_index}) writes {:?}, a slice of the {:?} wanted",
+                "({block_addr:#x}, {op_index}) writes {:?}, a slice of the {:?} wanted: {op:?}",
                 dst_storage,
                 storage
             );

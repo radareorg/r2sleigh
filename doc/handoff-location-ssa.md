@@ -25535,7 +25535,30 @@ ancestor repeats together -- and is wrong for exactly this reason: the nearest
 common ancestor is a `Block`, and the order really is unproven because the
 attribution is.
 
-Bypassing the order predicate does not exonerate it: the refusal becomes
+The chain ran four layers deeper than the refusal, and the cause was mine. The
+gap the observation belonged to was opened by one refusal in the loop header --
+`callsite-arguments-incomplete` at `0x100000d8c:39` -- and it claimed 297 cells
+over 77 ops, including cells of blocks after the loop, which is how a use of
+`0xea8` came to be scoped to the loop's region. The call refused because
+argument 1 had no reaching value, and the reaching-ABI walk reported why: at
+`0x100000d8c:32` a **lane temporary** carried the canonical storage of `w1`,
+four bytes where the ABI wants the eight of `x1`, and the walk fails closed on a
+slice. The general storage pairing in `record_renamed_op_storage` has always
+skipped lane temporaries; the promoted-access branch added for this feature did
+not, so a promoted load whose destination is a lane got the register's storage.
+One `is_lane_temp` guard, and `xxhash32` renders.
+
+`murmur3_32` at arm64 -O0 goes from 144 lines to 121 and from 118 statements to
+95, because the slot round trips collapse:
+
+```c
+/* before */                              /* after */
+stack_m68 = tmp_25180_2;                  uint32_t tmp_2b380_2 = stack_m92 * tmp_25180_2;
+tmp_24c00_7 = stack_m68;
+uint32_t tmp_2b380_2 = tmp_24c00_7 * stack_m92;
+```
+
+Bypassing the order predicate did not exonerate it either: the refusal becomes
 `read_before_assignment`, which is the dominator-tree answer to the same
 question, so the rendering really does read the object before anything assigns
 it. And the region tree says `0xea8` is not dominated by the loop header at all
@@ -25545,13 +25568,6 @@ therefore lying: either the use's text is in a block whose region is not where
 it was emitted, or the binding holds more than the one member the placement
 decision reports.
 
-So the next step is the pass that moves a test into a loop header:
-`rotate_pre_test` peels the body's trailing `if` and makes it the loop's
-condition. It already refuses when the body's prefix renders anything, so the
-question is how a statement of `0xea8` came to be in that body at all, or which
-other pass carried the condition's operand there. The counted-`for` former was
-the first suspect and is not it: requiring the latch to render nothing besides
-the update changed nothing.
 
 `alloc_and_copy` is not this: its five frame places are all named by the source,
 so promotion correctly leaves them alone, and `return (char*)stack_m24;` instead
