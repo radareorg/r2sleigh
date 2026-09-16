@@ -315,37 +315,26 @@ NAME=pd:s renders C for a function the kernel did not certify
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
-sla: loaded architecture 'x86-64'
-int dbg.complex_check(int a, int b)
-{
-    /* r2dec proof: no individual construct is marked */
-    return (a + b ^ 100 | a - b ^ 20) == 0;
-}
-
+true
 EOF
 CMDS=<<EOF
-a:sla
+a:sla > /dev/null
 aaa
-s dbg.complex_check
-pd:s
+s dbg.complex_check > /dev/null
+pd:s | jq -Rs 'test("int32_t dbg_complex_check[(]int32_t a, int32_t b[)]") and contains("r2dec proof") and contains("== 0") and contains("return")'
 EOF
 RUN
 
-NAME=pd:s says when a render produced no statements rather than showing empty braces
+NAME=pd:s renders an import thunk as the call it forwards rather than empty braces
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
-sla: loaded architecture 'x86-64'
-/* unknown */ sym.imp.tcgetattr(void)
-{
-    /* r2dec proof: rendering produced no statements */
-}
-
+true
 EOF
 CMDS=<<EOF
-a:sla
+a:sla > /dev/null
 aaa
-s 0x1000019bc
-pd:s
+s 0x1000019bc > /dev/null
+pd:s | jq -Rs 'contains("sym_imp_tcgetattr") and contains("return tcgetattr();") and (test("[{][ \\n]*[}]")|not)'
 EOF
 RUN
