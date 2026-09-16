@@ -23,9 +23,9 @@ pub use driver::{
 };
 pub use eval::{LeafRef, eval, mask, signed};
 pub use import::{
-    COPY_ELIDE, ExpansionPolicy, ExpansionQuery, Import, ImportedAccess, ImportedValue,
-    OBJECT_ADDRESS, default_expansion_policy, exact_stack_object_address, import, import_with,
-    machine_expr_is_literal, term_is_duplicable,
+    COPY_ELIDE, DeclaredPointers, ExpansionPolicy, ExpansionQuery, Import, ImportedAccess,
+    ImportedValue, OBJECT_ADDRESS, default_expansion_policy, exact_stack_object_address, import,
+    import_with, machine_expr_is_literal, no_declared_pointers, term_is_duplicable,
 };
 pub use rules::{
     DEFAULT_PROOF_WIDTHS, Measure, MeasureVector, RULES, Rule, RuleGroup, RuleId, measure,

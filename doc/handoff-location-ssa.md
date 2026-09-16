@@ -26227,3 +26227,56 @@ four bytes, so the negative returns print as `0xfffffffe` rather than `-2`; the
 return spells `(int32_t)` around it, and taking the signedness from the return
 type is the remaining step. And the slot has one reader, the return, so the
 whole conditional should inline into it.
+
+### `len[buf]`: the rewriter is type-blind, so the types are handed to it
+
+`alloc_and_copy` rendered `((uint8_t*)len)[buf] = 0;` for `buf[len] = '\0'` --
+base and index the wrong way round, and a wrong answer rather than an ugly one.
+
+The trace runs through three layers and ends outside all of them.
+`render_certified_subscript` spells whatever `TermKind::Subscript { base, index }`
+says, so the choice is the rewriter's; `constant_stride` makes it with
+`unique_base(.., TermArena::is_pointer)`, which refuses when two atoms qualify
+and so is not guessing; and `is_pointer` comes from `declare_leaf_facts`, whose
+only evidence is `value_is_pointer`: the machine arena's `Address` typing, or a
+parameter that some certified access reaches memory through. The address here is
+`buf + len`, `buf` is a `malloc` result and not a parameter, so the only
+parameter in the expression was `len` -- and the rule proved exactly the wrong
+atom. `import.rs` already carried the comment explaining why being a parameter
+proves nothing on its own; what it could not see is that a *non-parameter* atom
+may be the pointer.
+
+There is nothing further to trace inside `r2rewrite`, because the fact it needs
+is a type and this crate has no type system. So the caller that owns the types
+now answers: `canonicalize_with` takes a `DeclaredPointers` oracle beside the
+expansion policy, `value_is_pointer` consults it first, and an answer of *not* a
+pointer is as useful as an answer of pointer -- ruling a declared size out of
+the base position is what leaves the pointer alone in it.
+
+Three things the oracle had to get right, each found by running it.
+
+**It is asked of the object, not of the version.** At -O0 every local lives in a
+frame slot and the value an address is built from is a reload the type solution
+never typed. The pre-partition built for the fold guard already says which
+values share a C object, so the oracle agrees types over the group -- the same
+question `declaration_type_for_binding` asks of the finished component, asked of
+the coarser partition that exists before the plan does.
+
+**A declared prototype outranks the solution.** With the group answer alone,
+`len` was still a pointer: the type solution types `len` as `char *`, and
+nothing contradicted it. The signature does. A formal's declared type is
+therefore consulted first and the solution only where the signature is silent.
+
+**A recovered signature is not a declaration.** Gating that on the signature
+certificate carrying `SourceInterface` was not enough: every stripped function
+also has a signature, recovered as machine words, and reading `uint64_t RDI_0`
+as "declared not a pointer" took *every* byte-loop subscript in the corpus away
+-- twenty-four cells, caught by the snapshot column. A bare `Int` from a formal
+now says nothing; a name -- `size_t`, a typedef, an enum -- is a statement
+someone made.
+
+The corpus ends better than it started: raw 60/60, differential 60/60, every
+audit 60/60, and **eight cells improved**, each a dereference that became a
+subscript now that the rewriter can prove the base. `*(uint8_t*)(RDX_6 + RDI_0)`
+is `((uint8_t*)RDI_0)[RDX_6]`, and `*(uint8_t*)((uint64_t)X11_5 + 2)` is
+`X11_5[2]`.

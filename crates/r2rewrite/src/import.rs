@@ -281,6 +281,8 @@ struct Importer<'a> {
     /// Parameters some address reaches memory through, so a pointer rather
     /// than an integer that happens to be a parameter.
     pointer_parameters: BTreeSet<usize>,
+    /// What the caller's declarations say, where they say anything.
+    declared_pointers: &'a DeclaredPointers<'a>,
     /// One integer-typed source node per value the arena reads, so a
     /// certificate that names a value can be stated over a leaf.
     source_nodes: BTreeMap<ValueId, MachineExprId>,
@@ -301,7 +303,27 @@ pub fn import(
     projection: &MachineProjection,
     arena: &mut TermArena,
 ) -> Import {
-    import_with(artifact, projection, arena, &default_expansion_policy)
+    import_with(
+        artifact,
+        projection,
+        arena,
+        &default_expansion_policy,
+        &no_declared_pointers,
+    )
+}
+
+/// What the caller's types say about a value, where they say anything.
+///
+/// This crate has no type system, and which operand of `p + n` is the base is a
+/// question about types: `buf + len` came out spelled `len[buf]` because address
+/// provenance alone cannot tell a pointer from a size when both arrive with a
+/// unit coefficient and only one of them is a parameter. The caller that owns
+/// the declarations answers here, and says nothing where it has nothing.
+pub type DeclaredPointers<'a> = dyn Fn(ValueId) -> Option<bool> + 'a;
+
+/// The answer when no caller has declarations to offer.
+pub fn no_declared_pointers(_: ValueId) -> Option<bool> {
+    None
 }
 
 /// Import, asking `policy` whether each read may absorb its producer's term.
@@ -310,6 +332,7 @@ pub fn import_with(
     projection: &MachineProjection,
     arena: &mut TermArena,
     policy: &ExpansionPolicy<'_>,
+    declared_pointers: &DeclaredPointers<'_>,
 ) -> Import {
     let graph = artifact.graph();
     let entry_never_redefined = entry_values_never_redefined(graph);
@@ -356,6 +379,7 @@ pub fn import_with(
         entry_never_redefined,
         address_typed,
         pointer_parameters,
+        declared_pointers,
         source_nodes,
         walks: BTreeMap::new(),
         reading_for: None,
@@ -1138,6 +1162,12 @@ impl Importer<'_> {
     /// A value with terms added is a pointer too, and is not a *base*: it is
     /// the whole address, and an address that is its own base leaves no index.
     fn value_is_pointer(&self, value: ValueId) -> bool {
+        // A declaration outranks every inference below it, in both directions:
+        // saying a value is not a pointer is what keeps a declared size out of
+        // the base position of an address it happens to be a parameter of.
+        if let Some(declared) = (self.declared_pointers)(value) {
+            return declared;
+        }
         if self.address_typed.contains(&value) {
             return true;
         }

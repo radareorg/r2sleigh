@@ -702,6 +702,20 @@ pd:s | jq -Rs 'test("\\(char ?\\* ?s\\)") and test("size_t len") and (test("[^u]
 EOF_CMDS
 RUN
 
+NAME=dec_alloc_and_copy_indexes_the_buffer_not_the_length
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~alloc_and_copy$[0]` > /dev/null
+pd:s | jq -Rs 'test("buf\\)?\\[len\\] = 0;") and (test("\\[buf\\]")|not) and (contains("r2sleigh refused")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_alloc_and_copy_uses_callee_result_type
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

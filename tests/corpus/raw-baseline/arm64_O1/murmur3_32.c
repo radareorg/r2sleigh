@@ -40,11 +40,11 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     uint64_t X10_7;
                     X10_7 = 0;
                     if (X12_5 != 2) {
-                        uint8_t tmp_25500_1 = *(uint8_t*)((uint64_t)X11_5 + 2);
+                        uint8_t tmp_25500_1 = X11_5[2];
                         X10_7 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_1 << 16);
                     }
                     {
-                        uint8_t tmp_25500_3 = *(uint8_t*)((uint64_t)X11_5 + 1);
+                        uint8_t tmp_25500_3 = X11_5[1];
                         X10_9 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_3 << 8 | (uint32_t)X10_7);
                         {
                             tmp_25500_5 = *X11_5;

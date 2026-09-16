@@ -380,15 +380,22 @@ pub fn canonicalize(
     artifact: &SsaArtifact,
     projection: &MachineProjection,
 ) -> Result<CanonicalRoots, RewriteError> {
-    canonicalize_with(artifact, projection, &default_expansion_policy)
+    canonicalize_with(
+        artifact,
+        projection,
+        &default_expansion_policy,
+        &crate::import::no_declared_pointers,
+    )
 }
 
 /// Canonicalise every value of `projection`, asking `policy` whether each
-/// read may absorb its producer's term.
+/// read may absorb its producer's term and `declared_pointers` which values
+/// the caller's declarations call pointers.
 pub fn canonicalize_with(
     artifact: &SsaArtifact,
     projection: &MachineProjection,
     policy: &ExpansionPolicy<'_>,
+    declared_pointers: &crate::import::DeclaredPointers<'_>,
 ) -> Result<CanonicalRoots, RewriteError> {
     let graph = artifact.graph();
     for entity in projection.entities() {
@@ -403,7 +410,7 @@ pub fn canonicalize_with(
         .map(|entity| (entity.root(), entity.output().value()))
         .collect::<HashMap<_, _>>();
     let mut arena = TermArena::new();
-    let import = import_with(artifact, projection, &mut arena, policy);
+    let import = import_with(artifact, projection, &mut arena, policy, declared_pointers);
     // Definitionless constants have no machine entity and therefore no
     // `ImportedValue`, but the binding plan still renders them inline. Give
     // them a stable canonical term in the same dense value table as defined

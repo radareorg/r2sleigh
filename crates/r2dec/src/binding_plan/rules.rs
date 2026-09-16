@@ -1188,13 +1188,32 @@ pub(super) fn rewrite_inlining_partition(
     // `merge_would_interfere` reads, so it can remove the interference
     // blocking a merge and make a component *grow*.
     let source = source_owned.source();
-    let seed_canonical = r2rewrite::canonicalize_with(source, projection, &|_| false)
-        .map_err(BindingPlanBuildError::Canonicalisation)?;
+    // Built once from the two union sources that do not depend on inlinability,
+    // so the fold guard and the type oracle below can both ask about C objects
+    // before the bindings exist.
+    let pre_partition = super::construction::coalescing_pre_partition(source_owned);
+    let mut group_members = BTreeMap::<u32, Vec<ValueId>>::new();
+    for (index, group) in pre_partition.iter().copied().enumerate() {
+        group_members
+            .entry(group)
+            .or_default()
+            .push(ValueId(index as u32));
+    }
+    // The rewriter has no type system, so which operand of a sum is a pointer
+    // is a question it cannot answer alone: `buf + len` came out spelled
+    // `len[buf]` because address provenance proves only that *some* parameter
+    // reaches memory through that address, and `len` was the only parameter in
+    // it. The types answer here, asked of the object rather than of the
+    // version -- at -O0 the value an address is built from is a reload, and
+    // the solution typed whichever version it could see.
+    let declared_pointers = |value: ValueId| {
+        declared_pointer_of_object(source_owned, &pre_partition, &group_members, value)
+    };
+    let seed_canonical =
+        r2rewrite::canonicalize_with(source, projection, &|_| false, &declared_pointers)
+            .map_err(BindingPlanBuildError::Canonicalisation)?;
     crate::stage_timing::mark("plan_seed");
     let unrendered = unrendered_defined_values(source, projection, &seed_canonical);
-    // Built once from the two union sources that do not depend on inlinability,
-    // so the fold guard can ask about C objects before the bindings exist.
-    let pre_partition = super::construction::coalescing_pre_partition(source_owned);
     let conservative = inlinable_core(
         source_owned,
         projection,
@@ -1235,18 +1254,147 @@ pub(super) fn rewrite_inlining_partition(
     let component_eligible =
         component_eligible_with(source_owned, projection, &inlinable, &unrendered)?;
     crate::stage_timing::mark("plan_eligible");
-    let canonical =
-        r2rewrite::canonicalize_with(source, projection, &|query: &r2rewrite::ExpansionQuery<
-            '_,
-        >| {
-            term_absorbs_producer(&inlinable, query)
-        })
-        .map_err(BindingPlanBuildError::Canonicalisation)?;
+    let canonical = r2rewrite::canonicalize_with(
+        source,
+        projection,
+        &|query: &r2rewrite::ExpansionQuery<'_>| term_absorbs_producer(&inlinable, query),
+        &declared_pointers,
+    )
+    .map_err(BindingPlanBuildError::Canonicalisation)?;
     Ok(RewriteInliningPartition {
         canonical,
         inlinable,
         component_eligible,
     })
+}
+
+/// The declared answer for the C object a value belongs to.
+///
+/// The type solution types versions, and an address at -O0 is built from a
+/// reload the solution never saw. The object is what has a declared type, and
+/// the pre-partition already says which values share one -- the same question
+/// `declaration_type_for_binding` asks of the finished component, asked here of
+/// the coarser partition that is available before the plan exists. A group
+/// whose members disagree says nothing rather than guessing.
+///
+/// A declared prototype outranks the solution. `alloc_and_copy(char *src,
+/// size_t len)` is the case the whole oracle exists for, and the solution types
+/// `len` as `char *`: with nothing to contradict it, the address `buf + len`
+/// had two pointer atoms, the parameter won, and the store rendered as
+/// `len[buf]`. The signature is the one statement of what a formal is.
+fn declared_pointer_of_object(
+    source_owned: &SourceOwnedFunctionFacts,
+    pre_partition: &[u32],
+    group_members: &BTreeMap<u32, Vec<ValueId>>,
+    value: ValueId,
+) -> Option<bool> {
+    let source = source_owned.source();
+    let group = pre_partition.get(value.0 as usize).copied()?;
+    let members = group_members.get(&group)?;
+    let mut agreed: Option<bool> = None;
+    let mut agree = |answer: bool| -> Option<bool> {
+        match agreed {
+            None => {
+                agreed = Some(answer);
+                Some(answer)
+            }
+            Some(existing) if existing == answer => Some(answer),
+            Some(_) => None,
+        }
+    };
+    let mut declared = false;
+    for member in members {
+        let Some(ty) = declared_formal_type(source_owned, *member) else {
+            continue;
+        };
+        declared = true;
+        let Some(answer) = declared_pointer_for_value(ty) else {
+            continue;
+        };
+        agree(answer)?;
+    }
+    if declared {
+        return agreed;
+    }
+    for member in members {
+        let Some(answer) = source_owned
+            .evidence_types()
+            .value_type(*member)
+            .and_then(declared_pointer_for_value)
+        else {
+            continue;
+        };
+        agree(answer)?;
+    }
+    let _ = source;
+    agreed
+}
+
+/// The declared type of the formal this value is the entry read of.
+///
+/// Only from a signature the source's own type graph projected. Every function
+/// has a signature -- a stripped one is recovered as machine words -- and
+/// treating `uint64_t RDI_0` as a declaration that the parameter is not a
+/// pointer would silence the provenance inference that is the only evidence
+/// such a function has. That is not hypothetical: it took every byte-loop
+/// subscript in the corpus away.
+fn declared_formal_type(
+    source_owned: &SourceOwnedFunctionFacts,
+    value: ValueId,
+) -> Option<&r2types::CTypeLike> {
+    let facts = source_owned.report().type_facts();
+    if !facts.signature_certificate.as_ref().is_some_and(|cert| {
+        cert.sources
+            .contains(&r2types::SignatureCertificateSource::SourceInterface)
+    }) {
+        return None;
+    }
+    let source = source_owned.source();
+    let var = &source.graph().value(value)?.var;
+    let index = source
+        .function()
+        .decompile_prep_facts()?
+        .formal_parameter_of(var)?;
+    let ty = facts
+        .merged_signature
+        .as_ref()?
+        .params
+        .get(index)?
+        .ty
+        .as_ref()?;
+    // A bare integer is what a recovered signature says when it knows nothing:
+    // every stripped function's parameters come back as machine words, and
+    // reading that as "declared not a pointer" silences the provenance
+    // inference such a function depends on. A name -- `size_t`, an enum, a
+    // typedef -- is a statement someone made.
+    if matches!(ty, r2types::CTypeLike::Int { .. }) {
+        return None;
+    }
+    Some(ty)
+}
+
+/// Whether a declared type makes its value a pointer, where it decides at all.
+///
+/// A pointer or an array is one; an arithmetic type is not, and saying so is
+/// the point -- an address base has to be chosen between the atoms of a sum,
+/// and a declared size ruling itself out is what leaves the pointer alone in
+/// that position. Everything else says nothing and leaves the rewriter's own
+/// evidence in charge.
+fn declared_pointer_for_value(ty: &r2types::CTypeLike) -> Option<bool> {
+    match ty {
+        r2types::CTypeLike::Pointer(_) | r2types::CTypeLike::Array(_, _) => Some(true),
+        r2types::CTypeLike::Int { .. }
+        | r2types::CTypeLike::Bool
+        | r2types::CTypeLike::Float(_)
+        | r2types::CTypeLike::BitVector(_)
+        | r2types::CTypeLike::Enum(_) => Some(false),
+        r2types::CTypeLike::Typedef { ty, .. } => declared_pointer_for_value(ty),
+        r2types::CTypeLike::Void
+        | r2types::CTypeLike::Struct(_)
+        | r2types::CTypeLike::Union(_)
+        | r2types::CTypeLike::Function { .. }
+        | r2types::CTypeLike::Unknown => None,
+    }
 }
 
 /// Whether a reader's term may absorb the producer of `value`.

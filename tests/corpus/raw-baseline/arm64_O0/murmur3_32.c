@@ -49,12 +49,12 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     if (stack_m104 != 3) {
                         goto L3;
                     } else {
-                        uint8_t tmp_25500_1 = *(uint8_t*)((uint64_t)stack_m80 + 2);
+                        uint8_t tmp_25500_1 = stack_m80[2];
                         stack_m84_2 = stack_m84 ^ (uint32_t)tmp_25500_1 << 16;
                     }
                 }
                 {
-                    uint8_t tmp_25500_3 = *(uint8_t*)((uint64_t)stack_m80 + 1);
+                    uint8_t tmp_25500_3 = stack_m80[1];
                     stack_m84_3 = stack_m84_2 ^ (uint32_t)tmp_25500_3 << 8;
                 }
             }

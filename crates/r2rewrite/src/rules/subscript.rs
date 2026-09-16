@@ -99,7 +99,20 @@ fn constant_stride(arena: &mut TermArena, id: TermId) -> Option<TermId> {
     }
     let stride = stride_of(term)?;
     let mut affine = affine_of(arena, address)?;
-    let base = unique_base(arena, &affine, TermArena::is_pointer)?;
+    let Some(base) = unique_base(arena, &affine, TermArena::is_pointer) else {
+        // Which atoms were candidates is the whole of why an access stayed a
+        // dereference: no atom is a proved pointer, or two are.
+        r2il::refusal_evidence!(
+            "subscript-base",
+            "load {id:?} has no unique base among {:?}",
+            affine
+                .coefficients
+                .iter()
+                .map(|(term, k)| (*term, arena.term(*term).kind, *k, arena.is_pointer(*term)))
+                .collect::<Vec<_>>()
+        );
+        return None;
+    };
     affine.coefficients.remove(&base);
     let index = element_index(arena, &affine, stride)?;
     Some(arena.intern(term.ty, TermKind::Subscript { base, index }))

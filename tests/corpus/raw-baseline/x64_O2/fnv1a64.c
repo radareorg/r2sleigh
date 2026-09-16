@@ -39,7 +39,7 @@ uint64_t sym__fnv1a64(uint64_t RDI_0, uint64_t RSI_0)
                     RDI_0 += R9_1;
                     RSI_3 = (uint64_t)0;
                     for (; ; ) {
-                        uint8_t tmp_11e00_8 = *(uint8_t*)(RSI_3 + RDI_0);
+                        uint8_t tmp_11e00_8 = ((uint8_t*)RDI_0)[RSI_3];
                         R8_1 = (int64_t)(((uint64_t)R8_1 ^ (uint64_t)tmp_11e00_8) * 0x100000001b3);
                         RSI_3++;
                         uint8_t tmp_12800_5 = RDX_2 != RSI_3;
