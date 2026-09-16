@@ -25035,3 +25035,82 @@ discharged by the expression standing for the value, the way an ordinary folded
 operand already is, and a placement audit that checks it that way. That is the
 same layer the "one typed elaborator" plan reaches for, and it is the next
 thing between this tree and the three array-index tests.
+
+### A parameter's home reloads are the parameter, and the code said so
+
+`CertifiedEntity::StackSlot::coalescing_values` declines a parameter home with a
+comment naming its owner -- "a parameter's home is excluded: the parameter
+entity owns those values and decides there" -- and `CertifiedEntity::Parameter`
+never claimed them. Every `-O0` body therefore named one local for the slot and
+a second for the register that ferried it back, which is the defect
+`r2ssa::mobility`'s own module comment calls "twice the instruction mass of the
+source, at `-O0`, and the largest single defect in the output".
+
+The parameter entity now carries `home_reload_values`, filled from the slot
+whose `SourceStackSlotRole` names that parameter, and `coalescing_values`
+returns them beside the entry values. `test_array_index` went from five
+statements to two and renders `arr[idx]`; `check_secret` and `authenticate` lost
+their reload temporaries; `process_string` calls `strlen(s)` on the parameter
+rather than on a copy of it.
+
+Two filters were tried and both removed again because neither changed anything:
+restricting the reloads to the slot's own width, and to reloads landing in a
+storage span with one member. `reload_values` already means "at full width", and
+the span filter was aimed at a defect that turned out to be elsewhere.
+
+### `switch (s)` for a `DState *` was the selector walk crossing one load
+
+Adding the reloads above turned bzip2's `switch ((uint64_t)s)` -- already wrong,
+and compiling only because the cast hid it -- into `switch (s)`, which does not
+compile. The cause is older than either change.
+
+`infer_switch_selector_var` walks back from the indirect branch. At a load it
+first tries the address, because a jump table carries its index inside the
+address, and falls back to the loaded value when the address carries no index.
+The address walk reduced `s + 4` through `infer_switch_selector_var_from_sum`,
+which drops into the *value* walk for the non-constant side, so it followed `s`
+and reported the pointer as the selector. The fallback never ran.
+
+An address walk now stays on the address side when one operand is a literal:
+`base + literal` is a field or a table base, and a scaled index is still reached
+through `IntMult`. `switch (s->state)` selects the loaded state, and the census
+improved beyond baseline -- dpkg-divert from 9 compile failures to 8, bzip2 -O2
+from 6 to 4 -- because three functions stopped switching on a pointer.
+
+`a_switch_on_a_field_selects_the_loaded_value_not_the_pointer` in
+`crates/r2ssa/src/function.rs` is the guard; reverting the one-line change makes
+it report `reg:10`, the pointer, in place of `reg:20`, the loaded state.
+
+### What the remaining nine r2r failures wait on
+
+Five of them -- the three `alloc_and_copy` assertions, `check_secret` and
+`process_string` -- are one shape:
+
+```c
+uint32_t stack_m4;
+if ((uint32_t)x != 0xdead) { stack_m4 = 0; } else { stack_m4 = 1; }
+return (int32_t)stack_m4;
+```
+
+That is the `-O0` inverse of `return 0;` / `return 1;`: the compiler routes every
+return through one slot and reloads it at the epilogue. Recognising it is a
+certificate rather than a beautification -- a stack slot whose only writes are on
+return paths and whose only read is the return value is the C return's value --
+and it belongs beside `StackFrame` and `DeadFrameSlotStore` as an elision with
+each write rendering as the return it feeds. The obstacle is the same one the
+array-index work met: the write cells the journal holds for that slot have to
+move onto the return statements, and the placement audit has to accept them
+there.
+
+`dec_struct_array_index_keeps_member_write_shape` wants
+`return arr[idx].f_34 + arr[idx].f_8;` and gets two temporaries, because a value
+whose canonical term is a `Load` is refused by both spellability predicates.
+`r2ssa::mobility::loads_movable_to_their_reader` was written for exactly this
+question -- "a frame-slot read cannot be spelled at the place that uses it" --
+and has no callers; `materialize_term` also has no `Load` arm, and giving it one
+needs the term to name the access the memory renderer is keyed on.
+
+`dec_array_index_neg_preserves_subscript_shape` wants `[-idx]` and gets
+`[(int64_t)(int32_t)tmp_3e580_1]`; the value folds but the conversions do not
+collapse, which is the cast-elimination question §"one typed elaborator" records
+as unprovable in the present rewrite discipline.
