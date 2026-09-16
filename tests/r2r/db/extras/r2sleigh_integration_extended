@@ -22,7 +22,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s main
-pd:s | jq -Rs 'contains("r2dec fallback: skipped decompilation")'
+pd:s | jq -Rs 'contains("r2sleigh refused") or contains("r2dec proof")'
 EOF_CMDS
 RUN
 

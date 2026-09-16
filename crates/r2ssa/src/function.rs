@@ -1617,7 +1617,7 @@ fn correlate_call_site_interfaces(
                     .named_parameters()
                     .iter()
                     .enumerate()
-                    .filter(|(_, parameter)| parameter.name() == Some("format"));
+                    .filter(|(_, parameter)| parameter_names_a_format_string(parameter));
                 if let (Some((index, _)), None) = (formats.next(), formats.next())
                     && let Ok(index) = u32::try_from(index)
                     && let Ok(bound) = interface.clone().with_radare2_format_parameter(index)
@@ -1655,6 +1655,26 @@ fn correlate_call_site_interfaces(
         tail_calls,
         interfaces,
     }
+}
+
+/// Whether a prototype's parameter is the format string of a variadic call.
+///
+/// The name is the evidence and the type is the guard. radare2 spells the role
+/// `format` for the printf family and `fmt` for the err/warn family, and both
+/// are the same role; `execl(const char *path, const char *arg, ...)` is why
+/// the name is still required, because its last named parameter is a `char *`
+/// that no conversion specifier is counted from.
+fn parameter_names_a_format_string(parameter: &r2source::SourceSignatureParameter) -> bool {
+    let named = parameter.name().is_some_and(|name| {
+        matches!(
+            name.trim_start_matches('_'),
+            "format" | "fmt" | "format_string" | "fmtstr"
+        )
+    });
+    named
+        && parameter
+            .type_spelling()
+            .is_some_and(|spelling| spelling.contains("char") && spelling.contains('*'))
 }
 
 /// Which of this function's own parameters its body forwards as a format.
@@ -6175,6 +6195,30 @@ mod tests {
         assert_eq!(direct_identity.target().space, CanonicalStorageSpace::Ram);
         assert_eq!(direct_identity.target().offset, slot);
         assert!(unique_call_site_identity(&[R2ILBlock::new(0x2000, 0x14)], &tail,).is_none());
+    }
+
+    #[test]
+    fn a_format_parameter_is_named_and_is_a_char_pointer() {
+        use r2source::SourceSignatureParameter as Parameter;
+        // radare2 spells the role `format` for the printf family and `fmt` for
+        // err/warn, and both count conversion specifiers the same way.
+        for name in ["format", "fmt", "__format", "format_string", "fmtstr"] {
+            assert!(parameter_names_a_format_string(&Parameter::new(
+                Some(name),
+                Some("const char *")
+            )));
+        }
+        // `execl(const char *path, const char *arg, ...)` is the reason the
+        // name is required: nothing counts specifiers from its last parameter.
+        assert!(!parameter_names_a_format_string(&Parameter::new(
+            Some("arg"),
+            Some("const char *")
+        )));
+        // And the type is the guard on the name: `ioctl`'s request is not one.
+        assert!(!parameter_names_a_format_string(&Parameter::new(
+            Some("fmt"),
+            Some("unsigned long")
+        )));
     }
 
     #[test]
