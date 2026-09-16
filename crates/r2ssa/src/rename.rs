@@ -13,6 +13,7 @@ use crate::domtree::DomTree;
 use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::RegisterNameMap;
 use crate::op::SSAOp;
+use crate::phi::PromotedStackSlots;
 use crate::phi::{DefinitionSitesByIdentity, PhiPlacement, RenameIdentity, register_root_slot};
 use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 
@@ -375,6 +376,7 @@ pub fn rename_function_with_names_and_call_boundaries_and_control<C: SsaWorkCont
     reg_names: Option<&RegisterNameMap>,
     families: Option<Arc<RegisterFamilyInfo>>,
     call_boundaries: Option<&CallBoundaryConfig>,
+    promoted: &PromotedStackSlots,
     control: &C,
 ) -> Result<RenamedFunction, SsaExecutionStopReason> {
     control.poll()?;
@@ -443,6 +445,7 @@ pub fn rename_function_with_names_and_call_boundaries_and_control<C: SsaWorkCont
         reg_names,
         call_boundaries,
         stack_pointer_identity.as_ref(),
+        promoted,
         control,
     )?;
 
@@ -479,6 +482,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
     reg_names: Option<&RegisterNameMap>,
     call_boundaries: Option<&CallBoundaryConfig>,
     stack_pointer_identity: Option<&RenameIdentity>,
+    promoted: &PromotedStackSlots,
     control: &C,
 ) -> Result<(), SsaExecutionStopReason> {
     // An exit frame keeps each block's definitions live until all dominated
@@ -570,7 +574,14 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                     new_instruction,
                     lane_write_widened_later(block, op_idx, ctx.families.as_deref()),
                 );
-                let renamed_op = rename_op(op, op_addr, ctx, &mut defined_vars, reg_names);
+                let renamed_op = rename_op(
+                    op,
+                    op_addr,
+                    ctx,
+                    &mut defined_vars,
+                    reg_names,
+                    promoted.get(&(block_addr, op_idx)),
+                );
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 block_ops.append(&mut ctx.lanes.prefix);
                 let boundary_reads =
@@ -581,7 +592,12 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                     } else {
                         Vec::new()
                     };
-                record_renamed_op_storage(op, &renamed_op, result);
+                record_renamed_op_storage(
+                    op,
+                    &renamed_op,
+                    promoted.get(&(block_addr, op_idx)),
+                    result,
+                );
                 for (var, storage) in boundary_reads {
                     record_canonical_storage(
                         &mut result.canonical_storage_by_var,
@@ -739,7 +755,36 @@ fn lane_write_widened_later(
     false
 }
 
-fn record_renamed_op_storage(source: &r2il::R2ILOp, renamed: &SSAOp, result: &mut RenamedFunction) {
+fn record_renamed_op_storage(
+    source: &r2il::R2ILOp,
+    renamed: &SSAOp,
+    promoted_slot: Option<&r2il::Varnode>,
+    result: &mut RenamedFunction,
+) {
+    // A promoted access does not carry the lifted operation's positional
+    // provenance: its copy reads or writes the slot, not the address the
+    // machine computed, and pairing them by position gave the slot the
+    // address's storage and made the identity ambiguous.
+    if let Some(slot) = promoted_slot {
+        let (loaded, stored) = match (source, renamed) {
+            (r2il::R2ILOp::Load { dst, .. }, SSAOp::Copy { dst: var, src }) => {
+                (Some((var, (*dst).clone())), Some((src, slot.clone())))
+            }
+            (r2il::R2ILOp::Store { val, .. }, SSAOp::Copy { dst: var, src }) => {
+                (Some((var, slot.clone())), Some((src, (*val).clone())))
+            }
+            _ => (None, None),
+        };
+        for (var, varnode) in [loaded, stored].into_iter().flatten() {
+            record_canonical_storage(
+                &mut result.canonical_storage_by_var,
+                &mut result.ambiguous_storage_vars,
+                var,
+                CanonicalStorageId::from_varnode(&varnode),
+            );
+        }
+        return;
+    }
     if let (Some(varnode), Some(var)) = (source.output(), renamed.dst())
         && !is_lane_temp(var)
     {
@@ -983,8 +1028,34 @@ fn rename_op(
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<RenameIdentity>,
     reg_names: Option<&RegisterNameMap>,
+    promoted_slot: Option<&r2il::Varnode>,
 ) -> SSAOp {
     use r2il::R2ILOp::*;
+
+    // A private stack slot is a variable, so its access is a copy of one. The
+    // lifted text still says load and store -- that is what the machine did --
+    // and only the graph carries the variable it stands for.
+    if let Some(slot) = promoted_slot {
+        match op {
+            Load { dst, .. } => {
+                let src_ssa = read_varnode(slot, ctx, reg_names);
+                let dst_ssa = write_varnode(dst, ctx, defined_vars, reg_names);
+                return SSAOp::Copy {
+                    dst: dst_ssa,
+                    src: src_ssa,
+                };
+            }
+            Store { val, .. } => {
+                let src_ssa = read_varnode(val, ctx, reg_names);
+                let dst_ssa = write_varnode(slot, ctx, defined_vars, reg_names);
+                return SSAOp::Copy {
+                    dst: dst_ssa,
+                    src: src_ssa,
+                };
+            }
+            _ => {}
+        }
+    }
 
     match op {
         Copy { dst, src } => {

@@ -3211,8 +3211,8 @@ impl SSAFunction {
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let promoted =
-            promote_private_stack_slots(blocks, stack_pointer_carrier, questions.interface);
-        let blocks = promoted.as_deref().unwrap_or(blocks);
+            promote_private_stack_slots(blocks, stack_pointer_carrier, questions.interface)
+                .unwrap_or_default();
         // The convention says the callee leaves this carrier where it found
         // it, and the machine's own p-code moved it to transfer control. Both
         // halves have to be in hand before SSA construction, because it is
@@ -3269,6 +3269,7 @@ impl SSAFunction {
             callee_preserved_carriers,
             declared_successors,
             &abi_carriers,
+            &promoted,
             control,
         )?;
         phase("raw", func.num_blocks());
@@ -3309,8 +3310,15 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let mut func =
-            Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, &[], control)?;
+        let mut func = Self::from_blocks_raw_with_policy_and_control(
+            blocks,
+            arch,
+            None,
+            None,
+            &[],
+            &Default::default(),
+            control,
+        )?;
         let cfg = crate::optimize::OptimizationConfig {
             max_iterations: 1,
             enable_sccp: true,
@@ -3369,7 +3377,15 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, &[], control)
+        Self::from_blocks_raw_with_policy_and_control(
+            blocks,
+            arch,
+            None,
+            None,
+            &[],
+            &Default::default(),
+            control,
+        )
     }
 
     /// Build raw SSA prepared with decompiler-safe call boundaries.
@@ -3394,11 +3410,13 @@ impl SSAFunction {
             &CalleePreservedCarriers::new(),
             None,
             &[],
+            &Default::default(),
             control,
         )
     }
 
     /// The same, told which carrier the convention says a callee restores.
+    #[allow(clippy::too_many_arguments)]
     fn from_blocks_raw_for_decompile_with_carriers_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
@@ -3406,6 +3424,7 @@ impl SSAFunction {
         callee_preserved_carriers: &CalleePreservedCarriers,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
+        promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let policy = decompile_call_boundary_config(
@@ -3419,6 +3438,7 @@ impl SSAFunction {
             policy.as_ref(),
             declared_successors,
             abi_carriers,
+            promoted,
             control,
         )
     }
@@ -3429,6 +3449,7 @@ impl SSAFunction {
         call_boundaries: Option<&CallBoundaryConfig>,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
+        promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -3493,6 +3514,7 @@ impl SSAFunction {
                 &cfg,
                 reg_names_ref,
                 families_ref,
+                promoted,
                 control,
             )?;
 
@@ -3542,6 +3564,7 @@ impl SSAFunction {
             reg_names_ref,
             families.clone(),
             call_boundaries,
+            promoted,
             control,
         )?;
 
@@ -12952,7 +12975,7 @@ fn promote_private_stack_slots(
     blocks: &[R2ILBlock],
     stack_pointer: Option<CanonicalStorageId>,
     interface: Option<&SourceFunctionInterface>,
-) -> Option<Vec<R2ILBlock>> {
+) -> Option<crate::phi::PromotedStackSlots> {
     r2il::refusal_evidence!("promote-stack-slot", "asked over {} blocks", blocks.len());
     let Some(stack_pointer) = stack_pointer else {
         r2il::refusal_evidence!("promote-stack-slot", "no stack pointer carrier");
@@ -13202,10 +13225,10 @@ fn promote_private_stack_slots(
         );
         next_unique += u64::from(slot.width);
     }
-    let mut rewrites = BTreeMap::<(usize, usize), r2il::Varnode>::new();
+    let mut rewrites = crate::phi::PromotedStackSlots::new();
     for access in &accesses {
         if let Some(varnode) = varnode_for.get(&access.slot) {
-            rewrites.insert((access.block, access.op), varnode.clone());
+            rewrites.insert((blocks[access.block].addr, access.op), varnode.clone());
         }
     }
     if rewrites.is_empty() {
@@ -13218,54 +13241,5 @@ fn promote_private_stack_slots(
         rewrites.len(),
         promotable.iter().collect::<Vec<_>>()
     );
-    let mut out = blocks.to_vec();
-    // The addresses these accesses were reached through. Each is left behind
-    // computing a value nothing reads, and two rules then answer for its read
-    // of the stack pointer -- the certificate calls it a dead stack base and
-    // normalisation calls it a coalesced copy. The address is part of the
-    // access, so it goes with it.
-    let mut addresses = BTreeMap::<usize, Vec<r2il::Varnode>>::new();
-    for ((block, at), varnode) in rewrites {
-        let op = &mut out[block].ops[at];
-        let address = match op {
-            R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. } => addr.clone(),
-            _ => continue,
-        };
-        *op = match op {
-            R2ILOp::Load { dst, .. } => R2ILOp::Copy {
-                dst: dst.clone(),
-                src: varnode,
-            },
-            R2ILOp::Store { val, .. } => R2ILOp::Copy {
-                dst: varnode,
-                src: val.clone(),
-            },
-            _ => continue,
-        };
-        addresses.entry(block).or_default().push(address);
-    }
-    for (index, addresses) in addresses {
-        let block = &mut out[index];
-        for at in 0..block.ops.len() {
-            let Some(dst) = block.ops[at].output().cloned() else {
-                continue;
-            };
-            if dst.space != r2il::SpaceId::Unique
-                || !addresses.contains(&dst)
-                || !matches!(
-                    block.ops[at],
-                    R2ILOp::IntAdd { .. } | R2ILOp::IntSub { .. } | R2ILOp::Copy { .. }
-                )
-            {
-                continue;
-            }
-            let read_elsewhere = block.ops.iter().enumerate().any(|(other, op)| {
-                other != at && op.inputs().into_iter().any(|input| *input == dst)
-            });
-            if !read_elsewhere {
-                block.ops[at] = R2ILOp::Nop;
-            }
-        }
-    }
-    Some(out)
+    Some(rewrites)
 }
