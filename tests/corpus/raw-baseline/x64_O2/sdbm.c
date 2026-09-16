@@ -1,11 +1,10 @@
 uint64_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 127 source obligations: 97 rendered, 30 elided, 0 refused; 61 statements rendered */
+    /* r2dec proof: no individual construct is marked; 127 source obligations: 97 rendered, 30 elided, 0 refused; 60 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
-            uint64_t RAX_17 = (uint64_t)0;
-            return RAX_17;
+            return 0;
         } else {
             uint64_t RDX_1;
             uint64_t RAX_1;

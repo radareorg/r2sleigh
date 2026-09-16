@@ -1,11 +1,10 @@
 uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 124 source obligations: 94 rendered, 30 elided, 0 refused; 66 statements rendered */
+    /* r2dec proof: no individual construct is marked; 124 source obligations: 94 rendered, 30 elided, 0 refused; 65 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
-            uint64_t RAX_15 = 0x1505;
-            return RAX_15;
+            return 0x1505;
         } else {
             uint64_t RAX_1;
             uint64_t RDX_1;

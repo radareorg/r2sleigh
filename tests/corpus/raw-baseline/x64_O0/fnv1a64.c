@@ -1,6 +1,6 @@
 uint64_t sym__fnv1a64(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 79 source obligations: 37 rendered, 42 elided, 0 refused; 26 statements rendered */
+    /* r2dec proof: no individual construct is marked; 79 source obligations: 37 rendered, 42 elided, 0 refused; 25 statements rendered */
     {
         uint64_t stack_m40;
         uint64_t stack_m32;
@@ -29,10 +29,7 @@ uint64_t sym__fnv1a64(uint64_t RDI_0, uint64_t RSI_0)
                 stack_m40 = RAX_10;
             }
         }
-        {
-            uint64_t RAX_11 = stack_m32;
-            return RAX_11;
-        }
+        return stack_m32;
     }
 }
 

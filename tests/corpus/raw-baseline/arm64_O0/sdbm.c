@@ -1,6 +1,6 @@
 uint32_t sym__sdbm(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 64 source obligations: 39 rendered, 25 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 64 source obligations: 39 rendered, 25 elided, 0 refused; 24 statements rendered */
     {
         uint64_t stack_m16;
         uint8_t* stack_m8;
@@ -31,8 +31,7 @@ uint32_t sym__sdbm(uint64_t X0_0, uint64_t X1_0)
             }
         }
         {
-            uint32_t tmp_24c00_5 = stack_m20;
-            return tmp_24c00_5;
+            return stack_m20;
         }
     }
 }

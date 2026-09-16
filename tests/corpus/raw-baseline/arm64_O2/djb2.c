@@ -1,6 +1,6 @@
 uint64_t sym__djb2(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 39 source obligations: 29 rendered, 10 elided, 0 refused; 21 statements rendered */
+    /* r2dec proof: no individual construct is marked; 39 source obligations: 29 rendered, 10 elided, 0 refused; 20 statements rendered */
     {
         uint64_t X8_1;
         uint64_t X1_1;
@@ -24,10 +24,7 @@ uint64_t sym__djb2(uint64_t X0_0, uint64_t X1_0)
                 }
             }
         }
-        {
-            uint64_t X0_4 = X8_1;
-            return X0_4;
-        }
+        return X8_1;
     }
 }
 

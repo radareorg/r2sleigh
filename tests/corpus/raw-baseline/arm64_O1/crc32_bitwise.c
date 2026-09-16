@@ -1,9 +1,8 @@
 uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 66 source obligations: 52 rendered, 14 elided, 0 refused; 32 statements rendered */
+    /* r2dec proof: no individual construct is marked; 66 source obligations: 52 rendered, 14 elided, 0 refused; 30 statements rendered */
     if (X1_0 == 0) {
-        uint64_t X0_2 = 0;
-        return X0_2;
+        return 0;
     } else {
         uint64_t X9_1;
         uint64_t X8_1;
@@ -38,10 +37,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                 }
             }
         }
-        {
-            uint64_t X0_1 = (uint64_t)(uint32_t)~tmp_20380_4;
-            return X0_1;
-        }
+        return (uint64_t)~tmp_20380_4;
     }
 }
 

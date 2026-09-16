@@ -436,12 +436,17 @@ impl<'a> FoldingContext<'a> {
     /// The type the plan declares for a value, if it declares one.
     pub(super) fn value_declaration_type(&self, value: ValueId) -> Option<CType> {
         let names = self.inputs.binding_names?;
-        let crate::binding_plan::ValueDisposition::Bound { binding } =
-            names.disposition_for_value(value)?
-        else {
-            return None;
+        // An inlined value that spells one object is read at that object's
+        // declared type: the expression is the object, so the boundary that
+        // converts from a bound value has the same conversion to make here.
+        let binding = match names.disposition_for_value(value)? {
+            crate::binding_plan::ValueDisposition::Bound { binding } => *binding,
+            crate::binding_plan::ValueDisposition::Inline { term, .. } => {
+                crate::binding_plan::term_spells_binding(names.plan(), *term)?
+            }
+            _ => return None,
         };
-        Some(names.plan().binding(*binding)?.declaration_type().clone())
+        Some(names.plan().binding(binding)?.declaration_type().clone())
     }
 
     fn materialize_machine_expr(

@@ -4,13 +4,12 @@ struct r2sleigh_bits_256 {
 
 uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 291 source obligations: 277 rendered, 14 elided, 0 refused; 176 statements rendered */
+    /* r2dec proof: no individual construct is marked; 291 source obligations: 277 rendered, 14 elided, 0 refused; 174 statements rendered */
     {
         struct r2sleigh_bits_256 Z2_1;
         Z2_1 = r2sleigh_bits_zero_extend_64_256(0U);
         if (X1_0 == 0) {
-            uint64_t X0_4 = 0;
-            return X0_4;
+            return 0;
         } else {
             uint64_t X10_1;
             uint32_t tmp_20380_8;
@@ -183,10 +182,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                     break;
                 }
             }
-            {
-                uint64_t X0_3 = (uint64_t)(uint32_t)~tmp_20380_8;
-                return X0_3;
-            }
+            return (uint64_t)~tmp_20380_8;
         }
     }
 }

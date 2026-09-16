@@ -25572,3 +25572,36 @@ decision reports.
 `alloc_and_copy` is not this: its five frame places are all named by the source,
 so promotion correctly leaves them alone, and `return (char*)stack_m24;` instead
 of `return buf;` is the returning-tail duplication that is still owed.
+
+### A value the return alone reads is spelled by its expression
+
+A promoted slot's last read stayed a temporary of its own -- `t = slot;
+return t;` -- because `inlinable_core` refuses any value a certified boundary
+reader names, and a return certificate is one. That rule was right for switch
+selectors and derived-width results, which need a binding symbol, and wrong for
+the return: `op_to_stmt`'s return arm already spells an inlined value and
+records a certified read only when the value is bound. The return now joins the
+call argument as a boundary the renderer can consume inline.
+
+The conversion had to follow. `value_declaration_type` answered only for a
+bound value, so the inlined return lost its cast and `return stack_m4;` was a
+`uint32_t` returned as `int32_t` under `-Wsign-conversion`. An inlined value
+that spells one object is read at that object's declared type, which
+`term_spells_binding` already answers, so the boundary makes the same
+conversion it made from a bound value.
+
+Thirty-five of the sixty corpus snapshots change and every one is the same:
+one statement fewer, the final temporary folded into the `return`.
+
+```c
+uint32_t tmp_2b600_1 = ~stack_m20;    ->   return ~stack_m20;
+return tmp_2b600_1;
+```
+
+Two unit fixtures needed the contrast restored rather than the assertion
+relaxed: a value only the return reads is now inline by design, so
+`certified_value_read_rejects_forged_expression_at_allocation_and_seal` gives
+its returned value a computed definition and a second reader, and the shadow
+test records that both its values are inline. Corpus 60/60 raw and
+differential, r2r unchanged, and the compile census over `zlib-minigzip` is
+unmoved in both directions.

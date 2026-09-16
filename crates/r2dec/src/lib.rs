@@ -5681,9 +5681,12 @@ mod tests {
         );
         let plan = crate::binding_plan::BindingPlan::build_shadow(input.source_owned_facts())
             .expect("scalar audit fixture binding plan");
+        // The return is the only reader of either value here, and a value the
+        // return alone reads is spelled by its expression rather than given an
+        // object whose single use is `return t;`.
         assert!(matches!(
             plan.disposition(return_value),
-            Some(crate::binding_plan::ValueDisposition::Bound { .. })
+            Some(crate::binding_plan::ValueDisposition::Inline { .. })
         ));
         assert!(matches!(
             plan.disposition(copy_source_value),

@@ -4,7 +4,7 @@ struct r2sleigh_bits_256 {
 
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 420 source obligations: 392 rendered, 28 elided, 0 refused; 259 statements rendered */
+    /* r2dec proof: no individual construct is marked; 420 source obligations: 392 rendered, 28 elided, 0 refused; 258 statements rendered */
     {
         struct r2sleigh_bits_256 Z0_1;
         struct r2sleigh_bits_256 Z1_1;
@@ -279,8 +279,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     uint32_t tmp_lane_100000a70_0_d8_1 = (uint32_t)X11_13;
                     uint32_t tmp_2b380_7 = (tmp_lane_100000a70_0_d8_1 >> 15 ^ tmp_lane_100000a70_0_d8_1) * 0x85ebca77;
                     uint32_t tmp_2b380_8 = tmp_2a000_11 * (tmp_2b380_7 >> 13 ^ tmp_2b380_7);
-                    uint32_t tmp_20380_3 = tmp_2b380_8 >> 16 ^ tmp_2b380_8;
-                    return tmp_20380_3;
+                    return tmp_2b380_8 >> 16 ^ tmp_2b380_8;
                 }
             }
         }

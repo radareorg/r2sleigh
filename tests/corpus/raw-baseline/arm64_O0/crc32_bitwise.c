@@ -1,6 +1,6 @@
 uint32_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 92 source obligations: 57 rendered, 35 elided, 0 refused; 36 statements rendered */
+    /* r2dec proof: no individual construct is marked; 92 source obligations: 57 rendered, 35 elided, 0 refused; 35 statements rendered */
     {
         uint64_t stack_m16;
         uint8_t* stack_m8;
@@ -47,8 +47,7 @@ uint32_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
             }
         }
         {
-            uint32_t tmp_2b600_1 = ~stack_m20;
-            return tmp_2b600_1;
+            return ~stack_m20;
         }
     }
 }

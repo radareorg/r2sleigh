@@ -6489,9 +6489,18 @@ mod tests {
     #[test]
     fn certified_value_read_rejects_forged_expression_at_allocation_and_seal() {
         let mut block = R2ILBlock::new(0x1000, 4);
-        block.push(R2ILOp::Copy {
+        // A computed value with a second reader is what keeps the returned
+        // object one of its own: a literal is spelled at every reader, and a
+        // value only the return reads is spelled by its expression.
+        block.push(R2ILOp::IntAdd {
             dst: Varnode::register(0, 8),
-            src: Varnode::constant(7, 8),
+            a: Varnode::register(0x40, 8),
+            b: Varnode::register(0x48, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::register(0x10, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::register(0, 8),
         });
         block.push(R2ILOp::Return {
             target: Varnode::register(0x30, 8),

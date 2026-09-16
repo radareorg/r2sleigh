@@ -3,7 +3,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
 #define _pearson_tab__r2sleigh_addr 0x100001680ULL
     extern char _pearson_tab[];
 
-    /* r2dec proof: no individual construct is marked; 133 source obligations: 106 rendered, 27 elided, 0 refused; 59 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 133 source obligations: 106 rendered, 27 elided, 0 refused; 58 statements rendered; 1 data object type refused */
     {
         uint64_t RDX_16;
         uint64_t tmp_70500_1 = RSI_0;
@@ -73,10 +73,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
                 }
             }
         }
-        {
-            uint32_t tmp_lane_1000012e2_0_31_1 = (uint32_t)(uint8_t)RDX_16;
-            return tmp_lane_1000012e2_0_31_1;
-        }
+        return (uint32_t)(uint8_t)RDX_16;
     }
 }
 

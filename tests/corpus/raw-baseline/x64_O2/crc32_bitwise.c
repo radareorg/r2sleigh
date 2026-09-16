@@ -1,6 +1,6 @@
 uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 321 source obligations: 301 rendered, 20 elided, 0 refused; 82 statements rendered */
+    /* r2dec proof: no individual construct is marked; 321 source obligations: 301 rendered, 20 elided, 0 refused; 81 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
@@ -85,10 +85,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
                     break;
                 }
             }
-            {
-                uint32_t tmp_lane_100000adc_0_77_1 = ~tmp_lane_100000a50_267_74_1;
-                return tmp_lane_100000adc_0_77_1;
-            }
+            return ~tmp_lane_100000a50_267_74_1;
         }
     }
 }

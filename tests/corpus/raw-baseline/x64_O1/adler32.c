@@ -1,11 +1,10 @@
 uint64_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 77 source obligations: 55 rendered, 22 elided, 0 refused; 42 statements rendered */
+    /* r2dec proof: no individual construct is marked; 77 source obligations: 55 rendered, 22 elided, 0 refused; 40 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
-            uint64_t RAX_7 = 1;
-            return RAX_7;
+            return 1;
         } else {
             uint64_t R8_1;
             uint64_t RCX_1;
@@ -46,8 +45,7 @@ uint64_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
             {
                 uint32_t tmp_lane_10000068d_2_1e_1 = tmp_lane_100000650_94_1b_1 << 16;
                 uint32_t tmp_lane_10000068d_28_22_1 = tmp_lane_10000068d_2_1e_1 | tmp_lane_100000650_49_11_1;
-                uint64_t RAX_6 = (uint64_t)(uint32_t)tmp_lane_10000068d_28_22_1;
-                return RAX_6;
+                return (uint64_t)tmp_lane_10000068d_28_22_1;
             }
         }
     }

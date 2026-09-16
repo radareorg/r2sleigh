@@ -1,11 +1,10 @@
 uint64_t sym__fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 127 source obligations: 97 rendered, 30 elided, 0 refused; 59 statements rendered */
+    /* r2dec proof: no individual construct is marked; 127 source obligations: 97 rendered, 30 elided, 0 refused; 58 statements rendered */
     {
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
-            uint64_t RAX_12 = 0x811c9dc5;
-            return RAX_12;
+            return 0x811c9dc5;
         } else {
             uint64_t RAX_1;
             uint64_t RDX_1;

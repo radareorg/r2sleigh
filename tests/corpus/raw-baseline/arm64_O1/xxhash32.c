@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 260 source obligations: 223 rendered, 37 elided, 0 refused; 112 statements rendered */
+    /* r2dec proof: no individual construct is marked; 260 source obligations: 223 rendered, 37 elided, 0 refused; 111 statements rendered */
     {
         uint64_t X2_0_2;
         uint64_t X14_8;
@@ -128,8 +128,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     uint32_t tmp_lane_100000970_0_3f_1 = (uint32_t)X14_11;
                     uint32_t tmp_2b380_13 = tmp_2a000_4 * (tmp_lane_100000970_0_3f_1 >> 15 ^ tmp_lane_100000970_0_3f_1);
                     uint32_t tmp_2b380_14 = tmp_2a000_13 * (tmp_2b380_13 >> 13 ^ tmp_2b380_13);
-                    uint32_t tmp_20380_3 = tmp_2b380_14 >> 16 ^ tmp_2b380_14;
-                    return tmp_20380_3;
+                    return tmp_2b380_14 >> 16 ^ tmp_2b380_14;
                 }
             }
         }

@@ -1389,6 +1389,24 @@ fn inlinable_core(
         return BTreeSet::new();
     };
     let elided_reads = cells.read_elided_instructions;
+    // A return is the second kind the renderer consumes from an inline
+    // expression: it spells the certified value and records a certified read
+    // only when that value is bound. Requiring a binding here left a promoted
+    // slot's last read as a temporary of its own -- `t = slot; return t;` --
+    // where the object itself is what the return names.
+    let mut return_readers = BTreeMap::<ValueId, BTreeSet<InstId>>::new();
+    for (at, index) in &source.certificates().returns_by_inst {
+        let Some(certificate) = source.certificates().returns.get(*index) else {
+            continue;
+        };
+        if certificate.at != *at {
+            continue;
+        }
+        return_readers
+            .entry(certificate.value)
+            .or_default()
+            .insert(*at);
+    }
     // Which gate turned a value away, by name. Reading this function said a
     // flag copy passes every test in it, and the corpus said it stays bound;
     // the two could only be reconciled by asking the function itself, one
@@ -1574,6 +1592,9 @@ fn inlinable_core(
             !call_arg_readers
                 .get(&value.id)
                 .is_some_and(|arguments| arguments.contains(reader))
+                && !return_readers
+                    .get(&value.id)
+                    .is_some_and(|returns| returns.contains(reader))
         }) {
             rejected("a certified boundary reader requires a bound value");
             continue;

@@ -1,6 +1,6 @@
 uint32_t sym__adler32(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 84 source obligations: 55 rendered, 29 elided, 0 refused; 30 statements rendered */
+    /* r2dec proof: no individual construct is marked; 84 source obligations: 55 rendered, 29 elided, 0 refused; 29 statements rendered */
     {
         uint64_t stack_m16;
         uint8_t* stack_m8;
@@ -36,8 +36,7 @@ uint32_t sym__adler32(uint64_t X0_0, uint64_t X1_0)
             }
         }
         {
-            uint32_t tmp_2d500_1 = stack_m20 | stack_m24 << 16;
-            return tmp_2d500_1;
+            return stack_m20 | stack_m24 << 16;
         }
     }
 }

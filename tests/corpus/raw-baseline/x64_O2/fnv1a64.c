@@ -1,13 +1,12 @@
 uint64_t sym__fnv1a64(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 116 source obligations: 84 rendered, 32 elided, 0 refused; 56 statements rendered */
+    /* r2dec proof: no individual construct is marked; 116 source obligations: 84 rendered, 32 elided, 0 refused; 55 statements rendered */
     {
         int64_t R8_1;
         R8_1 = (int64_t)0xcbf29ce484222325U;
         uint64_t tmp_70500_1 = RSI_0;
         if (tmp_70500_1 == 0) {
-            int64_t RAX_15 = R8_1;
-            return (uint64_t)RAX_15;
+            return (uint64_t)R8_1;
         } else {
             uint64_t R9_1;
             uint32_t tmp_lane_100000623_5_3_1 = (uint32_t)RSI_0 & 3;
