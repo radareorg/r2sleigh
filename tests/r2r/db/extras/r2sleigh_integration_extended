@@ -457,7 +457,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pd:s | jq -Rs '(contains("len = sym.imp.strlen(s);")) and ((split("sym.imp.strlen(s)") | length) == 2) and contains("if (len > 100)") and (contains("if (len > 4)") or contains("if (len < 5)")) and contains("return -1;") and contains("return -2;") and contains("return len;")'
+pd:s | jq -Rs '(contains("len = sym_imp_strlen(s);")) and ((split("sym_imp_strlen(s)") | length) == 2) and contains("if (len > 100)") and (contains("if (len > 4)") or contains("if (len < 5)")) and contains("return -1;") and contains("return -2;") and contains("return len;")'
 EOF_CMDS
 RUN
 
@@ -499,7 +499,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~alloc_and_copy$[0]` > /dev/null
-pd:s | jq -Rs 'contains("buf = sym.imp.malloc(len + 1);") and (contains("if (buf == 0)") or contains("if (!buf)")) and contains("return 0;") and contains("sym.imp.memcpy(buf, src, len);") and contains("buf[len] = 0;") and contains("return buf;") and (contains("sym.imp.malloc(sym.imp")|not)'
+pd:s | jq -Rs 'contains("buf = sym_imp_malloc(len + 1);") and (contains("if (buf == 0)") or contains("if (!buf)")) and contains("return 0;") and contains("sym_imp_memcpy(buf, src, len);") and contains("buf[len] = 0;") and contains("return buf;") and (contains("sym_imp_malloc(sym.imp")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -514,7 +514,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~test_setlocale_wrapper$[0]` > /dev/null
-pd:s | jq -Rs 'contains("loc = sym.imp.setlocale(6, \"C\");") and (contains("if (loc != 0)") or contains("if (!loc)")) and (contains("return (int32_t)*loc;") or contains("return *loc;") or contains("return loc[0];") or contains("return (int32_t)loc[0];")) and (contains("return (int32_t)loc;")|not)'
+pd:s | jq -Rs 'contains("loc = sym_imp_setlocale(6, \"C\");") and (contains("if (loc != 0)") or contains("if (!loc)")) and (contains("return (int32_t)*loc;") or contains("return *loc;") or contains("return loc[0];") or contains("return (int32_t)loc[0];")) and (contains("return (int32_t)loc;")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -529,7 +529,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~vuln_memcpy$[0]` > /dev/null
-pd:s | jq -Rs 'contains("sym.imp.memcpy(buf, user_input, user_len);") and contains("sym.imp.printf(\"Copied: %s\\n\", buf);") and (contains("arg1")|not) and (contains("arg2")|not) and (contains("tmp:")|not) and (contains("*(rbp")|not)'
+pd:s | jq -Rs 'contains("sym_imp_memcpy(buf, user_input, user_len);") and contains("sym_imp_printf(\"Copied: %s\\n\", buf);") and (contains("arg1")|not) and (contains("arg2")|not) and (contains("tmp:")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -544,7 +544,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~vuln_memcpy$[0]` > /dev/null
-pd:s | jq -Rs 'contains("int64_t dbg.vuln_memcpy") and contains("sym.imp.memcpy(buf, user_input, user_len);") and contains("sym.imp.printf(\"Copied: %s\\n\", buf);") and (contains("r2dec fallback:")|not)'
+pd:s | jq -Rs 'contains("int64_t dbg_vuln_memcpy") and contains("sym_imp_memcpy(buf, user_input, user_len);") and contains("sym_imp_printf(\"Copied: %s\\n\", buf);") and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -559,7 +559,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~my_strdup$[0]` > /dev/null
-pd:s | jq -Rs 'contains("len = sym.imp.strlen(s);") and ((split("sym.imp.strlen(s)") | length) == 2) and ((contains("var_10h = sym.imp.malloc(len + 1);")) or contains("dup = sym.imp.malloc(len + 1);")) and ((contains("if (var_10h == 0)")) or contains("if (dup == 0)") or contains("if (!dup)")) and ((contains("sym.imp.memcpy(var_10h, s, len + 1);")) or contains("sym.imp.memcpy(dup, s, len + 1);")) and ((contains("return var_10h;")) or contains("return dup;")) and (contains("tmp:11f80")|not) and (contains("sym.imp.malloc(sym.imp")|not)'
+pd:s | jq -Rs 'contains("len = sym_imp_strlen(s);") and ((split("sym_imp_strlen(s)") | length) == 2) and ((contains("var_10h = sym_imp_malloc(len + 1);")) or contains("dup = sym_imp_malloc(len + 1);")) and ((contains("if (var_10h == 0)")) or contains("if (dup == 0)") or contains("if (!dup)")) and ((contains("sym_imp_memcpy(var_10h, s, len + 1);")) or contains("sym_imp_memcpy(dup, s, len + 1);")) and ((contains("return var_10h;")) or contains("return dup;")) and (contains("tmp:11f80")|not) and (contains("sym_imp_malloc(sym.imp")|not)'
 EOF_CMDS
 BROKEN=1
 RUN
@@ -726,7 +726,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~alloc_and_copy$[0]` > /dev/null
-pd:s | jq -Rs 'test("char ?\\* ?buf = sym\\.imp\\.malloc") and test("size_t len") and (contains("sym.imp.__memcpy_chk(buf, src, len")) '
+pd:s | jq -Rs 'test("char ?\\* ?buf = sym_imp_malloc") and test("size_t len") and (contains("sym_imp___memcpy_chk(buf, src, len")) '
 EOF_CMDS
 RUN
 

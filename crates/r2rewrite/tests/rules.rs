@@ -336,9 +336,12 @@ fn a_signed_branch_on_flags_becomes_a_comparison_through_the_difference_by_name(
     .into_iter()
     .map(|name| value_named(&artifact, name))
     .collect::<std::collections::BTreeSet<_>>();
-    let roots = canonicalize_with(&artifact, &projection, &|query| {
-        inlinable.contains(&query.value)
-    })
+    let roots = canonicalize_with(
+        &artifact,
+        &projection,
+        &|query| inlinable.contains(&query.value),
+        &r2rewrite::no_declared_pointers,
+    )
     .expect("canonical roots under the production expansion policy");
     let difference = roots
         .value(value_named(&artifact, "tmp:100_1"))
