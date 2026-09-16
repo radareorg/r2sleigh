@@ -971,6 +971,27 @@ impl<'a> FoldingContext<'a> {
 
 
 
+    /// The type the declared aggregate gives the member this store writes.
+    ///
+    /// The width of the stored value carries no signedness, so without this a
+    /// store to `arr[i].third` converted its value to the unsigned carrier and
+    /// then assigned it to a signed member, which is the conversion
+    /// `-Wsign-conversion` rejects. The member's own declaration is what the
+    /// destination is.
+    fn certified_member_type_for_current_store(&self) -> Option<CType> {
+        let render = self.inputs.render_facts()?;
+        let block_addr = self.current_block_addr.get()?;
+        let op_idx = self.current_op_idx.get()?;
+        let (block_addr, op_index) = self
+            .source_op_site_for_normalized_op(block_addr, op_idx)
+            .unwrap_or((block_addr, op_idx));
+        let members = render.member_accesses_by_op.get(&(block_addr, op_index, true))?;
+        let [member] = members.as_slice() else {
+            return None;
+        };
+        member.field_type.clone()
+    }
+
     fn type_hint_for_var(&self, var: &SSAVar) -> Option<CType> {
         let value = self.prepared_value_id_for_var(var)?;
         let render = self.inputs.render_facts()?;
@@ -1781,7 +1802,8 @@ impl<'a> FoldingContext<'a> {
                 // the program never had, and the value crossing into it is
                 // unsigned, which the compiler rejects outright.
                 let elem_ty = self
-                    .type_hint_for_var(val)
+                    .certified_member_type_for_current_store()
+                    .or_else(|| self.type_hint_for_var(val))
                     .unwrap_or_else(|| uint_type_from_size(val.size));
                 let certified_lhs =
                     self.render_certified_store_access_expr(addr, val, elem_ty.clone())?;

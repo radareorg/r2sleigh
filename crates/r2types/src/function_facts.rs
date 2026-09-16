@@ -1957,12 +1957,12 @@ impl SourceOwnedFunctionFacts {
         report.normalize_field_certificates_from_external_layout();
         if let Some(param_slots) = param_slots.as_ref() {
             report.populate_member_access_render_facts_from_field_certificates(source, param_slots);
-            report.populate_member_access_render_facts_from_declared_slots(source);
+            // Before the declared-slot pass, which reads an array fact to find
+            // the member offset inside an element the index selects.
+            report.populate_array_access_render_facts_from_scalar_candidates(source, param_slots);
+            report.populate_member_access_render_facts_from_declared_slots(source, param_slots);
         }
         report.populate_certified_loop_carrier_types();
-        if let Some(param_slots) = param_slots.as_ref() {
-            report.populate_array_access_render_facts_from_scalar_candidates(source, param_slots);
-        }
     }
 }
 
@@ -2665,6 +2665,7 @@ impl FunctionFacts {
     fn populate_member_access_render_facts_from_declared_slots(
         &mut self,
         prepared: &r2ssa::SsaArtifact,
+        param_slots: &ParamSlotResolver,
     ) {
         let Some(interface) = prepared.machine_context().function_interface() else {
             return;
@@ -2676,12 +2677,38 @@ impl FunctionFacts {
         for memory in self.render.memory_accesses() {
             // Offset zero is a member too when the access is narrower than the
             // object: the slot's name would stand for the whole aggregate.
+            // An element of an array of aggregates has no constant object
+            // offset -- the index is a value -- but the member's offset inside
+            // the element is as constant as any other, and the array fact for
+            // the same access carries it. Without this the declared type never
+            // sees the access and `arr[i].third` is left to the external
+            // layout's `f_8`.
+            let indexed = self
+                .render
+                .array_accesses_by_op
+                .get(&(memory.block_addr, memory.op_index, memory.is_write))
+                .and_then(|facts| {
+                    facts.iter().find(|fact| {
+                        fact.access == memory.access
+                            && fact.object == memory.object
+                            && fact.access_width == memory.width
+                    })
+                });
             let Some(offset_bits) = memory
                 .object_offset
-                .filter(|offset| *offset >= 0 && memory.width > 0)
+                .filter(|offset| *offset >= 0)
                 .and_then(|offset| u64::try_from(offset).ok())
+                .or_else(|| indexed.map(|fact| fact.field_offset))
+                .filter(|_| memory.width > 0)
                 .and_then(|bytes| bytes.checked_mul(8))
             else {
+                r2il::refusal_evidence!(
+                    "member-access-declined",
+                    "object={:?} width={} address={:?}: no constant offset inside the object",
+                    memory.object,
+                    memory.width,
+                    memory.address
+                );
                 continue;
             };
             let declined = |why: &str| {
@@ -2701,7 +2728,20 @@ impl FunctionFacts {
                 .and_then(|slot| slot.logical_type());
             let pointer_base = slot_type
                 .is_none()
-                .then(|| parameter_base_of(prepared, memory.address))
+                .then(|| {
+                    parameter_base_of(prepared, memory.address)
+                        .or_else(|| {
+                            indexed.and_then(|fact| match fact.base {
+                                Some(r2ssa::SemanticId::Parameter(slot)) => {
+                                    usize::try_from(slot).ok()
+                                }
+                                _ => None,
+                            })
+                        })
+                        .or_else(|| {
+                            prepared_memory_access_param_slot(prepared, memory, param_slots)
+                        })
+                })
                 .flatten();
             let declared_type =
                 slot_type.or_else(|| parameter_pointee_type(interface, pointer_base?));
@@ -2726,6 +2766,14 @@ impl FunctionFacts {
                 declined("no member covers exactly that offset and width");
                 continue;
             };
+            r2il::refusal_evidence!(
+                "member-access-named",
+                "object={:?} offset_bits={offset_bits} width={} aggregate={} member={}",
+                memory.object,
+                memory.width,
+                aggregate.name(),
+                member.name()
+            );
             member_facts.push(MemberAccessRenderFact {
                 access: memory.access,
                 block_addr: memory.block_addr,

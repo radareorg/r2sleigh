@@ -25761,3 +25761,29 @@ member loads are not inlined into the `return` because
 
 **Unrelated (two).** `dec_process_string_keeps_single_strlen_owner` and
 `taint_vuln_memcpy_call_sinks_include_arg_regs`.
+
+### An indexed member is named by the type that declares it
+
+`arr[idx].f_8` was the external layout's offset name winning over a `DemoStruct`
+whose fields the same rendering declares as `third` and `fourteenth`. Three
+things were wrong and all three are in the declared-slot member pass:
+
+* it took the member offset from `memory.object_offset`, which an element of an
+  array of aggregates does not have -- the index is a value -- while the offset
+  *inside* the element is as constant as any other and the array fact for the
+  same access carries it;
+* it found the pointer parameter only through `parameter_base_of`, which
+  requires a bare parameter address and so declines `arr + idx*56 + 8`;
+* it ran before `populate_array_access_render_facts_from_scalar_candidates`, so
+  the array fact it now needs did not exist yet.
+
+With the order swapped and both fallbacks in place the declared type answers,
+and the store is typed by the member rather than by the width of the value
+stored -- `arr[idx].third = v;` instead of `arr[idx].third = (uint32_t)v;`,
+which is the conversion `-Wsign-conversion` rejects when it reaches a signed
+member.
+
+What `dec_struct_array_index_keeps_member_write_shape` still wants is
+`return arr[idx].fourteenth + arr[idx].third;`, and that needs a `Load`'s value
+to be inlinable into its single reader, which `expression_renders_inline`
+refuses outright.
