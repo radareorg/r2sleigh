@@ -26019,3 +26019,34 @@ worth keeping: the machine arena's entity seal refuses a `Select` for a `Phi`
 instruction and is right to; the arms spell a materialized phi's expression, so
 the selection has to survive normalization; and the condition's read is the
 occurrence that lands in the wrong region when it does not.
+
+### Why `process_string` still spells its flags
+
+The comparison the test wants -- `if (len > 100)` -- is already a lemma the
+rewriter knows: `crates/r2rewrite/src/rules/flag.rs` states `x == y || x < y`
+is `x <= y`, which is exactly `TMPZR_2 || !TMPCY_2`. The rule never sees it
+because the three flags stay bound, each spelled as its own variable, so no one
+term holds the pattern. The inline trace names both gates:
+
+```
+TMPCY_2  stays bound: a location the expression reads is written between definition and reader
+TMPZR_2  stays bound: a location the expression reads is written between definition and reader
+CY_2     stays bound: a merge this block feeds carries a location the expression reads
+tmp:1000_1 stays bound: a merge this block feeds carries a location the expression reads
+```
+
+Both are correctness guards and both earned their place -- the second is the one
+that fixed `xxhash32`'s wrong digests, where `ZF = R8 == 1` folded below
+`R8 = R8 - 1` ended the loop a turn late. What makes them fire here is
+precision rather than principle: `read_locations` is built from **machine**
+storage, while what the rendered expression reads is the **binding**. The flag
+reads `len`, a declared slot; the machine reads whichever register `len` was
+reloaded into, and a later operation writes that register before the flag's
+reader. The rendered text would re-read `len`, which nothing writes in between,
+so the guard is refusing a fold that is in fact stable.
+
+Sharpening it means asking the question of the binding the expression will
+actually spell rather than of the storage the machine used. That is worth doing
+-- `TMPCY_2`/`TMPZR_2` variables are everywhere in the census -- and it must be
+done carefully, because this is the guard standing between the renderer and a
+wrong answer.
