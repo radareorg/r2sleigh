@@ -1622,7 +1622,14 @@ fn exact_callee_allocation_binds_anonymous_stack_object_without_source_identity(
         R2ILOp::Load {
             dst: loaded.clone(),
             space: SpaceId::Ram,
-            addr: address,
+            addr: address.clone(),
+        },
+        // The allocation's address leaves the frame in a register, which is
+        // what a callee-allocated buffer is for and what keeps the slot a
+        // stack object rather than a promoted variable.
+        R2ILOp::Copy {
+            dst: Varnode::register(0x10, 8),
+            src: address,
         },
         R2ILOp::Copy {
             dst: Varnode::register(0, 8),

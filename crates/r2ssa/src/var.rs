@@ -18,6 +18,8 @@ pub enum SSAVarNameKind {
     Constant,
     Memory,
     AddressSpace,
+    /// A frame slot promoted out of memory into a variable of the function.
+    Frame,
     Symbol,
     Object,
     Data,
@@ -47,6 +49,8 @@ impl SSAVarNameKind {
             Self::Constant
         } else if starts_with_ignore_ascii_case(name, "ram:") {
             Self::Memory
+        } else if starts_with_ignore_ascii_case(name, "stack:") {
+            Self::Frame
         } else if starts_with_ignore_ascii_case(name, "space") {
             Self::AddressSpace
         } else if starts_with_ignore_ascii_case(name, "sym.") {
@@ -70,6 +74,7 @@ impl SSAVarNameKind {
                 | Self::Constant
                 | Self::Memory
                 | Self::AddressSpace
+                | Self::Frame
         )
     }
 

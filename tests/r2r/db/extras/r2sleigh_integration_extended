@@ -881,3 +881,16 @@ pd:s | jq -Rs 'contains("arr[idx]") and (contains("idx = idx;")|not)'
 EOF_CMDS
 RUN
 
+NAME=dec_bitwise_check_promotes_the_private_frame_slot
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~bitwise_check$[0]` >/dev/null
+pd:s | jq -Rs '(contains("x & 240")) and (contains("r2sleigh refused")|not) and (test("\\*\\(")|not) and (test("([A-Za-z_][A-Za-z0-9_]*) = \\1;")|not)'
+EOF_CMDS
+RUN

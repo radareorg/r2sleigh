@@ -206,10 +206,15 @@ pub(crate) fn register_root_slot(
 }
 
 /// Collect definitions and storage while polling the block/operation scan.
+/// Which op site accesses a promoted stack slot, and the varnode standing for
+/// the slot there. Empty where nothing was promoted.
+pub type PromotedStackSlots = std::collections::BTreeMap<(u64, usize), r2il::Varnode>;
+
 pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + ?Sized>(
     cfg: &CFG,
     reg_names: Option<&RegisterNameMap>,
     families: Option<&RegisterFamilyInfo>,
+    promoted: &PromotedStackSlots,
     control: &C,
 ) -> Result<DefinitionCollection, SsaExecutionStopReason> {
     control.poll()?;
@@ -221,8 +226,23 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
-        for op in &block.ops {
+        for (op_idx, op) in block.ops.iter().enumerate() {
             control.poll()?;
+            // A promoted slot's access defines or reads the slot's own
+            // identity, which is what gives it a merge at a join the same way
+            // a register gets one.
+            if let Some(slot) = promoted.get(&(block.addr, op_idx)) {
+                let identity = RenameIdentity::for_varnode(slot, reg_names, families);
+                storage_by_identity.insert(identity.clone(), identity.storage);
+                match op {
+                    r2il::R2ILOp::Store { .. } => {
+                        defs.entry(identity).or_default().insert(block.addr);
+                    }
+                    _ => {
+                        defs.entry(identity).or_default();
+                    }
+                }
+            }
             for varnode in op.inputs() {
                 if !matches!(varnode.space, r2il::SpaceId::Const) {
                     let identity = RenameIdentity::for_varnode(varnode, reg_names, families);

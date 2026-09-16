@@ -2386,6 +2386,21 @@ impl LegacyObservationJournal {
                 let Some(input) = input else {
                     continue;
                 };
+                let dispositions = (
+                    plan.disposition(input.value),
+                    plan.disposition(output.value),
+                );
+                // An inlined source is an expression read where the copy
+                // stands, so when that expression spells the destination the
+                // copy assigns the object to itself wherever it sits, and the
+                // interval question a bound source needs has no subject.
+                let inline_spells_the_destination = matches!(
+                    (&dispositions.0, &dispositions.1),
+                    (
+                        Some(ValueDisposition::Inline { term, .. }),
+                        Some(ValueDisposition::Bound { binding }),
+                    ) if crate::binding_plan::term_spells_binding(&plan, *term) == Some(*binding)
+                );
                 // A restore states the convention rather than performing a
                 // copy the program wrote, so the question this asks of a
                 // program copy -- did anything write the object between the
@@ -2394,26 +2409,32 @@ impl LegacyObservationJournal {
                 // and the certificate is about exactly that call.
                 if let Some(inst) = program_copy
                     && !matches!(op, r2ssa::SSAOp::CallRestore { .. })
+                    && !inline_spells_the_destination
                     && !nothing_wrote_the_object_between(&plan, graph, inst, input.value)
                 {
                     continue;
                 }
-                let dispositions = (
-                    plan.disposition(input.value),
-                    plan.disposition(output.value),
-                );
-                let same_binding = matches!(
-                    dispositions,
-                    (
-                        Some(ValueDisposition::Bound { binding: input }),
-                        Some(ValueDisposition::Bound { binding: output }),
-                    ) if input == output
-                );
+                let same_binding = inline_spells_the_destination
+                    || matches!(
+                        dispositions,
+                        (
+                            Some(ValueDisposition::Bound { binding: input }),
+                            Some(ValueDisposition::Bound { binding: output }),
+                        ) if input == output
+                    );
                 if same_binding {
                     coalesced_carrier_copy_sites.insert(site);
                     if let Some(inst) = program_copy {
                         coalesced_copy_outputs.insert(output.value);
                         coalesced_copy_writes.insert(inst);
+                    }
+                    // A folded source's occurrence lived in the statement this
+                    // removes, so what it owed goes with it.
+                    if inline_spells_the_destination {
+                        coalesced_copy_outputs.insert(input.value);
+                        if let Some(definition) = graph.def_inst(input.value) {
+                            coalesced_copy_writes.insert(definition);
+                        }
                     }
                 }
             }
@@ -2574,6 +2595,13 @@ impl LegacyObservationJournal {
             .copied()
             .collect::<Vec<_>>();
         for site in coalesced_carrier_uses {
+            // A cell a certificate already answered for keeps that answer. Two
+            // tables saying one read renders nothing do not disagree, and the
+            // certificate is the one with the authority; what the seal is for
+            // is a cell two tables render *differently*.
+            if elided_uses.contains_key(&site) {
+                continue;
+            }
             match elided_uses.insert(site, r2ssa::ledger::ElisionReason::CoalescedCopy) {
                 Some(r2ssa::ledger::ElisionReason::CoalescedCopy) | None => {}
                 Some(existing) => {

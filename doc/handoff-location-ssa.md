@@ -25332,67 +25332,143 @@ duplication of a lone returning tail (route 1 above, reverted), and the
 single-reader inlining that landed earlier this session, which together turn
 `X0 = φ(1, 0)` into `if (c) { return 1; } else { return 0; }`.
 
-### Stack-slot promotion is built, on `arch/promote-stack-slots`
+### Promotion moved to the right layer, and the lift stopped being edited
 
-The pass named above is written and works. It lives on its own branch --
-`arch/promote-stack-slots`, one commit on top of `arch/location-ssa` -- because
-it is not finished and the integration branch has to stay green.
+The first cut of `promote_private_stack_slots` rewrote the lifted `R2ILBlock`s
+-- `Store` became `Copy`, `Load` became `Copy`, and the address computation left
+behind was replaced by a `Nop`. That is editing the evidence, and every problem
+it caused was a downstream layer noticing: the seal reported one cell claimed
+twice, declaration placement reported a region that could not dominate, and an
+orphaned `sp + K` had to be deleted by hand.
 
-`promote_private_stack_slots` runs in
-`SSAFunction::from_blocks_for_decompile_with_interface_and_control`, before
-anything is constructed, and rewrites a qualifying slot's stores and loads into
-copies of one synthetic varnode. The builder's own phi placement then merges it
-at joins like a register, which is the whole point: no certificate can say what
-a value is when it is one thing on one path and another on a second.
+The lift is evidence. The graph is derived. So the promotion now leaves the
+lifted text alone and applies in two places inside construction:
 
-Every condition is checked on the lifted text, because construction is what
-decides which value each read sees:
+- `collect_defs_from_cfg_with_names_storage_and_control` gives a promoted slot
+  its own `RenameIdentity` and records a definition site at each block that
+  stores to it, so the builder's own phi placement merges it at a join exactly
+  as it does a register;
+- `rename_op` emits `SSAOp::Copy` for a promoted access -- reading the slot for
+  a load, writing it for a store -- while the `R2ILOp` it came from is still the
+  machine's own load or store.
 
-- the prologue is one `sp = sp - N` in the entry block, and every other write of
-  the stack pointer is the epilogue of a returning block, after that block's
-  accesses;
-- the slot's address is only ever `sp + <constant>`, and a value derived from
-  the stack pointer reaches nothing but the address of such an access -- a read
-  of the bare stack pointer is not that, since the epilogue computes its own
-  flags from it;
-- one width per place, no place overlapping another;
-- and nothing the source named, because the name is what the rendering is for
-  and a promoted slot carries none.
+The analysis that decides *which* slots qualify is unchanged and still runs on
+the lifted text before construction, which is right: it is asking what the
+machine did.
 
-`check_secret` promotes and renders, the slot gone:
+One thing had to be fixed with it. `record_renamed_op_storage` pairs the lifted
+operation's varnodes with the renamed operation's variables by position, and a
+promoted access is not positional -- its copy reads or writes the slot, not the
+address the machine computed. Pairing them gave the slot the *address's* storage
+beside its own, which marked the identity ambiguous, dropped it from
+`canonical_storage_by_var`, and the integrity check then reported
+`PhiStorageMismatch` with `retained: None`. A promoted access now records the
+two pairs it actually has.
+
+`check_secret` renders with the slot gone and the merge coming from the builder:
 
 ```c
-uint32_t tmp_3e584_2;
-if ((uint32_t)x != 0xdead) { tmp_3e584_2 = 0; } else { tmp_3e584_2 = 1; }
-{ uint32_t tmp_24c00_2 = tmp_3e584_2; return (int32_t)tmp_24c00_2; }
+uint32_t space21249_3e584_1;
+if ((uint32_t)x != 0xdead) { space21249_3e584_1 = 0; } else { space21249_3e584_1 = 1; }
+{ uint32_t tmp_24c00_2 = space21249_3e584_1; return (int32_t)tmp_24c00_2; }
 ```
 
-Two things had to be fixed on the way, and one of them is worth keeping whatever
-happens to the pass.
+Fifty-two of the sixty corpus cells pass every column. The name is the synthetic
+space showing through and wants the slot's own `stack_*` spelling; that is
+presentation and comes after the last refusal.
 
-**The dead address computation.** Rewriting a store leaves the `sp + K` that
-reached it computing a value nothing reads, and two rules then answer for its
-read of the stack pointer -- the certificate calls it `DeadStackBase` and
-normalisation calls it `CoalescedCopy`. The address is part of the access, so it
-is replaced by a `Nop` when nothing else in the block reads it.
-
-**The seal refused two agreeing elisions.** `ConflictingUse` fires when a use
-cell is elided twice with different reasons, and `DeadStackBase` beside
-`CoalescedCopy` is not a disagreement: both say the read renders nothing. The
-certificate is the table with the authority, so its answer now stands and the
-carrier pass does not overwrite it. What the seal is for is a cell two tables
-render *differently*, and it still catches that.
-
-What is left is one cause, the same one in all eight of the sixty corpus cells
-the pass refuses:
+Which is still one cause, and the same one in all eight:
 
 ```
-binding BindingId(6) occurs at 0x100000548, which region RegionId(2)
-at 0x100000568 does not dominate
+BindingId(13) is read 1 times and never written;
+reads [(CertifiedValue { value: ValueId(145), at: InstId(120) }, ...)]
 ```
 
-The promoted carrier is initialised in the entry block and updated in a loop,
-and declaration placement put it in the loop's region while an occurrence sits
-in the entry. Fifty-two of the sixty cells are unaffected and still pass every
-column. So the remaining question is how the region for a promoted carrier's
-declaration is chosen, and it is one question rather than a class.
+The value the return certificate reads is the promoted carrier's last version,
+and every write of its binding was elided as a coalesced copy, so placement
+finds an object read and never assigned. That is the hazard the binding plan
+already names elsewhere -- "spelling the constant at each reader deletes that
+definition, and placement then finds the object read before it is assigned" --
+met here by a carrier whose writes are all copies within one binding. One of
+them has to survive, and which one is the question to answer next.
+
+### What the eight refusals actually were
+
+The hypothesis above was wrong, and tracing it out found three separate faults,
+all of them consequences of promotion rather than of the binding plan.
+
+The first and largest is the memory-space map. `SourceMachineContext` builds
+`memory_spaces_by_op` from the lifted blocks and then calls
+`remap_memory_sites_to_prepared` to rebind it to the prepared operation sites.
+That remap requires the prepared operations to hold the same memory operations,
+in the same order, as the lifted text did; anything else clears the whole map so
+certification fails closed. Promotion turns a `Load`/`Store` into a `Copy`, so
+the counts stopped matching and **one promoted slot deleted the memory context
+for the entire function**. Every remaining access then lost its address
+certificate: `memory_address_for_use` refused with `MachineContextMismatch`, the
+canonical import dropped the access because it demands
+`MachineUseDisposition::MemoryAddress`, and the load of `data[i]` refused as
+`UnsupportedOperation` and opened a gap that swallowed 133 cells -- including
+the definition placement then reported missing. The fix is that the function now
+carries `promoted_slot_sites`, and the remap drops those sites before it
+compares, because a promoted access is no longer one of the function's memory
+operations.
+
+The second showed up once the eight rendered: all eight failed the raw compile
+with `-Wself-assign` on
+
+```c
+for (space21249_3e788_1 = 0; ; space21249_3e788_1 = space21249_3e788_1)
+```
+
+The increment's sum is coalesced into the slot's own binding, so the promoted
+store that follows it copies the object to itself. The copy survived because the
+coalescing test requires both sides to be `Bound` and this source is `Inline`:
+`nothing_wrote_the_object_between` returns false for an inlined value, so the
+site was skipped before the binding comparison. An inlined source is an
+expression read where the copy stands, so when it spells the destination the
+copy is an identity wherever it sits and no interval question applies --
+`term_spells_binding` already answers exactly that, and the elision now accounts
+for the folded source the way the store elision does.
+
+The third is that promotion was taking slots it must not. The callee-saved
+save/reload in `frame_round_trip_certifies_through_a_merge_no_observation_depends_on`
+is a single-width private slot, so it qualified, and the round-trip certificate
+then had no store to attach to. The parameter-home exclusion already knew the
+shape -- a slot the prologue fills from a value the call brought in is that
+value's home -- but it only looked at a register stored directly. It now follows
+copies back to the carrier, which covers the callee-saved spill as well.
+
+With those three, the corpus is 60/60 on every column and the raw compile passes
+for all sixty. The synthetic `space21249_*` name is still the promoted space
+showing through and wants the slot's own `stack_*` spelling.
+
+### The promoted slot keeps the frame's own name
+
+`space21249_3e790_1` was the synthetic space showing through, and it was not
+only ugly: it made a promoted rendering incomparable with the same function's
+pre-promotion rendering, which spells the same object `stack_m20`. The promoted
+varnode's offset is now the slot's position relative to the frame the function
+was entered with -- displacement minus the prologue's subtraction, the exact
+coordinate `certificate.entry_offset` uses -- and `SSAVarNameKind::Frame`
+spells that space `stack:m20`, so the binding plan's name hint is `stack_m20`
+with no version suffix, because one frame position is one object.
+
+Beside the baseline, promotion is what turns the slot's loads and stores into
+the value itself:
+
+```c
+/* before: the slot is memory the stack-object layer names */
+tmp_24c00_3 = stack_m20;
+stack_m20 = (uint32_t)tmp_25600_2 ^ tmp_24c00_3;
+tmp_24c00_3 = stack_m20;
+stack_m20 = tmp_24c00_3 * tmp_2a000_5;
+
+/* after: the slot is a variable and the expression folds */
+stack_m20 = (stack_m20 ^ (uint32_t)tmp_25600_2) * tmp_2a000_5;
+```
+
+`fnv1a32` on `h_arm64_O0` goes from 25 statements to 22 and from 72 source
+obligations to 61. The compile census over `zlib-minigzip` is unchanged in both
+directions -- aarch64 O0 177/177 built, x86-64 O0 119/125 built, the same six
+failures and the same rendering counts as the integration branch.

@@ -1789,11 +1789,15 @@ impl SourceMachineContext {
     }
 
     /// Rebind raw lifted memory-space identities to the completed SSA operation
-    /// sites. SSA preparation may insert non-memory register-alias operations,
-    /// but it must retain the order, count, and exact space identity of memory
+    /// sites. SSA preparation may insert non-memory register-alias operations
+    /// and may promote a private frame slot out of memory, but otherwise it
+    /// must retain the order, count, and exact space identity of memory
     /// operations in each block. Any violation clears the map so certification
     /// fails closed.
     pub(crate) fn remap_memory_sites_to_prepared(&mut self, function: &SSAFunction) -> bool {
+        let promoted = function.promoted_slot_sites();
+        self.memory_spaces_by_op
+            .retain(|site, _| !promoted.contains(site));
         let mut raw_by_block = BTreeMap::<u64, Vec<SpaceId>>::new();
         for ((block_addr, _), space) in &self.memory_spaces_by_op {
             raw_by_block.entry(*block_addr).or_default().push(*space);

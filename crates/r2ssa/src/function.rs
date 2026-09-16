@@ -2267,6 +2267,12 @@ pub struct SSAFunction {
     /// source publishes it for functions whose interface it withholds, and
     /// those are the ones that need it.
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
+    /// The lifted memory operations promotion took out of memory.
+    ///
+    /// A promoted slot access is a copy of a variable in the prepared
+    /// operations, so it is no longer one of the function's memory
+    /// operations, and every layer that counts those has to agree.
+    promoted_slot_sites: BTreeSet<(u64, usize)>,
     /// The architectural stack pointer, as the machine roles name it.
     ///
     /// The roles know it for every function, including one whose signature
@@ -2346,6 +2352,7 @@ impl Clone for SSAFunction {
     fn clone(&self) -> Self {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
+            promoted_slot_sites: self.promoted_slot_sites.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
@@ -3130,6 +3137,7 @@ impl SSAFunction {
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
+            promoted_slot_sites: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,
             entry,
@@ -3241,6 +3249,17 @@ impl SSAFunction {
                 }
             }))
             .collect::<Vec<_>>();
+
+        // Which frame slots behave like variables. Asked of the lifted text,
+        // before construction, because construction is what decides which
+        // value each read of a variable sees.
+        let promoted = promote_private_stack_slots(
+            blocks,
+            stack_pointer_carrier,
+            questions.interface,
+            &abi_carriers,
+        )
+        .unwrap_or_default();
         // The same phase report the semantic collector gives, for the half of
         // a decompile's bytes that are already held before the collector runs.
         // Construction is three passes over the same body and they do not cost
@@ -3266,6 +3285,7 @@ impl SSAFunction {
             callee_preserved_carriers,
             declared_successors,
             &abi_carriers,
+            &promoted,
             control,
         )?;
         phase("raw", func.num_blocks());
@@ -3306,8 +3326,15 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let mut func =
-            Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, &[], control)?;
+        let mut func = Self::from_blocks_raw_with_policy_and_control(
+            blocks,
+            arch,
+            None,
+            None,
+            &[],
+            &Default::default(),
+            control,
+        )?;
         let cfg = crate::optimize::OptimizationConfig {
             max_iterations: 1,
             enable_sccp: true,
@@ -3366,7 +3393,15 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, &[], control)
+        Self::from_blocks_raw_with_policy_and_control(
+            blocks,
+            arch,
+            None,
+            None,
+            &[],
+            &Default::default(),
+            control,
+        )
     }
 
     /// Build raw SSA prepared with decompiler-safe call boundaries.
@@ -3391,11 +3426,13 @@ impl SSAFunction {
             &CalleePreservedCarriers::new(),
             None,
             &[],
+            &Default::default(),
             control,
         )
     }
 
     /// The same, told which carrier the convention says a callee restores.
+    #[allow(clippy::too_many_arguments)]
     fn from_blocks_raw_for_decompile_with_carriers_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
@@ -3403,6 +3440,7 @@ impl SSAFunction {
         callee_preserved_carriers: &CalleePreservedCarriers,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
+        promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let policy = decompile_call_boundary_config(
@@ -3416,6 +3454,7 @@ impl SSAFunction {
             policy.as_ref(),
             declared_successors,
             abi_carriers,
+            promoted,
             control,
         )
     }
@@ -3426,6 +3465,7 @@ impl SSAFunction {
         call_boundaries: Option<&CallBoundaryConfig>,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
+        promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -3490,6 +3530,7 @@ impl SSAFunction {
                 &cfg,
                 reg_names_ref,
                 families_ref,
+                promoted,
                 control,
             )?;
 
@@ -3539,6 +3580,7 @@ impl SSAFunction {
             reg_names_ref,
             families.clone(),
             call_boundaries,
+            promoted,
             control,
         )?;
 
@@ -3598,6 +3640,7 @@ impl SSAFunction {
         cfg.release_operations();
         let mut function = Self {
             call_preserved_carriers: None,
+            promoted_slot_sites: promoted.keys().copied().collect(),
             stack_pointer_carrier: None,
             name: None,
             entry,
@@ -3631,6 +3674,11 @@ impl SSAFunction {
     /// Build raw SSA without architecture metadata.
     pub fn from_blocks_raw_no_arch(blocks: &[R2ILBlock]) -> Option<Self> {
         Self::from_blocks_raw(blocks, None)
+    }
+
+    /// Which lifted memory operations promotion took out of memory.
+    pub fn promoted_slot_sites(&self) -> &BTreeSet<(u64, usize)> {
+        &self.promoted_slot_sites
     }
 
     /// Set the function name.
@@ -5648,7 +5696,7 @@ fn can_width_adapt_root(root: &SSAVar) -> bool {
         && !root.is_temp()
         && !matches!(
             root.name_kind(),
-            SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace
+            SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace | SSAVarNameKind::Frame
         )
 }
 
@@ -12867,4 +12915,409 @@ mod tests {
             certificate.argument_certificates
         );
     }
+}
+
+/// The `(base register, displacement)` an address computed in this block names.
+fn resolved_stack_address(
+    block: &R2ILBlock,
+    upto: usize,
+    addr: &r2il::Varnode,
+) -> Option<(r2il::Varnode, i64)> {
+    if addr.space == r2il::SpaceId::Register {
+        return Some((addr.clone(), 0));
+    }
+    let mut current = addr.clone();
+    let mut displacement = 0i64;
+    let mut at = upto;
+    while at > 0 {
+        at -= 1;
+        let op = &block.ops[at];
+        let Some(dst) = op.output() else { continue };
+        if *dst != current {
+            continue;
+        }
+        match op {
+            R2ILOp::Copy { src, .. } => current = src.clone(),
+            R2ILOp::IntAdd { a, b, .. } => match (a.space, b.space) {
+                (r2il::SpaceId::Const, _) => {
+                    displacement += a.offset as i64;
+                    current = b.clone();
+                }
+                (_, r2il::SpaceId::Const) => {
+                    displacement += b.offset as i64;
+                    current = a.clone();
+                }
+                _ => return None,
+            },
+            R2ILOp::IntSub { a, b, .. } if b.space == r2il::SpaceId::Const => {
+                displacement -= b.offset as i64;
+                current = a.clone();
+            }
+            _ => return None,
+        }
+        if current.space == r2il::SpaceId::Register {
+            return Some((current, displacement));
+        }
+    }
+    None
+}
+
+/// The space promoted stack slots live in: not memory, and not the lifter's
+/// scratch either.
+pub(crate) const PROMOTED_SLOT_SPACE: u32 = 0x5301;
+
+/// A stack slot promoted out of memory, keyed by where it sits in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PromotedSlot {
+    displacement: i64,
+    width: u32,
+}
+
+/// One access to a promoted slot.
+struct SlotAccess {
+    block: usize,
+    op: usize,
+    slot: PromotedSlot,
+}
+
+/// Promote a private stack slot to a variable before construction runs.
+///
+/// A slot the program only ever writes and reads whole, whose address never
+/// leaves the accesses that name it, behaves exactly like a register: `-O0`
+/// spills a value into it and reads it back, and the C that says so has one
+/// variable rather than a slot and a copy. Turning its stores and loads into
+/// copies of one synthetic varnode lets the builder's own phi placement merge
+/// it at joins, which is what a value that is one thing on one path and another
+/// on a second needs and what no certificate can supply after the fact.
+///
+/// Every condition is checked here because construction is what decides which
+/// value each read sees. A slot the source named is left alone: the name is
+/// what the rendering is for, and a promoted slot carries none.
+fn promote_private_stack_slots(
+    blocks: &[R2ILBlock],
+    stack_pointer: Option<CanonicalStorageId>,
+    interface: Option<&SourceFunctionInterface>,
+    argument_carriers: &[CanonicalStorageId],
+) -> Option<crate::phi::PromotedStackSlots> {
+    r2il::refusal_evidence!(
+        "promote-stack-slot",
+        "asked over {} blocks with {} argument carriers",
+        blocks.len(),
+        argument_carriers.len()
+    );
+    let Some(stack_pointer) = stack_pointer else {
+        r2il::refusal_evidence!("promote-stack-slot", "no stack pointer carrier");
+        return None;
+    };
+    if stack_pointer.space != CanonicalStorageSpace::Register {
+        r2il::refusal_evidence!("promote-stack-slot", "the stack pointer is not a register");
+        return None;
+    }
+    let is_stack_pointer = |varnode: &r2il::Varnode| {
+        varnode.space == r2il::SpaceId::Register && varnode.offset == stack_pointer.offset
+    };
+    let entry = blocks.first()?;
+    // The prologue: the one subtraction that opens the frame every access
+    // counts from. Without it there is no frame and nothing to promote.
+    let Some((prologue_at, frame_size)) =
+        entry.ops.iter().enumerate().find_map(|(at, op)| match op {
+            R2ILOp::IntSub { dst, a, b }
+                if is_stack_pointer(dst)
+                    && is_stack_pointer(a)
+                    && b.space == r2il::SpaceId::Const =>
+            {
+                Some((at, b.offset as i64))
+            }
+            _ => None,
+        })
+    else {
+        r2il::refusal_evidence!("promote-stack-slot", "no prologue frame subtraction");
+        return None;
+    };
+    // Every other write of the stack pointer is the epilogue of a returning
+    // block, after that block's accesses. Anything else moves the frame under
+    // the accesses and the displacement they share stops meaning one place.
+    for (index, block) in blocks.iter().enumerate() {
+        let returns = block
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Return { .. }));
+        for (at, op) in block.ops.iter().enumerate() {
+            let writes_stack_pointer = op.output().is_some_and(is_stack_pointer);
+            if !writes_stack_pointer {
+                continue;
+            }
+            if index == 0 && at == prologue_at {
+                continue;
+            }
+            if !returns {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x} writes the stack pointer and does not return",
+                    block.addr
+                );
+                return None;
+            }
+            let accesses_after = block.ops[at + 1..]
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. }));
+            if accesses_after {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x} accesses the frame after moving the stack pointer",
+                    block.addr
+                );
+                return None;
+            }
+        }
+    }
+    // Which displacements the source named, in the coordinate the accesses use.
+    let declared = interface
+        .map(|interface| {
+            interface
+                .stack_slots()
+                .iter()
+                .filter(|slot| slot.base() == StackAddressBase::StackPointer)
+                .map(|slot| slot.offset() + frame_size)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut accesses = Vec::new();
+    let mut widths = BTreeMap::<i64, BTreeSet<u32>>::new();
+    for (index, block) in blocks.iter().enumerate() {
+        // Everything this block derives from the stack pointer. A derived value
+        // used as anything but the address of an access has escaped, and then
+        // nothing here can say which slot a later access reaches.
+        let mut derived = Vec::<r2il::Varnode>::new();
+        let holds =
+            |set: &Vec<r2il::Varnode>, want: &r2il::Varnode| set.iter().any(|held| held == want);
+        for (at, op) in block.ops.iter().enumerate() {
+            // A read of the stack pointer itself is not a read of a slot: the
+            // epilogue computes its own flags from it. What may not happen is a
+            // *derived* address reaching anything but an access below.
+            let reads_derived = op.inputs().into_iter().any(|input| holds(&derived, input));
+            match op {
+                R2ILOp::Load { dst, addr, .. } => {
+                    if holds(&derived, addr) || is_stack_pointer(addr) {
+                        let Some((base, displacement)) = resolved_stack_address(block, at, addr)
+                        else {
+                            r2il::refusal_evidence!(
+                                "promote-stack-slot",
+                                "{:#x}:{at} loads through an address that resolves to no place",
+                                block.addr
+                            );
+                            return None;
+                        };
+                        if !is_stack_pointer(&base) {
+                            return None;
+                        }
+                        widths.entry(displacement).or_default().insert(dst.size);
+                        accesses.push(SlotAccess {
+                            block: index,
+                            op: at,
+                            slot: PromotedSlot {
+                                displacement,
+                                width: dst.size,
+                            },
+                        });
+                    }
+                }
+                R2ILOp::Store { addr, val, .. } => {
+                    if holds(&derived, val) || is_stack_pointer(val) {
+                        return None;
+                    }
+                    if holds(&derived, addr) || is_stack_pointer(addr) {
+                        let Some((base, displacement)) = resolved_stack_address(block, at, addr)
+                        else {
+                            r2il::refusal_evidence!(
+                                "promote-stack-slot",
+                                "{:#x}:{at} stores through an address that resolves to no place",
+                                block.addr
+                            );
+                            return None;
+                        };
+                        if !is_stack_pointer(&base) {
+                            return None;
+                        }
+                        widths.entry(displacement).or_default().insert(val.size);
+                        accesses.push(SlotAccess {
+                            block: index,
+                            op: at,
+                            slot: PromotedSlot {
+                                displacement,
+                                width: val.size,
+                            },
+                        });
+                    }
+                }
+                R2ILOp::Copy { dst, src } if holds(&derived, src) || is_stack_pointer(src) => {
+                    derived.push(dst.clone());
+                }
+                R2ILOp::IntAdd { dst, a, b }
+                    if (holds(&derived, a) || is_stack_pointer(a))
+                        && b.space == r2il::SpaceId::Const
+                        || (holds(&derived, b) || is_stack_pointer(b))
+                            && a.space == r2il::SpaceId::Const =>
+                {
+                    derived.push(dst.clone());
+                }
+                R2ILOp::IntSub { dst, a, b }
+                    if (holds(&derived, a) || is_stack_pointer(a))
+                        && b.space == r2il::SpaceId::Const =>
+                {
+                    derived.push(dst.clone());
+                }
+                _ if reads_derived => {
+                    r2il::refusal_evidence!(
+                        "promote-stack-slot",
+                        "{:#x}:{at} reads a frame address it does not access through",
+                        block.addr
+                    );
+                    return None;
+                }
+                _ => {}
+            }
+            // A frame address that lands in a register leaves this block. The
+            // stack pointer's own prologue and epilogue writes are not that:
+            // the discipline check above has already accounted for them.
+            if let Some(dst) = op.output()
+                && holds(&derived, dst)
+                && dst.space != r2il::SpaceId::Unique
+                && !is_stack_pointer(dst)
+            {
+                r2il::refusal_evidence!(
+                    "promote-stack-slot",
+                    "{:#x}:{at} puts a frame address in a register",
+                    block.addr
+                );
+                return None;
+            }
+        }
+    }
+    // A slot the prologue fills from an argument register is that parameter's
+    // home, and the parameter entity already owns it: promoting it leaves the
+    // parameter's binding with nothing but copies of itself and no write at
+    // all, which placement reads as an object assigned nowhere.
+    let mut parameter_homes = BTreeSet::<i64>::new();
+    if let Some(entry) = blocks.first() {
+        for (at, op) in entry.ops.iter().enumerate() {
+            let R2ILOp::Store { addr, val, .. } = op else {
+                continue;
+            };
+            // A register the prologue spills before anything wrote it came in
+            // with the call, so the slot is that value's home -- a parameter's
+            // or a callee-saved register's. Asked of the text rather than of
+            // an ABI, because a recovered interface often names no argument
+            // placement at all and the machine still says plainly that nothing
+            // in this function produced the value. Copies on the way to the
+            // store do not change whose home the slot is, so the walk follows
+            // them back to the carrier they read.
+            let mut root = val.clone();
+            let mut index = at;
+            while index > 0 {
+                index -= 1;
+                let earlier = &entry.ops[index];
+                if earlier.output() != Some(&root) {
+                    continue;
+                }
+                match earlier {
+                    R2ILOp::Copy { src, .. } if src.size == root.size => root = src.clone(),
+                    _ => break,
+                }
+            }
+            let entered_with_the_call = root.space == r2il::SpaceId::Register
+                && !entry.ops[..at].iter().any(|earlier| {
+                    earlier.output().is_some_and(|dst| {
+                        dst.space == root.space
+                            && dst.offset < root.offset + u64::from(root.size)
+                            && root.offset < dst.offset + u64::from(dst.size)
+                    })
+                });
+            let is_argument = entered_with_the_call
+                || argument_carriers.iter().any(|carrier| {
+                    carrier.space == CanonicalStorageSpace::Register
+                        && carrier.offset == root.offset
+                });
+            if !is_argument {
+                continue;
+            }
+            if let Some((base, displacement)) = resolved_stack_address(entry, at, addr)
+                && is_stack_pointer(&base)
+            {
+                parameter_homes.insert(displacement);
+            }
+        }
+    }
+    // One width per place, no place overlapping another, and nothing the source
+    // named.
+    let mut promotable = BTreeSet::<PromotedSlot>::new();
+    for (displacement, sizes) in &widths {
+        if sizes.len() != 1
+            || declared.contains(displacement)
+            || parameter_homes.contains(displacement)
+        {
+            continue;
+        }
+        let width = *sizes.iter().next().expect("one width");
+        let overlaps = widths.iter().any(|(other, other_sizes)| {
+            other != displacement
+                && other_sizes.iter().any(|other_width| {
+                    *other < displacement + i64::from(width)
+                        && *displacement < other + i64::from(*other_width)
+                })
+        });
+        if !overlaps {
+            promotable.insert(PromotedSlot {
+                displacement: *displacement,
+                width,
+            });
+        }
+    }
+    if promotable.is_empty() {
+        r2il::refusal_evidence!(
+            "promote-stack-slot",
+            "no slot qualifies of {} places, {} declared",
+            widths.len(),
+            declared.len()
+        );
+        return None;
+    }
+    let mut varnode_for = BTreeMap::<PromotedSlot, r2il::Varnode>::new();
+    for slot in &promotable {
+        varnode_for.insert(
+            *slot,
+            r2il::Varnode {
+                // Its own space, not `Unique`. A lowering temporary is
+                // block-local scratch and several rules read the space to say
+                // so; a promoted slot is a variable of the function and its
+                // declaration has to dominate every region that reads it.
+                space: r2il::SpaceId::Custom(PROMOTED_SLOT_SPACE),
+                // Where the slot sits relative to the frame the function was
+                // entered with, which is the coordinate every other frame
+                // object is named by, so the promoted variable keeps the name
+                // the slot had. Displacements are distinct, so the offsets are.
+                offset: (slot.displacement - frame_size) as u64,
+                size: slot.width,
+                meta: None,
+            },
+        );
+    }
+    let mut rewrites = crate::phi::PromotedStackSlots::new();
+    for access in &accesses {
+        if let Some(varnode) = varnode_for.get(&access.slot) {
+            rewrites.insert((blocks[access.block].addr, access.op), varnode.clone());
+        }
+    }
+    if rewrites.is_empty() {
+        return None;
+    }
+    r2il::refusal_evidence!(
+        "promote-stack-slot",
+        "{} slots promoted out of memory across {} accesses: {:?}",
+        promotable.len(),
+        rewrites.len(),
+        promotable.iter().collect::<Vec<_>>()
+    );
+    Some(rewrites)
 }
