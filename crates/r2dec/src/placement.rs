@@ -3962,9 +3962,18 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
                         occurrence.region,
                         // Which region an occurrence landed in is the whole
                         // question here, and its number alone names nothing.
-                        regions
-                            .node(occurrence.region)
-                            .map(|node| (node.kind(), node.entry())),
+                        {
+                            let mut chain = Vec::new();
+                            let mut id = Some(occurrence.region);
+                            while let Some(current) = id {
+                                let Some(node) = regions.node(current) else {
+                                    break;
+                                };
+                                chain.push((current, node.kind(), node.entry()));
+                                id = node.parent();
+                            }
+                            chain
+                        },
                         occurrence.order,
                         matches!(occurrence.kind, OccurrenceKind::Write { .. })
                             .then_some("write")
