@@ -25856,9 +25856,33 @@ The structured text at that point is still
 `IfThenElse@0x598[if{Block@0x5c0[s;s;]}else{Block@0x5b0[Block@0x5b4[s;s;]]}]Block@0x5c8[s;return;]`
 -- the arms still render their edge copies, because the selection reads the
 literals rather than the arm objects, so the copies are now dead stores that
-nothing has yet removed. Some binding's occurrence set spans the branch block
-and one arm, and the region chosen for its declaration is the arm. That is the
-one question left: which binding, and whether the answer is that the dead edge
-copies must go before the region is chosen, or that the selection's own
-occurrence is being attributed to an arm rather than to the merge. The attempt
-is reverted; nothing else in it needed changing.
+nothing has yet removed.
+
+The occurrence was chased down and it is the crux of the whole design:
+
+```
+binding BindingId(1) occurs at 0x100000598, which region RegionId(3)
+  at 0x1000005c0 does not dominate
+the read is Use(UseSite { inst: InstId(16), input_idx: 0 }) of Some(ValueId(9))
+```
+
+That is **the condition's own read**, whose instruction is in the branch block
+and whose text is now wherever the selection got spelled -- here, inside an arm.
+Requiring every reader of the merged value to be dominated by the branch does
+not help, because they all are; what moved is the condition, and the import
+cannot say where the expression it builds will be placed.
+
+So the last piece is not a guard in the import. The selection needs a read of
+the condition that is *its own*, rather than the branch's use moved onto it:
+either a certificate the journal recognises the way it recognises a return's
+read, so the `if` keeps its own use cell and the conditional gets a second one,
+or a placement rule that a selection may only be spelled in a region the branch
+dominates. The first is the smaller change and matches how every other
+graph-less read in this renderer is already admitted --
+`certified_boundary_read_values` names return values, call arguments and switch
+selectors, and a conditional's condition is the fourth of exactly that kind.
+
+The attempt is reverted; nothing else in it needed changing, and it is otherwise
+complete: the import finds the instruction, walks the arms, re-mints the
+literals at the merge width, interns the `Select`, and the plan will spell it
+inline once `Kind::Phi` is admitted by `expression_renders_inline`.
