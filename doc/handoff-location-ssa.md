@@ -25253,3 +25253,64 @@ strips their observations, which is why it only ever fires on unobserved ones.
 So the `-O0` return idiom wants two things together: the certificate that says
 this slot is the return's value, and a structurer willing to duplicate the
 epilogue it names. Neither half is useful alone.
+
+### The return idiom needs a real phi, and all three cheaper routes are closed
+
+Three routes were built and measured this session. All three are dead, and the
+reasons are different, so recording them is worth more than the code was.
+
+**Route 1: duplicate the return at the AST.** Built, gated on the carrier, and
+it works -- `ControlFlowStructurer` accepts it, `clone_cached_render_occurrence`
+mints fresh cells for the copy, and the differential gate stays 60/60. It gives
+
+```c
+if (c) { stack_m4 = 0; { return (int32_t)stack_m4; } }
+else   { stack_m4 = 1; { return (int32_t)stack_m4; } }
+```
+
+and no further. Both copies render *one* SSA load, so neither can say `0` or
+`1`. Left in, it costs three statements in `x64_O1/pearson` and buys nothing,
+so it is reverted.
+
+**Route 2: duplicate the epilogue block before SSA construction.** The guard is
+exact on the lifted text -- the exit writes no memory and calls nothing, every
+predecessor reaches it by an unconditional jump and nothing else does, and each
+of those last stores to exactly the slot the exit loads. It fires on
+`check_secret`, and the rendering then refuses:
+
+```
+native rendering refused: observation journal: ConflictingUse
+```
+
+because the certification model is one cell per machine instruction, and
+duplicating a machine instruction claims one cell twice. The AST layer already
+admits several occurrences of one statement; the SSA layer admits one occurrence
+of one instruction, by design. This route is closed at the model, not by a bug.
+
+**Route 3: a forwarded-load certificate.** The dual of
+`MemoryRoundTripCertificate`: a load that reads back what the store before it in
+the same block wrote, on an object no pointer outside its own accesses can name.
+It fires often -- 189 times in bzip2's `BZ2_decompress` alone -- and coalescing
+each pair changes **nothing**: the stored value and the reload already share a
+storage span, so the union-find had them in one component before the certificate
+spoke. Reverted as inert.
+
+Route 3 also settles which case is actually missing. Its 189 hits are all
+*intra-block* pairs. The return idiom's store and load are in **different**
+blocks -- that is the whole of it -- and a value that is one thing on one path
+and another on a second is a phi.
+
+So the piece is memory-SSA promotion of a private, uniformly accessed stack slot
+into a real graph phi. With it, `check_secret` becomes `X0 = φ(1, 0)`, whose
+edge copies the structurer already materialises per predecessor, and route 1 --
+which is built, certified and reverted only for want of a reason to fire --
+turns that into `if (c) { return 1; } else { return 0; }` through the
+single-reader inlining that landed earlier this session.
+
+It is one pass with a clear shape: private object, uniform offset and width,
+iterated dominance frontier of the store blocks, rename down the dominator tree,
+and the object then has no access left to render. `crates/r2ssa/src/domtree.rs`
+is already there and `private_stack_objects` already names the objects. What it
+has to respect is the order the artifact is built in: the promotion has to
+happen before the structured facts, obligations and certificates are collected
+from the graph, because every one of them is derived from it.
