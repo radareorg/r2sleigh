@@ -25331,3 +25331,68 @@ Two things that are already built wait on this and nothing else: the AST
 duplication of a lone returning tail (route 1 above, reverted), and the
 single-reader inlining that landed earlier this session, which together turn
 `X0 = φ(1, 0)` into `if (c) { return 1; } else { return 0; }`.
+
+### Stack-slot promotion is built, on `arch/promote-stack-slots`
+
+The pass named above is written and works. It lives on its own branch --
+`arch/promote-stack-slots`, one commit on top of `arch/location-ssa` -- because
+it is not finished and the integration branch has to stay green.
+
+`promote_private_stack_slots` runs in
+`SSAFunction::from_blocks_for_decompile_with_interface_and_control`, before
+anything is constructed, and rewrites a qualifying slot's stores and loads into
+copies of one synthetic varnode. The builder's own phi placement then merges it
+at joins like a register, which is the whole point: no certificate can say what
+a value is when it is one thing on one path and another on a second.
+
+Every condition is checked on the lifted text, because construction is what
+decides which value each read sees:
+
+- the prologue is one `sp = sp - N` in the entry block, and every other write of
+  the stack pointer is the epilogue of a returning block, after that block's
+  accesses;
+- the slot's address is only ever `sp + <constant>`, and a value derived from
+  the stack pointer reaches nothing but the address of such an access -- a read
+  of the bare stack pointer is not that, since the epilogue computes its own
+  flags from it;
+- one width per place, no place overlapping another;
+- and nothing the source named, because the name is what the rendering is for
+  and a promoted slot carries none.
+
+`check_secret` promotes and renders, the slot gone:
+
+```c
+uint32_t tmp_3e584_2;
+if ((uint32_t)x != 0xdead) { tmp_3e584_2 = 0; } else { tmp_3e584_2 = 1; }
+{ uint32_t tmp_24c00_2 = tmp_3e584_2; return (int32_t)tmp_24c00_2; }
+```
+
+Two things had to be fixed on the way, and one of them is worth keeping whatever
+happens to the pass.
+
+**The dead address computation.** Rewriting a store leaves the `sp + K` that
+reached it computing a value nothing reads, and two rules then answer for its
+read of the stack pointer -- the certificate calls it `DeadStackBase` and
+normalisation calls it `CoalescedCopy`. The address is part of the access, so it
+is replaced by a `Nop` when nothing else in the block reads it.
+
+**The seal refused two agreeing elisions.** `ConflictingUse` fires when a use
+cell is elided twice with different reasons, and `DeadStackBase` beside
+`CoalescedCopy` is not a disagreement: both say the read renders nothing. The
+certificate is the table with the authority, so its answer now stands and the
+carrier pass does not overwrite it. What the seal is for is a cell two tables
+render *differently*, and it still catches that.
+
+What is left is one cause, the same one in all eight of the sixty corpus cells
+the pass refuses:
+
+```
+binding BindingId(6) occurs at 0x100000548, which region RegionId(2)
+at 0x100000568 does not dominate
+```
+
+The promoted carrier is initialised in the entry block and updated in a loop,
+and declaration placement put it in the loop's region while an occurrence sits
+in the entry. Fifty-two of the sixty cells are unaffected and still pass every
+column. So the remaining question is how the region for a promoted carrier's
+declaration is chosen, and it is one question rather than a class.
