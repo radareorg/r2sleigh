@@ -3210,9 +3210,6 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let promoted =
-            promote_private_stack_slots(blocks, stack_pointer_carrier, questions.interface)
-                .unwrap_or_default();
         // The convention says the callee leaves this carrier where it found
         // it, and the machine's own p-code moved it to transfer control. Both
         // halves have to be in hand before SSA construction, because it is
@@ -3244,6 +3241,17 @@ impl SSAFunction {
                 }
             }))
             .collect::<Vec<_>>();
+
+        // Which frame slots behave like variables. Asked of the lifted text,
+        // before construction, because construction is what decides which
+        // value each read of a variable sees.
+        let promoted = promote_private_stack_slots(
+            blocks,
+            stack_pointer_carrier,
+            questions.interface,
+            &abi_carriers,
+        )
+        .unwrap_or_default();
         // The same phase report the semantic collector gives, for the half of
         // a decompile's bytes that are already held before the collector runs.
         // Construction is three passes over the same body and they do not cost
@@ -12975,8 +12983,14 @@ fn promote_private_stack_slots(
     blocks: &[R2ILBlock],
     stack_pointer: Option<CanonicalStorageId>,
     interface: Option<&SourceFunctionInterface>,
+    argument_carriers: &[CanonicalStorageId],
 ) -> Option<crate::phi::PromotedStackSlots> {
-    r2il::refusal_evidence!("promote-stack-slot", "asked over {} blocks", blocks.len());
+    r2il::refusal_evidence!(
+        "promote-stack-slot",
+        "asked over {} blocks with {} argument carriers",
+        blocks.len(),
+        argument_carriers.len()
+    );
     let Some(stack_pointer) = stack_pointer else {
         r2il::refusal_evidence!("promote-stack-slot", "no stack pointer carrier");
         return None;
@@ -13167,11 +13181,51 @@ fn promote_private_stack_slots(
             }
         }
     }
+    // A slot the prologue fills from an argument register is that parameter's
+    // home, and the parameter entity already owns it: promoting it leaves the
+    // parameter's binding with nothing but copies of itself and no write at
+    // all, which placement reads as an object assigned nowhere.
+    let mut parameter_homes = BTreeSet::<i64>::new();
+    if let Some(entry) = blocks.first() {
+        for (at, op) in entry.ops.iter().enumerate() {
+            let R2ILOp::Store { addr, val, .. } = op else {
+                continue;
+            };
+            // A register the prologue spills before anything wrote it came in
+            // with the call, so the slot is that value's home. Asked of the
+            // text rather than of an ABI, because a recovered interface often
+            // names no argument placement at all and the machine still says
+            // plainly that nothing in this function produced the value.
+            let entered_with_the_call = val.space == r2il::SpaceId::Register
+                && !entry.ops[..at].iter().any(|earlier| {
+                    earlier.output().is_some_and(|dst| {
+                        dst.space == val.space
+                            && dst.offset < val.offset + u64::from(val.size)
+                            && val.offset < dst.offset + u64::from(dst.size)
+                    })
+                });
+            let is_argument = entered_with_the_call
+                || argument_carriers.iter().any(|carrier| {
+                    carrier.space == CanonicalStorageSpace::Register && carrier.offset == val.offset
+                });
+            if !is_argument {
+                continue;
+            }
+            if let Some((base, displacement)) = resolved_stack_address(entry, at, addr)
+                && is_stack_pointer(&base)
+            {
+                parameter_homes.insert(displacement);
+            }
+        }
+    }
     // One width per place, no place overlapping another, and nothing the source
     // named.
     let mut promotable = BTreeSet::<PromotedSlot>::new();
     for (displacement, sizes) in &widths {
-        if sizes.len() != 1 || declared.contains(displacement) {
+        if sizes.len() != 1
+            || declared.contains(displacement)
+            || parameter_homes.contains(displacement)
+        {
             continue;
         }
         let width = *sizes.iter().next().expect("one width");
