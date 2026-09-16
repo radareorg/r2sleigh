@@ -25931,7 +25931,23 @@ return (int32_t)stack_m4;
 
 Corpus 60/60 raw and differential, every audit column 60/60, snapshots
 unchanged, unit suite clean, no observations lost and the control certificate
-satisfied.
+satisfied. r2r goes from eight failures to six, once the two tests that encode
+the early-return form are updated to the conditional spelling -- which is the
+consequence the decision accepted.
+
+The rule deliberately requires each arm to be **one** assignment and nothing
+else. Widening it so an arm may do other work first was tried on
+`alloc_and_copy`, whose taken arm calls `memcpy` and writes a terminator before
+assigning, and it is unsound for a reason worth recording: the branch has to
+stay for that work, so the text reads the condition twice -- once in the `if`
+and once in the conditional -- where the machine reads it once. The stage gate
+says exactly that: `duplicated=1 ... lost observations 2`.
+
+`alloc_and_copy` wants `return buf;`, and the honest route to it is not a wider
+conversion. Its conditional would be `buf != 0 ? buf : 0`, which is `buf` --
+an expression identity (`c ? v : 0` where `c` is `v != 0`) that belongs in
+`r2rewrite` beside the other algebraic rules, once something can build the
+conditional at all.
 
 ---
 
