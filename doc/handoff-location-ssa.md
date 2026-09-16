@@ -25840,3 +25840,25 @@ settle, and the machinery for each is already there:
 * **The condition is a read the branch owned.** It is not one of the phi's
   operands, so it is a moved read, which is exactly what the importer's `trace`
   already reports.
+
+All three were built and the import works: `MachineExprKind::Phi` now finds its
+instruction through `projection.entities()`, walks each arm's run back to the
+`ConditionalBranch`, imports each operand from its *producing* expression --
+re-minting a literal at the merge's width -- and interns `TermKind::Select`.
+`check_secret` then gets that far and declaration placement refuses:
+
+```
+binding BindingId(1) occurs at 0x100000598, which region RegionId(3)
+  at 0x1000005c0 does not dominate
+```
+
+The structured text at that point is still
+`IfThenElse@0x598[if{Block@0x5c0[s;s;]}else{Block@0x5b0[Block@0x5b4[s;s;]]}]Block@0x5c8[s;return;]`
+-- the arms still render their edge copies, because the selection reads the
+literals rather than the arm objects, so the copies are now dead stores that
+nothing has yet removed. Some binding's occurrence set spans the branch block
+and one arm, and the region chosen for its declaration is the arm. That is the
+one question left: which binding, and whether the answer is that the dead edge
+copies must go before the region is chosen, or that the selection's own
+occurrence is being attributed to an arm rather than to the merge. The attempt
+is reverted; nothing else in it needed changing.
