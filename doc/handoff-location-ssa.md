@@ -25114,3 +25114,40 @@ needs the term to name the access the memory renderer is keyed on.
 `[(int64_t)(int32_t)tmp_3e580_1]`; the value folds but the conversions do not
 collapse, which is the cast-elimination question §"one typed elaborator" records
 as unprovable in the present rewrite discipline.
+
+### Return sinking needs a later layer than the AST cleanup
+
+The `-O0` return idiom above was attempted as an AST rewrite in
+`structure/rewrite.rs`, beside `factor_guarded_common_suffix`, which is where
+this family of rewrites lives: find `[If{then: [.., v = a], else: [.., v = b]},
+return f(v)]`, replace each assignment with `return f(a)` / `return f(b)`, and
+drop the trailing return.
+
+It never fires, and the reason is a fact about *when* cleanup runs. At that
+point `check_secret`'s tail block is not `[return (int32_t)stack_m4;]` but
+
+```
+[ Expr(Assign(Var(3), ...)), Return(Some(Cast(int32, Var(...)))) ]
+```
+
+-- two statements, the first of which the observation journal goes on to elide
+and the reader never sees. Every shape test the rewrite makes is against an AST
+that still contains statements the final rendering will not have, so a rewrite
+whose precondition is "this carrier is written exactly twice and read once" can
+neither confirm nor deny it there.
+
+Two ways out, and the choice is the design question:
+
+- Run the rewrite after the journal's elisions are applied, so the statement set
+  is the final one. Nothing runs there today, and the placement audit assumes
+  the AST it walks is the one cleanup produced.
+- Recognise the idiom upstream instead, as a certificate over the SSA: a stack
+  slot whose only writes are on return paths and whose only read is the return
+  value. Then the plan elides the slot and each write renders as the return it
+  feeds, and no AST pass has to reason about statements that are about to
+  disappear.
+
+The second is the one that matches how everything else here is decided, and it
+is what the five open `alloc_and_copy` / `check_secret` / `process_string`
+assertions are waiting for. The experiment is reverted; this note is what it
+bought.
