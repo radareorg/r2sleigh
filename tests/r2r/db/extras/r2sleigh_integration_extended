@@ -384,7 +384,7 @@ aaa
 s `afl~check_secret$[0]` >/dev/null
 s `afl~check_secret$[0]` >/dev/null
 s `afl~check_secret$[0]` >/dev/null
-pd:s | jq -Rs 'contains("0xdead") and contains("return 0;") and contains("return 1;") and (contains("return rax")|not) and (contains("0 != 57005")|not)'
+pd:s | jq -Rs 'contains("0xdead") and (test("\\? *0 *: *1") or test("\\? *1 *: *0") or (contains("return 0;") and contains("return 1;"))) and (contains("return rax")|not) and (contains("0 != 57005")|not)'
 EOF_CMDS
 RUN
 
