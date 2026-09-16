@@ -25506,30 +25506,42 @@ Both occurrences are instructions of block `0x100000d08` -- `InstId(585)` writes
 `tmp:12180_12` and `InstId(589)` reads it -- but the read's text landed in the
 block region for `0x100000c4c` and the write's in the one for `0x100000d08`.
 `occurrence_regions_have_proven_order` accepts only nesting or exclusion, and
-these two are sequenced siblings, so it refuses. The evidence now prints each
-occurrence's whole ancestor chain, and that is what settles the shape:
+these two are sequenced siblings, so it refuses. Two pieces of evidence were
+added and together they settle the shape. The first prints each occurrence's
+whole ancestor chain:
 
 ```
-read  7(Block 0xc4c) < 6(Loop 0xc4c) < 5(Block 0xbbc) < 4 < 2(IfThenElse) < 1 < 0
-write 11(Block 0xd08) < 10(Block 0xd04) < 5(Block 0xbbc) < 4 < 2(IfThenElse) < 1 < 0
+read  7(Block 0xd8c) < 6(Loop 0xd8c) < 5(Block 0xd3c) < 4 < 2(IfThenElse) < 1 < 0
+write 11(Block 0xea8) < 10(Block 0xea4) < 5(Block 0xd3c) < 4 < 2(IfThenElse) < 1 < 0
 ```
 
-The read is inside the loop and the write is after it, and the binding has one
-member, `ValueId(591)`, defined by `InstId(585)` -- an instruction of
-`0x100000d08`, the block the write is in. So a use of an instruction that runs
-after the loop has its text inside the loop's header. That is a region
-attribution fault, not a missing order, and it is the same family as the `for`
-initializer that was attributed to the loop instead of the region the loop sits
-in. Relaxing the predicate was tried -- accepting two regions a common `Loop`
-ancestor repeats together -- and is wrong here for exactly this reason: the
-nearest common ancestor is a `Block`, and the order really is unproven because
-the attribution is.
+The write is in block `0xea8`, which sits after the loop; the read's text is
+inside the loop headed at `0xd8c`. The second says which use that is, and it is
+the only one in the whole function whose text is not in its own block:
 
-The next step is to find which pass emits that use inside the header. The
-counted-`for` former is the first suspect, because it is the one pass that lifts
-a statement out of one block and emits it in another's text, and requiring the
-latch to render nothing else was tried and changed nothing, so it is either not
-this loop or not that pass.
+```
+use-region-mismatch: UseSite { inst: InstId(589), input_idx: 1 }
+  at block 0x100000ea8 rendered in RegionId(7) entry 0x100000d8c statement 138
+```
+
+`InstId(585)` and `InstId(589)` are both operations of `0xea8`
+(`tmp:12180_12 = tmp:lane:100000ea8:36:3a_1`, then
+`tmp:12280_12 = tmp:24c00_33 + tmp:12180_12`), so a use of an instruction that
+runs after the loop has its text inside the loop. That is a region attribution
+fault, not a missing order, and it is the same family as the `for` initializer
+that was attributed to the loop instead of the region the loop sits in.
+Relaxing the predicate was tried -- accepting two regions a common `Loop`
+ancestor repeats together -- and is wrong for exactly this reason: the nearest
+common ancestor is a `Block`, and the order really is unproven because the
+attribution is.
+
+So the next step is the pass that moves a test into a loop header:
+`rotate_pre_test` peels the body's trailing `if` and makes it the loop's
+condition. It already refuses when the body's prefix renders anything, so the
+question is how a statement of `0xea8` came to be in that body at all, or which
+other pass carried the condition's operand there. The counted-`for` former was
+the first suspect and is not it: requiring the latch to render nothing besides
+the update changed nothing.
 
 `alloc_and_copy` is not this: its five frame places are all named by the source,
 so promotion correctly leaves them alone, and `return (char*)stack_m24;` instead

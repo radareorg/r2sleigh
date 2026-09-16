@@ -435,6 +435,16 @@ pub(crate) fn collect_final_placement_occurrences(
         let observation = RenderObservationId::from_dense_index(index);
         match target.expect("only reachable observations receive a scope") {
             PlacementObservationTarget::Use { site, block } => {
+                if regions
+                    .node(region)
+                    .is_some_and(|node| node.entry() != block)
+                {
+                    r2il::refusal_evidence!(
+                        "use-region-mismatch",
+                        "{site:?} at block {block:#x} rendered in {region:?} entry {:#x} statement {statement:?}",
+                        regions.node(region).map_or(0, |node| node.entry())
+                    );
+                }
                 let inst = graph
                     .inst(site.inst)
                     .ok_or(PlacementAnalysisError::InvalidUse { site })?;
