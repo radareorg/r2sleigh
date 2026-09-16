@@ -25197,3 +25197,35 @@ path and nothing else.
 So the fix is the plumbing the two `TaintAnalysis::new` comments already
 describe: give the taint endpoint the snapshot, not a different way to guess
 arguments. Both call sites say so in as many words, and both are right.
+
+### The arm64 DWARF PR, after review
+
+radareorg/radare2#26739 came back with two defects and a fixture, and both
+defects were real.
+
+The mapper is shared between `DW_OP_reg*` and `DW_OP_breg*`, so giving register
+31 `LOCATION_SP` also turned `DW_OP_reg31` -- a variable whose value *is* in the
+register -- into `sp+0x0`, a memory location. `parse_dwarf_location` now takes
+`is_frame_base`: a variable location forces `LOCATION_REGISTER` for the direct
+`reg` opcodes, and the recursive call that resolves `DW_AT_frame_base` passes
+`true`, so `DW_OP_fbreg` through a `DW_OP_reg29`/`DW_OP_reg31` frame base still
+resolves against the frame.
+
+The `r_anal_var_raw_delta` hunk is gone. It was a second idea in a
+one-idea PR, and under `anal.vars.newstack` it disagreed with what variable
+recovery stores, adding duplicate slot records rather than fixing the
+experimental mode. Without it the reviewer's third test passes as written.
+
+`test/db/formats/dwarf-arm64-locations` carries their three tests; the fixture
+assembles from the source in the review with
+`clang -target aarch64-unknown-linux-gnu` and `ld.lld -m aarch64linux`, needing
+no machine-header patch, and belongs in radare2-testbins at
+`elf/dwarf/arm64-locations`.
+
+One thing that looked like a defect and was not: `aaa` on that fixture
+segfaulted in `r_core_anal_plugin_data_refs`, which pointed straight at this
+plugin's `get_data_refs`. It was a stale build -- `libr_core` was still the
+object from a different branch's `cconfig.c`, which `lldb` said in as many words
+("source file checksum mismatch between line table and file on disk"). A full
+`make` cleared it. Switching the radare2 fork between branches means rebuilding
+all of it, not the one directory that changed.
