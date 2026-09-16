@@ -26046,7 +26046,32 @@ reader. The rendered text would re-read `len`, which nothing writes in between,
 so the guard is refusing a fold that is in fact stable.
 
 Sharpening it means asking the question of the binding the expression will
-actually spell rather than of the storage the machine used. That is worth doing
--- `TMPCY_2`/`TMPZR_2` variables are everywhere in the census -- and it must be
-done carefully, because this is the guard standing between the renderer and a
-wrong answer.
+actually spell rather than of the storage the machine used. That was tried with
+**storage spans**, which looked exactly right: a definition that reads its own
+storage continues that run, so `R8 = R8 - 1` stays in the same run as the `R8` a
+flag above it read -- the `xxhash32` hazard -- while a fresh reload into `X8`
+begins a run of its own. `process_string` went from eighteen statements to
+thirteen and rendered the comparisons the flag lemma is for:
+
+```c
+if (len <= 100) { if (5 <= len) { ... } }
+```
+
+And the corpus refused it: **sixteen cells computed the wrong answer**. Reverted.
+
+That is the most useful thing learned about this guard, so it is recorded
+plainly. The machine **location** is too coarse -- it refuses folds that are
+stable. The storage **span** is too fine -- two runs the binding plan later
+coalesces into one C object are one object to the rendered text, and a write to
+either is a write the expression would see. The right granularity is the
+**binding**, and the reason the guard does not use it is a cycle: inlinability
+decides component eligibility, which decides the components, which are the
+bindings.
+
+The way out is a pre-partition. The unions that form components come from
+storage spans and from certified entities, and **neither depends on
+inlinability**; only `component_eligible_with` does. A partition built from
+those two alone is sound, strictly coarser than spans, and available before the
+inlining pass runs. Asking the guard about that partition is the change worth
+making, and the corpus differential is the gate that will judge it, as it judged
+this one.
