@@ -25651,13 +25651,35 @@ and **fifty-one of the sixty corpus cells then refuse**, all with
 value is now proved to reach no text still has a *read* recorded against it, and
 placement sees a symbol read with nothing observing it. Reverted.
 
+Keeping certificate reads out of the walk -- a certificate's read is stated by
+the certificate rather than by an operation, so what the reading operation
+renders says nothing about whether the read happens -- was tried too, and the
+fifty-one refusals stay. The evidence names the fourth owner exactly:
+
+```
+binding-symbol-observed: Read binding=BindingId(3) name="stack_m32"
+  members=[25, 41, 42]
+  authorizing_elsewhere=["113:Use { site: UseSite { inst: InstId(45), input_idx: 0 } ... }"]
+```
+
+A value that becomes inline moves its binding read into whatever expression now
+spells it, and the marker moves with it; placement audits the node it expected
+the read on and finds nothing there, while the marker sits elsewhere in the
+journal. So widening deadness moves reads, and the audit that authorises a
+binding read has to move with them.
+
 That is the shape of the work, and it is bigger than the inlining rule: what
-reaches the page is currently answered by the binding plan, the observation
-journal and the effect ledger separately, and a fourth time by the name
-resolution that records binding reads. They have to become one derivation,
-computed once and consumed by all four -- the same "one owner per decision" the
-expression elaborator plan asks for, and this is its most valuable first
-target, because three of the seven remaining r2r failures sit behind it.
+reaches the page is answered four times over -- the binding plan's
+`renders_nothing`, the observation journal's dead-value fixpoint, the effect
+ledger's `dead_unused_value_effects`, and placement's binding-read
+authorisation. They have to become one derivation, computed once and consumed
+by all four -- the same "one owner per decision" the expression elaborator plan
+asks for, and this is its most valuable first target, because three of the seven
+remaining r2r failures sit behind it.
+
+Note that `dec_array_index_neg_preserves_subscript_shape` needs a second thing
+even then: it renders `arr[(int64_t)(int32_t)-idx]` and the test wants
+`arr[-idx]`, so the redundant cast pair has to collapse as well.
 
 The remaining `return (int32_t)tmp_25180_1;` is a second question: a `Load`'s
 value is refused inline by `expression_renders_inline`, which is one of the four
