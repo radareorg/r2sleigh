@@ -89,6 +89,16 @@ pub(crate) fn cached_register_name_map(arch: &ArchSpec) -> Arc<RegisterNameMap> 
     map
 }
 
+/// A promoted frame slot's spelling, in the coordinate every frame object is
+/// named by: where it sits relative to the frame the function was entered with.
+pub fn frame_slot_name(entry_offset: i64) -> String {
+    if entry_offset < 0 {
+        format!("stack:m{}", entry_offset.unsigned_abs())
+    } else {
+        format!("stack:p{}", entry_offset.unsigned_abs())
+    }
+}
+
 /// Convert a varnode to a variable name.
 ///
 /// For registers:
@@ -107,6 +117,9 @@ pub fn varnode_to_name(vn: &Varnode, reg_names: Option<&RegisterNameMap>) -> Str
         SpaceId::Unique => format!("tmp:{:x}", vn.offset),
         SpaceId::Const => format!("const:{:x}", vn.offset),
         SpaceId::Ram => format!("ram:{:x}", vn.offset),
+        SpaceId::Custom(id) if id == crate::function::PROMOTED_SLOT_SPACE => {
+            frame_slot_name(vn.offset as i64)
+        }
         SpaceId::Custom(id) => format!("space{}:{:x}", id, vn.offset),
     }
 }

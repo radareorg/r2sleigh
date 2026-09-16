@@ -5696,7 +5696,7 @@ fn can_width_adapt_root(root: &SSAVar) -> bool {
         && !root.is_temp()
         && !matches!(
             root.name_kind(),
-            SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace
+            SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace | SSAVarNameKind::Frame
         )
 }
 
@@ -12964,7 +12964,7 @@ fn resolved_stack_address(
 
 /// The space promoted stack slots live in: not memory, and not the lifter's
 /// scratch either.
-const PROMOTED_SLOT_SPACE: u32 = 0x5301;
+pub(crate) const PROMOTED_SLOT_SPACE: u32 = 0x5301;
 
 /// A stack slot promoted out of memory, keyed by where it sits in the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -13283,16 +13283,6 @@ fn promote_private_stack_slots(
         );
         return None;
     }
-    // A fresh unique for each slot, above everything the lift already used, so
-    // the synthetic name cannot collide with a temporary.
-    let mut next_unique = blocks
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .flat_map(|op| op.inputs().into_iter().chain(op.output()))
-        .filter(|varnode| varnode.space == r2il::SpaceId::Unique)
-        .map(|varnode| varnode.offset + u64::from(varnode.size))
-        .max()
-        .unwrap_or(0);
     let mut varnode_for = BTreeMap::<PromotedSlot, r2il::Varnode>::new();
     for slot in &promotable {
         varnode_for.insert(
@@ -13303,12 +13293,15 @@ fn promote_private_stack_slots(
                 // so; a promoted slot is a variable of the function and its
                 // declaration has to dominate every region that reads it.
                 space: r2il::SpaceId::Custom(PROMOTED_SLOT_SPACE),
-                offset: next_unique,
+                // Where the slot sits relative to the frame the function was
+                // entered with, which is the coordinate every other frame
+                // object is named by, so the promoted variable keeps the name
+                // the slot had. Displacements are distinct, so the offsets are.
+                offset: (slot.displacement - frame_size) as u64,
                 size: slot.width,
                 meta: None,
             },
         );
-        next_unique += u64::from(slot.width);
     }
     let mut rewrites = crate::phi::PromotedStackSlots::new();
     for access in &accesses {

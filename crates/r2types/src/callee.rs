@@ -2292,7 +2292,7 @@ mod kani_proofs {
     use super::*;
 
     fn pick_name_kind(tag: u8) -> SSAVarNameKind {
-        match tag % 10 {
+        match tag % 11 {
             0 => SSAVarNameKind::RegisterAlias,
             1 => SSAVarNameKind::Temporary,
             2 => SSAVarNameKind::Constant,
@@ -2302,6 +2302,7 @@ mod kani_proofs {
             6 => SSAVarNameKind::Object,
             7 => SSAVarNameKind::Data,
             8 => SSAVarNameKind::Got,
+            9 => SSAVarNameKind::Frame,
             _ => SSAVarNameKind::Ordinary,
         }
     }

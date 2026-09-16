@@ -855,7 +855,17 @@ impl BindingPlan {
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 },
-                presentation_name_hint: Some(first.var.display_name()),
+                // A promoted frame slot is the one object at that frame
+                // position, so it keeps the frame's own spelling rather than
+                // one of its versions -- the same name the slot had before it
+                // left memory.
+                presentation_name_hint: Some(
+                    if first.var.name_kind() == r2ssa::SSAVarNameKind::Frame {
+                        first.var.name().replace(':', "_")
+                    } else {
+                        first.var.display_name()
+                    },
+                ),
                 caller_supplied,
                 call_clobbered,
             });

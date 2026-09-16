@@ -25442,3 +25442,33 @@ copies back to the carrier, which covers the callee-saved spill as well.
 With those three, the corpus is 60/60 on every column and the raw compile passes
 for all sixty. The synthetic `space21249_*` name is still the promoted space
 showing through and wants the slot's own `stack_*` spelling.
+
+### The promoted slot keeps the frame's own name
+
+`space21249_3e790_1` was the synthetic space showing through, and it was not
+only ugly: it made a promoted rendering incomparable with the same function's
+pre-promotion rendering, which spells the same object `stack_m20`. The promoted
+varnode's offset is now the slot's position relative to the frame the function
+was entered with -- displacement minus the prologue's subtraction, the exact
+coordinate `certificate.entry_offset` uses -- and `SSAVarNameKind::Frame`
+spells that space `stack:m20`, so the binding plan's name hint is `stack_m20`
+with no version suffix, because one frame position is one object.
+
+Beside the baseline, promotion is what turns the slot's loads and stores into
+the value itself:
+
+```c
+/* before: the slot is memory the stack-object layer names */
+tmp_24c00_3 = stack_m20;
+stack_m20 = (uint32_t)tmp_25600_2 ^ tmp_24c00_3;
+tmp_24c00_3 = stack_m20;
+stack_m20 = tmp_24c00_3 * tmp_2a000_5;
+
+/* after: the slot is a variable and the expression folds */
+stack_m20 = (stack_m20 ^ (uint32_t)tmp_25600_2) * tmp_2a000_5;
+```
+
+`fnv1a32` on `h_arm64_O0` goes from 25 statements to 22 and from 72 source
+obligations to 61. The compile census over `zlib-minigzip` is unchanged in both
+directions -- aarch64 O0 177/177 built, x86-64 O0 119/125 built, the same six
+failures and the same rendering counts as the integration branch.
