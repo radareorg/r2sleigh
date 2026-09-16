@@ -766,7 +766,17 @@ fn bound_value(
         Some(ValueDisposition::Refused { .. }) => {
             Err(PlacementAnalysisError::RefusedPlannedValue { value })
         }
-        None => Err(PlacementAnalysisError::MissingPlannedValue { value }),
+        None => {
+            // The plan's dispositions are dense over the graph's values, so a
+            // value it has no answer for is a value outside the domain the
+            // plan was built over. Which domain that was is the whole question.
+            r2il::refusal_evidence!(
+                "planned-value",
+                "{value:?} is outside the plan's {} values",
+                names.plan().value_count()
+            );
+            Err(PlacementAnalysisError::MissingPlannedValue { value })
+        }
     }
 }
 

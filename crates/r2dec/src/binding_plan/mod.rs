@@ -1467,6 +1467,11 @@ impl BindingPlan {
         self.dispositions.get(value.0 as usize)
     }
 
+    /// How many values the plan was built over.
+    pub(crate) fn value_count(&self) -> usize {
+        self.dispositions.len()
+    }
+
     /// Whether a call put this value there and nothing says what it holds.
     pub(crate) fn value_is_call_clobber(&self, value: ValueId) -> bool {
         self.call_clobbers.contains(&value)

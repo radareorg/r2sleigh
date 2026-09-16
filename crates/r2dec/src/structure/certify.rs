@@ -899,6 +899,26 @@ fn expected_edges(
 /// A rendered `default` stands for every selector value the arms do not
 /// name, so it agrees with the table when those values all reach its target
 /// and the table's own default, if any, does too.
+/// Whether the text converted a branch that decides no control.
+///
+/// Both arms of the conditional render nothing and rejoin at once, so every
+/// edge leaving the block arrives at the same place and the branch chooses only
+/// a value. The text says so with a conditional expression and one edge, which
+/// is the same control flow the machine has: whichever way the test goes,
+/// execution continues in the same block.
+fn converted_conditional_agrees(
+    rendered: &[(Target, EdgeLabel)],
+    expected: &[(Target, EdgeLabel)],
+) -> bool {
+    let [(target, EdgeLabel::Normal)] = rendered else {
+        return false;
+    };
+    expected.len() > 1
+        && expected.iter().all(|(expected_target, label)| {
+            expected_target == target && matches!(label, EdgeLabel::True | EdgeLabel::False)
+        })
+}
+
 fn switch_edges_agree(rendered: &[(Target, EdgeLabel)], expected: &[(Target, EdgeLabel)]) -> bool {
     let is_switch = |edges: &[(Target, EdgeLabel)]| {
         !edges.is_empty()
@@ -1037,6 +1057,9 @@ pub(crate) fn certify(
             continue;
         }
         if switch_edges_agree(&rendered, &expected) {
+            continue;
+        }
+        if converted_conditional_agrees(&rendered, &expected) {
             continue;
         }
         let terminator = cfg.get_block(block).map(|block| &block.terminator);

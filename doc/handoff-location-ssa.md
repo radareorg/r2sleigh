@@ -25882,6 +25882,59 @@ graph-less read in this renderer is already admitted --
 `certified_boundary_read_values` names return values, call arguments and switch
 selectors, and a conditional's condition is the fourth of exactly that kind.
 
+### The selection was in the wrong layer, and moving it made it three lines
+
+Everything below this heading is the record of putting the conditional
+expression in the expression layer, and it is kept because the reasoning is
+worth having. The conclusion is that it does not go there.
+
+A merge is a property of **control flow**, not of an expression tree. Put in
+`r2rewrite`, the recovery could only reach it by undoing what normalization had
+already done -- lowering the merge to a copy in each arm -- and every layer
+downstream had been built on that lowering having happened. Five sealed layers
+refused in sequence, each correctly. That count was the signal.
+
+In the layer that owns statement and control shape it is a local rewrite:
+
+```rust
+// if (c) { x = A; } else { x = B; }  is one assignment of a conditional
+fn rewrite_two_way_assignment(stmt: CStmt) -> CStmt
+```
+
+beside the compound-assignment and `++` rewrites in `structure/rewrite.rs`,
+where both arms' statement markers stay on the result so both writes are
+accounted for where they were, and the condition keeps the one read it always
+had. No certificate, no import change, no normalization exemption, no new kind
+of graph-less read.
+
+One thing was genuinely missing, and it is an invariant rather than an
+accommodation. The control certificate rejected the result with
+`edge-mismatch=1`, because the text no longer branches where the CFG does. It
+is right to ask, and the answer is a rule beside `switch_edges_agree`:
+
+```rust
+/// Whether the text converted a branch that decides no control.
+fn converted_conditional_agrees(rendered, expected) -> bool
+```
+
+-- one unconditional rendered edge, two or more expected edges, and every one of
+them arriving at that same target. Both arms render nothing and rejoin at once,
+so whichever way the test goes execution continues in the same block: the branch
+chooses a value, not a path, and the conditional expression is what says so.
+
+`check_secret` goes from five statements to three:
+
+```c
+stack_m4 = (uint32_t)x != 0xdead ? 0 : 1;
+return (int32_t)stack_m4;
+```
+
+Corpus 60/60 raw and differential, every audit column 60/60, snapshots
+unchanged, unit suite clean, no observations lost and the control certificate
+satisfied.
+
+---
+
 Bisecting settled it, and the answer is neither of those. The import alone
 causes the refusal, with the certified condition read and the inline
 spellability both reverted, and with the selection restricted to merges that

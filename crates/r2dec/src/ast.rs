@@ -1307,6 +1307,14 @@ pub(crate) struct StmtObservationChain {
 }
 
 impl StmtObservationChain {
+    /// Take on another chain's markers, innermost last.
+    ///
+    /// Two statements the text replaces with one still owe every cell they
+    /// owned, so the survivor carries both chains.
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.outer_to_inner.extend(other.outer_to_inner);
+    }
+
     /// Reattach this chain to the semantic statement at the same position.
     pub(crate) fn reapply(self, mut stmt: CStmt) -> CStmt {
         for id in self.outer_to_inner.into_iter().rev() {

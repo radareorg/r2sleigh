@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use crate::ast::{BinaryOp, CExpr, CStmt, UnaryOp};
+use crate::ast::{BinaryOp, CExpr, CStmt, StmtObservationChain, UnaryOp};
 use crate::structured_region::StructuredRegionKind;
 use crate::symbol::SymbolId;
 
@@ -87,6 +87,7 @@ impl ControlFlowStructurer<'_, '_> {
                 }
                 let taken = std::mem::replace(stmt, CStmt::Empty);
                 let taken = Self::rewrite_if_short_circuit(taken);
+                let taken = Self::rewrite_two_way_assignment(taken);
                 let taken = Self::rewrite_empty_if_bodies(taken);
                 *stmt = Self::rewrite_guarded_switch_with_trailing_return(taken);
             }
@@ -329,6 +330,115 @@ impl ControlFlowStructurer<'_, '_> {
             CStmt::Empty => {}
             other => out.push(observations.reapply(other)),
         }
+    }
+
+    /// The one assignment a branch arm makes, with the markers around it.
+    ///
+    /// Through the region and observation wrappers, and through a block that
+    /// holds nothing else: an arm that assigns once and does nothing more is
+    /// the shape a selection has in the text.
+    fn sole_assignment(
+        stmt: &CStmt,
+    ) -> Option<(
+        StmtObservationChain,
+        Vec<crate::observation_journal::RenderObservationId>,
+        CExpr,
+        CExpr,
+    )> {
+        let (semantic, observations) = stmt.clone().into_semantic_with_observations();
+        match semantic {
+            CStmt::StructuredRegion { stmt, .. } => {
+                let (inner, carried, lhs, rhs) = Self::sole_assignment(&stmt)?;
+                let mut chain = observations;
+                chain.extend(inner);
+                Some((chain, carried, lhs, rhs))
+            }
+            CStmt::Block(stmts) => {
+                let mut live = stmts
+                    .iter()
+                    .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)));
+                let only = live.next()?;
+                if live.next().is_some() {
+                    return None;
+                }
+                let (inner, carried, lhs, rhs) = Self::sole_assignment(only)?;
+                let mut chain = observations;
+                chain.extend(inner);
+                Some((chain, carried, lhs, rhs))
+            }
+            CStmt::Expr(expr) => {
+                // The assignment may carry expression markers of its own; they
+                // belong to the whole statement's occurrence, so they go back
+                // around whatever replaces it.
+                let mut carried = Vec::new();
+                let mut cursor = expr;
+                while let CExpr::Observed { id, expr } = cursor {
+                    carried.push(id);
+                    cursor = *expr;
+                }
+                let CExpr::Binary {
+                    op: BinaryOp::Assign,
+                    left,
+                    right,
+                } = cursor
+                else {
+                    return None;
+                };
+                Some((observations, carried, *left, *right))
+            }
+            _ => None,
+        }
+    }
+
+    /// `if (c) { x = A; } else { x = B; }` is one assignment of a conditional.
+    ///
+    /// A merge of two values under one condition is a selection, and this is
+    /// where the text says so: the arms write one object, so the object is
+    /// written once with the value the condition chooses. Both arms' markers
+    /// stay on the result, so both writes are still accounted for where they
+    /// were, and the condition keeps the one read it always had.
+    fn rewrite_two_way_assignment(stmt: CStmt) -> CStmt {
+        let CStmt::If {
+            cond,
+            then_body,
+            else_body: Some(else_body),
+        } = stmt
+        else {
+            return stmt;
+        };
+        let restore = |cond, then_body, else_body| CStmt::If {
+            cond,
+            then_body,
+            else_body: Some(else_body),
+        };
+        let (
+            Some((then_marks, then_carried, then_lhs, then_rhs)),
+            Some((else_marks, else_carried, else_lhs, else_rhs)),
+        ) = (
+            Self::sole_assignment(&then_body),
+            Self::sole_assignment(&else_body),
+        )
+        else {
+            return restore(cond, then_body, else_body);
+        };
+        if !then_lhs.transparently_eq(&else_lhs) {
+            return restore(cond, then_body, else_body);
+        }
+        let mut assignment = CExpr::assign(
+            then_lhs,
+            CExpr::Ternary {
+                cond: Box::new(cond),
+                then_expr: Box::new(then_rhs),
+                else_expr: Box::new(else_rhs),
+            },
+        );
+        for id in then_carried.into_iter().chain(else_carried).rev() {
+            assignment = CExpr::Observed {
+                id,
+                expr: Box::new(assignment),
+            };
+        }
+        else_marks.reapply(then_marks.reapply(CStmt::expr(assignment)))
     }
 
     fn rewrite_empty_if_bodies(stmt: CStmt) -> CStmt {

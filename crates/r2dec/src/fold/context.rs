@@ -819,15 +819,19 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    #[track_caller]
     pub(super) fn retain_first_observation_error(
         &self,
         error: crate::observation_journal::LegacyObservationJournalError,
     ) {
+        // Which call retained it. One journal error can be raised from several
+        // places and the variant alone does not say which asked.
         r2il::refusal_evidence!(
             "observation-error",
-            "{error:?} at {:#x}:{}",
+            "{error:?} at {:#x}:{} retained by {}",
             self.current_block_addr.get().unwrap_or_default(),
-            self.current_op_idx.get().unwrap_or_default()
+            self.current_op_idx.get().unwrap_or_default(),
+            std::panic::Location::caller()
         );
         let mut first = self.observation_error.borrow_mut();
         if first.is_none() {
