@@ -172,8 +172,9 @@ pub use semantic::{
     StackArrayLayoutDisposition, StackArrayLayoutRefusal, StackFrameRoundTripCertificate,
     StackGeometryCertificate, StackObjectKey, StackSlotCertificate, StructuredAccessId,
     StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind, StructuredMemoryAccessFact,
-    StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact, ValueOwner,
-    VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal,
+    StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact,
+    TwoWaySelectionCertificate, ValueOwner, VariadicCallsiteArgumentCountEvidence,
+    VariadicCallsiteArgumentCountRefusal,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};

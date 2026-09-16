@@ -1777,7 +1777,28 @@ pub struct PreparedFunctionCertificates {
     pub stack_reloads: BTreeMap<ValueId, StackReloadSourceCertificate>,
     pub returns: Vec<ReturnValueCertificate>,
     pub returns_by_inst: BTreeMap<InstId, usize>,
+    /// Merges of two values that the one condition above them selects between.
+    pub two_way_selections: BTreeMap<InstId, TwoWaySelectionCertificate>,
     pub failures: Vec<PreparedProofFailure>,
+}
+
+/// A merge of two values that one condition selects between.
+///
+/// The phi carries the blocks its edges come from and the conditional branch
+/// above them names which edge is which, so the merge is a selection: the value
+/// is `condition ? if_true : if_false`. A compiler often puts the jump to the
+/// merge in a block of its own, so each arm is a run of single-predecessor
+/// blocks walked back to the branch rather than the branch's own successor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwoWaySelectionCertificate {
+    /// The block whose conditional branch chooses between the two arms.
+    pub branch: u64,
+    /// The value that branch tests.
+    pub condition: ValueId,
+    /// The merge's input reached on the branch's taken edge.
+    pub if_true: ValueId,
+    /// The merge's input reached on the other edge.
+    pub if_false: ValueId,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -8525,8 +8546,144 @@ fn collect_prepared_function_certificates(
         stack_reloads,
         returns,
         returns_by_inst,
+        two_way_selections: collect_two_way_selection_certificates(function, graph),
         failures: Vec::new(),
     }
+}
+
+/// Every merge of two values that one condition selects between.
+fn collect_two_way_selection_certificates(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+) -> BTreeMap<InstId, TwoWaySelectionCertificate> {
+    let mut certificates = BTreeMap::new();
+    for inst in &graph.insts {
+        let crate::graph::InstPayload::Phi { predecessors } = &inst.payload else {
+            continue;
+        };
+        if inst.inputs.len() != 2 || predecessors.len() != 2 {
+            continue;
+        }
+        let Some(merge) = graph.block(inst.block).map(|block| block.addr) else {
+            continue;
+        };
+        let Some(arms) = predecessors
+            .iter()
+            .map(|id| graph.block(*id).map(|block| block.addr))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        // The straight-line run an arm sits at the end of. Every block on the
+        // way has one predecessor, which is what makes the run an arm rather
+        // than a join of its own.
+        let run = |arm: u64| -> Vec<u64> {
+            let mut chain = vec![arm];
+            let mut at = arm;
+            while chain.len() <= graph.blocks.len() {
+                let Some(block) = graph
+                    .block_id_for_addr(at)
+                    .and_then(|id| graph.block(id))
+                    .filter(|block| block.predecessors.len() == 1)
+                else {
+                    break;
+                };
+                let Some(previous) = graph.block(block.predecessors[0]).map(|block| block.addr)
+                else {
+                    break;
+                };
+                if chain.contains(&previous) {
+                    break;
+                }
+                chain.push(previous);
+                at = previous;
+            }
+            chain
+        };
+        let runs = [run(arms[0]), run(arms[1])];
+        let mut selection = None;
+        for candidate in runs.iter().flat_map(|chain| chain.iter().copied()) {
+            let Some(block) = function.cfg().get_block(candidate) else {
+                continue;
+            };
+            let crate::cfg::BlockTerminator::ConditionalBranch {
+                true_target,
+                false_target,
+            } = block.terminator
+            else {
+                continue;
+            };
+            let edge = |chain: &[u64]| -> Option<u64> {
+                let at = chain.iter().position(|block| *block == candidate)?;
+                match at.checked_sub(1) {
+                    Some(previous) => chain.get(previous).copied(),
+                    // The arm is the branch's own block, so it leaves by the
+                    // edge that goes straight to the merge.
+                    None => Some(merge),
+                }
+            };
+            let (Some(left), Some(right)) = (edge(&runs[0]), edge(&runs[1])) else {
+                continue;
+            };
+            if left == right {
+                continue;
+            }
+            if left == true_target && right == false_target {
+                selection = Some((candidate, 0usize, 1usize));
+            } else if right == true_target && left == false_target {
+                selection = Some((candidate, 1usize, 0usize));
+            }
+            if selection.is_some() {
+                break;
+            }
+        }
+        let Some((branch, true_input, false_input)) = selection else {
+            continue;
+        };
+        // The selection reads the branch's condition wherever the merged value
+        // is spelled, so the merge has to dominate every reader. A value read
+        // above the merge is spelled above it too, and the condition's read
+        // would then sit outside the region that declares it.
+        let Some(output) = inst.output else {
+            continue;
+        };
+        let readable = graph.use_sites(output).iter().all(|site| {
+            graph
+                .inst(site.inst)
+                .and_then(|inst| graph.block(inst.block))
+                .is_some_and(|block| function.dominates(merge, block.addr))
+        });
+        if !readable {
+            continue;
+        }
+        let Some(condition) = graph
+            .block_id_for_addr(branch)
+            .and_then(|id| graph.block(id))
+            .and_then(|block| {
+                block.insts.iter().rev().find_map(|id| {
+                    let inst = graph.inst(*id)?;
+                    match &inst.payload {
+                        crate::graph::InstPayload::Op(SSAOp::CBranch { .. }) => {
+                            inst.inputs.last().copied()
+                        }
+                        _ => None,
+                    }
+                })
+            })
+        else {
+            continue;
+        };
+        certificates.insert(
+            inst.id,
+            TwoWaySelectionCertificate {
+                branch,
+                condition,
+                if_true: inst.inputs[true_input],
+                if_false: inst.inputs[false_input],
+            },
+        );
+    }
+    certificates
 }
 
 /// The aggregate a source type identifies, when it is one.

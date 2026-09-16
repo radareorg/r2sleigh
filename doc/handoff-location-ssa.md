@@ -25882,7 +25882,24 @@ graph-less read in this renderer is already admitted --
 `certified_boundary_read_values` names return values, call arguments and switch
 selectors, and a conditional's condition is the fourth of exactly that kind.
 
-The attempt is reverted; nothing else in it needed changing, and it is otherwise
-complete: the import finds the instruction, walks the arms, re-mints the
-literals at the merge width, interns the `Select`, and the plan will spell it
-inline once `Kind::Phi` is admitted by `expression_renders_inline`.
+Bisecting settled it, and the answer is neither of those. The import alone
+causes the refusal, with the certified condition read and the inline
+spellability both reverted, and with the selection restricted to merges that
+dominate every reader of their own value. What remains is structural:
+
+**while a phi is lowered to edge copies, its expression is spelled in the
+arms.** Normalization removes a phi by materialising a copy in each
+predecessor, so the renderer emits `x = <the phi's value>` inside each arm, and
+the phi's value is now a `Select` -- so the selection, and every read under it
+including the branch's condition, lands in an arm that does not dominate the
+branch. That is exactly what the evidence says.
+
+So the last piece is in normalization: a phi the certificate names as a
+selection must keep a single definition at the merge instead of being lowered
+to edge copies. The certificate that drives it is landed --
+`PreparedFunctionCertificates::two_way_selections`, computed where the CFG
+lives, naming the branch, the condition and which input is the taken edge -- and
+the rest of the arc is already written and verified against it: the import that
+spells `TermKind::Select` from the certificate, `Kind::Phi` admitted by
+`expression_renders_inline`, and the condition as the fourth kind of certified
+boundary read beside return values, call arguments and switch selectors.
