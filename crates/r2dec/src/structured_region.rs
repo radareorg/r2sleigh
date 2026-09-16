@@ -173,7 +173,6 @@ impl StructuredRegionNode {
         self.emission_anchor
     }
 
-    #[cfg(test)]
     pub(crate) const fn kind(&self) -> StructuredRegionKind {
         self.kind
     }

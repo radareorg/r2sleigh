@@ -816,6 +816,22 @@ fn collect_expr_observation_regions(
     }
 }
 
+/// The region a loop sits in, where `current` is the loop's own.
+///
+/// A `for` initializer executes before the loop is entered, so the region that
+/// has to dominate it is the one holding the loop statement.
+fn enclosing_region_of_loop(
+    current: Option<RegionId>,
+    regions: &SealedStructuredRegionArtifact,
+) -> Option<RegionId> {
+    let region = current?;
+    let node = regions.node(region)?;
+    if node.kind() != crate::structured_region::StructuredRegionKind::Loop {
+        return current;
+    }
+    node.parent().or(current)
+}
+
 fn collect_stmt_observation_regions(
     statement: &CStmt,
     current: Option<RegionId>,
@@ -869,8 +885,17 @@ fn collect_stmt_observation_regions(
             update,
             body,
         } => {
+            // A `for` header's initializer runs once, at the predecessor that
+            // enters the loop, so its occurrence belongs to the region the loop
+            // sits in and not to the loop. The clause is lexically inside the
+            // loop's region only because C writes it there.
             if let Some(init) = init {
-                collect_stmt_observation_regions(init, current, regions, scoped);
+                collect_stmt_observation_regions(
+                    init,
+                    enclosing_region_of_loop(current, regions),
+                    regions,
+                    scoped,
+                );
             }
             if let Some(cond) = cond {
                 collect_expr_observation_regions(cond, current, scoped);
@@ -1490,9 +1515,18 @@ fn collect_stmt_observation_scopes(
             update,
             body,
         } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            // The initializer runs once at the predecessor, so it and the
+            // statement markers the structurer folded in with it belong to the
+            // region the loop sits in rather than the loop's own. A `for` has
+            // an initializer only because a predecessor's statement was moved
+            // into its header.
+            let header = match init {
+                Some(_) => enclosing_region_of_loop(current, regions),
+                None => current,
+            };
+            record_control_observations(&leading, header, targets, order, scoped);
             if let Some(init) = init {
-                collect_stmt_observation_scopes(init, current, regions, targets, order, scoped);
+                collect_stmt_observation_scopes(init, header, regions, targets, order, scoped);
             }
             if let Some(cond) = cond {
                 collect_expr_observation_scopes(cond, current, targets, order, scoped);
@@ -3776,10 +3810,12 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
         .inspect_err(|_| {
             r2il::refusal_evidence!(
                 "placement-dominance",
-                "the write is {:?} defining {:?} at statement {}",
+                "the write is {:?} defining {:?} at statement {} in region {:?} of block {:#x}",
                 write.inst,
                 write.defines,
-                write.statement
+                write.statement,
+                write.region,
+                write.block
             );
         })?;
     }
@@ -4549,6 +4585,49 @@ mod tests {
         fn dominates(&self, dominator: u64, block: u64) -> bool {
             self.dominators[&block].contains(&dominator)
         }
+    }
+
+    #[test]
+    fn a_for_initializer_belongs_to_the_region_the_loop_sits_in() {
+        // `for (i = 0; ...)` writes the initializer inside the loop because C
+        // spells it there, and it runs once, at the predecessor that enters the
+        // loop. Giving the occurrence the loop's own region asks the loop
+        // header to dominate a block before it, which it never does.
+        let init_marker = crate::ast::RenderObservationId::from_index(0);
+        let body_marker = crate::ast::RenderObservationId::from_index(1);
+        let loop_body = CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1010, StructuredRegionKind::Loop),
+            CStmt::For {
+                init: Some(Box::new(CStmt::observed(init_marker, CStmt::Empty))),
+                cond: None,
+                update: None,
+                body: Box::new(CStmt::observed(body_marker, CStmt::Empty)),
+            },
+        );
+        let (marked, regions) =
+            crate::structured_region::seal_structured_body_for_test(CStmt::structured_region(
+                StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+                CStmt::Block(vec![block_region(0x1000), loop_body]),
+            ))
+            .expect("marker tree")
+            .into_marked_parts();
+        let mut scoped = vec![None; 2];
+        collect_stmt_observation_regions(&marked, None, &regions, &mut scoped);
+        let init_region = scoped[0].expect("the initializer was scoped");
+        let body_region = scoped[1].expect("the body was scoped");
+        assert_ne!(
+            init_region, body_region,
+            "the initializer runs before the loop and the body runs inside it"
+        );
+        assert_eq!(
+            regions.node(body_region).map(|node| node.kind()),
+            Some(StructuredRegionKind::Loop)
+        );
+        assert_eq!(
+            regions.node(body_region).and_then(|node| node.parent()),
+            Some(init_region),
+            "the initializer takes the region the loop sits in"
+        );
     }
 
     /// A marker tree sealed the way the structurer seals its own.
