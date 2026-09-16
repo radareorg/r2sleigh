@@ -25684,3 +25684,38 @@ even then: it renders `arr[(int64_t)(int32_t)-idx]` and the test wants
 The remaining `return (int32_t)tmp_25180_1;` is a second question: a `Load`'s
 value is refused inline by `expression_renders_inline`, which is one of the four
 independent answers to "what can the renderer spell" that plan A3 collapses.
+
+### The owner already existed, and the plan was not asking it
+
+The four-way framing above was wrong, and the correction is worth more than the
+analysis was. `SsaArtifact::unobserved_values` is already the single transitive
+answer: a value outside the obligation inventory's observed closure whose
+defining instruction it proved dead. Plan construction already elides those as
+`UnobservedValue`, so the observation journal, the effect ledger and placement
+all agree about them by construction.
+
+`inlinable_core`'s `renders_nothing` never consulted it. It asked
+`unread_defined_values` -- values with no use at all -- and
+`unrendered_defined_values` -- values a reader's term absorbed -- and a flag
+temporary read once, by the copy into an architectural flag nothing reads, is in
+neither. Adding the owner's own answer to that test is the whole change:
+
+```rust
+let unobserved = source.unobserved_values();
+```
+
+Nothing else moved, because nothing else disagreed. Measured on the corpus:
+
+| | before | after |
+|---|---|---|
+| `fnv1a32` arm64 -O0 | 21 statements | 15 |
+| `djb2` x86-64 -O0 | 25 | 13 |
+| `crc32_bitwise` x86-64 -O0 | 38 | 21 |
+| `crc32_bitwise` arm64 -O2 | 174 | 154 |
+| corpus diagnostic column | 8 wrong | 6 |
+| `zlib-minigzip` x86-64 -O0 compile failures | 6 of 125 | 2 of 125 |
+
+`fnv1a32` gains a real counted loop, `for (stack_m32 = 0; ; stack_m32++)`, and
+the four `array subscript is not an integer` compile failures in the census are
+gone. All sixty corpus cells still pass raw and differential, every audit column
+is 60/60, and no rendering was lost in either census.

@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 314 source obligations: 229 rendered, 85 elided, 0 refused; 95 statements rendered */
+    /* r2dec proof: no individual construct is marked; 314 source obligations: 231 rendered, 83 elided, 0 refused; 80 statements rendered */
     {
         uint64_t stack_m56;
         uint32_t stack_m40;
@@ -23,30 +23,20 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         X8_3 = stack_m32;
         uint64_t tmp_42488_1 = X8_3 / 4;
         stack_m56 = 0 ? 0 : tmp_42488_1;
-        stack_m64 = 0;
-        for (; ; ) {
-            uint64_t X8_6 = stack_m64;
-            uint64_t tmp_3e680_2 = stack_m56;
-            uint8_t TMPCY_3 = tmp_3e680_2 <= X8_6;
+        for (stack_m64 = 0; ; stack_m64++) {
+            uint8_t TMPCY_3 = stack_m56 <= stack_m64;
             if (TMPCY_3) {
                 break;
             } else {
                 uint32_t tmp_25180_2 = ((uint32_t*)stack_m24)[stack_m64];
-                uint32_t tmp_2b380_2 = stack_m92 * tmp_25180_2;
-                uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)tmp_2b380_2, 15);
+                uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(stack_m92 * tmp_25180_2), 15);
                 uint32_t tmp_24d00_3 = stack_m40;
-                uint32_t tmp_20380_2 = tmp_24d00_3 ^ stack_m88 * (uint32_t)X0_3;
-                stack_m40 = tmp_20380_2;
+                stack_m40 = tmp_24d00_3 ^ stack_m88 * (uint32_t)X0_3;
                 uint32_t tmp_24d00_4 = stack_m40;
                 uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)tmp_24d00_4, 13);
                 stack_m40 = (uint32_t)X0_5;
                 uint32_t tmp_24d00_5 = stack_m40;
-                uint32_t tmp_2a000_7 = 0xe6546b64;
-                stack_m40 = tmp_24d00_5 * 5 + tmp_2a000_7;
-                {
-                    uint64_t X8_21 = stack_m64;
-                    stack_m64 = X8_21 + 1;
-                }
+                stack_m40 = tmp_24d00_5 * 5 - 0x19ab949c;
             }
         }
         {
@@ -61,37 +51,29 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             stack_m84_3 = stack_m84;
             if (!ZR_3) {
                 uint32_t stack_m84_2;
-                uint64_t X8_28 = stack_m104;
-                uint8_t TMPZR_8 = X8_28 == 2;
+                uint8_t TMPZR_8 = stack_m104 == 2;
                 uint8_t ZR_4 = TMPZR_8;
                 stack_m84_2 = stack_m84;
                 if (!ZR_4) {
-                    uint64_t X8_30 = stack_m104;
-                    uint8_t TMPZR_9 = X8_30 == 3;
-                    uint8_t ZR_5 = TMPZR_9;
-                    uint8_t tmp_a00_1 = !ZR_5;
+                    uint8_t TMPZR_9 = stack_m104 == 3;
+                    uint8_t tmp_a00_1 = !TMPZR_9;
                     if (tmp_a00_1) {
                         goto L3;
                     } else {
                         uint8_t tmp_25500_1 = *(uint8_t*)((uint64_t)stack_m80 + 2);
-                        uint32_t tmp_20380_3 = stack_m84 ^ (uint32_t)tmp_25500_1 << 16;
-                        stack_m84_2 = tmp_20380_3;
+                        stack_m84_2 = stack_m84 ^ (uint32_t)tmp_25500_1 << 16;
                     }
                 }
                 {
                     uint8_t tmp_25500_3 = *(uint8_t*)((uint64_t)stack_m80 + 1);
-                    uint32_t tmp_20380_5 = stack_m84_2 ^ (uint32_t)tmp_25500_3 << 8;
-                    stack_m84_3 = tmp_20380_5;
+                    stack_m84_3 = stack_m84_2 ^ (uint32_t)tmp_25500_3 << 8;
                 }
             }
             {
                 uint8_t tmp_25500_5 = *stack_m80;
-                uint32_t tmp_2b380_5 = stack_m92 * (stack_m84_3 ^ (uint32_t)tmp_25500_5);
-                uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)tmp_2b380_5, 15);
-                uint32_t tmp_24c00_18 = stack_m88 * (uint32_t)X0_7;
+                uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(stack_m92 * (stack_m84_3 ^ (uint32_t)tmp_25500_5)), 15);
                 uint32_t tmp_24d00_6 = stack_m40;
-                uint32_t tmp_20380_8 = tmp_24d00_6 ^ tmp_24c00_18;
-                stack_m40 = tmp_20380_8;
+                stack_m40 = tmp_24d00_6 ^ stack_m88 * (uint32_t)X0_7;
             }
             {
 L3: ;

@@ -1355,11 +1355,23 @@ fn inlinable_core(
     // under x86-64's flag lanes a value carries several graph readers and one
     // rendered one, and counting the graph's is what keeps it named.
 
+    // The obligation inventory already answers this, transitively and once:
+    // a value outside the observed closure whose definition it proved dead
+    // reaches the page nowhere, and construction elides it as
+    // `UnobservedValue`, so the journal, the effect ledger and placement all
+    // agree about it already. Asking only the two narrower sets is what let a
+    // flag temporary -- read by the copy into an architectural flag nothing
+    // reads -- count as a rendered reader.
+    let unobserved = source.unobserved_values();
     let renders_nothing = |inst: InstId| {
         graph
             .inst(inst)
             .and_then(|node| node.output)
-            .is_some_and(|output| dead_readers.contains(&output) || unrendered.contains(&output))
+            .is_some_and(|output| {
+                dead_readers.contains(&output)
+                    || unrendered.contains(&output)
+                    || unobserved.contains(&output)
+            })
     };
     // Of those graphless reads, call arguments are the one kind the renderer
     // can currently consume from an inline expression. Return, switch and

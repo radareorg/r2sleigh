@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 95 source obligations: 77 rendered, 18 elided, 0 refused; 48 statements rendered */
+    /* r2dec proof: no individual construct is marked; 95 source obligations: 76 rendered, 19 elided, 0 refused; 40 statements rendered */
     {
         uint64_t X0_2;
         uint64_t X11_1;
@@ -11,8 +11,7 @@ uint64_t sym__unaligned_words(uint64_t X0_0, uint64_t X1_0)
         if (CY_1) {
             uint64_t X12_1;
             X12_1 = 0;
-            uint64_t tmp_11f80_1 = (uint64_t)X8_1 + 1;
-            uint64_t X10_1 = tmp_11f80_1;
+            uint64_t X10_1 = (uint64_t)X8_1 + 1;
             for (; ; ) {
                 uint32_t tmp_25180_2 = *(uint32_t*)(X12_1 + X10_1);
                 X0_2 = (uint64_t)(uint32_t)(tmp_2a000_4 * ((uint32_t)X0_2 ^ tmp_25180_2));
@@ -30,28 +29,21 @@ uint64_t sym__unaligned_words(uint64_t X0_0, uint64_t X1_0)
             X11_1 = 0;
         }
         {
-            uint64_t X10_4;
+            uint64_t X10_3;
             uint64_t tmp_3e680_1 = X11_1;
-            uint64_t tmp_3e780_1 = X1_0 - tmp_3e680_1;
-            uint64_t X10_3 = tmp_3e780_1;
+            X10_3 = X1_0 - tmp_3e680_1;
             uint8_t tmp_1000_4 = X1_0 <= tmp_3e680_1;
-            X10_4 = X10_3;
             if (!tmp_1000_4) {
                 uint8_t* X8_2;
-                uint64_t tmp_12380_1 = X11_1;
-                uint8_t* tmp_12480_1 = (uint8_t*)((uint64_t)X8_1 + tmp_12380_1);
-                X8_2 = tmp_12480_1;
+                X8_2 = (uint8_t*)(X11_1 + (uint64_t)X8_1);
                 for (; ; ) {
                     uint8_t* tmp_7400_2 = X8_2;
                     X8_2 = (uint8_t*)((uint64_t)X8_2 + 1);
                     uint8_t tmp_25400_2 = *tmp_7400_2;
-                    uint32_t tmp_20380_5 = (uint32_t)X0_2 ^ (uint32_t)tmp_25400_2;
-                    X0_2 = (uint64_t)(uint32_t)(tmp_20380_5 * tmp_2a000_4);
-                    uint64_t tmp_3e280_2 = X10_4 - 1;
-                    uint8_t TMPZR_11 = X10_4 == 1;
-                    uint64_t X10_5 = tmp_3e280_2;
+                    X0_2 = (uint64_t)(uint32_t)(((uint32_t)X0_2 ^ (uint32_t)tmp_25400_2) * tmp_2a000_4);
+                    uint8_t TMPZR_11 = X10_3 == 1;
+                    X10_3--;
                     uint8_t tmp_a00_2 = !TMPZR_11;
-                    X10_4 = X10_5;
                     if (!tmp_a00_2) {
                         break;
                     }
