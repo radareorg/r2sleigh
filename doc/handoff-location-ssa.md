@@ -25632,13 +25632,32 @@ rendered reader and the negation keeps an object of its own.
 
 Carrying deadness transitively -- a value renders nothing when every reader's
 own output renders nothing, with an effect operation ending the walk -- was
-tried and reproduces the failure this project has already met twice:
-`live-value-producer ... unaccounted`. The plan's idea of what reaches the page
-then differs from the ledger's, and the ledger is what must account for every
-cell. So it is not a change to the inlining rule alone: the journal's
-`unrendered` set and the plan's reader count have to be one derivation, computed
-once and shared, which is the same "one owner per decision" the expression
-elaborator plan asks for.
+built and measured, and it takes **three** agreeing changes, not one. The
+journal already runs the same fixpoint, but only over `Inline` values, so a
+bound flag carrier stops it; the effect ledger closes a `LiveValueProducer`
+obligation only for the writes the *first* elision pass elides, so the ones the
+fixpoint finds go unaccounted. With all three widened together --
+`renders_nothing` in the plan, the journal's fixpoint over bound values as well,
+and the producer obligations of the writes that fixpoint elides -- the target
+renders:
+
+```c
+uint32_t tmp_25180_1 = (uint32_t)arr[(int64_t)(int32_t)-idx];   /* was two statements */
+return (int32_t)tmp_25180_1;
+```
+
+and **fifty-one of the sixty corpus cells then refuse**, all with
+`unobserved_binding_read`. So the third view is still missing: a binding whose
+value is now proved to reach no text still has a *read* recorded against it, and
+placement sees a symbol read with nothing observing it. Reverted.
+
+That is the shape of the work, and it is bigger than the inlining rule: what
+reaches the page is currently answered by the binding plan, the observation
+journal and the effect ledger separately, and a fourth time by the name
+resolution that records binding reads. They have to become one derivation,
+computed once and consumed by all four -- the same "one owner per decision" the
+expression elaborator plan asks for, and this is its most valuable first
+target, because three of the seven remaining r2r failures sit behind it.
 
 The remaining `return (int32_t)tmp_25180_1;` is a second question: a `Load`'s
 value is refused inline by `expression_renders_inline`, which is one of the four
