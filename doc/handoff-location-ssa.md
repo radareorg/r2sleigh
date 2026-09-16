@@ -25787,3 +25787,56 @@ What `dec_struct_array_index_keeps_member_write_shape` still wants is
 `return arr[idx].fourteenth + arr[idx].third;`, and that needs a `Load`'s value
 to be inlinable into its single reader, which `expression_renders_inline`
 refuses outright.
+
+### The return idiom: decided, and where it goes
+
+The user settled the design: **a merge of two values under one condition renders
+as a conditional expression**. `if (c) { x = 0; } else { x = 1; } return x;`
+becomes `return c ? 0 : 1;`. The two alternatives were rejected explicitly --
+specialising a duplicated tail per arm would give `if (c) { return 1; } else
+{ return 0; }` and satisfy the four r2r tests as written, but it needs several
+rendered occurrences of one return instruction each discharging a *different*
+value cell, which the observation model does not admit; and leaving the shape
+keeps an extra local and an assignment in every such function. The four tests
+that assert `return 0;` / `return 1;` are therefore updated to the conditional
+spelling rather than satisfied by it.
+
+Every part of the machinery already exists: `MachineExprKind::Select`,
+`TermKind::Select`, and the renderer's two `Kind::Select` arms.
+
+**It does not go in the machine arena.** That was tried. Recognising the
+selection is easy -- the phi carries its predecessor blocks, and
+`BlockTerminator::ConditionalBranch` names the two edges; the only subtlety is
+that a compiler often puts the jump to the merge in a block of its own, so each
+arm is a run of single-predecessor blocks walked back to the branch rather than
+an immediate predecessor. But the projection refuses it twice, and rightly:
+
+```
+MachineProjection(InvalidExpressionType { expr: MachineExprId(53) })   /* the widths */
+MachineProjection(EntityMismatch(InstId(34)))                          /* the contract */
+```
+
+`validate_entity` requires every operand leaf of an expression to be exactly one
+of the instruction's operands, and requires a `Phi` instruction to carry a `Phi`
+expression (`machine.rs:2695-2710`). Both are the seal that makes the machine
+arena a faithful mirror of the instruction, and a selection is not what the
+instruction is -- it is what the instruction *means*. Turning a phi into a
+select is a rewrite, and this project has one rewriting layer.
+
+**It goes in `r2rewrite`'s import**, where `MachineExprKind::Phi` is currently
+declined outright (`import.rs:622`). The importer holds the artifact, so it has
+the graph, the dominator tree and the CFG; `projection.entities()` maps a root
+expression back to its output value, which is how the phi instruction and its
+predecessor blocks are found from an expression id. Three things it has to
+settle, and the machinery for each is already there:
+
+* **The operands have to mean the same thing at the merge.** An arm-local object
+  does not -- reading it on the other path reads whatever that path left there.
+  A literal does, wherever the arm spelled it, so the operand is imported from
+  the value's *producing* expression and accepted when `canon::literal_bits`
+  answers, or when it is a leaf whose definition dominates the merge. `buf`
+  versus `0` in `alloc_and_copy` is the second case.
+* **Both arms are read at the merge's width**, whatever width the arm spelled.
+* **The condition is a read the branch owned.** It is not one of the phi's
+  operands, so it is a moved read, which is exactly what the importer's `trace`
+  already reports.
