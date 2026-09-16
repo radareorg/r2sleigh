@@ -25472,3 +25472,103 @@ stack_m20 = (stack_m20 ^ (uint32_t)tmp_25600_2) * tmp_2a000_5;
 obligations to 61. The compile census over `zlib-minigzip` is unchanged in both
 directions -- aarch64 O0 177/177 built, x86-64 O0 119/125 built, the same six
 failures and the same rendering counts as the integration branch.
+
+### Promotion through the frame pointer, and the cell it still refuses
+
+`promote_private_stack_slots` only ever saw leaf functions. Its escape rule
+treats anything derived from the stack pointer that lands in a register as a
+frame address leaving the block, and the prologue's `mov x29, sp` is exactly
+that, so every function that calls anything declined. Two faults were in the
+way and both are fixed on `arch/promote-frame-pointer`:
+
+* The prologue's own `sub sp, sp, #N` pushed the **stack pointer itself** into
+  the derived set, so the epilogue's `CARRY(sp, #N)` read a "frame address it
+  does not access through". It only ever showed up in single-block functions,
+  because the derived set is per block.
+* The frame pointer is now recognised -- the register the entry block copies
+  from a stack-pointer-derived value after the prologue -- and an address
+  through it resolves to the same slot, in the stack pointer's coordinate, via
+  `frame_displacement`. It is a base only after the op that establishes it,
+  because before that it still holds the caller's, which the prologue saves like
+  any other callee-saved register, and writes of it are held to the same
+  epilogue discipline as writes of the stack pointer.
+
+`xxhash32` at arm64 -O0 then promotes thirteen slots instead of none and refuses
+with `unprovable_execution_order`:
+
+```
+binding=BindingId(60) occurrences=[
+  (0x100000d08, RegionId(7),  (Block, 0x100000c4c), order 138, read),
+  (0x100000d08, RegionId(11), (Block, 0x100000d08), order 280, write)]
+```
+
+Both occurrences are instructions of block `0x100000d08` -- `InstId(585)` writes
+`tmp:12180_12` and `InstId(589)` reads it -- but the read's text landed in the
+block region for `0x100000c4c` and the write's in the one for `0x100000d08`.
+`occurrence_regions_have_proven_order` accepts only nesting or exclusion, and
+these two are sequenced siblings, so it refuses. Two pieces of evidence were
+added and together they settle the shape. The first prints each occurrence's
+whole ancestor chain:
+
+```
+read  7(Block 0xd8c) < 6(Loop 0xd8c) < 5(Block 0xd3c) < 4 < 2(IfThenElse) < 1 < 0
+write 11(Block 0xea8) < 10(Block 0xea4) < 5(Block 0xd3c) < 4 < 2(IfThenElse) < 1 < 0
+```
+
+The write is in block `0xea8`, which sits after the loop; the read's text is
+inside the loop headed at `0xd8c`. The second says which use that is, and it is
+the only one in the whole function whose text is not in its own block:
+
+```
+use-region-mismatch: UseSite { inst: InstId(589), input_idx: 1 }
+  at block 0x100000ea8 rendered in RegionId(7) entry 0x100000d8c statement 138
+```
+
+`InstId(585)` and `InstId(589)` are both operations of `0xea8`
+(`tmp:12180_12 = tmp:lane:100000ea8:36:3a_1`, then
+`tmp:12280_12 = tmp:24c00_33 + tmp:12180_12`), so a use of an instruction that
+runs after the loop has its text inside the loop. That is a region attribution
+fault, not a missing order, and it is the same family as the `for` initializer
+that was attributed to the loop instead of the region the loop sits in.
+Relaxing the predicate was tried -- accepting two regions a common `Loop`
+ancestor repeats together -- and is wrong for exactly this reason: the nearest
+common ancestor is a `Block`, and the order really is unproven because the
+attribution is.
+
+The chain ran four layers deeper than the refusal, and the cause was mine. The
+gap the observation belonged to was opened by one refusal in the loop header --
+`callsite-arguments-incomplete` at `0x100000d8c:39` -- and it claimed 297 cells
+over 77 ops, including cells of blocks after the loop, which is how a use of
+`0xea8` came to be scoped to the loop's region. The call refused because
+argument 1 had no reaching value, and the reaching-ABI walk reported why: at
+`0x100000d8c:32` a **lane temporary** carried the canonical storage of `w1`,
+four bytes where the ABI wants the eight of `x1`, and the walk fails closed on a
+slice. The general storage pairing in `record_renamed_op_storage` has always
+skipped lane temporaries; the promoted-access branch added for this feature did
+not, so a promoted load whose destination is a lane got the register's storage.
+One `is_lane_temp` guard, and `xxhash32` renders.
+
+`murmur3_32` at arm64 -O0 goes from 144 lines to 121 and from 118 statements to
+95, because the slot round trips collapse:
+
+```c
+/* before */                              /* after */
+stack_m68 = tmp_25180_2;                  uint32_t tmp_2b380_2 = stack_m92 * tmp_25180_2;
+tmp_24c00_7 = stack_m68;
+uint32_t tmp_2b380_2 = tmp_24c00_7 * stack_m92;
+```
+
+Bypassing the order predicate did not exonerate it either: the refusal becomes
+`read_before_assignment`, which is the dominator-tree answer to the same
+question, so the rendering really does read the object before anything assigns
+it. And the region tree says `0xea8` is not dominated by the loop header at all
+-- its block region hangs off `0xd3c` beside the loop rather than inside it --
+so no SSA value defined there can reach a use in the header. One of the two is
+therefore lying: either the use's text is in a block whose region is not where
+it was emitted, or the binding holds more than the one member the placement
+decision reports.
+
+
+`alloc_and_copy` is not this: its five frame places are all named by the source,
+so promotion correctly leaves them alone, and `return (char*)stack_m24;` instead
+of `return buf;` is the returning-tail duplication that is still owed.

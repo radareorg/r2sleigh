@@ -776,6 +776,13 @@ fn record_renamed_op_storage(
             _ => (None, None),
         };
         for (var, varnode) in [loaded, stored].into_iter().flatten() {
+            // A lane temporary is a slice the lift minted, not the register:
+            // giving it the register's storage makes the reaching-ABI walk
+            // read it as a partial definition of the carrier and fail closed
+            // on the next call that passes that register.
+            if is_lane_temp(var) {
+                continue;
+            }
             record_canonical_storage(
                 &mut result.canonical_storage_by_var,
                 &mut result.ambiguous_storage_vars,

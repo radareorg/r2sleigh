@@ -12962,6 +12962,27 @@ fn resolved_stack_address(
     None
 }
 
+/// One access's place in the frame, in the stack pointer's coordinate.
+///
+/// An address through the frame pointer names the same slot as one through the
+/// stack pointer; which register the compiler chose is not a property of the
+/// slot, so both are answered in the one coordinate the widths are keyed by.
+fn frame_displacement(
+    is_stack_pointer: &impl Fn(&r2il::Varnode) -> bool,
+    is_frame_pointer: &impl Fn(&r2il::Varnode) -> bool,
+    frame_pointer_offset: Option<i64>,
+    base: &r2il::Varnode,
+    displacement: i64,
+) -> Option<i64> {
+    if is_stack_pointer(base) {
+        return Some(displacement);
+    }
+    if is_frame_pointer(base) {
+        return frame_pointer_offset.map(|offset| displacement + offset);
+    }
+    None
+}
+
 /// The space promoted stack slots live in: not memory, and not the lifter's
 /// scratch either.
 pub(crate) const PROMOTED_SLOT_SPACE: u32 = 0x5301;
@@ -13034,20 +13055,63 @@ fn promote_private_stack_slots(
         r2il::refusal_evidence!("promote-stack-slot", "no prologue frame subtraction");
         return None;
     };
-    // Every other write of the stack pointer is the epilogue of a returning
-    // block, after that block's accesses. Anything else moves the frame under
-    // the accesses and the displacement they share stops meaning one place.
+    // The register the prologue points at the frame, where there is one. Code
+    // compiled without optimisation addresses its locals through it as soon as
+    // the function calls anything, so without this the pass only ever sees a
+    // leaf.
+    let frame_pointer = entry
+        .ops
+        .iter()
+        .enumerate()
+        .skip(prologue_at + 1)
+        .find_map(|(at, op)| {
+            let R2ILOp::Copy { dst, src } = op else {
+                return None;
+            };
+            if dst.space != r2il::SpaceId::Register || is_stack_pointer(dst) {
+                return None;
+            }
+            let (base, displacement) = resolved_stack_address(entry, at, src)?;
+            is_stack_pointer(&base).then(|| (at, dst.clone(), displacement))
+        });
+    let is_frame_pointer = |varnode: &r2il::Varnode| {
+        frame_pointer
+            .as_ref()
+            .is_some_and(|(_, register, _)| register == varnode)
+    };
+    // The frame pointer is a base only once the prologue has pointed it at the
+    // frame: before that it still holds the caller's, which the prologue saves
+    // like any other callee-saved register.
+    let is_frame_base = |varnode: &r2il::Varnode, block_index: usize, at: usize| {
+        is_stack_pointer(varnode)
+            || is_frame_pointer(varnode)
+                && !(block_index == 0
+                    && frame_pointer
+                        .as_ref()
+                        .is_some_and(|(established, _, _)| at <= *established))
+    };
+    // Every other write of the stack pointer or the frame pointer is the
+    // epilogue of a returning block, after that block's accesses. Anything else
+    // moves the frame under the accesses and the displacement they share stops
+    // meaning one place.
     for (index, block) in blocks.iter().enumerate() {
         let returns = block
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::Return { .. }));
         for (at, op) in block.ops.iter().enumerate() {
-            let writes_stack_pointer = op.output().is_some_and(is_stack_pointer);
+            let writes_stack_pointer = op
+                .output()
+                .is_some_and(|dst| is_stack_pointer(dst) || is_frame_pointer(dst));
             if !writes_stack_pointer {
                 continue;
             }
-            if index == 0 && at == prologue_at {
+            if index == 0
+                && (at == prologue_at
+                    || frame_pointer
+                        .as_ref()
+                        .is_some_and(|(established, _, _)| at <= *established))
+            {
                 continue;
             }
             if !returns {
@@ -13099,7 +13163,7 @@ fn promote_private_stack_slots(
             let reads_derived = op.inputs().into_iter().any(|input| holds(&derived, input));
             match op {
                 R2ILOp::Load { dst, addr, .. } => {
-                    if holds(&derived, addr) || is_stack_pointer(addr) {
+                    if holds(&derived, addr) || is_frame_base(addr, index, at) {
                         let Some((base, displacement)) = resolved_stack_address(block, at, addr)
                         else {
                             r2il::refusal_evidence!(
@@ -13109,9 +13173,13 @@ fn promote_private_stack_slots(
                             );
                             return None;
                         };
-                        if !is_stack_pointer(&base) {
-                            return None;
-                        }
+                        let displacement = frame_displacement(
+                            &is_stack_pointer,
+                            &is_frame_pointer,
+                            frame_pointer.as_ref().map(|(_, _, offset)| *offset),
+                            &base,
+                            displacement,
+                        )?;
                         widths.entry(displacement).or_default().insert(dst.size);
                         accesses.push(SlotAccess {
                             block: index,
@@ -13124,10 +13192,10 @@ fn promote_private_stack_slots(
                     }
                 }
                 R2ILOp::Store { addr, val, .. } => {
-                    if holds(&derived, val) || is_stack_pointer(val) {
+                    if holds(&derived, val) || is_frame_base(val, index, at) {
                         return None;
                     }
-                    if holds(&derived, addr) || is_stack_pointer(addr) {
+                    if holds(&derived, addr) || is_frame_base(addr, index, at) {
                         let Some((base, displacement)) = resolved_stack_address(block, at, addr)
                         else {
                             r2il::refusal_evidence!(
@@ -13137,9 +13205,13 @@ fn promote_private_stack_slots(
                             );
                             return None;
                         };
-                        if !is_stack_pointer(&base) {
-                            return None;
-                        }
+                        let displacement = frame_displacement(
+                            &is_stack_pointer,
+                            &is_frame_pointer,
+                            frame_pointer.as_ref().map(|(_, _, offset)| *offset),
+                            &base,
+                            displacement,
+                        )?;
                         widths.entry(displacement).or_default().insert(val.size);
                         accesses.push(SlotAccess {
                             block: index,
@@ -13151,27 +13223,39 @@ fn promote_private_stack_slots(
                         });
                     }
                 }
-                R2ILOp::Copy { dst, src } if holds(&derived, src) || is_stack_pointer(src) => {
-                    derived.push(dst.clone());
+                // The frame bases themselves are not derived values: the
+                // prologue's own subtraction rewrites the stack pointer and the
+                // epilogue reads it back to compute its flags, and neither is a
+                // frame address travelling somewhere it should not.
+                R2ILOp::Copy { dst, src }
+                    if holds(&derived, src) || is_frame_base(src, index, at) =>
+                {
+                    if !is_frame_base(dst, index, at) {
+                        derived.push(dst.clone());
+                    }
                 }
                 R2ILOp::IntAdd { dst, a, b }
-                    if (holds(&derived, a) || is_stack_pointer(a))
+                    if (holds(&derived, a) || is_frame_base(a, index, at))
                         && b.space == r2il::SpaceId::Const
-                        || (holds(&derived, b) || is_stack_pointer(b))
+                        || (holds(&derived, b) || is_frame_base(b, index, at))
                             && a.space == r2il::SpaceId::Const =>
                 {
-                    derived.push(dst.clone());
+                    if !is_frame_base(dst, index, at) {
+                        derived.push(dst.clone());
+                    }
                 }
                 R2ILOp::IntSub { dst, a, b }
-                    if (holds(&derived, a) || is_stack_pointer(a))
+                    if (holds(&derived, a) || is_frame_base(a, index, at))
                         && b.space == r2il::SpaceId::Const =>
                 {
-                    derived.push(dst.clone());
+                    if !is_frame_base(dst, index, at) {
+                        derived.push(dst.clone());
+                    }
                 }
                 _ if reads_derived => {
                     r2il::refusal_evidence!(
                         "promote-stack-slot",
-                        "{:#x}:{at} reads a frame address it does not access through",
+                        "{:#x}:{at} reads a frame address it does not access through: {op}",
                         block.addr
                     );
                     return None;
@@ -13184,7 +13268,7 @@ fn promote_private_stack_slots(
             if let Some(dst) = op.output()
                 && holds(&derived, dst)
                 && dst.space != r2il::SpaceId::Unique
-                && !is_stack_pointer(dst)
+                && !is_frame_base(dst, index, at)
             {
                 r2il::refusal_evidence!(
                     "promote-stack-slot",
