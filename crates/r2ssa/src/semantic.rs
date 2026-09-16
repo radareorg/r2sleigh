@@ -8551,6 +8551,32 @@ fn collect_prepared_function_certificates(
     }
 }
 
+/// The literal a value stands for, through the copies that carry it.
+///
+/// An arm that assigns a constant does it through a temporary, so the merge's
+/// operand is the copy's output rather than the literal; the literal is what
+/// means the same thing wherever the conditional reads it.
+fn constant_root_through_copies(graph: &SsaGraph, value: ValueId) -> Option<ValueId> {
+    let mut at = value;
+    for _ in 0..graph.values.len() {
+        if graph
+            .value(at)
+            .is_some_and(|value| value.var.constant_bits().is_some())
+        {
+            return Some(at);
+        }
+        let definition = graph.def_inst(at)?;
+        let inst = graph.inst(definition)?;
+        match &inst.payload {
+            crate::graph::InstPayload::Op(SSAOp::Copy { .. }) => {
+                at = *inst.inputs.first()?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Every merge of two values that one condition selects between.
 fn collect_two_way_selection_certificates(
     function: &SSAFunction,
@@ -8647,6 +8673,21 @@ fn collect_two_way_selection_certificates(
         let Some(output) = inst.output else {
             continue;
         };
+        // A merge that addresses memory is the object model's business, and a
+        // conditional spelling of an address is not what any of that machinery
+        // expects. Only a merge of ordinary values becomes a selection.
+        let addresses_memory = graph.use_sites(output).iter().any(|site| {
+            site.input_idx == 0
+                && matches!(
+                    graph.inst(site.inst).map(|inst| &inst.payload),
+                    Some(crate::graph::InstPayload::Op(
+                        SSAOp::Load { .. } | SSAOp::Store { .. }
+                    ))
+                )
+        });
+        if addresses_memory {
+            continue;
+        }
         let readable = graph.use_sites(output).iter().all(|site| {
             graph
                 .inst(site.inst)
@@ -8673,6 +8714,24 @@ fn collect_two_way_selection_certificates(
         else {
             continue;
         };
+        // The conditional reads one arm's value where the merge is rather than
+        // in the arm, so what it reads has to mean the same thing there. A
+        // literal does, wherever the arm spelled it; so does an object whose
+        // definition dominates the merge. An arm-local object does not.
+        let means_the_same = |value: ValueId| {
+            if constant_root_through_copies(graph, value).is_some() {
+                return true;
+            }
+            graph.def_inst(value).is_none_or(|definition| {
+                graph
+                    .inst(definition)
+                    .and_then(|inst| graph.block(inst.block))
+                    .is_some_and(|block| function.dominates(block.addr, merge))
+            })
+        };
+        if !means_the_same(inst.inputs[true_input]) || !means_the_same(inst.inputs[false_input]) {
+            continue;
+        }
         certificates.insert(
             inst.id,
             TwoWaySelectionCertificate {

@@ -25896,10 +25896,42 @@ branch. That is exactly what the evidence says.
 
 So the last piece is in normalization: a phi the certificate names as a
 selection must keep a single definition at the merge instead of being lowered
-to edge copies. The certificate that drives it is landed --
+to edge copies. That was built too, along with the other three consumers, and it
+moves the failure one layer further on:
+
+```
+native rendering refused: observation journal: MissingPlannedValue
+MissingPlannedValue(ValueId(48)) at 0x1000005c8:11
+```
+
+which is `bound_value` in placement finding no disposition at all for a value in
+the merge block -- `names.disposition_for_value` answering `None`, not
+`Refused`. A merge that is kept rather than materialized leaves a value the
+sealed plan's domain does not cover, and that is the next thing to establish:
+which value `48` is, and whether the plan should be giving a kept merge's output
+a disposition of its own.
+
+The certificate is landed and green on its own:
 `PreparedFunctionCertificates::two_way_selections`, computed where the CFG
-lives, naming the branch, the condition and which input is the taken edge -- and
-the rest of the arc is already written and verified against it: the import that
-spells `TermKind::Select` from the certificate, `Kind::Phi` admitted by
-`expression_renders_inline`, and the condition as the fourth kind of certified
-boundary read beside return values, call arguments and switch selectors.
+lives, naming the branch, the condition and which input is the taken edge, and
+restricted to merges that can actually be spelled -- each operand a literal
+through copies or a definition dominating the merge, every reader dominated by
+the merge, and no use as a memory address. The four consumers are written and
+each was verified to do its own job:
+
+* `normalize.rs` exempts a certified selection from materialization, which is
+  the one exemption the rule there admits and it is admitted on a certificate
+  rather than on the shape of the join, which is what the earlier attempt in
+  that comment got wrong;
+* `import.rs` spells `TermKind::Select` from the certificate, re-minting a
+  literal operand at the merge's width;
+* `expression_renders_inline` admits `Kind::Phi`, since the import decides
+  whether a canonical term exists at all;
+* `certified_boundary_read_values` names the condition, the fourth kind of
+  graph-less read beside return values, call arguments and switch selectors.
+
+Bisection through the three earlier failures is what got here, and each one is
+worth keeping: the machine arena's entity seal refuses a `Select` for a `Phi`
+instruction and is right to; the arms spell a materialized phi's expression, so
+the selection has to survive normalization; and the condition's read is the
+occurrence that lands in the wrong region when it does not.

@@ -3365,17 +3365,30 @@ impl LegacyObservationJournal {
     ) -> Result<CExpr, LegacyObservationJournalError> {
         self.value_slot(value)?;
         if !crate::placement::value_names_object_address(&self.plan, value, object) {
+            // Which of the two it is decides where to look: a value with no
+            // planned spelling at all, or one whose spelling is not this
+            // object's address.
+            r2il::refusal_evidence!(
+                "object-address",
+                "{value:?} does not name {object:?}: disposition {:?}",
+                self.plan.disposition(value)
+            );
             return Err(LegacyObservationJournalError::MissingPlannedValue(value));
         }
         let Some(StackObjectDisposition::Bound { binding }) =
             self.plan.stack_object_disposition(object)
         else {
+            r2il::refusal_evidence!(
+                "object-address",
+                "{object:?} is not bound: {:?}",
+                self.plan.stack_object_disposition(object)
+            );
             return Err(LegacyObservationJournalError::MissingPlannedValue(value));
         };
-        let symbol = self
-            .names
-            .symbol_for_binding(binding)
-            .ok_or(LegacyObservationJournalError::MissingPlannedValue(value))?;
+        let Some(symbol) = self.names.symbol_for_binding(binding) else {
+            r2il::refusal_evidence!("object-address", "{binding:?} has no symbol");
+            return Err(LegacyObservationJournalError::MissingPlannedValue(value));
+        };
         let is_array = self
             .plan
             .binding(binding)
