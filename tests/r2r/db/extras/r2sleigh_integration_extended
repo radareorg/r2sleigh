@@ -307,7 +307,7 @@ aaa
 s `afl~test_array_index_neg$[0]` >/dev/null
 s `afl~test_array_index_neg$[0]` >/dev/null
 s `afl~test_array_index_neg$[0]` >/dev/null
-pd:s | jq -Rs 'contains("test_array_index_neg") and (contains("[-idx]") or contains("[0 - idx]") or contains("[-arg2]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+pd:s | jq -Rs 'contains("test_array_index_neg") and (test("\\[(\\((u?int(8|16|32|64)_t)\\))*-\\(?(u?int(8|16|32|64)_t\\))?(idx|arg2)\\]") or contains("[0 - idx]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
