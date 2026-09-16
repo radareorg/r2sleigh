@@ -867,3 +867,17 @@ s `afl~test_piece$[0]` > /dev/null
 pd:s | jq -Rs '(contains("typedef uint64_t uint64_t;")|not) and contains("uint64_t dbg_test_piece(")'
 EOF_CMDS
 RUN
+NAME=dec_test_array_index_reloads_the_parameter_as_the_parameter
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~test_array_index$[0]` >/dev/null
+pd:s | jq -Rs 'contains("arr[idx]") and (contains("idx = idx;")|not)'
+EOF_CMDS
+RUN
+

@@ -1086,6 +1086,10 @@ pub enum CertifiedEntity {
         id: r2ssa::SemanticId,
         slot: u32,
         entry_values: BTreeSet<r2ssa::ValueId>,
+        /// Values a reload of this parameter's home slot proves to be the
+        /// parameter. The home is the parameter's own storage, so a register
+        /// the body fills from it is the parameter and not a copy of it.
+        home_reload_values: BTreeSet<r2ssa::ValueId>,
         carrier_width: u32,
         /// Exact logical type from the immutable source interface. Absence is
         /// unknown and must not be repaired from a merged renderer signature.
@@ -1147,7 +1151,17 @@ impl CertifiedEntity {
     /// is not a certificate of `ValueId` membership.
     pub fn coalescing_values(&self) -> Option<BTreeSet<r2ssa::ValueId>> {
         match self {
-            Self::Parameter { entry_values, .. } => Some(entry_values.clone()),
+            Self::Parameter {
+                entry_values,
+                home_reload_values,
+                ..
+            } => Some(
+                entry_values
+                    .iter()
+                    .chain(home_reload_values.iter())
+                    .copied()
+                    .collect(),
+            ),
             Self::LoopCarrier { members, .. } => {
                 Some(members.iter().map(|member| member.value).collect())
             }
@@ -1939,6 +1953,7 @@ impl SourceOwnedFunctionFacts {
         if let Some(param_slots) = param_slots.as_ref() {
             report.populate_certified_parameter_exprs(source, param_slots);
         }
+        report.populate_parameter_home_reloads();
         report.normalize_field_certificates_from_external_layout();
         if let Some(param_slots) = param_slots.as_ref() {
             report.populate_member_access_render_facts_from_field_certificates(source, param_slots);
@@ -3254,10 +3269,60 @@ impl FunctionFacts {
                     id,
                     slot,
                     entry_values: BTreeSet::from([entry_value]),
+                    home_reload_values: BTreeSet::new(),
                     carrier_width,
                     ty,
                 },
             );
+        }
+    }
+
+    /// Give each parameter the values its home slot's reloads produced.
+    ///
+    /// `CertifiedEntity::StackSlot` deliberately declines to coalesce a
+    /// parameter home's reloads -- "the parameter entity owns those values and
+    /// decides there" -- and until now the parameter entity never claimed them,
+    /// so every `-O0` body named one local for the slot and a second for the
+    /// register that ferried it back.
+    fn populate_parameter_home_reloads(&mut self) {
+        let mut by_parameter = BTreeMap::<u32, BTreeSet<r2ssa::ValueId>>::new();
+        for entity in self.render.certified_entities.values() {
+            let CertifiedEntity::StackSlot {
+                source_slot,
+                reload_values,
+                ..
+            } = entity
+            else {
+                continue;
+            };
+            let Some(index) = source_slot.and_then(|slot| match slot.role() {
+                r2ssa::SourceStackSlotRole::ParameterHome {
+                    parameter_index, ..
+                }
+                | r2ssa::SourceStackSlotRole::Parameter { parameter_index } => {
+                    Some(parameter_index)
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            by_parameter
+                .entry(index)
+                .or_default()
+                .extend(reload_values.iter().copied());
+        }
+        for entity in self.render.certified_entities.values_mut() {
+            let CertifiedEntity::Parameter {
+                slot,
+                home_reload_values,
+                ..
+            } = entity
+            else {
+                continue;
+            };
+            if let Some(reloads) = by_parameter.get(slot) {
+                home_reload_values.extend(reloads.iter().copied());
+            }
         }
     }
 
@@ -5282,11 +5347,16 @@ mod tests {
             id: r2ssa::SemanticId::Parameter(0),
             slot: 0,
             entry_values: entry_values.clone(),
+            home_reload_values: BTreeSet::from([r2ssa::ValueId(20)]),
             carrier_width: 8,
             ty: None,
         };
 
-        assert_eq!(entity.coalescing_values(), Some(entry_values));
+        // The home slot's reloads are the parameter too: the slot is its
+        // storage, so a register the body fills from it is not a copy.
+        let mut expected = entry_values;
+        expected.insert(r2ssa::ValueId(20));
+        assert_eq!(entity.coalescing_values(), Some(expected));
     }
 
     #[test]

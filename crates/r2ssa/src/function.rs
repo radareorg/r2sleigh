@@ -5130,7 +5130,7 @@ impl SSAFunction {
                 self.infer_switch_selector_var_from_address(src, depth + 1)
             }
             SSAOp::IntAdd { a, b, .. } | SSAOp::IntSub { a, b, .. } => {
-                self.infer_switch_selector_var_from_sum(a, b, depth + 1)
+                self.infer_switch_selector_var_from_address_sum(a, b, depth + 1)
             }
             SSAOp::IntMult { a, b, .. } => {
                 self.infer_switch_selector_var_from_scaled(a, b, depth + 1)
@@ -5146,6 +5146,27 @@ impl SSAFunction {
                 None
             }
         }
+    }
+
+    /// The index inside an address, where the address carries one.
+    ///
+    /// `base + literal` is a field or a table base and carries no index, so the
+    /// walk stays on the address side rather than dropping into the value walk:
+    /// `s->state` is `s + 4`, and following `s` as if it were an index made
+    /// bzip2's `switch (s->state)` render as `switch (s)` on a `DState *`.
+    fn infer_switch_selector_var_from_address_sum(
+        &self,
+        a: &SSAVar,
+        b: &SSAVar,
+        depth: u32,
+    ) -> Option<SSAVar> {
+        if Self::is_constish_switch_value(a) {
+            return self.infer_switch_selector_var_from_address(b, depth);
+        }
+        if Self::is_constish_switch_value(b) {
+            return self.infer_switch_selector_var_from_address(a, depth);
+        }
+        self.infer_switch_selector_var_from_sum(a, b, depth)
     }
 
     fn infer_switch_selector_var_from_sum(
@@ -6154,6 +6175,72 @@ mod tests {
         assert_eq!(direct_identity.target().space, CanonicalStorageSpace::Ram);
         assert_eq!(direct_identity.target().offset, slot);
         assert!(unique_call_site_identity(&[R2ILBlock::new(0x2000, 0x14)], &tail,).is_none());
+    }
+
+    #[test]
+    fn a_switch_on_a_field_selects_the_loaded_value_not_the_pointer() {
+        // `switch (s->state)` is a load at `s + 4` feeding a jump table. The
+        // address walk used to follow `s` as if it were the table's index, so
+        // the selector came out as the pointer and the rendering wrote
+        // `switch (s)` for a `DState *`.
+        let pointer = Varnode::register(0x10, 8);
+        let field_address = Varnode::unique(0x100, 8);
+        let state = Varnode::register(0x20, 8);
+        let scaled = Varnode::unique(0x200, 8);
+        let entry_address = Varnode::unique(0x300, 8);
+        let entry = Varnode::register(0x30, 8);
+        let pc = Varnode::register(0, 8);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: field_address.clone(),
+            a: pointer,
+            b: Varnode::constant(4, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: state.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: field_address,
+        });
+        block.push(R2ILOp::IntMult {
+            dst: scaled.clone(),
+            a: state.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: entry_address.clone(),
+            a: Varnode::constant(0x40_0000, 8),
+            b: scaled,
+        });
+        block.push(R2ILOp::Load {
+            dst: entry.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: entry_address,
+        });
+        block.push(R2ILOp::Copy {
+            dst: pc.clone(),
+            src: entry,
+        });
+        block.push(R2ILOp::BranchInd { target: pc });
+        let function =
+            SSAFunction::from_blocks_raw_no_arch(&[block]).expect("raw SSA should build");
+        let selector = function
+            .infer_switch_selector_var(0x1000)
+            .expect("the walk reaches a selector");
+        let read_state = function
+            .get_block(0x1000)
+            .expect("the fixture block")
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Load { dst, .. } if dst.size == state.size => Some(dst.name().to_string()),
+                _ => None,
+            })
+            .expect("the field load");
+        assert_eq!(
+            selector.name(),
+            read_state,
+            "the selector is the loaded state, not the pointer it was read through"
+        );
     }
 
     #[test]
