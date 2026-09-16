@@ -25472,3 +25472,47 @@ stack_m20 = (stack_m20 ^ (uint32_t)tmp_25600_2) * tmp_2a000_5;
 obligations to 61. The compile census over `zlib-minigzip` is unchanged in both
 directions -- aarch64 O0 177/177 built, x86-64 O0 119/125 built, the same six
 failures and the same rendering counts as the integration branch.
+
+### Promotion through the frame pointer, and the cell it still refuses
+
+`promote_private_stack_slots` only ever saw leaf functions. Its escape rule
+treats anything derived from the stack pointer that lands in a register as a
+frame address leaving the block, and the prologue's `mov x29, sp` is exactly
+that, so every function that calls anything declined. Two faults were in the
+way and both are fixed on `arch/promote-frame-pointer`:
+
+* The prologue's own `sub sp, sp, #N` pushed the **stack pointer itself** into
+  the derived set, so the epilogue's `CARRY(sp, #N)` read a "frame address it
+  does not access through". It only ever showed up in single-block functions,
+  because the derived set is per block.
+* The frame pointer is now recognised -- the register the entry block copies
+  from a stack-pointer-derived value after the prologue -- and an address
+  through it resolves to the same slot, in the stack pointer's coordinate, via
+  `frame_displacement`. It is a base only after the op that establishes it,
+  because before that it still holds the caller's, which the prologue saves like
+  any other callee-saved register, and writes of it are held to the same
+  epilogue discipline as writes of the stack pointer.
+
+`xxhash32` at arm64 -O0 then promotes thirteen slots instead of none and refuses
+with `unprovable_execution_order`:
+
+```
+binding=BindingId(60) occurrences=[
+  (0x100000d08, RegionId(7),  (Block, 0x100000c4c), order 138, read),
+  (0x100000d08, RegionId(11), (Block, 0x100000d08), order 280, write)]
+```
+
+Both occurrences are instructions of block `0x100000d08` -- `InstId(585)` writes
+`tmp:12180_12` and `InstId(589)` reads it -- but the read's text landed in the
+block region for `0x100000c4c` and the write's in the one for `0x100000d08`.
+`occurrence_regions_have_proven_order` accepts only nesting or exclusion, and
+these two are sequenced siblings, so it refuses. The question to answer next is
+which pass put a use of a `0x100000d08` instruction into `0x100000c4c`'s text --
+an inlined read that moved, or a duplicated tail -- because that decides whether
+the predicate is too strong or the attribution is wrong. The evidence now names
+each region's kind and entry, which is what turned this from a pair of integers
+into a question.
+
+`alloc_and_copy` is not this: its five frame places are all named by the source,
+so promotion correctly leaves them alone, and `return (char*)stack_m24;` instead
+of `return buf;` is the returning-tail duplication that is still owed.

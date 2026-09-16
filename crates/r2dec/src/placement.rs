@@ -3960,6 +3960,11 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
                     .map(|occurrence| (
                         occurrence.block,
                         occurrence.region,
+                        // Which region an occurrence landed in is the whole
+                        // question here, and its number alone names nothing.
+                        regions
+                            .node(occurrence.region)
+                            .map(|node| (node.kind(), node.entry())),
                         occurrence.order,
                         matches!(occurrence.kind, OccurrenceKind::Write { .. })
                             .then_some("write")
