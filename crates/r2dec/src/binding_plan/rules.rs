@@ -1354,6 +1354,7 @@ fn inlinable_core(
     // A read is a read only if what it feeds reaches the page. At -O0 and again
     // under x86-64's flag lanes a value carries several graph readers and one
     // rendered one, and counting the graph's is what keeps it named.
+
     let renders_nothing = |inst: InstId| {
         graph
             .inst(inst)
@@ -1545,7 +1546,30 @@ fn inlinable_core(
                     .count(),
                 use_sites
                     .iter()
-                    .map(|site| format!("i{}#{}", site.inst.0, site.input_idx))
+                    .map(|site| {
+                        // Which operation reads it, not only where: a reader
+                        // that renders nothing looks the same as one that does
+                        // until the operation is named.
+                        let out = graph.inst(site.inst).and_then(|inst| inst.output);
+                        format!(
+                            "i{}#{}={}->{}[{} uses]",
+                            site.inst.0,
+                            site.input_idx,
+                            graph.inst(site.inst).map_or("-".to_string(), |inst| {
+                                match &inst.payload {
+                                    r2ssa::InstPayload::Op(op) => format!("{op:?}")
+                                        .split_whitespace()
+                                        .next()
+                                        .unwrap_or("Op")
+                                        .to_string(),
+                                    r2ssa::InstPayload::Phi { .. } => "Phi".to_string(),
+                                }
+                            }),
+                            out.and_then(|out| graph.value(out))
+                                .map_or("-".to_string(), |v| v.var.display_name().to_string()),
+                            out.map_or(0, |out| graph.use_sites(out).len())
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" "),
                 boundary_readers

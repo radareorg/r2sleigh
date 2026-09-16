@@ -25605,3 +25605,41 @@ its returned value a computed definition and a second reader, and the shadow
 test records that both its values are inline. Corpus 60/60 raw and
 differential, r2r unchanged, and the compile census over `zlib-minigzip` is
 unmoved in both directions.
+
+### Why `[-idx]` is still two statements, and what it would take
+
+`test_array_index_neg` renders
+
+```c
+int32_t tmp_3e580_1 = (int32_t)-(uint32_t)idx;
+uint32_t tmp_25180_1 = (uint32_t)arr[(int64_t)(int32_t)tmp_3e580_1];
+return (int32_t)tmp_25180_1;
+```
+
+where the r2r test wants `arr[-idx]`. The inline trace now names each reader's
+operation, output and use count, and that says why in one line:
+
+```
+tmp:3e580_1 stays bound: 2 of 4 readers rendered; root Arithmetic;
+  sites [i19#0=IntSLess->TMPNG_1[1 uses] i27#0=IntSExt->tmp:5f80_1[1 uses]]
+```
+
+The `IntSExt` is the subscript. The `IntSLess` is a flag computation whose
+output `TMPNG_1` is read once, by the copy into the architectural `NG`, which
+nothing reads. So the chain reaches the page nowhere, but `dead_readers` only
+holds values that are never read at all, so the first link still counts as a
+rendered reader and the negation keeps an object of its own.
+
+Carrying deadness transitively -- a value renders nothing when every reader's
+own output renders nothing, with an effect operation ending the walk -- was
+tried and reproduces the failure this project has already met twice:
+`live-value-producer ... unaccounted`. The plan's idea of what reaches the page
+then differs from the ledger's, and the ledger is what must account for every
+cell. So it is not a change to the inlining rule alone: the journal's
+`unrendered` set and the plan's reader count have to be one derivation, computed
+once and shared, which is the same "one owner per decision" the expression
+elaborator plan asks for.
+
+The remaining `return (int32_t)tmp_25180_1;` is a second question: a `Load`'s
+value is refused inline by `expression_renders_inline`, which is one of the four
+independent answers to "what can the renderer spell" that plan A3 collapses.
