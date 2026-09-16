@@ -263,7 +263,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~check_secret$[0]` > /dev/null
-pd:s | jq -Rs 'contains("if") and contains("return")'
+pd:s | jq -Rs '(contains("if") or contains("?")) and contains("return")'
 EOF_CMDS
 RUN
 
