@@ -25151,3 +25151,49 @@ The second is the one that matches how everything else here is decided, and it
 is what the five open `alloc_and_copy` / `check_secret` / `process_string`
 assertions are waiting for. The experiment is reverted; this note is what it
 bought.
+
+### `warnx` counts its format, `ioctl` still cannot
+
+A variadic callsite's argument count comes from counting conversion specifiers
+in its format string, and the format parameter was bound only when radare2's
+prototype named it exactly `format`. radare2 names it `fmt` for the err/warn
+family, so `warnx(const char *fmt, ...)` and `err`/`errx` beside it could prove
+no count and refused the whole calling function -- which is what `/bin/ls`'s
+`main` did.
+
+The rule now accepts `format`, `fmt`, `format_string` and `fmtstr`, with or
+without leading underscores, and requires the parameter to spell a `char`
+pointer. The name is still required rather than "the last named parameter of a
+variadic prototype", because `execl(const char *path, const char *arg, ...)` is
+exactly that shape and counting specifiers from `arg` would be nonsense;
+`a_format_parameter_is_named_and_is_a_char_pointer` states both halves.
+
+What is left at `/bin/ls` is `ioctl(int fd, unsigned long request, ...)`, which
+has no format parameter at all and never will. Its argument count has to come
+from the callsite -- which registers the call actually reads -- and that is a
+different proof from counting specifiers.
+
+### The taint view's calls name their target and nothing else
+
+`taint_vuln_memcpy_call_sinks_include_arg_regs` wants a `Call` sink hit whose
+tainted variables include an argument register. The sink hits are there and the
+calls are found; every one names only `ram:1000024xx_0`, the call target.
+
+`TaintAnalysis::sink_sources_for_op` already extends a call's sources with
+`collect_call_arg_vars`, which reads `argument_values` off the prepared
+callsite certificate -- the same authority `pd:s` renders a call from, and
+deliberately not a second ABI answerer. The endpoint that serves
+`a:sla.debug.taint` builds only `SSAFunction::from_blocks_with_arch`, so there
+is no artifact and the extension never runs.
+
+Building one with `SsaArtifact::for_decompile` is not enough, and measuring that
+is what this note is worth: the certificate then exists and declares **zero**
+argument values. `exact_register_call_arguments` runs only for a *complete*
+boundary, and the convention fallback that completes a boundary without an
+interface needs a `machine_context` -- which the FFI taint endpoint never
+receives, because the trusted snapshot reaches the engine through the decompile
+path and nothing else.
+
+So the fix is the plumbing the two `TaintAnalysis::new` comments already
+describe: give the taint endpoint the snapshot, not a different way to guess
+arguments. Both call sites say so in as many words, and both are right.
