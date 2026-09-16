@@ -1,13 +1,12 @@
 uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 220 source obligations: 189 rendered, 31 elided, 0 refused; 59 statements rendered */
+    /* r2dec proof: no individual construct is marked; 220 source obligations: 189 rendered, 31 elided, 0 refused; 57 statements rendered */
     {
         uint64_t RDX_0_2;
         uint64_t RDX_8;
         RDX_0_2 = (uint64_t)(uint32_t)EDX_0;
-        uint8_t CF_1 = RSI_0 < 4;
         RDX_8 = RDX_0_2;
-        if (!CF_1) {
+        if (RSI_0 >= 4) {
             uint64_t RCX_2;
             uint64_t RAX_1;
             RCX_2 = RSI_0 >> 2;
@@ -37,9 +36,8 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 RAX_1 = (uint64_t)0;
             }
             {
-                uint8_t ZF_15 = (uint8_t)((uint8_t)RSI_0 & 4) == 0;
                 RDX_8 = RDX_0_2;
-                if (!ZF_15) {
+                if ((uint8_t)((uint8_t)RSI_0 & 4) != 0) {
                     int32_t tmp_11f00_5 = (int32_t)*(uint32_t*)(RAX_1 + RDI_0);
                     uint32_t tmp_lane_100000d69_6_25_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffffcc9e2d51U);
                     uint32_t tmp_lane_100000d69_2b_2c_1 = (uint32_t)RDX_0_2 ^ (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000d69_6_25_1 << 15 | tmp_lane_100000d69_6_25_1 >> 17) * 0x1b873593);

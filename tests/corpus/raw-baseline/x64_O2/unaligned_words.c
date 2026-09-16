@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 159 source obligations: 124 rendered, 35 elided, 0 refused; 55 statements rendered */
+    /* r2dec proof: no individual construct is marked; 159 source obligations: 124 rendered, 35 elided, 0 refused; 51 statements rendered */
     {
         uint64_t RAX_1;
         uint64_t RCX_1;
@@ -14,10 +14,9 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                 uint64_t RCX_3 = RDX_1 + 7;
                 uint64_t tmp_3f080_2 = RDX_1 + 15;
                 uint64_t RDX_4 = RCX_3;
-                uint8_t tmp_12900_2 = tmp_3f080_2 <= RSI_0;
                 RDX_1 = RDX_4;
                 RCX_1 = RCX_3;
-                if (!tmp_12900_2) {
+                if (RSI_0 < tmp_3f080_2) {
                     break;
                 }
             }
@@ -27,11 +26,9 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
         {
             uint64_t RAX_14;
             uint64_t RDX_6 = RCX_1;
-            uint8_t CF_10 = RDX_6 < RSI_0;
             uint64_t RDX_7 = RDX_6 - RSI_0;
-            uint8_t tmp_12700_2 = !CF_10;
             RAX_14 = RAX_1;
-            if (!tmp_12700_2) {
+            if (RDX_6 < RSI_0) {
                 uint64_t R8_4;
                 uint32_t tmp_lane_100001392_e_12_1 = (uint32_t)RSI_0 - (uint32_t)RCX_1 & 3;
                 uint64_t R8_3 = (uint64_t)(uint32_t)tmp_lane_100001392_e_12_1;
@@ -51,9 +48,8 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                 }
                 {
                     uint64_t tmp_3ea80_2 = RDX_7;
-                    uint8_t tmp_12a80_1 = (uint64_t)-0x4 < tmp_3ea80_2;
                     RAX_14 = RAX_1;
-                    if (!tmp_12a80_1) {
+                    if ((uint64_t)-0x4 >= tmp_3ea80_2) {
                         for (; ; ) {
                             uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RCX_1];
                             uint8_t tmp_11e00_6 = ((uint8_t*)RDI_0)[RCX_1 + 1];

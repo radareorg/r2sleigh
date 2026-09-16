@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 314 source obligations: 231 rendered, 83 elided, 0 refused; 80 statements rendered */
+    /* r2dec proof: no individual construct is marked; 314 source obligations: 231 rendered, 83 elided, 0 refused; 70 statements rendered */
     {
         uint64_t stack_m56;
         uint32_t stack_m40;
@@ -23,21 +23,16 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         X8_3 = stack_m32;
         uint64_t tmp_42488_1 = X8_3 / 4;
         stack_m56 = 0 ? 0 : tmp_42488_1;
-        for (stack_m64 = 0; ; stack_m64++) {
-            uint8_t TMPCY_3 = stack_m56 <= stack_m64;
-            if (TMPCY_3) {
-                break;
-            } else {
-                uint32_t tmp_25180_2 = ((uint32_t*)stack_m24)[stack_m64];
-                uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(stack_m92 * tmp_25180_2), 15);
-                uint32_t tmp_24d00_3 = stack_m40;
-                stack_m40 = tmp_24d00_3 ^ stack_m88 * (uint32_t)X0_3;
-                uint32_t tmp_24d00_4 = stack_m40;
-                uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)tmp_24d00_4, 13);
-                stack_m40 = (uint32_t)X0_5;
-                uint32_t tmp_24d00_5 = stack_m40;
-                stack_m40 = tmp_24d00_5 * 5 - 0x19ab949c;
-            }
+        for (stack_m64 = 0; stack_m64 < stack_m56; stack_m64++) {
+            uint32_t tmp_25180_2 = ((uint32_t*)stack_m24)[stack_m64];
+            uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(stack_m92 * tmp_25180_2), 15);
+            uint32_t tmp_24d00_3 = stack_m40;
+            stack_m40 = tmp_24d00_3 ^ stack_m88 * (uint32_t)X0_3;
+            uint32_t tmp_24d00_4 = stack_m40;
+            uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)tmp_24d00_4, 13);
+            stack_m40 = (uint32_t)X0_5;
+            uint32_t tmp_24d00_5 = stack_m40;
+            stack_m40 = tmp_24d00_5 * 5 - 0x19ab949c;
         }
         {
             uint32_t stack_m84_3;
@@ -46,18 +41,12 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             X8_3 = stack_m32;
             X8_3 &= 3;
             uint64_t stack_m104 = X8_3;
-            uint8_t TMPZR_7 = X8_3 == 1;
-            uint8_t ZR_3 = TMPZR_7;
             stack_m84_3 = stack_m84;
-            if (!ZR_3) {
+            if (X8_3 != 1) {
                 uint32_t stack_m84_2;
-                uint8_t TMPZR_8 = stack_m104 == 2;
-                uint8_t ZR_4 = TMPZR_8;
                 stack_m84_2 = stack_m84;
-                if (!ZR_4) {
-                    uint8_t TMPZR_9 = stack_m104 == 3;
-                    uint8_t tmp_a00_1 = !TMPZR_9;
-                    if (tmp_a00_1) {
+                if (stack_m104 != 2) {
+                    if (stack_m104 != 3) {
                         goto L3;
                     } else {
                         uint8_t tmp_25500_1 = *(uint8_t*)((uint64_t)stack_m80 + 2);
@@ -78,9 +67,8 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             {
 L3: ;
                 X8_3 = stack_m32;
-                uint64_t X9_24 = X8_3;
                 uint32_t tmp_24d00_8 = stack_m40;
-                stack_m40 = (uint32_t)X9_24 ^ tmp_24d00_8;
+                stack_m40 = (uint32_t)X8_3 ^ tmp_24d00_8;
                 uint32_t tmp_24d00_9 = stack_m40;
                 uint32_t tmp_24d00_10 = stack_m40;
                 stack_m40 = tmp_24d00_9 >> 16 ^ tmp_24d00_10;

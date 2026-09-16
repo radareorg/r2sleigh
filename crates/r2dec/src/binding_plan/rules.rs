@@ -1192,12 +1192,16 @@ pub(super) fn rewrite_inlining_partition(
         .map_err(BindingPlanBuildError::Canonicalisation)?;
     crate::stage_timing::mark("plan_seed");
     let unrendered = unrendered_defined_values(source, projection, &seed_canonical);
+    // Built once from the two union sources that do not depend on inlinability,
+    // so the fold guard can ask about C objects before the bindings exist.
+    let pre_partition = super::construction::coalescing_pre_partition(source_owned);
     let conservative = inlinable_core(
         source_owned,
         projection,
         &seed_canonical,
         &BTreeSet::new(),
         &unrendered,
+        &pre_partition,
     );
     crate::stage_timing::mark("plan_inlinable");
     let eligible = component_eligible_with(source_owned, projection, &conservative, &unrendered)?;
@@ -1219,6 +1223,7 @@ pub(super) fn rewrite_inlining_partition(
             &seed_canonical,
             &admitted,
             &unrendered,
+            &pre_partition,
         )
     };
     // The seed's term arena interns every term in the function, and the pass
@@ -1335,6 +1340,7 @@ fn inlinable_core(
     canonical: &r2rewrite::CanonicalRoots,
     admitted: &BTreeSet<ValueId>,
     unrendered: &BTreeSet<ValueId>,
+    pre_partition: &[u32],
 ) -> BTreeSet<ValueId> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -1402,6 +1408,13 @@ fn inlinable_core(
         return BTreeSet::new();
     };
     let elided_reads = cells.read_elided_instructions;
+    // A use the certificates elide is not a read the text performs, so there is
+    // no occurrence for a folded expression to move into. The switch is the
+    // case that matters: its computed target is expressed by the case topology,
+    // so the `BranchInd` renders while the operand it dispatches through is
+    // spelled nowhere, and folding the jump-table address into it left that
+    // address's producer obligation owed by nobody.
+    let elided_uses = cells.uses;
     // A return is the second kind the renderer consumes from an inline
     // expression: it spells the certified value and records a certified read
     // only when that value is bound. Requiring a binding here left a promoted
@@ -1426,6 +1439,14 @@ fn inlinable_core(
     // value at a time. `R2SLEIGH_TRACE_INLINE=<display name>` or `=all`.
     let trace = crate::debug::traced_inline_name();
     let mut inlinable = BTreeSet::new();
+    // The values each fold candidate's expression reads directly, and the
+    // candidates whose hazard is still to be decided. The hazard cannot be
+    // decided in this loop: a leaf that is itself folded contributes what *it*
+    // reads, and the leaf may be a later value, so the answer is a closure over
+    // the whole candidate set rather than something a single pass can carry.
+    let mut direct_reads = BTreeMap::<ValueId, Vec<ValueId>>::new();
+    let mut hazard_candidates = Vec::<(ValueId, r2ssa::InstId, r2ssa::InstId)>::new();
+    let group_of = |value: ValueId| pre_partition.get(value.0 as usize).copied();
     for value in &graph.values {
         let traced = trace.is_some_and(|want| {
             want == "all" || value.var.display_name().eq_ignore_ascii_case(want)
@@ -1679,7 +1700,7 @@ fn inlinable_core(
         // decompilation at all, which is what `murmur3_32` and `xxhash32` did.
         if use_sites
             .iter()
-            .any(|site| elided_reads.contains(&site.inst))
+            .any(|site| elided_reads.contains(&site.inst) || elided_uses.contains_key(site))
             || boundary_readers
                 .iter()
                 .any(|inst| elided_reads.contains(inst))
@@ -1691,6 +1712,7 @@ fn inlinable_core(
             // Nothing is being moved past anything. The tests below ask whether
             // a computation stays correct where it lands, and a literal is the
             // same in both places.
+            direct_reads.insert(value.id, Vec::new());
             inlinable.insert(value.id);
             continue;
         }
@@ -1720,12 +1742,18 @@ fn inlinable_core(
             rejected("the one reader is in another block or does not follow the definition");
             continue;
         }
-        // Every location the *rendered* expression reads, not only the ones the
+        // Every object the *rendered* expression reads, not only the ones the
         // defining instruction lists. A machine expression is a tree over the
         // arena, so moving it moves every leaf in it, and a leaf can name a
-        // location the instruction itself never mentions. Checking only the
+        // read the instruction itself never mentions. Checking only the
         // instruction's inputs let three corpus cells compute the wrong answer.
-        let mut read_locations = BTreeSet::new();
+        //
+        // The object is the pre-partition's group, not the machine location.
+        // The location is too coarse -- every version of a register shares one,
+        // so a fresh reload refuses a fold that is stable -- and the storage
+        // span alone is too fine, because the plan coalesces spans that a
+        // certificate joins into one C object.
+        let mut reads = BTreeSet::<ValueId>::new();
         let source_reads_machine_location = |source: ValueId| {
             let storage_is_lowering_temporary = graph.value(source).is_some_and(|value| {
                 value
@@ -1752,84 +1780,151 @@ fn inlinable_core(
             let Some(expr) = projection.expr(node) else {
                 continue;
             };
-            if let r2ssa::MachineExprKind::Source { binding, storage } = expr.kind() {
+            if let r2ssa::MachineExprKind::Source { binding, .. } = expr.kind() {
                 // A source whose own producer has no inline C form is read
                 // through its planned binding, not through the machine
                 // location that once carried it.  A later reuse of a Sleigh
                 // Unique slot therefore cannot change that C object.  This is
                 // the reload/copy shape in x64 -O0 djb2: the load remains a
                 // statement, while its register copy may move past reuse of
-                // the load temporary.  Keep the location hazard for sources
-                // that can themselves expand, because their ultimate read may
-                // still move with this expression.
+                // the load temporary.  Keep the hazard for sources that can
+                // themselves expand, because their ultimate read may still
+                // move with this expression.
                 if source_reads_machine_location(binding.value()) {
-                    if let Some(storage) = storage {
-                        read_locations.insert(storage.location());
-                    } else if let Some(storage) = graph
-                        .value(binding.value())
-                        .and_then(|v| v.canonical_storage)
-                    {
-                        read_locations.insert(storage.location());
-                    }
+                    reads.insert(binding.value());
                 }
             }
             pending.extend(expr.kind().children());
         }
-        read_locations.extend(
+        reads.extend(
             def_inst
                 .inputs
                 .iter()
-                .filter(|input| source_reads_machine_location(**input))
-                .filter_map(|i| graph.value(*i))
-                .filter_map(|v| v.canonical_storage)
-                .map(r2ssa::CanonicalStorageId::location),
+                .copied()
+                .filter(|input| source_reads_machine_location(*input)),
         );
+        direct_reads.insert(value.id, reads.into_iter().collect());
+        hazard_candidates.push((value.id, definition, reader));
+    }
+
+    // The objects each candidate's *rendered* expression reads, closed over the
+    // candidates it reads through. A leaf the plan binds is read as its own
+    // object; a leaf the plan folds has no object, so reading it is reading
+    // whatever that leaf's expression reads, however far down that goes.
+    //
+    // Closing over every candidate rather than over the values that survive
+    // below is deliberate and is what makes this answerable at all. The set
+    // only ever shrinks from here, and a smaller folded set means shorter
+    // expansions and fewer reads, so a hazard computed from the candidates
+    // covers the hazard of any subset. There is no fixpoint to iterate.
+    let mut hazard = BTreeMap::<ValueId, BTreeSet<u32>>::new();
+    let mut visited = BTreeSet::<ValueId>::new();
+    for root in direct_reads.keys().copied().collect::<Vec<_>>() {
+        if hazard.contains_key(&root) {
+            continue;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((value, expanded)) = stack.pop() {
+            if expanded {
+                let mut groups = BTreeSet::new();
+                for read in direct_reads.get(&value).into_iter().flatten() {
+                    match hazard.get(read) {
+                        Some(closed) => groups.extend(closed.iter().copied()),
+                        // Either a bound leaf, which is read as its own object,
+                        // or one still on the stack: a cycle through folded
+                        // values cannot be spelled, and its object is the
+                        // conservative answer for it.
+                        None => groups.extend(group_of(*read)),
+                    }
+                }
+                hazard.insert(value, groups);
+                continue;
+            }
+            if hazard.contains_key(&value) || !visited.insert(value) {
+                continue;
+            }
+            stack.push((value, true));
+            for read in direct_reads.get(&value).into_iter().flatten() {
+                if direct_reads.contains_key(read) && !hazard.contains_key(read) {
+                    stack.push((*read, false));
+                }
+            }
+        }
+    }
+
+    for (value, definition, reader) in hazard_candidates {
+        let read_groups = hazard.get(&value).cloned().unwrap_or_default();
+        let (Some(def_inst), Some(use_inst)) = (graph.inst(definition), graph.inst(reader)) else {
+            continue;
+        };
         // Only this block's operations can sit between the definition and the
         // reader, so only this block's are read. Asking every operation in the
         // function was the same answer at the cost of the whole graph, once per
         // candidate value.
-        let rewritten = graph
+        let rewritten_by = graph
             .block(def_inst.block)
             .into_iter()
             .flat_map(|block| block.insts.iter())
             .filter_map(|inst| graph.inst(*inst))
-            .any(|inst| {
+            .find(|inst| {
                 inst.ordinal > def_inst.ordinal
                     && inst.ordinal < use_inst.ordinal
+                    // A write nothing observes prints no statement, so it
+                    // cannot disturb a read moved past it.
+                    && !renders_nothing(inst.id)
                     && inst
                         .output
-                        .and_then(|o| graph.value(o))
-                        .and_then(|v| v.canonical_storage)
-                        .is_some_and(|s| read_locations.contains(&s.location()))
+                        .and_then(group_of)
+                        .is_some_and(|group| read_groups.contains(&group))
             });
+        let rewritten = rewritten_by.is_some();
         // A merge this block feeds is copied to its carrier at the block's end,
         // so a read moved to the terminator reads the next iteration's value:
         // `ZF = R8 == 1` folded into the branch below `R8 = R8 - 1` ends the
         // loop one turn late.
         let carried = !rewritten
-            && (transfers_control(use_inst)
-                && graph.insts.iter().any(|inst| {
-                    matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
-                        && inst.inputs.iter().any(|input| {
-                            graph
-                                .def_inst(*input)
-                                .and_then(|def| graph.inst(def))
-                                .is_some_and(|def| def.block == def_inst.block)
-                        })
-                        && inst
-                            .output
-                            .and_then(|o| graph.value(o))
-                            .and_then(|v| v.canonical_storage)
-                            .is_some_and(|s| read_locations.contains(&s.location()))
-                }));
-        if rewritten {
-            rejected("a location the expression reads is written between definition and reader");
-        } else if carried {
-            rejected("a merge this block feeds carries a location the expression reads");
-        } else {
-            inlinable.insert(value.id);
+            && transfers_control(use_inst)
+            && graph.insts.iter().any(|inst| {
+                matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
+                    && inst.inputs.iter().any(|input| {
+                        graph
+                            .def_inst(*input)
+                            .and_then(|def| graph.inst(def))
+                            .is_some_and(|def| def.block == def_inst.block)
+                    })
+                    && inst
+                        .output
+                        .and_then(group_of)
+                        .is_some_and(|group| read_groups.contains(&group))
+            });
+        let traced = trace.is_some_and(|want| {
+            want == "all"
+                || graph
+                    .value(value)
+                    .is_some_and(|v| v.var.display_name().eq_ignore_ascii_case(want))
+        });
+        if traced {
+            let name = graph
+                .value(value)
+                .map(|v| v.var.display_name().to_string())
+                .unwrap_or_default();
+            let verdict = if rewritten {
+                "stays bound: an object the expression reads is written between definition and reader"
+            } else if carried {
+                "stays bound: a merge this block feeds carries an object the expression reads"
+            } else {
+                "folds"
+            };
+            eprintln!(
+                "INLINE {name} {value:?} {verdict}; reads {read_groups:?} written_by {:?}",
+                rewritten_by.map(|inst| (inst.id, inst.output))
+            );
+        }
+        if !rewritten && !carried {
+            inlinable.insert(value);
         }
     }
+
     inlinable
 }
 

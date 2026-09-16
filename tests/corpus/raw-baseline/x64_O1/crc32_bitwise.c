@@ -1,6 +1,6 @@
 uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 66 source obligations: 41 rendered, 25 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 66 source obligations: 41 rendered, 25 elided, 0 refused; 24 statements rendered */
     if (RSI_0 == 0) {
         return 0;
     } else {
@@ -19,8 +19,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
                 RAX_1 = (uint64_t)(uint32_t)tmp_lane_100000740_2d_17_1;
                 uint32_t tmp_lane_100000740_36_1a_1 = (uint32_t)RDX_5 - 1;
                 RDX_5 = (uint64_t)(uint32_t)tmp_lane_100000740_36_1a_1;
-                uint8_t tmp_12800_3 = tmp_lane_100000740_36_1a_1 != 0;
-                if (!tmp_12800_3) {
+                if (tmp_lane_100000740_36_1a_1 == 0) {
                     break;
                 }
             }

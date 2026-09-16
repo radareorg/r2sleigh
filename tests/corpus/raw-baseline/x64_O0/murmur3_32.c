@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 379 source obligations: 261 rendered, 118 elided, 0 refused; 98 statements rendered */
+    /* r2dec proof: no individual construct is marked; 379 source obligations: 261 rendered, 118 elided, 0 refused; 95 statements rendered */
     {
         uint64_t stack_m56;
         uint64_t stack_m48;
@@ -53,15 +53,12 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             tmp_11f80_1 = stack_m24;
             uint64_t RAX_21 = (uint64_t)(uint32_t)((uint32_t)tmp_11f80_1 & 3);
             stack_m88 = RAX_21;
-            uint8_t ZF_10 = RAX_21 == 1;
-            if (!ZF_10) {
+            if (RAX_21 != 1) {
                 uint64_t tmp_11f80_11;
                 tmp_11f80_11 = stack_m88;
-                uint8_t ZF_11 = tmp_11f80_11 == 2;
-                if (!ZF_11) {
+                if (tmp_11f80_11 != 2) {
                     tmp_11f80_11 = stack_m88;
-                    uint8_t tmp_12800_1 = tmp_11f80_11 != 3;
-                    if (tmp_12800_1) {
+                    if (tmp_11f80_11 != 3) {
                         goto L3;
                     } else {
                         tmp_11f80_13 = stack_m72;

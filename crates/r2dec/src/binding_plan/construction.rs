@@ -232,6 +232,80 @@ fn bind_stack_object(
     Ok(binding)
 }
 
+/// The coarsest partition of values that no inlining decision can refine.
+///
+/// The plan merges values into one C object from two sources -- a shared
+/// storage span and a certified entity -- and then declines a merge that would
+/// put two values one instruction reads together into the same object. Neither
+/// union source depends on inlinability; only the eligibility filter and the
+/// decline do, and both of those only ever make the partition finer. The unions
+/// alone therefore give a partition strictly coarser than the bindings the plan
+/// will build, and it is available before the inlining pass runs.
+///
+/// That is what the fold guard needs. Asking a coarser partition refuses folds
+/// that would have been safe; asking a finer one permits folds that are not,
+/// which is what the storage span alone did -- two runs the plan later
+/// coalesces are one object to the rendered text, and a write to either is a
+/// write the folded expression would see.
+pub(super) fn coalescing_pre_partition(source_owned: &SourceOwnedFunctionFacts) -> Vec<u32> {
+    fn find(parent: &mut [u32], mut value: u32) -> u32 {
+        while parent[value as usize] != value {
+            let grandparent = parent[parent[value as usize] as usize];
+            parent[value as usize] = grandparent;
+            value = grandparent;
+        }
+        value
+    }
+
+    fn union(parent: &mut [u32], left: u32, right: u32) {
+        let left = find(parent, left);
+        let right = find(parent, right);
+        if left != right {
+            parent[left.max(right) as usize] = left.min(right);
+        }
+    }
+
+    let source = source_owned.source();
+    let value_count = source.graph().values.len();
+    let mut parent = (0..value_count as u32).collect::<Vec<u32>>();
+
+    let mut first_of_span = BTreeMap::<SpanId, u32>::new();
+    for value in source.graph().values.iter() {
+        let Some(span) = source.storage_spans().span_of(value.id) else {
+            continue;
+        };
+        match first_of_span.entry(span) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(value.id.0);
+            }
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                union(&mut parent, *slot.get(), value.id.0);
+            }
+        }
+    }
+
+    if let Some(render) = source_owned.report().render() {
+        for entity in render.certified_entities.values() {
+            let Some(values) = entity.coalescing_values() else {
+                continue;
+            };
+            let mut members = values
+                .into_iter()
+                .filter(|value| (value.0 as usize) < value_count);
+            let Some(first) = members.next() else {
+                continue;
+            };
+            for value in members {
+                union(&mut parent, first.0, value.0);
+            }
+        }
+    }
+
+    (0..value_count as u32)
+        .map(|value| find(&mut parent, value))
+        .collect()
+}
+
 pub(super) fn binding_components_with(
     source_owned: &SourceOwnedFunctionFacts,
     eligible: &[bool],

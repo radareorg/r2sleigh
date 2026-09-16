@@ -2,7 +2,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 565 source obligations: 389 rendered, 176 elided, 0 refused; 135 statements rendered */
+    /* r2dec proof: no individual construct is marked; 565 source obligations: 389 rendered, 176 elided, 0 refused; 130 statements rendered */
     {
         uint32_t stack_m44;
         uint64_t stack_m40;
@@ -74,8 +74,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                     stack_m16 = tmp_11f80_1 + 4;
                     tmp_11f80_1 = stack_m16;
                     uint64_t tmp_3f800_2 = stack_m56;
-                    uint8_t tmp_12900_2 = tmp_11f80_1 <= tmp_3f800_2;
-                    if (!tmp_12900_2) {
+                    if (tmp_3f800_2 < tmp_11f80_1) {
                         break;
                     }
                 }
@@ -86,14 +85,11 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                     uint64_t RAX_43 = (uint64_t)sym__rotl32((uint32_t)stack_m60, 1);
                     stack_m92 = (uint32_t)RAX_43;
                     uint64_t RAX_44 = (uint64_t)sym__rotl32((uint32_t)stack_m64, 7);
-                    uint32_t tmp_lane_100000c70_13_44_1 = (uint32_t)RAX_44;
-                    stack_m88 = stack_m92 + tmp_lane_100000c70_13_44_1;
+                    stack_m88 = (uint32_t)RAX_44 + stack_m92;
                     uint64_t RAX_47 = (uint64_t)sym__rotl32((uint32_t)stack_m68, 12);
-                    uint32_t tmp_lane_100000c70_2e_4d_1 = (uint32_t)RAX_47;
-                    stack_m84 = (int32_t)(stack_m88 + tmp_lane_100000c70_2e_4d_1);
+                    stack_m84 = (int32_t)((uint32_t)RAX_47 + stack_m88);
                     uint64_t RAX_50 = (uint64_t)sym__rotl32((uint32_t)stack_m72, 18);
-                    uint32_t tmp_lane_100000c70_49_56_1 = (uint32_t)RAX_50;
-                    stack_m44 = (uint32_t)stack_m84 + tmp_lane_100000c70_49_56_1;
+                    stack_m44 = (uint32_t)RAX_50 + (uint32_t)stack_m84;
                 }
             }
         }
@@ -109,8 +105,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 uint64_t RAX_60 = tmp_11f80_1 + 4;
                 tmp_11f80_6 = stack_m40;
                 uint64_t tmp_3f800_5 = tmp_11f80_6;
-                uint8_t tmp_12a80_2 = tmp_3f800_5 < RAX_60;
-                if (tmp_12a80_2) {
+                if (tmp_3f800_5 < RAX_60) {
                     break;
                 } else {
                     uint32_t stack_m80;

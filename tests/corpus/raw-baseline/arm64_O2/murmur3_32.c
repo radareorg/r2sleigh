@@ -1,13 +1,12 @@
 uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 137 source obligations: 121 rendered, 16 elided, 0 refused; 53 statements rendered */
+    /* r2dec proof: no individual construct is marked; 137 source obligations: 121 rendered, 16 elided, 0 refused; 50 statements rendered */
     {
         uint64_t X2_0_2;
         X2_0_2 = (uint64_t)(uint32_t)W2_0;
         uint32_t tmp_2a000_2 = 0xcc9e2d51;
         uint32_t tmp_2a000_4 = 0x1b873593;
-        uint8_t tmp_b00_1 = X1_0 < 4;
-        if (!tmp_b00_1) {
+        if (X1_0 >= 4) {
             uint64_t X10_1;
             uint8_t* X12_1;
             X10_1 = X1_0 >> 2;
@@ -20,8 +19,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 uint32_t tmp_2b380_2 = tmp_24e00_2 * tmp_2a000_2;
                 uint32_t tmp_20380_2 = (tmp_2b380_2 >> 17 | tmp_2b380_2 << 15) * tmp_2a000_4 ^ (uint32_t)X2_0_2;
                 uint32_t tmp_31880_3 = tmp_20380_2 >> 19 | tmp_20380_2 << 13;
-                uint32_t tmp_12280_2 = tmp_31880_3 + tmp_31880_3 * 4;
-                X2_0_2 = (uint64_t)(uint32_t)(tmp_2a000_6 + tmp_12280_2);
+                X2_0_2 = (uint64_t)(uint32_t)(tmp_2a000_6 + (tmp_31880_3 * 4 + tmp_31880_3));
                 uint8_t TMPZR_5 = X10_1 == 1;
                 X10_1--;
                 uint8_t tmp_a00_2 = !TMPZR_5;
@@ -40,9 +38,8 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 uint32_t tmp_2b380_5;
                 if (X12_5 != 1 && r2sleigh_int_sborrow_64(X12_5, 1) == (int64_t)(X12_5 - 1) < 0) {
                     uint64_t X10_7;
-                    uint8_t ZR_6 = X12_5 == 2;
                     X10_7 = 0;
-                    if (!ZR_6) {
+                    if (X12_5 != 2) {
                         uint8_t tmp_25500_1 = *(uint8_t*)((uint64_t)X11_5 + 2);
                         X10_7 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_1 << 16);
                     }

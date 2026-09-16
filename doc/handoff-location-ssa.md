@@ -26075,3 +26075,95 @@ those two alone is sound, strictly coarser than spans, and available before the
 inlining pass runs. Asking the guard about that partition is the change worth
 making, and the corpus differential is the gate that will judge it, as it judged
 this one.
+
+### The pre-partition, built and landed
+
+It works, and it took three corrections to get there, each of which the corpus
+differential found.
+
+`coalescing_pre_partition` in `binding_plan/construction.rs` unions values from
+the two sources `binding_components_with` uses -- a shared storage span and a
+certified entity's `coalescing_values` -- and from nothing else. It applies
+neither the eligibility filter nor the interference decline, and both of those
+only ever make a partition finer, so the result is strictly coarser than the
+bindings the plan goes on to build. That is the direction soundness needs: a
+coarser partition refuses folds that would have been safe, a finer one permits
+folds that are not, which is exactly what the span attempt did.
+
+**The first correction: a folded leaf is not a read of an object.** Asking the
+partition about each leaf of the machine expression still computed the wrong
+answer for four cells, because a leaf naming a value the plan also folds has no
+object at all -- reading it is reading whatever *it* spells. `unaligned_words`
+at x64 -O2 is the shape: the branch reads a flag copy, the flag copy reads
+`ZF_15`, and `ZF_15` reads `R8_4`, the loop carrier that the merge's carrier copy
+overwrites two lines above the branch. Stopping at the flag copy loses the only
+hazard in the chain.
+
+**The second correction: the closure cannot be carried by a single pass.** The
+obvious repair -- remember each folded value's read set and inherit it at the
+leaf -- fixed two of the four and left `xxhash32` wrong on arm64, because value
+ids are not in dependence order: `tmp:1000_6` is `ValueId(428)` and reads
+`ValueId(456)` and `ValueId(464)`, neither of which has been decided when it is
+reached. So the hazard is now computed in a second pass, over the whole
+candidate set, by an iterative post-order closure: a leaf the plan binds
+contributes its own object, a leaf the plan folds contributes that leaf's
+closure, and a cycle contributes the object conservatively. Closing over the
+*candidates* rather than over the survivors is what makes this answerable
+without a fixpoint -- the folded set only shrinks from here, a smaller folded
+set means shorter expansions and fewer reads, so a hazard computed from the
+candidates covers the hazard of any subset of them.
+
+**The third correction: a certificate-elided use is not an occurrence.** With
+the hazard right, `murmur3_32` at x64 -O1 and -O2 stopped generating at all:
+`0 refused, 2 unaccounted (live-value-producer at 0x100000d87:op:41)`. The old
+guard had been rejecting `R8_17`, the jump-table address, for an unrelated
+carried-location reason; with the hazard computed properly it became foldable
+and folded into the `BranchInd`. But that operand is spelled nowhere -- the case
+topology expresses it, which is why `certified_direct_control_target_sites`
+already elides the use -- so the address computation's producer obligations were
+owed by nobody. The gate that reads "a reader sits in a certificate-elided
+instruction" now also asks whether the reader's *use of this value* is elided.
+That is the same fact one level finer, and it leaves reader counting alone;
+filtering elided uses out of the rendered-reader count instead was tried and
+took ten cells down, because it changes which values look single-reader.
+
+One free refinement went in with it: a write whose instruction renders nothing
+prints no statement, so it cannot disturb a read moved past it, and the
+between-definition-and-reader scan now skips those.
+
+**Result.** Raw 60/60, differential 60/60, snapshot 60/60, and every audit
+column 60/60. Thirty-one cells changed and **124 statements went away**. The
+shape of the win is the one the flag lemma was for -- at arm64 -O0, `djb2` went
+from sixteen statements to twelve and from
+
+```c
+for (stack_m32 = 0; ; stack_m32++) {
+    uint8_t TMPCY_2 = stack_m16 <= stack_m32;
+    if (TMPCY_2) { break; } else { ... }
+}
+```
+
+to
+
+```c
+for (stack_m32 = 0; stack_m32 < stack_m16; stack_m32++) { ... }
+```
+
+and `crc32_bitwise` at x64 -O0 recovered a real `while ((int32_t)stack_m44 < 8)`.
+
+**Two cells cost one statement each**, `pearson` at x64 -O1 and `fnv1a64` at x64
+-O2, and the reason is worth keeping. In both, the intervening write is to a
+value that is itself a fold candidate: if it folds it prints no statement and
+the hazard is imaginary, and if it stays bound the hazard is real. Answering
+that needs the folded set the guard is helping to compute, so the guard assumes
+the pessimistic branch. Deciding it exactly means a greatest-fixpoint iteration
+-- assume every candidate folds, reject those that fail, repeat -- which is
+sound only if two folds cannot justify each other, and that is not yet proved.
+Two statements against a hundred and twenty-four is the right side of that
+trade for now.
+
+**Unrelated defect noticed while reading the diffs.** `arm64_O0/adler32` and
+`arm64_O0/murmur3_32` render `stack_m20 = tmp_12280_2 - (0 ? 0 : tmp_42288_2) *
+0xfff1;`. The constant-false conditional is in the blessed baseline too, so it
+predates this work; a division guard lowers to a conditional whose condition is
+a literal zero and nothing folds it away.
