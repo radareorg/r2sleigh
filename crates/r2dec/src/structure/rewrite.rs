@@ -363,6 +363,16 @@ impl ControlFlowStructurer<'_, '_> {
                 }
                 let (inner, carried, lhs, rhs) = Self::sole_assignment(only)?;
                 let mut chain = observations;
+                // A statement that renders nothing can still carry markers, and
+                // they are cells the survivor owes: dropping them loses an
+                // occurrence the ledger is still counting.
+                for stmt in &stmts {
+                    if std::ptr::eq(stmt, only) {
+                        continue;
+                    }
+                    let (_, marks) = stmt.clone().into_semantic_with_observations();
+                    chain.extend(marks);
+                }
                 chain.extend(inner);
                 Some((chain, carried, lhs, rhs))
             }
