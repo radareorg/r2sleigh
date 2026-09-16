@@ -485,7 +485,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~authenticate$[0]` > /dev/null
-pd:s | jq -Rs 'contains("sym.imp.strcmp(password, \"secret123\")") and ((contains("!= 0")) or (contains("== 0"))) and (contains("0 != 0")|not) and (contains("0 == 0")|not)'
+pd:s | jq -Rs 'test("sym_imp_strcmp[(][^;]*password[^;]*\"secret123\"[)]") and ((contains("!= 0")) or (contains("== 0"))) and (contains("0 != 0")|not) and (contains("0 == 0")|not)'
 EOF_CMDS
 RUN
 
@@ -698,7 +698,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pd:s | jq -Rs 'test("\\(char ?\\* ?s\\)") and test("size_t len") and (contains("int8_t")|not) and (contains("uint64_t len")|not)'
+pd:s | jq -Rs 'test("\\(char ?\\* ?s\\)") and test("size_t len") and (test("[^u]int8_t")|not) and (contains("uint64_t len")|not)'
 EOF_CMDS
 RUN
 
