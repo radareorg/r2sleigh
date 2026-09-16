@@ -394,7 +394,15 @@ impl ControlFlowStructurer<'_, '_> {
                 else {
                     return None;
                 };
-                Some((observations, carried, *left, *right))
+                // The object written carries markers of its own, and only one
+                // of the two arms' lvalues survives the conversion. Both sets
+                // are cells the one assignment owes, so they ride with it.
+                let mut left = *left;
+                while let CExpr::Observed { id, expr } = left {
+                    carried.push(id);
+                    left = *expr;
+                }
+                Some((observations, carried, left, *right))
             }
             _ => None,
         }
@@ -432,6 +440,21 @@ impl ControlFlowStructurer<'_, '_> {
             return restore(cond, then_body, else_body);
         };
         if !then_lhs.transparently_eq(&else_lhs) {
+            return restore(cond, then_body, else_body);
+        }
+        // Only one of the two lvalues survives, so neither may carry a marker
+        // of its own: a store to a frame slot is marked on the expression that
+        // names the slot, and two stores are two effects rather than one
+        // assignment of a chosen value. A plain object written twice is the
+        // shape this converts.
+        if !matches!(then_lhs, CExpr::Var(_)) || !matches!(else_lhs, CExpr::Var(_)) {
+            return restore(cond, then_body, else_body);
+        }
+        // An assignment marked as an expression is a store to a frame slot,
+        // and the marker is a claim about that expression: the conditional is a
+        // different expression, so the claim would no longer hold. Two stores
+        // are two effects; only a plain object written twice converts.
+        if !then_carried.is_empty() || !else_carried.is_empty() {
             return restore(cond, then_body, else_body);
         }
         let mut assignment = CExpr::assign(

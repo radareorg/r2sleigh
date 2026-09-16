@@ -25943,6 +25943,21 @@ stay for that work, so the text reads the condition twice -- once in the `if`
 and once in the conditional -- where the machine reads it once. The stage gate
 says exactly that: `duplicated=1 ... lost observations 2`.
 
+Two restrictions earned their place while getting `process_string` to render at
+all. Only one of the two lvalues survives the conversion, so **neither may
+carry a marker of its own**: a store to a frame slot is marked on the
+expression that names the slot, and that marker is a claim about *that*
+expression, which the conditional is not. Two stores are two effects; a plain
+object written twice is the shape this converts. Moving the markers onto the
+survivor instead was tried and placement refused it with
+`unobserved_binding_write`, which is the same statement from the other side.
+
+The gate is what made this safe to explore: a rewrite that loses an observation
+is declined and the stage falls back, so the only cost of getting it wrong was
+that `process_string` kept its uncleaned text. That is also why the loss was
+worth fixing rather than tolerating -- one failed rewrite declines the whole
+cleanup stage for the function.
+
 `alloc_and_copy` wants `return buf;`, and the honest route to it is not a wider
 conversion. Its conditional would be `buf != 0 ? buf : 0`, which is `buf` --
 an expression identity (`c ? v : 0` where `c` is `v != 0`) that belongs in
