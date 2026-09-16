@@ -25229,3 +25229,27 @@ object from a different branch's `cconfig.c`, which `lldb` said in as many words
 ("source file checksum mismatch between line table and file on disk"). A full
 `make` cleared it. Switching the radare2 fork between branches means rebuilding
 all of it, not the one directory that changed.
+
+### Why return sinking is a structuring choice, not a rewrite
+
+Beside the timing problem already recorded, there is a second and harder reason
+the AST route cannot work, and it is worth stating because it names the layer.
+
+`ControlFlowStructurer::apply` accepts a rewrite only when `certified && lost ==
+0`, where `lost` counts the render-observation ids present before and absent
+after. Sinking one `return f(v)` into two arms *duplicates* that statement, so
+its markers would have to appear twice, and a marker identifies one cell. The
+journal minted one read of the carrier because the machine reads it once, at the
+epilogue.
+
+That is the whole of it: the machine has one epilogue block that both arms jump
+to, and the C the test wants has two. Giving it two is tail duplication of a
+shared exit, which is a decision about the region tree -- taken where the
+structure is built, so each copy's cells are minted per copy -- and not a
+rewrite of a tree whose cells are already fixed. `factor_guarded_common_suffix`
+is the same rule seen from the other side: it *merges* duplicated statements and
+strips their observations, which is why it only ever fires on unobserved ones.
+
+So the `-O0` return idiom wants two things together: the certificate that says
+this slot is the return's value, and a structurer willing to duplicate the
+epilogue it names. Neither half is useful alone.
