@@ -816,6 +816,22 @@ fn collect_expr_observation_regions(
     }
 }
 
+/// The region a loop sits in, where `current` is the loop's own.
+///
+/// A `for` initializer executes before the loop is entered, so the region that
+/// has to dominate it is the one holding the loop statement.
+fn enclosing_region_of_loop(
+    current: Option<RegionId>,
+    regions: &SealedStructuredRegionArtifact,
+) -> Option<RegionId> {
+    let region = current?;
+    let node = regions.node(region)?;
+    if node.kind() != crate::structured_region::StructuredRegionKind::Loop {
+        return current;
+    }
+    node.parent().or(current)
+}
+
 fn collect_stmt_observation_regions(
     statement: &CStmt,
     current: Option<RegionId>,
@@ -869,8 +885,17 @@ fn collect_stmt_observation_regions(
             update,
             body,
         } => {
+            // A `for` header's initializer runs once, at the predecessor that
+            // enters the loop, so its occurrence belongs to the region the loop
+            // sits in and not to the loop. The clause is lexically inside the
+            // loop's region only because C writes it there.
             if let Some(init) = init {
-                collect_stmt_observation_regions(init, current, regions, scoped);
+                collect_stmt_observation_regions(
+                    init,
+                    enclosing_region_of_loop(current, regions),
+                    regions,
+                    scoped,
+                );
             }
             if let Some(cond) = cond {
                 collect_expr_observation_regions(cond, current, scoped);
@@ -1490,9 +1515,18 @@ fn collect_stmt_observation_scopes(
             update,
             body,
         } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            // The initializer runs once at the predecessor, so it and the
+            // statement markers the structurer folded in with it belong to the
+            // region the loop sits in rather than the loop's own. A `for` has
+            // an initializer only because a predecessor's statement was moved
+            // into its header.
+            let header = match init {
+                Some(_) => enclosing_region_of_loop(current, regions),
+                None => current,
+            };
+            record_control_observations(&leading, header, targets, order, scoped);
             if let Some(init) = init {
-                collect_stmt_observation_scopes(init, current, regions, targets, order, scoped);
+                collect_stmt_observation_scopes(init, header, regions, targets, order, scoped);
             }
             if let Some(cond) = cond {
                 collect_expr_observation_scopes(cond, current, targets, order, scoped);
@@ -3776,10 +3810,12 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
         .inspect_err(|_| {
             r2il::refusal_evidence!(
                 "placement-dominance",
-                "the write is {:?} defining {:?} at statement {}",
+                "the write is {:?} defining {:?} at statement {} in region {:?} of block {:#x}",
                 write.inst,
                 write.defines,
-                write.statement
+                write.statement,
+                write.region,
+                write.block
             );
         })?;
     }

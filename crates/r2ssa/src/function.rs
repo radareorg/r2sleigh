@@ -13213,9 +13213,10 @@ fn promote_private_stack_slots(
     }
     r2il::refusal_evidence!(
         "promote-stack-slot",
-        "{} slots promoted out of memory across {} accesses",
+        "{} slots promoted out of memory across {} accesses: {:?}",
         promotable.len(),
-        rewrites.len()
+        rewrites.len(),
+        promotable.iter().collect::<Vec<_>>()
     );
     let mut out = blocks.to_vec();
     // The addresses these accesses were reached through. Each is left behind
