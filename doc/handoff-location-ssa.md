@@ -25719,3 +25719,45 @@ Nothing else moved, because nothing else disagreed. Measured on the corpus:
 the four `array subscript is not an integer` compile failures in the census are
 gone. All sixty corpus cells still pass raw and differential, every audit column
 is 60/60, and no rendering was lost in either census.
+
+### What the seven remaining r2r failures are
+
+With the change above, `dec_array_index_neg_preserves_subscript_shape` passes
+once its expectation admits the defined spelling: the project's UB policy puts
+arithmetic on unsigned carriers, so the index is
+`arr[(int64_t)(int32_t)-idx]` and not `arr[-idx]`. The test's real content --
+the subscript is preserved, the index is the negation, no `[0]`, no `saved_fp`,
+no `*(rbp` -- is unchanged.
+
+The seven that remain fall into three groups.
+
+**The returning tail (four).** `dec_check_secret_keeps_hex_compare` and the
+three `dec_alloc_and_copy_*` want `return 0;` / `return buf;` where a frame slot
+is assigned in both arms and read in the tail. Route 1 -- duplicating the tail
+at the AST -- is built and reverted, and on its own it gives
+`{ stack_m4 = 0; return (int32_t)stack_m4; }` per arm, two statements more and
+no constant. It needs a within-arm collapse as well: the last write of an object
+that is dead after it, immediately followed by its only read, is the value. That
+is the statement-level work the expression elaborator plan records as out of
+scope, and it is the natural next arc.
+
+**Struct member names (one).** `dec_struct_array_index_keeps_member_write_shape`
+renders
+
+```c
+arr[idx].f_8 = (uint32_t)v;
+uint32_t tmp_24c00_2 = arr[idx].f_8;
+uint32_t tmp_24c00_3 = arr[idx].f_34;
+return tmp_24c00_3 + tmp_24c00_2;
+```
+
+against a `DemoStruct` whose fields the rendering itself declares by name
+(`third`, `fourteenth`). Two gaps: the access is named by offset although the
+declared aggregate names it -- `function_facts.rs:2736` takes `member.name()`
+from the type graph and would say `third`, so the fact the `ParamArray` syntax
+picks is the offset-named one from `field_access_certificates` -- and the two
+member loads are not inlined into the `return` because
+`expression_renders_inline` refuses `Load`, which is plan A3.
+
+**Unrelated (two).** `dec_process_string_keeps_single_strlen_owner` and
+`taint_vuln_memcpy_call_sinks_include_arg_regs`.
