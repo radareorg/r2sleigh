@@ -22,19 +22,19 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
         stack_m56 = 0;
         while (stack_m56 < stack_m48) {
             int32_t stack_m60;
-            int32_t tmp_11f00_4;
-            int32_t tmp_11f00_3 = (int32_t)((uint32_t*)stack_m16)[stack_m56];
+            int32_t tmp_11f00_3;
+            tmp_11f00_3 = (int32_t)((uint32_t*)stack_m16)[stack_m56];
             stack_m60 = tmp_11f00_3;
-            tmp_11f00_4 = (int32_t)stack_m60;
-            stack_m60 = (int32_t)((uint64_t)tmp_11f00_4 * 0xffffffffcc9e2d51U);
-            tmp_11f00_4 = (int32_t)stack_m60;
-            uint64_t RAX_9 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_4, 15);
+            tmp_11f00_3 = (int32_t)stack_m60;
+            stack_m60 = (int32_t)((uint64_t)tmp_11f00_3 * 0xffffffffcc9e2d51U);
+            tmp_11f00_3 = (int32_t)stack_m60;
+            uint64_t RAX_9 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_3, 15);
             stack_m60 = (int32_t)RAX_9;
-            tmp_11f00_4 = (int32_t)stack_m60;
-            stack_m60 = (int32_t)((uint64_t)tmp_11f00_4 * 0x1b873593);
-            tmp_11f00_4 = (int32_t)stack_m60;
+            tmp_11f00_3 = (int32_t)stack_m60;
+            stack_m60 = (int32_t)((uint64_t)tmp_11f00_3 * 0x1b873593);
+            tmp_11f00_3 = (int32_t)stack_m60;
             tmp_11f00_10 = stack_m32;
-            stack_m32 = (uint32_t)tmp_11f00_4 ^ tmp_11f00_10;
+            stack_m32 = (uint32_t)tmp_11f00_3 ^ tmp_11f00_10;
             tmp_11f00_10 = stack_m32;
             uint64_t RAX_13 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_10, 13);
             stack_m32 = (uint32_t)RAX_13;
@@ -46,19 +46,19 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             uint64_t stack_m88;
             uint32_t stack_m76;
             uint64_t stack_m72;
+            uint64_t RAX_21;
             uint64_t tmp_11f80_13;
             uint32_t tmp_11f00_11;
             stack_m72 = stack_m48 * 4 + stack_m16;
             stack_m76 = 0;
             tmp_11f80_1 = stack_m24;
-            uint64_t RAX_21 = (uint64_t)(uint32_t)((uint32_t)tmp_11f80_1 & 3);
+            RAX_21 = (uint64_t)(uint32_t)((uint32_t)tmp_11f80_1 & 3);
             stack_m88 = RAX_21;
             if (RAX_21 != 1) {
-                uint64_t tmp_11f80_11;
-                tmp_11f80_11 = stack_m88;
-                if (tmp_11f80_11 != 2) {
-                    tmp_11f80_11 = stack_m88;
-                    if (tmp_11f80_11 != 3) {
+                RAX_21 = stack_m88;
+                if (RAX_21 != 2) {
+                    RAX_21 = stack_m88;
+                    if (RAX_21 != 3) {
                         goto L3;
                     } else {
                         tmp_11f80_13 = stack_m72;

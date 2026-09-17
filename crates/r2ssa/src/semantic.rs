@@ -1471,6 +1471,9 @@ pub struct StackSlotCertificate {
     /// location and width, holds what that store wrote; so does a copy of it.
     /// Rendering them and the slot as one variable asserts only that equality.
     pub reload_values: BTreeSet<ValueId>,
+    /// Values a full-width store writes into the slot. Each is offered to the
+    /// slot's object on its own, judged by identity and liveness.
+    pub stored_values: BTreeSet<ValueId>,
     /// Exact proof that a source-less object lies wholly inside storage owned
     /// by this callee at every access. This is deliberately separate from a
     /// source slot: compiler-created spills and temporaries are real machine
@@ -8423,6 +8426,7 @@ fn collect_prepared_function_certificates(
                             .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
                         source_slot: exact_stack_slots.get(&(base, offset)).copied(),
                         reload_values: BTreeSet::new(),
+                        stored_values: BTreeSet::new(),
                         callee_allocation: callee_stack_allocations.get(object).cloned(),
                     },
                 ))
@@ -8615,9 +8619,10 @@ fn collect_prepared_function_certificates(
     let mut stack_slots: BTreeMap<ObjectId, StackSlotCertificate> = stack_slots;
     // A full-width read of a private slot is the slot's value, whatever store
     // put it there. Requiring one reaching store as well would exclude every
-    // variable a loop writes, which is most of them at -O0.
+    // variable a loop writes, which is most of them at -O0. A full-width
+    // write is the slot's value too, offered to the object one at a time.
     for access in structured.memory_accesses.values() {
-        if access.is_write || !access.provenance_complete || access.space != SpaceId::Ram {
+        if !access.provenance_complete || access.space != SpaceId::Ram {
             continue;
         }
         if !private_objects.contains(&access.object) {
@@ -8625,9 +8630,11 @@ fn collect_prepared_function_certificates(
         }
         // A round trip's read is the stored value, already answered by the
         // store it reads back; it is not a read of the slot the renderer names.
-        if memory_round_trips.values().any(|certificate| {
-            certificate.read == access.id || certificate.redundant_reads.contains(&access.id)
-        }) {
+        if !access.is_write
+            && memory_round_trips.values().any(|certificate| {
+                certificate.read == access.id || certificate.redundant_reads.contains(&access.id)
+            })
+        {
             continue;
         }
         // An address the machine indexes reads an element, not the slot.
@@ -8648,7 +8655,11 @@ fn collect_prepared_function_certificates(
         if let Some(slot) = stack_slots.get_mut(&access.object)
             && slot.size == Some(access.width)
         {
-            slot.reload_values.insert(value);
+            if access.is_write {
+                slot.stored_values.insert(value);
+            } else {
+                slot.reload_values.insert(value);
+            }
         }
     }
     // And the copies of those reads, which the reload certificates already

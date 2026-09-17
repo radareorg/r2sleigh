@@ -443,7 +443,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pd:s | jq -Rs '(contains("size_t len;")) and (contains("var_8h")|not)'
+pd:s | jq -Rs '(contains("size_t len")) and (contains("var_8h")|not)'
 EOF_CMDS
 RUN
 

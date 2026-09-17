@@ -873,6 +873,7 @@ impl BindingPlan {
                     array_layout,
                     source_slot,
                     reload_values,
+                    stored_values,
                     callee_allocation,
                     ty: _,
                 } => Some((
@@ -884,6 +885,7 @@ impl BindingPlan {
                     array_layout.clone(),
                     *source_slot,
                     reload_values.clone(),
+                    stored_values.clone(),
                     callee_allocation.clone(),
                 )),
                 r2types::CertifiedEntity::Parameter { .. }
@@ -907,6 +909,7 @@ impl BindingPlan {
             array_layout,
             source_slot,
             reload_values,
+            stored_values,
             callee_allocation,
         ) in expected_stack_objects
         {
@@ -919,6 +922,7 @@ impl BindingPlan {
                     || certificate.array_layout != array_layout
                     || certificate.source_slot != source_slot
                     || certificate.reload_values != reload_values
+                    || certificate.stored_values != stored_values
                     || certificate.callee_allocation != callee_allocation
             }) {
                 return Err(BindingPlanBuildError::Seal(
@@ -974,6 +978,7 @@ impl BindingPlan {
                         &self.dispositions,
                         &actual_by_binding,
                         &reload_values,
+                        &stored_values,
                         Some(&declaration_type),
                     );
                     let Some(binding) =
@@ -997,6 +1002,7 @@ impl BindingPlan {
                         adopted.is_some(),
                         &actual_by_binding[binding.index()],
                         &reload_values,
+                        &stored_values,
                     ) {
                         r2il::refusal_evidence!(
                             "seal-stack-object",
@@ -1055,6 +1061,7 @@ impl BindingPlan {
                             &self.dispositions,
                             &actual_by_binding,
                             &reload_values,
+                            &stored_values,
                             declaration_type.as_ref(),
                         );
                         let Some(binding) =
@@ -1077,6 +1084,7 @@ impl BindingPlan {
                             adopted.is_some(),
                             &actual_by_binding[binding.index()],
                             &reload_values,
+                            &stored_values,
                         ) {
                             return Err(BindingPlanBuildError::Seal(
                                 BindingPlanSourceMismatch::StackObjectCertificate {
@@ -1177,6 +1185,7 @@ impl BindingPlan {
                                 &self.dispositions,
                                 &actual_by_binding,
                                 &reload_values,
+                                &stored_values,
                                 Some(&declaration_type),
                             );
                             let Some(binding) =
@@ -1200,6 +1209,7 @@ impl BindingPlan {
                                 adopted.is_some(),
                                 &actual_by_binding[binding.index()],
                                 &reload_values,
+                                &stored_values,
                             ) {
                                 return Err(BindingPlanBuildError::Seal(
                                     BindingPlanSourceMismatch::StackObjectCertificate {
@@ -1313,6 +1323,7 @@ fn adopted_reload_binding(
     dispositions: &[ValueDisposition],
     actual_by_binding: &[BTreeSet<ValueId>],
     reload_values: &BTreeSet<ValueId>,
+    stored_values: &BTreeSet<ValueId>,
     declaration_type: Option<&CType>,
 ) -> Option<BindingId> {
     if declaration_type.is_some_and(|ty| {
@@ -1329,8 +1340,20 @@ fn adopted_reload_binding(
         .filter(|binding| {
             actual_by_binding
                 .get(binding.index())
-                .is_some_and(|actual| actual == reload_values)
+                .is_some_and(|actual| slot_members_agree(actual, reload_values, stored_values))
         })
+}
+
+/// The binding holds every reload and nothing but reloads and stored values.
+fn slot_members_agree(
+    actual: &BTreeSet<ValueId>,
+    reload_values: &BTreeSet<ValueId>,
+    stored_values: &BTreeSet<ValueId>,
+) -> bool {
+    actual.is_superset(reload_values)
+        && actual
+            .iter()
+            .all(|value| reload_values.contains(value) || stored_values.contains(value))
 }
 
 /// Whether the binding a stack object took carries the object's certificate.
@@ -1343,13 +1366,14 @@ fn stack_object_certificate_agrees(
     adopted: bool,
     actual: &BTreeSet<ValueId>,
     reload_values: &BTreeSet<ValueId>,
+    stored_values: &BTreeSet<ValueId>,
 ) -> bool {
     if adopted {
         planned
             .certificate
             .sources
             .contains(&BindingCertificateSource::CertifiedEntity(entity))
-            && actual == reload_values
+            && slot_members_agree(actual, reload_values, stored_values)
     } else {
         planned.certificate.sources.as_ref() == [BindingCertificateSource::CertifiedEntity(entity)]
             && actual.is_empty()

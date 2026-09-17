@@ -1109,6 +1109,8 @@ pub enum CertifiedEntity {
         /// Values a reload proves to be this slot's contents at full width.
         /// Empty where nothing loads the slot back into a register.
         reload_values: BTreeSet<r2ssa::ValueId>,
+        /// Values a full-width store writes into the slot, each an offer.
+        stored_values: BTreeSet<r2ssa::ValueId>,
         /// Upstream proof for a compiler-created, source-less callee-owned
         /// stack object. Consumers may use it but must not reconstruct it.
         callee_allocation: Option<r2ssa::CalleeStackAllocationCertificate>,
@@ -4841,6 +4843,7 @@ fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRenderFacts {
                     array_layout: cert.array_layout.clone(),
                     source_slot: cert.source_slot,
                     reload_values: cert.reload_values.clone(),
+                    stored_values: cert.stored_values.clone(),
                     callee_allocation: cert.callee_allocation.clone(),
                     ty: cert
                         .source_slot
@@ -5578,6 +5581,7 @@ mod tests {
             array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
             source_slot: None,
             reload_values: BTreeSet::new(),
+            stored_values: BTreeSet::new(),
             callee_allocation: None,
             ty: None,
         };
@@ -6027,6 +6031,7 @@ mod tests {
                             array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
                             source_slot: None,
                             reload_values: BTreeSet::new(),
+                            stored_values: BTreeSet::new(),
                             callee_allocation: None,
                             ty: None,
                         },
@@ -8153,6 +8158,7 @@ mod tests {
                     array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
                     source_slot: None,
                     reload_values: BTreeSet::new(),
+                    stored_values: BTreeSet::new(),
                     callee_allocation: None,
                     ty: None,
                 },

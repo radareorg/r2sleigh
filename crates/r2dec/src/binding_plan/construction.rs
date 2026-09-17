@@ -157,6 +157,7 @@ pub(super) fn shared_reload_binding(
     dispositions: &[ValueDisposition],
     bound_value_counts: &BTreeMap<BindingId, usize>,
     reload_values: &BTreeSet<ValueId>,
+    stored_values: &BTreeSet<ValueId>,
     declaration_type: &CType,
 ) -> Option<BindingId> {
     // A register holds the bytes of an aggregate, never the aggregate.
@@ -168,8 +169,19 @@ pub(super) fn shared_reload_binding(
     ) {
         return None;
     }
-    unanimous_value_binding(dispositions, reload_values.iter().copied())
-        .filter(|binding| bound_value_counts.get(binding).copied() == Some(reload_values.len()))
+    // The binding holds the reloads and whichever stored values joined it.
+    unanimous_value_binding(dispositions, reload_values.iter().copied()).filter(|binding| {
+        let stored = stored_values
+            .iter()
+            .filter(|value| {
+                matches!(
+                    dispositions.get(value.0 as usize),
+                    Some(ValueDisposition::Bound { binding: bound }) if bound == binding
+                )
+            })
+            .count();
+        bound_value_counts.get(binding).copied() == Some(reload_values.len() + stored)
+    })
 }
 
 /// The binding a stack object takes, sharing one with the values its reloads
@@ -508,6 +520,60 @@ pub(super) fn binding_components_with(
             }
             identity_by_root[find(&mut parent, first.0 as usize)] = joined;
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
+        }
+    }
+
+    // A value stored into a slot is the slot's value at that point, offered on
+    // its own: it joins where nothing it is live across writes the object and
+    // no other identity claims it, and otherwise the store stays a copy.
+    if let Some(render) = source_owned.report().render() {
+        for entity in render.certified_entities.values() {
+            let r2types::CertifiedEntity::StackSlot {
+                id, stored_values, ..
+            } = entity
+            else {
+                continue;
+            };
+            let Some(mates) = entity.coalescing_values() else {
+                continue;
+            };
+            let Some(mate) = mates
+                .into_iter()
+                .find(|value| (value.0 as usize) < value_count && eligible[value.0 as usize])
+            else {
+                continue;
+            };
+            for stored in stored_values.iter().copied() {
+                let index = stored.0 as usize;
+                if index >= value_count || !eligible[index] || literal_defined(stored) {
+                    continue;
+                }
+                if find(&mut parent, index) == find(&mut parent, mate.0 as usize) {
+                    continue;
+                }
+                let proposed = BTreeSet::from([stored, mate]);
+                if let Some((left, right)) =
+                    identity_conflict(&mut parent, &identity_by_root, &proposed, None)
+                {
+                    r2il::refusal_evidence!(
+                        "store-declined",
+                        "{id:?} stored {stored:?}: {left:?} and {right:?} are two objects"
+                    );
+                    continue;
+                }
+                if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed) {
+                    r2il::refusal_evidence!(
+                        "store-declined",
+                        "{id:?} stored {stored:?} stays a copy"
+                    );
+                    continue;
+                }
+                union(&mut parent, &mut rank, &mut ring, mate, stored);
+                let root = find(&mut parent, mate.0 as usize);
+                live_by_root[root] = None;
+                identity_by_root[root] = Some(*id);
+                certificate_sets.push((BindingCertificateSource::CertifiedEntity(*id), proposed));
+            }
         }
     }
 
@@ -1128,6 +1194,7 @@ impl BindingPlan {
                     array_layout,
                     source_slot,
                     reload_values,
+                    stored_values,
                     callee_allocation,
                     ty: _,
                 } = entity
@@ -1239,6 +1306,7 @@ impl BindingPlan {
                             &dispositions,
                             &bound_value_counts,
                             reload_values,
+                            stored_values,
                             &declaration_type,
                         ),
                         *id,
@@ -1272,6 +1340,7 @@ impl BindingPlan {
                             &dispositions,
                             &bound_value_counts,
                             reload_values,
+                            stored_values,
                             &declaration_type,
                         ),
                         *id,
@@ -1360,6 +1429,7 @@ impl BindingPlan {
                                 &dispositions,
                                 &bound_value_counts,
                                 reload_values,
+                                stored_values,
                                 &declaration_type,
                             ),
                             *id,
