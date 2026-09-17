@@ -343,6 +343,21 @@ pub(super) fn binding_components_with(
     // root and grown as runs join, so a merge is judged against everything
     // already in the runs it touches and never against the whole function.
     let mut live_by_root = vec![None::<r2ssa::liveness::ComponentLiveness>; value_count];
+    // A stack slot or a parameter is one object by identity, whatever its
+    // values' live ranges say. A run that would carry two of them is two runs.
+    let mut identity_by_root = vec![None::<r2ssa::SemanticId>; value_count];
+    let identity_conflict = |parent: &mut Vec<usize>,
+                             identity_by_root: &[Option<r2ssa::SemanticId>],
+                             values: &BTreeSet<ValueId>,
+                             claimed: Option<r2ssa::SemanticId>| {
+        let mut identities = values
+            .iter()
+            .filter_map(|value| identity_by_root[find(parent, value.0 as usize)])
+            .chain(claimed)
+            .collect::<BTreeSet<_>>();
+        let first = identities.pop_first();
+        first.zip(identities.pop_first())
+    };
     let merge_would_interfere = |parent: &mut Vec<usize>,
                                  ring: &[u32],
                                  live_by_root: &mut Vec<
@@ -389,30 +404,6 @@ pub(super) fn binding_components_with(
         false
     };
 
-    for (span, values) in &values_by_span {
-        let values = values.clone();
-        let span = *span;
-        if values.len() > 1 {
-            // A storage span says these values share a machine location. That
-            // is not on its own a licence to share a C object, and this asked
-            // nothing before unioning: the certificate path below has always
-            // asked, and one instruction reading two members is exactly as
-            // impossible whichever derivation proposed the merge. `crc32_bitwise`
-            // at arm64 -O2 is the case -- one p-code temporary carries both
-            // `w10` and `w11`, and `eor w10, w10, w11` reads two of its versions.
-            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
-                r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
-                continue;
-            }
-            let first = values.first().copied().expect("multi-member span");
-            for value in values.iter().copied().skip(1) {
-                union(&mut parent, &mut rank, &mut ring, first, value);
-                live_by_root[find(&mut parent, first.0 as usize)] = None;
-            }
-            certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
-        }
-    }
-
     if let Some(render) = source_owned.report().render() {
         for entity in render.certified_entities.values() {
             let Some(values) = entity.coalescing_values() else {
@@ -440,7 +431,23 @@ pub(super) fn binding_components_with(
             // instruction needs both at once. Where it does, the coalescing is
             // declined and the values keep their own objects, which costs an
             // assignment in the output and nothing in correctness.
+            let identity = match entity.id() {
+                id @ (r2ssa::SemanticId::StackSlot(_) | r2ssa::SemanticId::Parameter(_)) => {
+                    Some(id)
+                }
+                _ => None,
+            };
             if let Some(first) = values.first().copied() {
+                if let Some((left, right)) =
+                    identity_conflict(&mut parent, &identity_by_root, &values, identity)
+                {
+                    r2il::refusal_evidence!(
+                        "coalescing-declined",
+                        "entity {:?} members {values:?}: {left:?} and {right:?} are two objects",
+                        entity.id()
+                    );
+                    continue;
+                }
                 if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
                     r2il::refusal_evidence!(
                         "coalescing-declined",
@@ -449,15 +456,58 @@ pub(super) fn binding_components_with(
                     );
                     continue;
                 }
+                let joined = identity.or_else(|| {
+                    values
+                        .iter()
+                        .find_map(|value| identity_by_root[find(&mut parent, value.0 as usize)])
+                });
                 for value in values.iter().copied().skip(1) {
                     union(&mut parent, &mut rank, &mut ring, first, value);
                     live_by_root[find(&mut parent, first.0 as usize)] = None;
                 }
+                identity_by_root[find(&mut parent, first.0 as usize)] = joined;
             }
             certificate_sets.push((
                 BindingCertificateSource::CertifiedEntity(entity.id()),
                 values,
             ));
+        }
+    }
+
+    for (span, values) in &values_by_span {
+        let values = values.clone();
+        let span = *span;
+        if values.len() > 1 {
+            // A storage span says these values share a machine location. That
+            // is not on its own a licence to share a C object, and this asked
+            // nothing before unioning: the certificate path below has always
+            // asked, and one instruction reading two members is exactly as
+            // impossible whichever derivation proposed the merge. `crc32_bitwise`
+            // at arm64 -O2 is the case -- one p-code temporary carries both
+            // `w10` and `w11`, and `eor w10, w10, w11` reads two of its versions.
+            if let Some((left, right)) =
+                identity_conflict(&mut parent, &identity_by_root, &values, None)
+            {
+                r2il::refusal_evidence!(
+                    "span-declined",
+                    "{span:?} members {values:?}: {left:?} and {right:?} are two objects"
+                );
+                continue;
+            }
+            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
+                r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
+                continue;
+            }
+            let joined = values
+                .iter()
+                .find_map(|value| identity_by_root[find(&mut parent, value.0 as usize)]);
+            let first = values.first().copied().expect("multi-member span");
+            for value in values.iter().copied().skip(1) {
+                union(&mut parent, &mut rank, &mut ring, first, value);
+                live_by_root[find(&mut parent, first.0 as usize)] = None;
+            }
+            identity_by_root[find(&mut parent, first.0 as usize)] = joined;
+            certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
         }
     }
 

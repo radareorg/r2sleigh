@@ -2520,14 +2520,8 @@ pub(crate) fn certificate_elided_cells(
 /// called, so neither derivation has to agree with the other about names in
 /// order to agree about the answer.
 ///
-/// A version-0 input is excluded, mirroring the journal's own exclusion: such
-/// an input has no defining statement, so its edge copy is the only place the
-/// value is written and is therefore rendered. Removing the exclusion is
-/// tempting -- the copy spells `x = x` and the binding has a name already --
-/// but a live-in register that is not a parameter has no declaration to be
-/// rendered by, and placement then reports the object read before it is
-/// assigned. Whether such a value should get an entry declaration is the
-/// open question; until it is answered the edge copy is what defines it.
+/// An entry value among the inputs is no exception: a binding holding one is
+/// caller-supplied and declared as such, so its edge copy says `x = x` too.
 pub(super) fn identity_merge_values(
     graph: &SsaGraph,
     group_of: impl Fn(ValueId) -> Option<u32>,
@@ -2543,12 +2537,11 @@ pub(super) fn identity_merge_values(
         let Some(output_group) = group_of(output) else {
             continue;
         };
-        if inst.inputs.iter().all(|input| {
-            group_of(*input) == Some(output_group)
-                && graph
-                    .value(*input)
-                    .is_some_and(|value| value.var.version != 0)
-        }) {
+        if inst
+            .inputs
+            .iter()
+            .all(|input| group_of(*input) == Some(output_group))
+        {
             merges.insert(output);
         }
     }

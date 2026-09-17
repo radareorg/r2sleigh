@@ -3906,15 +3906,18 @@ impl LegacyObservationJournal {
                     Some(LegacyValueObservation::Bound { binding: legacy });
                 continue;
             }
-            let every_use_is_elided = graph.use_sites(value).iter().all(|site| {
+            // A read a gap owns is accounted as surely as an elided one.
+            let every_use_is_accounted = graph.use_sites(value).iter().all(|site| {
                 matches!(
                     self.uses
                         .get(site.inst.0 as usize)
                         .and_then(|row| row.get(site.input_idx)),
-                    Some(Some(LegacyUseObservation::Elided(_)))
+                    Some(Some(
+                        LegacyUseObservation::Elided(_) | LegacyUseObservation::Gap(_)
+                    ))
                 )
             });
-            if every_use_is_elided {
+            if every_use_is_accounted {
                 self.values[value.0 as usize] = Some(LegacyValueObservation::Elided(
                     r2ssa::ledger::ElisionReason::CoalescedImmutablePhi,
                 ));

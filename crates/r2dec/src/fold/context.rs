@@ -691,6 +691,34 @@ impl<'a> FoldingContext<'a> {
         let Some(closure) = self.gap_closure_from_seed(anchor) else {
             return false;
         };
+        // A gap opens where the lowering visits it, and a merge is never visited: the
+        // plan is anchored at the first operation it covers, or it would claim its
+        // cells and never open.
+        let graph = self.inputs.prepared_ssa.map(r2ssa::SsaArtifact::graph);
+        let anchor = match graph.and_then(|graph| graph.op_site_for_inst(anchor)) {
+            Some(_) => anchor,
+            None => {
+                let Some(first) = graph.and_then(|graph| {
+                    closure
+                        .sites
+                        .iter()
+                        .copied()
+                        .filter_map(|site| graph.op_site_for_inst(site).map(|at| (at, site)))
+                        .min()
+                        .map(|(_, site)| site)
+                }) else {
+                    r2il::refusal_evidence!(
+                        "gap",
+                        "the plan at {anchor:?} covers no operation the lowering visits"
+                    );
+                    return false;
+                };
+                if self.gap_anchors.borrow().contains_key(&first) {
+                    return false;
+                }
+                first
+            }
+        };
         self.gap_anchors
             .borrow_mut()
             .insert(anchor, GapReason::from_proof(kind));
