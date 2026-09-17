@@ -5686,7 +5686,10 @@ mod tests {
             observations,
         } = audited.binding_shadow()
         else {
-            panic!("public native path did not expose its complete shadow audit");
+            panic!(
+                "public native path did not expose its complete shadow audit: {:?}",
+                audited.binding_shadow()
+            );
         };
         assert!(ledger.equations_hold());
         assert!(ledger.passes_quality());

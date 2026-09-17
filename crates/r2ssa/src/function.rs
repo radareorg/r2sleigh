@@ -237,6 +237,10 @@ pub struct SsaArtifact {
     storage_spans: StorageSpans,
     live_out: crate::liveout::FunctionLiveOut,
     liveness: crate::liveness::ValueLiveness,
+    /// Pairs of values the memory facts prove hold one content -- reads of
+    /// one object with no write between -- for anyone who recomputes the
+    /// liveness with reads relocated.
+    same_content_pairs: Vec<(crate::graph::ValueId, crate::graph::ValueId)>,
     unobserved_merges: crate::deadphi::DeadPhis,
     mode: FunctionPrepareMode,
     facts: PreparedFunctionFacts,
@@ -420,7 +424,7 @@ impl SsaArtifact {
             .collect::<Vec<_>>();
         let live_out =
             crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
-        let liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
+        let mut liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         let graph_built_bytes = r2il::allocation::live_bytes();
         let facts = PreparedFunctionFacts::collect_with_context(
@@ -442,6 +446,13 @@ impl SsaArtifact {
             graph_built_bytes.saturating_sub(prepare_entry_bytes),
             r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
         );
+        // Two reads of one object with no write to it between are one
+        // content, which the graph cannot see and the memory facts can. The
+        // spans above were judged without this and are at worst finer.
+        let same_content_pairs = same_content_reads(&facts.structured);
+        for (left, right) in &same_content_pairs {
+            liveness.declare_same_content(*left, *right);
+        }
         let unobserved_merges = crate::deadphi::DeadPhis::find(&graph, &live_out, &facts);
         let aggregate_accesses = collect_aggregate_access_projections(
             &graph,
@@ -458,6 +469,7 @@ impl SsaArtifact {
             storage_spans,
             live_out,
             liveness,
+            same_content_pairs,
             unobserved_merges,
             mode,
             facts,
@@ -1061,6 +1073,11 @@ impl SsaArtifact {
         &self.liveness
     }
 
+    /// Pairs of values the memory facts prove hold one content.
+    pub fn same_content_pairs(&self) -> &[(crate::graph::ValueId, crate::graph::ValueId)] {
+        &self.same_content_pairs
+    }
+
     pub fn graph(&self) -> &SsaGraph {
         &self.graph
     }
@@ -1117,6 +1134,7 @@ impl SsaArtifact {
             storage_spans: self.storage_spans.clone(),
             live_out: self.live_out.clone(),
             liveness: self.liveness.clone(),
+            same_content_pairs: self.same_content_pairs.clone(),
             unobserved_merges: self.unobserved_merges.clone(),
             mode: self.mode,
             facts,
@@ -2345,6 +2363,41 @@ struct SsaQueryIndex {
 }
 
 /// One block of a reverse-postorder vector, by address.
+/// Reads of one memory object that see the same content: consecutive reads
+/// in one block with no write to that object between them.
+fn same_content_reads(
+    structured: &crate::semantic::StructuredDataflowFacts,
+) -> Vec<(crate::graph::ValueId, crate::graph::ValueId)> {
+    let mut by_block_object =
+        BTreeMap::<(u64, crate::ObjectId), Vec<&crate::semantic::StructuredMemoryAccessFact>>::new(
+        );
+    for access in structured.memory_accesses.values() {
+        by_block_object
+            .entry((access.block_addr, access.object))
+            .or_default()
+            .push(access);
+    }
+    let mut pairs = Vec::new();
+    for accesses in by_block_object.values_mut() {
+        accesses.sort_by_key(|access| access.op_index);
+        let mut last_read = None;
+        for access in accesses.iter() {
+            if access.is_write {
+                last_read = None;
+                continue;
+            }
+            let Some(value) = access.value else {
+                continue;
+            };
+            if let Some(previous) = last_read {
+                pairs.push((previous, value));
+            }
+            last_read = Some(value);
+        }
+    }
+    pairs
+}
+
 fn block_at_mut<'a>(
     index: &BTreeMap<u64, u32>,
     blocks: &'a mut [SSABlock],
@@ -10357,9 +10410,10 @@ mod tests {
         let prepared = SsaArtifact::new(function, FunctionPrepareMode::Raw);
         let phi_value = prepared.graph().value_id_for_var(&phi).unwrap();
         let init_value = prepared.graph().value_id_for_var(&init).unwrap();
-        // The copy into RAX is forwarded, so the merge reads the sum itself.
-        let update_value = prepared.graph().value_id_for_var(&update_source).unwrap();
-        let _ = &update;
+        // The copy into RAX feeds the merge, so it is the merge's edge write
+        // and stays; the merge reads it rather than the sum.
+        let update_value = prepared.graph().value_id_for_var(&update).unwrap();
+        let _ = &update_source;
         let result_value = prepared.graph().value_id_for_var(&result).unwrap();
         let chained_result_value = prepared.graph().value_id_for_var(&chained_result).unwrap();
         let phi_inst = prepared.graph().def_inst(phi_value).unwrap();

@@ -1,6 +1,6 @@
 uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 139 source obligations: 115 rendered, 24 elided, 0 refused; 33 statements rendered */
+    /* r2dec proof: no individual construct is marked; 139 source obligations: 115 rendered, 24 elided, 0 refused; 32 statements rendered */
     {
         uint64_t RDX_0_2;
         RDX_0_2 = (uint64_t)(uint32_t)EDX_0;
@@ -15,8 +15,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 uint64_t R8_6 = (uint64_t)(uint32_t)(tmp_lane_100000830_2b_a_1 << 13 | tmp_lane_100000830_2b_a_1 >> 19);
                 RDX_0_2 = (uint64_t)(uint32_t)((uint32_t)(R8_6 * 4 + R8_6) - 0x19ab949c);
                 RCX_1++;
-                uint8_t tmp_12800_2 = RAX_2 != RCX_1;
-                if (!tmp_12800_2) {
+                if (RAX_2 == RCX_1) {
                     break;
                 }
             }

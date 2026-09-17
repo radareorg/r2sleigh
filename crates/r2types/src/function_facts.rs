@@ -1162,9 +1162,22 @@ impl CertifiedEntity {
                     .copied()
                     .collect(),
             ),
-            Self::LoopCarrier { members, .. } => {
-                Some(members.iter().map(|member| member.value).collect())
-            }
+            // A member whose only role is sharing a run with a real member is
+            // the span's to offer, under the liveness rule, not the carrier's
+            // to claim; the same rule `LoopCarrierFact::coalescing_values`
+            // applies.
+            Self::LoopCarrier { members, .. } => Some(
+                members
+                    .iter()
+                    .filter(|member| {
+                        member
+                            .roles
+                            .iter()
+                            .any(|role| *role != r2ssa::LoopCarrierMemberRole::StorageContinuation)
+                    })
+                    .map(|member| member.value)
+                    .collect(),
+            ),
             // A reload of a slot is the slot, so it and the registers that
             // ferry it are one variable. A parameter's home is excluded: the
             // parameter entity owns those values and decides there.
@@ -5461,11 +5474,21 @@ mod tests {
                     },
                 },
             ],
+            // Every member shares a run with the carrier; all but one also
+            // hold a role the carrier proved, and that one is the span's to
+            // offer rather than the carrier's to claim.
             members: [1, 2, 3, 4, 6, 7, 8, 9]
                 .into_iter()
                 .map(|value| r2ssa::LoopCarrierMemberFact {
                     value: r2ssa::ValueId(value),
-                    roles: BTreeSet::from([r2ssa::LoopCarrierMemberRole::StorageContinuation]),
+                    roles: if value == 4 {
+                        BTreeSet::from([r2ssa::LoopCarrierMemberRole::StorageContinuation])
+                    } else {
+                        BTreeSet::from([
+                            r2ssa::LoopCarrierMemberRole::StorageContinuation,
+                            r2ssa::LoopCarrierMemberRole::Entry,
+                        ])
+                    },
                 })
                 .collect(),
             ty: None,

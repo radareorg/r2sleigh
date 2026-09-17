@@ -1,6 +1,6 @@
 uint64_t sym__adler32(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 62 source obligations: 50 rendered, 12 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 62 source obligations: 50 rendered, 12 elided, 0 refused; 24 statements rendered */
     if (X1_0 == 0) {
         return 1;
     } else {
@@ -23,8 +23,7 @@ uint64_t sym__adler32(uint64_t X0_0, uint64_t X1_0)
             X8_1 = (uint64_t)(uint32_t)tmp_2b000_3;
             uint8_t TMPZR_4 = X1_0 == 1;
             X1_0--;
-            uint8_t tmp_a00_2 = !TMPZR_4;
-            if (!tmp_a00_2) {
+            if (TMPZR_4) {
                 break;
             }
         }

@@ -1,6 +1,6 @@
 uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 65 source obligations: 41 rendered, 24 elided, 0 refused; 24 statements rendered */
+    /* r2dec proof: no individual construct is marked; 65 source obligations: 41 rendered, 24 elided, 0 refused; 23 statements rendered */
     if (RSI_0 == 0) {
         return 0;
     } else {
@@ -25,8 +25,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
             }
             {
                 RCX_1++;
-                uint8_t tmp_12800_4 = RCX_1 != RSI_0;
-                if (!tmp_12800_4) {
+                if (RCX_1 == RSI_0) {
                     break;
                 }
             }

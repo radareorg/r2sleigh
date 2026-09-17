@@ -1066,7 +1066,23 @@ impl LoopCarrierFact {
     /// The rows are sealed in [`StructuredLoopFact::validate_carrier_members`];
     /// this projection deliberately contains no second membership algorithm.
     pub fn coalescing_values(&self) -> BTreeSet<ValueId> {
-        self.members.iter().map(|member| member.value).collect()
+        // A member whose only role is sharing a run with a real member is not
+        // the carrier's claim: the run is the span's, and the span offers it to
+        // the object under the liveness rule. Claiming it here put the folded
+        // intermediates of an update -- `zext(byte)`, the xor -- in the
+        // carrier's proposed set, and the carrier is still live where they
+        // are written, so the whole union was declined for values that render
+        // nothing.
+        self.members
+            .iter()
+            .filter(|member| {
+                member
+                    .roles
+                    .iter()
+                    .any(|role| *role != LoopCarrierMemberRole::StorageContinuation)
+            })
+            .map(|member| member.value)
+            .collect()
     }
 
     /// Validate every retained edge against the graph that owns this fact.

@@ -72,6 +72,39 @@ struct BlockScratch {
 
 impl ValueLiveness {
     pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
+        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), &[])
+    }
+
+    /// State that two values hold one content, on evidence the graph alone
+    /// does not carry: two reads of one memory object with no write between.
+    pub fn declare_same_content(&mut self, left: ValueId, right: ValueId) {
+        if (left.0 as usize) < self.content.len() && (right.0 as usize) < self.content.len() {
+            content_union(&mut self.content, left.0, right.0);
+        }
+    }
+
+    /// Liveness as the text will have it once some definitions are folded
+    /// into their readers: a read made by a folded instruction happens where
+    /// the reader is, and the operands it reads are needed until then.
+    /// `relocations` maps each folded definition to its one reader, and a
+    /// chain of folds resolves to the last reader.
+    pub fn compute_with_relocations(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        relocations: &BTreeMap<InstId, InstId>,
+        same_content: &[(ValueId, ValueId)],
+    ) -> Self {
+        let relocate = |mut inst: InstId| {
+            let mut steps = 0;
+            while let Some(next) = relocations.get(&inst) {
+                inst = *next;
+                steps += 1;
+                if steps > relocations.len() {
+                    break;
+                }
+            }
+            inst
+        };
         let value_count = graph.values.len();
         let block_count = graph.blocks.len();
         // Which values are one content seen more than once. A copy or a
@@ -212,7 +245,7 @@ impl ValueLiveness {
             // Every read, as the block and position it happens at.
             let mut reads = Vec::<(BlockId, u32)>::new();
             for site in graph.use_sites(value.id) {
-                let Some(inst) = graph.inst(site.inst) else {
+                let Some(inst) = graph.inst(relocate(site.inst)) else {
                     continue;
                 };
                 if dead_phi[inst.id.0 as usize] {
@@ -327,12 +360,16 @@ impl ValueLiveness {
         }
         offsets.push(segments.len() as u32);
 
-        Self {
+        let mut liveness = Self {
             offsets,
             segments,
             content,
             unread_phi: dead_phi,
+        };
+        for (left, right) in same_content {
+            liveness.declare_same_content(*left, *right);
         }
+        liveness
     }
 
     /// Whether this merge is read by nothing, so it merges nothing the text
@@ -438,16 +475,28 @@ impl ComponentLiveness {
     /// Whether any value of one component is live where a value of the other
     /// holds the object, the two values not being one content.
     pub fn interferes(&self, other: &Self, liveness: &ValueLiveness) -> bool {
+        self.first_interference(other, liveness).is_some()
+    }
+
+    /// The first pair of values, one from each component, that are both live
+    /// at one point and are not one content; which pair it is names the
+    /// reason a union was declined.
+    pub fn first_interference(
+        &self,
+        other: &Self,
+        liveness: &ValueLiveness,
+    ) -> Option<(ValueId, ValueId)> {
         let (small, large) = if self.by_block.len() <= other.by_block.len() {
             (self, other)
         } else {
             (other, self)
         };
-        small.by_block.iter().any(|(block, mine)| {
-            large.by_block.get(block).is_some_and(|theirs| {
-                mine.iter().any(|(segment, value)| {
-                    theirs.iter().any(|(candidate, member)| {
-                        segment.overlaps(*candidate) && !liveness.same_content(*value, *member)
+        small.by_block.iter().find_map(|(block, mine)| {
+            large.by_block.get(block).and_then(|theirs| {
+                mine.iter().find_map(|(segment, value)| {
+                    theirs.iter().find_map(|(candidate, member)| {
+                        (segment.overlaps(*candidate) && !liveness.same_content(*value, *member))
+                            .then_some((*value, *member))
                     })
                 })
             })

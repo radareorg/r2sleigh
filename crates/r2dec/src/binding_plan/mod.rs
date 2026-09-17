@@ -1207,7 +1207,7 @@ pub(crate) enum BindingPlanBuildError {
     WorkExhausted(r2ssa::SsaExecutionStopReason),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BindingComponent {
     members: BTreeSet<ValueId>,
     sources: BTreeSet<BindingCertificateSource>,

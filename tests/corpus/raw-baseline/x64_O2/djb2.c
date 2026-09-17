@@ -1,6 +1,6 @@
 uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 120 source obligations: 91 rendered, 29 elided, 0 refused; 36 statements rendered */
+    /* r2dec proof: no individual construct is marked; 120 source obligations: 91 rendered, 29 elided, 0 refused; 34 statements rendered */
     if (RSI_0 == 0) {
         return 0x1505;
     } else {
@@ -21,8 +21,7 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
                 uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RDX_1 + 3];
                 RAX_1 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_5 + tmp_lane_1000006f0_b9_2f_1 + tmp_lane_1000006f0_b9_2f_1 * 32);
                 RDX_1 += 4;
-                uint8_t tmp_12800_2 = RSI_0 != RDX_1;
-                if (!tmp_12800_2) {
+                if (RSI_0 == RDX_1) {
                     break;
                 }
             }
@@ -39,8 +38,7 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
                     uint8_t tmp_11e00_8 = ((uint8_t*)RDI_0)[RDX_6];
                     RAX_1 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_8 + ((uint32_t)RAX_1 * 32 + (uint32_t)RAX_1));
                     RDX_6++;
-                    uint8_t tmp_12800_5 = RCX_2 != RDX_6;
-                    if (!tmp_12800_5) {
+                    if (RCX_2 == RDX_6) {
                         break;
                     }
                 }

@@ -479,17 +479,14 @@ pub(super) fn component_eligible_values(
     Ok(rewrite_inlining_partition(source_owned, projection)?.component_eligible)
 }
 
-/// The same answer from a stated inlining decision.
+/// Which values can be an object at all.
 ///
-/// The partition is a function of which values are inlined, and the inlining
-/// answer needs the partition to ask whether a literal is alone in its
-/// object. Taking the decision as an argument is what lets the two be
-/// computed in a stated order instead of one estimating the other.
+/// This depends on nothing the plan decides afterwards: a value the inlining
+/// pass folds into its reader is still a member of the object it would have
+/// been, so the partition is computed once and no later answer refines it.
 pub(super) fn component_eligible_with(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
-    inlinable: &BTreeSet<ValueId>,
-    unrendered: &BTreeSet<ValueId>,
 ) -> Result<Vec<bool>, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -520,9 +517,7 @@ pub(super) fn component_eligible_with(
                 && !stack_frame_values.contains(&value.id)
                 && !stack_geometry_values.contains(&value.id)
                 && !structural_unused.contains(&value.id)
-                && !inlinable.contains(&value.id)
                 && !unread.contains(&value.id)
-                && !unrendered.contains(&value.id)
         })
         .collect())
 }
@@ -939,23 +934,22 @@ pub(super) fn declaration_type_describes_width(
     declaration_type_width(ty, ptr_bits) == Some(width_bits)
 }
 
-/// Whether two of these values cannot share one object: one is still needed
-/// where the other holds it, and they are not one content seen twice.
-///
-/// Liveness is the whole of the question. The two proxies this replaces --
-/// values one instruction reads together, and a member redefined between
-/// another's definition and its last read in one block -- were each exact for
-/// one shape and blind to the rest, and forwarding copies made the rest common.
-pub(super) fn values_interfere(
-    liveness: &r2ssa::liveness::ValueLiveness,
-    members: &BTreeSet<ValueId>,
-) -> bool {
-    let members = members.iter().copied().collect::<Vec<_>>();
-    members.iter().enumerate().any(|(index, left)| {
-        members[index + 1..]
-            .iter()
-            .any(|right| liveness.interferes(*left, *right))
-    })
+/// Whether this value is a literal the machine put somewhere: a copy of a
+/// constant. Such a value decides no object of its own.
+pub(super) fn literal_defined(graph: &SsaGraph, value: ValueId) -> bool {
+    graph
+        .def_inst(value)
+        .and_then(|inst| graph.inst(inst))
+        .is_some_and(|inst| {
+            matches!(
+                inst.payload,
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
+            ) && inst.inputs.iter().all(|input| {
+                graph
+                    .value(*input)
+                    .is_some_and(|input| input.var.is_const())
+            })
+        })
 }
 
 /// Takes the projection rather than building one.
@@ -970,129 +964,154 @@ pub(crate) struct RewriteInliningPartition {
     pub(super) canonical: r2rewrite::CanonicalRoots,
     pub(super) inlinable: BTreeSet<ValueId>,
     pub(super) component_eligible: Vec<bool>,
+    /// The one partition: every value that can be an object, grouped once,
+    /// before anything is inlined. A member later inlined stays a member
+    /// whose definition prints nothing; a component none of whose members is
+    /// bound gets no binding.
+    pub(super) components: Vec<super::BindingComponent>,
+    /// Liveness as the text has it: reads a folded definition made happen at
+    /// its reader. The components were judged against this, and the seal
+    /// judges them again against the same.
+    pub(super) liveness: r2ssa::liveness::ValueLiveness,
 }
 
-/// Compute producer expansion, expression inlining, and binding membership as
-/// one bounded fixed point.
+/// The partition and the inlining, brought to agreement.
 ///
-/// Pass one imports without absorbing producers. That is enough to decide
-/// whether each value's own canonical root has a C form, without feeding a
-/// binding decision back into the rewriter. The existing conservative
-/// singleton partition then admits only bound literals that cannot orphan a
-/// coalesced object. Pass two canonicalises once with that settled inlining set
-/// as the expansion policy and derives the final component eligibility from the
-/// same set. Every lookup is indexed; each pass is linear in the machine and
-/// term arenas apart from the existing ordered component lookups.
+/// Objects decide which folds are safe, and folds decide which values occupy
+/// an object and where their reads happen, so neither is first. The
+/// resolution is a descending chain. The partition is built over every value
+/// that can be an object and the folds are decided against it; then the
+/// partition is rebuilt without the folded values, with the reads they made
+/// relocated to their readers, and every fold is checked again against that
+/// partition, keeping only those still safe. A fold never returns once
+/// dropped, so the chain ends, and it ends with a partition judged exactly
+/// against the values the text binds and a set of folds each safe against
+/// that partition. Two rounds is the usual count.
 pub(super) fn rewrite_inlining_partition(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
 ) -> Result<RewriteInliningPartition, BindingPlanBuildError> {
-    // Two passes, in a stated order, and no iteration.
-    //
-    // The gate below turns away a literal that lives in a register because
-    // such a literal is frequently the only write of an object other values
-    // are coalesced into: `R8_1 = 0xcbf29ce484222325` initialises the
-    // accumulator `fnv1a64` then reads across its loop, and spelling the
-    // constant at each reader leaves that object read before it is assigned.
-    // The honest test is whether the value is alone in its binding, and that
-    // needs the partition, which is computed from this answer.
-    //
-    // So the partition is built once from the answer that admits no such
-    // literal -- the conservative one, which is what this function returned
-    // before -- and a literal that is a *one-member component* there is
-    // admitted on the second pass. Nothing coalesces with a one-member
-    // component by definition, so removing that value removes its own object
-    // and no other object loses a writer. A literal that shares an object,
-    // like the accumulator, is not a singleton and stays bound.
-    //
-    // Termination is by construction rather than by convergence: pass one
-    // does not depend on pass two, so there is no iteration to bound. The
-    // second pass is conservative rather than maximal -- a candidate that
-    // would become a singleton only after other candidates are inlined is
-    // declined -- which is the safe direction, and it is why estimating the
-    // partition from a relaxed eligibility set is not needed. That estimate
-    // is also unsound: excluding a value removes it from the member set
-    // `merge_would_interfere` reads, so it can remove the interference
-    // blocking a merge and make a component *grow*.
     let source = source_owned.source();
-    // Built once from the two union sources that do not depend on inlinability,
-    // so the fold guard and the type oracle below can both ask about C objects
-    // before the bindings exist.
-    let pre_partition = super::construction::coalescing_pre_partition(source_owned);
-    let mut group_members = BTreeMap::<u32, Vec<ValueId>>::new();
-    for (index, group) in pre_partition.iter().copied().enumerate() {
-        group_members
-            .entry(group)
-            .or_default()
-            .push(ValueId(index as u32));
-    }
-    // The rewriter has no type system, so which operand of a sum is a pointer
-    // is a question it cannot answer alone: `buf + len` came out spelled
-    // `len[buf]` because address provenance proves only that *some* parameter
-    // reaches memory through that address, and `len` was the only parameter in
-    // it. The types answer here, asked of the object rather than of the
-    // version -- at -O0 the value an address is built from is a reload, and
-    // the solution typed whichever version it could see.
-    let declared_pointers = |value: ValueId| {
-        declared_pointer_of_object(source_owned, &pre_partition, &group_members, value)
-    };
-    let seed_canonical =
-        r2rewrite::canonicalize_with(source, projection, &|_| false, &declared_pointers)
+    let graph = source.graph();
+    let mut eligible = component_eligible_with(source_owned, projection)?;
+    // A value every reader stopped reading when the terms were rewritten is
+    // no object either. That needs the canonical terms, which do not depend
+    // on the partition except for how a pointer is spelled, so one seed
+    // canonicalisation without the pointer oracle decides it for every round.
+    let unrendered = {
+        let seed = r2rewrite::canonicalize_with(source, projection, &|_| false, &|_| None)
             .map_err(BindingPlanBuildError::Canonicalisation)?;
-    crate::stage_timing::mark("plan_seed");
-    let unrendered = unrendered_defined_values(source, projection, &seed_canonical);
-    let conservative = inlinable_core(
-        source_owned,
-        projection,
-        &seed_canonical,
-        &BTreeSet::new(),
-        &unrendered,
-        &pre_partition,
-    );
-    crate::stage_timing::mark("plan_inlinable");
-    let eligible = component_eligible_with(source_owned, projection, &conservative, &unrendered)?;
+        unrendered_defined_values(source, projection, &seed)
+    };
+    for value in &unrendered {
+        eligible[value.0 as usize] = false;
+    }
     crate::stage_timing::mark("plan_component_eligible");
-    let components = super::construction::binding_components_with(source_owned, &eligible)?;
-    crate::stage_timing::mark("plan_components");
-    let alone = components
-        .iter()
-        .filter(|component| component.members.len() == 1)
-        .filter_map(|component| component.members.first().copied())
-        .collect::<BTreeSet<_>>();
-    let admitted = duplicable_bound_constants(projection, source_owned, &seed_canonical, &alone);
-    let inlinable = if admitted.is_empty() {
-        conservative
-    } else {
-        inlinable_core(
+    let mut inlined = BTreeSet::<ValueId>::new();
+    let mut readers = BTreeMap::<ValueId, r2ssa::InstId>::new();
+    let mut round = 0_usize;
+    loop {
+        round += 1;
+        let liveness = if inlined.is_empty() {
+            source.value_liveness().clone()
+        } else {
+            let relocations = inlined
+                .iter()
+                .filter_map(|value| Some((graph.def_inst(*value)?, *readers.get(value)?)))
+                .collect::<BTreeMap<_, _>>();
+            r2ssa::liveness::ValueLiveness::compute_with_relocations(
+                graph,
+                source.live_out(),
+                &relocations,
+                source.same_content_pairs(),
+            )
+        };
+        let round_eligible = eligible
+            .iter()
+            .enumerate()
+            .map(|(index, eligible)| *eligible && !inlined.contains(&ValueId(index as u32)))
+            .collect::<Vec<_>>();
+        let components =
+            super::construction::binding_components_with(source_owned, &round_eligible, &liveness)?;
+        crate::stage_timing::mark("plan_components");
+        // Which component each value belongs to; a value that is no object has none.
+        let mut groups = vec![u32::MAX; graph.values.len()];
+        let mut group_members = BTreeMap::<u32, Vec<ValueId>>::new();
+        for (index, component) in components.iter().enumerate() {
+            for member in &component.members {
+                groups[member.0 as usize] = index as u32;
+            }
+            group_members.insert(index as u32, component.members.iter().copied().collect());
+        }
+        // The rewriter has no type system, so which operand of a sum is a
+        // pointer is a question it cannot answer alone: `buf + len` came out
+        // spelled `len[buf]` because address provenance proves only that
+        // *some* parameter reaches memory through that address, and `len` was
+        // the only parameter in it. The types answer here, asked of the object
+        // rather than of the version -- at -O0 the value an address is built
+        // from is a reload, and the solution typed whichever version it could
+        // see.
+        let declared_pointers = |value: ValueId| {
+            declared_pointer_of_object(source_owned, &groups, &group_members, value)
+        };
+        let seed_canonical =
+            r2rewrite::canonicalize_with(source, projection, &|_| false, &declared_pointers)
+                .map_err(BindingPlanBuildError::Canonicalisation)?;
+        crate::stage_timing::mark("plan_seed");
+        // Alone in its object: a one-member component, or a value the
+        // previous round folded and this round's partition therefore does
+        // not hold at all -- it has no object to share.
+        let mut alone = components
+            .iter()
+            .filter(|component| component.members.len() == 1)
+            .filter_map(|component| component.members.first().copied())
+            .collect::<BTreeSet<_>>();
+        alone.extend(inlined.iter().copied());
+        let admitted =
+            duplicable_bound_constants(projection, source_owned, &seed_canonical, &alone);
+        let folds = inlinable_core(
             source_owned,
             projection,
             &seed_canonical,
             &admitted,
             &unrendered,
-            &pre_partition,
-        )
-    };
-    // The seed's term arena interns every term in the function, and the pass
-    // below builds a second one. Nothing reads the seed after this point, so
-    // holding it across the second canonicalisation doubles the arena's share
-    // of the peak for nothing.
-    drop(seed_canonical);
-    crate::stage_timing::mark("plan_conservative");
-    let component_eligible =
-        component_eligible_with(source_owned, projection, &inlinable, &unrendered)?;
-    crate::stage_timing::mark("plan_eligible");
-    let canonical = r2rewrite::canonicalize_with(
-        source,
-        projection,
-        &|query: &r2rewrite::ExpansionQuery<'_>| term_absorbs_producer(&inlinable, query),
-        &declared_pointers,
-    )
-    .map_err(BindingPlanBuildError::Canonicalisation)?;
-    Ok(RewriteInliningPartition {
-        canonical,
-        inlinable,
-        component_eligible,
-    })
+            &groups,
+        );
+        crate::stage_timing::mark("plan_inlinable");
+        let next: BTreeSet<ValueId> = if round == 1 {
+            folds.values
+        } else {
+            folds.values.intersection(&inlined).copied().collect()
+        };
+        readers = folds
+            .readers
+            .into_iter()
+            .filter(|(value, _)| next.contains(value))
+            .collect();
+        if round > 1 && next == inlined {
+            r2il::refusal_evidence!(
+                "plan-rounds",
+                "{:#x}: partition and inlining agreed after {round} rounds",
+                source.function().entry
+            );
+            drop(seed_canonical);
+            let canonical = r2rewrite::canonicalize_with(
+                source,
+                projection,
+                &|query: &r2rewrite::ExpansionQuery<'_>| term_absorbs_producer(&inlined, query),
+                &declared_pointers,
+            )
+            .map_err(BindingPlanBuildError::Canonicalisation)?;
+            return Ok(RewriteInliningPartition {
+                canonical,
+                inlinable: inlined,
+                component_eligible: round_eligible,
+                components,
+                liveness,
+            });
+        }
+        inlined = next;
+    }
 }
 
 /// The declared answer for the C object a value belongs to.
@@ -1309,6 +1328,13 @@ fn frame_constant(
         })
 }
 
+/// Which values fold into their one reader, and for each non-literal fold
+/// which instruction that reader is: the read the fold moves happens there.
+struct Folds {
+    values: BTreeSet<ValueId>,
+    readers: BTreeMap<ValueId, r2ssa::InstId>,
+}
+
 fn inlinable_core(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
@@ -1316,7 +1342,7 @@ fn inlinable_core(
     admitted: &BTreeSet<ValueId>,
     unrendered: &BTreeSet<ValueId>,
     pre_partition: &[u32],
-) -> BTreeSet<ValueId> {
+) -> Folds {
     let source = source_owned.source();
     let graph = source.graph();
     let unobserved_uses = source.unobserved_merges().unobserved_uses();
@@ -1380,7 +1406,10 @@ fn inlinable_core(
     // observation journal. A certificate the cells cannot be built from is a
     // function the journal will refuse, so there is nothing to fold for.
     let Ok(cells) = certificate_elided_cells(source, projection) else {
-        return BTreeSet::new();
+        return Folds {
+            values: BTreeSet::new(),
+            readers: BTreeMap::new(),
+        };
     };
     let elided_reads = cells.read_elided_instructions;
     // A use the certificates elide is not a read the text performs, so there is
@@ -1421,7 +1450,12 @@ fn inlinable_core(
     // the whole candidate set rather than something a single pass can carry.
     let mut direct_reads = BTreeMap::<ValueId, Vec<ValueId>>::new();
     let mut hazard_candidates = Vec::<(ValueId, r2ssa::InstId, r2ssa::InstId)>::new();
-    let group_of = |value: ValueId| pre_partition.get(value.0 as usize).copied();
+    let group_of = |value: ValueId| {
+        pre_partition
+            .get(value.0 as usize)
+            .copied()
+            .filter(|group| *group != u32::MAX)
+    };
     for value in &graph.values {
         let traced = trace.is_some_and(|want| {
             want == "all" || value.var.display_name().eq_ignore_ascii_case(want)
@@ -1803,13 +1837,16 @@ fn inlinable_core(
             if expanded {
                 let mut groups = BTreeSet::new();
                 for read in direct_reads.get(&value).into_iter().flatten() {
-                    match hazard.get(read) {
-                        Some(closed) => groups.extend(closed.iter().copied()),
-                        // Either a bound leaf, which is read as its own object,
-                        // or one still on the stack: a cycle through folded
-                        // values cannot be spelled, and its object is the
-                        // conservative answer for it.
-                        None => groups.extend(group_of(*read)),
+                    // The leaf's own object, whether or not it folds: a leaf
+                    // that is a candidate may still stay bound, and then a
+                    // write to its object between here and the reader is the
+                    // hazard. Its expansion is added beside that, for the case
+                    // where it does fold. Both kept is the answer that covers
+                    // either outcome; keeping only the expansion let
+                    // `q = p + 1` move past a later write of `p`.
+                    groups.extend(group_of(*read));
+                    if let Some(closed) = hazard.get(read) {
+                        groups.extend(closed.iter().copied());
                     }
                 }
                 hazard.insert(value, groups);
@@ -1829,9 +1866,9 @@ fn inlinable_core(
 
     // Which objects a merge assigns at the end of each block. A merge's carrier
     // is written on the edge, so the write sits at the end of the predecessor
-    // the edge leaves, whatever block defined the value it carries. Every edge
-    // counts as a write: the partition here is coarser than the one rendered,
-    // so two values in one group may still end up as two objects.
+    // the edge leaves, whatever block defined the value it carries. An edge
+    // whose value is already the merge's object writes nothing, and the
+    // partition asked here is the one rendered, so that answer is exact.
     let mut edge_writes_by_block = vec![Vec::<u32>::new(); graph.blocks.len()];
     for inst in &graph.insts {
         let r2ssa::InstPayload::Phi { predecessors } = &inst.payload else {
@@ -1840,12 +1877,28 @@ fn inlinable_core(
         let Some(written) = inst.output.and_then(group_of) else {
             continue;
         };
-        for predecessor in predecessors {
+        for (input, predecessor) in inst.inputs.iter().zip(predecessors) {
+            if group_of(*input) == Some(written) {
+                continue;
+            }
             if let Some(writes) = edge_writes_by_block.get_mut(predecessor.0 as usize) {
                 writes.push(written);
             }
         }
     }
+    // Later definitions first. A write that could disturb a candidate's read
+    // sits between its definition and its reader, so it is a later definition
+    // in the same block, and if that definition is itself a candidate it has
+    // already been decided by the time this one is asked. A write that folds
+    // prints no statement and disturbs nothing; asking in this order makes
+    // that exact rather than a guess.
+    hazard_candidates.sort_by_key(|(_, definition, _)| {
+        graph
+            .inst(*definition)
+            .map_or((0, 0), |inst| (inst.block.0, usize::MAX - inst.ordinal))
+    });
+    let mut folded = BTreeSet::<r2ssa::InstId>::new();
+    let mut readers = BTreeMap::new();
     for (value, definition, reader) in hazard_candidates {
         let read_groups = hazard.get(&value).cloned().unwrap_or_default();
         let (Some(def_inst), Some(use_inst)) = (graph.inst(definition), graph.inst(reader)) else {
@@ -1864,8 +1917,10 @@ fn inlinable_core(
                 inst.ordinal > def_inst.ordinal
                     && inst.ordinal < use_inst.ordinal
                     // A write nothing observes prints no statement, so it
-                    // cannot disturb a read moved past it.
+                    // cannot disturb a read moved past it; nor does one
+                    // already decided to fold into its own reader.
                     && !renders_nothing(inst.id)
+                    && !folded.contains(&inst.id)
                     && inst
                         .output
                         .and_then(group_of)
@@ -1906,10 +1961,15 @@ fn inlinable_core(
         }
         if !rewritten && !carried {
             inlinable.insert(value);
+            folded.insert(definition);
+            readers.insert(value, reader);
         }
     }
 
-    inlinable
+    Folds {
+        values: inlinable,
+        readers,
+    }
 }
 
 /// Whether this instruction leaves its block, so a merge's carrier copy is

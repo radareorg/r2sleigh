@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 92 source obligations: 73 rendered, 19 elided, 0 refused; 34 statements rendered */
+    /* r2dec proof: no individual construct is marked; 92 source obligations: 73 rendered, 19 elided, 0 refused; 33 statements rendered */
     {
         uint64_t X0_2;
         uint64_t X11_1;
@@ -37,8 +37,7 @@ uint64_t sym__unaligned_words(uint64_t X0_0, uint64_t X1_0)
                     X0_2 = (uint64_t)(uint32_t)(((uint32_t)X0_2 ^ (uint32_t)tmp_25400_2) * tmp_2a000_4);
                     uint8_t TMPZR_11 = X10_3 == 1;
                     X10_3--;
-                    uint8_t tmp_a00_2 = !TMPZR_11;
-                    if (!tmp_a00_2) {
+                    if (TMPZR_11) {
                         break;
                     }
                 }

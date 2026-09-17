@@ -3,7 +3,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
 #define _pearson_tab__r2sleigh_addr 0x100001680ULL
     extern char _pearson_tab[];
 
-    /* r2dec proof: no individual construct is marked; 125 source obligations: 99 rendered, 26 elided, 0 refused; 38 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 125 source obligations: 99 rendered, 26 elided, 0 refused; 36 statements rendered; 1 data object type refused */
     {
         uint64_t RDX_1;
         if (RSI_0 == 0) {
@@ -26,8 +26,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
                     uint8_t tmp_11e00_9 = *(uint8_t*)((uint64_t)(uint8_t)(tmp_11e00_7 ^ tmp_11e00_8) + (uint64_t)&_pearson_tab);
                     RDX_1 = (uint64_t)(uint32_t)tmp_11e00_9;
                     RCX_1 += 4;
-                    uint8_t tmp_12800_2 = RSI_0 != RCX_1;
-                    if (!tmp_12800_2) {
+                    if (RSI_0 == RCX_1) {
                         break;
                     }
                 }
@@ -44,8 +43,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
                     uint8_t tmp_11e00_13 = *(uint8_t*)((uint64_t)(uint8_t)((uint8_t)RDX_1 ^ tmp_11e00_12) + (uint64_t)&_pearson_tab);
                     RDX_1 = (uint64_t)(uint32_t)tmp_11e00_13;
                     RCX_6++;
-                    uint8_t tmp_12800_5 = RAX_2 != RCX_6;
-                    if (!tmp_12800_5) {
+                    if (RAX_2 == RCX_6) {
                         break;
                     }
                 }

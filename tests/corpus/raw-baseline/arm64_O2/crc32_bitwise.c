@@ -4,7 +4,7 @@ struct r2sleigh_bits_256 {
 
 uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 289 source obligations: 277 rendered, 12 elided, 0 refused; 152 statements rendered */
+    /* r2dec proof: no individual construct is marked; 289 source obligations: 277 rendered, 12 elided, 0 refused; 151 statements rendered */
     {
         struct r2sleigh_bits_256 Z2_1;
         Z2_1 = r2sleigh_bits_zero_extend_64_256(0U);
@@ -155,8 +155,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                 X10_1 = (uint64_t)(uint32_t)tmp_20380_8;
                 uint8_t TMPZR_2 = X1_0 == 1;
                 X1_0--;
-                uint8_t tmp_a00_2 = !TMPZR_2;
-                if (!tmp_a00_2) {
+                if (TMPZR_2) {
                     break;
                 }
             }

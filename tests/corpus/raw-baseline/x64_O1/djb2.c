@@ -1,6 +1,6 @@
 uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 26 rendered, 14 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 26 rendered, 14 elided, 0 refused; 12 statements rendered */
     {
         uint64_t RAX_1;
         RAX_1 = 0x1505;
@@ -11,8 +11,7 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
                 uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
                 RAX_1 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_2 + ((uint32_t)RAX_1 * 32 + (uint32_t)RAX_1));
                 RCX_1++;
-                uint8_t tmp_12800_2 = RSI_0 != RCX_1;
-                if (!tmp_12800_2) {
+                if (RSI_0 == RCX_1) {
                     break;
                 }
             }

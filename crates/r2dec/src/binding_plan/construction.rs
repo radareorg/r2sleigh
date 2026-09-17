@@ -113,7 +113,11 @@ pub(super) fn binding_components(
     projection: &MachineProjection,
 ) -> Result<Vec<BindingComponent>, BindingPlanBuildError> {
     let eligible = super::rules::component_eligible_values(source_owned, projection)?;
-    binding_components_with(source_owned, &eligible)
+    binding_components_with(
+        source_owned,
+        &eligible,
+        source_owned.source().value_liveness(),
+    )
 }
 
 /// The same partition from a stated eligibility.
@@ -232,83 +236,10 @@ fn bind_stack_object(
     Ok(binding)
 }
 
-/// The coarsest partition of values that no inlining decision can refine.
-///
-/// The plan merges values into one C object from two sources -- a shared
-/// storage span and a certified entity -- and then declines a merge that would
-/// put two values one instruction reads together into the same object. Neither
-/// union source depends on inlinability; only the eligibility filter and the
-/// decline do, and both of those only ever make the partition finer. The unions
-/// alone therefore give a partition strictly coarser than the bindings the plan
-/// will build, and it is available before the inlining pass runs.
-///
-/// That is what the fold guard needs. Asking a coarser partition refuses folds
-/// that would have been safe; asking a finer one permits folds that are not,
-/// which is what the storage span alone did -- two runs the plan later
-/// coalesces are one object to the rendered text, and a write to either is a
-/// write the folded expression would see.
-pub(super) fn coalescing_pre_partition(source_owned: &SourceOwnedFunctionFacts) -> Vec<u32> {
-    fn find(parent: &mut [u32], mut value: u32) -> u32 {
-        while parent[value as usize] != value {
-            let grandparent = parent[parent[value as usize] as usize];
-            parent[value as usize] = grandparent;
-            value = grandparent;
-        }
-        value
-    }
-
-    fn union(parent: &mut [u32], left: u32, right: u32) {
-        let left = find(parent, left);
-        let right = find(parent, right);
-        if left != right {
-            parent[left.max(right) as usize] = left.min(right);
-        }
-    }
-
-    let source = source_owned.source();
-    let value_count = source.graph().values.len();
-    let mut parent = (0..value_count as u32).collect::<Vec<u32>>();
-
-    let mut first_of_span = BTreeMap::<SpanId, u32>::new();
-    for value in source.graph().values.iter() {
-        let Some(span) = source.storage_spans().span_of(value.id) else {
-            continue;
-        };
-        match first_of_span.entry(span) {
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(value.id.0);
-            }
-            std::collections::btree_map::Entry::Occupied(slot) => {
-                union(&mut parent, *slot.get(), value.id.0);
-            }
-        }
-    }
-
-    if let Some(render) = source_owned.report().render() {
-        for entity in render.certified_entities.values() {
-            let Some(values) = entity.coalescing_values() else {
-                continue;
-            };
-            let mut members = values
-                .into_iter()
-                .filter(|value| (value.0 as usize) < value_count);
-            let Some(first) = members.next() else {
-                continue;
-            };
-            for value in members {
-                union(&mut parent, first.0, value.0);
-            }
-        }
-    }
-
-    (0..value_count as u32)
-        .map(|value| find(&mut parent, value))
-        .collect()
-}
-
 pub(super) fn binding_components_with(
     source_owned: &SourceOwnedFunctionFacts,
     eligible: &[bool],
+    liveness: &r2ssa::liveness::ValueLiveness,
 ) -> Result<Vec<BindingComponent>, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -375,8 +306,16 @@ pub(super) fn binding_components_with(
         ring.swap(root, child);
     }
 
+    // A value that is a literal decides no object. It is spelled at its
+    // readers when it is alone, and it joins an object only where one exists
+    // for other reasons and it fits; letting it seed a run bound `RDX_7 =
+    // 0x80078071` as a variable and put a constant's live range in the way
+    // of a loop carrier's union. So literals are set aside here and offered
+    // to their run last.
+    let literal_defined = |value: ValueId| super::rules::literal_defined(graph, value);
     let mut certificate_sets = Vec::<(BindingCertificateSource, BTreeSet<ValueId>)>::new();
     let mut values_by_span = BTreeMap::<SpanId, BTreeSet<ValueId>>::new();
+    let mut literals_by_span = BTreeMap::<SpanId, Vec<ValueId>>::new();
     for (index, value) in graph.values.iter().enumerate() {
         if value.id.0 as usize != index {
             return Err(BindingPlanBuildError::Seal(
@@ -393,13 +332,16 @@ pub(super) fn binding_components_with(
             .storage_spans()
             .span_of(value.id)
             .ok_or(BindingPlanBuildError::MissingStorageSpan { value: value.id })?;
-        values_by_span.entry(span).or_default().insert(value.id);
+        if literal_defined(value.id) {
+            literals_by_span.entry(span).or_default().push(value.id);
+        } else {
+            values_by_span.entry(span).or_default().insert(value.id);
+        }
     }
     // Whether merging every one of these values into one object would put a
     // value where another is still needed. Each run's liveness is kept at its
     // root and grown as runs join, so a merge is judged against everything
     // already in the runs it touches and never against the whole function.
-    let liveness = source.value_liveness();
     let mut live_by_root = vec![None::<r2ssa::liveness::ComponentLiveness>; value_count];
     let merge_would_interfere = |parent: &mut Vec<usize>,
                                  ring: &[u32],
@@ -425,7 +367,19 @@ pub(super) fn binding_components_with(
             match merged.as_mut() {
                 None => merged = Some(component),
                 Some(merged) => {
-                    if merged.interferes(&component, liveness) {
+                    if let Some((left, right)) = merged.first_interference(&component, liveness) {
+                        r2il::refusal_evidence!(
+                            "union-declined",
+                            "{} is live where {} is written",
+                            graph.value(left).map_or("?".to_string(), |value| value
+                                .var
+                                .display_name()
+                                .to_string()),
+                            graph.value(right).map_or("?".to_string(), |value| value
+                                .var
+                                .display_name()
+                                .to_string())
+                        );
                         return true;
                     }
                     merged.absorb(component);
@@ -435,7 +389,9 @@ pub(super) fn binding_components_with(
         false
     };
 
-    for (span, values) in values_by_span {
+    for (span, values) in &values_by_span {
+        let values = values.clone();
+        let span = *span;
         if values.len() > 1 {
             // A storage span says these values share a machine location. That
             // is not on its own a licence to share a C object, and this asked
@@ -473,7 +429,7 @@ pub(super) fn binding_components_with(
                             value,
                         }));
                     }
-                    eligible[index].then_some(Ok(value))
+                    (eligible[index] && !literal_defined(value)).then_some(Ok(value))
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?;
             if values.is_empty() {
@@ -505,6 +461,31 @@ pub(super) fn binding_components_with(
         }
     }
 
+    // Now the literals, each offered to whatever its run became. One that
+    // fits is a write to that object; one that does not stays alone and is
+    // spelled where it is read.
+    for (span, literals) in literals_by_span {
+        let Some(mate) = values_by_span
+            .get(&span)
+            .and_then(|values| values.first().copied())
+        else {
+            continue;
+        };
+        for literal in literals {
+            let proposed = BTreeSet::from([literal, mate]);
+            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed) {
+                r2il::refusal_evidence!(
+                    "span-declined",
+                    "{span:?} literal {literal:?} stays alone"
+                );
+                continue;
+            }
+            union(&mut parent, &mut rank, &mut ring, mate, literal);
+            live_by_root[find(&mut parent, mate.0 as usize)] = None;
+            certificate_sets.push((BindingCertificateSource::StorageSpan(span), proposed));
+        }
+    }
+
     let mut members_by_root = BTreeMap::<usize, BTreeSet<ValueId>>::new();
     for (index, is_eligible) in eligible.iter().copied().enumerate() {
         if !is_eligible {
@@ -528,6 +509,10 @@ pub(super) fn binding_components_with(
         {
             sources_by_root.entry(root).or_default().insert(source);
         } else {
+            r2il::refusal_evidence!(
+                "certificate-membership",
+                "{source:?} names {values:?}, which are not one run"
+            );
             return Err(BindingPlanBuildError::Seal(
                 BindingPlanSourceMismatch::CertificateMembership {
                     binding: BindingId(u32::MAX),
@@ -702,7 +687,6 @@ impl BindingPlan {
         let unrendered =
             super::rules::unrendered_defined_values(source, &machine_projection, canonical);
         let inlinable = &partition.inlinable;
-        let component_eligible = &partition.component_eligible;
         let mut dispositions = graph
             .values
             .iter()
@@ -887,7 +871,7 @@ impl BindingPlan {
         }
 
         crate::stage_timing::mark("plan_dispositions");
-        let components = binding_components_with(source_owned, component_eligible)?;
+        let components = partition.components.clone();
         if u32::try_from(components.len()).is_err() {
             return Err(BindingPlanBuildError::TooManyBindings {
                 count: components.len(),
@@ -898,7 +882,21 @@ impl BindingPlan {
         let mut bindings = Vec::with_capacity(components.len());
 
         let mut call_clobbers = BTreeSet::new();
-        for component in components {
+        for mut component in components {
+            // A member already answered for -- folded into its reader, or
+            // elided -- keeps that answer; the object is the members that
+            // still need one, and a component with none is no object.
+            component.members.retain(|value| {
+                matches!(
+                    dispositions[value.0 as usize],
+                    ValueDisposition::Refused {
+                        reason: ValueRefusal::MissingBindingCertificate { .. }
+                    }
+                )
+            });
+            if component.members.is_empty() {
+                continue;
+            }
             let width_bits = match binding_width(source, &machine_projection, &component)? {
                 BindingWidth::Exact(width_bits) => width_bits,
                 BindingWidth::Refused(reason) => {

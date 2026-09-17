@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 245 source obligations: 207 rendered, 38 elided, 0 refused; 87 statements rendered */
+    /* r2dec proof: no individual construct is marked; 245 source obligations: 207 rendered, 38 elided, 0 refused; 83 statements rendered */
     {
         uint64_t X2_0_2;
         uint64_t X12_5;
@@ -46,8 +46,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 tmp_2b380_5 = (tmp_28e80_5 >> 19 | tmp_28e80_5 << 13) * tmp_2a000_2;
                 X14_1 = (uint64_t)(uint32_t)tmp_2b380_5;
                 X12_5 += 16;
-                uint8_t tmp_1000_2 = X12_5 <= X13_1;
-                if (!tmp_1000_2) {
+                if (X13_1 < X12_5) {
                     break;
                 }
             }
@@ -71,8 +70,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     uint8_t ZR_7 = X12_5 == X11_1;
                     uint8_t CY_7 = X11_1 <= X12_5;
                     X12_5 = X15_10;
-                    uint8_t tmp_1000_6 = !CY_7 || ZR_7;
-                    if (!tmp_1000_6) {
+                    if (!(!CY_7 || ZR_7)) {
                         break;
                     }
                 }
@@ -80,8 +78,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 X15_10 = X12_5;
             }
             {
-                uint8_t CY_9 = X11_1 <= X15_10;
-                if (!CY_9) {
+                if (X15_10 < X11_1) {
                     uint64_t X11_3;
                     X11_3 = X0_0 + X1_0 - X15_10;
                     for (; ; ) {
@@ -92,8 +89,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         X14_11 = (uint64_t)(uint32_t)((tmp_28e80_11 >> 21 | tmp_28e80_11 << 11) * tmp_2a000_2);
                         uint8_t TMPZR_24 = X11_3 == 1;
                         X11_3--;
-                        uint8_t tmp_a00_2 = !TMPZR_24;
-                        if (!tmp_a00_2) {
+                        if (TMPZR_24) {
                             break;
                         }
                     }

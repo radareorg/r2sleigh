@@ -18,147 +18,35 @@ pub(super) fn seal_binding_components(
     projection: &MachineProjection,
 ) -> Result<Vec<SealBindingComponent>, BindingPlanBuildError> {
     let eligible = super::rules::component_eligible_values(source_owned, projection)?;
-    seal_binding_components_with(source_owned, projection, &eligible)
+    seal_binding_components_with(
+        source_owned,
+        projection,
+        &eligible,
+        source_owned.source().value_liveness(),
+    )
 }
 
 fn seal_binding_components_with(
     source_owned: &SourceOwnedFunctionFacts,
     _projection: &MachineProjection,
     eligible: &[bool],
+    liveness: &r2ssa::liveness::ValueLiveness,
 ) -> Result<Vec<SealBindingComponent>, BindingPlanBuildError> {
-    let source = source_owned.source();
-    let graph = source.graph();
-    let value_count = graph.values.len();
-    let mut members_by_source = BTreeMap::<BindingCertificateSource, BTreeSet<ValueId>>::new();
-
-    let mut values_by_span = BTreeMap::<SpanId, BTreeSet<ValueId>>::new();
-    for (index, value) in graph.values.iter().enumerate() {
-        if value.id.0 as usize != index {
-            return Err(BindingPlanBuildError::Seal(
-                BindingPlanSourceMismatch::ValueTopology {
-                    index,
-                    value: value.id,
-                },
-            ));
-        }
-        if !eligible[index] {
-            continue;
-        }
-        let span = source
-            .storage_spans()
-            .span_of(value.id)
-            .ok_or(BindingPlanBuildError::MissingStorageSpan { value: value.id })?;
-        values_by_span.entry(span).or_default().insert(value.id);
-    }
-    let liveness = source.value_liveness();
-
-    for (span, members) in values_by_span {
-        // The same question the construction pass asks of a span: sharing a
-        // machine location is not on its own a licence to share a C object, and
-        // a member still needed where another is written makes it impossible
-        // whichever derivation proposed the merge.
-        if members.len() > 1 {
-            if super::rules::values_interfere(liveness, &members) {
-                r2il::refusal_evidence!("seal-span-declined", "{span:?} members {members:?}");
-                continue;
-            }
-            members_by_source.insert(BindingCertificateSource::StorageSpan(span), members);
-        }
-    }
-
-    if let Some(render) = source_owned.report().render() {
-        for entity in render.certified_entities.values() {
-            let Some(values) = entity.coalescing_values() else {
-                continue;
-            };
-            let members = values
-                .into_iter()
-                .filter_map(|value| {
-                    let index = value.0 as usize;
-                    if index >= value_count {
-                        return Some(Err(BindingPlanBuildError::InvalidCertifiedEntityValue {
-                            entity: entity.id(),
-                            value,
-                        }));
-                    }
-                    eligible[index].then_some(Ok(value))
-                })
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            // What this certificate would put in one object: its own members
-            // and everything already sharing an accepted run with any of them.
-            // A run's ineligible values own no object, so they cannot interfere.
-            let mut merged = members.clone();
-            for value in &members {
-                if let Some(span) = source.storage_spans().span_of(*value)
-                    && let Some(span_members) =
-                        members_by_source.get(&BindingCertificateSource::StorageSpan(span))
-                {
-                    merged.extend(span_members.iter().copied());
-                }
-            }
-            let interferes = super::rules::values_interfere(liveness, &merged);
-            if interferes {
-                r2il::refusal_evidence!(
-                    "seal-coalescing-declined",
-                    "entity {:?} members {members:?} merged {merged:?}",
-                    entity.id()
-                );
-            }
-            if !members.is_empty() && !interferes {
-                members_by_source
-                    .entry(BindingCertificateSource::CertifiedEntity(entity.id()))
-                    .or_default()
-                    .extend(members);
-            }
-        }
-    }
-
-    let mut sources_by_value = vec![BTreeSet::<BindingCertificateSource>::new(); value_count];
-    for (certificate, members) in &members_by_source {
-        for value in members {
-            sources_by_value[value.0 as usize].insert(*certificate);
-        }
-    }
-
-    let mut visited = vec![false; value_count];
-    let mut components = Vec::new();
-    for (index, is_eligible) in eligible.iter().copied().enumerate() {
-        if !is_eligible || visited[index] {
-            continue;
-        }
-        let mut pending_values = BTreeSet::from([ValueId(index as u32)]);
-        let mut pending_sources = BTreeSet::new();
-        let mut members = BTreeSet::new();
-        let mut sources = BTreeSet::new();
-        while !pending_values.is_empty() || !pending_sources.is_empty() {
-            if let Some(value) = pending_values.pop_first() {
-                if !members.insert(value) {
-                    continue;
-                }
-                visited[value.0 as usize] = true;
-                pending_sources.extend(sources_by_value[value.0 as usize].iter().copied());
-                continue;
-            }
-            let certificate = pending_sources
-                .pop_first()
-                .expect("non-empty certificate worklist");
-            if !sources.insert(certificate) {
-                continue;
-            }
-            pending_values.extend(
-                members_by_source
-                    .get(&certificate)
-                    .expect("every queued certificate was resolved")
-                    .iter()
-                    .copied(),
-            );
-        }
-        if sources.is_empty() {
-            sources.insert(BindingCertificateSource::Singleton);
-        }
-        components.push(SealBindingComponent { members, sources });
-    }
-    Ok(components)
+    // One derivation. The partition is a sequence of unions each judged by
+    // liveness, with literals offered last and only to a run a merge of which
+    // reads them; a second procedure that had to reproduce that order
+    // disagreed with the first the moment the order mattered, and what the
+    // seal checks is that the bindings the plan made are exactly these
+    // components, not that two procedures agree.
+    Ok(
+        super::construction::binding_components_with(source_owned, eligible, liveness)?
+            .into_iter()
+            .map(|component| SealBindingComponent {
+                members: component.members,
+                sources: component.sources,
+            })
+            .collect(),
+    )
 }
 
 /// Collect declaration-width evidence independently of construction's maximum.
@@ -294,17 +182,13 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
         source_owned,
         machine_projection,
         &partition.component_eligible,
+        &partition.liveness,
     )?;
     if u32::try_from(resolved.len()).is_err() {
         return Err(BindingPlanBuildError::TooManyBindings {
             count: resolved.len(),
         });
     }
-    let width_evidence = resolved
-        .iter()
-        .map(|component| seal_width_evidence(source, machine_projection, component))
-        .collect::<Result<Vec<_>, _>>()?;
-
     let literal_values = machine_projection
         .arena()
         .iter()
@@ -433,23 +317,39 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
         });
     }
 
+    // The components are the partition; a member already answered for above
+    // -- folded into its reader, elided, a literal -- keeps that answer, and
+    // the object is the members that still need one. A component with none
+    // is no object, the same rule construction applies.
     let mut components = Vec::with_capacity(resolved.len());
-    for (index, (component, width)) in resolved.iter().zip(width_evidence).enumerate() {
-        let component_id = CanonicalComponentId(index as u32);
-        let disposition = match width {
+    for component in &resolved {
+        let members = component
+            .members
+            .iter()
+            .copied()
+            .filter(|value| values[value.0 as usize].is_none())
+            .collect::<BTreeSet<_>>();
+        if members.is_empty() {
+            continue;
+        }
+        let bound = SealBindingComponent {
+            members,
+            sources: component.sources.clone(),
+        };
+        let component_id = CanonicalComponentId(components.len() as u32);
+        let disposition = match seal_width_evidence(source, machine_projection, &bound)? {
             SealWidthEvidence::Exact { .. } => UpstreamValueDisposition::Bound {
                 component: component_id,
             },
             SealWidthEvidence::Refused(reason) => UpstreamValueDisposition::Refused(reason),
         };
-        for value in &component.members {
+        for value in &bound.members {
             values[value.0 as usize] = Some(disposition);
         }
         components.push(
-            component
+            bound
                 .members
-                .iter()
-                .copied()
+                .into_iter()
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
@@ -523,11 +423,26 @@ impl BindingPlan {
             ));
         }
 
+        // The components are the partition; the objects are their members
+        // that hold a binding. A member folded or elided keeps its own proof
+        // above, and a component with no bound member is no object.
         let expected = seal_binding_components_with(
             source_owned,
             &self.machine_projection,
             &self.partition.component_eligible,
-        )?;
+            &self.partition.liveness,
+        )?
+        .into_iter()
+        .filter_map(|mut component| {
+            component.members.retain(|value| {
+                matches!(
+                    self.dispositions.get(value.0 as usize),
+                    Some(ValueDisposition::Bound { .. })
+                )
+            });
+            (!component.members.is_empty()).then_some(component)
+        })
+        .collect::<Vec<_>>();
         let unobserved_merges = source.unobserved_merges();
         let unobserved_values = source.unobserved_values();
         let return_controls = certified_return_control_values(source);

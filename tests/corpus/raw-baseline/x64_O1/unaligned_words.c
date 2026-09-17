@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 78 source obligations: 54 rendered, 24 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 78 source obligations: 54 rendered, 24 elided, 0 refused; 23 statements rendered */
     {
         uint64_t RAX_1;
         uint64_t RCX_1;
@@ -22,14 +22,12 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
             RCX_1 = (uint64_t)0;
         }
         {
-            uint8_t tmp_12700_2 = RSI_0 <= RCX_1;
-            if (!tmp_12700_2) {
+            if (RCX_1 < RSI_0) {
                 for (; ; ) {
                     uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
                     RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_2 ^ (uint32_t)RAX_1) * 0x1000193);
                     RCX_1++;
-                    uint8_t tmp_12800_2 = RSI_0 != RCX_1;
-                    if (!tmp_12800_2) {
+                    if (RSI_0 == RCX_1) {
                         break;
                     }
                 }

@@ -1,6 +1,6 @@
 uint64_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 123 source obligations: 94 rendered, 29 elided, 0 refused; 33 statements rendered */
+    /* r2dec proof: no individual construct is marked; 123 source obligations: 94 rendered, 29 elided, 0 refused; 31 statements rendered */
     if (RSI_0 == 0) {
         return 0;
     } else {
@@ -18,8 +18,7 @@ uint64_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
                 uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RDX_1 + 3];
                 RAX_1 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_5 + (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_4 + (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_3 + (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_2 + (uint32_t)((uint64_t)(int32_t)RAX_1 * 0x1003f)) * 0x1003f)) * 0x1003f)) * 0x1003f));
                 RDX_1 += 4;
-                uint8_t tmp_12800_2 = RSI_0 != RDX_1;
-                if (!tmp_12800_2) {
+                if (RSI_0 == RDX_1) {
                     break;
                 }
             }
@@ -36,8 +35,7 @@ uint64_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
                     uint8_t tmp_11e00_8 = ((uint8_t*)RDI_0)[RDX_6];
                     RAX_1 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_8 + (uint32_t)((uint64_t)(int32_t)RAX_1 * 0x1003f));
                     RDX_6++;
-                    uint8_t tmp_12800_5 = RCX_2 != RDX_6;
-                    if (!tmp_12800_5) {
+                    if (RCX_2 == RDX_6) {
                         break;
                     }
                 }

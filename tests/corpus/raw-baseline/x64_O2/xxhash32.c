@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 370 source obligations: 310 rendered, 60 elided, 0 refused; 87 statements rendered */
+    /* r2dec proof: no individual construct is marked; 370 source obligations: 310 rendered, 60 elided, 0 refused; 86 statements rendered */
     {
         uint64_t RCX_6;
         uint64_t tmp_4a00_1 = RDI_0 + RSI_0;
@@ -97,8 +97,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                                 uint32_t tmp_lane_100000f40_aa_87_1 = (uint32_t)((uint64_t)(int32_t)tmp_11e00_8 * 0x165667b1) + (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000f40_76_7c_1 << 11 | tmp_lane_100000f40_76_7c_1 >> 21) * 0xffffffff9e3779b1U);
                                 RSI_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)(tmp_lane_100000f40_aa_87_1 << 11 | tmp_lane_100000f40_aa_87_1 >> 21) * 0xffffffff9e3779b1U);
                                 RCX_10 += 4;
-                                uint8_t CF_68 = RCX_10 < tmp_4a00_1;
-                                if (!CF_68) {
+                                if (RCX_10 >= tmp_4a00_1) {
                                     break;
                                 }
                             }

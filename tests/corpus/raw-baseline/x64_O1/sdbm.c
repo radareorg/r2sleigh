@@ -1,6 +1,6 @@
 uint32_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 47 source obligations: 28 rendered, 19 elided, 0 refused; 16 statements rendered */
+    /* r2dec proof: no individual construct is marked; 47 source obligations: 28 rendered, 19 elided, 0 refused; 15 statements rendered */
     if (RSI_0 == 0) {
         return 0;
     } else {
@@ -14,8 +14,7 @@ uint32_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
             tmp_lane_100000610_10_b_1 = (uint32_t)tmp_11e00_2 + (uint32_t)((uint64_t)(int32_t)RAX_1 * 0x1003f);
             RAX_1 = (uint64_t)(uint32_t)tmp_lane_100000610_10_b_1;
             RCX_1++;
-            uint8_t tmp_12800_2 = RSI_0 != RCX_1;
-            if (!tmp_12800_2) {
+            if (RSI_0 == RCX_1) {
                 break;
             }
         }

@@ -1,6 +1,6 @@
 uint64_t sym__sdbm(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 39 source obligations: 30 rendered, 9 elided, 0 refused; 18 statements rendered */
+    /* r2dec proof: no individual construct is marked; 39 source obligations: 30 rendered, 9 elided, 0 refused; 17 statements rendered */
     if (X1_0 == 0) {
         return 0;
     } else {
@@ -16,8 +16,7 @@ uint64_t sym__sdbm(uint64_t X0_0, uint64_t X1_0)
             X0_1 = (uint64_t)(uint32_t)((uint32_t)X0_1 * tmp_2a000_2 + (uint32_t)tmp_25400_2);
             uint8_t TMPZR_2 = X1_0 == 1;
             X1_0--;
-            uint8_t tmp_a00_2 = !TMPZR_2;
-            if (!tmp_a00_2) {
+            if (TMPZR_2) {
                 break;
             }
         }
