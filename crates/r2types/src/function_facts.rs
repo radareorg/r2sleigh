@@ -5500,7 +5500,6 @@ mod tests {
                 r2ssa::ValueId(1),
                 r2ssa::ValueId(2),
                 r2ssa::ValueId(3),
-                r2ssa::ValueId(4),
                 r2ssa::ValueId(6),
                 r2ssa::ValueId(7),
                 r2ssa::ValueId(8),
