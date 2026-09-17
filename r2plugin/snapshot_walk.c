@@ -217,6 +217,10 @@ static bool walk_image(R2SleighWireWriter *writer, const RAnalFunctionSnapshot *
 	if (image->num_string_literals > UINT32_MAX) {
 		WIRE_REFUSE ();
 	}
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("R2SLEIGH_LITERALS entry=0x%" PFMT64x " blocks=%zu literals=%zu\n",
+			image->entry_addr, image->num_blocks, image->num_string_literals);
+	}
 	r2sleigh_wire_u32 (writer, (uint32_t)image->num_string_literals);
 	for (size_t i = 0; i < image->num_string_literals; i++) {
 		const RAnalSnapshotStringLiteral *literal = &image->string_literals[i];

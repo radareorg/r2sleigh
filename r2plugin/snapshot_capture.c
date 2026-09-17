@@ -1817,6 +1817,10 @@ static bool function_image_string_literals_collect(RAnal *anal,
 			R_VEC_FOREACH (refs, ref) {
 				char scratch[64] = {0};
 				const char *text = snapshot_string_at (anal, ref->addr, scratch, sizeof (scratch));
+				if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+					eprintf ("R2SLEIGH_LITERAL from=0x%" PFMT64x " to=0x%" PFMT64x " type=%u text=%d\n",
+						ref->at, ref->addr, (unsigned)ref->type, text? 1: 0);
+				}
 				if (text && !snapshot_string_literal_record (image, limits, ref->addr, text)) {
 					RVecAnalRef_free (refs);
 					return false;

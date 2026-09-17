@@ -2025,7 +2025,7 @@ impl TrustedSsaArtifact {
                 // call-result and register-alias operations are inserted; an
                 // exact source callsite then fails to correlate in the
                 // provisional pass even though it correlates in the final one.
-                let provisional_machine_context =
+                let mut provisional_machine_context =
                     SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
                         blocks.as_slice(),
                         Some(&arch),
@@ -2035,6 +2035,10 @@ impl TrustedSsaArtifact {
                         correlated_call_sites.interfaces.clone(),
                         correlated_call_sites.tail_calls.clone(),
                     );
+                // The recovery proves variadic counts from the same literals
+                // the final pass reads; without them every format was unproven.
+                provisional_machine_context
+                    .bind_source_string_literals(source.image().string_literals());
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
