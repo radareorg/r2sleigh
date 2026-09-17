@@ -1556,6 +1556,8 @@ fn unique_call_site_identity(
 struct CorrelatedCallSites {
     tail_calls: Vec<SourceCallSiteIdentity>,
     interfaces: Vec<SourceCallSiteInterface>,
+    /// Who each correlated site calls, where the source knew: the binary's own function or an import.
+    callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1565,6 +1567,7 @@ fn correlate_call_site_interfaces(
 ) -> CorrelatedCallSites {
     let mut tail_calls = Vec::new();
     let mut interfaces = Vec::new();
+    let mut callee_linkages = BTreeMap::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, call) else {
             // The source named a call the lift does not have exactly one
@@ -1583,6 +1586,9 @@ fn correlate_call_site_interfaces(
             r2source::AdvisoryCallTransfer::TailJump | r2source::AdvisoryCallTransfer::TailSlot
         ) {
             tail_calls.push(identity);
+        }
+        if call.linkage() != r2source::AdvisoryCalleeLinkage::Unknown {
+            callee_linkages.insert(identity, call.linkage());
         }
         // A prototype the source recovered supplies the physical call
         // contract. When this capture also carries the callee body, retain its
@@ -1705,6 +1711,7 @@ fn correlate_call_site_interfaces(
     CorrelatedCallSites {
         tail_calls,
         interfaces,
+        callee_linkages,
     }
 }
 
@@ -2095,6 +2102,7 @@ impl TrustedSsaArtifact {
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
             );
+        machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         r2il::refusal_evidence!(
             "snapshot-literals",
             "the decoded image delivers {} string literals",
@@ -6268,6 +6276,7 @@ mod tests {
         writer.u64(target);
         writer.string("").expect("empty call name");
         writer.u8(transfer);
+        writer.u8(0);
         writer.bool(false);
         let bytes = writer.finish().expect("callsite wire");
         let mut reader =

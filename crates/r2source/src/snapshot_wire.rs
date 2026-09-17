@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 17;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 18;
 /// The reader speaks exactly the format the writer writes.
 ///
 /// Producer and consumer are one build: `r2plugin/snapshot_wire.c` writes the
@@ -367,9 +367,9 @@ use crate::contracts::{
     SourceTypeGraph, SourceTypeKind, StackAddressBase,
 };
 use crate::{
-    AdvisoryCallPrototype, AdvisoryCallSite, AdvisoryCallTransfer, AdvisorySuccessor,
-    AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity, FunctionIdentity,
-    FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
+    AdvisoryCallPrototype, AdvisoryCallSite, AdvisoryCallTransfer, AdvisoryCalleeLinkage,
+    AdvisorySuccessor, AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity,
+    FunctionIdentity, FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
     OwnedFunctionSnapshot, SnapshotValidationError, SourceCodePointerTable, SourceDataObject,
     SourceEndianness, SourceSignatureParameter, SourceSignaturePresentation, SourceStackSlotName,
 };
@@ -1290,6 +1290,9 @@ pub fn read_call_prototype(
 const CALL_TRANSFER_CALL: u8 = 0;
 const CALL_TRANSFER_TAIL_JUMP: u8 = 1;
 const CALL_TRANSFER_TAIL_SLOT: u8 = 2;
+const CALLEE_LINKAGE_UNKNOWN: u8 = 0;
+const CALLEE_LINKAGE_INTERNAL: u8 = 1;
+const CALLEE_LINKAGE_IMPORTED: u8 = 2;
 
 pub fn write_call_site(
     writer: &mut SnapshotWireWriter,
@@ -1302,6 +1305,11 @@ pub fn write_call_site(
         AdvisoryCallTransfer::Call => CALL_TRANSFER_CALL,
         AdvisoryCallTransfer::TailJump => CALL_TRANSFER_TAIL_JUMP,
         AdvisoryCallTransfer::TailSlot => CALL_TRANSFER_TAIL_SLOT,
+    });
+    writer.u8(match site.linkage() {
+        AdvisoryCalleeLinkage::Unknown => CALLEE_LINKAGE_UNKNOWN,
+        AdvisoryCalleeLinkage::Internal => CALLEE_LINKAGE_INTERNAL,
+        AdvisoryCalleeLinkage::Imported => CALLEE_LINKAGE_IMPORTED,
     });
     // Absence is meaningful here: radare2 described the call but not what it
     // takes or returns, which is not the same as an empty prototype.
@@ -1332,6 +1340,17 @@ pub fn read_call_site(
             });
         }
     };
+    let linkage = match reader.u8()? {
+        CALLEE_LINKAGE_UNKNOWN => AdvisoryCalleeLinkage::Unknown,
+        CALLEE_LINKAGE_INTERNAL => AdvisoryCalleeLinkage::Internal,
+        CALLEE_LINKAGE_IMPORTED => AdvisoryCalleeLinkage::Imported,
+        tag => {
+            return Err(SnapshotWireError::UnknownDiscriminant {
+                record: "callee linkage",
+                tag: u64::from(tag),
+            });
+        }
+    };
     let prototype = if reader.bool()? {
         Some(read_call_prototype(reader)?)
     } else {
@@ -1342,6 +1361,7 @@ pub fn read_call_site(
         target_address,
         transfer,
         target_name: (!target_name.is_empty()).then(|| target_name.to_string()),
+        linkage,
         prototype,
     })
 }
@@ -1389,20 +1409,14 @@ pub fn write_logical_value(writer: &mut SnapshotWireWriter, value: SourceLogical
     write_carrier(writer, value.carrier());
 }
 
-/// One parameter's logical value, or its absence.
+/// One parameter's logical value, or its absence: an absent value has no carrier to write.
 pub fn write_optional_logical_value(
     writer: &mut SnapshotWireWriter,
     value: Option<SourceLogicalValue>,
 ) {
     match value {
         Some(value) => write_logical_value(writer, value),
-        None => {
-            writer.u32(LOGICAL_TYPE_ABSENT);
-            write_carrier(
-                writer,
-                SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 0),
-            );
-        }
+        None => writer.u32(LOGICAL_TYPE_ABSENT),
     }
 }
 
@@ -1418,8 +1432,13 @@ pub fn read_optional_logical_value(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<Option<SourceLogicalValue>, SnapshotWireError> {
     let type_id = reader.u32()?;
-    let carrier = read_carrier(reader)?;
-    Ok((type_id != LOGICAL_TYPE_ABSENT).then(|| SourceLogicalValue::new(type_id, carrier)))
+    if type_id == LOGICAL_TYPE_ABSENT {
+        return Ok(None);
+    }
+    Ok(Some(SourceLogicalValue::new(
+        type_id,
+        read_carrier(reader)?,
+    )))
 }
 
 const LOCATION_REGISTER: u8 = 0;
@@ -3052,6 +3071,7 @@ mod tests {
             target_address: 0x1000_1980,
             transfer: AdvisoryCallTransfer::Call,
             target_name: Some("sym.imp.strcmp".to_string()),
+            linkage: AdvisoryCalleeLinkage::Imported,
             prototype: Some(AdvisoryCallPrototype {
                 calling_convention: "amd64".to_string(),
                 arguments: vec![
@@ -3071,6 +3091,7 @@ mod tests {
             target_address: 0x1000_1986,
             transfer: AdvisoryCallTransfer::Call,
             target_name: Some("sym.imp.malloc".to_string()),
+            linkage: AdvisoryCalleeLinkage::Imported,
             prototype: None,
         };
         let unnamed = AdvisoryCallSite {
@@ -3078,6 +3099,7 @@ mod tests {
             target_address: 0x1000_1992,
             transfer: AdvisoryCallTransfer::Call,
             target_name: None,
+            linkage: AdvisoryCalleeLinkage::Unknown,
             prototype: None,
         };
         // A tail transfer is the same record with a different way in: a jump
@@ -3088,6 +3110,7 @@ mod tests {
             target_address: 0x1000_1a00,
             transfer: AdvisoryCallTransfer::TailJump,
             target_name: Some("sym.func.10001a00".to_string()),
+            linkage: AdvisoryCalleeLinkage::Internal,
             prototype: None,
         };
         let tail_slot = AdvisoryCallSite {
@@ -3095,6 +3118,7 @@ mod tests {
             target_address: 0x1000_8010,
             transfer: AdvisoryCallTransfer::TailSlot,
             target_name: Some("strcoll".to_string()),
+            linkage: AdvisoryCalleeLinkage::Imported,
             prototype: None,
         };
         for site in [with_prototype, without, unnamed, tail_jump, tail_slot] {

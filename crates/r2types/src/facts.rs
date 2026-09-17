@@ -625,6 +625,35 @@ pub(crate) const fn model_policy_authorized_from_evidence_count(evidence_count: 
 }
 
 impl CalleeFact {
+    /// A callee known only by its address, name and linkage: nothing about what it does.
+    pub fn named(function_id: u64, name: Option<String>, linkage: CalleeLinkage) -> Self {
+        Self {
+            function_id,
+            name,
+            linkage,
+            signature: None,
+            signature_callconv: None,
+            signature_noreturn: false,
+            model_policy_evidence: BTreeSet::new(),
+            direct_callees: Vec::new(),
+            callsite_count: 0,
+            has_unknown_calls: false,
+            arg_effects: BTreeMap::new(),
+            memory_effects: Vec::new(),
+            transfer_effects: Vec::new(),
+            allocation_effects: Vec::new(),
+            lifetime_effects: Vec::new(),
+            sync_effects: Vec::new(),
+            atomic_effects: Vec::new(),
+            param_type_hints: BTreeMap::new(),
+            return_type_hint: None,
+            return_relation: CalleeReturnRelation::Unknown,
+            reads_global_memory: false,
+            writes_global_memory: false,
+            touches_unknown_memory: false,
+        }
+    }
+
     pub fn authorizes_model_policy(&self) -> bool {
         model_policy_authorized_from_evidence_count(self.model_policy_evidence.len())
     }

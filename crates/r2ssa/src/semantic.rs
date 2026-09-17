@@ -582,6 +582,8 @@ pub struct CallSiteFact {
     pub fallthrough: Option<u64>,
     pub transfer: CallSiteTransfer,
     pub memory_effect: CallMemoryEffect,
+    /// Who the site calls, as the source's symbol or relocation said.
+    pub callee_linkage: r2source::AdvisoryCalleeLinkage,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1632,6 +1634,9 @@ pub struct CallsiteCertificate {
     pub direct_target: Option<u64>,
     pub fallthrough: Option<u64>,
     pub transfer: CallSiteTransfer,
+    /// Who the site calls, as the source's symbol or relocation said; import
+    /// policy rests on this and never on the shape of a name.
+    pub callee_linkage: r2source::AdvisoryCalleeLinkage,
     pub argument_values: Vec<ValueId>,
     /// Whether the callee takes a variadic tail, as radare2's prototype for it
     /// says. Not a machine fact: nothing in the call instruction distinguishes
@@ -8591,6 +8596,7 @@ fn collect_prepared_function_certificates(
                     direct_target: fact.direct_target,
                     fallthrough: fact.fallthrough,
                     transfer: fact.transfer,
+                    callee_linkage: fact.callee_linkage,
                     argument_values,
                     variadic,
                     fixed_argument_count,
@@ -12528,6 +12534,10 @@ fn collect_call_sites(
                     },
                     transfer,
                     memory_effect: CallMemoryEffect::Unknown,
+                    callee_linkage: raw_identity.zip(machine_context).map_or(
+                        r2source::AdvisoryCalleeLinkage::Unknown,
+                        |(identity, context)| context.callee_linkage(identity),
+                    ),
                 },
             );
         }

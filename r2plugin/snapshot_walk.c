@@ -494,6 +494,9 @@ bool r2sleigh_wire_write_snapshot_prefix(R2SleighWireWriter *writer, const void 
 
 /* Wire discriminants shared with r2source::snapshot_wire. */
 #define WALK_SPACE_REGISTER 1
+#define WALK_CALLEE_LINKAGE_UNKNOWN 0
+#define WALK_CALLEE_LINKAGE_INTERNAL 1
+#define WALK_CALLEE_LINKAGE_IMPORTED 2
 #define WALK_CALL_TRANSFER_CALL 0
 #define WALK_CALL_TRANSFER_TAIL_JUMP 1
 #define WALK_CALL_TRANSFER_TAIL_SLOT 2
@@ -657,6 +660,20 @@ static bool walk_call_site(R2SleighWireWriter *writer,
 	default:
 		/* A transfer this side cannot name is one the consumer would
 		 * misread as a call. */
+		WIRE_REFUSE ();
+	}
+	/* Who the target is: the consumer decides import policy on this, never on the shape of a name. */
+	switch (call->linkage) {
+	case R_ANAL_FCN_CALLEE_UNKNOWN:
+		r2sleigh_wire_u8 (writer, WALK_CALLEE_LINKAGE_UNKNOWN);
+		break;
+	case R_ANAL_FCN_CALLEE_INTERNAL:
+		r2sleigh_wire_u8 (writer, WALK_CALLEE_LINKAGE_INTERNAL);
+		break;
+	case R_ANAL_FCN_CALLEE_IMPORTED:
+		r2sleigh_wire_u8 (writer, WALK_CALLEE_LINKAGE_IMPORTED);
+		break;
+	default:
 		WIRE_REFUSE ();
 	}
 	/* An incomplete site described the call but not what it takes or returns,
@@ -913,7 +930,9 @@ static bool walk_interface(R2SleighWireWriter *writer,
 		for (size_t i = 0; i < interface->num_parameters; i++) {
 			const RAnalSnapshotParameter *parameter = &interface->parameters[i];
 			r2sleigh_wire_u32 (writer, parameter->logical_type_id);
-			if (!walk_carrier (writer, &parameter->carrier)) {
+			/* A parameter whose type would not place has no carrier projection. */
+			if (parameter->logical_type_id != R_ANAL_SNAPSHOT_TYPE_ID_INVALID
+				&& !walk_carrier (writer, &parameter->carrier)) {
 				WIRE_REFUSE ();
 			}
 		}

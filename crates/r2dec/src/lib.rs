@@ -2897,7 +2897,7 @@ impl Decompiler {
         let prepared = input.prepared_ssa();
         debug_log_slice(prepared);
         let func = prepared.function();
-        if let Some(declaration) = self.variadic_forwarding_stub(prepared) {
+        if let Some(declaration) = self.import_stub_declaration(prepared) {
             return Ok(InternalBuildProduct::Residual(declaration));
         }
         if crate::debug::debug_merges() {
@@ -3735,44 +3735,40 @@ impl Decompiler {
         Ok(InternalBuildProduct::Native(native))
     }
 
-    /// The declaration a variadic forwarding stub renders as, when it is one.
+    /// The declaration an import stub renders as.
     ///
-    /// A PLT stub is a jump: it tail-transfers to the import with every
-    /// argument register untouched, so for a variadic callee it forwards the
-    /// caller's variadic tail. C has no syntax for that forwarding, and the
-    /// only spelling that does (`__builtin_va_arg_pack`) is GCC-only and
-    /// requires an always-inline definition. So the rendering states what is
-    /// true and spellable: the address resolves to this import, here is its
-    /// declaration, and there is no body to write.
-    fn variadic_forwarding_stub(
+    /// A stub is one tail transfer to an import and nothing else: no store, no
+    /// other call, no register written that the transfer does not carry. It has
+    /// no body of its own, so it renders as the import's declaration and a
+    /// comment naming the import, and it is counted as a declaration. A stub
+    /// whose import has no prototype renders as the comment alone: nothing is
+    /// invented for it.
+    fn import_stub_declaration(
         &self,
         prepared: &r2ssa::SsaArtifact,
     ) -> Option<EmissionReadyFunction> {
         let certificates = prepared.certificates();
         let [callsite] = certificates.callsites.values().collect::<Vec<_>>()[..] else {
+            r2il::refusal_evidence!(
+                "import-stub-declaration",
+                "{:#x}: {} call sites, not one",
+                prepared.function().entry,
+                certificates.callsites.len()
+            );
             return None;
         };
         if callsite.transfer != r2ssa::CallSiteTransfer::TailCall
-            || !callsite.variadic
             || !certificates.returns.is_empty()
         {
+            r2il::refusal_evidence!(
+                "import-stub-declaration",
+                "{:#x}: transfer {:?}, {} return certificates",
+                prepared.function().entry,
+                callsite.transfer,
+                certificates.returns.len()
+            );
             return None;
         }
-        // Forwarding is the whole claim, so it has to be checked rather than
-        // assumed from the shape of the transfer. A stub hands the callee the
-        // machine state it was entered with: it writes no memory, leaves every
-        // carrier the callee can see alone, and only computes the target it
-        // jumps to. A one-line wrapper that loads a format string and
-        // tail-jumps to the same import looks identical at the transfer and is
-        // an ordinary function with a body.
-        //
-        // "Leaves alone" is the convention's own statement rather than "writes
-        // no register at all". An AArch64 thunk is `adrp x16, slot; ldr x16,
-        // [x16]; br x16`: it has to materialise the target somewhere, and it
-        // uses the register the convention names as clobbered across a call
-        // for exactly that reason. A carrier a call may clobber and that
-        // passes no argument is not state the callee can observe, so writing
-        // it forwards nothing away.
         let graph = prepared.graph();
         let machine = prepared.machine_context();
         let clobbered = machine
@@ -3786,14 +3782,12 @@ impl Decompiler {
             .iter()
             .map(|slot| slot.storage().location())
             .collect::<std::collections::BTreeSet<_>>();
-        // The value the transfer reads is the target, which is the transfer
-        // rather than state it leaves behind.
         let transfer_inputs = graph
             .inst_id_for_op_site(callsite.block_addr, callsite.op_index)
             .and_then(|inst| graph.inst(inst))
             .map(|inst| inst.inputs.to_vec())
             .unwrap_or_default();
-        let defines_observable_state = graph.insts.iter().any(|inst| {
+        let observable = graph.insts.iter().find(|inst| {
             if matches!(
                 inst.payload,
                 r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { .. } | r2ssa::SSAOp::Call { .. })
@@ -3804,6 +3798,11 @@ impl Decompiler {
                 return false;
             };
             if transfer_inputs.contains(&output) {
+                return false;
+            }
+            // A write nothing reads and nothing carries out is the transfer's
+            // own bookkeeping, such as the program counter it sets.
+            if graph.use_sites(output).is_empty() && !prepared.live_out().contains(output) {
                 return false;
             }
             graph
@@ -3818,37 +3817,87 @@ impl Decompiler {
                     _ => false,
                 })
         });
-        if defines_observable_state {
+        if let Some(inst) = observable {
+            r2il::refusal_evidence!(
+                "import-stub-declaration",
+                "{:#x}: the body defines observable state beside the transfer: {:?} -> {:?} caller_supplied={}",
+                prepared.function().entry,
+                inst.payload,
+                inst.output
+                    .and_then(|output| graph.value(output))
+                    .map(|value| (
+                        value.var.display_name().to_string(),
+                        value.canonical_storage
+                    )),
+                inst.output
+                    .is_some_and(|output| graph.caller_supplied(output))
+            );
             return None;
         }
-        let identity = self
-            .context
-            .function_facts
-            .callee_resolution()?
-            .identity_for_callsite(r2types::CallsiteKey {
-                block_addr: callsite.block_addr,
-                op_index: callsite.op_index,
-            })?;
+        let Some(identity) =
+            self.context
+                .function_facts
+                .callee_resolution()
+                .and_then(|resolution| {
+                    resolution.identity_for_callsite(r2types::CallsiteKey {
+                        block_addr: callsite.block_addr,
+                        op_index: callsite.op_index,
+                    })
+                })
+        else {
+            r2il::refusal_evidence!(
+                "import-stub-declaration",
+                "{:#x}: the transfer resolves to no callee identity",
+                prepared.function().entry
+            );
+            return None;
+        };
+        // An external symbol reached through a relocation slot is an import
+        // by another name; an internal or unknown callee is not a stub's.
+        if !matches!(
+            identity.class,
+            r2types::CalleeClass::Imported | r2types::CalleeClass::ExternalSymbol
+        ) {
+            r2il::refusal_evidence!(
+                "import-stub-declaration",
+                "{:#x}: the callee is {:?}, not an import: {:?}",
+                prepared.function().entry,
+                identity.class,
+                identity
+            );
+            return None;
+        }
         let name = identity
             .display_name
             .as_deref()
             .or(identity.normalized_name.as_deref())
             .or(identity.raw_name.as_deref())?;
-        let signature = identity.signature.as_ref()?;
-        if !signature.variadic {
-            return None;
-        }
         let name = crate::ast::c_identifier(name);
+        let entry = prepared.function().entry;
+        let Some(signature) = identity.signature.as_ref() else {
+            r2il::refusal_evidence!(
+                "import-stub-declaration",
+                "tail transfer at {:#x}:{} resolves to {name}, which has no prototype",
+                callsite.block_addr,
+                callsite.op_index
+            );
+            let reason = format!(
+                "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
+                 whose prototype nothing states."
+            );
+            return Some(prepare_function_for_emission(
+                crate::residual_function_for_render_boundary(&name, &reason),
+            ));
+        };
         r2il::refusal_evidence!(
-            "variadic-forwarding-stub",
+            "import-stub-declaration",
             "tail transfer at {:#x}:{} resolves to {name}, declared rather than defined",
             callsite.block_addr,
             callsite.op_index
         );
         let reason = format!(
-            "r2sleigh: PLT stub at {:#x}; this symbol resolves to the import `{name}`. \
-             The tail forwards this function's own variadic arguments, which C cannot spell.",
-            prepared.function().entry
+            "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \
+             has no body of its own."
         );
         let mut function = CFunction::new(name.clone(), signature.return_type.clone())
             .as_declaration_only(sanitize_comment_text(&reason));
@@ -3856,13 +3905,12 @@ impl Decompiler {
             name,
             ret_type: signature.return_type.clone(),
             params: Some(signature.params.clone()),
-            variadic: true,
+            variadic: signature.variadic,
             noreturn: false,
         }];
         Some(prepare_function_for_emission(function))
     }
 
-    /// Convert a CStmt to a Vec<CStmt>.
     fn stmt_to_vec(&self, stmt: CStmt) -> Vec<CStmt> {
         let (semantic, observations) = stmt.into_semantic_with_observations();
         match semantic {

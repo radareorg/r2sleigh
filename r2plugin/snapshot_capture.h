@@ -366,6 +366,8 @@ typedef struct r_anal_call_site_interface_snapshot_t {
 	bool noreturn;
 	bool complete;
 	RAnalCallTransfer transfer;
+	/* Whether the target is this binary's own or an import, from the symbol or relocation that named it. */
+	RAnalFcnCalleeLinkage linkage;
 } RAnalCallSiteInterfaceSnapshot;
 
 typedef struct r_anal_snapshot_type_t {

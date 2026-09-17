@@ -1935,12 +1935,13 @@ mod tests {
     }
 
     #[test]
-    fn a_tail_call_through_a_relocated_slot_renders_as_the_callee() {
+    fn a_tail_call_through_a_relocated_slot_renders_as_the_import_stub() {
         // An import thunk is `jmp qword [reloc.X]`: an indirect branch through
         // a slot the relocation table names, which r2ssa certifies as a tail
-        // call to that slot. The lowering admitted only the direct-branch
-        // shape of a tail call, so every thunk refused on the loaded target
-        // having no rendered occurrence -- 32 functions per binary.
+        // call to that slot. The thunk has no body of its own: it renders as
+        // the import's declaration where a prototype is known and as a
+        // residual naming the import where none is, never as a forwarding
+        // body and never as an unresolved dispatch.
         let arch = make_test_arch_x86_64();
         let slot = 0x20f70;
         let mut thunk = R2ILBlock::new(0x1340, 6);
@@ -1948,48 +1949,37 @@ mod tests {
             target: Varnode::ram(slot, 8),
         });
 
-        let prepared = prepared_from_r2il_blocks_with_tail_slot(
-            std::slice::from_ref(&thunk),
-            &arch,
-            "sym_imp_fileno",
-            slot,
-            "fileno",
-            1,
-            true,
-        );
-        let input = crate::DecompilerInput::new(prepared.facts.clone());
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
-        assert_eq!(audit.render_refusal(), None, "{}", audit.output());
-        assert!(
-            audit.output().contains("return fileno("),
-            "a value-returning thunk returns its callee's result: {}",
-            audit.output()
-        );
-        assert!(
-            !audit.output().contains("indirect branch target unresolved"),
-            "a certified tail slot is not an unresolved dispatch: {}",
-            audit.output()
-        );
-
-        let prepared = prepared_from_r2il_blocks_with_tail_slot(
-            std::slice::from_ref(&thunk),
-            &arch,
-            "sym_imp_perror",
-            slot,
-            "perror",
-            1,
-            false,
-        );
-        let input = crate::DecompilerInput::new(prepared.facts.clone());
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
-        assert_eq!(audit.render_refusal(), None, "{}", audit.output());
-        assert!(
-            audit.output().contains("perror(") && audit.output().contains("return;"),
-            "a void thunk calls and returns: {}",
-            audit.output()
-        );
+        for (name, callee, returns_value) in [
+            ("sym_imp_fileno", "fileno", true),
+            ("sym_imp_perror", "perror", false),
+        ] {
+            let prepared = prepared_from_r2il_blocks_with_tail_slot(
+                std::slice::from_ref(&thunk),
+                &arch,
+                name,
+                slot,
+                callee,
+                1,
+                returns_value,
+            );
+            let input = crate::DecompilerInput::new(prepared.facts.clone());
+            let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
+                .decompile_input_with_binding_audit(&input);
+            assert_eq!(audit.render_refusal(), None, "{}", audit.output());
+            let output = audit.output();
+            assert!(
+                output.contains("import stub at 0x1340") && output.contains(&format!("`{callee}`")),
+                "a thunk names the import it stands for: {output}"
+            );
+            assert!(
+                !output.contains(&format!("return {callee}(")) && !output.contains("return;"),
+                "a thunk has no body to forward through: {output}"
+            );
+            assert!(
+                !output.contains("indirect branch target unresolved"),
+                "a certified tail slot is not an unresolved dispatch: {output}"
+            );
+        }
 
         // The same branch with nothing certifying it stays what it is: an
         // indirect dispatch nobody resolved.
@@ -1999,7 +1989,7 @@ mod tests {
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
         assert!(
-            !audit.output().contains("fileno(") && !audit.output().contains("return fileno("),
+            !audit.output().contains("fileno(") && !audit.output().contains("import stub"),
             "{}",
             audit.output()
         );

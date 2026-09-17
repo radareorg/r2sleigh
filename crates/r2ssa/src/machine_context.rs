@@ -571,6 +571,8 @@ pub struct SourceMachineContext {
     /// lifted from.
     raw_call_sites: BTreeMap<u64, SourceCallSiteIdentity>,
     tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
+    /// Who each raw call site calls, where the source knew.
+    callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     call_site_interfaces: BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface>,
     /// Literal bytes captured by the same immutable source transaction as the
     /// callsite interfaces. Unlike display strings, these participate in
@@ -1342,6 +1344,7 @@ impl SourceMachineContext {
             register_projections,
             raw_call_sites,
             tail_call_sites,
+            callee_linkages: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             memory_spaces_by_op,
@@ -1577,6 +1580,24 @@ impl SourceMachineContext {
         self.tail_call_sites.contains(&identity)
     }
 
+    pub(crate) fn set_callee_linkages(
+        &mut self,
+        callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
+    ) {
+        self.callee_linkages = callee_linkages;
+    }
+
+    /// Who the site calls, as the source's symbol or relocation said; unknown where it said nothing.
+    pub fn callee_linkage(
+        &self,
+        identity: SourceCallSiteIdentity,
+    ) -> r2source::AdvisoryCalleeLinkage {
+        self.callee_linkages
+            .get(&identity)
+            .copied()
+            .unwrap_or(r2source::AdvisoryCalleeLinkage::Unknown)
+    }
+
     pub const fn call_site_interfaces(
         &self,
     ) -> &BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface> {
@@ -1767,6 +1788,11 @@ impl SourceMachineContext {
         for identity in self.raw_call_sites.values() {
             write_call_identity(&mut writer, *identity);
             writer.bool(self.tail_call_sites.contains(identity));
+            writer.u8(match self.callee_linkage(*identity) {
+                r2source::AdvisoryCalleeLinkage::Unknown => 0,
+                r2source::AdvisoryCalleeLinkage::Internal => 1,
+                r2source::AdvisoryCalleeLinkage::Imported => 2,
+            });
         }
         writer.usize(self.call_site_interfaces.len());
         for interface in self.call_site_interfaces.values() {

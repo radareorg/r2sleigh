@@ -9,8 +9,8 @@ use crate::external::{
     normalize_external_type_name,
 };
 use crate::facts::{
-    CalleeFact, CalleeLinkage, CalleeReturnRelation, FunctionParamSpec, FunctionSignatureSpec,
-    FunctionType, FunctionTypeFacts, SignatureCertificate, SignatureCertificateSource,
+    CalleeFact, CalleeLinkage, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
+    FunctionTypeFacts, SignatureCertificate, SignatureCertificateSource,
 };
 use crate::signature_infer::render_signature_type;
 
@@ -623,31 +623,9 @@ fn parse_external_callees(
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned);
         let linkage = CalleeLinkage::from(callee.linkage);
-        let entry = facts.entry(callee.addr).or_insert_with(|| CalleeFact {
-            function_id: callee.addr,
-            name: name.clone(),
-            linkage,
-            signature: None,
-            signature_callconv: None,
-            signature_noreturn: false,
-            model_policy_evidence: BTreeSet::new(),
-            direct_callees: Vec::new(),
-            callsite_count: 0,
-            has_unknown_calls: false,
-            arg_effects: BTreeMap::new(),
-            memory_effects: Vec::new(),
-            transfer_effects: Vec::new(),
-            allocation_effects: Vec::new(),
-            lifetime_effects: Vec::new(),
-            sync_effects: Vec::new(),
-            atomic_effects: Vec::new(),
-            param_type_hints: BTreeMap::new(),
-            return_type_hint: None,
-            return_relation: CalleeReturnRelation::Unknown,
-            reads_global_memory: false,
-            writes_global_memory: false,
-            touches_unknown_memory: false,
-        });
+        let entry = facts
+            .entry(callee.addr)
+            .or_insert_with(|| CalleeFact::named(callee.addr, name.clone(), linkage));
         if entry.name.is_none() {
             entry.name = name;
         }

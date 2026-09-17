@@ -325,16 +325,86 @@ pd:s | jq -Rs 'test("int32_t dbg_complex_check[(]int32_t a, int32_t b[)]") and c
 EOF
 RUN
 
-NAME=pd:s renders an import thunk as the call it forwards rather than empty braces
+NAME=pd:s renders an x86-64 import thunk without a prototype as a residual naming the import
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
-true
+/* unknown */ tcgetattr()
+{
+    /* r2sleigh: import stub at 0x1000019bc; this symbol is the import `tcgetattr`, whose prototype nothing states. */
+}
+
 EOF
 CMDS=<<EOF
 a:sla > /dev/null
 aaa
 s 0x1000019bc > /dev/null
-pd:s | jq -Rs 'contains("sym_imp_tcgetattr") and contains("return tcgetattr();") and (test("[{][ \\n]*[}]")|not)'
+pd:s
+EOF
+RUN
+
+NAME=pd:s renders an x86-64 import thunk with a prototype as the import's declaration
+FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+/* r2sleigh: import stub at 0x1000019aa; this symbol is the import `strlen` and has no body of its own. */
+extern size_t strlen(int8_t*);
+
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s sym.imp.strlen > /dev/null
+pd:s
+EOF
+RUN
+
+NAME=pd:s renders an import stub with a prototype as the import's declaration
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+/* r2sleigh: import stub at 0x100002af0; this symbol is the import `strlen` and has no body of its own. */
+extern size_t strlen(int8_t*);
+
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s sym.imp.strlen > /dev/null
+pd:s
+EOF
+RUN
+
+NAME=pd:s renders a variadic import stub as a variadic declaration
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+/* r2sleigh: import stub at 0x100002ae4; this symbol is the import `printf` and has no body of its own. */
+extern int32_t printf(int8_t*, ...);
+
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s sym.imp.printf > /dev/null
+pd:s
+EOF
+RUN
+
+NAME=pd:s renders an import stub without a prototype as a residual naming the import
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+/* unknown */ tcgetattr()
+{
+    /* r2sleigh: import stub at 0x100002b44; this symbol is the import `tcgetattr`, whose prototype nothing states. */
+}
+
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s sym.imp.tcgetattr > /dev/null
+pd:s
 EOF
 RUN

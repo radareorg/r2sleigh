@@ -598,6 +598,16 @@ pub enum AdvisoryCallTransfer {
     TailSlot,
 }
 
+/// Who the callee is, from the symbol or relocation that named it: a function
+/// this binary defines, or one it imports. Import policy rests on this and
+/// never on the shape of a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum AdvisoryCalleeLinkage {
+    Unknown,
+    Internal,
+    Imported,
+}
+
 /// Advisory call metadata copied from the source snapshot. This projection
 /// does not claim exact call-site identity, so it cannot create a call
 /// certificate by itself. SSA preparation compares it with the lifted
@@ -613,6 +623,8 @@ pub struct AdvisoryCallSite {
     /// This spells the call in rendered output and nothing more: it is not
     /// evidence about what the callee does, and no analysis reads it.
     target_name: Option<String>,
+    /// Whether the target is the binary's own or imported.
+    linkage: AdvisoryCalleeLinkage,
     /// The prototype radare2 recovered for this site. Present only when radare2
     /// reported the site as complete; absent means it described the call but
     /// not what it takes or returns.
@@ -657,6 +669,11 @@ impl AdvisoryCallSite {
     /// What radare2 calls the target, when it has a name for it.
     pub fn target_name(&self) -> Option<&str> {
         self.target_name.as_deref()
+    }
+
+    /// Whether the target is the binary's own or imported.
+    pub const fn linkage(&self) -> AdvisoryCalleeLinkage {
+        self.linkage
     }
 }
 

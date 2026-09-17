@@ -403,7 +403,8 @@ impl<'c> CodeGenerator<'c> {
             }
             self.output.push_str(";\n");
         }
-        if !func.externs.is_empty() || !func.extern_objects.is_empty() {
+        // The blank line separates the declarations from the definition that follows; a declaration alone has nothing after it.
+        if !file_scope && (!func.externs.is_empty() || !func.extern_objects.is_empty()) {
             self.output.push('\n');
         }
     }

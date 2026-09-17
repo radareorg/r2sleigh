@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::callee::{CalleeIdentityContext, CalleeResolutionFacts, CallsiteKey};
 use crate::context::{ExternalStackSlotRole, ExternalStackSlotSpec, StackSlotKey};
 use crate::facts::{
-    FunctionSignatureProjection, FunctionSignatureSpec, FunctionTypeFacts,
-    OutParamCertificateEvidence, OutParamCertificateSource, SignatureCertificateSource,
-    SignatureProjectionResult, VisibleBindingKind,
+    CalleeFact, CalleeLinkage, FunctionSignatureProjection, FunctionSignatureSpec,
+    FunctionTypeFacts, OutParamCertificateEvidence, OutParamCertificateSource,
+    SignatureCertificateSource, SignatureProjectionResult, VisibleBindingKind,
 };
 use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
 
@@ -4059,10 +4059,29 @@ fn prepared_callee_resolution_facts(
         .iter()
         .map(|(name, ty)| (crate::normalize_callee_name(name), ty.clone()))
         .collect::<HashMap<_, _>>();
+    // The linkage radare2 read off the symbol or relocation that named each
+    // call target is the fact import policy rests on; a name's shape is not.
+    let mut callee_facts = type_facts.callee_facts.clone();
+    for cert in prepared.certificates().callsites.values() {
+        let linkage = match cert.callee_linkage {
+            r2source::AdvisoryCalleeLinkage::Unknown => continue,
+            r2source::AdvisoryCalleeLinkage::Internal => CalleeLinkage::Internal,
+            r2source::AdvisoryCalleeLinkage::Imported => CalleeLinkage::Imported,
+        };
+        let Some(target) = cert.direct_target else {
+            continue;
+        };
+        let fact = callee_facts.entry(target).or_insert_with(|| {
+            CalleeFact::named(target, function_names.get(&target).cloned(), linkage)
+        });
+        if fact.linkage == CalleeLinkage::Unknown {
+            fact.linkage = linkage;
+        }
+    }
     let ctx = CalleeIdentityContext {
         function_names: &function_names,
         symbols: &symbols,
-        callee_facts: &type_facts.callee_facts,
+        callee_facts: &callee_facts,
         known_function_signatures: &known_function_signatures,
     };
 
@@ -5910,6 +5929,7 @@ mod tests {
             direct_target: Some(0x402000),
             fallthrough: None,
             transfer: r2ssa::CallSiteTransfer::TailCall,
+            callee_linkage: r2source::AdvisoryCalleeLinkage::Unknown,
             memory_effect: r2ssa::CallMemoryEffect::Unknown,
         };
         let certificate = r2ssa::CallsiteCertificate {
@@ -5921,6 +5941,7 @@ mod tests {
             direct_target: Some(0x402000),
             fallthrough: None,
             transfer: r2ssa::CallSiteTransfer::TailCall,
+            callee_linkage: r2source::AdvisoryCalleeLinkage::Unknown,
             argument_values: Vec::new(),
             variadic: false,
             fixed_argument_count: Some(0),

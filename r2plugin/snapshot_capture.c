@@ -801,12 +801,33 @@ static char *fcn_context_resolve_callee_name(RAnal *anal, ut64 addr) {
 	}
 	return fcn_context_callee_symbol_name (anal, addr);
 }
+/* radare2's prototype accessors trim leading underscores when the exact key
+ * is absent, which reads Darwin's __error as glibc's error: ask for the key itself. */
+static bool type_prototype_exact(Sdb *types, const char *name) {
+	return sdb_const_getf (types, NULL, "func.%s.ret", name) != NULL;
+}
+/* Whether the prototype radare2 found by name is the symbol's own: the key it
+ * matched is the identifier itself. The lookup strips leading underscores, which
+ * turns Darwin's __error into glibc's error; that is another function. */
+static bool fcn_context_name_prototype_is_own(RAnal *anal, const char *fcn_name) {
+	if (!anal || !anal->sdb_types || R_STR_ISEMPTY (fcn_name)) {
+		return false;
+	}
+	const char *ident = strrchr (fcn_name, '.');
+	ident = ident? ident + 1: fcn_name;
+	return type_prototype_exact (anal->sdb_types, ident);
+}
 static RAnalFunctionSignature *fcn_context_resolve_callee_signature(RAnal *anal, ut64 addr) {
 	RAnalFunction *callee_fcn;
 	R_RETURN_VAL_IF_FAIL (anal, NULL);
 	callee_fcn = r_anal_get_function_at (anal, addr);
 	RAnalFunctionSignature *signature = callee_fcn
 		? r_anal_function_get_signature (callee_fcn): NULL;
+	if (signature && signature->origin == R_ANAL_FUNCTION_SIGNATURE_ORIGIN_NAME
+		&& !fcn_context_name_prototype_is_own (anal, callee_fcn->name)) {
+		r_anal_function_signature_free (signature);
+		signature = NULL;
+	}
 	// The body's own noreturn finding is part of what the signature says.
 	if (signature && callee_fcn->is_noreturn) {
 		signature->noreturn = true;
@@ -3392,7 +3413,8 @@ static bool function_interface_snapshot_collect(
 	 * finds by its name is the only statement of it, and it travels marked. */
 	const bool imported_prototype = ctx->signature
 		&& ctx->signature->origin == R_ANAL_FUNCTION_SIGNATURE_ORIGIN_NAME
-		&& fcn_context_resolve_callee_linkage (anal, fcn->addr) == R_ANAL_FCN_CALLEE_IMPORTED;
+		&& fcn_context_resolve_callee_linkage (anal, fcn->addr) == R_ANAL_FCN_CALLEE_IMPORTED
+		&& fcn_context_name_prototype_is_own (anal, fcn->name);
 	interface->prototype_from_types = imported_prototype;
 	if (!ctx->signature || (!address_linked && !imported_prototype)) {
 		// Leaving without a word here hid the largest refusal cause in the
@@ -5531,6 +5553,7 @@ static bool call_site_interface_snapshot_collect_one(
 	interface->instruction_addr = callee->call_addr;
 	interface->target_addr = callee->addr;
 	interface->transfer = callee->transfer;
+	interface->linkage = callee->linkage;
 	// Whatever named the callee when it was collected -- the function at the
 	// address, a relocated slot, or the stub standing for one -- travels on
 	// the record, so nothing is looked up at the address again here.
@@ -6849,27 +6872,13 @@ beach:
 
 static char *function_signature_try_type_name(Sdb *types, const char *candidate) {
 	R_RETURN_VAL_IF_FAIL (types && candidate && *candidate, NULL);
-	/* The prototype namespace decides whether a name has a prototype. The
-	 * kind key `NAME=func` shares its name with struct, union and enum tags,
-	 * which C keeps apart from ordinary identifiers: a program that declares
-	 * `struct stat` and calls `stat()` -- every program that calls stat --
-	 * has `stat=struct` written over `stat=func` once its DWARF is read, and
-	 * the prototype still recorded under `func.stat.*` went unfound. */
-	char *name = r_type_func_key (types, candidate);
-	if (name) {
-		if (r_type_func_prototype_exist (types, name)) {
-			return name;
-		}
-		free (name);
-	}
-	name = r_type_func_guess (types, candidate);
-	if (name) {
-		if (r_type_func_prototype_exist (types, name)) {
-			return name;
-		}
-		free (name);
-	}
-	return r_type_func_prototype_exist (types, candidate)? strdup (candidate): NULL;
+	/* The prototype namespace decides whether a name has a prototype: `struct
+	 * stat` writes `stat=struct` over `stat=func`, and `func.stat.*` is still
+	 * there. The key must be the identifier itself, never a guess through
+	 * its underscores. */
+	const char *ident = strrchr (candidate, '.');
+	ident = ident? ident + 1: candidate;
+	return type_prototype_exact (types, ident)? strdup (ident): NULL;
 }
 
 static int var_ptr_comparator(RAnalVar * const *a, RAnalVar * const *b) {
