@@ -32,7 +32,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                 R9_1 = (uint32_t)tmp_lane_100000e40_91_1c_1;
                 uint32_t tmp_lane_100000e40_99_1f_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffff85ebca77U) + (uint32_t)RCX_1;
                 tmp_lane_100000e40_b8_24_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000e40_67_16_1 << 13 | tmp_lane_100000e40_67_16_1 >> 19) * 0xffffffff9e3779b1U);
-                RDX_0 = (uint64_t)(uint32_t)tmp_lane_100000e40_b8_24_1;
+                RDX_0 = (uint64_t)tmp_lane_100000e40_b8_24_1;
                 tmp_lane_100000e40_c1_26_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000e40_99_1f_1 << 13 | tmp_lane_100000e40_99_1f_1 >> 19) * 0xffffffff9e3779b1U);
                 RCX_1 = (uint32_t)tmp_lane_100000e40_c1_26_1;
                 RDI_0 += 16;
@@ -68,7 +68,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                 if (RCX_10 < tmp_4a00_1) {
                     uint64_t RDI_10;
                     uint32_t tmp_lane_100000efd_e_54_1 = (uint32_t)tmp_4a00_1 - (uint32_t)RCX_10 & 3;
-                    RDI_10 = (uint64_t)(uint32_t)tmp_lane_100000efd_e_54_1;
+                    RDI_10 = (uint64_t)tmp_lane_100000efd_e_54_1;
                     if (tmp_lane_100000efd_e_54_1 != 0) {
                         for (; ; ) {
                             uint8_t tmp_11e00_2 = *(uint8_t*)RCX_10;

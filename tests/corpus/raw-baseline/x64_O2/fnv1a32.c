@@ -6,7 +6,7 @@ uint64_t sym__fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
     } else {
         uint64_t RAX_1;
         uint64_t RDX_1;
-        uint64_t RCX_2 = (uint64_t)(uint32_t)((uint32_t)RSI_0 & 3);
+        uint64_t RCX_2 = (uint64_t)((uint32_t)RSI_0 & 3);
         if (4 <= RSI_0) {
             RSI_0 &= (uint64_t)-0x4;
             RAX_1 = 0x811c9dc5;

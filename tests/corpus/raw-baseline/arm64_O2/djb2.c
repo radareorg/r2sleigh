@@ -10,7 +10,7 @@ uint64_t sym__djb2(uint64_t X0_0, uint64_t X1_0)
                 uint8_t* tmp_7400_2 = (uint8_t*)X0_0;
                 X0_0++;
                 uint8_t tmp_25400_2 = *tmp_7400_2;
-                X8_1 = (uint64_t)(uint32_t)((uint32_t)tmp_25400_2 + (tmp_lane_1000005b8_0_0_1 * 32 + tmp_lane_1000005b8_0_0_1));
+                X8_1 = (uint64_t)((uint32_t)tmp_25400_2 + (tmp_lane_1000005b8_0_0_1 * 32 + tmp_lane_1000005b8_0_0_1));
                 uint8_t TMPZR_4 = X1_0 == 1;
                 X1_0--;
                 if (TMPZR_4) {

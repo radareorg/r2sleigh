@@ -12,7 +12,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 int32_t tmp_11f00_2 = (int32_t)((uint32_t*)RDI_0)[RCX_1];
                 uint32_t tmp_lane_100000830_6_3_1 = (uint32_t)((uint64_t)tmp_11f00_2 * 0xffffffffcc9e2d51U);
                 uint32_t tmp_lane_100000830_2b_a_1 = (uint32_t)RDX_0_2 ^ (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000830_6_3_1 << 15 | tmp_lane_100000830_6_3_1 >> 17) * 0x1b873593);
-                uint64_t R8_6 = (uint64_t)(uint32_t)(tmp_lane_100000830_2b_a_1 << 13 | tmp_lane_100000830_2b_a_1 >> 19);
+                uint64_t R8_6 = (uint64_t)(tmp_lane_100000830_2b_a_1 << 13 | tmp_lane_100000830_2b_a_1 >> 19);
                 RDX_0_2 = (uint32_t)((uint32_t)(R8_6 * 4 + R8_6) - 0x19ab949c);
                 RCX_1++;
                 if (RAX_2 == RCX_1) {

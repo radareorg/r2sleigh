@@ -10,7 +10,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
             RDX_1 = (uint64_t)0;
         } else {
             uint64_t RCX_1;
-            uint64_t RAX_2 = (uint64_t)(uint32_t)((uint32_t)RSI_0 & 3);
+            uint64_t RAX_2 = (uint64_t)((uint32_t)RSI_0 & 3);
             if (4 <= RSI_0) {
                 RSI_0 &= (uint64_t)-0x4;
                 RCX_1 = (uint64_t)0;
@@ -24,7 +24,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
                     uint8_t tmp_11e00_7 = ((uint8_t*)RDI_0)[RCX_1 + 3];
                     uint8_t tmp_11e00_8 = *(uint8_t*)((uint64_t)(uint8_t)(tmp_11e00_5 ^ tmp_11e00_6) + (uint64_t)&_pearson_tab);
                     uint8_t tmp_11e00_9 = *(uint8_t*)((uint64_t)(uint8_t)(tmp_11e00_7 ^ tmp_11e00_8) + (uint64_t)&_pearson_tab);
-                    RDX_1 = (uint64_t)(uint32_t)tmp_11e00_9;
+                    RDX_1 = (uint64_t)tmp_11e00_9;
                     RCX_1 += 4;
                     if (RSI_0 == RCX_1) {
                         break;
@@ -41,7 +41,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
                 for (; ; ) {
                     uint8_t tmp_11e00_12 = ((uint8_t*)RDI_0)[RCX_6];
                     uint8_t tmp_11e00_13 = *(uint8_t*)((uint64_t)(uint8_t)((uint8_t)RDX_1 ^ tmp_11e00_12) + (uint64_t)&_pearson_tab);
-                    RDX_1 = (uint64_t)(uint32_t)tmp_11e00_13;
+                    RDX_1 = (uint64_t)tmp_11e00_13;
                     RCX_6++;
                     if (RAX_2 == RCX_6) {
                         break;

@@ -2248,15 +2248,19 @@ impl<'a> FoldingContext<'a> {
                     );
                     return Ok(self.assign_stmt(lhs, rhs));
                 }
-                let rhs = if *offset == 0 && dst.size == src.size {
-                    src_expr
-                } else if *offset == 0 {
-                    CExpr::cast(uint_type_from_size(dst.size), src_expr)
+                let dst_ty = uint_type_from_size(dst.size);
+                let rhs = if *offset == 0 {
+                    // The low piece is a conversion from what the operand
+                    // has, spelled only where it is not the identity: an
+                    // object declared at the piece's width is the piece.
+                    let (expr, ty) = self.typed_input(frame, 0, src)?;
+                    self.convert_from(expr, ty.as_ref(), &dst_ty)
                 } else {
                     let shift_bits = offset.saturating_mul(8);
                     let shifted =
                         CExpr::binary(BinaryOp::Shr, src_expr, CExpr::IntLit(shift_bits as i64));
-                    CExpr::cast(uint_type_from_size(dst.size), shifted)
+                    let shifted_ty = CValue::Typed(uint_type_from_size(src.size));
+                    self.convert_from(shifted, Some(&shifted_ty), &dst_ty)
                 };
                 self.assign_stmt(lhs, rhs)
             }

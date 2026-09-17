@@ -8,7 +8,7 @@ uint64_t sym__fnv1a64(uint64_t RDI_0, uint64_t RSI_0)
             return (uint64_t)R8_1;
         } else {
             uint64_t R9_1;
-            uint64_t RDX_2 = (uint64_t)(uint32_t)((uint32_t)RSI_0 & 3);
+            uint64_t RDX_2 = (uint64_t)((uint32_t)RSI_0 & 3);
             if (4 <= RSI_0) {
                 RSI_0 &= (uint64_t)-0x4;
                 R9_1 = (uint64_t)0;

@@ -15,7 +15,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
             for (; ; ) {
                 uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RAX_1];
                 uint8_t tmp_11e00_3 = *(uint8_t*)((uint64_t)(uint8_t)((uint8_t)RCX_1 ^ tmp_11e00_2) + (uint64_t)&_pearson_tab);
-                RCX_1 = (uint64_t)(uint32_t)tmp_11e00_3;
+                RCX_1 = (uint64_t)tmp_11e00_3;
                 RAX_1++;
                 if (RSI_0 == RAX_1) {
                     break;

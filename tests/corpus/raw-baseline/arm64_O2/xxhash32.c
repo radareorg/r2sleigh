@@ -15,7 +15,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         uint32_t tmp_2a000_2 = 0x165667b1;
         uint64_t X9_1 = X1_0 + X0_0;
         if (X1_0 < 16) {
-            X11_8 = (uint64_t)(uint32_t)(tmp_2a000_2 + W2_0);
+            X11_8 = (uint64_t)(tmp_2a000_2 + W2_0);
             X12_1 = X0_0;
         } else {
             uint32_t tmp_lane_1000009ac_21_6f_1;
@@ -50,7 +50,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             Z0_1 = r2sleigh_bits_insert_256_64(Z0_1, 0, 192);
             uint32_t tmp_2a000_6 = 0x85ebca77;
             uint32_t tmp_2a000_8 = 0x9e3779b1;
-            X11_8 = (uint64_t)(uint32_t)tmp_2a000_8;
+            X11_8 = (uint64_t)tmp_2a000_8;
             X12_1 = X0_0;
             for (; ; ) {
                 struct r2sleigh_bits_256 Z0_17;
@@ -234,7 +234,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     }
                 }
                 {
-                    uint32_t tmp_lane_100000a70_0_d8_1 = (uint32_t)X11_13;
+                    uint32_t tmp_lane_100000a70_0_d8_1 = X11_13;
                     uint32_t tmp_2b380_7 = (tmp_lane_100000a70_0_d8_1 >> 15 ^ tmp_lane_100000a70_0_d8_1) * 0x85ebca77;
                     uint32_t tmp_2b380_8 = tmp_2a000_11 * (tmp_2b380_7 >> 13 ^ tmp_2b380_7);
                     return tmp_2b380_8 >> 16 ^ tmp_2b380_8;

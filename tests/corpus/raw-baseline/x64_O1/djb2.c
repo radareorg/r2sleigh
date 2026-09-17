@@ -9,7 +9,7 @@ uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
             RCX_1 = (uint64_t)0;
             for (; ; ) {
                 uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
-                RAX_1 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_2 + ((uint32_t)RAX_1 * 32 + (uint32_t)RAX_1));
+                RAX_1 = (uint64_t)((uint32_t)tmp_11e00_2 + ((uint32_t)RAX_1 * 32 + (uint32_t)RAX_1));
                 RCX_1++;
                 if (RSI_0 == RCX_1) {
                     break;

@@ -52,7 +52,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             stack_m72 = stack_m48 * 4 + stack_m16;
             stack_m76 = 0;
             tmp_11f80_1 = stack_m24;
-            RAX_21 = (uint64_t)(uint32_t)((uint32_t)tmp_11f80_1 & 3);
+            RAX_21 = (uint64_t)((uint32_t)tmp_11f80_1 & 3);
             stack_m88 = RAX_21;
             if (RAX_21 != 1) {
                 RAX_21 = stack_m88;

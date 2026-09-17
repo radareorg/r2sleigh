@@ -333,11 +333,32 @@ impl<'a> FoldingContext<'a> {
                 // object is declared as is the last word, and the conversion
                 // to it is made once, outside the projection, from the type
                 // the projection produced.
+                // A right-hand side already as wide as the carrier spells the
+                // zero extension itself: its root is the extension, and the
+                // projection describing the same write must not say it twice.
+                r2il::refusal_evidence!(
+                    "write-projection",
+                    "{:?} {:?} rhs_type={:?} rhs={:?}",
+                    output.value,
+                    projection,
+                    rhs_type,
+                    rhs
+                );
+                let projection = match *projection {
+                    r2ssa::MachineWriteProjection::ZeroExtend { to_width_bits, .. }
+                        if rhs_type.as_ref().and_then(CValue::as_type).and_then(|ty| {
+                            r2types::declaration_type_width_bits(ty, self.pointer_bits())
+                        }) == Some(to_width_bits) =>
+                    {
+                        r2ssa::MachineWriteProjection::Full
+                    }
+                    projection => projection,
+                };
                 let (lhs, rhs, projected_type) = project_machine_write(
                     lhs,
                     rhs,
                     rhs_type.as_ref(),
-                    *projection,
+                    projection,
                     self.pointer_bits(),
                 )
                 .map_err(|_| {
@@ -707,18 +728,28 @@ impl<'a> FoldingContext<'a> {
             }
             Kind::Extract { input, lsb_bits } => {
                 let rendered = child(0, input)?;
-                let shifted = if lsb_bits == 0 {
-                    rendered
-                } else {
-                    CExpr::binary(BinaryOp::Shr, rendered, CExpr::IntLit(i64::from(lsb_bits)))
-                };
                 let Some(produced) = typed
                     .term_produced(term)
                     .and_then(r2rewrite::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
-                CExpr::cast(produced.clone(), shifted)
+                // The operand arrives at the type this term requires of it; a
+                // shift leaves it at that type promoted. The piece's width is
+                // a conversion from there, spelled only where it is not the
+                // identity: a 32-bit object read at 32 bits is the object.
+                let from = typed.term_required(term, 0).cloned();
+                if lsb_bits == 0 {
+                    let from = from.map(r2rewrite::CValue::Typed);
+                    self.convert_from(rendered, from.as_ref(), produced)
+                } else {
+                    let shifted =
+                        CExpr::binary(BinaryOp::Shr, rendered, CExpr::IntLit(i64::from(lsb_bits)));
+                    let from = from
+                        .map(|ty| r2rewrite::promoted(&ty))
+                        .map(r2rewrite::CValue::Typed);
+                    self.convert_from(shifted, from.as_ref(), produced)
+                }
             }
             Kind::Concat { high, low } => {
                 let low_width = arena.term(low).width_bits();

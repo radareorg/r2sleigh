@@ -26,7 +26,7 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
             if (RCX_1 < RSI_0) {
                 uint64_t R8_3;
                 uint32_t tmp_lane_100001392_e_12_1 = (uint32_t)RSI_0 - (uint32_t)RCX_1 & 3;
-                R8_3 = (uint64_t)(uint32_t)tmp_lane_100001392_e_12_1;
+                R8_3 = (uint64_t)tmp_lane_100001392_e_12_1;
                 if (tmp_lane_100001392_e_12_1 != 0) {
                     for (; ; ) {
                         uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];

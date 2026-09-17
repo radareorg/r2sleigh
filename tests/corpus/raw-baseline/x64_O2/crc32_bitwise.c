@@ -19,7 +19,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
             uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
             uint32_t tmp_lane_100000a50_7_6_1 = (uint32_t)tmp_11e00_2 ^ (uint32_t)RAX_1;
             uint32_t tmp_lane_100000a50_3e_19_1 = tmp_lane_100000a50_7_6_1 >> 1 ^ (-(tmp_lane_100000a50_7_6_1 & 1) & 0xedb88320);
-            XMM2_2 = (__uint128_t)(uint32_t)tmp_lane_100000a50_7_6_1;
+            XMM2_2 = (__uint128_t)tmp_lane_100000a50_7_6_1;
             uint32_t tmp_lane_100000a50_a9_2c_1 = tmp_lane_100000a50_3e_19_1 >> 1 ^ ((uint32_t)((int32_t)(tmp_lane_100000a50_7_6_1 << 30) >> 31) & 0xedb88320);
             XMM2_2 = (XMM2_2 & ~((__uint128_t)~(uint32_t)0U << 0U)) | (__uint128_t)tmp_lane_100000a50_7_6_1 << 0;
             XMM2_2 = (XMM2_2 & ~((__uint128_t)~(uint32_t)0U << 32U)) | (__uint128_t)tmp_lane_100000a50_7_6_1 << 32;
@@ -55,7 +55,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
             XMM2_17 ^= XMM3_6;
             uint32_t tmp_lane_100000a50_263_71_1 = (uint32_t)XMM2_17;
             tmp_lane_100000a50_267_74_1 = tmp_lane_100000a50_263_71_1 ^ (((uint32_t)((int32_t)(tmp_lane_100000a50_3e_19_1 << 26) >> 31) & 0x76dc4190) ^ (tmp_lane_100000a50_a9_2c_1 >> 6 ^ ((uint32_t)((int32_t)(tmp_lane_100000a50_a9_2c_1 << 26) >> 31) & 0xedb88320)));
-            RAX_1 = (uint64_t)(uint32_t)tmp_lane_100000a50_267_74_1;
+            RAX_1 = (uint64_t)tmp_lane_100000a50_267_74_1;
             RCX_1++;
             if (RSI_0 == RCX_1) {
                 break;
