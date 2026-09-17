@@ -31,12 +31,7 @@ use crate::op::SSAOp;
 fn blocks_reachable_from(graph: &SsaGraph, start: BlockId) -> Vec<bool> {
     let mut seen = vec![false; graph.blocks.len()];
     let mut queue = VecDeque::from([start]);
-    let mut first = true;
     while let Some(next) = queue.pop_front() {
-        if !first && seen[next.0 as usize] {
-            continue;
-        }
-        first = false;
         let Some(block) = graph.blocks.get(next.0 as usize) else {
             continue;
         };
@@ -678,6 +673,70 @@ mod tests {
         let wide = value_named(&graph, "RAX", 1);
         assert_ne!(spans.span_of(narrow), spans.span_of(wide));
         assert!(!spans.all_one_span([narrow, wide]));
+    }
+
+    #[test]
+    fn a_read_two_blocks_downstream_is_a_read_after_the_definition() {
+        // A loop whose body updates RAX twice and whose exit reads the header
+        // value. The exit is two edges away from the first update, and the walk
+        // that decided reachability stopped after one, so the update continued
+        // the header's run as if nothing read it afterwards.
+        let mut arch = arch();
+        arch.add_register(RegisterDef::new("RDX", 16, 8));
+        arch.add_register(RegisterDef::new("cond", 32, 1));
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::Copy {
+            dst: reg(0, 8),
+            src: reg(8, 8),
+        });
+        let mut header = R2ILBlock::new(0x1004, 4);
+        header.push(R2ILOp::CBranch {
+            target: Varnode::constant(0x1010, 8),
+            cond: reg(32, 1),
+        });
+        let mut first_update = R2ILBlock::new(0x1008, 4);
+        first_update.push(R2ILOp::IntAdd {
+            dst: reg(0, 8),
+            a: reg(0, 8),
+            b: Varnode::constant(1, 8),
+        });
+        let mut second_update = R2ILBlock::new(0x100c, 4);
+        second_update.push(R2ILOp::IntAdd {
+            dst: reg(0, 8),
+            a: reg(0, 8),
+            b: reg(8, 8),
+        });
+        second_update.push(R2ILOp::Copy {
+            dst: reg(16, 8),
+            src: reg(0, 8),
+        });
+        second_update.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1004, 8),
+        });
+        let mut exit = R2ILBlock::new(0x1010, 4);
+        exit.push(R2ILOp::IntAdd {
+            dst: reg(16, 8),
+            a: reg(0, 8),
+            b: Varnode::constant(5, 8),
+        });
+        exit.push(R2ILOp::Return {
+            target: reg(0x288, 8),
+        });
+        let func = SSAFunction::from_blocks_with_arch(
+            &[entry, header, first_update, second_update, exit],
+            Some(&arch),
+        )
+        .expect("ssa");
+        let graph = SsaGraph::from_function(&func);
+        let spans = StorageSpans::compute(&func, &graph);
+
+        let merged = value_named(&graph, "RAX", 2);
+        let updated = value_named(&graph, "RAX", 3);
+        assert_ne!(
+            spans.span_of(merged),
+            spans.span_of(updated),
+            "the exit still reads the header's value after the body redefines RAX"
+        );
     }
 
     #[test]
