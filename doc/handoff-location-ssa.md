@@ -26986,3 +26986,48 @@ recorded failures.
 truncating cast on a narrowed definition, the literal cast `(uint32_t)0`,
 the re-widening of a narrowed vector register at a lane read, and the
 `int8_t*` spelling of an import's `char *`.
+
+### Phase 1c, first step: three identity conversions that were spelled anyway
+
+The conversion site already exists -- `convert_from` asks `TypedBoundaries`
+for the produced and required type of every operand edge and spells a cast
+only where they differ -- so 1c.1's "one site" was mostly a census of the
+emitters that bypassed it. Three did, and each spelled a conversion that 1b
+had just made the identity.
+
+**A width extract of a value already at that width.** The canonical
+`Extract` term cast to the piece's type unconditionally; it now converts
+from what the term requires of its operand (promoted, after a shift) to
+what it produces, so a 32-bit object read at 32 bits is the object. The
+`Subpiece` operation lowering did the same for values rendered op by op
+and now converts from what its operand has. That took `(uint32_t)X` off
+every read of a narrowed object: `X = (uint32_t)((uint32_t)X ^ t)` is
+`X = (uint32_t)(X ^ t)`.
+
+**A zero-extending definition spelled twice.** The use projection already
+spells the conversion a use carries, so the operand of a zero extension
+arrives as `(uint64_t)t` typed 64 bits; the write projection then described
+the same write as `ZeroExtend` and brought the operand back to 32 bits
+before extending it again, `(uint64_t)(uint32_t)t`. At the one assignment
+site, a right-hand side already as wide as the carrier is treated as
+`Full`: its root is the extension. One attempt to fix this in the op-level
+`IntZExt` arm instead was reverted -- bound definitions render through the
+canonical term path and never reach it, and forcing the operand narrow there
+recreated the pair. The `write-projection` evidence line that found this
+stays.
+
+**Measured.** bzip2 arm64 -O2: 134 `(uint64_t)(uint32_t)x` pairs are single
+casts; the cast census counts 3774 with 365 narrowing name casts (its
+regex read the pair as one cast, so the total did not move; the shape
+table shows 337 `(uint64_t)(` becoming 233 and 119 `(uint64_t)name` on a
+32-bit name becoming 203). Corpus: differential 60/60, 31 cells changed and
+read, all one of the three shapes above; r2r 99 of 101 with the two
+recorded failures.
+
+**Still spelled, ranked by count on bzip2:** 380 `(uint32_t*)(expr)` and
+208 `(uint32_t*)name` at memory accesses (the memory renderer, Phase 2's
+edge); 233 `(uint64_t)(expr)` widenings of a 32-bit operation into a 64-bit
+object, real conversions the machine made; 314 `(uint32_t)name` on 64-bit
+names read at 32 bits elsewhere, real truncations; 216 `(int32_t)(expr)`
+signed reinterpretations at comparisons; and the `(__uint128_t)` re-widening
+of a narrowed vector register at a lane read.
