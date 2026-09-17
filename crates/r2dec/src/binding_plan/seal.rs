@@ -50,15 +50,15 @@ fn seal_binding_components_with(
             .ok_or(BindingPlanBuildError::MissingStorageSpan { value: value.id })?;
         values_by_span.entry(span).or_default().insert(value.id);
     }
-    let read_together = super::rules::values_read_together(graph);
+    let liveness = source.value_liveness();
 
     for (span, members) in values_by_span {
         // The same question the construction pass asks of a span: sharing a
         // machine location is not on its own a licence to share a C object, and
-        // one instruction reading two members makes it impossible whichever
-        // derivation proposed the merge.
+        // a member still needed where another is written makes it impossible
+        // whichever derivation proposed the merge.
         if members.len() > 1 {
-            if super::rules::set_interferes(&read_together, &members) {
+            if super::rules::values_interfere(liveness, &members) {
                 r2il::refusal_evidence!("seal-span-declined", "{span:?} members {members:?}");
                 continue;
             }
@@ -96,8 +96,7 @@ fn seal_binding_components_with(
                     merged.extend(span_members.iter().copied());
                 }
             }
-            let interferes = super::rules::set_interferes(&read_together, &merged)
-                || super::rules::set_outlives_a_redefinition(graph, &members);
+            let interferes = super::rules::values_interfere(liveness, &merged);
             if interferes {
                 r2il::refusal_evidence!(
                     "seal-coalescing-declined",

@@ -1,6 +1,6 @@
 uint64_t sym__fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 26 rendered, 15 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 26 rendered, 14 elided, 0 refused; 13 statements rendered */
     {
         uint64_t RAX_1;
         RAX_1 = 0x811c9dc5;

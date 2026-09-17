@@ -303,9 +303,13 @@ fn certified_address_reads_are_owned_by_exact_affine_provenance() {
 fn shadow_plan_groups_spans_and_inlines_only_upstream_literals() {
     let first = Varnode::unique(0x10, 8);
     let source_owned = source_owned([
-        R2ILOp::Copy {
+        // The chain is computed from a register rather than copied from one:
+        // a copy is forwarded to its readers and is then a version nothing
+        // reads, so it would seed no span.
+        R2ILOp::IntAdd {
             dst: first.clone(),
-            src: Varnode::register(0, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(3, 8),
         },
         // Each version is read twice, and the span is seeded from a register.
         // A value with a single reader is folded into that reader and gets no
@@ -413,6 +417,8 @@ fn dead_phi_reader_does_not_force_a_live_temporary_copy_to_bind() {
     });
     let source_owned = source_owned_blocks(&[entry, left, right, join]);
     let source = source_owned.source();
+    // The copy feeds the merge, so it is the merge's edge write and stays a
+    // copy the merge reads; that read is what the dead-value analysis owns.
     let producer = source
         .graph()
         .inst_id_for_op_site(0x1004, 0)
@@ -500,9 +506,10 @@ fn copy_of_bound_load_survives_temporary_storage_reuse_inline() {
         plan.disposition(load),
         Some(ValueDisposition::Bound { .. })
     ));
+    // The copy is forwarded into the stores and is then read by nothing.
     assert!(matches!(
         plan.disposition(copy),
-        Some(ValueDisposition::Inline { .. })
+        Some(ValueDisposition::Elided { .. })
     ));
     let binding_of = |value| match plan.disposition(value) {
         Some(ValueDisposition::Bound { binding, .. }) => *binding,
@@ -1152,18 +1159,15 @@ fn unsupported_c_scalar_width_is_a_typed_value_refusal() {
             val: Varnode::unique(0x10, 3),
         },
     ]);
-    // The register read is a lane subpiece folded into its one reader; the
-    // copied unique is the value read twice.
-    let output = source_owned
-        .source()
-        .graph()
-        .insts
+    // The copy is forwarded, so the register's lane projection is the
+    // three-byte value both stores read and the one that needs a declaration.
+    let graph = source_owned.source().graph();
+    let output = graph
+        .values
         .iter()
-        .find_map(|inst| match &inst.payload {
-            r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) => inst.output,
-            _ => None,
-        })
-        .expect("copy output");
+        .find(|value| value.var.size == 3 && graph.use_sites(value.id).len() >= 2)
+        .map(|value| value.id)
+        .expect("three-byte value read twice");
     let plan = BindingPlan::build_shadow(&source_owned).expect("typed refusal plan");
 
     assert!(matches!(
@@ -1258,9 +1262,12 @@ fn seal_resolves_certificate_sources_instead_of_trusting_stored_witnesses() {
     // is spelled at each reader rather than bound, and this test needs
     // bindings whose certificate sources it can resolve.
     let source_owned = source_owned([
-        R2ILOp::Copy {
+        // Computed from registers rather than copied: a copy is forwarded to
+        // its readers and seeds no span.
+        R2ILOp::IntAdd {
             dst: first.clone(),
-            src: Varnode::register(0, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(3, 8),
         },
         R2ILOp::Store {
             space: SpaceId::Ram,
@@ -1272,9 +1279,10 @@ fn seal_resolves_certificate_sources_instead_of_trusting_stored_witnesses() {
             a: Varnode::unique(0x10, 8),
             b: Varnode::constant(1, 8),
         },
-        R2ILOp::Copy {
+        R2ILOp::IntAdd {
             dst: second.clone(),
-            src: Varnode::register(8, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::constant(3, 8),
         },
         R2ILOp::Store {
             space: SpaceId::Ram,

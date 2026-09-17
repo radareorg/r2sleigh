@@ -1257,6 +1257,11 @@ impl MarkedNativeDraft {
         let Some(placement) = self.placement.as_ref() else {
             return Err(NativePlacementFailure::MissingStructuredRegionArtifact);
         };
+        // The tree placement is about to judge, markers and all, for a reader
+        // chasing a refusal that names one statement out of it.
+        if let Some(path) = crate::debug::dump_ast_path() {
+            let _ = std::fs::write(path, format!("{:#?}", self.function));
+        }
         let occurrences = crate::placement::collect_final_placement_occurrences(
             &self.function,
             &placement.regions,
@@ -6281,29 +6286,30 @@ mod tests {
     fn source_owned() -> SourceOwnedFunctionFacts {
         let mut block = R2ILBlock::new(0x1000, 4);
         // These tests are about what the journal records for a bound value, so
-        // the fixture has to contain one, and that has taken two corrections.
+        // the fixture has to contain one, and that has taken three corrections.
         // A value with a single reader is folded into that reader, so the
-        // first temporary is read twice. And a value that reads nothing but
-        // literals is spelled at every reader however many there are, so the
-        // chain starts from a register rather than from a constant: reading
-        // something the function did not compute is what gives a value an
-        // object of its own.
-        block.push(R2ILOp::Copy {
-            dst: Varnode::unique(0x10, 8),
-            src: Varnode::register(0, 8),
-        });
+        // first sum is read twice. A value that reads nothing but literals is
+        // spelled at every reader however many there are, so the chain starts
+        // from a register rather than from a constant. And a copy is forwarded
+        // to its readers and is then read by nothing, so the bound value has
+        // to be computed rather than copied.
         block.push(R2ILOp::IntAdd {
             dst: Varnode::unique(0x20, 8),
-            a: Varnode::unique(0x10, 8),
+            a: Varnode::register(0, 8),
             b: Varnode::constant(2, 8),
         });
         block.push(R2ILOp::IntAdd {
             dst: Varnode::unique(0x30, 8),
             a: Varnode::unique(0x20, 8),
-            b: Varnode::unique(0x10, 8),
+            b: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x40, 8),
+            a: Varnode::unique(0x30, 8),
+            b: Varnode::unique(0x20, 8),
         });
         block.push(R2ILOp::Return {
-            target: Varnode::unique(0x30, 8),
+            target: Varnode::unique(0x40, 8),
         });
         source_owned_from_blocks(&[block])
     }
@@ -7243,25 +7249,30 @@ mod tests {
             cond: Varnode::constant(1, 1),
             target: Varnode::constant(0x1008, 8),
         });
-        // Each edge copies a register the function entered holding, not a
-        // constant. A fixture built from constants stops having a subject
-        // every time the plan gets better at spelling one: every value in it
-        // folds into its reader, and a test about a *bound* merge input then
-        // asserts about values the plan no longer binds. This is the third
-        // time that has been corrected here, so the reason is written down
-        // rather than the shape merely repaired.
+        // Each edge computes from a register the function entered holding,
+        // not a constant and not a copy. A fixture built from constants stops
+        // having a subject every time the plan gets better at spelling one:
+        // every value in it folds into its reader, and a test about a *bound*
+        // merge input then asserts about values the plan no longer binds. A
+        // fixture built from copies lost its subject when copies were
+        // forwarded: the merge then read two entry values, which are both live
+        // at entry and so cannot be one object. This is the fourth time that
+        // has been corrected here, so the reason is written down rather than
+        // the shape merely repaired.
         let mut left = R2ILBlock::new(0x1004, 4);
-        left.push(R2ILOp::Copy {
+        left.push(R2ILOp::IntAdd {
             dst: Varnode::register(0, 8),
-            src: Varnode::register(0x38, 8),
+            a: Varnode::register(0x38, 8),
+            b: Varnode::constant(1, 8),
         });
         left.push(R2ILOp::Branch {
             target: Varnode::constant(0x100c, 8),
         });
         let mut right = R2ILBlock::new(0x1008, 4);
-        right.push(R2ILOp::Copy {
+        right.push(R2ILOp::IntAdd {
             dst: Varnode::register(0, 8),
-            src: Varnode::register(0x20, 8),
+            a: Varnode::register(0x38, 8),
+            b: Varnode::constant(2, 8),
         });
         right.push(R2ILOp::Branch {
             target: Varnode::constant(0x100c, 8),

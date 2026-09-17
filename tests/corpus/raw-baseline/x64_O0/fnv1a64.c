@@ -1,6 +1,6 @@
 uint64_t sym__fnv1a64(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 79 source obligations: 37 rendered, 42 elided, 0 refused; 14 statements rendered */
+    /* r2dec proof: no individual construct is marked; 69 source obligations: 29 rendered, 40 elided, 0 refused; 14 statements rendered */
     {
         uint64_t stack_m40;
         uint64_t stack_m32;

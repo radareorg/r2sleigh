@@ -1,6 +1,6 @@
 uint64_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 77 source obligations: 55 rendered, 22 elided, 0 refused; 23 statements rendered */
+    /* r2dec proof: no individual construct is marked; 75 source obligations: 54 rendered, 21 elided, 0 refused; 23 statements rendered */
     if (RSI_0 == 0) {
         return 1;
     } else {

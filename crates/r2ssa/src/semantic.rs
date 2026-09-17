@@ -2026,6 +2026,7 @@ impl PreparedFunctionFacts {
             &call_sites,
             &structured,
             &unobserved,
+            &live_out,
             &private_stack_objects,
             &declared_slots,
             memory_round_trips,
@@ -5259,26 +5260,51 @@ fn exact_return_address_fact(
     // return. Admit only that one-hop, full-width terminal transport. Broader
     // copy chains, casts, phis, partial aliases, and cross-block/non-terminal
     // definitions need distinct proofs.
-    let producer = graph.def_inst(target.id).and_then(|id| graph.inst(id))?;
-    let [source_id] = producer.inputs.as_slice() else {
-        return None;
-    };
-    let source = graph.value(*source_id)?;
-    let InstPayload::Op(SSAOp::Copy { dst, src }) = &producer.payload else {
-        return None;
-    };
-    (producer.block == return_inst.block
+    if let Some(producer) = graph.def_inst(target.id).and_then(|id| graph.inst(id))
+        && let [source_id] = producer.inputs.as_slice()
+        && let Some(source) = graph.value(*source_id)
+        && let InstPayload::Op(SSAOp::Copy { dst, src }) = &producer.payload
+        && producer.block == return_inst.block
         && producer.ordinal.checked_add(1) == Some(return_inst.ordinal)
         && producer.output == Some(target.id)
         && target.var == *dst
         && source.var == *src
         && target.var.size == storage.size
         && source.var.size == storage.size
-        && source.canonical_storage == Some(storage))
-    .then_some(SourceReturnAddressFact {
-        storage,
-        value: target.id,
-    })
+        && source.canonical_storage == Some(storage)
+    {
+        return Some(SourceReturnAddressFact {
+            storage,
+            value: target.id,
+        });
+    }
+
+    // Once copies are forwarded the return names the value itself -- the word
+    // reloaded from the frame -- and the copy that put it in the return-address
+    // register stands beside it, read by nothing. That copy is the proof: the
+    // machine returned through the register holding exactly this value.
+    let block = graph.block(return_inst.block)?;
+    block
+        .insts
+        .iter()
+        .filter_map(|inst| graph.inst(*inst))
+        .filter(|inst| inst.ordinal < return_inst.ordinal)
+        .any(|inst| {
+            matches!(inst.payload, InstPayload::Op(SSAOp::Copy { .. }))
+                && inst.inputs.as_slice() == [target.id]
+                && inst
+                    .output
+                    .and_then(|output| graph.value(output))
+                    .is_some_and(|carrier| {
+                        carrier.canonical_storage == Some(storage)
+                            && carrier.var.size == storage.size
+                            && target.var.size == storage.size
+                    })
+        })
+        .then_some(SourceReturnAddressFact {
+            storage,
+            value: target.id,
+        })
 }
 
 fn projected_logical_register_storage(
@@ -6478,6 +6504,7 @@ fn instruction_strictly_precedes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_stack_frame_round_trip_certificates(
     boundaries: &SourceBoundaryFacts,
     function: &SSAFunction,
@@ -6486,6 +6513,7 @@ fn collect_stack_frame_round_trip_certificates(
     structured: &StructuredDataflowFacts,
     callee_allocations: &BTreeMap<ObjectId, CalleeStackAllocationCertificate>,
     unobserved: &crate::deadphi::DeadPhis,
+    live_out: &crate::liveout::FunctionLiveOut,
 ) -> (
     BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
     BTreeMap<InstId, ObjectId>,
@@ -6509,6 +6537,12 @@ fn collect_stack_frame_round_trip_certificates(
             .filter(|access| !access.is_write)
             .collect::<Vec<_>>();
         let [store] = writes.as_slice() else {
+            r2il::refusal_evidence!(
+                "frame-round-trip",
+                "{object:?}: {} writes, {} reads",
+                writes.len(),
+                reads.len()
+            );
             continue;
         };
         if reads.is_empty()
@@ -6525,6 +6559,22 @@ fn collect_stack_frame_round_trip_certificates(
                     .collect::<Vec<_>>()
                     .as_slice()
         {
+            r2il::refusal_evidence!(
+                "frame-round-trip",
+                "{object:?}: accesses {:?} allocation {:?} size {}",
+                accesses
+                    .iter()
+                    .map(|access| (
+                        access.id,
+                        access.is_write,
+                        access.width,
+                        access.provenance_complete,
+                        access.space
+                    ))
+                    .collect::<Vec<_>>(),
+                allocation.accesses,
+                allocation.size_bytes
+            );
             continue;
         }
 
@@ -6539,14 +6589,25 @@ fn collect_stack_frame_round_trip_certificates(
             continue;
         };
         let Some(stored_value) = store.value else {
+            r2il::refusal_evidence!("frame-round-trip", "{object:?}: store carries no value");
             continue;
         };
         if store_inst.inputs.as_slice() != [store.address, stored_value] {
+            r2il::refusal_evidence!(
+                "frame-round-trip",
+                "{object:?}: store reads {:?}, fact says address {:?} value {stored_value:?}",
+                store_inst.inputs,
+                store.address
+            );
             continue;
         }
         let Some((storage, entry_value, save_insts, save_values)) =
             exact_copy_chain_to_entry_storage(graph, stored_value, allocation.size_bytes)
         else {
+            r2il::refusal_evidence!(
+                "frame-round-trip",
+                "{object:?}: stored value {stored_value:?} is not a copy chain from an entry register"
+            );
             continue;
         };
         let machine_roles = machine_context.map(SourceMachineContext::machine_roles);
@@ -6580,6 +6641,10 @@ fn collect_stack_frame_round_trip_certificates(
                 )
             })
         {
+            r2il::refusal_evidence!(
+                "frame-round-trip",
+                "{object:?}: {storage:?} is a reserved, parameter, argument or returned register"
+            );
             continue;
         }
 
@@ -6618,6 +6683,10 @@ fn collect_stack_frame_round_trip_certificates(
             let Some((restore_insts, restore_values)) =
                 exact_copy_chain_to_storage(graph, loaded_value, storage)
             else {
+                r2il::refusal_evidence!(
+                    "frame-round-trip",
+                    "{object:?}: reload {loaded_value:?} does not reach {storage:?} by copies alone"
+                );
                 complete = false;
                 break;
             };
@@ -6645,14 +6714,37 @@ fn collect_stack_frame_round_trip_certificates(
         // the exact copy/store/load chains, and `DeadPhis` is empty unless the
         // obligation inventory is complete, so an incompletely proven function
         // still declines.
-        if !complete
-            || values.iter().any(|value| {
-                graph.use_sites(*value).iter().any(|site| {
-                    !insts.contains(&site.inst) && !unobserved.unobserved_uses().contains(site)
-                })
+        // A copy of the saved register that nothing reads -- its readers were
+        // forwarded to the register itself -- reads it to no effect, and that
+        // is a fact of the graph alone, so it holds when the inventory is
+        // incomplete and `DeadPhis` says nothing.
+        let unread_copy = |site: &UseSite| {
+            graph.inst(site.inst).is_some_and(|inst| {
+                matches!(inst.payload, InstPayload::Op(SSAOp::Copy { .. }))
+                    && inst.output.is_some_and(|output| {
+                        graph.use_sites(output).is_empty() && !live_out.contains(output)
+                    })
             })
+        };
+        let escaping_read = values.iter().find_map(|value| {
+            graph
+                .use_sites(*value)
+                .iter()
+                .find(|site| {
+                    !insts.contains(&site.inst)
+                        && !unobserved.unobserved_uses().contains(site)
+                        && !unread_copy(site)
+                })
+                .map(|site| (*value, *site))
+        });
+        if !complete
+            || escaping_read.is_some()
             || insts.iter().any(|inst| by_inst.contains_key(inst))
         {
+            r2il::refusal_evidence!(
+                "frame-round-trip",
+                "{object:?}: complete={complete} escaping read {escaping_read:?} of values {values:?} outside {insts:?}"
+            );
             continue;
         }
 
@@ -8052,6 +8144,7 @@ fn collect_prepared_function_certificates(
     call_sites: &CallSiteFacts,
     structured: &StructuredDataflowFacts,
     unobserved: &crate::deadphi::DeadPhis,
+    live_out: &crate::liveout::FunctionLiveOut,
     private_objects: &BTreeSet<ObjectId>,
     declared_slots: &DeclaredStackSlots,
     memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
@@ -8195,6 +8288,7 @@ fn collect_prepared_function_certificates(
             structured,
             &callee_stack_allocations,
             unobserved,
+            live_out,
         );
     let (machine_return_controls, machine_return_control_by_inst) =
         collect_machine_return_control_certificates(
@@ -13585,6 +13679,7 @@ mod tests {
             &facts.call_sites,
             &structured,
             artifact.unobserved_merges(),
+            artifact.live_out(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
             BTreeMap::new(),
@@ -13633,6 +13728,7 @@ mod tests {
             &facts.call_sites,
             &structured,
             artifact.unobserved_merges(),
+            artifact.live_out(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
             BTreeMap::new(),
@@ -14232,6 +14328,7 @@ mod tests {
             &allocated_facts.call_sites,
             &incomplete_structured,
             allocated.unobserved_merges(),
+            allocated.live_out(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
             BTreeMap::new(),
@@ -14268,6 +14365,7 @@ mod tests {
             &allocated_facts.call_sites,
             &allocated_facts.structured,
             allocated.unobserved_merges(),
+            allocated.live_out(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
             BTreeMap::new(),
@@ -16767,14 +16865,22 @@ mod tests {
         assert_eq!(certificate.load_accesses.len(), 1);
         assert_eq!(
             inst_sites,
-            BTreeSet::from([(0x60a0, 0), (0x60a0, 2), (0x60b4, 0), (0x60b4, 2)])
+            // The save copy is forwarded into the store and read by nothing,
+            // so the round trip is the store, the reload and the restore.
+            BTreeSet::from([(0x60a0, 2), (0x60b4, 0), (0x60b4, 2)])
         );
+        // Every read of a round-trip value is inside the round trip, or is
+        // the forwarded save copy that nothing reads.
         assert!(certificate.values.iter().all(|value| {
-            artifact
-                .graph()
-                .use_sites(*value)
-                .iter()
-                .all(|site| certificate.insts.contains(&site.inst))
+            artifact.graph().use_sites(*value).iter().all(|site| {
+                certificate.insts.contains(&site.inst)
+                    || artifact.graph().inst(site.inst).is_some_and(|inst| {
+                        matches!(inst.payload, InstPayload::Op(SSAOp::Copy { .. }))
+                            && inst
+                                .output
+                                .is_some_and(|out| artifact.graph().use_sites(out).is_empty())
+                    })
+            })
         }));
         assert!(certificate.insts.iter().all(|inst| {
             artifact
@@ -17201,27 +17307,21 @@ mod tests {
             .return_address
             .expect("declared return address transported to control target");
         assert_eq!(transported_address.storage, register_storage(16, 8));
+        // The copy into the control register is forwarded: the return reads
+        // the declared return address itself, and the copy is read by nothing.
         assert_eq!(
             transported
                 .graph()
                 .value(transported_address.value)
                 .and_then(|value| value.canonical_storage),
-            Some(register_storage(40, 8))
+            Some(register_storage(16, 8))
         );
-        let transport = transported
-            .graph()
-            .def_inst(transported_address.value)
-            .and_then(|inst| transported.graph().inst(inst))
-            .expect("exact return-address transport");
-        assert!(matches!(
-            transport.payload,
-            InstPayload::Op(SSAOp::Copy { .. })
-        ));
         assert!(
             transported
-                .obligations()
-                .obligations_for_inst(transport.id)
-                .any(|obligation| obligation.id.kind == SemanticObligationKind::LiveValueProducer)
+                .graph()
+                .def_inst(transported_address.value)
+                .is_none(),
+            "the return address is the value the function was entered with"
         );
         assert!(transported_boundary.complete);
 
@@ -17267,7 +17367,31 @@ mod tests {
             target: Varnode::register(40, 8),
         });
 
-        for corrupt in [wrong_source, non_copy, non_terminal, copy_chain] {
+        // However the address is moved, the return reads the declared value
+        // itself once the copies are forwarded, so the spelling of the
+        // transport no longer decides anything.
+        for transported in [non_terminal, copy_chain] {
+            let artifact = SsaArtifact::raw_with_interface(
+                &[transported],
+                Some(&return_boundary_arch()),
+                preserved_stack_interface(),
+            )
+            .expect("transported return-address artifact");
+            let boundary = artifact
+                .facts()
+                .boundaries
+                .returns
+                .values()
+                .next()
+                .expect("transported return boundary");
+            assert_eq!(
+                boundary.return_address.map(|address| address.storage),
+                Some(register_storage(16, 8))
+            );
+            assert!(boundary.complete);
+        }
+
+        for corrupt in [wrong_source, non_copy] {
             let artifact = SsaArtifact::raw_with_interface(
                 &[corrupt],
                 Some(&return_boundary_arch()),

@@ -1,6 +1,6 @@
 uint64_t sym__fnv1a32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 127 source obligations: 97 rendered, 30 elided, 0 refused; 33 statements rendered */
+    /* r2dec proof: no individual construct is marked; 123 source obligations: 94 rendered, 29 elided, 0 refused; 33 statements rendered */
     if (RSI_0 == 0) {
         return 0x811c9dc5;
     } else {

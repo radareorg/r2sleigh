@@ -1,6 +1,6 @@
 uint64_t sym__fnv1a64(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 42 source obligations: 31 rendered, 11 elided, 0 refused; 18 statements rendered */
+    /* r2dec proof: no individual construct is marked; 41 source obligations: 31 rendered, 10 elided, 0 refused; 18 statements rendered */
     {
         uint8_t* X8_1;
         uint64_t X0_7;

@@ -1,6 +1,6 @@
 uint32_t sym__sdbm(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 81 source obligations: 36 rendered, 45 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 73 source obligations: 30 rendered, 43 elided, 0 refused; 13 statements rendered */
     {
         uint64_t stack_m40;
         uint32_t stack_m28;

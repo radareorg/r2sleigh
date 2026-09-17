@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 80 source obligations: 55 rendered, 25 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 78 source obligations: 54 rendered, 24 elided, 0 refused; 25 statements rendered */
     {
         uint64_t RAX_1;
         uint64_t RCX_1;

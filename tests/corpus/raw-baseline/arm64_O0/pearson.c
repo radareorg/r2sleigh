@@ -3,7 +3,7 @@ uint8_t sym__pearson(uint64_t X0_0, uint64_t X1_0)
 #define _pearson_tab__r2sleigh_addr 0x100001f68ULL
     extern char _pearson_tab[];
 
-    /* r2dec proof: no individual construct is marked; 76 source obligations: 54 rendered, 22 elided, 0 refused; 13 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 67 source obligations: 46 rendered, 21 elided, 0 refused; 13 statements rendered; 1 data object type refused */
     {
         uint64_t stack_m16;
         uint8_t* stack_m8;

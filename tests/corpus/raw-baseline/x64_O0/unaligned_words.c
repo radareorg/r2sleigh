@@ -1,6 +1,6 @@
 uint32_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 126 source obligations: 63 rendered, 63 elided, 0 refused; 23 statements rendered */
+    /* r2dec proof: no individual construct is marked; 115 source obligations: 54 rendered, 61 elided, 0 refused; 23 statements rendered */
     {
         uint64_t stack_m40;
         int32_t stack_m28;
@@ -17,7 +17,7 @@ uint32_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                 break;
             } else {
                 int32_t stack_m44;
-                int32_t tmp_11f00_2 = (int32_t)*(uint32_t*)((uint64_t)stack_m16 + stack_m40 + 1);
+                int32_t tmp_11f00_2 = (int32_t)*(uint32_t*)(stack_m40 + (uint64_t)stack_m16 + 1);
                 stack_m44 = tmp_11f00_2;
                 stack_m28 = (int32_t)((uint64_t)(int32_t)((uint32_t)stack_m28 ^ (uint32_t)stack_m44) * 0x1000193);
                 stack_m40 += 7;

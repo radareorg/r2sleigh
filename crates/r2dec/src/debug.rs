@@ -56,3 +56,9 @@ pub(crate) fn unowned_log_path() -> Option<&'static str> {
     PATH.get_or_init(|| value("R2SLEIGH_DEBUG_UNOWNED_LOG"))
         .as_deref()
 }
+
+/// Where to write the marked tree as placement sees it, when asked for.
+pub(crate) fn dump_ast_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| value("R2SLEIGH_DUMP_AST")).as_deref()
+}

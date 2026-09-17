@@ -440,7 +440,9 @@ mod tests {
         let slice = backward_slice(&artifact, seed);
         let text = slice.to_string();
         assert!(slice.error.is_none());
-        assert_eq!(text.lines().count(), 3);
+        // The second copy reads the original directly once the first copy is
+        // forwarded, so the slice is the seed and the entry value it copies.
+        assert_eq!(text.lines().count(), 2);
         assert!(
             text.lines()
                 .next()
@@ -449,12 +451,7 @@ mod tests {
         assert!(
             text.lines()
                 .nth(1)
-                .is_some_and(|line| line.starts_with("depth=1 0x1000:0"))
-        );
-        assert!(
-            text.lines()
-                .nth(2)
-                .is_some_and(|line| line.starts_with("depth=2 entry") && line.contains("RAX_0"))
+                .is_some_and(|line| line.starts_with("depth=1 entry") && line.contains("RAX_0"))
         );
         assert_eq!(text, backward_slice(&artifact, seed).to_string());
         assert_eq!(text, backward_slice(&copy_artifact()?, seed).to_string());

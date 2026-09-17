@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 260 source obligations: 221 rendered, 39 elided, 0 refused; 87 statements rendered */
+    /* r2dec proof: no individual construct is marked; 245 source obligations: 207 rendered, 38 elided, 0 refused; 87 statements rendered */
     {
         uint64_t X2_0_2;
         uint64_t X12_5;
@@ -23,7 +23,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             uint32_t tmp_2b380_4;
             uint64_t X13_1 = X11_1 - 16;
             X15_1 = (uint64_t)(uint32_t)(W2_0 + 0x24234428);
-            X16_1 = (uint64_t)(uint32_t)(tmp_2a000_4 + W2_0);
+            X16_1 = (uint64_t)(uint32_t)(W2_0 + tmp_2a000_4);
             X14_1 = (uint64_t)(uint32_t)(W2_0 + 0x61c8864f);
             X12_5 = X0_0;
             for (; ; ) {

@@ -1,6 +1,6 @@
 uint64_t sym__sdbm(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 30 rendered, 11 elided, 0 refused; 18 statements rendered */
+    /* r2dec proof: no individual construct is marked; 39 source obligations: 30 rendered, 9 elided, 0 refused; 18 statements rendered */
     if (X1_0 == 0) {
         return 0;
     } else {

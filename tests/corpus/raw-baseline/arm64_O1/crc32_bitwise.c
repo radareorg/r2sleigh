@@ -1,6 +1,6 @@
 uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 66 source obligations: 52 rendered, 14 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 63 source obligations: 51 rendered, 12 elided, 0 refused; 25 statements rendered */
     if (X1_0 == 0) {
         return 0;
     } else {

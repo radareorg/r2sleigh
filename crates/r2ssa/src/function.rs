@@ -401,6 +401,11 @@ impl SsaArtifact {
         })?;
         function.apply_convention_cleared_direction_flag(&machine_context);
         function.mint_entry_lane_projections(&machine_context);
+        // Before the graph, so every fact built from it counts readers of a
+        // copied value where they are, not where the copy was. It rewrites
+        // reads to variables the validated function already defines, so the
+        // validation above still holds; the minted lanes could not pass it.
+        function.forward_copies();
         machine_context.remap_memory_sites_to_prepared(&function);
         let mut graph = SsaGraph::from_function_with_storage(&function);
         crate::semantic::ensure_source_formal_parameter_values(&mut graph, &machine_context);
@@ -6138,6 +6143,8 @@ impl SSABlock {
     }
 }
 
+mod forward;
+
 #[cfg(test)]
 mod tests {
 
@@ -10318,7 +10325,7 @@ mod tests {
             },
             SSAOp::Copy {
                 dst: update.clone(),
-                src: update_source,
+                src: update_source.clone(),
             },
             SSAOp::CBranch {
                 target: SSAVar::new("ram:1a20", 0, 8),
@@ -10350,7 +10357,9 @@ mod tests {
         let prepared = SsaArtifact::new(function, FunctionPrepareMode::Raw);
         let phi_value = prepared.graph().value_id_for_var(&phi).unwrap();
         let init_value = prepared.graph().value_id_for_var(&init).unwrap();
-        let update_value = prepared.graph().value_id_for_var(&update).unwrap();
+        // The copy into RAX is forwarded, so the merge reads the sum itself.
+        let update_value = prepared.graph().value_id_for_var(&update_source).unwrap();
+        let _ = &update;
         let result_value = prepared.graph().value_id_for_var(&result).unwrap();
         let chained_result_value = prepared.graph().value_id_for_var(&chained_result).unwrap();
         let phi_inst = prepared.graph().def_inst(phi_value).unwrap();

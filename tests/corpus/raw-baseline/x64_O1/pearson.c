@@ -3,7 +3,7 @@ uint32_t sym__pearson(uint64_t RDI_0, uint64_t RSI_0)
 #define _pearson_tab__r2sleigh_addr 0x100000f70ULL
     extern char _pearson_tab[];
 
-    /* r2dec proof: no individual construct is marked; 48 source obligations: 32 rendered, 16 elided, 0 refused; 15 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 46 source obligations: 31 rendered, 15 elided, 0 refused; 15 statements rendered; 1 data object type refused */
     {
         uint64_t RCX_1;
         if (RSI_0 == 0) {

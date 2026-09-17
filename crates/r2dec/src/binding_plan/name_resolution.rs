@@ -708,7 +708,7 @@ mod tests {
                         resolution.symbol_for_binding(*binding)
                     );
                 }
-                Some(ValueDisposition::Inline { .. }) => {
+                Some(ValueDisposition::Inline { .. } | ValueDisposition::Elided { .. }) => {
                     assert_eq!(resolution.symbol_for_value(value.id), None);
                 }
                 other => panic!("unexpected disposition: {other:?}"),

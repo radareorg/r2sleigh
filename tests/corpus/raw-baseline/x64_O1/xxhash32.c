@@ -1,10 +1,10 @@
 uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 263 source obligations: 212 rendered, 51 elided, 0 refused; 64 statements rendered */
+    /* r2dec proof: no individual construct is marked; 257 source obligations: 209 rendered, 48 elided, 0 refused; 64 statements rendered */
     {
         int32_t tmp_11f00_5;
         uint64_t RCX_6;
-        uint64_t RAX_1 = RSI_0 + RDI_0;
+        uint64_t tmp_4a00_1 = RDI_0 + RSI_0;
         if (RSI_0 < 16) {
             RCX_6 = (uint64_t)(uint32_t)((uint32_t)RDX_0 + 0x165667b1);
         } else {
@@ -15,7 +15,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
             uint32_t tmp_lane_100000910_91_1c_1;
             uint32_t tmp_lane_100000910_b8_24_1;
             uint32_t tmp_lane_100000910_c1_26_1;
-            uint64_t R8_1 = RAX_1 - 16;
+            uint64_t R8_1 = tmp_4a00_1 - 16;
             R10_1 = (uint64_t)(uint32_t)(RDX_0 + 0x24234428);
             R9_1 = (uint64_t)(uint32_t)(RDX_0 - 0x7a143589);
             RCX_1 = (uint64_t)(uint32_t)(RDX_0 + 0x61c8864f);
@@ -49,7 +49,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
             uint64_t RCX_10;
             RSI_1 = (uint64_t)(uint32_t)((uint32_t)RSI_0 + (uint32_t)RCX_6);
             uint64_t tmp_3f080_4 = RDI_0 + 4;
-            if (tmp_3f080_4 <= RAX_1) {
+            if (tmp_3f080_4 <= tmp_4a00_1) {
                 for (; ; ) {
                     tmp_11f00_5 = (int32_t)*(uint32_t*)RDI_0;
                     uint32_t tmp_lane_1000009a0_c_47_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffffc2b2ae3dU) + (uint32_t)RSI_1;
@@ -57,7 +57,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                     RCX_10 = RDI_0 + 4;
                     uint64_t tmp_3f080_6 = RDI_0 + 8;
                     RDI_0 = RCX_10;
-                    if (RAX_1 < tmp_3f080_6) {
+                    if (tmp_4a00_1 < tmp_3f080_6) {
                         break;
                     }
                 }
@@ -68,7 +68,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
             }
             {
 L3: ;
-                while (RCX_10 < RAX_1) {
+                while (RCX_10 < tmp_4a00_1) {
                     uint8_t tmp_11e00_2 = *(uint8_t*)RCX_10;
                     uint32_t tmp_lane_1000009d0_e_52_1 = (uint32_t)((uint64_t)(int32_t)tmp_11e00_2 * 0x165667b1) + (uint32_t)RSI_1;
                     RSI_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)(tmp_lane_1000009d0_e_52_1 << 11 | tmp_lane_1000009d0_e_52_1 >> 21) * 0xffffffff9e3779b1U);

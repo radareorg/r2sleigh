@@ -1,6 +1,6 @@
 uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 137 source obligations: 121 rendered, 16 elided, 0 refused; 46 statements rendered */
+    /* r2dec proof: no individual construct is marked; 134 source obligations: 119 rendered, 15 elided, 0 refused; 46 statements rendered */
     {
         uint64_t X2_0_2;
         X2_0_2 = (uint64_t)(uint32_t)W2_0;

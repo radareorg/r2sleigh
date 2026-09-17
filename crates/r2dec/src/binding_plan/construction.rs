@@ -395,21 +395,45 @@ pub(super) fn binding_components_with(
             .ok_or(BindingPlanBuildError::MissingStorageSpan { value: value.id })?;
         values_by_span.entry(span).or_default().insert(value.id);
     }
-    let read_together = super::rules::values_read_together(source.graph());
-    // Whether merging every one of these values into one object would put two
-    // values that some instruction reads together into that object.
-    let merge_would_interfere =
-        |parent: &mut Vec<usize>, ring: &[u32], values: &BTreeSet<ValueId>| {
-            let roots = values
-                .iter()
-                .map(|value| find(parent, value.0 as usize))
-                .collect::<BTreeSet<_>>();
-            let members = roots
-                .iter()
-                .flat_map(|root| ring_members(ring, *root))
-                .collect::<BTreeSet<_>>();
-            super::rules::set_interferes(&read_together, &members)
-        };
+    // Whether merging every one of these values into one object would put a
+    // value where another is still needed. Each run's liveness is kept at its
+    // root and grown as runs join, so a merge is judged against everything
+    // already in the runs it touches and never against the whole function.
+    let liveness = source.value_liveness();
+    let mut live_by_root = vec![None::<r2ssa::liveness::ComponentLiveness>; value_count];
+    let merge_would_interfere = |parent: &mut Vec<usize>,
+                                 ring: &[u32],
+                                 live_by_root: &mut Vec<
+        Option<r2ssa::liveness::ComponentLiveness>,
+    >,
+                                 values: &BTreeSet<ValueId>| {
+        let roots = values
+            .iter()
+            .map(|value| find(parent, value.0 as usize))
+            .collect::<BTreeSet<_>>();
+        let mut merged = None::<r2ssa::liveness::ComponentLiveness>;
+        for root in roots {
+            let component = live_by_root[root]
+                .get_or_insert_with(|| {
+                    let mut component = r2ssa::liveness::ComponentLiveness::default();
+                    for member in ring_members(ring, root) {
+                        component.absorb(r2ssa::liveness::ComponentLiveness::of(liveness, member));
+                    }
+                    component
+                })
+                .clone();
+            match merged.as_mut() {
+                None => merged = Some(component),
+                Some(merged) => {
+                    if merged.interferes(&component, liveness) {
+                        return true;
+                    }
+                    merged.absorb(component);
+                }
+            }
+        }
+        false
+    };
 
     for (span, values) in values_by_span {
         if values.len() > 1 {
@@ -420,13 +444,14 @@ pub(super) fn binding_components_with(
             // impossible whichever derivation proposed the merge. `crc32_bitwise`
             // at arm64 -O2 is the case -- one p-code temporary carries both
             // `w10` and `w11`, and `eor w10, w10, w11` reads two of its versions.
-            if merge_would_interfere(&mut parent, &ring, &values) {
+            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
                 r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
                 continue;
             }
             let first = values.first().copied().expect("multi-member span");
             for value in values.iter().copied().skip(1) {
                 union(&mut parent, &mut rank, &mut ring, first, value);
+                live_by_root[find(&mut parent, first.0 as usize)] = None;
             }
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
         }
@@ -460,20 +485,17 @@ pub(super) fn binding_components_with(
             // declined and the values keep their own objects, which costs an
             // assignment in the output and nothing in correctness.
             if let Some(first) = values.first().copied() {
-                let interferes = merge_would_interfere(&mut parent, &ring, &values);
-                let outlives = super::rules::set_outlives_a_redefinition(graph, &values);
-                if interferes || outlives {
-                    // Which of the two declined it decides the repair, and the
-                    // consumer sees only that the values kept their own objects.
+                if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
                     r2il::refusal_evidence!(
                         "coalescing-declined",
-                        "entity {:?} members {values:?}: interferes={interferes} outlives_redefinition={outlives}",
+                        "entity {:?} members {values:?}: a member is live where another is written",
                         entity.id()
                     );
                     continue;
                 }
                 for value in values.iter().copied().skip(1) {
                     union(&mut parent, &mut rank, &mut ring, first, value);
+                    live_by_root[find(&mut parent, first.0 as usize)] = None;
                 }
             }
             certificate_sets.push((

@@ -1365,7 +1365,18 @@ fn materialize_phis_where_with_control<'f>(
     let certificates = CarrierEdgeCertificates::build(graph, render_facts)
         .ok_or(NormalizationOriginError::InvalidCarrierCertificates)?;
     crate::stage_timing::mark("normalize_certificates");
-    let liveness = PhiEdgeLiveness::compute_with_control(func, control)?;
+    // Which merges are placed decides which edges carry a read: a merge left
+    // as a merge -- one nothing observes -- reads nothing on any edge, and
+    // counting its sources live there refused the plain back-edge copy of a
+    // loop whose dead temporaries merge the carrier.
+    let materialized = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.phis.iter())
+        .filter(|phi| eligible(phi))
+        .map(|phi| phi.dst.clone())
+        .collect::<HashSet<_>>();
+    let liveness = PhiEdgeLiveness::compute_with_control(func, &materialized, control)?;
     crate::stage_timing::mark("normalize_liveness");
     let mut copies_by_pred = BTreeMap::<u64, Vec<PhiMove>>::new();
     let mut materialized_by_block = BTreeMap::<u64, BTreeSet<r2ssa::SSAVar>>::new();
@@ -1383,7 +1394,7 @@ fn materialize_phis_where_with_control<'f>(
         let selected = block
             .phis
             .iter()
-            .filter(|phi| eligible(phi))
+            .filter(|phi| materialized.contains(&phi.dst))
             .collect::<Vec<_>>();
         if selected.is_empty() {
             continue;
@@ -1736,15 +1747,20 @@ impl VarSet {
 impl PhiEdgeLiveness {
     pub(crate) fn compute_with_control(
         func: &SSAFunction,
+        materialized: &HashSet<r2ssa::SSAVar>,
         control: DecompileWorkControl<'_>,
     ) -> Result<Self, DecompileExecutionStop> {
         control.poll()?;
-        // The universe is what a merge names: its destination, and the values
-        // its edges carry. Nothing else is ever asked about.
+        // The universe is what a placed merge names: its destination, and the
+        // values its edges carry. Nothing else is ever asked about.
         let mut numbering = HashMap::<r2ssa::SSAVar, u32>::new();
         for block in func.blocks() {
             control.poll()?;
-            for phi in &block.phis {
+            for phi in block
+                .phis
+                .iter()
+                .filter(|phi| materialized.contains(&phi.dst))
+            {
                 let next = u32::try_from(numbering.len()).unwrap_or(u32::MAX);
                 numbering.entry(phi.dst.clone()).or_insert(next);
                 for (_, src) in &phi.sources {
@@ -1766,7 +1782,11 @@ impl PhiEdgeLiveness {
             let mut defs = VarSet::with_capacity(bits);
             let mut uses = VarSet::with_capacity(bits);
             let mut defined = VarSet::with_capacity(bits);
-            for phi in &block.phis {
+            for phi in block
+                .phis
+                .iter()
+                .filter(|phi| materialized.contains(&phi.dst))
+            {
                 control.poll()?;
                 if let Some(bit) = number(&phi.dst) {
                     defs.insert(bit);
@@ -3223,10 +3243,11 @@ mod tests {
             .iter()
             .position(|op| matches!(op, SSAOp::IntSub { dst, .. } if dst.name() == "RDI"))
             .expect("RDI is reused for the byte-count computation");
+        // The preserving copy is forwarded, so the load names the merge itself.
         let dereference = exit_ops
             .iter()
-            .position(|op| matches!(op, SSAOp::Load { addr, .. } if addr.name() == "RCX"))
-            .expect("the tail load uses the preserved pointer carrier");
+            .position(|op| matches!(op, SSAOp::Load { addr, .. } if addr == &post_loop_phi.dst))
+            .expect("the tail load uses the preserved pointer");
         assert!(preserve < reuse && reuse < dereference);
     }
 
