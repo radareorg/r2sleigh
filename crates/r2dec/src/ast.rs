@@ -516,6 +516,18 @@ impl CExpr {
                 return expr;
             }
             let surviving = |inner: &CExpr| rewrap_observations(&carried, inner.clone());
+            // Two pointer conversions in a row are one. C11 6.3.2.3p1 and p7
+            // make a conversion to `void *` and back the same pointer, and an
+            // object pointer converted twice lands where converting once would
+            // have: `(char *)(void *)p` is `(char *)p`. Function pointers are
+            // left alone -- only object pointers carry that guarantee.
+            if matches!(ty, CType::Pointer(_))
+                && matches!(inner_ty, CType::Pointer(_))
+                && !matches!(&ty, CType::Pointer(inner) if matches!(**inner, CType::Function { .. }))
+                && !matches!(inner_ty, CType::Pointer(inner) if matches!(**inner, CType::Function { .. }))
+            {
+                return Self::cast_with_role(ty, surviving(inner_expr), role);
+            }
             // A conversion sitting directly on a pointer is the address-width
             // step whether or not the site that emitted it said so, and
             // dropping it leaves a pointer converted straight to a narrower
@@ -1364,6 +1376,12 @@ impl StmtObservationChain {
         )
     }
 
+    /// The markers themselves, outermost first, for a rewrite that has to put
+    /// them somewhere other than around one statement.
+    pub(crate) fn into_ids(self) -> Vec<RenderObservationId> {
+        self.outer_to_inner
+    }
+
     /// Reattach this chain to the semantic statement at the same position.
     pub(crate) fn reapply(self, mut stmt: CStmt) -> CStmt {
         for id in self.outer_to_inner.into_iter().rev() {
@@ -2175,8 +2193,13 @@ impl ReachableObservations {
                 expected_count: self.reachable.len(),
             });
         };
+        // A marker met twice is not refused here. Two occurrences of one cell
+        // are a duplicate only if both can happen, and that is a question about
+        // the structure this walk cannot see: a return specialised into the
+        // arms of a conditional is written twice and performed once. The seal
+        // asks it, over the same tree, where the region tree is in hand.
         if *reachable {
-            return Err(RenderObservationStripError::Duplicate { id });
+            return Ok(());
         }
         *reachable = true;
         Ok(())
@@ -2929,21 +2952,26 @@ mod tests {
         assert!(!stripped.contains("Observed"));
     }
 
+    /// A marker written twice is not refused here.
+    ///
+    /// Two occurrences of one cell are a duplicate only when both can happen,
+    /// and that is a question about the structure the walk cannot see. The
+    /// seal asks it, where the region tree is in hand.
     #[test]
-    fn stripping_rejects_duplicate_and_out_of_range_observations_without_mutation() {
+    fn stripping_admits_a_repeated_observation_for_the_seal_to_judge() {
         let duplicate = RenderObservationId::from_index(0);
         let mut duplicate_function =
             CFunction::new("duplicate", CType::Void).with_body(vec![CStmt::observed(
                 duplicate,
                 CStmt::Expr(CExpr::observed(duplicate, CExpr::IntLit(1))),
             )]);
-        let duplicate_before = duplicate_function.clone();
-        assert_eq!(
-            strip_render_observations(&mut duplicate_function, 1),
-            Err(RenderObservationStripError::Duplicate { id: duplicate })
-        );
-        assert_eq!(duplicate_function, duplicate_before);
+        let reachable = strip_render_observations(&mut duplicate_function, 1)
+            .expect("a repeat is not a strip failure");
+        assert_eq!(reachable.ids().collect::<Vec<_>>(), vec![duplicate]);
+    }
 
+    #[test]
+    fn stripping_rejects_out_of_range_observations_without_mutation() {
         let out_of_range = RenderObservationId::from_index(1);
         let mut out_of_range_function = CFunction::new("range", CType::Void)
             .with_body(vec![CStmt::observed(out_of_range, CStmt::Empty)]);

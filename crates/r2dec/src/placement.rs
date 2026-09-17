@@ -806,13 +806,94 @@ pub(crate) fn final_observation_regions(
     statements: &[CStmt],
     regions: &SealedStructuredRegionArtifact,
     count: usize,
-) -> Vec<Option<ObservationScope>> {
-    let mut scoped = vec![None; count];
+) -> FinalObservationScopes {
+    let mut scoped = FinalObservationScopes {
+        first: vec![None; count],
+        repeats: BTreeMap::new(),
+    };
     let mut conditionals = 0;
     for statement in statements {
         collect_stmt_observation_regions(statement, None, regions, &mut conditionals, &mut scoped);
     }
     scoped
+}
+
+/// The markers this body writes more than once.
+///
+/// One cell discharged by several occurrences is a duplicate unless they
+/// exclude one another, and where there is no region tree to prove that with,
+/// this is the whole answer.
+pub(crate) fn repeated_observations(statements: &[CStmt]) -> Vec<RenderObservationId> {
+    let mut seen = BTreeSet::new();
+    let mut repeated = Vec::new();
+    for statement in statements {
+        for id in crate::ast::stmt_render_observation_ids(statement) {
+            if !seen.insert(id) && !repeated.contains(&id) {
+                repeated.push(id);
+            }
+        }
+    }
+    repeated
+}
+
+/// Where each observation was written, and where each repeat of one was.
+///
+/// A marker written more than once is a cell discharged by more than one
+/// occurrence. That is a duplicate unless the occurrences exclude one another,
+/// and this is what the seal asks to decide it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FinalObservationScopes {
+    first: Vec<Option<ObservationScope>>,
+    repeats: BTreeMap<RenderObservationId, Vec<ObservationScope>>,
+}
+
+impl FinalObservationScopes {
+    pub(crate) fn scope(&self, id: RenderObservationId) -> Option<&ObservationScope> {
+        self.first.get(id.index() as usize)?.as_ref()
+    }
+
+    /// The scope of one particular writing of this marker, in the order the
+    /// walk met them.
+    ///
+    /// A repeated marker has one scope per occurrence, and handing the first
+    /// one back for every occurrence made two writings of a cell look like the
+    /// same place -- which is never exclusive, so a specialised return refused
+    /// as a duplicate of itself.
+    pub(crate) fn scope_at(
+        &self,
+        id: RenderObservationId,
+        nth: usize,
+    ) -> Option<&ObservationScope> {
+        match nth.checked_sub(1) {
+            None => self.scope(id),
+            Some(index) => self.repeats.get(&id)?.get(index),
+        }
+    }
+
+    /// The ids written more than once, with every scope they were written in.
+    pub(crate) fn repeated(
+        &self,
+    ) -> impl Iterator<Item = (RenderObservationId, Vec<&ObservationScope>)> + '_ {
+        self.repeats.iter().filter_map(|(id, extra)| {
+            let first = self.scope(*id)?;
+            Some((
+                *id,
+                std::iter::once(first)
+                    .chain(extra.iter())
+                    .collect::<Vec<_>>(),
+            ))
+        })
+    }
+
+    fn record(&mut self, id: RenderObservationId, scope: ObservationScope) {
+        let Some(slot) = self.first.get_mut(id.index() as usize) else {
+            return;
+        };
+        match slot {
+            None => *slot = Some(scope),
+            Some(_) => self.repeats.entry(id).or_default().push(scope),
+        }
+    }
 }
 
 /// Where one observation finally sits: its lexical region, and the arm of each
@@ -850,37 +931,39 @@ impl ObservationScope {
 fn record_observation_region(
     id: RenderObservationId,
     region: Option<RegionId>,
-    scoped: &mut [Option<ObservationScope>],
+    scoped: &mut FinalObservationScopes,
 ) {
-    if let Some(slot) = scoped.get_mut(id.index() as usize) {
-        *slot = Some(ObservationScope {
+    scoped.record(
+        id,
+        ObservationScope {
             region,
             arms: Vec::new(),
-        });
-    }
+        },
+    );
 }
 
 fn collect_expr_observation_regions(
     expr: &CExpr,
     region: Option<RegionId>,
     conditionals: &mut u32,
-    scoped: &mut [Option<ObservationScope>],
+    scoped: &mut FinalObservationScopes,
 ) {
     fn walk(
         expr: &CExpr,
         region: Option<RegionId>,
         arms: &mut Vec<(u32, bool)>,
         conditionals: &mut u32,
-        scoped: &mut [Option<ObservationScope>],
+        scoped: &mut FinalObservationScopes,
     ) {
         match expr {
             CExpr::Observed { id, expr } => {
-                if let Some(slot) = scoped.get_mut(id.index() as usize) {
-                    *slot = Some(ObservationScope {
+                scoped.record(
+                    *id,
+                    ObservationScope {
                         region,
                         arms: arms.clone(),
-                    });
-                }
+                    },
+                );
                 walk(expr, region, arms, conditionals, scoped);
             }
             CExpr::Ternary {
@@ -928,7 +1011,7 @@ fn collect_stmt_observation_regions(
     current: Option<RegionId>,
     regions: &SealedStructuredRegionArtifact,
     conditionals: &mut u32,
-    scoped: &mut [Option<ObservationScope>],
+    scoped: &mut FinalObservationScopes,
 ) {
     if let CStmt::StructuredRegion { marker, stmt } = statement {
         let entered = regions.node_for_marker(marker).map(|(id, _)| id);
@@ -4214,17 +4297,29 @@ fn validate_occurrence<C: PlacementControlFlow + ?Sized>(
     if !block_indices.contains_key(&block) {
         return Err(PlacementAnalysisError::BlockOutsideFunction { block });
     }
-    if !cfg.dominates(node.entry(), block) {
-        // A region identifier says nothing on its own; the entry it fails to
-        // dominate from is what a trace needs.
-        r2il::refusal_evidence!(
-            "placement-dominance",
-            "binding {binding:?} occurs at {block:#x}, which region {region:?} at {:#x} does not dominate",
-            node.entry()
-        );
-        return Err(PlacementAnalysisError::RegionDoesNotDominateOccurrence { region, block });
+    // The occurrence is lexically inside every region above it, so any of them
+    // dominating the block it names is enough. Asking only the innermost was
+    // right while one block had one occurrence: a block specialised into the
+    // arms of the conditional above it is rendered where its own entry does not
+    // dominate, and the arm region that holds the copy is the one that does.
+    let mut at = Some(region);
+    while let Some(current) = at {
+        let Some(node) = regions.node(current) else {
+            break;
+        };
+        if cfg.dominates(node.entry(), block) {
+            return Ok(());
+        }
+        at = node.parent();
     }
-    Ok(())
+    // A region identifier says nothing on its own; the entry it fails to
+    // dominate from is what a trace needs.
+    r2il::refusal_evidence!(
+        "placement-dominance",
+        "binding {binding:?} occurs at {block:#x}, which region {region:?} at {:#x} does not dominate, nor does any region above it",
+        node.entry()
+    );
+    Err(PlacementAnalysisError::RegionDoesNotDominateOccurrence { region, block })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4730,15 +4825,18 @@ mod tests {
             ))
             .expect("marker tree")
             .into_marked_parts();
-        let mut scoped = vec![None; 2];
+        let mut scoped = FinalObservationScopes {
+            first: vec![None; 2],
+            repeats: BTreeMap::new(),
+        };
         let mut conditionals = 0;
         collect_stmt_observation_regions(&marked, None, &regions, &mut conditionals, &mut scoped);
-        let init_region = scoped[0]
-            .as_ref()
+        let init_region = scoped
+            .scope(RenderObservationId::from_dense_index(0))
             .and_then(|scope| scope.region)
             .expect("the initializer was scoped");
-        let body_region = scoped[1]
-            .as_ref()
+        let body_region = scoped
+            .scope(RenderObservationId::from_dense_index(1))
             .and_then(|scope| scope.region)
             .expect("the body was scoped");
         assert_ne!(

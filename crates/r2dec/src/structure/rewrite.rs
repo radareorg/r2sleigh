@@ -24,11 +24,19 @@ impl ControlFlowStructurer<'_, '_> {
     pub(crate) fn cleanup(
         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
         is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
+        carries_only_to_return: &dyn Fn(crate::symbol::SymbolId) -> bool,
+        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
         stmt: CStmt,
     ) -> CStmt {
         // Recurse first, then simplify
         let mut stmt = stmt;
-        Self::cleanup_recurse(symbols, is_write, &mut stmt);
+        Self::cleanup_recurse(
+            symbols,
+            is_write,
+            carries_only_to_return,
+            elisions,
+            &mut stmt,
+        );
         Self::flatten(stmt)
     }
 
@@ -44,6 +52,8 @@ impl ControlFlowStructurer<'_, '_> {
     fn cleanup_recurse(
         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
         is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
+        carries_only_to_return: &dyn Fn(crate::symbol::SymbolId) -> bool,
+        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
         stmt: &mut CStmt,
     ) {
         match stmt {
@@ -51,7 +61,7 @@ impl ControlFlowStructurer<'_, '_> {
                 marker,
                 stmt: inner,
             } => {
-                Self::cleanup_recurse(symbols, is_write, inner);
+                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, inner);
                 // An empty region renders nothing and its marker goes with
                 // it -- except the function body's. That marker is what
                 // sealing looks for at the root, so collapsing it turned a
@@ -66,10 +76,18 @@ impl ControlFlowStructurer<'_, '_> {
                     *stmt = CStmt::Empty;
                 }
             }
-            CStmt::Observed { stmt: inner, .. } => Self::cleanup_recurse(symbols, is_write, inner),
+            CStmt::Observed { stmt: inner, .. } => {
+                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, inner)
+            }
             CStmt::Block(stmts) => {
                 for child in stmts.iter_mut() {
-                    Self::cleanup_recurse(symbols, is_write, child);
+                    Self::cleanup_recurse(
+                        symbols,
+                        is_write,
+                        carries_only_to_return,
+                        elisions,
+                        child,
+                    );
                 }
                 stmts.retain(|child| !matches!(child.unobserved(), CStmt::Empty));
                 let cleaned = std::mem::take(stmts);
@@ -77,7 +95,17 @@ impl ControlFlowStructurer<'_, '_> {
                 let cleaned = Self::rewrite_guarded_switch_if_else(cleaned);
                 let cleaned = Self::rewrite_continue_tail_merges(symbols, cleaned);
                 let cleaned = super::self_update::coalesce_sequence(cleaned);
-                let mut cleaned = Self::truncate_dead_straight_line_tail(cleaned);
+                // After truncation, so the block the return leaves behind is not
+                // then deleted as unreachable: it still owes the cells of what
+                // it does before returning, and placement is what removes it.
+                let cleaned = Self::truncate_dead_straight_line_tail(cleaned);
+                let mut cleaned = Self::rewrite_return_into_arms(
+                    symbols,
+                    is_write,
+                    carries_only_to_return,
+                    elisions,
+                    cleaned,
+                );
                 *stmt = if cleaned.is_empty() {
                     CStmt::Empty
                 } else if cleaned.len() == 1 {
@@ -91,9 +119,21 @@ impl ControlFlowStructurer<'_, '_> {
                 else_body,
                 ..
             } => {
-                Self::cleanup_recurse(symbols, is_write, then_body);
+                Self::cleanup_recurse(
+                    symbols,
+                    is_write,
+                    carries_only_to_return,
+                    elisions,
+                    then_body,
+                );
                 if let Some(body) = else_body {
-                    Self::cleanup_recurse(symbols, is_write, body);
+                    Self::cleanup_recurse(
+                        symbols,
+                        is_write,
+                        carries_only_to_return,
+                        elisions,
+                        body,
+                    );
                 }
                 if else_body
                     .as_ref()
@@ -108,12 +148,12 @@ impl ControlFlowStructurer<'_, '_> {
                 *stmt = Self::rewrite_guarded_switch_with_trailing_return(taken);
             }
             CStmt::While { body, .. } => {
-                Self::cleanup_recurse(symbols, is_write, body);
+                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
                 **body = Self::strip_trailing_continue(taken);
             }
             CStmt::DoWhile { body, .. } => {
-                Self::cleanup_recurse(symbols, is_write, body);
+                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
                 **body = Self::strip_trailing_continue(taken);
             }
@@ -123,7 +163,7 @@ impl ControlFlowStructurer<'_, '_> {
                     let compound = Self::rewrite_compound_assignment_expr(taken);
                     *update = super::self_update::shorten_unit_update(compound);
                 }
-                Self::cleanup_recurse(symbols, is_write, body);
+                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, body);
                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
                 let cleaned = Self::strip_trailing_continue(taken);
                 // The strip consumes the body and hands one back either way, so
@@ -141,11 +181,19 @@ impl ControlFlowStructurer<'_, '_> {
                     case.body = Self::cleanup_switch_body(
                         symbols,
                         is_write,
+                        carries_only_to_return,
+                        elisions,
                         std::mem::take(&mut case.body),
                     );
                 }
                 if let Some(body) = default {
-                    *body = Self::cleanup_switch_body(symbols, is_write, std::mem::take(body));
+                    *body = Self::cleanup_switch_body(
+                        symbols,
+                        is_write,
+                        carries_only_to_return,
+                        elisions,
+                        std::mem::take(body),
+                    );
                 }
             }
             CStmt::Expr(expr) => {
@@ -160,11 +208,13 @@ impl ControlFlowStructurer<'_, '_> {
     fn cleanup_switch_body(
         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
         is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
+        carries_only_to_return: &dyn Fn(crate::symbol::SymbolId) -> bool,
+        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
         stmts: Vec<CStmt>,
     ) -> Vec<CStmt> {
         let mut cleaned = stmts;
         for stmt in cleaned.iter_mut() {
-            Self::cleanup_recurse(symbols, is_write, stmt);
+            Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, stmt);
         }
         cleaned.retain(|stmt| !matches!(stmt.unobserved(), CStmt::Empty));
         let cleaned = super::self_update::coalesce_sequence(cleaned);
@@ -423,6 +473,372 @@ impl ControlFlowStructurer<'_, '_> {
                 Some((observations, carried, written, left, *right))
             }
             _ => None,
+        }
+    }
+
+    /// The last assignment an arm makes, taken out of it.
+    ///
+    /// Unlike `sole_assignment` the arm may do other work first: only its final
+    /// statement has to be the assignment, because only that is what the merge
+    /// carries out of the arm.
+    fn take_final_assignment(stmt: &mut CStmt) -> Option<SoleAssignment> {
+        match stmt {
+            CStmt::StructuredRegion { stmt: inner, .. } => Self::take_final_assignment(inner),
+            // The marker comes away with the statement. Recursing under it and
+            // then dropping the emptied statement took the wrapper's cell with
+            // it -- one store's `ObservableMemoryWrite`, and the stage declined
+            // for one lost observation.
+            CStmt::Observed { .. } => {
+                let (mut semantic, observations) =
+                    std::mem::replace(stmt, CStmt::Empty).into_semantic_with_observations();
+                match Self::take_final_assignment(&mut semantic) {
+                    Some((chain, carried, written, lhs, rhs)) => {
+                        let mut owed = observations;
+                        owed.extend(chain);
+                        *stmt = semantic;
+                        Some((owed, carried, written, lhs, rhs))
+                    }
+                    None => {
+                        *stmt = observations.reapply(semantic);
+                        None
+                    }
+                }
+            }
+            CStmt::Block(stmts) => {
+                let at = stmts.iter().rposition(|stmt| {
+                    !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_))
+                })?;
+                let taken = Self::take_final_assignment(&mut stmts[at])?;
+                if matches!(stmts[at].unobserved(), CStmt::Empty) {
+                    stmts.remove(at);
+                }
+                Some(taken)
+            }
+            CStmt::Expr(_) => {
+                let (semantic, observations) =
+                    std::mem::replace(stmt, CStmt::Empty).into_semantic_with_observations();
+                let CStmt::Expr(expr) = semantic else {
+                    return None;
+                };
+                let mut carried = Vec::new();
+                let mut cursor = expr;
+                while let CExpr::Observed { id, expr } = cursor {
+                    carried.push(id);
+                    cursor = *expr;
+                }
+                let CExpr::Binary {
+                    op: BinaryOp::Assign,
+                    left,
+                    right,
+                } = cursor
+                else {
+                    return None;
+                };
+                let mut written = Vec::new();
+                let mut left = *left;
+                while let CExpr::Observed { id, expr } = left {
+                    written.push(id);
+                    left = *expr;
+                }
+                Some((observations, carried, written, left, *right))
+            }
+            _ => None,
+        }
+    }
+
+    /// The value a tail that returns once returns, and where it says so.
+    fn sole_return(stmt: &CStmt) -> Option<CExpr> {
+        match stmt.clone().into_semantic_with_observations().0 {
+            CStmt::StructuredRegion { stmt, .. } => Self::sole_return(&stmt),
+            CStmt::Block(stmts) => {
+                let at = stmts.iter().rposition(|stmt| {
+                    !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_))
+                })?;
+                Self::sole_return(&stmts[at])
+            }
+            CStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        }
+    }
+
+    /// The returned expression with the object it names replaced by `value`.
+    ///
+    /// Casts stay -- the return still converts to the declared type -- and
+    /// every marker on the way down to the name is owed by the statement
+    /// instead: the text no longer reads that object, so no expression here
+    /// can stand for reading it.
+    fn substitute_returned_var(
+        symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+        expr: &CExpr,
+        value: &CExpr,
+        owed: &mut Vec<crate::observation_journal::RenderObservationId>,
+    ) -> Option<CExpr> {
+        match expr {
+            CExpr::Observed { id, expr: inner } => {
+                let rebuilt = Self::substitute_returned_var(symbols, inner, value, owed)?;
+                owed.push(*id);
+                Some(rebuilt)
+            }
+            CExpr::Paren(inner) => Some(CExpr::Paren(Box::new(Self::substitute_returned_var(
+                symbols, inner, value, owed,
+            )?))),
+            // Through the constructor, so the conversion the arm already made
+            // to the carrier's type collapses into this one instead of being
+            // spelled twice.
+            CExpr::Cast {
+                ty,
+                expr: inner,
+                role,
+            } => {
+                let inner = Self::substitute_returned_var(symbols, inner, value, owed)?;
+                let collapsed = CExpr::cast_with_role(ty.clone(), inner, *role);
+                // A conversion to the type the object is already declared with
+                // converts nothing, and the declaration is the one place that
+                // says so. Asked after the adjacent conversions have collapsed,
+                // because the arm's conversion to the carrier's type stands
+                // between this one and the name until then. Without it the
+                // recovered `return buf;` is spelled `return (char *)buf;`.
+                if let CExpr::Cast {
+                    ty: outer,
+                    expr: named,
+                    ..
+                } = &collapsed
+                    && let CExpr::Var(name) = named.unobserved()
+                    && symbols.borrow().get(*name).ty == *outer
+                {
+                    return Some(named.as_ref().clone());
+                }
+                Some(collapsed)
+            }
+            CExpr::Var(_) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    /// A copy of the tail that returns `value`, keeping only the return.
+    ///
+    /// The tail may hold other statements -- a frame teardown store that
+    /// renders nothing is the common one -- and those are not duplicated. They
+    /// stay where they are, in a copy of the block the return has left, which
+    /// is also what keeps that block's own occurrence.
+    fn respell_return(
+        symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+        stmt: &CStmt,
+        value: &CExpr,
+        extra: &[crate::observation_journal::RenderObservationId],
+        stated: &mut Vec<(
+            crate::observation_journal::RenderObservationId,
+            r2ssa::ledger::ElisionReason,
+        )>,
+    ) -> Option<CStmt> {
+        let (semantic, observations) = stmt.clone().into_semantic_with_observations();
+        let rebuilt = match semantic {
+            CStmt::StructuredRegion { marker, stmt } => CStmt::StructuredRegion {
+                marker,
+                stmt: Box::new(Self::respell_return(symbols, &stmt, value, extra, stated)?),
+            },
+            CStmt::Block(stmts) => {
+                let at = stmts.iter().rposition(|stmt| {
+                    !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_))
+                })?;
+                CStmt::Block(vec![Self::respell_return(
+                    symbols, &stmts[at], value, extra, stated,
+                )?])
+            }
+            CStmt::Return(Some(returned)) => {
+                let mut read = Vec::new();
+                let returned = Self::substitute_returned_var(symbols, &returned, value, &mut read)?;
+                stated.extend(
+                    read.into_iter()
+                        .map(|id| (id, r2ssa::ledger::ElisionReason::SpecialisedMergeCarrier)),
+                );
+                let mut rebuilt = CStmt::Return(Some(returned));
+                for id in extra.iter().copied().rev() {
+                    rebuilt = CStmt::observed(id, rebuilt);
+                }
+                rebuilt
+            }
+            _ => return None,
+        };
+        Some(observations.reapply(rebuilt))
+    }
+
+    /// The same tail with its return taken out, for the statements it keeps.
+    ///
+    /// Whatever the tail does before returning stays where it is. The machine
+    /// performs it, and the block keeps the cells it owes; what makes the text
+    /// correct is that the block is now unreachable, and it renders nothing for
+    /// the same reason it rendered nothing before -- placement removes a
+    /// statement whose object nothing reads.
+    fn tail_without_return(stmt: &CStmt) -> Option<CStmt> {
+        let (semantic, observations) = stmt.clone().into_semantic_with_observations();
+        let rebuilt = match semantic {
+            CStmt::StructuredRegion { marker, stmt } => CStmt::StructuredRegion {
+                marker,
+                stmt: Box::new(Self::tail_without_return(&stmt)?),
+            },
+            CStmt::Block(stmts) => {
+                let at = stmts.iter().rposition(|stmt| {
+                    !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_))
+                })?;
+                let mut stmts = stmts;
+                stmts[at] = Self::tail_without_return(&stmts[at])?;
+                CStmt::Block(stmts)
+            }
+            CStmt::Return(Some(_)) => return Some(CStmt::Empty),
+            _ => return None,
+        };
+        Some(observations.reapply(rebuilt))
+    }
+
+    /// `if (c) { ...; x = A; } else { ...; x = B; } return x;` is two returns.
+    ///
+    /// The merge exists because the machine had one `return` and two paths to
+    /// it; the text does not have to. Each arm already computes what the merge
+    /// carries, so the return is written in each arm reading that arm's value,
+    /// and the object the merge went through stops being written or read at
+    /// all. The two returns exclude one another, which is what lets one cell be
+    /// discharged by both of them.
+    fn rewrite_return_into_arms(
+        symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+        is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
+        carries_only_to_return: &dyn Fn(crate::symbol::SymbolId) -> bool,
+        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
+        stmts: Vec<CStmt>,
+    ) -> Vec<CStmt> {
+        if stmts.len() < 2 {
+            return stmts;
+        }
+        let mut stmts = stmts;
+        let tail = stmts.pop().expect("two statements");
+        let branch = stmts.pop().expect("two statements");
+        let restore = |stmts: &mut Vec<CStmt>, branch, tail| {
+            stmts.push(branch);
+            stmts.push(tail);
+        };
+        let Some(remainder) = Self::tail_without_return(&tail) else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        let Some(returned) = Self::sole_return(&tail) else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        let mut returned_name = &returned;
+        while let CExpr::Observed { expr, .. } | CExpr::Paren(expr) | CExpr::Cast { expr, .. } =
+            returned_name
+        {
+            returned_name = expr;
+        }
+        let returned_name = returned_name.clone();
+        if !matches!(returned_name, CExpr::Var(_)) {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        }
+        // The object the merge goes through has to exist only to carry the
+        // value here, and that is the plan's answer rather than the text's.
+        let CExpr::Var(carrier) = returned_name else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        if !carries_only_to_return(carrier) {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        }
+        let mut candidate = branch.clone();
+        let Some((then_body, else_body)) = Self::branch_arms_mut(&mut candidate) else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        let (Some(then_taken), Some(else_taken)) = (
+            Self::take_final_assignment(then_body),
+            Self::take_final_assignment(else_body),
+        ) else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        let (then_marks, then_carried, then_written, then_lhs, then_rhs) = then_taken;
+        let (else_marks, else_carried, else_written, else_lhs, else_rhs) = else_taken;
+        if !then_lhs.transparently_eq(&else_lhs) || !then_lhs.transparently_eq(&CExpr::Var(carrier))
+        {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        }
+        // The carrier's cells are not moved anywhere: the text no longer writes
+        // it or reads it, so the rewrite states the elision and the ledger
+        // records the reason. Moving them onto the return instead would have
+        // the return's statement stand for a store it does not perform.
+        let mut stated = Vec::new();
+        // An arm's markers split the way they did for the conditional
+        // expression. The write is what stops happening -- the object is not
+        // written any more -- and the rest is the value the arm computed, which
+        // the return now spells, so it travels to that arm's return. Eliding
+        // the value markers too said a constant was not rendered while another
+        // occurrence still rendered it, which is what `pearson` refused on.
+        let arm_owed = |marks: StmtObservationChain,
+                        carried: Vec<crate::observation_journal::RenderObservationId>,
+                        written: Vec<crate::observation_journal::RenderObservationId>,
+                        stated: &mut Vec<(
+            crate::observation_journal::RenderObservationId,
+            r2ssa::ledger::ElisionReason,
+        )>| {
+            let mut kept = Vec::new();
+            for id in marks.into_ids().into_iter().chain(carried).chain(written) {
+                if is_write(id) {
+                    stated.push((id, r2ssa::ledger::ElisionReason::SpecialisedMergeCarrier));
+                } else {
+                    kept.push(id);
+                }
+            }
+            kept
+        };
+        let then_extra = arm_owed(then_marks, then_carried, then_written, &mut stated);
+        let else_extra = arm_owed(else_marks, else_carried, else_written, &mut stated);
+        let (Some(then_tail), Some(else_tail)) = (
+            Self::respell_return(symbols, &tail, &then_rhs, &then_extra, &mut stated),
+            Self::respell_return(symbols, &tail, &else_rhs, &else_extra, &mut stated),
+        ) else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        let Some((then_body, else_body)) = Self::branch_arms_mut(&mut candidate) else {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        };
+        Self::append_to_arm(then_body, then_tail);
+        Self::append_to_arm(else_body, else_tail);
+        elisions.borrow_mut().cells.extend(stated);
+        stmts.push(candidate);
+        stmts.push(remainder);
+        stmts
+    }
+
+    /// The two arms of a conditional, through the markers around it.
+    fn branch_arms_mut(stmt: &mut CStmt) -> Option<(&mut CStmt, &mut CStmt)> {
+        match stmt {
+            CStmt::StructuredRegion { stmt: inner, .. } | CStmt::Observed { stmt: inner, .. } => {
+                Self::branch_arms_mut(inner)
+            }
+            CStmt::If {
+                then_body,
+                else_body: Some(else_body),
+                ..
+            } => Some((then_body.as_mut(), else_body.as_mut())),
+            _ => None,
+        }
+    }
+
+    /// Put a statement at the end of an arm, inside whatever wraps it.
+    fn append_to_arm(arm: &mut CStmt, stmt: CStmt) {
+        match arm {
+            CStmt::StructuredRegion { stmt: inner, .. } | CStmt::Observed { stmt: inner, .. } => {
+                Self::append_to_arm(inner, stmt);
+            }
+            CStmt::Block(stmts) => stmts.push(stmt),
+            other => {
+                let taken = std::mem::replace(other, CStmt::Empty);
+                *other = CStmt::Block(vec![taken, stmt]);
+            }
         }
     }
 

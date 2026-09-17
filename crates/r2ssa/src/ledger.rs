@@ -122,6 +122,15 @@ pub enum ElisionReason {
     /// Its output is not elided with it. The value is still rendered, under
     /// the binding's name, by whatever wrote that binding.
     CoalescedIdentityPhi,
+    /// An object written on every path only to carry a value to one reader,
+    /// where the text now reads each path's value at that reader instead.
+    ///
+    /// The machine had one `return` and two ways to reach it, so it merged
+    /// through a frame slot and returned the slot. The text writes a return in
+    /// each arm reading that arm's own value, which is what the source said;
+    /// the carrier is then written nowhere and read nowhere, and no C statement
+    /// has to carry it.
+    SpecialisedMergeCarrier,
     /// A condition-code write no rendered predicate reads.
     DeadCpuFlag,
     /// A value only ever read to compute a flag that is itself elided.
@@ -229,6 +238,7 @@ impl std::fmt::Display for ElisionReason {
             Self::CoalescedImmutablePhi => "coalesced-immutable-phi",
             Self::CoalescedCopy => "coalesced-copy",
             Self::CoalescedIdentityPhi => "coalesced-identity-phi",
+            Self::SpecialisedMergeCarrier => "specialised-merge-carrier",
             Self::DeadCpuFlag => "dead-cpu-flag",
             Self::DeadFlagOnly => "dead-flag-only",
             Self::DeadUnusedTemporary => "dead-unused-temp",

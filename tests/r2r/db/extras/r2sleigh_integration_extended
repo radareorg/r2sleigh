@@ -744,6 +744,20 @@ pd:s | jq -Rs '([match("= strcmp\\("; "g")] | length) == 1'
 EOF_CMDS
 RUN
 
+NAME=dec_alloc_and_copy_recovers_the_early_return
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~alloc_and_copy$[0]` > /dev/null
+pd:s | jq -Rs '((([match("return "; "g")] | length)) == 2) and (test("return buf;")) and (test("stack_m[0-9]+")|not) and (contains("r2sleigh refused")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_alloc_and_copy_returns_the_slot_not_the_frame_base
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

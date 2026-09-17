@@ -26352,29 +26352,55 @@ placement-level fact and is decided after the structurer runs, so the next step
 is to give the plan that answer before the rewrite asks for it. Until then the
 rewrite declines on every shape seen so far.
 
-**Two things found on the way out, both worth having before the next attempt.**
+**Both remaining gaps closed; the specialisation is landed.**
 
-The seal that the walk gave up has to be restored in *both* paths, not one.
-`seal_preserving_effects` proves exclusivity from the region tree, and that is
-the only place it can be proved; the path that runs without a region tree --
-`LegacyObservationJournal::seal`, and `finish_enforcing` on a draft that carries
-no placement -- has nothing to prove it with, so a repeat there must refuse
-outright. `production_audit_failure_refuses_the_native_product` is the test that
-pins this, and it was still passing a duplicate through when the attempt was
-set aside: the early refusal added for it did not fire, so the path
-`finish_enforcing` takes for a placement-less draft is not the one it was added
-to. That is the first thing to establish next time, because it is a weakening
-of the seal and not a missing feature.
+The first was "nothing reads what this wrote". Asked of the plan it was wrong in
+both directions, because the statement the return has to move above --
+`alloc_and_copy`'s frame teardown -- is read: `sp = fp + 48` feeds the restore.
+It is not dead, it simply renders nothing. So the return does not move above it
+at all. The tail keeps every statement it had and only the return leaves,
+into a copy of the tail's block in each arm; the block it leaves behind keeps
+its own occurrence and the cells it owes, and renders nothing for exactly the
+reason it did before. The one thing that made this fail was ordering: the
+rewrite now runs *after* `truncate_dead_straight_line_tail`, so the block is not
+deleted as unreachable the moment both arms return.
 
-The other is that two of the three unit tests that encoded the old contract
-were updated correctly and are worth keeping in the patch:
-`stripping_reports_a_repeated_observation_rather_than_refusing_it` says what the
-walk now does, and the out-of-range half keeps its own name and its
-no-mutation claim.
+The second was the scope of a repeated marker. `effect_occurrence_regions`
+looked the scope up by id, so both writings of a specialised return got the
+*first* one -- the same place twice, which is never exclusive, and the return
+refused as a duplicate of itself. `scope_at` hands back the scope of the nth
+writing, and the walk counts them.
 
-The tree is green throughout: corpus 60/60 on every column, r2r unchanged at 90
-passing, snapshots untouched. The attempt is kept as
-`doc/wip-return-specialisation.patch`, which applies to this commit and carries
-everything above -- the duplicate-tolerant walk, the exclusivity check, the
-`RewriteElisions` channel, `SpecialisedMergeCarrier`, the region-dominance walk,
-the two plan queries and the rewrite itself.
+Two spellings came with it, both general. Adjacent pointer conversions collapse
+-- `(char *)(void *)p` is `(char *)p`, by C11 6.3.2.3p1 and p7, function
+pointers excepted -- and a conversion to the type an object is already declared
+with is dropped, which is what turns `return (char *)buf;` into `return buf;`.
+
+`alloc_and_copy` now renders what its source says:
+
+```c
+char* buf = (char*)malloc(len + 1);
+if (buf != 0) {
+    __memcpy_chk(buf, src, len, -1);
+    ((uint8_t*)buf)[len] = 0;
+    return buf;
+} else {
+    return (char*)0;
+}
+```
+
+**Two things found on the way, both worth keeping.**
+
+The seal the walk gave up is restored in *both* paths. `seal_preserving_effects`
+proves exclusivity from the region tree, and that is the only place it can be
+proved; the path that runs without one refuses any repeat outright, reporting
+the first marker the walk meets twice rather than the lowest id, which is what
+`production_audit_failure_refuses_the_native_product` pins. The walk itself no
+longer tracks duplicates at all -- one answerer, over the tree, in the seal.
+
+The unit test that encoded the old contract says the new one:
+`stripping_admits_a_repeated_observation_for_the_seal_to_judge`, with the
+out-of-range half keeping its own name and its no-mutation claim.
+
+The tree is green throughout: corpus 60/60 on every column, snapshots untouched,
+and r2r **93 passing with 4 failing**, down from six.

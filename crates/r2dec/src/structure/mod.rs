@@ -194,14 +194,23 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // observed occurrence, or it is not applied.
         let placed = self.certificate(&stmt);
         let fold_ctx = self.fold_ctx;
-        let shaped =
-            self.rewrite_stage("shape", &placed, stmt, |tree| Self::shape(fold_ctx, tree))?;
+        let elisions =
+            std::cell::RefCell::new(crate::observation_journal::RewriteElisions::default());
+        let shaped = self.rewrite_stage("shape", &placed, &elisions, stmt, |tree| {
+            Self::shape(fold_ctx, tree)
+        })?;
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);
         let journal = self.fold_ctx.inputs.observation_journal;
-        let stmt = self.rewrite_stage("cleanup", &placed, shaped, |tree| {
+        let stmt = self.rewrite_stage("cleanup", &placed, &elisions, shaped, |tree| {
             Self::cleanup(
                 &symbols,
                 &|id| journal.is_some_and(|journal| journal.borrow().observation_is_write(id)),
+                &|symbol| {
+                    journal.is_some_and(|journal| {
+                        journal.borrow().merge_carries_only_to_return(symbol)
+                    })
+                },
+                &elisions,
                 tree,
             )
         })?;
@@ -224,6 +233,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         &mut self,
         name: &'static str,
         placed: &certify::ControlCertificate,
+        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
         before: CStmt,
         rewrite: impl FnOnce(CStmt) -> CStmt,
     ) -> ControlFlowStructureResult<CStmt> {
@@ -239,7 +249,19 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let kept: BTreeSet<_> = crate::ast::stmt_render_observation_ids(&after)
             .into_iter()
             .collect();
-        let lost = observed.iter().filter(|id| !kept.contains(id)).count();
+        // What the rewrite says it removed, and why. A cell the rewrite states
+        // an elision for is answered rather than lost: the ledger records the
+        // reason the same way it records a certificate's.
+        let stated = std::mem::take(&mut *elisions.borrow_mut());
+        let elided = stated
+            .cells
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>();
+        let lost = observed
+            .iter()
+            .filter(|id| !kept.contains(id) && !elided.contains(id))
+            .count();
         let certified = certificate.ok() || !placed.ok();
         if let Some(before_digest) = before_digest {
             r2il::refusal_evidence!(
@@ -249,12 +271,31 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             );
         }
         if certified && lost == 0 {
+            if let Some(journal) = self.fold_ctx.inputs.observation_journal {
+                journal.borrow_mut().record_rewrite_elisions(&stated);
+            }
             self.rewrite_outcomes.push(format!("{name}:applied"));
             return Ok(after);
         }
         r2il::refusal_evidence!(
             "control-rewrite",
-            "{name} not applied: certificate {certificate}; {lost} observations lost"
+            "{name} not applied: certificate {certificate}; {lost} observations lost {:?}",
+            {
+                let journal = self
+                    .fold_ctx
+                    .inputs
+                    .observation_journal
+                    .map(|journal| journal.borrow());
+                observed
+                    .iter()
+                    .filter(|id| !kept.contains(id) && !elided.contains(id))
+                    .map(|id| {
+                        journal
+                            .as_ref()
+                            .map_or_else(|| format!("{id:?}"), |j| j.observation_description(*id))
+                    })
+                    .collect::<Vec<_>>()
+            }
         );
         Err(ControlFlowStructureError::RewriteDeclined(name))
     }

@@ -362,6 +362,12 @@ fn upstream_zero_occurrence_outcome(
     if effects.dead_unused_value_effect(id) {
         return Some(Outcome::Elided(ElisionReason::DeadUnusedTemporary));
     }
+    // A control rewrite took the statement out of the text and said why: the
+    // object it wrote carried a value to one reader, and that reader now reads
+    // each path's value directly.
+    if effects.rewrite_elided_effect(id) {
+        return Some(Outcome::Elided(ElisionReason::SpecialisedMergeCarrier));
+    }
     // A store that put into an object exactly what the object's binding already held.
     if effects.coalesced_store_effect(id) {
         return Some(Outcome::Elided(ElisionReason::CoalescedCopy));

@@ -743,6 +743,7 @@ pub(crate) struct SurvivingEffectObservations {
     occurrences: BTreeMap<SemanticObligationId, EffectOccurrences>,
     coalesced_carriers: Box<CoalescedCarrierEffectElisions>,
     gapped: BTreeSet<SemanticObligationId>,
+    rewrite_elided: BTreeSet<SemanticObligationId>,
 }
 
 /// How often one source obligation was rendered, and whether the copies stand
@@ -848,6 +849,12 @@ impl SurvivingEffectObservations {
             .contains(&id)
     }
 
+    /// Whether a control rewrite took this obligation's statement out of the
+    /// text and said why.
+    pub(crate) fn rewrite_elided_effect(&self, id: SemanticObligationId) -> bool {
+        self.rewrite_elided.contains(&id)
+    }
+
     /// Whether a pre-placement dead definition owned this producer obligation.
     pub(crate) fn dead_unused_value_effect(&self, id: SemanticObligationId) -> bool {
         self.coalesced_carriers
@@ -929,12 +936,27 @@ pub(crate) struct LegacyObservationJournal {
     /// occurrence, so a shared tail cloned onto two paths cannot turn one
     /// gapped obligation into a duplicate rendering.
     gapped_effects: BTreeSet<SemanticObligationId>,
+    /// Cells a control rewrite took out of the text, with its stated reason.
+    rewrite_elisions: RewriteElisions,
     /// Values a marked gap accounts for, so a read the gap also covers is
     /// known to name an object no statement outside the gap assigns.
     gapped_values: BTreeSet<ValueId>,
     targets: Vec<ObservationTarget>,
     /// Where each target was allocated, under `R2DEC_TRACE_REFUSAL` only.
     target_origins: Vec<&'static std::panic::Location<'static>>,
+}
+
+/// Cells a control rewrite removed from the text, with the reason it removed
+/// them.
+///
+/// A rewrite that takes a statement out of the tree owes an answer for the
+/// cells that statement carried. Reporting them is that answer, and it is the
+/// rewrite's to give: it is the only thing that knows why the statement is
+/// gone. The journal records the elision and the ledger reads it, exactly as it
+/// reads the certificates' elisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RewriteElisions {
+    pub(crate) cells: Vec<(RenderObservationId, r2ssa::ledger::ElisionReason)>,
 }
 
 /// Transaction boundary for render markers allocated by one tentative AST
@@ -1937,6 +1959,81 @@ impl LegacyObservationJournal {
 
     /// The block whose text one observed statement was emitted in, for the
     /// control certificate; read-side targets say nothing about placement.
+    /// Record cells a control rewrite removed, with the reason it removed them.
+    pub(crate) fn record_rewrite_elisions(&mut self, elisions: &RewriteElisions) {
+        self.rewrite_elisions
+            .cells
+            .extend(elisions.cells.iter().copied());
+    }
+
+    /// The effect obligations a control rewrite removed from the text.
+    pub(crate) fn rewrite_elided_effects(&self) -> BTreeSet<SemanticObligationId> {
+        self.rewrite_elisions
+            .cells
+            .iter()
+            .filter_map(|(id, _)| match self.targets.get(id.index() as usize) {
+                Some(ObservationTarget::Effect(effect)) => Some(*effect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What this marker stands for, for a diagnostic that has only its id.
+    pub(crate) fn observation_description(&self, id: RenderObservationId) -> String {
+        match self.targets.get(id.index() as usize) {
+            Some(target) => format!("{target:?}").chars().take(200).collect(),
+            None => "<none>".to_string(),
+        }
+    }
+
+    /// Whether the object this symbol names exists only to carry a value to
+    /// the function's return.
+    ///
+    /// Specialising the return into the arms above it removes that object, so
+    /// nothing else may read it. `pearson` is why this is asked of the plan and
+    /// not of the text: its merge is also a loop carrier, read inside the arm
+    /// through an expression written somewhere the rewrite cannot see. A phi
+    /// that feeds the same object back is the carrier rather than a reader.
+    pub(crate) fn merge_carries_only_to_return(&self, symbol: SymbolId) -> bool {
+        let Some(binding) = (0..self.plan.binding_count())
+            .filter_map(crate::binding_plan::BindingId::from_dense_index)
+            .find(|binding| self.names.symbol_for_binding(*binding) == Some(symbol))
+        else {
+            return false;
+        };
+        let owns = |value: ValueId| {
+            matches!(
+                self.names.disposition_for_value(value),
+                Some(ValueDisposition::Bound { binding: owner }) if *owner == binding
+            )
+        };
+        let graph = self.source.graph();
+        let returns = &self.source.certificates().returns_by_inst;
+        let mut members = 0_usize;
+        for index in 0..graph.values.len() {
+            let value = ValueId(index as u32);
+            if !owns(value) {
+                continue;
+            }
+            members += 1;
+            for site in graph.use_sites(value) {
+                if returns.contains_key(&site.inst) {
+                    continue;
+                }
+                let Some(inst) = graph.inst(site.inst) else {
+                    return false;
+                };
+                if matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
+                    && inst.output.is_some_and(owns)
+                {
+                    continue;
+                }
+                return false;
+            }
+        }
+        members > 0
+    }
+
     /// Whether this marker stands for a write rather than for a value or read.
     ///
     /// A rewrite that merges two arms into one assignment has to know: the
@@ -2549,6 +2646,7 @@ impl LegacyObservationJournal {
             effect_occurrence_regions: BTreeMap::new(),
             exclusive_duplicate_effects: BTreeSet::new(),
             gapped_effects: BTreeSet::new(),
+            rewrite_elisions: RewriteElisions::default(),
             gapped_values: BTreeSet::new(),
             targets: Vec::new(),
         };
@@ -4708,9 +4806,10 @@ impl LegacyObservationJournal {
         }
         let mut seal_authority = ObservationSealAuthority::new();
         let function = ready.function_mut_for_observation_seal(&mut seal_authority);
+        let rewrite_elided = self.rewrite_elided_effects();
         let mut effect_occurrences = self.effect_occurrences;
         let targets = self.targets;
-        inspect_and_strip_render_observations(
+        let reachable = inspect_and_strip_render_observations(
             function,
             targets.len(),
             |id, _node| -> Result<(), LegacyObservationJournalError> {
@@ -4739,7 +4838,15 @@ impl LegacyObservationJournal {
             }
             RenderObservationInspectError::Observer(error) => error,
         })?;
+        // Without a region tree there is nothing to prove two occurrences of
+        // one cell exclude each other, so a repeat is a duplicate here.
+        if let Some(id) = reachable.duplicated().iter().next().copied() {
+            return Err(LegacyObservationJournalError::Markers(
+                RenderObservationStripError::Duplicate { id },
+            ));
+        }
         Ok(SurvivingEffectObservations {
+            rewrite_elided,
             // This path has no region tree to prove exclusion with, so it
             // claims none.
             occurrences: effect_occurrences
@@ -4800,6 +4907,19 @@ impl LegacyObservationJournal {
             return Err(LegacyObservationJournalError::SymbolTableMismatch);
         }
 
+        // A marker written more than once discharges its cell more than once,
+        // which is a duplicate unless the writings exclude one another. Without
+        // a region tree there is no structure to prove that with, so a repeat
+        // refuses here and the tree is left as it was found.
+        if regions.is_none()
+            && let Some(id) = crate::placement::repeated_observations(&function.body)
+                .into_iter()
+                .next()
+        {
+            return Err(LegacyObservationJournalError::Markers(
+                RenderObservationStripError::Duplicate { id },
+            ));
+        }
         // Where each observation ended up in the structured tree. Read before
         // the walk, from the same final tree the walk counts, so the two cannot
         // disagree about which occurrence sat where.
@@ -4813,12 +4933,42 @@ impl LegacyObservationJournal {
         let mut effect_occurrences = std::mem::take(&mut self.effect_occurrences);
         let mut effect_occurrence_regions = std::mem::take(&mut self.effect_occurrence_regions);
         let mut gapped_effects = std::mem::take(&mut self.gapped_effects);
+        // Cells a control rewrite took out of the text. They are answered here,
+        // before the walk, because the walk counts what the tree carries and
+        // these are exactly what it no longer carries. The rewrite stated the
+        // reason; nothing is inferred from the absence.
+        for (id, reason) in self.rewrite_elisions.cells.clone() {
+            match self.targets.get(id.index() as usize) {
+                Some(ObservationTarget::Value(value)) => {
+                    if let Some(slot) = values.get_mut(value.0 as usize) {
+                        let _ = record_same(slot, LegacyValueObservation::Elided(reason));
+                    }
+                }
+                Some(ObservationTarget::Use { site, .. }) => {
+                    if let Some(slot) = uses
+                        .get_mut(site.inst.0 as usize)
+                        .and_then(|inputs| inputs.get_mut(site.input_idx))
+                    {
+                        let _ = record_same(slot, LegacyUseObservation::Elided(reason));
+                    }
+                }
+                Some(ObservationTarget::Write { inst, .. }) => {
+                    if let Some(slot) = writes.get_mut(inst.0 as usize) {
+                        let _ = record_same(slot, LegacyWriteObservation::Elided(reason));
+                    }
+                }
+                _ => {}
+            }
+        }
         let targets = &self.targets;
         let value_is_literal = &self.value_is_literal;
         let plan = &self.plan;
         let names = &self.names;
         let symbol_bindings = declared_legacy_bindings(function);
         let mut binding_failure = None;
+        // How many times the walk has met each marker, so a repeat's scope is
+        // the place that writing sits in rather than the first one's.
+        let mut seen_markers = BTreeMap::<RenderObservationId, usize>::new();
         // Which allocated observations the final tree actually carries. One it
         // does not is a cell that was accounted for by an expression nothing
         // emitted, and the slot it answered for stays owed to nobody.
@@ -4991,10 +5141,12 @@ impl LegacyObservationJournal {
                         *occurrences = occurrences
                             .checked_add(1)
                             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
+                        let nth = seen_markers.entry(id).or_insert(0);
+                        let at = *nth;
+                        *nth += 1;
                         if let Some(scope) = observation_regions
                             .as_ref()
-                            .and_then(|scoped| scoped.get(id.index() as usize))
-                            .and_then(Option::as_ref)
+                            .and_then(|scoped| scoped.scope_at(id, at))
                         {
                             effect_occurrence_regions
                                 .entry(effect)
@@ -5078,6 +5230,26 @@ impl LegacyObservationJournal {
                 })
                 .map(|(effect, _)| *effect)
                 .collect();
+        }
+        if let (Some(scopes), Some(regions)) = (observation_regions.as_ref(), regions) {
+            for (id, written) in scopes.repeated() {
+                let exclusive = written.iter().enumerate().all(|(at, left)| {
+                    written
+                        .iter()
+                        .skip(at + 1)
+                        .all(|right| left.excludes(right, regions))
+                });
+                if !exclusive {
+                    r2il::refusal_evidence!(
+                        "repeated-observation",
+                        "{id:?} written {} times on paths that do not exclude one another",
+                        written.len()
+                    );
+                    return Err(LegacyObservationJournalError::Markers(
+                        RenderObservationStripError::Duplicate { id },
+                    ));
+                }
+            }
         }
         // Strip the proof markers only after every classification and coverage
         // check succeeds. A binding failure leaves the marked draft intact.
@@ -5299,6 +5471,7 @@ impl LegacyObservationJournal {
         source: &SourceOwnedFunctionFacts,
     ) -> SealedLegacyObservations {
         let coverage = self.final_coverage();
+        let rewrite_elided = self.rewrite_elided_effects();
         let exclusive = std::mem::take(&mut self.exclusive_duplicate_effects);
         let repeated_literals = self.repeated_literal_effects();
         let named_object_addresses = self.named_object_address_effects();
@@ -5318,6 +5491,7 @@ impl LegacyObservationJournal {
                 })
                 .collect(),
             gapped: std::mem::take(&mut self.gapped_effects),
+            rewrite_elided,
             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
                 coalesced_store_sites: std::mem::take(&mut self.coalesced_store_sites),
                 coalesced_carrier_uses: std::mem::take(&mut self.coalesced_carrier_uses),
@@ -7666,6 +7840,9 @@ mod tests {
         function.body = vec![CStmt::Expr(bound), CStmt::Expr(inline), effect];
 
         let result = MarkedNativeDraft::new(function, journal).finish_enforcing(&source, None);
+        if let Err(error) = &result {
+            eprintln!("production audit failure: {error:?}");
+        }
         assert!(matches!(
             result,
             Err(BindingShadowAuditFailure::JournalSeal(
