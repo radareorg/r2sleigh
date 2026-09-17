@@ -4809,10 +4809,21 @@ impl LegacyObservationJournal {
         let rewrite_elided = self.rewrite_elided_effects();
         let mut effect_occurrences = self.effect_occurrences;
         let targets = self.targets;
-        let reachable = inspect_and_strip_render_observations(
+        // Without a region tree there is nothing to prove two occurrences of
+        // one cell exclude each other, so the first marker met twice refuses.
+        let mut met = vec![false; targets.len()];
+        inspect_and_strip_render_observations(
             function,
             targets.len(),
             |id, _node| -> Result<(), LegacyObservationJournalError> {
+                if let Some(seen) = met.get_mut(id.index() as usize) {
+                    if *seen {
+                        return Err(LegacyObservationJournalError::Markers(
+                            RenderObservationStripError::Duplicate { id },
+                        ));
+                    }
+                    *seen = true;
+                }
                 let target = targets.get(id.index() as usize).copied().ok_or({
                     LegacyObservationJournalError::Markers(
                         RenderObservationStripError::OutOfRange {
@@ -4838,13 +4849,6 @@ impl LegacyObservationJournal {
             }
             RenderObservationInspectError::Observer(error) => error,
         })?;
-        // Without a region tree there is nothing to prove two occurrences of
-        // one cell exclude each other, so a repeat is a duplicate here.
-        if let Some(id) = reachable.duplicated().iter().next().copied() {
-            return Err(LegacyObservationJournalError::Markers(
-                RenderObservationStripError::Duplicate { id },
-            ));
-        }
         Ok(SurvivingEffectObservations {
             rewrite_elided,
             // This path has no region tree to prove exclusion with, so it

@@ -88,25 +88,6 @@ struct CertifiedForRegion {
 }
 
 impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
-    #[cfg(test)]
-    pub(crate) fn new(
-        func: &'a r2ssa::RewrittenFunction<'a>,
-        fold_ctx: &'o FoldingContext<'o>,
-    ) -> Self {
-        Self {
-            func,
-            fold_ctx,
-            labels: HashMap::new(),
-            label_counter: 0,
-            control: None,
-            stop_reason: Cell::new(None),
-            declined_rewrites: BTreeSet::new(),
-            certified_for_regions: BTreeMap::new(),
-            certified_for_header_sites: BTreeSet::new(),
-            rewrite_outcomes: Vec::new(),
-        }
-    }
-
     /// A structurer that polls the engine's work control as it writes.
     pub(crate) fn new_with_control(
         func: &'a r2ssa::RewrittenFunction<'a>,

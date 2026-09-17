@@ -208,14 +208,6 @@ impl SealedStructuredRegionArtifact {
         self.nodes[self.root.index()].children[0]
     }
 
-    /// Children already retained for `id`, in exact render order.
-    #[cfg(test)]
-    pub(crate) fn children(&self, id: RegionId) -> Option<&[RegionId]> {
-        self.nodes
-            .get(id.index())
-            .map(|node| node.children.as_ref())
-    }
-
     pub(crate) fn nodes(&self) -> &[StructuredRegionNode] {
         &self.nodes
     }
@@ -496,11 +488,6 @@ pub(crate) struct StructuredRegionDraft {
 }
 
 impl StructuredRegionDraft {
-    #[cfg(test)]
-    pub(crate) const fn authority(&self) -> &StructuredRegionArtifactAuthority {
-        &self.authority
-    }
-
     /// Anchor that the structurer must attach to the emitted occurrence.
     pub(crate) fn emission_anchor(&self, id: RegionId) -> Option<RegionEmissionAnchor> {
         self.nodes.get(id.index()).map(|node| node.emission_anchor)
@@ -567,12 +554,6 @@ impl SealedStructuredBody {
     /// The still-marked tree, for a reader that only looks.
     pub(crate) fn stmt(&self) -> &CStmt {
         &self.stmt
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_stmt(mut self) -> CStmt {
-        strip_region_markers(&mut self.stmt);
-        self.stmt
     }
 
     /// Transfer the still-marked tree and its sole lexical authority together.

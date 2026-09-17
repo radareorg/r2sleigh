@@ -4336,42 +4336,7 @@ mod tests {
         RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
     };
     use r2types::{FunctionParamSpec, FunctionSignatureSpec};
-    use std::collections::{BTreeMap, HashMap};
-
-    /// What the two type models lose when a type crosses between them.
-    ///
-    /// `r2dec` and `r2types` each have a type enum and a renderer, and the two
-    /// renderers already disagreed once -- about how to spell a 128-bit integer
-    /// -- with nothing to catch it. Before the two are folded into one model,
-    /// this records exactly which types do not survive the trip, so the fold is
-    /// closing a measured gap rather than an assumed one.
-    fn empty_fold_context_for_linearization<'a>() -> FoldingContext<'a> {
-        let arch = Box::leak(Box::new(FoldArchConfig {
-            ptr_size: 8,
-            arg_regs: vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ],
-        }));
-        FoldingContext::from_inputs(FoldInputs {
-            normalization_origins: None,
-            observation_journal: None,
-            arch,
-            function_names: Box::leak(Box::new(HashMap::new())),
-            binary_symbols: Box::leak(Box::new(HashMap::new())),
-            function_facts: crate::fold::context::empty_function_facts(),
-            stack_slots: Box::leak(Box::new(BTreeMap::new())),
-            visible_bindings: Box::leak(Box::new(Vec::new())),
-            function_return_type: None,
-            prepared_ssa: None,
-            binding_names: None,
-            prepared_semantic_view: None,
-        })
-    }
+    use std::collections::BTreeMap;
 
     fn prepared_from_ops(ops: Vec<R2ILOp>, arch: &ArchSpec) -> r2ssa::SsaArtifact {
         let mut block = R2ILBlock::new(0x1000, 4);
