@@ -1,6 +1,6 @@
 uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 137 source obligations: 121 rendered, 16 elided, 0 refused; 50 statements rendered */
+    /* r2dec proof: no individual construct is marked; 137 source obligations: 121 rendered, 16 elided, 0 refused; 46 statements rendered */
     {
         uint64_t X2_0_2;
         X2_0_2 = (uint64_t)(uint32_t)W2_0;
@@ -29,42 +29,35 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             }
         }
         {
-            uint64_t X2_4;
+            uint64_t X10_5;
+            X10_5 = 0;
             uint8_t* X11_5 = (uint8_t*)((X1_0 & (uint64_t)-0x4) + X0_0);
             uint64_t X12_5 = X1_0 & 3;
             {
-                uint64_t X10_9;
                 uint8_t tmp_25500_5;
                 uint32_t tmp_2b380_5;
                 if (X12_5 != 1 && r2sleigh_int_sborrow_64(X12_5, 1) == (int64_t)(X12_5 - 1) < 0) {
-                    uint64_t X10_7;
-                    X10_7 = 0;
                     if (X12_5 != 2) {
                         uint8_t tmp_25500_1 = X11_5[2];
-                        X10_7 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_1 << 16);
+                        X10_5 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_1 << 16);
                     }
                     {
                         uint8_t tmp_25500_3 = X11_5[1];
-                        X10_9 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_3 << 8 | (uint32_t)X10_7);
+                        X10_5 = (uint64_t)(uint32_t)((uint32_t)tmp_25500_3 << 8 | (uint32_t)X10_5);
                         {
                             tmp_25500_5 = *X11_5;
-                            tmp_2b380_5 = ((uint32_t)X10_9 ^ (uint32_t)tmp_25500_5) * tmp_2a000_2;
-                            X2_4 = (uint64_t)(uint32_t)((tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * tmp_2a000_4 ^ (uint32_t)X2_0_2);
+                            tmp_2b380_5 = ((uint32_t)X10_5 ^ (uint32_t)tmp_25500_5) * tmp_2a000_2;
+                            X2_0_2 = (uint64_t)(uint32_t)((tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * tmp_2a000_4 ^ (uint32_t)X2_0_2);
                         }
                     }
-                } else {
-                    X10_9 = 0;
-                    if (X12_5 != 0) {
-                        tmp_25500_5 = *X11_5;
-                        tmp_2b380_5 = ((uint32_t)X10_9 ^ (uint32_t)tmp_25500_5) * tmp_2a000_2;
-                        X2_4 = (uint64_t)(uint32_t)((tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * tmp_2a000_4 ^ (uint32_t)X2_0_2);
-                    } else {
-                        X2_4 = X2_0_2;
-                    }
+                } else if (X12_5 != 0) {
+                    tmp_25500_5 = *X11_5;
+                    tmp_2b380_5 = ((uint32_t)X10_5 ^ (uint32_t)tmp_25500_5) * tmp_2a000_2;
+                    X2_0_2 = (uint64_t)(uint32_t)((tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * tmp_2a000_4 ^ (uint32_t)X2_0_2);
                 }
             }
             {
-                uint32_t tmp_20380_7 = (uint32_t)X2_4 ^ (uint32_t)X1_0;
+                uint32_t tmp_20380_7 = (uint32_t)X2_0_2 ^ (uint32_t)X1_0;
                 uint32_t tmp_2b380_8 = (tmp_20380_7 >> 16 ^ tmp_20380_7) * 0x85ebca6b;
                 uint32_t tmp_2b380_9 = (tmp_2b380_8 >> 13 ^ tmp_2b380_8) * 0xc2b2ae35;
                 return tmp_2b380_9 >> 16 ^ tmp_2b380_9;

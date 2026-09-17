@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::graph::{BlockId, InstPayload, SsaGraph, ValueId};
+use crate::graph::{BlockId, InstId, InstPayload, SsaGraph, ValueId};
 use crate::liveout::FunctionLiveOut;
 use crate::op::SSAOp;
 
@@ -54,6 +54,8 @@ pub struct ValueLiveness {
     /// Union-find parent over values that re-express one content at another
     /// width: a copy, a zero extension, a sign extension.
     content: Vec<u32>,
+    /// Merges nothing reads, directly or through other such merges.
+    unread_phi: Vec<bool>,
 }
 
 /// Per-value scratch for one block, stamped so nothing is cleared between values.
@@ -72,26 +74,72 @@ impl ValueLiveness {
     pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
         let value_count = graph.values.len();
         let block_count = graph.blocks.len();
+        // Which values are one content seen more than once. A copy or a
+        // widening re-expresses what it read; a lane is part of it; the merges
+        // one block makes over one location are that location's single state
+        // at that point, seen at several widths, and so are the values a
+        // function is entered with. None of these can hold two contents at
+        // once, whatever their live ranges do.
         let mut content = (0..value_count as u32).collect::<Vec<u32>>();
+        let location_of = |value: ValueId| {
+            graph
+                .value(value)
+                .and_then(|value| value.canonical_storage)
+                .filter(|storage| !storage.is_unknown())
+                .map(|storage| storage.location())
+        };
+        let mut first_phi_by_location = std::collections::HashMap::new();
         for inst in &graph.insts {
-            let InstPayload::Op(op) = &inst.payload else {
+            let Some(output) = inst.output else {
                 continue;
             };
-            if !matches!(
-                op,
-                SSAOp::Copy { .. } | SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. }
-            ) {
+            match &inst.payload {
+                InstPayload::Phi { .. } => {
+                    if let Some(location) = location_of(output) {
+                        match first_phi_by_location.entry((inst.block, location)) {
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                slot.insert(output);
+                            }
+                            std::collections::hash_map::Entry::Occupied(slot) => {
+                                content_union(&mut content, slot.get().0, output.0);
+                            }
+                        }
+                    }
+                }
+                InstPayload::Op(op) => {
+                    let views_input = match op {
+                        SSAOp::Copy { .. } | SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. } => {
+                            match (
+                                graph.value(output),
+                                inst.inputs.first().and_then(|input| graph.value(*input)),
+                            ) {
+                                (Some(out), Some(inp)) => out.var.size >= inp.var.size,
+                                _ => false,
+                            }
+                        }
+                        SSAOp::Subpiece { .. } => true,
+                        _ => false,
+                    };
+                    if views_input && let Some(input) = inst.inputs.first() {
+                        content_union(&mut content, output.0, input.0);
+                    }
+                }
+            }
+        }
+        let mut first_entry_by_location = std::collections::HashMap::new();
+        for value in &graph.values {
+            if graph.def_inst(value.id).is_some() || value.var.is_const() {
                 continue;
             }
-            let (Some(output), [input]) = (inst.output, inst.inputs.as_slice()) else {
-                continue;
-            };
-            let widens = match (graph.value(output), graph.value(*input)) {
-                (Some(out), Some(inp)) => out.var.size >= inp.var.size,
-                _ => false,
-            };
-            if widens {
-                content_union(&mut content, output.0, input.0);
+            if let Some(location) = location_of(value.id) {
+                match first_entry_by_location.entry(location) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(value.id);
+                    }
+                    std::collections::hash_map::Entry::Occupied(slot) => {
+                        content_union(&mut content, slot.get().0, value.id.0);
+                    }
+                }
             }
         }
 
@@ -283,7 +331,17 @@ impl ValueLiveness {
             offsets,
             segments,
             content,
+            unread_phi: dead_phi,
         }
+    }
+
+    /// Whether this merge is read by nothing, so it merges nothing the text
+    /// performs and cannot make two values one object.
+    pub fn phi_is_unread(&self, inst: InstId) -> bool {
+        self.unread_phi
+            .get(inst.0 as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Where `value` is live, by block.

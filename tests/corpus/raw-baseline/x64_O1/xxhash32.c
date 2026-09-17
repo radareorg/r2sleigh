@@ -1,7 +1,8 @@
 uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 263 source obligations: 213 rendered, 50 elided, 0 refused; 66 statements rendered */
+    /* r2dec proof: no individual construct is marked; 263 source obligations: 212 rendered, 51 elided, 0 refused; 64 statements rendered */
     {
+        int32_t tmp_11f00_5;
         uint64_t RCX_6;
         uint64_t RAX_1 = RSI_0 + RDI_0;
         if (RSI_0 < 16) {
@@ -27,7 +28,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                 R10_1 = (uint64_t)(uint32_t)tmp_lane_100000910_54_12_1;
                 int32_t tmp_11f00_4 = (int32_t)((uint32_t*)RDI_0)[2];
                 uint32_t tmp_lane_100000910_67_16_1 = (uint32_t)((uint64_t)tmp_11f00_4 * 0xffffffff85ebca77U) + (uint32_t)RDX_0;
-                int32_t tmp_11f00_5 = (int32_t)((uint32_t*)RDI_0)[3];
+                tmp_11f00_5 = (int32_t)((uint32_t*)RDI_0)[3];
                 tmp_lane_100000910_91_1c_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000910_35_d_1 << 13 | tmp_lane_100000910_35_d_1 >> 19) * 0xffffffff9e3779b1U);
                 R9_1 = (uint64_t)(uint32_t)tmp_lane_100000910_91_1c_1;
                 uint32_t tmp_lane_100000910_99_1f_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffff85ebca77U) + (uint32_t)RCX_1;
@@ -46,19 +47,16 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
         {
             uint64_t RSI_1;
             uint64_t RCX_10;
-            uint64_t RDI_4;
             RSI_1 = (uint64_t)(uint32_t)((uint32_t)RSI_0 + (uint32_t)RCX_6);
             uint64_t tmp_3f080_4 = RDI_0 + 4;
-            RDI_4 = RDI_0;
             if (tmp_3f080_4 <= RAX_1) {
                 for (; ; ) {
-                    int32_t tmp_11f00_8 = (int32_t)*(uint32_t*)RDI_4;
-                    uint32_t tmp_lane_1000009a0_c_47_1 = (uint32_t)((uint64_t)tmp_11f00_8 * 0xffffffffc2b2ae3dU) + (uint32_t)RSI_1;
+                    tmp_11f00_5 = (int32_t)*(uint32_t*)RDI_0;
+                    uint32_t tmp_lane_1000009a0_c_47_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffffc2b2ae3dU) + (uint32_t)RSI_1;
                     RSI_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)(tmp_lane_1000009a0_c_47_1 << 17 | tmp_lane_1000009a0_c_47_1 >> 15) * 0x27d4eb2f);
-                    RCX_10 = RDI_4 + 4;
-                    uint64_t tmp_3f080_6 = RDI_4 + 8;
-                    uint64_t RDI_6 = RCX_10;
-                    RDI_4 = RDI_6;
+                    RCX_10 = RDI_0 + 4;
+                    uint64_t tmp_3f080_6 = RDI_0 + 8;
+                    RDI_0 = RCX_10;
                     if (RAX_1 < tmp_3f080_6) {
                         break;
                     }

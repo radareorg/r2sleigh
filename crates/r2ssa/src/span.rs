@@ -18,118 +18,8 @@
 //! The grouping is a disjoint set over values, so building it costs one pass over
 //! the instructions and answering costs effectively constant time.
 
-use std::collections::VecDeque;
-
-use crate::function::SSAFunction;
-use crate::graph::{BlockId, GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
-use crate::op::SSAOp;
-
-/// Which blocks control can still arrive at from this one.
-///
-/// A block that sits in a loop reaches itself, which is how a value wanted
-/// again on the next turn round the back edge is recognised as still live.
-fn blocks_reachable_from(graph: &SsaGraph, start: BlockId) -> Vec<bool> {
-    let mut seen = vec![false; graph.blocks.len()];
-    let mut queue = VecDeque::from([start]);
-    while let Some(next) = queue.pop_front() {
-        let Some(block) = graph.blocks.get(next.0 as usize) else {
-            continue;
-        };
-        for successor in &block.successors {
-            if !seen[successor.0 as usize] {
-                seen[successor.0 as usize] = true;
-                queue.push_back(*successor);
-            }
-        }
-    }
-    seen
-}
-
-/// Whether this definition only re-expresses at another width what it read.
-///
-/// `R9 = zext(R9D)` is one register's content seen twice, so the two values
-/// hold the same thing and one object may carry both however their live ranges
-/// overlap. A narrowing keeps only part of what it read and is a new content
-/// like any other.
-fn is_width_reprojection(
-    graph: &SsaGraph,
-    output: ValueId,
-    input: ValueId,
-    inst: &GraphInst,
-) -> bool {
-    let InstPayload::Op(op) = &inst.payload else {
-        return false;
-    };
-    if !matches!(
-        op,
-        SSAOp::Copy { .. } | SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. }
-    ) {
-        return false;
-    }
-    let (Some(output), Some(input)) = (graph.value(output), graph.value(input)) else {
-        return false;
-    };
-    output.var.size >= input.var.size
-}
-
-/// Where a use of a value happens, as a point in one block.
-///
-/// A merge reads each source on one incoming edge, so its use of that source
-/// happens at the end of that predecessor and not at the merge. Placing it at
-/// the merge would report a loop-entry source as live all through the body,
-/// which is exactly the carrier the merge rule is there to keep.
-fn use_point(graph: &SsaGraph, site: UseSite) -> Option<(BlockId, usize)> {
-    let inst = graph.inst(site.inst)?;
-    match &inst.payload {
-        InstPayload::Phi { predecessors } => predecessors
-            .get(site.input_idx)
-            .map(|predecessor| (*predecessor, usize::MAX)),
-        InstPayload::Op(_) => Some((inst.block, inst.ordinal)),
-    }
-}
-
-/// Whether anything already in this run is read after this definition.
-///
-/// The run's own definitions are not uses, and the definition being judged
-/// reads the run itself, so neither counts. What counts is a reader the
-/// definition does not precede: later in its own block, or in any block control
-/// can still reach -- including its own block again, when a member that this
-/// block does not define is wanted on the next turn of a loop.
-fn run_is_read_after(
-    graph: &SsaGraph,
-    builder: &StorageSpanBuilder,
-    run: ValueId,
-    def: &GraphInst,
-    reachable: &[bool],
-) -> bool {
-    for member in builder.run_members(run) {
-        let member_def_block = graph
-            .def_inst(member)
-            .and_then(|inst| graph.inst(inst))
-            .map(|inst| inst.block);
-        for site in graph.use_sites(member) {
-            if site.inst == def.id {
-                continue;
-            }
-            let Some((use_block, use_ordinal)) = use_point(graph, *site) else {
-                return true;
-            };
-            if use_block == def.block {
-                if use_ordinal > def.ordinal {
-                    return true;
-                }
-                if member_def_block != Some(def.block)
-                    && reachable.get(def.block.0 as usize).copied().unwrap_or(true)
-                {
-                    return true;
-                }
-            } else if reachable.get(use_block.0 as usize).copied().unwrap_or(true) {
-                return true;
-            }
-        }
-    }
-    false
-}
+use crate::graph::{InstPayload, SsaGraph, ValueId};
+use crate::liveness::{ComponentLiveness, ValueLiveness};
 
 /// One run of definitions over which a storage holds a single value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -151,17 +41,14 @@ pub struct StorageSpans {
 struct StorageSpanBuilder {
     parent: Vec<u32>,
     rank: Vec<u8>,
-    /// Members of each run, threaded into one circular list per run.
-    ///
-    /// Judging a definition needs the run it would continue, not just the input
-    /// it read, so the run has to be walkable. Threading the members costs one
-    /// pointer swap per union and no allocation at all.
-    next_member: Vec<u32>,
+    /// Where each run is live, kept at the run's root; a run of one value is
+    /// built from that value the first time it is asked about.
+    live: Vec<Option<ComponentLiveness>>,
 }
 
 impl StorageSpans {
     /// Cut every storage into the runs over which it holds one value.
-    pub(crate) fn compute(func: &SSAFunction, graph: &SsaGraph) -> Self {
+    pub(crate) fn compute(graph: &SsaGraph, liveness: &ValueLiveness) -> Self {
         let mut builder = StorageSpanBuilder::new(graph.values.len());
 
         let storage_of = |value: ValueId| {
@@ -170,56 +57,24 @@ impl StorageSpans {
                 .and_then(|value| value.canonical_storage)
                 .filter(|storage| !storage.is_unknown())
         };
-        // A definition that reads its own storage continues that storage's run.
-        // One that reads none of it begins a new run, whatever it is called.
-        let join_with_same_storage =
-            |output: ValueId, inputs: &[ValueId], builder: &mut StorageSpanBuilder| {
-                let Some(storage) = storage_of(output) else {
-                    return;
-                };
-                for input in inputs {
-                    if storage_of(*input)
-                        .is_some_and(|other| storage.location() == other.location())
-                    {
-                        builder.union(output, *input);
-                    }
-                }
-            };
 
-        // Continuing a run puts the new content in the run's C object, which is
-        // sound exactly when the two are never both needed -- the same
-        // condition the merge rule below states and tests. A straight-line
-        // definition needs that argument just as much and had none: it
-        // continued the run whatever else was still reading it.
+        // A definition that reads its own storage continues that storage's run
+        // when nothing in the run is still needed where the new content lands.
+        // One that reads none of it begins a new run, whatever it is called.
         //
-        // `adler32` is the case. `add r9d, r8d` forms the sum in `r9d`,
-        // `mov r8d, r9d` saves it, and `imul r9, rdx` then reuses `r9` for the
-        // reciprocal product. Copy propagation lets the later `sub r8d, r9d`
-        // read the sum's own value, so the sum is still live where the product
-        // is defined, and joining the product into the sum's run gave both one
-        // object, in which the multiply destroyed the sum. The loop then
-        // subtracted the quotient from the quotient and the function returned
-        // zero, compiling perfectly cleanly.
-        //
-        // So the same two reasons, either of which is enough:
-        //
-        //   * the definition only re-expresses at another width what it read,
-        //     so both values hold one content and overlapping live ranges cost
-        //     nothing; or
-        //   * nothing already in the run is read after this definition, so the
-        //     run's content really does end here.
-        for block in func.blocks() {
-            let reachable = graph
-                .block_id_for_addr(block.addr)
-                .map(|id| blocks_reachable_from(graph, id))
-                .unwrap_or_default();
-            for (op_index, _) in block.ops.iter().enumerate() {
-                let Some(inst) = graph
-                    .inst_id_for_op_site(block.addr, op_index)
-                    .and_then(|inst| graph.inst(inst))
-                else {
+        // `adler32` is why the second half is there. `add r9d, r8d` forms the
+        // sum in `r9d`, `mov r8d, r9d` saves it, and `imul r9, rdx` then reuses
+        // `r9` for the reciprocal product. Once the copy is forwarded the later
+        // `sub r8d, r9d` reads the sum itself, so the sum is live where the
+        // product is defined, and joining the product into the sum's run gave
+        // both one object in which the multiply destroyed the sum. Liveness is
+        // the whole of that argument; a re-expression at another width is the
+        // one content twice and is exempt inside the predicate.
+        for block in &graph.blocks {
+            for inst in block.insts.iter().filter_map(|inst| graph.inst(*inst)) {
+                if !matches!(inst.payload, InstPayload::Op(_)) {
                     continue;
-                };
+                }
                 let Some(output) = inst.output else {
                     continue;
                 };
@@ -231,83 +86,46 @@ impl StorageSpans {
                     {
                         continue;
                     }
-                    if !is_width_reprojection(graph, output, *input, inst)
-                        && run_is_read_after(graph, &builder, *input, inst, &reachable)
-                    {
-                        continue;
-                    }
-                    builder.union(output, *input);
+                    builder.union_unless_live_together(output, *input, liveness);
                 }
             }
         }
 
-        // A merge continues a run only when every content arriving at it is
-        // already that run.
-        //
-        // A span is the stretch over which one storage holds one content, and a
-        // phi is where contents from different paths arrive at the same place.
-        // Where those contents are the same run the storage is still
-        // uninterrupted and the run continues. Where they are different runs it
-        // is not, and joining anyway declares two contents to be one.
-        //
-        // That is what put `murmur3_32` wrong. It builds `c2` in a lifter
-        // temporary and later `0xe6546b64` in the same temporary, and a phi
-        // over that temporary joined both runs into one span and so into one C
-        // object. The second constant overwrote the first while the first was
-        // still live, and the block loop multiplied by the wrong number while
-        // compiling perfectly cleanly.
+        // A merge is one object with each source it can be, whatever storage
+        // the source was computed in: the machine moves a source into the
+        // merge's storage on the edge, and that move prints nothing exactly
+        // when the two are one object. What forbids it is the same fact as
+        // above -- a source still wanted after the merge is written, or two
+        // sources wanted at once -- which is what put `murmur3_32` wrong when a
+        // merge over a lifter temporary joined two constants that were both
+        // still needed.
         //
         // The phis are considered after the ops so that the runs straight-line
         // code establishes are already known when a merge is judged.
-        for block in func.blocks() {
-            for phi in &block.phis {
-                let Some(output) = graph.value_id_for_var(&phi.dst) else {
-                    continue;
-                };
-                let Some(storage) = storage_of(output) else {
-                    continue;
-                };
-                let sources = phi
-                    .sources
-                    .iter()
-                    .filter_map(|(_, source)| graph.value_id_for_var(source))
-                    .filter(|source| {
-                        storage_of(*source)
-                            .is_some_and(|other| storage.location() == other.location())
-                    })
-                    .collect::<Vec<_>>();
-                // Coalescing an input into the merge makes them one C object,
-                // which is sound exactly when the two are never both needed.
-                // Two independent reasons establish that, and either is enough.
-                //
-                // Every arriving content is already the same run, so the merge
-                // introduces no second content and the storage is uninterrupted
-                // across it. This is the ordinary carried value.
-                let mut roots = sources
-                    .iter()
-                    .map(|source| builder.find_mut(source.0))
-                    .collect::<Vec<_>>();
-                roots.dedup();
-                if roots.len() <= 1 {
-                    join_with_same_storage(output, &sources, &mut builder);
+        for block in &graph.blocks {
+            for inst in block.insts.iter().filter_map(|inst| graph.inst(*inst)) {
+                if !matches!(inst.payload, InstPayload::Phi { .. }) {
                     continue;
                 }
-
-                // Otherwise, only an input this merge is the sole reader of. An
-                // input read by anything else is still needed after the merge,
-                // so one object would have to hold two contents and one of them
-                // would be overwritten while it was still wanted.
-                let exclusive = sources
-                    .iter()
-                    .copied()
-                    .filter(|source| {
-                        graph
-                            .use_sites(*source)
-                            .iter()
-                            .all(|site| Some(site.inst) == graph.def_inst(output))
-                    })
-                    .collect::<Vec<_>>();
-                join_with_same_storage(output, &exclusive, &mut builder);
+                // The graph keeps a merge for every storage a loop writes. One
+                // nothing reads performs no merge, so it joins nothing: two
+                // reloads of different slots through one temporary are two
+                // objects however the dead merge between them is spelled.
+                if liveness.phi_is_unread(inst.id) {
+                    continue;
+                }
+                let Some(output) = inst.output else {
+                    continue;
+                };
+                if storage_of(output).is_none() {
+                    continue;
+                }
+                for source in &inst.inputs {
+                    if storage_of(*source).is_none() {
+                        continue;
+                    }
+                    builder.union_unless_live_together(output, *source, liveness);
+                }
             }
         }
         builder.finalize()
@@ -344,17 +162,56 @@ impl StorageSpanBuilder {
         Self {
             parent: (0..value_count as u32).collect(),
             rank: vec![0; value_count],
-            next_member: (0..value_count as u32).collect(),
+            live: vec![None; value_count],
         }
     }
 
+    fn live_of(&mut self, root: u32, liveness: &ValueLiveness) -> ComponentLiveness {
+        self.live[root as usize]
+            .take()
+            .unwrap_or_else(|| ComponentLiveness::of(liveness, ValueId(root)))
+    }
+
+    /// Join two runs into one unless a value of either is still needed where a
+    /// value of the other holds the storage.
+    fn union_unless_live_together(
+        &mut self,
+        left: ValueId,
+        right: ValueId,
+        liveness: &ValueLiveness,
+    ) -> bool {
+        let mut a = self.find_mut(left.0);
+        let mut b = self.find_mut(right.0);
+        if a == b {
+            return true;
+        }
+        let mut live_a = self.live_of(a, liveness);
+        let mut live_b = self.live_of(b, liveness);
+        if live_a.interferes(&live_b, liveness) {
+            self.live[a as usize] = Some(live_a);
+            self.live[b as usize] = Some(live_b);
+            return false;
+        }
+        if self.rank[a as usize] < self.rank[b as usize] {
+            std::mem::swap(&mut a, &mut b);
+            std::mem::swap(&mut live_a, &mut live_b);
+        }
+        self.parent[b as usize] = a;
+        if self.rank[a as usize] == self.rank[b as usize] {
+            self.rank[a as usize] += 1;
+        }
+        live_a.absorb(live_b);
+        self.live[a as usize] = Some(live_a);
+        true
+    }
+
+    #[cfg(test)]
     fn union(&mut self, left: ValueId, right: ValueId) {
         let mut a = self.find_mut(left.0);
         let mut b = self.find_mut(right.0);
         if a == b {
             return;
         }
-        self.next_member.swap(a as usize, b as usize);
         if self.rank[a as usize] < self.rank[b as usize] {
             std::mem::swap(&mut a, &mut b);
         }
@@ -362,18 +219,6 @@ impl StorageSpanBuilder {
         if self.rank[a as usize] == self.rank[b as usize] {
             self.rank[a as usize] += 1;
         }
-    }
-
-    /// Every value in the run this one belongs to, itself included.
-    fn run_members(&self, member: ValueId) -> impl Iterator<Item = ValueId> + '_ {
-        let start = member.0;
-        let mut current = Some(start);
-        std::iter::from_fn(move || {
-            let value = current?;
-            let next = self.next_member[value as usize];
-            current = (next != start).then_some(next);
-            Some(ValueId(value))
-        })
     }
 
     /// Find with path compression, so construction stays effectively linear.
@@ -448,6 +293,7 @@ impl StorageSpans {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::function::SSAFunction;
     use proptest::prelude::*;
     use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
 
@@ -592,7 +438,8 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let spans = StorageSpans::compute(&func, &graph);
+        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let spans = StorageSpans::compute(&graph, &liveness);
 
         let first = value_named(&graph, "RAX", 1);
         let updated = value_named(&graph, "RAX", 2);
@@ -624,7 +471,8 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let spans = StorageSpans::compute(&func, &graph);
+        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let spans = StorageSpans::compute(&graph, &liveness);
 
         let accumulator = value_named(&graph, "RAX", 1);
         let reused = value_named(&graph, "RAX", 2);
@@ -661,7 +509,8 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let spans = StorageSpans::compute(&func, &graph);
+        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let spans = StorageSpans::compute(&graph, &liveness);
 
         // The narrow write is the lane temporary the extension widens.
         let narrow = graph
@@ -676,11 +525,10 @@ mod tests {
     }
 
     #[test]
-    fn a_read_two_blocks_downstream_is_a_read_after_the_definition() {
+    fn a_carrier_read_after_its_loop_is_one_run_with_its_updates() {
         // A loop whose body updates RAX twice and whose exit reads the header
-        // value. The exit is two edges away from the first update, and the walk
-        // that decided reachability stopped after one, so the update continued
-        // the header's run as if nothing read it afterwards.
+        // value. Every path from an update to the exit passes the merge, which
+        // redefines the carrier, so no update is live beside the merge.
         let mut arch = arch();
         arch.add_register(RegisterDef::new("RDX", 16, 8));
         arch.add_register(RegisterDef::new("cond", 32, 1));
@@ -728,14 +576,15 @@ mod tests {
         )
         .expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let spans = StorageSpans::compute(&func, &graph);
+        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let spans = StorageSpans::compute(&graph, &liveness);
 
         let merged = value_named(&graph, "RAX", 2);
         let updated = value_named(&graph, "RAX", 3);
-        assert_ne!(
+        assert_eq!(
             spans.span_of(merged),
             spans.span_of(updated),
-            "the exit still reads the header's value after the body redefines RAX"
+            "the exit reads the merge, which the merge itself redefines on every turn, so the update is never wanted beside it"
         );
     }
 
@@ -762,7 +611,8 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let spans = StorageSpans::compute(&func, &graph);
+        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let spans = StorageSpans::compute(&graph, &liveness);
 
         let seeded = value_named(&graph, "RAX", 1);
         let updated = value_named(&graph, "RAX", 2);

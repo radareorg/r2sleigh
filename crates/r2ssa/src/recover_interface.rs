@@ -568,7 +568,11 @@ fn recover_interface_inner(
     // scan cannot distinguish program inputs from preserved machine state.
     let graph = SsaGraph::from_function(func);
     let facts = if let Some(machine_context) = machine_context {
-        let storage_spans = StorageSpans::compute(func, &graph);
+        let liveness = crate::liveness::ValueLiveness::compute(
+            &graph,
+            &crate::liveout::FunctionLiveOut::default(),
+        );
+        let storage_spans = StorageSpans::compute(&graph, &liveness);
         crate::semantic::PreparedFunctionFacts::collect_with_context(
             func,
             &graph,

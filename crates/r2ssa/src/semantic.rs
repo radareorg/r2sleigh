@@ -1867,7 +1867,11 @@ pub struct PreparedFunctionFacts {
 
 impl PreparedFunctionFacts {
     pub fn collect(function: &SSAFunction, graph: &SsaGraph) -> Self {
-        let storage_spans = StorageSpans::compute(function, graph);
+        let liveness = crate::liveness::ValueLiveness::compute(
+            graph,
+            &crate::liveout::FunctionLiveOut::default(),
+        );
+        let storage_spans = StorageSpans::compute(graph, &liveness);
         Self::collect_inner(
             function,
             graph,
@@ -1883,7 +1887,11 @@ impl PreparedFunctionFacts {
         graph: &SsaGraph,
         assumptions: &AssumptionSet,
     ) -> Self {
-        let storage_spans = StorageSpans::compute(function, graph);
+        let liveness = crate::liveness::ValueLiveness::compute(
+            graph,
+            &crate::liveout::FunctionLiveOut::default(),
+        );
+        let storage_spans = StorageSpans::compute(graph, &liveness);
         Self::collect_inner(function, graph, &storage_spans, assumptions, None, "assume")
     }
 

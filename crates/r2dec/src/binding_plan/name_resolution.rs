@@ -221,7 +221,27 @@ impl BindingNameResolution {
         let mut source_named_locals = 0usize;
         for (binding_id, binding) in plan.bindings() {
             let mut stack_object = None;
-            let role = match plan.binding_role(binding_id) {
+            let role = plan.binding_role(binding_id);
+            if role.is_none() {
+                let members = source
+                    .graph()
+                    .values
+                    .iter()
+                    .filter(|value| {
+                        matches!(
+                            plan.disposition(value.id),
+                            Some(ValueDisposition::Bound { binding }) if *binding == binding_id
+                        )
+                    })
+                    .map(|value| value.var.display_name().to_string())
+                    .collect::<Vec<_>>();
+                r2il::refusal_evidence!(
+                    "binding-role-conflict",
+                    "{binding_id:?} certified by {:?} over {members:?}",
+                    binding.certificate.sources
+                );
+            }
+            let role = match role {
                 Some(BindingRole::Parameter { slot }) => SymbolRole::Parameter(slot),
                 Some(BindingRole::StackObject { object }) => {
                     stack_object = Some(object);

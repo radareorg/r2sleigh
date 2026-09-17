@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 314 source obligations: 231 rendered, 83 elided, 0 refused; 70 statements rendered */
+    /* r2dec proof: no individual construct is marked; 314 source obligations: 231 rendered, 83 elided, 0 refused; 67 statements rendered */
     {
         uint64_t stack_m56;
         uint32_t stack_m40;
@@ -35,32 +35,29 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             stack_m40 = tmp_24d00_5 * 5 - 0x19ab949c;
         }
         {
-            uint32_t stack_m84_3;
+            uint32_t stack_m84;
             uint8_t* stack_m80 = (uint8_t*)(stack_m24 + stack_m56 * 4);
-            uint32_t stack_m84 = 0;
+            stack_m84 = 0;
             X8_3 = stack_m32;
             X8_3 &= 3;
             uint64_t stack_m104 = X8_3;
-            stack_m84_3 = stack_m84;
             if (X8_3 != 1) {
-                uint32_t stack_m84_2;
-                stack_m84_2 = stack_m84;
                 if (stack_m104 != 2) {
                     if (stack_m104 != 3) {
                         goto L3;
                     } else {
                         uint8_t tmp_25500_1 = stack_m80[2];
-                        stack_m84_2 = stack_m84 ^ (uint32_t)tmp_25500_1 << 16;
+                        stack_m84 ^= (uint32_t)tmp_25500_1 << 16;
                     }
                 }
                 {
                     uint8_t tmp_25500_3 = stack_m80[1];
-                    stack_m84_3 = stack_m84_2 ^ (uint32_t)tmp_25500_3 << 8;
+                    stack_m84 ^= (uint32_t)tmp_25500_3 << 8;
                 }
             }
             {
                 uint8_t tmp_25500_5 = *stack_m80;
-                uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(stack_m92 * (stack_m84_3 ^ (uint32_t)tmp_25500_5)), 15);
+                uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(stack_m92 * (stack_m84 ^ (uint32_t)tmp_25500_5)), 15);
                 uint32_t tmp_24d00_6 = stack_m40;
                 stack_m40 = tmp_24d00_6 ^ stack_m88 * (uint32_t)X0_7;
             }

@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 159 source obligations: 124 rendered, 35 elided, 0 refused; 51 statements rendered */
+    /* r2dec proof: no individual construct is marked; 159 source obligations: 123 rendered, 36 elided, 0 refused; 44 statements rendered */
     {
         uint64_t RAX_1;
         uint64_t RCX_1;
@@ -11,11 +11,9 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
             for (; ; ) {
                 uint32_t tmp_11f00_2 = *(uint32_t*)(RDI_0 + RDX_1 + 1);
                 RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)RAX_1 ^ tmp_11f00_2) * 0x1000193);
-                uint64_t RCX_3 = RDX_1 + 7;
+                RCX_1 = RDX_1 + 7;
                 uint64_t tmp_3f080_2 = RDX_1 + 15;
-                uint64_t RDX_4 = RCX_3;
-                RDX_1 = RDX_4;
-                RCX_1 = RCX_3;
+                RDX_1 = RCX_1;
                 if (RSI_0 < tmp_3f080_2) {
                     break;
                 }
@@ -24,23 +22,20 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
             RCX_1 = (uint64_t)0;
         }
         {
-            uint64_t RAX_14;
             uint64_t RDX_6 = RCX_1;
             uint64_t RDX_7 = RDX_6 - RSI_0;
-            RAX_14 = RAX_1;
             if (RDX_6 < RSI_0) {
-                uint64_t R8_4;
+                uint64_t R8_3;
                 uint32_t tmp_lane_100001392_e_12_1 = (uint32_t)RSI_0 - (uint32_t)RCX_1 & 3;
-                uint64_t R8_3 = (uint64_t)(uint32_t)tmp_lane_100001392_e_12_1;
-                R8_4 = R8_3;
+                R8_3 = (uint64_t)(uint32_t)tmp_lane_100001392_e_12_1;
                 if (tmp_lane_100001392_e_12_1 != 0) {
                     for (; ; ) {
                         uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
                         RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_2 ^ (uint32_t)RAX_1) * 0x1000193);
                         RCX_1++;
-                        uint64_t R8_5 = R8_4 - 1;
-                        uint8_t tmp_12800_2 = R8_4 != 1;
-                        R8_4 = R8_5;
+                        uint64_t R8_5 = R8_3 - 1;
+                        uint8_t tmp_12800_2 = R8_3 != 1;
+                        R8_3 = R8_5;
                         if (!tmp_12800_2) {
                             break;
                         }
@@ -48,7 +43,6 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                 }
                 {
                     uint64_t tmp_3ea80_2 = RDX_7;
-                    RAX_14 = RAX_1;
                     if ((uint64_t)-0x4 >= tmp_3ea80_2) {
                         for (; ; ) {
                             uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RCX_1];
@@ -58,7 +52,6 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                             RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_8 ^ (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_7 ^ (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_5 ^ (uint32_t)RAX_1) * 0x1000193) ^ (uint32_t)tmp_11e00_6) * 0x1000193)) * 0x1000193)) * 0x1000193);
                             RCX_1 += 4;
                             uint8_t tmp_12800_5 = RSI_0 != RCX_1;
-                            RAX_14 = RAX_1;
                             if (!tmp_12800_5) {
                                 break;
                             }
@@ -66,7 +59,7 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                     }
                 }
             }
-            return RAX_14;
+            return RAX_1;
         }
     }
 }

@@ -407,8 +407,6 @@ impl SsaArtifact {
         let formal_parameters =
             crate::semantic::collect_source_formal_parameter_facts(&graph, &machine_context);
         function.install_exact_formal_parameters(&graph, &formal_parameters);
-        let storage_spans = StorageSpans::compute(&function, &graph);
-        let graph_built_bytes = r2il::allocation::live_bytes();
         let return_storages = machine_context
             .abi_model()
             .return_registers()
@@ -418,6 +416,8 @@ impl SsaArtifact {
         let live_out =
             crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
         let liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
+        let storage_spans = StorageSpans::compute(&graph, &liveness);
+        let graph_built_bytes = r2il::allocation::live_bytes();
         let facts = PreparedFunctionFacts::collect_with_context(
             &function,
             &graph,
