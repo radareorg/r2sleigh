@@ -3939,6 +3939,12 @@ fn reaching_format_literals(
             .skip(1)
             .all(|input| reaching_format_literals(context, *input, seen, found)),
         InstPayload::Op(op) => {
+            // An address the code computes from constants -- a page and an
+            // offset, the way arm64 spells one -- is the literal it names.
+            if let Some(address) = constant_address_of(function, graph, value, 0) {
+                found.insert(address);
+                return true;
+            }
             // A translation of a msgid consumes what the msgid consumes, so
             // the literal handed to the translator is the one that counts.
             if let Some(msgid) =
@@ -4091,6 +4097,46 @@ impl FormatForwardingLookup<'_> {
             SourceCallArgumentValue::PreservedEntry => None,
         }
     }
+}
+
+/// The constant `value` evaluates to when it is a constant or integer
+/// arithmetic over constants, at the value's width; `depth` bounds the
+/// walk to the address-forming shapes.
+fn constant_address_of(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    value: ValueId,
+    depth: usize,
+) -> Option<u64> {
+    let graph_value = graph.value(value)?;
+    if let Some(bits) = resolve_const_value(function.decompile_prep_facts(), &graph_value.var) {
+        return Some(bits);
+    }
+    if depth >= 4 {
+        return None;
+    }
+    let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
+    let width_bits = graph_value.var.size.checked_mul(8)?;
+    let mask = if width_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width_bits) - 1
+    };
+    let operand = |index: usize| {
+        definition
+            .inputs
+            .get(index)
+            .and_then(|input| constant_address_of(function, graph, *input, depth + 1))
+    };
+    let result = match &definition.payload {
+        InstPayload::Op(SSAOp::IntAdd { .. }) => operand(0)?.wrapping_add(operand(1)?),
+        InstPayload::Op(SSAOp::IntSub { .. }) => operand(0)?.wrapping_sub(operand(1)?),
+        InstPayload::Op(SSAOp::IntOr { .. }) => operand(0)? | operand(1)?,
+        InstPayload::Op(SSAOp::IntLeft { .. }) => operand(0)?.checked_shl(operand(1)? as u32)?,
+        InstPayload::Op(SSAOp::IntZExt { .. }) => operand(0)?,
+        _ => return None,
+    };
+    Some(result & mask)
 }
 
 /// Prove a merged variadic count from formats that agree.
@@ -5650,6 +5696,7 @@ fn reaching_stack_pointer_before(
             calls_are_barriers: true,
             transfer_carrier: Some(storage),
         },
+        &mut BTreeMap::new(),
     )? {
         ReachingAbiPath::Reaches(state) => Some(state),
         ReachingAbiPath::Cycle => None,
@@ -5678,6 +5725,7 @@ fn reaching_abi_value_in_block_with_policy(
             calls_are_barriers: true,
             transfer_carrier: machine_context.stack_pointer_carrier(),
         },
+        &mut BTreeMap::new(),
     )? {
         ReachingAbiPath::Reaches(state) => Some(state),
         ReachingAbiPath::Cycle => None,
@@ -5690,6 +5738,40 @@ fn trace_call_definitions() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("R2SSA_TRACE_CALLDEF").is_some())
 }
 
+/// What reaches the end of `block_addr`, computed once per query.
+///
+/// A block's answer does not depend on the path that asked for it, except
+/// for a block still being walked -- the root, scanned only up to its
+/// boundary, or an ancestor on the current path, which a back edge asks
+/// about -- and those keep the path's own scan. Without this the walk
+/// enumerated every path through a diamond-shaped body and never finished.
+#[allow(clippy::too_many_arguments)]
+fn reaching_abi_value_at_end(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    block_addr: u64,
+    storage: CanonicalStorageId,
+    visited: &BTreeMap<u64, usize>,
+    policy: ReachingAbiPolicy,
+    memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
+) -> Option<ReachingAbiPath> {
+    let boundary = function.get_block(block_addr)?.ops.len();
+    if visited.contains_key(&block_addr) {
+        return reaching_abi_value_before(
+            function, graph, block_addr, boundary, storage, visited, policy, memo,
+        );
+    }
+    if let Some(known) = memo.get(&block_addr) {
+        return *known;
+    }
+    let result = reaching_abi_value_before(
+        function, graph, block_addr, boundary, storage, visited, policy, memo,
+    );
+    memo.insert(block_addr, result);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
 fn reaching_abi_value_before(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -5698,6 +5780,7 @@ fn reaching_abi_value_before(
     storage: CanonicalStorageId,
     visited: &BTreeMap<u64, usize>,
     policy: ReachingAbiPolicy,
+    memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
     let block = function.get_block(block_addr)?;
     // A block already on this path was scanned up to the boundary it was
@@ -5860,15 +5943,14 @@ fn reaching_abi_value_before(
         return None;
     }
     for predecessor in &predecessors {
-        let predecessor_block = function.get_block(*predecessor)?;
-        match reaching_abi_value_before(
+        match reaching_abi_value_at_end(
             function,
             graph,
             *predecessor,
-            predecessor_block.ops.len(),
             storage,
             &path_visited,
             policy,
+            memo,
         )? {
             ReachingAbiPath::Reaches(state) => values.push(state),
             ReachingAbiPath::Cycle => {}
