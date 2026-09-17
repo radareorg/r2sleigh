@@ -15,7 +15,7 @@
 //! sitting in the registers the caller is entitled to read are live, and being
 //! read by the caller is a use like any other.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::CanonicalStorageId;
 use crate::function::SSAFunction;
@@ -25,6 +25,8 @@ use crate::graph::{SsaGraph, ValueId};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionLiveOut {
     values: BTreeSet<ValueId>,
+    /// The values each returning block hands back, by the block's address.
+    by_return: BTreeMap<u64, BTreeSet<ValueId>>,
     /// Return blocks where no definition of a return register could be found.
     unresolved: BTreeSet<u64>,
 }
@@ -69,8 +71,12 @@ impl FunctionLiveOut {
             // one unresolved block, and left the value the loop computed
             // observed by nothing.
             let mut complete = !return_storages.is_empty();
+            let mut here = BTreeSet::new();
             for storage in return_storages {
-                complete &= live.collect_reaching(func, graph, *storage, block.addr);
+                complete &= live.collect_reaching(func, graph, *storage, block.addr, &mut here);
+            }
+            if !here.is_empty() {
+                live.by_return.insert(block.addr, here);
             }
             if !complete {
                 live.unresolved.insert(block.addr);
@@ -91,6 +97,7 @@ impl FunctionLiveOut {
         graph: &SsaGraph,
         return_storage: CanonicalStorageId,
         from: u64,
+        here: &mut BTreeSet<ValueId>,
     ) -> bool {
         let mut found = false;
         let mut clobbered_any = false;
@@ -134,7 +141,8 @@ impl FunctionLiveOut {
                     continue;
                 }
                 if let Some(value) = graph.value_id_for_var(dst) {
-                    found |= self.values.insert(value);
+                    self.values.insert(value);
+                    found |= here.insert(value);
                 }
                 if covers_fully(storage, return_storage) {
                     defined_here = true;
@@ -162,7 +170,8 @@ impl FunctionLiveOut {
                 }
                 if let Some(value) = graph.value_id_for_var(&phi.dst) {
                     defined_here |= covers_fully(storage, return_storage);
-                    found |= self.values.insert(value);
+                    self.values.insert(value);
+                    found |= here.insert(value);
                 }
             }
             if clobbered {
@@ -197,6 +206,15 @@ impl FunctionLiveOut {
 
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    /// What each returning block hands back, by the block's address.
+    pub fn by_return(
+        &self,
+    ) -> impl Iterator<Item = (u64, impl Iterator<Item = ValueId> + '_)> + '_ {
+        self.by_return
+            .iter()
+            .map(|(addr, values)| (*addr, values.iter().copied()))
     }
 
     /// Returning blocks whose outgoing register value this pass could not name.

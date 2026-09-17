@@ -236,6 +236,7 @@ pub struct SsaArtifact {
     graph: SsaGraph,
     storage_spans: StorageSpans,
     live_out: crate::liveout::FunctionLiveOut,
+    liveness: crate::liveness::ValueLiveness,
     unobserved_merges: crate::deadphi::DeadPhis,
     mode: FunctionPrepareMode,
     facts: PreparedFunctionFacts,
@@ -416,6 +417,7 @@ impl SsaArtifact {
             .collect::<Vec<_>>();
         let live_out =
             crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
+        let liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
         let facts = PreparedFunctionFacts::collect_with_context(
             &function,
             &graph,
@@ -450,6 +452,7 @@ impl SsaArtifact {
             graph,
             storage_spans,
             live_out,
+            liveness,
             unobserved_merges,
             mode,
             facts,
@@ -1048,6 +1051,11 @@ impl SsaArtifact {
         &self.live_out
     }
 
+    /// Where every value is live, the fact every coalescing decision is made from.
+    pub const fn value_liveness(&self) -> &crate::liveness::ValueLiveness {
+        &self.liveness
+    }
+
     pub fn graph(&self) -> &SsaGraph {
         &self.graph
     }
@@ -1103,6 +1111,7 @@ impl SsaArtifact {
             graph: self.graph.clone(),
             storage_spans: self.storage_spans.clone(),
             live_out: self.live_out.clone(),
+            liveness: self.liveness.clone(),
             unobserved_merges: self.unobserved_merges.clone(),
             mode: self.mode,
             facts,
