@@ -26939,3 +26939,50 @@ Both are waiting on CI.
 `doc/phase1-plan.md`. One note for 1c from this step: an import's `char *`
 parameter is spelled `int8_t*` because `parse_c_type_like` reads `char` as
 an 8-bit integer; the declaration should keep the C spelling.
+
+### Phase 1b: an object is as wide as its widest read
+
+**The rule.** `binding_width` and `seal_width_evidence` no longer take the
+carrier: each member contributes the bit past the widest read any operation
+takes of it (`member_read_end_bits`), the object is the largest of those
+rounded up to a width C declares, and its definitions may be wider -- the
+assignment truncates, and nothing reads the bits it drops. The call-result
+special case of Phase 0 is deleted; the general rule gives the same
+`int32_t RAX_1 = strcmp(...)`. A member C cannot spell (a three-byte value)
+is still refused rather than rounded, because rounding would claim bits
+nothing defines.
+
+**What a read is.** The canonical use slice says the operand whole for
+every computed value (`canonical_machine_use_disposition`: the object is the
+value, not the register), so the width had to come from the operation. The
+projection now records `use_read_ends` beside the use table: the piece a
+`Subpiece` extracts, the width a truncating cast keeps, the whole operand
+for everything else, and zero where the projection could not say
+(`MachineProjection::use_read_end_bits`). Three reads are not the
+operation's own. A merge or a same-width copy reads nothing: it asks what
+its consumers ask, followed transitively with a visited set, so a call
+result merged at a join is as wide as the join's readers. A call's
+conventional read of a register the certified call does not pass
+(`ignored_reads`, the set Phase 0 derived for liveness) is not a read. And a
+value the function entered with is read at its carrier, so a parameter's
+declaration still agrees with what a caller writes. A value nothing reads
+keeps its width. Each read is on the `binding-width` evidence line.
+
+**Measured.** bzip2 arm64 -O2, `tests/corpus/cast_census.py` over the
+census output (a durable script now; the design's numbers were ad hoc):
+narrowing name casts 693 to 383, names never read at their declared width
+77 to 18, statements 6097 unchanged, refusals 13 unchanged. Total casts rose
+from 3800 to 3850: the `(uint64_t)(uint32_t)x` pair on a zero-extending
+definition became one `(uint32_t)x` on the narrower object, but each
+definition of a narrowed object now spells `(uint32_t)(expr)`, which is 1c's
+edge to decide. Corpus: differential 60/60, sixteen cells changed and read
+(-O0 `adler32` `uint32_t tmp = (uint32_t)(x % 0xfff1)`, every
+`uint64_t R = (uint64_t)(uint32_t)e` now `uint32_t R = (uint32_t)e`, and
+`crc32_bitwise`'s vector register read only through its low lanes narrowed
+from 128 to 64 bits with the lane reads re-widening it, `(uint8_t)((__uint128_t)Q3_2 >> 8)`, another 1c edge); r2r 99 of 101 with the two
+recorded failures.
+
+**Next: 1c**, `doc/phase1-plan.md`. The edges this step exposed for it: the
+truncating cast on a narrowed definition, the literal cast `(uint32_t)0`,
+the re-widening of a narrowed vector register at a lane read, and the
+`int8_t*` spelling of an import's `char *`.
