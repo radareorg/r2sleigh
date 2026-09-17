@@ -24,16 +24,12 @@ pub struct Forwarding {
 }
 
 impl SSAFunction {
-    /// Forward every same-width copy of a variable to the readers of the copy.
+    /// Forward every copy that is a value fact to the readers of the copy.
     ///
-    /// A copy of a constant is left alone: whether a literal is spelled at
-    /// each reader or written once to an object is a rendering decision, and
-    /// the binding plan makes it with the object partition in hand.
+    /// One principle decides which: a copy the program means keeps its
+    /// statement, and every other copy is the value it copied. See
+    /// [`Self::copy_is_a_program_write`].
     pub(crate) fn forward_copies(&mut self) -> Forwarding {
-        // A copy whose result a merge reads is that merge's edge write, placed
-        // by the program: forwarding it moves the write onto every edge the
-        // block leaves by, which doubles it where the block also exits a
-        // loop. It stays a statement where the program put it.
         let mut merge_sources = std::collections::HashSet::<SSAVar>::new();
         for block in &self.blocks {
             for phi in &block.phis {
@@ -46,9 +42,7 @@ impl SSAFunction {
                 if let SSAOp::Copy { dst, src } = op
                     && dst.size == src.size
                     && dst != src
-                    && !src.is_const()
-                    && !merge_sources.contains(dst)
-                    && !self.is_memory_variable(dst)
+                    && !self.copy_is_a_program_write(dst, src, &merge_sources)
                 {
                     forwarded.insert(dst.clone(), src.clone());
                 }
@@ -94,9 +88,24 @@ impl SSAFunction {
 }
 
 impl SSAFunction {
+    /// Whether a copy is one the program means, so its statement stays.
+    ///
+    /// Three copies mean something: a write of a named object, which is the
+    /// source's assignment to a private slot; a merge's edge write, which the
+    /// block makes before it branches and which forwarded would land on every
+    /// edge the block leaves by; and a literal's spelling, which is the plan's
+    /// decision with the partition in hand. Every other copy is a value fact.
+    fn copy_is_a_program_write(
+        &self,
+        dst: &SSAVar,
+        src: &SSAVar,
+        merge_sources: &std::collections::HashSet<SSAVar>,
+    ) -> bool {
+        src.is_const() || merge_sources.contains(dst) || self.is_memory_variable(dst)
+    }
+
     /// Whether this variable is a stack slot the function proved private and
-    /// treats as a variable. A copy into it is the source's assignment to a
-    /// named local, so the slot stays the object and its readers read it.
+    /// treats as a variable.
     fn is_memory_variable(&self, var: &SSAVar) -> bool {
         self.canonical_storage_by_var
             .get(var)

@@ -884,6 +884,8 @@ pub(crate) struct LegacyObservationJournal {
     /// Stores into an object that already holds the value, by block address and op index.
     coalesced_store_sites: BTreeSet<(u64, usize)>,
     coalesced_carrier_uses: BTreeSet<UseSite>,
+    /// Bindings whose every read is a return or a merge of the binding itself.
+    return_only_carriers: BTreeSet<crate::binding_plan::BindingId>,
     /// Removed carrier phis for which every incoming edge is already accounted
     /// by SSA identity or one of `coalesced_carrier_copy_sites`.
     coalesced_carrier_phi_writes: BTreeSet<InstId>,
@@ -2000,43 +2002,9 @@ impl LegacyObservationJournal {
     /// through an expression written somewhere the rewrite cannot see. A phi
     /// that feeds the same object back is the carrier rather than a reader.
     pub(crate) fn merge_carries_only_to_return(&self, symbol: SymbolId) -> bool {
-        let Some(binding) = (0..self.plan.binding_count())
-            .filter_map(crate::binding_plan::BindingId::from_dense_index)
-            .find(|binding| self.names.symbol_for_binding(*binding) == Some(symbol))
-        else {
-            return false;
-        };
-        let owns = |value: ValueId| {
-            matches!(
-                self.names.disposition_for_value(value),
-                Some(ValueDisposition::Bound { binding: owner }) if *owner == binding
-            )
-        };
-        let graph = self.source.graph();
-        let returns = &self.source.certificates().returns_by_inst;
-        let mut members = 0_usize;
-        for index in 0..graph.values.len() {
-            let value = ValueId(index as u32);
-            if !owns(value) {
-                continue;
-            }
-            members += 1;
-            for site in graph.use_sites(value) {
-                if returns.contains_key(&site.inst) {
-                    continue;
-                }
-                let Some(inst) = graph.inst(site.inst) else {
-                    return false;
-                };
-                if matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
-                    && inst.output.is_some_and(owns)
-                {
-                    continue;
-                }
-                return false;
-            }
-        }
-        members > 0
+        self.return_only_carriers
+            .iter()
+            .any(|binding| self.names.symbol_for_binding(*binding) == Some(symbol))
     }
 
     /// Whether this marker stands for a write rather than for a value or read.
@@ -2303,17 +2271,9 @@ impl LegacyObservationJournal {
                 // tested below; the loop carrier is where the case was found,
                 // not the reason it holds.
                 //
-                // A version-0 source has no defining statement, and the
-                // exclusion for it is exactly as wide as its reason: a
-                // live-in register that is not a parameter has no
-                // declaration to be rendered by either side, so eliding its
-                // copy leaves the object read before it is assigned. A
-                // parameter is the case the reason excepts -- the signature
-                // declares it, so the binding is written before the function
-                // body starts and the copy adds nothing. Excluding it too
-                // left `X0_0 = X0_0;` on the first two lines of every arm64
-                // function that takes arguments, which compiled only while a
-                // redundant cast hid it from `-Wself-assign`.
+                // An entry value among the sources is no exception: a binding
+                // holding one is declared as caller-supplied, so its copy
+                // into that binding says `x = x` like any other.
                 //
                 // And the program's own copies. `subs x1, x1, #1` lifts to a
                 // subtraction into a temporary and a copy of the temporary
@@ -2432,58 +2392,20 @@ impl LegacyObservationJournal {
                 // mints it only for the carrier the callee brings back, so
                 // the operation's existence is the licence an edge copy has
                 // to earn below.
-                let src = match op {
-                    r2ssa::SSAOp::Copy { src, .. } | r2ssa::SSAOp::CallRestore { src, .. } => src,
-                    _ => continue,
-                };
-                // A restore's source is the carrier as the function was
-                // entered with it whenever the call is the first one, and that
-                // version-0 exclusion does not reach it: the reason for the
-                // exclusion is that a live-in register with no declaration is
-                // read before it is assigned, and the stack pointer has no
-                // declaration on either side of this copy, because the frame
-                // it addresses is not a C object at all.
-                // A copy of an entry value into the object that is the entry
-                // value says nothing either; the exclusion below is for a
-                // copy that would move an undeclared live-in somewhere else.
-                let same_object_as_source = graph.value_id_for_var(src).is_some_and(|source| {
-                    matches!(
-                        (plan.disposition(source), normalized_projections[block_id.0 as usize][op_idx].output.map(|output| plan.disposition(output.value))),
-                        (Some(ValueDisposition::Bound { binding: input }), Some(Some(ValueDisposition::Bound { binding: output })))
-                            if input == output
-                    )
-                });
-                if !matches!(op, r2ssa::SSAOp::CallRestore { .. })
-                    && src.version == 0
-                    && !same_object_as_source
-                    && !copy_source_is_a_parameter(&plan, graph, src)
-                {
+                if !matches!(
+                    op,
+                    r2ssa::SSAOp::Copy { .. } | r2ssa::SSAOp::CallRestore { .. }
+                ) {
                     continue;
                 }
                 let mut program_copy = None;
                 let incoming = match origins.origin(site) {
                     Some(NormalizedOpOrigin::PhiEdgeCopy(origin)) => Some(origin.incoming),
                     Some(NormalizedOpOrigin::RelocatedInitializer(_)) => None,
-                    // A copy the program itself made needs more than both
-                    // sides being one binding. A copy normalization
-                    // introduced sits at a merge edge, where nothing can have
-                    // touched the object between the edge's two ends; one the
-                    // program made has a position, and the object can be
-                    // written between the source's definition and the copy --
-                    // a save and restore around a clobber is exactly that
-                    // shape, and dropping the restore loses the value. Three
-                    // corpus cells computed the wrong answer when every such
-                    // copy was dropped on the strength of the coalescing
-                    // alone.
-                    //
-                    // So the question is asked at the copy rather than of the
-                    // coalescing: nothing wrote this object between the value
-                    // being produced and the copy of it. That is checkable
-                    // here and does not depend on the interference test having
-                    // been right. `subs x1, x1, #1` -- a subtraction into a
-                    // temporary and a copy of the temporary into `x1` -- is
-                    // the shape it admits, and it is the shape the ledger
-                    // already names.
+                    // A copy the program itself made says nothing for the same
+                    // reason: both sides are one object, and the partition
+                    // that made them one was judged by liveness, so nothing
+                    // wrote the object between the value and the copy.
                     Some(NormalizedOpOrigin::Original(inst)) => {
                         program_copy = Some(*inst);
                         None
@@ -2527,13 +2449,6 @@ impl LegacyObservationJournal {
                 // value and the copy -- is the one the certificate already
                 // answered. The call is the only thing between the two sides,
                 // and the certificate is about exactly that call.
-                if let Some(inst) = program_copy
-                    && !matches!(op, r2ssa::SSAOp::CallRestore { .. })
-                    && !inline_spells_the_destination
-                    && !nothing_wrote_the_object_between(&plan, graph, inst, input.value)
-                {
-                    continue;
-                }
                 let same_binding = inline_spells_the_destination
                     || matches!(
                         dispositions,
@@ -2586,6 +2501,46 @@ impl LegacyObservationJournal {
             })
             .map(|removed| removed.definition.inst)
             .collect::<BTreeSet<_>>();
+        // A binding read only by returns and by merges of itself exists to
+        // carry a value out; computed once, over every value, for the cleanup
+        // that asks per return.
+        let return_only_carriers = {
+            let returns = &source.source().certificates().returns_by_inst;
+            let owner = |value: ValueId| match names.disposition_for_value(value) {
+                Some(ValueDisposition::Bound { binding }) => Some(*binding),
+                _ => None,
+            };
+            let mut carriers = BTreeMap::<crate::binding_plan::BindingId, bool>::new();
+            for index in 0..graph.values.len() {
+                let value = ValueId(index as u32);
+                let Some(binding) = owner(value) else {
+                    continue;
+                };
+                let only_returns = carriers.entry(binding).or_insert(true);
+                if !*only_returns {
+                    continue;
+                }
+                for site in graph.use_sites(value) {
+                    if returns.contains_key(&site.inst) {
+                        continue;
+                    }
+                    let own_merge = graph.inst(site.inst).is_some_and(|inst| {
+                        matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
+                            && inst
+                                .output
+                                .is_some_and(|output| owner(output) == Some(binding))
+                    });
+                    if !own_merge {
+                        *only_returns = false;
+                        break;
+                    }
+                }
+            }
+            carriers
+                .into_iter()
+                .filter_map(|(binding, only_returns)| only_returns.then_some(binding))
+                .collect::<BTreeSet<_>>()
+        };
         crate::stage_timing::mark("journal_coalesced");
         let values = vec![None; graph.values.len()].into_boxed_slice();
         let uses = graph
@@ -2632,6 +2587,7 @@ impl LegacyObservationJournal {
             coalesced_carrier_copy_sites,
             coalesced_store_sites,
             coalesced_carrier_uses,
+            return_only_carriers,
             coalesced_carrier_phi_writes,
             coalesced_copy_writes,
             coalesced_copy_outputs,
@@ -5798,74 +5754,6 @@ fn classify_value_node(
     } else {
         Ok(LegacyValueObservation::InlineNonLiteral)
     }
-}
-
-/// Whether the object a copy writes went untouched between the value it
-/// copies being produced and the copy itself.
-///
-/// Both sides of the copy resolve to one binding, so the copy re-states a
-/// write the object has already had -- provided nothing else wrote that
-/// object in between. Asked here rather than of the coalescing, because the
-/// answer is local and exact: the source's definition and the copy are two
-/// positions in one block, and every write to the binding is an instruction
-/// whose output belongs to it.
-///
-/// A source defined in another block declines. Reaching it means crossing a
-/// control edge, and what may have written the object on the way is a
-/// liveness question this deliberately does not ask.
-fn nothing_wrote_the_object_between(
-    plan: &BindingPlan,
-    graph: &r2ssa::SsaGraph,
-    copy: InstId,
-    source: ValueId,
-) -> bool {
-    let Some(ValueDisposition::Bound { binding }) = plan.disposition(source) else {
-        return false;
-    };
-    let Some(copy_inst) = graph.inst(copy) else {
-        return false;
-    };
-    let Some(source_inst) = graph.def_inst(source).and_then(|inst| graph.inst(inst)) else {
-        return false;
-    };
-    if source_inst.block != copy_inst.block || source_inst.ordinal > copy_inst.ordinal {
-        return false;
-    }
-    !graph.insts.iter().any(|inst| {
-        inst.block == copy_inst.block
-            && inst.ordinal > source_inst.ordinal
-            && inst.ordinal < copy_inst.ordinal
-            && inst.output.is_some_and(|written| {
-                matches!(
-                    plan.disposition(written),
-                    Some(ValueDisposition::Bound { binding: other }) if other == binding
-                )
-            })
-    })
-}
-
-/// Whether a copy's undefined source is a value the signature declares.
-///
-/// A live-in register with no defining instruction is either a parameter,
-/// which the function's own signature declares and therefore writes before
-/// the body runs, or a register the program read before writing, which
-/// nothing declares. The first can have its copy elided; the second cannot,
-/// because then no statement writes the object at all.
-fn copy_source_is_a_parameter(
-    plan: &BindingPlan,
-    graph: &r2ssa::SsaGraph,
-    src: &r2ssa::SSAVar,
-) -> bool {
-    let Some(value) = graph.value_id_for_var(src) else {
-        return false;
-    };
-    let Some(ValueDisposition::Bound { binding }) = plan.disposition(value) else {
-        return false;
-    };
-    matches!(
-        plan.binding_role(*binding),
-        Some(crate::binding_plan::BindingRole::Parameter { .. })
-    )
 }
 
 /// Whether this expression reads `symbol` anywhere inside it.
