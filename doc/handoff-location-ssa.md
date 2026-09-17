@@ -26724,6 +26724,31 @@ instructions, plans in 363ms against 345ms -- the descending rounds cost in
 `plan_components` and `plan_inlinable` what the deleted conservative pass
 gave back -- and the whole `pd:s` wall time is unchanged at 3.9s.
 
+**An inferred slot is evidence; a declared one is the program's.** radare2
+names the arm64 frame save `stp x29, x30, [sp, N]` as two locals, the capture
+forwarded every radare2 variable as a declared slot whenever the function had
+an address-linked signature, and the callee-allocation collector skipped every
+declared slot -- so on a binary with debug information the frame round trip
+was never certified and `var_20h = X29_0` rendered at the top of every
+function that calls. The wire now carries whether debug information declared
+the slot (`RAnalFcnSlot.dwarf_declared`, format 16), and the collector admits
+an inferred `Local` so that its round trip can be proven. Two things had to
+hold beside that. A parameter home is a parameter's whatever named it, so
+only the `Local` role is admitted. And a callee allocation names a source-less
+object: an inferred local that did not turn out to be a round trip keeps its
+own identity, or its stores stop being the variable's writes and placement
+reports the local read before it is assigned -- which is what
+`dec_authenticate_*` and `dec_explicit_*` on `vuln_test_x86` showed the first
+time round.
+
+Two probes taught the same lesson about measuring: r2r runs the fork's
+`radare2` with `XDG_DATA_HOME` redirected, so only its own plugin directory
+loads, and it uses `bins/vuln_test_x86` for the tests named above. A `pd:s`
+from the shell loads the user plugin directory as well, and against
+`bins/vuln_test` it answers a different question. `tests/corpus/locked_probe.sh`
+measures this tree's plugin, not r2r's environment; when an r2r expectation is
+the question, run r2r.
+
 **Gates at the end of the arc.** Corpus raw, differential, snapshot and all
 four audits 60/60; r2r 93 passing with the four recorded failures; unit tests
 and clippy clean on `r2ssa` and `r2dec`.
