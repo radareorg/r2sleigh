@@ -27031,3 +27031,21 @@ object, real conversions the machine made; 314 `(uint32_t)name` on 64-bit
 names read at 32 bits elsewhere, real truncations; 216 `(int32_t)(expr)`
 signed reinterpretations at comparisons; and the `(__uint128_t)` re-widening
 of a narrowed vector register at a lane read.
+
+### Phase 1 verification
+
+r2r 99 of 101 with the two recorded failures; corpus 60/60 on every gate
+including `--gate cutover` on a clean tree; the shapes gate has no required
+cells and its matrix is as it was (17 of 78 pass both ways, the rest the
+recorded blocks). Growth curve over bzip2's 107 functions with
+`R2SLEIGH_TIMING=1` and `growth_fit.py`: every plan stage between 0.98 and
+1.04 on the tail, `fold` 1.10, `audit` 1.15 (down from 1.39 on 39 points),
+`structure_cleanup` 1.56 on the tail at 284ms total -- the one superlinear
+stage left, to be traced before Phase 2 grows what it walks. bzip2 census:
+48 bodies, 43 declarations, 3 undeclared stubs, 13 refusals in seven
+classes (four `format_argument_not_literal`, two
+`MissingNormalizedSiteContext`, two `implementation.rs:1432`, one each of
+`lowering.rs:168`, `implementation.rs:1726`, program-variable
+authorization, unobserved binding read at placement, and an effect
+obligation at a call). Those are next, one class at a time, starting with
+the largest.
