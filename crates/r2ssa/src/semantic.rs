@@ -8313,6 +8313,26 @@ fn collect_prepared_function_certificates(
             unobserved,
             live_out,
         );
+    // A callee allocation names a source-less object. A local radare2 inferred
+    // was admitted above only so that a frame save it named could be proven a
+    // round trip; where it was not, the slot keeps its own identity.
+    let callee_stack_allocations = {
+        let mut allocations = callee_stack_allocations;
+        allocations.retain(|object, _| {
+            let declared = objects
+                .objects
+                .get(object)
+                .is_some_and(|fact| match fact.kind {
+                    ObjectKind::StackSlot { base, offset, .. }
+                    | ObjectKind::FrameObject { base, offset, .. } => {
+                        exact_stack_slots.contains_key(&(base, offset))
+                    }
+                    _ => false,
+                });
+            !declared || stack_frame_round_trips.contains_key(object)
+        });
+        allocations
+    };
     let (machine_return_controls, machine_return_control_by_inst) =
         collect_machine_return_control_certificates(
             boundaries, graph, objects, structured, unobserved,
