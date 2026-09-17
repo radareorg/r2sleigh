@@ -651,150 +651,191 @@ pub(super) fn binding_components_with(
     Ok(components)
 }
 
-/// Compute the smallest unsigned C-object width proved by the graph and every
-/// surviving exact machine projection. Refused projection cells are delegated
-/// upstream and cannot survive the cutover, so they do not poison the object.
-/// The width the callee declares for this value, where the value is the
-/// call's result itself rather than something derived from it.
-pub(super) fn call_result_return_bits(
+/// What one member's reads ask of the object: the bit past the widest read,
+/// or a refusal where a read is incoherent with the member.
+///
+/// A read the projection cannot state, the address of the object, and a value
+/// the caller reads at the return keep the member whole. A value the function
+/// entered with is read at the width the machine handed it over in: its
+/// carrier, so this function's idea of its parameters agrees with the
+/// declaration a caller writes for it. A merge or a copy reads nothing of its
+/// own: what it asks is what its consumers ask. A member nothing reads keeps
+/// its width.
+pub(super) fn member_read_end_bits(
     source_owned: &SourceOwnedFunctionFacts,
+    machine_projection: &MachineProjection,
     value: ValueId,
-) -> Option<u32> {
-    let source = source_owned.source();
-    let certificate = source.certificates().call_results.get(&value)?;
-    if !certificate.relation.is_identity() {
-        return None;
-    }
-    let signature = source_owned
-        .report()
-        .callsites()?
-        .by_callsite
-        .values()
-        .find(|fact| fact.call_site_id == certificate.call_site)?
-        .callee_signature
-        .as_ref()?;
-    let ptr_bits = source
-        .machine_context()
-        .memory_model()
-        .default_address_bits();
-    super::rules::declaration_type_width(&signature.return_type, ptr_bits)
+) -> Result<Result<u32, ValueRefusal>, BindingPlanBuildError> {
+    let mut visited = std::collections::BTreeSet::new();
+    let read_end_bits = match read_end_bits_through_merges(
+        source_owned,
+        machine_projection,
+        value,
+        &mut visited,
+    )? {
+        Ok(bits) => bits,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    Ok(Ok(if read_end_bits == 0 {
+        value_width_bits(source_owned, value)?
+    } else {
+        read_end_bits
+    }))
 }
 
+fn value_width_bits(
+    source_owned: &SourceOwnedFunctionFacts,
+    value: ValueId,
+) -> Result<u32, BindingPlanBuildError> {
+    let graph_value =
+        source_owned
+            .source()
+            .graph()
+            .value(value)
+            .ok_or(BindingPlanBuildError::Seal(
+                BindingPlanSourceMismatch::ValueTopology {
+                    index: value.0 as usize,
+                    value,
+                },
+            ))?;
+    graph_value
+        .var
+        .size
+        .checked_mul(8)
+        .filter(|bits| *bits > 0)
+        .ok_or(BindingPlanBuildError::InvalidValueWidth {
+            value,
+            size_bytes: graph_value.var.size,
+        })
+}
+
+/// The bit past the widest read of `value`, following merges and copies to
+/// the reads of their outputs; zero where nothing reads it.
+fn read_end_bits_through_merges(
+    source_owned: &SourceOwnedFunctionFacts,
+    machine_projection: &MachineProjection,
+    value: ValueId,
+    visited: &mut std::collections::BTreeSet<ValueId>,
+) -> Result<Result<u32, ValueRefusal>, BindingPlanBuildError> {
+    let source = source_owned.source();
+    let graph = source.graph();
+    let member_width_bits = value_width_bits(source_owned, value)?;
+    // A member C cannot spell is not declared at any width: rounding it up
+    // would claim bits nothing defines.
+    if !declaration_width_is_supported(member_width_bits) {
+        return Ok(Err(ValueRefusal::UnsupportedDeclarationWidth {
+            value,
+            width_bits: member_width_bits,
+        }));
+    }
+    if !visited.insert(value) {
+        return Ok(Ok(0));
+    }
+    let computed = graph.def_inst(value).is_some();
+    let mut read_end_bits = if source.live_out().contains(value) {
+        member_width_bits
+    } else {
+        0
+    };
+    for site in graph.use_sites(value) {
+        // A call's conventional read of a register the certified call does
+        // not pass is not a read the text performs.
+        if source.ignored_reads().contains(site) {
+            continue;
+        }
+        let Some(MachineUseDisposition::Exact(slice)) = machine_projection.use_disposition(*site)
+        else {
+            read_end_bits = read_end_bits.max(member_width_bits);
+            continue;
+        };
+        let valid_end = slice
+            .bit_offset()
+            .checked_add(slice.width_bits())
+            .is_some_and(|end| end <= slice.carrier_width_bits());
+        if slice.width_bits() == 0 || slice.carrier_width_bits() < member_width_bits || !valid_end {
+            return Ok(Err(ValueRefusal::IncoherentUseProjection { site: *site }));
+        }
+        let reader = graph.inst(site.inst);
+        let forwarded_output = reader.and_then(|inst| match inst.payload {
+            r2ssa::InstPayload::Phi { .. } | r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) => {
+                inst.output
+            }
+            _ => None,
+        });
+        let site_end_bits = if !computed {
+            slice.carrier_width_bits()
+        } else if let Some(output) = forwarded_output
+            && value_width_bits(source_owned, output)? == member_width_bits
+        {
+            match read_end_bits_through_merges(source_owned, machine_projection, output, visited)? {
+                Ok(bits) => bits,
+                Err(_) => member_width_bits,
+            }
+        } else {
+            machine_projection
+                .use_read_end_bits(*site)
+                .unwrap_or(member_width_bits)
+        };
+        r2il::refusal_evidence!(
+            "binding-width",
+            "{value:?} {:?} read at {:?} to bit {site_end_bits} by {:?}",
+            graph
+                .value(value)
+                .map(|graph_value| graph_value.var.display_name()),
+            site,
+            reader.map(|inst| &inst.payload)
+        );
+        read_end_bits = read_end_bits.max(site_end_bits);
+    }
+    if let Some(definition) = graph.def_inst(value)
+        && let Some(&MachineWriteDisposition::Exact(MachineWriteProjection::ZeroExtend {
+            from_width_bits,
+            to_width_bits,
+        })) = machine_projection.write_disposition(definition)
+        && (from_width_bits == 0
+            || from_width_bits >= to_width_bits
+            || to_width_bits < member_width_bits)
+    {
+        return Ok(Err(ValueRefusal::IncoherentWriteProjection { value }));
+    }
+    Ok(Ok(read_end_bits))
+}
+
+/// The narrowest declaration width that holds `bits`.
+pub(super) fn declaration_width_holding(bits: u32) -> Option<u32> {
+    [8, 16, 32, 64, 128, 256, 512]
+        .into_iter()
+        .find(|width| *width >= bits)
+}
+
+/// An object is as wide as the widest read any member takes of it, rounded
+/// up to a width C declares. Its definitions may be wider: the assignment
+/// truncates, and nothing reads the bits it drops.
 fn binding_width(
     source_owned: &SourceOwnedFunctionFacts,
     machine_projection: &MachineProjection,
     component: &BindingComponent,
 ) -> Result<BindingWidth, BindingPlanBuildError> {
-    let source = source_owned.source();
-    let graph = source.graph();
-    let mut binding_width_bits = 0_u32;
-    // A call's result is the callee's declared return; the register that
-    // carries it is wider, and what the convention says of the rest is
-    // nothing. Where every read stays inside the declared width, the object
-    // is the return, not the carrier.
-    let mut declared_result_bits = None::<u32>;
-    let mut reads_stay_inside = true;
+    let mut read_end_bits = 0_u32;
     for value in &component.members {
-        let graph_value = graph.value(*value).ok_or(BindingPlanBuildError::Seal(
-            BindingPlanSourceMismatch::ValueTopology {
-                index: value.0 as usize,
-                value: *value,
-            },
-        ))?;
-        let member_width_bits = graph_value
-            .var
-            .size
-            .checked_mul(8)
-            .filter(|bits| *bits > 0)
-            .ok_or(BindingPlanBuildError::InvalidValueWidth {
-                value: *value,
-                size_bytes: graph_value.var.size,
-            })?;
-        binding_width_bits = binding_width_bits.max(member_width_bits);
-
-        for site in graph.use_sites(*value) {
-            let Some(MachineUseDisposition::Exact(slice)) =
-                machine_projection.use_disposition(*site)
-            else {
-                continue;
-            };
-            let valid_end = slice
-                .bit_offset()
-                .checked_add(slice.width_bits())
-                .is_some_and(|end| end <= slice.carrier_width_bits());
-            if slice.width_bits() == 0
-                || slice.carrier_width_bits() < member_width_bits
-                || !valid_end
-            {
-                return Ok(BindingWidth::Refused(
-                    ValueRefusal::IncoherentUseProjection { site: *site },
-                ));
-            }
-            binding_width_bits = binding_width_bits.max(slice.carrier_width_bits());
-            if slice.bit_offset() != 0 {
-                reads_stay_inside = false;
-            }
-            declared_result_bits = declared_result_bits.map(|bits| bits.max(slice.width_bits()));
+        match member_read_end_bits(source_owned, machine_projection, *value)? {
+            Ok(bits) => read_end_bits = read_end_bits.max(bits),
+            Err(reason) => return Ok(BindingWidth::Refused(reason)),
         }
-        match call_result_return_bits(source_owned, *value) {
-            Some(bits) if component.members.len() == 1 => {
-                declared_result_bits =
-                    Some(declared_result_bits.map_or(bits, |seen| seen.max(bits)));
-                if declared_result_bits != Some(bits) {
-                    reads_stay_inside = false;
-                }
-            }
-            _ => reads_stay_inside = false,
-        }
-
-        let Some(definition) = graph.def_inst(*value) else {
-            continue;
-        };
-        let Some(MachineWriteDisposition::Exact(write)) =
-            machine_projection.write_disposition(definition)
-        else {
-            continue;
-        };
-        let carrier_width_bits = match *write {
-            MachineWriteProjection::Full => member_width_bits,
-            MachineWriteProjection::ZeroExtend {
-                from_width_bits,
-                to_width_bits,
-            } => {
-                if from_width_bits == 0
-                    || from_width_bits >= to_width_bits
-                    || to_width_bits < member_width_bits
-                {
-                    return Ok(BindingWidth::Refused(
-                        ValueRefusal::IncoherentWriteProjection { value: *value },
-                    ));
-                }
-                to_width_bits
-            }
-        };
-        binding_width_bits = binding_width_bits.max(carrier_width_bits);
     }
-    if reads_stay_inside
-        && let Some(bits) = declared_result_bits
-        && bits < binding_width_bits
-        && declaration_width_is_supported(bits)
-    {
-        binding_width_bits = bits;
-    }
-    if !declaration_width_is_supported(binding_width_bits) {
-        let value = component
-            .members
-            .first()
-            .copied()
-            .expect("binding components are non-empty");
-        return Ok(BindingWidth::Refused(
+    match declaration_width_holding(read_end_bits) {
+        Some(width_bits) => Ok(BindingWidth::Exact(width_bits)),
+        None => Ok(BindingWidth::Refused(
             ValueRefusal::UnsupportedDeclarationWidth {
-                value,
-                width_bits: binding_width_bits,
+                value: component
+                    .members
+                    .first()
+                    .copied()
+                    .expect("binding components are non-empty"),
+                width_bits: read_end_bits,
             },
-        ));
+        )),
     }
-    Ok(BindingWidth::Exact(binding_width_bits))
 }
 
 impl BindingPlan {

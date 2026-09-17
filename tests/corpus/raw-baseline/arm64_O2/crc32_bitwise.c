@@ -11,7 +11,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
         if (X1_0 == 0) {
             return 0;
         } else {
-            uint64_t X10_1;
+            uint32_t X10_1;
             uint32_t tmp_20380_8;
             X10_1 = 0xffffffff;
             uint32_t tmp_2a000_2 = 0xedb88320;
@@ -129,22 +129,22 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                 __uint128_t tmp_lane_1000006d8_6b_9f_1 = r2sleigh_bits_extract_256_128(Z2_24, 0U);
                 __uint128_t tmp_0_2 = tmp_lane_1000006d8_6b_9f_1 >> 64;
                 __uint128_t tmp_10_2 = tmp_lane_1000006d8_6b_9f_1 << 64;
-                __uint128_t Q3_2 = tmp_0_2 | tmp_10_2;
+                uint64_t Q3_2 = (uint64_t)(tmp_0_2 | tmp_10_2);
                 uint8_t tmp_lane_1000006d8_6e_a1_1 = (uint8_t)Q3_2;
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_4f_78_1 ^ tmp_lane_1000006d8_6e_a1_1), 0);
-                uint8_t tmp_lane_1000006d8_6f_a4_1 = (uint8_t)(Q3_2 >> 8);
+                uint8_t tmp_lane_1000006d8_6f_a4_1 = (uint8_t)((__uint128_t)Q3_2 >> 8);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_50_7a_1 ^ tmp_lane_1000006d8_6f_a4_1), 8);
-                uint8_t tmp_lane_1000006d8_70_a7_1 = (uint8_t)(Q3_2 >> 16);
+                uint8_t tmp_lane_1000006d8_70_a7_1 = (uint8_t)((__uint128_t)Q3_2 >> 16);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_51_7c_1 ^ tmp_lane_1000006d8_70_a7_1), 16);
-                uint8_t tmp_lane_1000006d8_71_aa_1 = (uint8_t)(Q3_2 >> 24);
+                uint8_t tmp_lane_1000006d8_71_aa_1 = (uint8_t)((__uint128_t)Q3_2 >> 24);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_52_7e_1 ^ tmp_lane_1000006d8_71_aa_1), 24);
-                uint8_t tmp_lane_1000006d8_72_ad_1 = (uint8_t)(Q3_2 >> 32);
+                uint8_t tmp_lane_1000006d8_72_ad_1 = (uint8_t)((__uint128_t)Q3_2 >> 32);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_53_80_1 ^ tmp_lane_1000006d8_72_ad_1), 32);
-                uint8_t tmp_lane_1000006d8_73_b0_1 = (uint8_t)(Q3_2 >> 40);
+                uint8_t tmp_lane_1000006d8_73_b0_1 = (uint8_t)((__uint128_t)Q3_2 >> 40);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_54_82_1 ^ tmp_lane_1000006d8_73_b0_1), 40);
-                uint8_t tmp_lane_1000006d8_74_b3_1 = (uint8_t)(Q3_2 >> 48);
+                uint8_t tmp_lane_1000006d8_74_b3_1 = (uint8_t)((__uint128_t)Q3_2 >> 48);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_55_84_1 ^ tmp_lane_1000006d8_74_b3_1), 48);
-                uint8_t tmp_lane_1000006d8_75_b6_1 = (uint8_t)(Q3_2 >> 56);
+                uint8_t tmp_lane_1000006d8_75_b6_1 = (uint8_t)((__uint128_t)Q3_2 >> 56);
                 Z2_48 = r2sleigh_bits_insert_256_8(Z2_48, (uint8_t)(tmp_lane_1000006d8_56_86_1 ^ tmp_lane_1000006d8_75_b6_1), 56);
                 Z2_1 = r2sleigh_bits_insert_256_64(Z2_48, 0, 64);
                 Z2_1 = r2sleigh_bits_insert_256_64(Z2_1, 0, 128);
@@ -152,7 +152,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                 uint64_t tmp_lane_1000006d8_79_bb_1 = r2sleigh_bits_extract_256_64(Z2_48, 0U);
                 uint64_t X13_2 = tmp_lane_1000006d8_79_bb_1;
                 tmp_20380_8 = (uint32_t)(X13_2 >> 32) ^ ((uint32_t)X13_2 ^ ((uint32_t)((int32_t)(tmp_20380_3 << 26) >> 31) & tmp_2a000_4)) ^ (tmp_20380_4 >> 6 ^ ((uint32_t)((int32_t)(tmp_20380_4 << 26) >> 31) & tmp_2a000_2));
-                X10_1 = (uint64_t)(uint32_t)tmp_20380_8;
+                X10_1 = (uint32_t)tmp_20380_8;
                 uint8_t TMPZR_2 = X1_0 == 1;
                 X1_0--;
                 if (TMPZR_2) {

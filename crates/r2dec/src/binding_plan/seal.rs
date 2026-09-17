@@ -51,6 +51,7 @@ fn seal_binding_components_with(
 
 /// Collect declaration-width evidence independently of construction's maximum.
 ///
+/// Each member contributes the declaration width its own reads ask for.
 /// Validation later proves minimality by requiring the declaration to satisfy
 /// every lower bound and equal at least one witness. That is equivalent to the
 /// least upper bound without sharing construction's `max` implementation.
@@ -59,108 +60,25 @@ fn seal_width_evidence(
     machine_projection: &MachineProjection,
     component: &SealBindingComponent,
 ) -> Result<SealWidthEvidence, BindingPlanBuildError> {
-    let source = source_owned.source();
-    let graph = source.graph();
     let mut lower_bounds = Vec::new();
-    // The same rule construction applies: a call's result is the declared
-    // return where every read stays inside it, whatever carries it.
-    let mut declared_result_bits = None::<u32>;
-    let mut reads_stay_inside = true;
     for value in &component.members {
-        let graph_value = graph.value(*value).ok_or(BindingPlanBuildError::Seal(
-            BindingPlanSourceMismatch::ValueTopology {
-                index: value.0 as usize,
-                value: *value,
-            },
-        ))?;
-        let member_width_bits = graph_value
-            .var
-            .size
-            .checked_mul(8)
-            .filter(|bits| *bits > 0)
-            .ok_or(BindingPlanBuildError::InvalidValueWidth {
-                value: *value,
-                size_bytes: graph_value.var.size,
-            })?;
-        lower_bounds.push(member_width_bits);
-
-        for site in graph.use_sites(*value) {
-            let Some(MachineUseDisposition::Exact(slice)) =
-                machine_projection.use_disposition(*site)
-            else {
-                continue;
-            };
-            let carrier_width_bits = slice.carrier_width_bits();
-            let valid_end = slice
-                .bit_offset()
-                .checked_add(slice.width_bits())
-                .is_some_and(|end| end <= carrier_width_bits);
-            if slice.width_bits() == 0 || carrier_width_bits < member_width_bits || !valid_end {
-                return Ok(SealWidthEvidence::Refused(
-                    ValueRefusal::IncoherentUseProjection { site: *site },
-                ));
-            }
-            lower_bounds.push(carrier_width_bits);
-            if slice.bit_offset() != 0 {
-                reads_stay_inside = false;
-            }
-            declared_result_bits = declared_result_bits.map(|bits| bits.max(slice.width_bits()));
-        }
-        match super::construction::call_result_return_bits(source_owned, *value) {
-            Some(bits) if component.members.len() == 1 => {
-                declared_result_bits =
-                    Some(declared_result_bits.map_or(bits, |seen| seen.max(bits)));
-                if declared_result_bits != Some(bits) {
-                    reads_stay_inside = false;
-                }
-            }
-            _ => reads_stay_inside = false,
-        }
-
-        let Some(definition) = graph.def_inst(*value) else {
-            continue;
+        let read_end_bits = match super::construction::member_read_end_bits(
+            source_owned,
+            machine_projection,
+            *value,
+        )? {
+            Ok(bits) => bits,
+            Err(reason) => return Ok(SealWidthEvidence::Refused(reason)),
         };
-        let Some(MachineWriteDisposition::Exact(write)) =
-            machine_projection.write_disposition(definition)
-        else {
-            continue;
+        let Some(width_bits) = super::construction::declaration_width_holding(read_end_bits) else {
+            return Ok(SealWidthEvidence::Refused(
+                ValueRefusal::UnsupportedDeclarationWidth {
+                    value: *value,
+                    width_bits: read_end_bits,
+                },
+            ));
         };
-        match *write {
-            MachineWriteProjection::Full => lower_bounds.push(member_width_bits),
-            MachineWriteProjection::ZeroExtend {
-                from_width_bits,
-                to_width_bits,
-            } => {
-                if from_width_bits == 0
-                    || from_width_bits >= to_width_bits
-                    || to_width_bits < member_width_bits
-                {
-                    return Ok(SealWidthEvidence::Refused(
-                        ValueRefusal::IncoherentWriteProjection { value: *value },
-                    ));
-                }
-                lower_bounds.push(to_width_bits);
-            }
-        }
-    }
-    if reads_stay_inside
-        && let Some(bits) = declared_result_bits
-        && lower_bounds.iter().any(|bound| *bound > bits)
-    {
-        for bound in &mut lower_bounds {
-            *bound = (*bound).min(bits);
-        }
-    }
-    let width_bits = lower_bounds.iter().copied().max().unwrap_or(0);
-    if !declaration_width_is_supported(width_bits) {
-        let value = component
-            .members
-            .first()
-            .copied()
-            .expect("seal binding components are non-empty");
-        return Ok(SealWidthEvidence::Refused(
-            ValueRefusal::UnsupportedDeclarationWidth { value, width_bits },
-        ));
+        lower_bounds.push(width_bits);
     }
     Ok(SealWidthEvidence::Exact { lower_bounds })
 }

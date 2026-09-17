@@ -2,8 +2,8 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
     /* r2dec proof: no individual construct is marked; 139 source obligations: 115 rendered, 24 elided, 0 refused; 32 statements rendered */
     {
-        uint64_t RDX_0_2;
-        RDX_0_2 = (uint64_t)(uint32_t)EDX_0;
+        uint32_t RDX_0_2;
+        RDX_0_2 = (uint32_t)EDX_0;
         if (RSI_0 >= 4) {
             uint64_t RCX_1;
             uint64_t RAX_2 = RSI_0 >> 2;
@@ -13,7 +13,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 uint32_t tmp_lane_100000830_6_3_1 = (uint32_t)((uint64_t)tmp_11f00_2 * 0xffffffffcc9e2d51U);
                 uint32_t tmp_lane_100000830_2b_a_1 = (uint32_t)RDX_0_2 ^ (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000830_6_3_1 << 15 | tmp_lane_100000830_6_3_1 >> 17) * 0x1b873593);
                 uint64_t R8_6 = (uint64_t)(uint32_t)(tmp_lane_100000830_2b_a_1 << 13 | tmp_lane_100000830_2b_a_1 >> 19);
-                RDX_0_2 = (uint64_t)(uint32_t)((uint32_t)(R8_6 * 4 + R8_6) - 0x19ab949c);
+                RDX_0_2 = (uint32_t)((uint32_t)(R8_6 * 4 + R8_6) - 0x19ab949c);
                 RCX_1++;
                 if (RAX_2 == RCX_1) {
                     break;
@@ -21,26 +21,26 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             }
         }
         {
-            uint64_t RCX_5;
+            uint32_t RCX_5;
             uint64_t RAX_5 = RSI_0 & (uint64_t)-0x4;
             uint32_t tmp_lane_10000085c_e_15_1 = (uint32_t)RSI_0 & 3;
-            RCX_5 = (uint64_t)0;
+            RCX_5 = (uint32_t)0;
             switch (tmp_lane_10000085c_e_15_1) {
             case 3:
                 {
                     uint8_t tmp_11e00_1 = ((uint8_t*)RDI_0)[RAX_5 + 2];
-                    RCX_5 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_1 << 16);
+                    RCX_5 = (uint32_t)((uint32_t)tmp_11e00_1 << 16);
                 }
             case 2:
                 {
                     uint8_t tmp_11e00_3 = ((uint8_t*)RDI_0)[RAX_5 + 1];
-                    RCX_5 = (uint64_t)(uint32_t)((uint32_t)tmp_11e00_3 << 8 | (uint32_t)RCX_5);
+                    RCX_5 = (uint32_t)((uint32_t)tmp_11e00_3 << 8 | (uint32_t)RCX_5);
                 }
             case 1:
                 {
                     uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RAX_5];
                     uint32_t tmp_lane_100000892_12_2c_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_5 ^ (uint32_t)RCX_5) * 0xffffffffcc9e2d51U);
-                    RDX_0_2 = (uint64_t)(uint32_t)((uint32_t)RDX_0_2 ^ (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000892_12_2c_1 << 15 | tmp_lane_100000892_12_2c_1 >> 17) * 0x1b873593));
+                    RDX_0_2 = (uint32_t)((uint32_t)RDX_0_2 ^ (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000892_12_2c_1 << 15 | tmp_lane_100000892_12_2c_1 >> 17) * 0x1b873593));
                     break;
                 }
             case 0:

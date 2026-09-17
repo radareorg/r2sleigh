@@ -1132,6 +1132,11 @@ pub struct MachineProjection {
     /// for the total, so a row is a slice rather than its own allocation.
     use_offsets: Box<[u32]>,
     use_slots: Box<[PackedUseDisposition]>,
+    /// Dense beside `use_slots`: the bit past the last one the operation reads
+    /// of its operand, or zero where the projection cannot say. A `Subpiece`
+    /// reads only the piece it extracts, whatever the canonical slice says of
+    /// the operand as a whole.
+    use_read_ends: Box<[u32]>,
     /// The address certificates the `MemoryAddress` cells stand for.
     address_uses: Box<[MachineValueUse]>,
     /// Dense by `InstId`; `None` is reserved for graph instructions with no output.
@@ -1213,7 +1218,7 @@ impl MachineProjection {
         let mut use_slots = builder.use_slots;
         canonical_machine_use_dispositions(artifact, &builder.use_offsets, &mut use_slots)?;
         let packed = pack_use_dispositions(builder.use_offsets, use_slots);
-        let projection = Self {
+        let mut projection = Self {
             machine: MachineFunction {
                 arena: MachineExprArena {
                     nodes: builder.nodes.into_boxed_slice(),
@@ -1226,9 +1231,11 @@ impl MachineProjection {
             value_geometries: value_geometries.into_boxed_slice(),
             use_offsets: packed.offsets,
             use_slots: packed.slots,
+            use_read_ends: Box::new([]),
             address_uses: packed.addresses,
             write_dispositions: write_dispositions.into_boxed_slice(),
         };
+        projection.use_read_ends = projection.operation_read_ends(artifact);
         projection.validate_against(artifact)?;
         Ok(projection)
     }
@@ -1259,6 +1266,76 @@ impl MachineProjection {
     /// Dense cells indexed by `ValueId`.
     pub const fn value_geometries(&self) -> &[MachineValueGeometryDisposition] {
         &self.value_geometries
+    }
+
+    /// The bit past the last one the operation at `site` reads of its
+    /// operand, when the projection can state it.
+    pub fn use_read_end_bits(&self, site: UseSite) -> Option<u32> {
+        let start = *self.use_offsets.get(site.inst.0 as usize)? as usize;
+        let end = *self.use_offsets.get(site.inst.0 as usize + 1)? as usize;
+        let read_end = *self.use_read_ends.get(start..end)?.get(site.input_idx)?;
+        (read_end != 0).then_some(read_end)
+    }
+
+    /// What each operation reads of each operand, in the machine's own terms:
+    /// the operand whole, or the piece an extraction takes of it. An operation
+    /// with no output reads its operands whole; one that failed to project
+    /// states nothing.
+    fn operation_read_ends(&self, artifact: &SsaArtifact) -> Box<[u32]> {
+        let graph = artifact.graph();
+        let mut ends = vec![0u32; self.use_slots.len()];
+        for (inst_index, inst) in graph.insts.iter().enumerate() {
+            let Some(start) = self
+                .use_offsets
+                .get(inst_index)
+                .map(|start| *start as usize)
+            else {
+                continue;
+            };
+            if inst
+                .output
+                .is_some_and(|output| self.failures.iter().any(|failure| failure.output == output))
+            {
+                continue;
+            }
+            let root = inst
+                .output
+                .and_then(|output| self.machine.entity_for_output(output))
+                .and_then(|entity| self.machine.expr(entity.root()));
+            let children = root.map(|root| root.kind.children());
+            for (input_idx, input) in inst.inputs.iter().enumerate() {
+                let Some(source) = graph
+                    .value(*input)
+                    .and_then(|value| binding_for_value(value).ok())
+                else {
+                    continue;
+                };
+                let end = match (root, &children) {
+                    (Some(root), Some(children)) => children.get(input_idx).and_then(|child| {
+                        machine_use_slice_for_input(
+                            &self.machine.arena,
+                            root,
+                            *child,
+                            source,
+                            false,
+                        )
+                        .map(|slice| match slice.conversion() {
+                            // A truncation reads only the bits it keeps; an extension reads its operand whole.
+                            Some(conversion) if conversion.kind == MachineCastKind::Truncate => {
+                                conversion.to_width_bits.min(slice.width_bits())
+                            }
+                            _ => slice.bit_offset() + slice.width_bits(),
+                        })
+                    }),
+                    (None, _) if inst.output.is_none() => Some(source.width_bits),
+                    _ => None,
+                };
+                if let Some(cell) = ends.get_mut(start + input_idx) {
+                    *cell = end.unwrap_or(0);
+                }
+            }
+        }
+        ends.into_boxed_slice()
     }
 
     /// Dense O(1) lookup for the disposition of one exact graph input use.
@@ -1392,7 +1469,9 @@ impl MachineProjection {
         failures: &ByValue<&MachineProjectionFailure>,
     ) -> Result<(), MachineBuildError> {
         let graph = artifact.graph();
-        if self.use_offsets.len() != graph.insts.len() + 1 {
+        if self.use_offsets.len() != graph.insts.len() + 1
+            || self.use_read_ends.len() != self.use_slots.len()
+        {
             return Err(MachineBuildError::TopologyMismatch);
         }
         let constant_bindings = self

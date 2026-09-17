@@ -15,10 +15,10 @@ uint32_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
         while (stack_m40 < stack_m24) {
             uint8_t tmp_11e00_2 = stack_m16[stack_m40];
             uint64_t tmp_43f80_2 = (uint64_t)((uint32_t)tmp_11e00_2 + stack_m28);
-            uint64_t tmp_44200_2 = tmp_43f80_2 % 0xfff1;
+            uint32_t tmp_44200_2 = (uint32_t)(tmp_43f80_2 % 0xfff1);
             stack_m28 = (uint32_t)tmp_44200_2;
             uint64_t tmp_43f80_3 = (uint64_t)(stack_m32 + stack_m28);
-            uint64_t tmp_44200_3 = tmp_43f80_3 % 0xfff1;
+            uint32_t tmp_44200_3 = (uint32_t)(tmp_43f80_3 % 0xfff1);
             stack_m32 = (uint32_t)tmp_44200_3;
             stack_m40++;
         }
