@@ -329,6 +329,24 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
                 CExpr::cast(to.clone(), CExpr::cast(CType::uint(pointer_bits), expr))
             }
         }
+        // A call's `void *` result converts to any object pointer without a
+        // cast, C11 6.3.2.3p1 and 6.5.16.1. A named `void *` keeps its
+        // conversion: a rewrite that later replaces the name by what was
+        // assigned to it needs one conversion left to collapse into.
+        (None, None)
+            if matches!(from, CType::Pointer(pointee) if matches!(**pointee, CType::Void))
+                && matches!(to, CType::Pointer(pointee) if !matches!(**pointee, CType::Function { .. })) =>
+        {
+            let mut bare = &expr;
+            while let CExpr::Observed { expr: inner, .. } | CExpr::Paren(inner) = bare {
+                bare = inner;
+            }
+            if matches!(bare, CExpr::Call { .. }) {
+                expr
+            } else {
+                CExpr::cast(to.clone(), expr)
+            }
+        }
         (None, None) if is_address(from) && matches!(to, CType::Pointer(_)) => {
             CExpr::cast(to.clone(), expr)
         }

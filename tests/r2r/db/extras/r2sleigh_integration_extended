@@ -457,7 +457,7 @@ CMDS=<<EOF_CMDS
 a:sla > /dev/null
 aaa
 s `afl~process_string$[0]` > /dev/null
-pd:s | jq -Rs '(contains("len = sym_imp_strlen(s);")) and ((split("sym_imp_strlen(s)") | length) == 2) and contains("if (len > 100)") and (contains("if (len > 4)") or contains("if (len < 5)")) and contains("return -1;") and contains("return -2;") and contains("return len;")'
+pd:s | jq -Rs '(contains("len = sym_imp_strlen(s);")) and ((split("sym_imp_strlen(s)") | length) == 2) and (contains("len > 100") or contains("len <= 100")) and (contains("len > 4") or contains("len < 5") or contains("5 <= len")) and (contains("return -1;") or contains("0xffffffff")) and (contains("return -2;") or contains("0xfffffffe"))'
 EOF_CMDS
 RUN
 

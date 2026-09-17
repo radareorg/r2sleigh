@@ -55,12 +55,17 @@ fn seal_binding_components_with(
 /// every lower bound and equal at least one witness. That is equivalent to the
 /// least upper bound without sharing construction's `max` implementation.
 fn seal_width_evidence(
-    source: &r2ssa::SsaArtifact,
+    source_owned: &SourceOwnedFunctionFacts,
     machine_projection: &MachineProjection,
     component: &SealBindingComponent,
 ) -> Result<SealWidthEvidence, BindingPlanBuildError> {
+    let source = source_owned.source();
     let graph = source.graph();
     let mut lower_bounds = Vec::new();
+    // The same rule construction applies: a call's result is the declared
+    // return where every read stays inside it, whatever carries it.
+    let mut declared_result_bits = None::<u32>;
+    let mut reads_stay_inside = true;
     for value in &component.members {
         let graph_value = graph.value(*value).ok_or(BindingPlanBuildError::Seal(
             BindingPlanSourceMismatch::ValueTopology {
@@ -96,6 +101,20 @@ fn seal_width_evidence(
                 ));
             }
             lower_bounds.push(carrier_width_bits);
+            if slice.bit_offset() != 0 {
+                reads_stay_inside = false;
+            }
+            declared_result_bits = declared_result_bits.map(|bits| bits.max(slice.width_bits()));
+        }
+        match super::construction::call_result_return_bits(source_owned, *value) {
+            Some(bits) if component.members.len() == 1 => {
+                declared_result_bits =
+                    Some(declared_result_bits.map_or(bits, |seen| seen.max(bits)));
+                if declared_result_bits != Some(bits) {
+                    reads_stay_inside = false;
+                }
+            }
+            _ => reads_stay_inside = false,
         }
 
         let Some(definition) = graph.def_inst(*value) else {
@@ -122,6 +141,14 @@ fn seal_width_evidence(
                 }
                 lower_bounds.push(to_width_bits);
             }
+        }
+    }
+    if reads_stay_inside
+        && let Some(bits) = declared_result_bits
+        && lower_bounds.iter().any(|bound| *bound > bits)
+    {
+        for bound in &mut lower_bounds {
+            *bound = (*bound).min(bits);
         }
     }
     let width_bits = lower_bounds.iter().copied().max().unwrap_or(0);
@@ -337,7 +364,7 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
             sources: component.sources.clone(),
         };
         let component_id = CanonicalComponentId(components.len() as u32);
-        let disposition = match seal_width_evidence(source, machine_projection, &bound)? {
+        let disposition = match seal_width_evidence(source_owned, machine_projection, &bound)? {
             SealWidthEvidence::Exact { .. } => UpstreamValueDisposition::Bound {
                 component: component_id,
             },
@@ -475,7 +502,7 @@ impl BindingPlan {
         }
         let width_evidence = expected
             .iter()
-            .map(|component| seal_width_evidence(source, &self.machine_projection, component))
+            .map(|component| seal_width_evidence(source_owned, &self.machine_projection, component))
             .collect::<Result<Vec<_>, _>>()?;
         let mut actual_by_binding = vec![BTreeSet::<ValueId>::new(); self.bindings.len()];
         for (index, disposition) in self.dispositions.iter().enumerate() {

@@ -40,25 +40,25 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 for (; ; ) {
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_5 = *(uint32_t*)X8_5;
-                    uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_5 * tmp_2a000_4 + stack_m68), 13);
+                    uint32_t X0_3 = sym__rotl32((uint32_t)(tmp_24c00_5 * tmp_2a000_4 + stack_m68), 13);
                     stack_m68 = (uint32_t)X0_3 * tmp_2a000_2;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_11 = *(uint32_t*)X8_5;
-                    uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_11 * tmp_2a000_4 + stack_m72), 13);
+                    uint32_t X0_5 = sym__rotl32((uint32_t)(tmp_24c00_11 * tmp_2a000_4 + stack_m72), 13);
                     stack_m72 = (uint32_t)X0_5 * tmp_2a000_2;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_17 = *(uint32_t*)X8_5;
-                    uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_17 * tmp_2a000_4 + tmp_24d00_1), 13);
+                    uint32_t X0_7 = sym__rotl32((uint32_t)(tmp_24c00_17 * tmp_2a000_4 + tmp_24d00_1), 13);
                     tmp_24d00_1 = (uint32_t)X0_7 * tmp_2a000_2;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_23 = *(uint32_t*)X8_5;
-                    uint64_t X0_9 = (uint64_t)sym__rotl32((uint32_t)(tmp_24c00_23 * tmp_2a000_4 + stack_m80), 13);
+                    uint32_t X0_9 = sym__rotl32((uint32_t)(tmp_24c00_23 * tmp_2a000_4 + stack_m80), 13);
                     stack_m80 = tmp_2a000_2 * (uint32_t)X0_9;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
@@ -71,10 +71,10 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     }
                 }
                 {
-                    uint64_t X0_11 = (uint64_t)sym__rotl32((uint32_t)stack_m68, 1);
-                    uint64_t X0_13 = (uint64_t)sym__rotl32((uint32_t)stack_m72, 7);
-                    uint64_t X0_16 = (uint64_t)sym__rotl32((uint32_t)tmp_24d00_1, 12);
-                    uint64_t X0_18 = (uint64_t)sym__rotl32((uint32_t)stack_m80, 18);
+                    uint32_t X0_11 = sym__rotl32((uint32_t)stack_m68, 1);
+                    uint32_t X0_13 = sym__rotl32((uint32_t)stack_m72, 7);
+                    uint32_t X0_16 = sym__rotl32((uint32_t)tmp_24d00_1, 12);
+                    uint32_t X0_18 = sym__rotl32((uint32_t)stack_m80, 18);
                     stack_m52 = (uint32_t)X0_11 + (uint32_t)X0_13 + (uint32_t)X0_16 + (uint32_t)X0_18;
                 }
             }
@@ -94,7 +94,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     X8_5 = stack_m24;
                     uint32_t tmp_24c00_36 = *(uint32_t*)X8_5;
                     tmp_24d00_7 = stack_m52;
-                    uint64_t X0_22 = (uint64_t)sym__rotl32((uint32_t)(tmp_24d00_7 - tmp_24c00_36 * 0x3d4d51c3), 17);
+                    uint32_t X0_22 = sym__rotl32((uint32_t)(tmp_24d00_7 - tmp_24c00_36 * 0x3d4d51c3), 17);
                     stack_m52 = (uint32_t)X0_22 * 0x27d4eb2f;
                     X8_5 = stack_m24;
                     stack_m24 = X8_5 + 4;
@@ -109,7 +109,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         tmp_24d00_7 = stack_m52;
                         X8_5 = stack_m24;
                         uint8_t tmp_25500_2 = *(uint8_t*)X8_5;
-                        uint64_t X0_25 = (uint64_t)sym__rotl32((uint32_t)(tmp_24d00_7 + (uint32_t)tmp_25500_2 * 0x165667b1), 11);
+                        uint32_t X0_25 = sym__rotl32((uint32_t)(tmp_24d00_7 + (uint32_t)tmp_25500_2 * 0x165667b1), 11);
                         stack_m52 = tmp_2a000_2 * (uint32_t)X0_25;
                         X8_5 = stack_m24;
                         stack_m24 = X8_5 + 1;

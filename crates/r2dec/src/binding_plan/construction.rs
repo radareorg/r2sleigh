@@ -654,13 +654,46 @@ pub(super) fn binding_components_with(
 /// Compute the smallest unsigned C-object width proved by the graph and every
 /// surviving exact machine projection. Refused projection cells are delegated
 /// upstream and cannot survive the cutover, so they do not poison the object.
+/// The width the callee declares for this value, where the value is the
+/// call's result itself rather than something derived from it.
+pub(super) fn call_result_return_bits(
+    source_owned: &SourceOwnedFunctionFacts,
+    value: ValueId,
+) -> Option<u32> {
+    let source = source_owned.source();
+    let certificate = source.certificates().call_results.get(&value)?;
+    if !certificate.relation.is_identity() {
+        return None;
+    }
+    let signature = source_owned
+        .report()
+        .callsites()?
+        .by_callsite
+        .values()
+        .find(|fact| fact.call_site_id == certificate.call_site)?
+        .callee_signature
+        .as_ref()?;
+    let ptr_bits = source
+        .machine_context()
+        .memory_model()
+        .default_address_bits();
+    super::rules::declaration_type_width(&signature.return_type, ptr_bits)
+}
+
 fn binding_width(
-    source: &r2ssa::SsaArtifact,
+    source_owned: &SourceOwnedFunctionFacts,
     machine_projection: &MachineProjection,
     component: &BindingComponent,
 ) -> Result<BindingWidth, BindingPlanBuildError> {
+    let source = source_owned.source();
     let graph = source.graph();
     let mut binding_width_bits = 0_u32;
+    // A call's result is the callee's declared return; the register that
+    // carries it is wider, and what the convention says of the rest is
+    // nothing. Where every read stays inside the declared width, the object
+    // is the return, not the carrier.
+    let mut declared_result_bits = None::<u32>;
+    let mut reads_stay_inside = true;
     for value in &component.members {
         let graph_value = graph.value(*value).ok_or(BindingPlanBuildError::Seal(
             BindingPlanSourceMismatch::ValueTopology {
@@ -698,6 +731,20 @@ fn binding_width(
                 ));
             }
             binding_width_bits = binding_width_bits.max(slice.carrier_width_bits());
+            if slice.bit_offset() != 0 {
+                reads_stay_inside = false;
+            }
+            declared_result_bits = declared_result_bits.map(|bits| bits.max(slice.width_bits()));
+        }
+        match call_result_return_bits(source_owned, *value) {
+            Some(bits) if component.members.len() == 1 => {
+                declared_result_bits =
+                    Some(declared_result_bits.map_or(bits, |seen| seen.max(bits)));
+                if declared_result_bits != Some(bits) {
+                    reads_stay_inside = false;
+                }
+            }
+            _ => reads_stay_inside = false,
         }
 
         let Some(definition) = graph.def_inst(*value) else {
@@ -726,6 +773,13 @@ fn binding_width(
             }
         };
         binding_width_bits = binding_width_bits.max(carrier_width_bits);
+    }
+    if reads_stay_inside
+        && let Some(bits) = declared_result_bits
+        && bits < binding_width_bits
+        && declaration_width_is_supported(bits)
+    {
+        binding_width_bits = bits;
     }
     if !declaration_width_is_supported(binding_width_bits) {
         let value = component
@@ -1013,7 +1067,7 @@ impl BindingPlan {
             if component.members.is_empty() {
                 continue;
             }
-            let width_bits = match binding_width(source, &machine_projection, &component)? {
+            let width_bits = match binding_width(source_owned, &machine_projection, &component)? {
                 BindingWidth::Exact(width_bits) => width_bits,
                 BindingWidth::Refused(reason) => {
                     for value in component.members {

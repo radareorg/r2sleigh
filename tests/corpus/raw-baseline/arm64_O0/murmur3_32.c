@@ -24,11 +24,11 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         stack_m56 = 0 ? 0 : tmp_42488_1;
         for (stack_m64 = 0; stack_m64 < stack_m56; stack_m64++) {
             uint32_t tmp_25180_2 = ((uint32_t*)stack_m24)[stack_m64];
-            uint64_t X0_3 = (uint64_t)sym__rotl32((uint32_t)(tmp_25180_2 * tmp_2a000_2), 15);
+            uint32_t X0_3 = sym__rotl32((uint32_t)(tmp_25180_2 * tmp_2a000_2), 15);
             tmp_24d00_5 = stack_m40;
             stack_m40 = (uint32_t)X0_3 * tmp_2a000_4 ^ tmp_24d00_5;
             tmp_24d00_5 = stack_m40;
-            uint64_t X0_5 = (uint64_t)sym__rotl32((uint32_t)tmp_24d00_5, 13);
+            uint32_t X0_5 = sym__rotl32((uint32_t)tmp_24d00_5, 13);
             stack_m40 = (uint32_t)X0_5;
             tmp_24d00_5 = stack_m40;
             stack_m40 = tmp_24d00_5 * 5 - 0x19ab949c;
@@ -55,7 +55,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             }
             {
                 uint8_t tmp_25500_5 = *tmp_12480_1;
-                uint64_t X0_7 = (uint64_t)sym__rotl32((uint32_t)(tmp_2a000_2 * ((uint32_t)tmp_25500_5 ^ stack_m84)), 15);
+                uint32_t X0_7 = sym__rotl32((uint32_t)(tmp_2a000_2 * ((uint32_t)tmp_25500_5 ^ stack_m84)), 15);
                 tmp_24d00_5 = stack_m40;
                 stack_m40 = (uint32_t)X0_7 * tmp_2a000_4 ^ tmp_24d00_5;
             }

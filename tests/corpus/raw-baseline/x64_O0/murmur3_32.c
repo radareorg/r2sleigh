@@ -28,7 +28,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             tmp_11f00_3 = (int32_t)stack_m60;
             stack_m60 = (int32_t)((uint64_t)tmp_11f00_3 * 0xffffffffcc9e2d51U);
             tmp_11f00_3 = (int32_t)stack_m60;
-            uint64_t RAX_9 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_3, 15);
+            uint32_t RAX_9 = sym__rotl32((uint32_t)tmp_11f00_3, 15);
             stack_m60 = (int32_t)RAX_9;
             tmp_11f00_3 = (int32_t)stack_m60;
             stack_m60 = (int32_t)((uint64_t)tmp_11f00_3 * 0x1b873593);
@@ -36,7 +36,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             tmp_11f00_10 = stack_m32;
             stack_m32 = (uint32_t)tmp_11f00_3 ^ tmp_11f00_10;
             tmp_11f00_10 = stack_m32;
-            uint64_t RAX_13 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_10, 13);
+            uint32_t RAX_13 = sym__rotl32((uint32_t)tmp_11f00_10, 13);
             stack_m32 = (uint32_t)RAX_13;
             tmp_11f00_10 = stack_m32;
             stack_m32 = (uint32_t)((uint64_t)(int32_t)tmp_11f00_10 * 5) - 0x19ab949c;
@@ -82,7 +82,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 tmp_11f00_11 = stack_m76;
                 stack_m76 = (uint32_t)((uint64_t)(int32_t)tmp_11f00_11 * 0xffffffffcc9e2d51U);
                 tmp_11f00_11 = stack_m76;
-                uint64_t RAX_41 = (uint64_t)sym__rotl32((uint32_t)tmp_11f00_11, 15);
+                uint32_t RAX_41 = sym__rotl32((uint32_t)tmp_11f00_11, 15);
                 stack_m76 = (uint32_t)RAX_41;
                 tmp_11f00_11 = stack_m76;
                 stack_m76 = (uint32_t)((uint64_t)(int32_t)tmp_11f00_11 * 0x1b873593);
