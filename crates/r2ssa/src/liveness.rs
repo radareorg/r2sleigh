@@ -13,9 +13,9 @@
 //! caller reads is read past the last ordinal of every returning block that
 //! hands it back. Both are [`BLOCK_END`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::graph::{BlockId, InstId, InstPayload, SsaGraph, ValueId};
+use crate::graph::{BlockId, InstId, InstPayload, SsaGraph, UseSite, ValueId};
 use crate::liveout::FunctionLiveOut;
 use crate::op::SSAOp;
 
@@ -72,7 +72,7 @@ struct BlockScratch {
 
 impl ValueLiveness {
     pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
-        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), &[])
+        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), &[], &BTreeSet::new())
     }
 
     /// State that two values hold one content, on evidence the graph alone
@@ -88,11 +88,15 @@ impl ValueLiveness {
     /// the reader is, and the operands it reads are needed until then.
     /// `relocations` maps each folded definition to its one reader, and a
     /// chain of folds resolves to the last reader.
+    /// `ignored_reads` are use sites the text never performs -- a call's
+    /// conventional read of a register the certified call does not pass --
+    /// and they hold nothing live.
     pub fn compute_with_relocations(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         relocations: &BTreeMap<InstId, InstId>,
         same_content: &[(ValueId, ValueId)],
+        ignored_reads: &BTreeSet<UseSite>,
     ) -> Self {
         let relocate = |mut inst: InstId| {
             let mut steps = 0;
@@ -245,6 +249,9 @@ impl ValueLiveness {
             // Every read, as the block and position it happens at.
             let mut reads = Vec::<(BlockId, u32)>::new();
             for site in graph.use_sites(value.id) {
+                if ignored_reads.contains(site) {
+                    continue;
+                }
                 let Some(inst) = graph.inst(relocate(site.inst)) else {
                     continue;
                 };

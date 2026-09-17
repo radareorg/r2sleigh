@@ -214,14 +214,6 @@ fn declared_member_base(
     if member.source != r2types::MemberAccessSource::DeclaredType {
         return None;
     }
-    // An address the plan bound is read somewhere else too, and the label would
-    // spell the member without spelling that binding.
-    if matches!(
-        inputs.dispositions.get(fact.address.0 as usize),
-        Some(ValueDisposition::Bound { .. })
-    ) {
-        return None;
-    }
     let r2ssa::SemanticId::Parameter(slot) = member.base? else {
         return None;
     };
@@ -237,6 +229,13 @@ fn declared_member_base(
     let ValueDisposition::Bound { binding } = inputs.dispositions.get(base.0 as usize)? else {
         return None;
     };
+    // An address bound to another name is read there too, and `p->field` would hide it.
+    if let Some(ValueDisposition::Bound { binding: address }) =
+        inputs.dispositions.get(fact.address.0 as usize)
+        && address != binding
+    {
+        return None;
+    }
     let declared = inputs.bindings.get(binding.index())?.declaration_type();
     let r2types::CTypeLike::Pointer(pointee) = declared.unaliased() else {
         return None;

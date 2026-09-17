@@ -241,6 +241,9 @@ pub struct SsaArtifact {
     /// one object with no write between -- for anyone who recomputes the
     /// liveness with reads relocated.
     same_content_pairs: Vec<(crate::graph::ValueId, crate::graph::ValueId)>,
+    /// Reads the text never performs: a call's conventional read of a
+    /// register the certified call does not pass.
+    ignored_reads: std::collections::BTreeSet<crate::graph::UseSite>,
     unobserved_merges: crate::deadphi::DeadPhis,
     mode: FunctionPrepareMode,
     facts: PreparedFunctionFacts,
@@ -450,9 +453,18 @@ impl SsaArtifact {
         // content, which the graph cannot see and the memory facts can. The
         // spans above were judged without this and are at worst finer.
         let same_content_pairs = same_content_reads(&facts.structured);
-        for (left, right) in &same_content_pairs {
-            liveness.declare_same_content(*left, *right);
-        }
+        // A call's conventional read of a register the certified call does
+        // not pass is not a read the text performs, and held values live
+        // across every call that the machine merely might have read. The
+        // spans above were judged with those reads and are at worst finer.
+        let ignored_reads = uncertified_call_reads(&graph, &facts.boundaries);
+        liveness = crate::liveness::ValueLiveness::compute_with_relocations(
+            &graph,
+            &live_out,
+            &std::collections::BTreeMap::new(),
+            &same_content_pairs,
+            &ignored_reads,
+        );
         let unobserved_merges = crate::deadphi::DeadPhis::find(&graph, &live_out, &facts);
         let aggregate_accesses = collect_aggregate_access_projections(
             &graph,
@@ -470,6 +482,7 @@ impl SsaArtifact {
             live_out,
             liveness,
             same_content_pairs,
+            ignored_reads,
             unobserved_merges,
             mode,
             facts,
@@ -1078,6 +1091,11 @@ impl SsaArtifact {
         &self.same_content_pairs
     }
 
+    /// Reads the text never performs, which hold nothing live.
+    pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
+        &self.ignored_reads
+    }
+
     pub fn graph(&self) -> &SsaGraph {
         &self.graph
     }
@@ -1135,6 +1153,7 @@ impl SsaArtifact {
             live_out: self.live_out.clone(),
             liveness: self.liveness.clone(),
             same_content_pairs: self.same_content_pairs.clone(),
+            ignored_reads: self.ignored_reads.clone(),
             unobserved_merges: self.unobserved_merges.clone(),
             mode: self.mode,
             facts,
@@ -2396,6 +2415,44 @@ fn same_content_reads(
         }
     }
     pairs
+}
+
+/// A call's conventional reads of registers the certified call does not
+/// pass. The graph states a read of every register the convention lets a
+/// callee read, so that liveness before the facts exist errs safe; once the
+/// call boundary says which values are arguments, the rest are not reads.
+fn uncertified_call_reads(
+    graph: &SsaGraph,
+    boundaries: &crate::semantic::SourceBoundaryFacts,
+) -> std::collections::BTreeSet<crate::graph::UseSite> {
+    let mut passed = std::collections::BTreeSet::new();
+    for boundary in boundaries.calls.values() {
+        for argument in &boundary.arguments {
+            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
+                passed.insert(value);
+            }
+        }
+    }
+    graph
+        .insts
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst.payload,
+                crate::graph::InstPayload::Op(SSAOp::CallUse { .. })
+            )
+        })
+        .flat_map(|inst| {
+            inst.inputs
+                .iter()
+                .enumerate()
+                .filter(|(_, input)| !passed.contains(input))
+                .map(move |(input_idx, _)| crate::graph::UseSite {
+                    inst: inst.id,
+                    input_idx,
+                })
+        })
+        .collect()
 }
 
 fn block_at_mut<'a>(

@@ -1024,6 +1024,7 @@ pub(super) fn rewrite_inlining_partition(
                 source.live_out(),
                 &relocations,
                 source.same_content_pairs(),
+                source.ignored_reads(),
             )
         };
         let round_eligible = eligible
