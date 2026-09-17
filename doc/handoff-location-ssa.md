@@ -26868,3 +26868,74 @@ through its underscores (a unit test pins it, and the guess now excludes
 `sub.`), and `longjmp_chk` is noreturn, so `tn` lists it and the two
 expectations that enumerate noreturn functions moved with it. Both follow-ups
 are on the pull-request branches; the CI result is to be read next session.
+
+### Phase 1a: an import stub is the import's declaration
+
+**One route for every import stub.** `variadic_forwarding_stub` is
+`import_stub_declaration`: one call site, a tail transfer, no return
+certificate, and nothing observable beside the transfer (a store, another
+call, or a register write that is read or live out and is not the transfer's
+own operand). The callee must resolve to an import, and the import's
+prototype, where radare2 states one, becomes `extern size_t strlen(int8_t*);`
+under a comment naming the stub; where none is stated the stub renders as a
+residual naming the import and inventing nothing. The x86-64 thunk that used
+to render `return tcgetattr();` with a made-up `uint64_t tcgetattr(void)`
+renders the residual now, and the r2r test that pinned the forwarding was
+rewritten to say so.
+
+**Who a callee is travels on the wire.** The identity of a call target was
+built from names: a `sym.imp.` shape, or a data symbol radare2 happened to
+have at the slot. On arm64 the `adrp`/`ldr` pair leaves a data reference at
+the slot, so the slot's `reloc.` flag reached the identity and the stub
+passed; the x86-64 `jmp [rip+X]` leaves none and the same stub was
+`Unknown`. The capture already knew the answer -- `RAnalFcnCallee.linkage`
+from the relocation -- and dropped it before the wire. Format 18 carries
+`linkage` on every call-site record; `AdvisoryCallSite::linkage` reaches the
+machine context (`callee_linkages`, part of its identity hash), the call-site
+fact and the `CallsiteCertificate`, and `prepared_callee_resolution_facts`
+turns it into a `CalleeFact` for the identity resolver, which already treated
+an imported linkage as the fact that authorises import policy. The name-shape
+and data-symbol routes still exist as hints; they no longer decide.
+
+**A prototype is looked up by the identifier itself.** radare2's
+`r_type_func_*` accessors trim leading underscores whenever the exact key is
+absent (`trim_lodashes` in `libr/util/utype.c`), so `__error` on Darwin read
+as glibc's `error(int, int, const char *)` at every layer: the guess, the key
+lookup, and even `r_type_func_prototype_exist`. The capture now asks for the
+key `func.<identifier>.ret` directly (`type_prototype_exact`) in both the
+relocation path and the own-prototype gate, and `__error`, `__maskrune` and
+`__stack_chk_fail` render as undeclared stubs. Whether the accessors should
+trim at all is an upstream question not raised yet: the guess is where a
+heuristic belongs, and PR #26742 closed for guessing too much in the other
+direction.
+
+**An unplaced parameter has no carrier.** `bzero`'s `size_t` parameter would
+not root in the type graph, the capture cleared its logical type and carrier,
+and the walker wrote the cleared carrier anyway, which the reader refused as
+an invalid kind: nine bzip2 stubs refused at `walk_carrier:614`. Both ends now
+agree that an absent logical value is the type id alone.
+
+**The census measures the binary it is told to.** `control_census.sh` took
+`r2` from the path, and when given the fork through `R2_BIN` it still ran
+against the installed libraries, because macOS strips `DYLD_LIBRARY_PATH`
+when `/usr/bin/env bash` starts: every stub refused, and three hours of
+bisecting found no engine cause because there was none. The script now sets
+the library path itself when the binary is inside a radare2 tree, and counts
+per function: `bzip2` is 107 = 48 bodies + 43 declarations + 3 undeclared
+stubs + 13 refused. The design's 51 bodies counted three functions that are
+stubs with a `sym_imp_` name (`exit`, `malloc`, `free`, reached by `b`), now
+in the declaration column. Gates: unit and clippy green, r2r 99 of 101 with
+the two recorded baseline failures, corpus 60/60 on every gate.
+
+**Upstream.** #26744 (arm64 `ldr` after `adrp` refers to the slot) had a
+heredoc terminator mismatch in its test and now annotates the slot values in
+the swift jump-table expectation; both fixed. #26743 (fortify prototypes) had
+replaced upstream's `test/db/cmd/types` with the fork's copy, dropping eleven
+upstream tests; rebuilt as one commit on upstream master with the types, the
+`noreturn` order and the `kj` listing that now names the fortified functions.
+Both are waiting on CI.
+
+**Next: 1b.** Storage width as the maximum slice endpoint over every read,
+`doc/phase1-plan.md`. One note for 1c from this step: an import's `char *`
+parameter is spelled `int8_t*` because `parse_c_type_like` reads `char` as
+an 8-bit integer; the declaration should keep the C spelling.

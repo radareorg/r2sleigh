@@ -17,10 +17,18 @@ binary=$1
 out=${2:-${CLAUDE_JOB_DIR:-/tmp}/control-census-$(basename "$binary").txt}
 mkdir -p "$(dirname "$out")"
 
-r2_bin=$(command -v r2) || {
+# R2_BIN names the radare2 to measure with. A binary inside a radare2 source
+# tree runs against that tree's libraries; the path is set here because macOS
+# strips DYLD_LIBRARY_PATH when it starts a system shell.
+r2_bin=${R2_BIN:-$(command -v r2 || true)}
+[[ -x $r2_bin ]] || {
     echo "radare2 executable not found" >&2
     exit 69
 }
+if [[ $r2_bin == */binr/radare2/radare2 ]]; then
+    export DYLD_LIBRARY_PATH="$(ls -d "${r2_bin%/binr/radare2/radare2}"/libr/*/ | tr '\n' ':')"
+    export LD_LIBRARY_PATH="$DYLD_LIBRARY_PATH"
+fi
 
 fns=$("$r2_bin" -e scr.color=0 -q -c 'a:sla; aaa; afl' "$binary" 2>/dev/null | awk '$1 ~ /^0x/ {print $1}')
 if [[ -z "$fns" ]]; then
@@ -49,7 +57,21 @@ identity=$(awk '/^==MARK/ { if (last != "") print last; last = "" }
                 /^register-identity / { last = $0 }
                 END { if (last != "") print last }' "$out")
 split=$(printf '%s\n' "$identity" | grep -vc 'split_entries=0$' || true)
-echo "$(basename "$binary"): functions=$functions certified=$certified ok=$ok fail=$fail with-inversions=$inverted split-entries=$split out=$out"
+# Every function is one of: a body, an import stub rendered as the import's
+# declaration, an import stub whose prototype nothing states, or a refusal.
+# The counts are per function, whatever else was printed under its marker.
+read -r bodies declared undeclared refused <<<"$(awk '
+    /^==MARK/ { m = $2; seen[m] = 1 }
+    /r2sleigh refused/ { refused[m] = 1 }
+    /import stub at .* has no body of its own/ { declared[m] = 1 }
+    /import stub at .* whose prototype nothing states/ { undeclared[m] = 1 }
+    END {
+        for (m in seen) {
+            if (refused[m]) r++; else if (declared[m]) d++; else if (undeclared[m]) u++; else b++
+        }
+        print b + 0, d + 0, u + 0, r + 0
+    }' "$out")"
+echo "$(basename "$binary"): functions=$functions bodies=$bodies declarations=$declared undeclared-stubs=$undeclared refused=$refused certified=$certified ok=$ok fail=$fail with-inversions=$inverted split-entries=$split out=$out"
 # Clauses, by the number of functions whose final certificate names each.
 printf '%s\n' "$final" | grep ': FAIL' \
     | sed -E 's/^control-certificate [^ ]*: FAIL [0-9]+ //; s/ occurrences=.*$//' \
