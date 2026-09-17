@@ -26333,13 +26333,48 @@ which applies to this commit.
    markers split the way they do for the conditional expression: the write stops
    happening and is elided, the value the arm computed travels to that arm's
    return.
-7. **`read_before_assignment` -- open.** `pearson`'s merge is *also* a loop
+7. **`read_before_assignment` -- closed.** `pearson`'s merge is *also* a loop
    carrier read inside the arm, so it is not read only by the return and must
-   not be specialised at all. The precondition is right and the check for it is
-   not: a mention walk over the rewritten statements found the mention in
-   `alloc_and_copy`, where there is none, and missed it in `pearson`, where
-   there is one. The question is really about the plan -- which readers a
-   binding has -- rather than about the text, and asking the binding plan
-   instead of walking the tree is the change to make next.
+   not be specialised at all. A mention walk over the rewritten statements got
+   this wrong in both directions; the question is about the plan, not the text.
+   `merge_carries_only_to_return` asks it there: every graph use of every value
+   bound to the object is either the certified return or a phi that feeds the
+   same object back. `pearson` declines on it and renders as before.
 
-Reverted to keep the tree green; the corpus is back to 60/60 on every column.
+What remains is the precondition on what the tail does *before* the return.
+`alloc_and_copy`'s tail holds a frame teardown store, and moving the return
+above a store is sound exactly when nothing reads what it wrote.
+`binding_is_never_read` asks the plan -- for a frame object, whether every
+structured access to it is a write -- and it answers no here, because the
+binding is a register-held frame temporary whose graph readers all render
+nothing. The honest question is "no *rendered* reads", which is a
+placement-level fact and is decided after the structurer runs, so the next step
+is to give the plan that answer before the rewrite asks for it. Until then the
+rewrite declines on every shape seen so far.
+
+**Two things found on the way out, both worth having before the next attempt.**
+
+The seal that the walk gave up has to be restored in *both* paths, not one.
+`seal_preserving_effects` proves exclusivity from the region tree, and that is
+the only place it can be proved; the path that runs without a region tree --
+`LegacyObservationJournal::seal`, and `finish_enforcing` on a draft that carries
+no placement -- has nothing to prove it with, so a repeat there must refuse
+outright. `production_audit_failure_refuses_the_native_product` is the test that
+pins this, and it was still passing a duplicate through when the attempt was
+set aside: the early refusal added for it did not fire, so the path
+`finish_enforcing` takes for a placement-less draft is not the one it was added
+to. That is the first thing to establish next time, because it is a weakening
+of the seal and not a missing feature.
+
+The other is that two of the three unit tests that encoded the old contract
+were updated correctly and are worth keeping in the patch:
+`stripping_reports_a_repeated_observation_rather_than_refusing_it` says what the
+walk now does, and the out-of-range half keeps its own name and its
+no-mutation claim.
+
+The tree is green throughout: corpus 60/60 on every column, r2r unchanged at 90
+passing, snapshots untouched. The attempt is kept as
+`doc/wip-return-specialisation.patch`, which applies to this commit and carries
+everything above -- the duplicate-tolerant walk, the exclusivity check, the
+`RewriteElisions` channel, `SpecialisedMergeCarrier`, the region-dominance walk,
+the two plan queries and the rewrite itself.
