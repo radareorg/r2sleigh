@@ -26680,12 +26680,10 @@ same shape everywhere, so they are not this arc's. What they wait on, traced:
     the slot's own value, which is the single-owner rendering the post-call
     decision already names.
 
-**What the plan listed for deletion and is not yet gone.** The journal's
-`merge_carries_only_to_return`, `nothing_wrote_the_object_between` and
-`copy_source_is_a_parameter` still stand; each is a guard the exact partition
-makes redundant in principle, and each is removed only once a cell shows the
-partition answering the same question, which none has yet. Everything else on
-the list is deleted. The design is recorded in `doc/adr-partition-first.md`.
+**What the plan listed for deletion is gone.** The journal's
+`nothing_wrote_the_object_between` and `copy_source_is_a_parameter` are
+deleted and `merge_carries_only_to_return` is a set computed once; see the
+closing section below. The design is recorded in `doc/adr-partition-first.md`.
 
 **What a whole binary said.** A locally built arm64 `bzip2` at -O2 (107
 functions) was rendered with the engine from before the arc and with the
@@ -26776,4 +26774,92 @@ returns -- is the one question to settle first.
 
 **Gates at the end of the arc.** Corpus raw, differential, snapshot and all
 four audits 60/60; r2r 93 passing with the four recorded failures; unit tests
-and clippy clean on `r2ssa` and `r2dec`.
+and clippy clean on `r2ssa` and `r2dec`. After the closing section below:
+r2r 95 passing, with `dec_struct_array_index_keeps_member_write_shape` and
+`taint_vuln_memcpy_call_sinks_include_arg_regs` the two that remain.
+
+### Closing the arc: stored values, the last guards, one forwarding rule, the curve
+
+**A store into a private slot is the slot's value, offered one at a time.**
+The whole-set union recorded above is replaced by offers: each value a
+full-width store writes travels on the slot certificate as `stored_values`,
+beside the reloads, and `binding_components_with` offers each to the slot's
+component on its own after the entity unions and before the literals, judged
+by identity and liveness like a literal. The plan and the seal adopt a
+binding for a slot when it holds every reload and nothing but reloads and
+stored values (`slot_members_agree`). `alloc_and_copy` renders
+`char* buf = (char*)malloc(len + 1);`, `process_string` renders
+`size_t len = strlen(s);`, the early-return recovery is untouched, two -O0
+cells lost a temporary each and `murmur3_32` only renamed one.
+
+**The three journal guards are gone.** `nothing_wrote_the_object_between`
+scanned every instruction per program copy and asked what the partition
+already answered: two values in one object were judged by liveness, so
+nothing wrote the object between the value and its copy. The version-zero
+exclusion and `copy_source_is_a_parameter` guarded a live-in with no
+declaration, which the entry-value role now declares. And
+`merge_carries_only_to_return` scanned every value per return the cleanup
+asked about; the return-only carriers are now computed once, over every
+value, when the journal is built. r2r and the corpus did not move.
+
+**Forwarding has one rule.** A copy the program means keeps its statement:
+a write of a named object, a merge's edge write, or a literal's spelling.
+Every other copy is the value it copied. `copy_is_a_program_write` is that
+rule, stated once.
+
+**An import's prototype is radare2's, and it travels marked.** Every call
+to an import rendered through `uint64_t` casts because the capture wrote an
+interface only for an address-linked signature, and an import stub's
+prototype comes from radare2's type database by name. A function whose
+linkage is imported -- the symbol, or the `imp` function radare2 makes of an
+arm64 stub -- now carries that prototype with a flag on the wire (format 17,
+`prototype_from_source_types`); the callee's C signature takes its parameter
+widths from the interface rather than from body entities the stub never
+has; the call-site facts carry the flag to the rendering; and the proof line
+counts "N callee prototypes supplied by radare2", which is what the standing
+decision on radare2 facts asks for. `strcmp`, `strlen` and `malloc` now
+render by their prototypes on both architectures.
+
+**A call's result is the declared return, not the carrier.** With `int
+strcmp(...)` known, the result still rendered `uint64_t RAX_1 =
+(uint64_t)strcmp(...)`: the `CallDefine` is the whole register, and a
+declaration narrower than a member was dropped for the machine width. The
+convention says nothing about the rest of the register, and every read
+stayed inside the declared width, so `binding_width` and the seal's width
+evidence now take the declared return width for a one-member component that
+is a call's own result whose reads all lie inside it. `int32_t RAX_1 =
+strcmp(...)`, and the four -O0 cells that call `rotl32` declare `uint32_t`.
+
+**Pointer conversions to and from `void *` are implicit.** C11 6.3.2.3p1 and
+6.5.16.1: `char* buf = malloc(len + 1)` and `memcpy_chk(buf, src, len)` need
+no casts. A call's `void *` result takes the rule; a named `void *` keeps its
+conversion, because the early-return rewrite substitutes an arm's slot-typed
+expression into the return and needs one conversion left to collapse into --
+dropping it there produced `return (void*)buf;`. Any object pointer
+converting to `void *` drops its cast wherever the conversion is asked for.
+
+**The growth curve, measured.** Every bzip2 function rendered one at a time
+with `R2SLEIGH_TIMING=1`, plan time against instruction count over the
+forty functions of 150 instructions or more (154 to 32531): total slope
+1.10. The partition rounds are linear -- `plan_seed` 1.08,
+`plan_inlinable` 1.17, `plan_components` 1.24 -- so the descending chain
+costs a constant factor, not an exponent, and is left as it is. Two phases
+read superlinear on that run, `journal_coalesced` at 1.66 and `audit` at
+1.54. Re-measured on a quiet host after the guards went: total slope 1.05,
+`journal_coalesced` 0.91 and 1.7ms on the largest function (it was 145ms:
+the per-copy instruction scan deleted above), the largest function 894ms
+against 1839ms. `audit` reads 1.39 and 132ms; it is `finalize_effect_ledger`
+-- two rebuilds of the emission tree and a deep clone -- all linear walks,
+so the slope is allocation noise on thirty-nine points and is left.
+
+**Two radare2 defects behind the last casts, fixed in the fork and raised
+upstream.** `__memcpy_chk` still rendered through `uint64_t` after the
+prototype work because radare2 had no prototype for it: the guess that maps
+a symbol to the type table strips one leading underscore, and Darwin's
+`__memcpy_chk` keeps two once `sym.imp.` is gone; and the fortified `_chk`
+functions were declared only in the linux table. The guess now tries each
+leading underscore in turn (radareorg/radare2#26742) and the fortify
+prototypes live in the generic table (#26743), one idea per pull request.
+The type tables are compiled into `libr_anal` through gperf, so a table
+change needs `libr/anal` relinked, not the `.sdb` copied; that cost one
+wrong conclusion.

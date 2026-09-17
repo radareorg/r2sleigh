@@ -347,6 +347,14 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
                 CExpr::cast(to.clone(), expr)
             }
         }
+        // And the other way: any object pointer converts to `void *` without
+        // a cast, C11 6.3.2.3p1, wherever a conversion is asked for.
+        (None, None)
+            if matches!(from, CType::Pointer(pointee) if !matches!(**pointee, CType::Function { .. }))
+                && matches!(to, CType::Pointer(pointee) if matches!(**pointee, CType::Void)) =>
+        {
+            expr
+        }
         (None, None) if is_address(from) && matches!(to, CType::Pointer(_)) => {
             CExpr::cast(to.clone(), expr)
         }
