@@ -3388,7 +3388,13 @@ static bool function_interface_snapshot_collect(
 	}
 	const bool address_linked = ctx->signature
 		&& ctx->signature->origin == R_ANAL_FUNCTION_SIGNATURE_ORIGIN_ADDRESS;
-	if (!ctx->signature || !address_linked) {
+	/* An import has no body and no debug information: the prototype radare2
+	 * finds by its name is the only statement of it, and it travels marked. */
+	const bool imported_prototype = ctx->signature
+		&& ctx->signature->origin == R_ANAL_FUNCTION_SIGNATURE_ORIGIN_NAME
+		&& fcn_context_resolve_callee_linkage (anal, fcn->addr) == R_ANAL_FCN_CALLEE_IMPORTED;
+	interface->prototype_from_types = imported_prototype;
+	if (!ctx->signature || (!address_linked && !imported_prototype)) {
 		// Leaving without a word here hid the largest refusal cause in the
 		// benchmark. A function that takes this exit carries no interface into
 		// the snapshot, so the engine recovers one from the instructions

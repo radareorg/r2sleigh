@@ -350,6 +350,7 @@ fn note_unproven_constructs(
     func: &mut CFunction,
     ledger: Option<&r2ssa::ledger::ObligationLedger>,
     radare2_variadic_format_counts: usize,
+    radare2_prototypes: usize,
     radare2_local_names: usize,
 ) {
     let rendered_nothing = func.body.is_empty();
@@ -434,6 +435,17 @@ fn note_unproven_constructs(
         let _ = write!(
             &mut detail,
             "; {radare2_variadic_format_counts} {noun} supplied by radare2 format literals"
+        );
+    }
+    if radare2_prototypes > 0 {
+        let noun = if radare2_prototypes == 1 {
+            "callee prototype"
+        } else {
+            "callee prototypes"
+        };
+        let _ = write!(
+            &mut detail,
+            "; {radare2_prototypes} {noun} supplied by radare2"
         );
     }
     if radare2_local_names > 0 {
@@ -3704,10 +3716,20 @@ impl Decompiler {
                     })
             })
             .count();
+        // Call sites whose prototype is radare2's by-name lookup for an import.
+        let radare2_prototypes = self
+            .context
+            .function_facts
+            .callsites()
+            .into_iter()
+            .flat_map(|facts| facts.by_callsite.values())
+            .filter(|fact| fact.callee_signature_from_source_types)
+            .count();
         crate::stage_timing::mark("effect_ledger");
         native.finalize_effect_ledger(
             &ledger,
             radare2_variadic_format_counts,
+            radare2_prototypes,
             binding_names.source_named_locals(),
         );
         Ok(InternalBuildProduct::Native(native))
@@ -5066,7 +5088,7 @@ mod tests {
             simplify_data_object_loads_in_stmt(stmt, 64, &used);
         }
         function.extern_objects = used.into_inner().into_values().collect();
-        note_unproven_constructs(&mut function, None, 0, 0);
+        note_unproven_constructs(&mut function, None, 0, 0, 0);
         let ready = crate::codegen::prepare_function_for_emission(function);
         let rendered =
             crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
@@ -5121,7 +5143,7 @@ mod tests {
             simplify_data_object_loads_in_stmt(stmt, 64, &used);
         }
         function.extern_objects = used.into_inner().into_values().collect();
-        note_unproven_constructs(&mut function, None, 0, 0);
+        note_unproven_constructs(&mut function, None, 0, 0, 0);
         let ready = crate::codegen::prepare_function_for_emission(function);
         let rendered =
             crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
@@ -6120,7 +6142,7 @@ mod tests {
         ];
         assert_eq!(count_residual_markers(&func.body), 2);
 
-        note_unproven_constructs(&mut func, None, 0, 0);
+        note_unproven_constructs(&mut func, None, 0, 0, 0);
         let note = match func.body.first() {
             Some(CStmt::Comment(text)) => text.clone(),
             other => panic!("expected a leading proof note, got {other:?}"),
@@ -6144,7 +6166,7 @@ mod tests {
     fn a_rendering_says_so_even_with_nothing_marked() {
         let mut func = CFunction::new("unclaimed".to_string(), CType::Unknown);
         func.body = vec![CStmt::Return(Some(CExpr::IntLit(0)))];
-        note_unproven_constructs(&mut func, None, 0, 0);
+        note_unproven_constructs(&mut func, None, 0, 0, 0);
         let note = match func.body.first() {
             Some(CStmt::Comment(text)) => text.clone(),
             other => panic!("expected a leading proof note, got {other:?}"),
@@ -6157,7 +6179,7 @@ mod tests {
     fn proof_line_attributes_variadic_format_counts_to_radare2() {
         let mut func = CFunction::new("formatted".to_string(), CType::Unknown);
         func.body = vec![CStmt::Return(None)];
-        note_unproven_constructs(&mut func, None, 2, 0);
+        note_unproven_constructs(&mut func, None, 2, 0, 0);
         let note = match func.body.first() {
             Some(CStmt::Comment(text)) => text,
             other => panic!("expected a leading proof note, got {other:?}"),
@@ -6177,7 +6199,7 @@ mod tests {
     fn a_body_that_rendered_nothing_says_so_rather_than_reading_as_empty() {
         let mut func = CFunction::new("nothing_rendered".to_string(), CType::Unknown);
         func.body = Vec::new();
-        note_unproven_constructs(&mut func, None, 0, 0);
+        note_unproven_constructs(&mut func, None, 0, 0, 0);
         let text = format!("{:?}", func.body);
         assert!(
             text.contains("r2dec proof: rendering produced no statements"),

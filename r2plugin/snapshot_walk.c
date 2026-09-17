@@ -984,6 +984,7 @@ static bool walk_interface(R2SleighWireWriter *writer,
 	} else {
 		r2sleigh_wire_bool (writer, false);
 	}
+	r2sleigh_wire_bool (writer, snapshot->function_interface.prototype_from_types);
 
 	return true;
 }

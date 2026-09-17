@@ -1432,6 +1432,9 @@ pub struct SourceFunctionInterface {
     /// string, for callers whose prototype for it names none. A property of
     /// the function, unlike the per-callsite count rule a literal decides.
     body_proven_format_parameter: Option<u32>,
+    /// The prototype is radare2's, found by an import's name rather than
+    /// linked to the address or stated by debug information.
+    prototype_from_source_types: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1833,6 +1836,7 @@ impl SourceFunctionInterface {
             stack_pointer_preserved_across_calls: false,
             frame_pointer_preserved_across_calls: false,
             body_proven_format_parameter: None,
+            prototype_from_source_types: false,
         })
     }
 
@@ -1941,6 +1945,16 @@ impl SourceFunctionInterface {
 
     pub const fn body_proven_format_parameter(&self) -> Option<u32> {
         self.body_proven_format_parameter
+    }
+
+    /// The same interface, with its prototype marked as radare2's by-name lookup.
+    pub const fn with_prototype_from_source_types(mut self) -> Self {
+        self.prototype_from_source_types = true;
+        self
+    }
+
+    pub const fn prototype_from_source_types(&self) -> bool {
+        self.prototype_from_source_types
     }
 
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {

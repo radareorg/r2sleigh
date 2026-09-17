@@ -1430,6 +1430,8 @@ pub struct CallsiteArgumentFacts {
     /// source-owned capture. Its carrier contract has already been checked
     /// against this call site by `r2ssa`.
     pub callee_signature: Option<crate::FunctionType>,
+    /// Whether that signature is radare2's by-name prototype for an import.
+    pub callee_signature_from_source_types: bool,
     /// Per-callsite argument-count proof for a variadic call. This is absent
     /// for fixed calls and never inferred from live argument registers.
     pub variadic_argument_count_evidence: Option<r2ssa::VariadicCallsiteArgumentCountEvidence>,
@@ -2328,6 +2330,8 @@ impl FunctionFacts {
                 let mut logical_signature = signature.signature.clone();
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
+                arguments.callee_signature_from_source_types =
+                    signature.interface.prototype_from_source_types();
             } else {
                 let site = source
                     .call_site_interface(arguments.call_site_id)
@@ -4153,6 +4157,7 @@ fn prepared_callsite_argument_facts(prepared: &r2ssa::SsaArtifact) -> FunctionCa
                     // source-owned callee analysis fills this only after its
                     // exact retained interface matches this call site.
                     callee_signature: None,
+                    callee_signature_from_source_types: false,
                     variadic_argument_count_evidence: cert.variadic_argument_count_evidence,
                     variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
                     register_argument_locations,
@@ -6177,6 +6182,7 @@ mod tests {
                     variadic: false,
                     fixed_argument_count: None,
                     callee_signature: None,
+                    callee_signature_from_source_types: false,
                     variadic_argument_count_evidence: None,
                     variadic_argument_count_refusal: None,
                     register_argument_locations: vec![RegisterCallArgumentLocationFact {
@@ -6389,6 +6395,7 @@ mod tests {
                     variadic: false,
                     fixed_argument_count: None,
                     callee_signature: None,
+                    callee_signature_from_source_types: false,
                     variadic_argument_count_evidence: None,
                     variadic_argument_count_refusal: None,
                     register_argument_locations: Vec::new(),
@@ -6510,6 +6517,7 @@ mod tests {
             variadic: false,
             fixed_argument_count: None,
             callee_signature: None,
+            callee_signature_from_source_types: false,
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
             register_argument_locations: vec![RegisterCallArgumentLocationFact {
@@ -6958,6 +6966,7 @@ mod tests {
             variadic: false,
             fixed_argument_count: None,
             callee_signature: None,
+            callee_signature_from_source_types: false,
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
             register_argument_locations: Vec::new(),

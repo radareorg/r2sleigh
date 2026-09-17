@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 16;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 17;
 /// The reader speaks exactly the format the writer writes.
 ///
 /// Producer and consumer are one build: `r2plugin/snapshot_wire.c` writes the
@@ -1990,6 +1990,7 @@ fn write_interface_for_format(
         }
         None => writer.bool(false),
     }
+    writer.bool(interface.prototype_from_source_types());
     if format_version < 3 {
         match legacy_stack_allocation {
             Some(contract) => {
@@ -2169,6 +2170,9 @@ fn read_interface_record(
                 contract: "SourceFunctionInterface::with_exact_stacked_return",
                 reason: format!("{error:?}"),
             })?;
+    }
+    if reader.bool()? {
+        interface = interface.with_prototype_from_source_types();
     }
     Ok(interface)
 }

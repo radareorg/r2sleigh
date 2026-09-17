@@ -1053,21 +1053,33 @@ impl TypeWritebackAnalysis {
             .machine_context()
             .memory_model()
             .default_address_bits();
+        // An import's prototype is radare2's: its parameters are what the
+        // interface declares, and no body reads them for an entity to certify.
+        let interface = self.source.machine_context().function_interface();
+        let prototype =
+            interface.is_some_and(r2ssa::SourceFunctionInterface::prototype_from_source_types);
         let params = signature
             .params
             .iter()
             .enumerate()
             .map(|(slot, parameter)| {
                 let id = r2ssa::SemanticId::parameter(slot)?;
-                let Some(crate::CertifiedEntity::Parameter { carrier_width, .. }) =
-                    render.certified_entities.get(&id)
-                else {
-                    r2il::refusal_evidence!(
-                        "callee-signature",
-                        "{entry:#x}: parameter {slot} ({}) has no certified entity",
-                        parameter.name
-                    );
-                    return None;
+                let carrier_width = match render.certified_entities.get(&id) {
+                    Some(crate::CertifiedEntity::Parameter { carrier_width, .. }) => *carrier_width,
+                    _ if prototype => {
+                        let spec = interface?.parameters().get(slot)?;
+                        spec.register_storage()
+                            .map(|storage| storage.size)
+                            .or_else(|| spec.location().stack().map(|(_, size)| size))?
+                    }
+                    _ => {
+                        r2il::refusal_evidence!(
+                            "callee-signature",
+                            "{entry:#x}: parameter {slot} ({}) has no certified entity",
+                            parameter.name
+                        );
+                        return None;
+                    }
                 };
                 let width_bits = carrier_width.checked_mul(8)?;
                 Some(crate::admit_declaration_type(

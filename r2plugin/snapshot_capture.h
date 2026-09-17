@@ -346,6 +346,8 @@ typedef struct r_anal_function_interface_snapshot_t {
 	st64 convention_stack_argument_offset;
 	ut32 convention_stack_argument_stride;
 	bool convention_stack_arguments_known;
+	/* The prototype is radare2's, found by the import's name; no address or debug information links it. */
+	bool prototype_from_types;
 } RAnalFunctionInterfaceSnapshot;
 
 typedef struct r_anal_call_site_interface_snapshot_t {
