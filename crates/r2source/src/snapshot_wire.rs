@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 15;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 16;
 /// The reader speaks exactly the format the writer writes.
 ///
 /// Producer and consumer are one build: `r2plugin/snapshot_wire.c` writes the
@@ -1812,6 +1812,7 @@ pub fn write_stack_slot(writer: &mut SnapshotWireWriter, slot: &SourceStackSlotS
             writer.u32(parameter_index);
         }
     }
+    writer.u8(u8::from(slot.declared_by_debug_info()));
     // The slot's node in the type graph, or the invalid id when it has none.
     writer.u32(slot.logical_type().unwrap_or(u32::MAX));
 }
@@ -1866,8 +1867,18 @@ pub fn read_stack_slot(
             });
         }
     };
-    // A slot's declared type is a node of the function's type graph from
-    // format 9 on; the invalid id says the graph does not carry it.
+    let slot = match reader.u8()? {
+        0 => slot,
+        1 => slot.with_debug_declaration(),
+        tag => {
+            return Err(SnapshotWireError::UnknownDiscriminant {
+                record: "stack slot declaration",
+                tag: u64::from(tag),
+            });
+        }
+    };
+    // A slot's declared type is a node of the function's type graph; the
+    // invalid id says the graph does not carry it.
     let logical_type = {
         let id = reader.u32()?;
         (id != u32::MAX).then_some(id)

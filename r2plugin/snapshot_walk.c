@@ -736,6 +736,8 @@ static bool walk_stack_slot(R2SleighWireWriter *writer, const RAnalFcnSlot *slot
 		r2sleigh_wire_u8 (writer, WALK_ROLE_UNCLASSIFIED);
 		break;
 	}
+	/* Whether debug information declares the slot; an inferred one is evidence. */
+	r2sleigh_wire_u8 (writer, slot->dwarf_declared? 1: 0);
 	/* The slot's node in the type graph travels only with the graph: without
 	 * exact types there is no graph for the id to index. */
 	r2sleigh_wire_u32 (writer, exact_types

@@ -1145,6 +1145,9 @@ pub struct SourceStackSlotSpec {
     /// Absent when the interface carries no graph or the graph could not
     /// place the declaration; never a guess.
     logical_type: Option<u32>,
+    /// Whether the source's debug information declares this slot, as opposed
+    /// to radare2 inferring it from the body's stack accesses.
+    declared_by_debug_info: bool,
 }
 
 impl SourceStackSlotSpec {
@@ -1162,6 +1165,7 @@ impl SourceStackSlotSpec {
             size_bytes,
             role: SourceStackSlotRole::UnclassifiedResource,
             logical_type: None,
+            declared_by_debug_info: false,
         }
     }
 
@@ -1178,6 +1182,7 @@ impl SourceStackSlotSpec {
             size_bytes,
             role: SourceStackSlotRole::Local,
             logical_type: None,
+            declared_by_debug_info: false,
         }
     }
 
@@ -1199,6 +1204,7 @@ impl SourceStackSlotSpec {
                 home_storage,
             },
             logical_type: None,
+            declared_by_debug_info: false,
         }
     }
 
@@ -1217,6 +1223,7 @@ impl SourceStackSlotSpec {
             size_bytes,
             role: SourceStackSlotRole::Parameter { parameter_index },
             logical_type: None,
+            declared_by_debug_info: false,
         }
     }
 
@@ -1230,6 +1237,18 @@ impl SourceStackSlotSpec {
 
     pub const fn logical_type(&self) -> Option<u32> {
         self.logical_type
+    }
+
+    /// The same slot, stated by the source's debug information.
+    pub const fn with_debug_declaration(self) -> Self {
+        Self {
+            declared_by_debug_info: true,
+            ..self
+        }
+    }
+
+    pub const fn declared_by_debug_info(&self) -> bool {
+        self.declared_by_debug_info
     }
 
     pub const fn base(&self) -> StackAddressBase {

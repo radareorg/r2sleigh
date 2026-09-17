@@ -17,7 +17,7 @@ use crate::machine_context::{
     MachineRegisterGeometryState, SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
     SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceCallResult, SourceCallSiteIdentity, SourceCarrierKind,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceStackAllocationContract,
-    SourceStackSlotSpec, SourceTypeKind,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTypeKind,
 };
 use crate::obligation::SemanticObligationInventory;
 use crate::op::SSAOp;
@@ -6276,7 +6276,14 @@ fn collect_callee_stack_allocation_certificates(
             | ObjectKind::EscapedUnknown { .. }
             | ObjectKind::Pointee { .. } => continue,
         };
-        if space != SpaceId::Ram || exact_stack_slots.contains_key(&(base, offset)) {
+        // A slot debug information declares, or a parameter's, is the
+        // program's; a local radare2 inferred from the body's accesses is
+        // evidence, and a frame save it named is still a frame save.
+        if space != SpaceId::Ram
+            || exact_stack_slots.get(&(base, offset)).is_some_and(|slot| {
+                slot.declared_by_debug_info() || !matches!(slot.role(), SourceStackSlotRole::Local)
+            })
+        {
             continue;
         }
         let Some(entry_root) = objects.entry_stack_roots.get(object).copied() else {
