@@ -1,0 +1,1078 @@
+diff --git a/crates/r2dec/src/ast.rs b/crates/r2dec/src/ast.rs
+index f83f4faa..d28c1ca2 100644
+--- a/crates/r2dec/src/ast.rs
++++ b/crates/r2dec/src/ast.rs
+@@ -1364,6 +1364,12 @@ impl StmtObservationChain {
+         )
+     }
+ 
++    /// The markers themselves, outermost first, for a rewrite that has to put
++    /// them somewhere other than around one statement.
++    pub(crate) fn into_ids(self) -> Vec<RenderObservationId> {
++        self.outer_to_inner
++    }
++
+     /// Reattach this chain to the semantic statement at the same position.
+     pub(crate) fn reapply(self, mut stmt: CStmt) -> CStmt {
+         for id in self.outer_to_inner.into_iter().rev() {
+@@ -1712,6 +1718,14 @@ impl CFunction {
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct ReachableObservations {
+     reachable: Vec<bool>,
++    /// Markers the walk met more than once.
++    ///
++    /// Two occurrences of one cell are a duplicate only if both can happen. A
++    /// return specialised into the arms of a conditional is written twice and
++    /// performed once, so the walk records the repeat and the consumer, which
++    /// can see the structure, decides. Refusing here made that structural
++    /// question unanswerable.
++    duplicated: std::collections::BTreeSet<RenderObservationId>,
+ }
+ 
+ impl ReachableObservations {
+@@ -1816,7 +1830,10 @@ fn validate_render_observations(
+         .try_reserve_exact(expected_count)
+         .map_err(|_| RenderObservationStripError::CapacityUnavailable { expected_count })?;
+     reachable.resize(expected_count, false);
+-    let mut observations = ReachableObservations { reachable };
++    let mut observations = ReachableObservations {
++        reachable,
++        duplicated: std::collections::BTreeSet::new(),
++    };
+     for stmt in &function.body {
+         visit_stmt_observations(stmt, &mut |id| observations.record(id))?;
+     }
+@@ -2176,7 +2193,8 @@ impl ReachableObservations {
+             });
+         };
+         if *reachable {
+-            return Err(RenderObservationStripError::Duplicate { id });
++            self.duplicated.insert(id);
++            return Ok(());
+         }
+         *reachable = true;
+         Ok(())
+diff --git a/crates/r2dec/src/effect_ledger.rs b/crates/r2dec/src/effect_ledger.rs
+index 1929c75c..ea8cbca6 100644
+--- a/crates/r2dec/src/effect_ledger.rs
++++ b/crates/r2dec/src/effect_ledger.rs
+@@ -362,6 +362,12 @@ fn upstream_zero_occurrence_outcome(
+     if effects.dead_unused_value_effect(id) {
+         return Some(Outcome::Elided(ElisionReason::DeadUnusedTemporary));
+     }
++    // A control rewrite took the statement out of the text and said why: the
++    // object it wrote carried a value to one reader, and that reader now reads
++    // each path's value directly.
++    if effects.rewrite_elided_effect(id) {
++        return Some(Outcome::Elided(ElisionReason::SpecialisedMergeCarrier));
++    }
+     // A store that put into an object exactly what the object's binding already held.
+     if effects.coalesced_store_effect(id) {
+         return Some(Outcome::Elided(ElisionReason::CoalescedCopy));
+diff --git a/crates/r2dec/src/observation_journal.rs b/crates/r2dec/src/observation_journal.rs
+index dd755731..5f98a847 100644
+--- a/crates/r2dec/src/observation_journal.rs
++++ b/crates/r2dec/src/observation_journal.rs
+@@ -743,6 +743,7 @@ pub(crate) struct SurvivingEffectObservations {
+     occurrences: BTreeMap<SemanticObligationId, EffectOccurrences>,
+     coalesced_carriers: Box<CoalescedCarrierEffectElisions>,
+     gapped: BTreeSet<SemanticObligationId>,
++    rewrite_elided: BTreeSet<SemanticObligationId>,
+ }
+ 
+ /// How often one source obligation was rendered, and whether the copies stand
+@@ -848,6 +849,12 @@ impl SurvivingEffectObservations {
+             .contains(&id)
+     }
+ 
++    /// Whether a control rewrite took this obligation's statement out of the
++    /// text and said why.
++    pub(crate) fn rewrite_elided_effect(&self, id: SemanticObligationId) -> bool {
++        self.rewrite_elided.contains(&id)
++    }
++
+     /// Whether a pre-placement dead definition owned this producer obligation.
+     pub(crate) fn dead_unused_value_effect(&self, id: SemanticObligationId) -> bool {
+         self.coalesced_carriers
+@@ -929,6 +936,8 @@ pub(crate) struct LegacyObservationJournal {
+     /// occurrence, so a shared tail cloned onto two paths cannot turn one
+     /// gapped obligation into a duplicate rendering.
+     gapped_effects: BTreeSet<SemanticObligationId>,
++    /// Cells a control rewrite took out of the text, with its stated reason.
++    rewrite_elisions: RewriteElisions,
+     /// Values a marked gap accounts for, so a read the gap also covers is
+     /// known to name an object no statement outside the gap assigns.
+     gapped_values: BTreeSet<ValueId>,
+@@ -937,6 +946,19 @@ pub(crate) struct LegacyObservationJournal {
+     target_origins: Vec<&'static std::panic::Location<'static>>,
+ }
+ 
++/// Cells a control rewrite removed from the text, with the reason it removed
++/// them.
++///
++/// A rewrite that takes a statement out of the tree owes an answer for the
++/// cells that statement carried. Reporting them is that answer, and it is the
++/// rewrite's to give: it is the only thing that knows why the statement is
++/// gone. The journal records the elision and the ledger reads it, exactly as it
++/// reads the certificates' elisions.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub(crate) struct RewriteElisions {
++    pub(crate) cells: Vec<(RenderObservationId, r2ssa::ledger::ElisionReason)>,
++}
++
+ /// Transaction boundary for render markers allocated by one tentative AST
+ /// route. The source V/U/W domains are immutable after journal construction;
+ /// only the dense target tail changes while lowering candidate trees.
+@@ -1360,6 +1382,7 @@ impl MarkedNativeDraft {
+             .record_placement_removals(removals, occurrences.writes());
+         let undeclared = crate::unrendered::names_mentioned_without_a_declaration(&self.function);
+         if !undeclared.is_empty() {
++            r2il::refusal_evidence!("undeclared-names", "{undeclared:?}");
+             return Err(NativePlacementFailure::UndeclaredNames {
+                 count: undeclared.len(),
+             });
+@@ -1937,6 +1960,33 @@ impl LegacyObservationJournal {
+ 
+     /// The block whose text one observed statement was emitted in, for the
+     /// control certificate; read-side targets say nothing about placement.
++    /// Record cells a control rewrite removed, with the reason it removed them.
++    pub(crate) fn record_rewrite_elisions(&mut self, elisions: &RewriteElisions) {
++        self.rewrite_elisions
++            .cells
++            .extend(elisions.cells.iter().copied());
++    }
++
++    /// The effect obligations a control rewrite removed from the text.
++    pub(crate) fn rewrite_elided_effects(&self) -> BTreeSet<SemanticObligationId> {
++        self.rewrite_elisions
++            .cells
++            .iter()
++            .filter_map(|(id, _)| match self.targets.get(id.index() as usize) {
++                Some(ObservationTarget::Effect(effect)) => Some(*effect),
++                _ => None,
++            })
++            .collect()
++    }
++
++    /// What this marker stands for, for a diagnostic that has only its id.
++    pub(crate) fn observation_description(&self, id: RenderObservationId) -> String {
++        match self.targets.get(id.index() as usize) {
++            Some(target) => format!("{target:?}").chars().take(200).collect(),
++            None => "<none>".to_string(),
++        }
++    }
++
+     /// Whether this marker stands for a write rather than for a value or read.
+     ///
+     /// A rewrite that merges two arms into one assignment has to know: the
+@@ -2549,6 +2599,7 @@ impl LegacyObservationJournal {
+             effect_occurrence_regions: BTreeMap::new(),
+             exclusive_duplicate_effects: BTreeSet::new(),
+             gapped_effects: BTreeSet::new(),
++            rewrite_elisions: RewriteElisions::default(),
+             gapped_values: BTreeSet::new(),
+             targets: Vec::new(),
+         };
+@@ -4739,7 +4790,9 @@ impl LegacyObservationJournal {
+             }
+             RenderObservationInspectError::Observer(error) => error,
+         })?;
++        let rewrite_elided = self.rewrite_elided_effects();
+         Ok(SurvivingEffectObservations {
++            rewrite_elided,
+             // This path has no region tree to prove exclusion with, so it
+             // claims none.
+             occurrences: effect_occurrences
+@@ -4813,6 +4866,33 @@ impl LegacyObservationJournal {
+         let mut effect_occurrences = std::mem::take(&mut self.effect_occurrences);
+         let mut effect_occurrence_regions = std::mem::take(&mut self.effect_occurrence_regions);
+         let mut gapped_effects = std::mem::take(&mut self.gapped_effects);
++        // Cells a control rewrite took out of the text. They are answered here,
++        // before the walk, because the walk counts what the tree carries and
++        // these are exactly what it no longer carries. The rewrite stated the
++        // reason; nothing is inferred from the absence.
++        for (id, reason) in self.rewrite_elisions.cells.clone() {
++            match self.targets.get(id.index() as usize) {
++                Some(ObservationTarget::Value(value)) => {
++                    if let Some(slot) = values.get_mut(value.0 as usize) {
++                        let _ = record_same(slot, LegacyValueObservation::Elided(reason));
++                    }
++                }
++                Some(ObservationTarget::Use { site, .. }) => {
++                    if let Some(slot) = uses
++                        .get_mut(site.inst.0 as usize)
++                        .and_then(|inputs| inputs.get_mut(site.input_idx))
++                    {
++                        let _ = record_same(slot, LegacyUseObservation::Elided(reason));
++                    }
++                }
++                Some(ObservationTarget::Write { inst, .. }) => {
++                    if let Some(slot) = writes.get_mut(inst.0 as usize) {
++                        let _ = record_same(slot, LegacyWriteObservation::Elided(reason));
++                    }
++                }
++                _ => {}
++            }
++        }
+         let targets = &self.targets;
+         let value_is_literal = &self.value_is_literal;
+         let plan = &self.plan;
+@@ -4991,10 +5071,8 @@ impl LegacyObservationJournal {
+                         *occurrences = occurrences
+                             .checked_add(1)
+                             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
+-                        if let Some(scope) = observation_regions
+-                            .as_ref()
+-                            .and_then(|scoped| scoped.get(id.index() as usize))
+-                            .and_then(Option::as_ref)
++                        if let Some(scope) =
++                            observation_regions.as_ref().and_then(|scoped| scoped.scope(id))
+                         {
+                             effect_occurrence_regions
+                                 .entry(effect)
+@@ -5079,6 +5157,30 @@ impl LegacyObservationJournal {
+                 .map(|(effect, _)| *effect)
+                 .collect();
+         }
++        // A marker written more than once discharges its cell more than once,
++        // which is a duplicate unless the writings exclude one another. This is
++        // the seal the walk no longer applies on its own: it cannot see the
++        // structure, and the structure is the whole of the answer.
++        if let (Some(scopes), Some(regions)) = (observation_regions.as_ref(), regions) {
++            for (id, written) in scopes.repeated() {
++                let exclusive = written.iter().enumerate().all(|(at, left)| {
++                    written
++                        .iter()
++                        .skip(at + 1)
++                        .all(|right| left.excludes(right, regions))
++                });
++                if !exclusive {
++                    r2il::refusal_evidence!(
++                        "repeated-observation",
++                        "{id:?} written {} times on paths that do not exclude one another",
++                        written.len()
++                    );
++                    return Err(LegacyObservationJournalError::Markers(
++                        RenderObservationStripError::Duplicate { id },
++                    ));
++                }
++            }
++        }
+         // Strip the proof markers only after every classification and coverage
+         // check succeeds. A binding failure leaves the marked draft intact.
+         let mut seal_authority = ObservationSealAuthority::new();
+@@ -5299,6 +5401,7 @@ impl LegacyObservationJournal {
+         source: &SourceOwnedFunctionFacts,
+     ) -> SealedLegacyObservations {
+         let coverage = self.final_coverage();
++        let rewrite_elided = self.rewrite_elided_effects();
+         let exclusive = std::mem::take(&mut self.exclusive_duplicate_effects);
+         let repeated_literals = self.repeated_literal_effects();
+         let named_object_addresses = self.named_object_address_effects();
+@@ -5318,6 +5421,7 @@ impl LegacyObservationJournal {
+                 })
+                 .collect(),
+             gapped: std::mem::take(&mut self.gapped_effects),
++            rewrite_elided,
+             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
+                 coalesced_store_sites: std::mem::take(&mut self.coalesced_store_sites),
+                 coalesced_carrier_uses: std::mem::take(&mut self.coalesced_carrier_uses),
+diff --git a/crates/r2dec/src/placement.rs b/crates/r2dec/src/placement.rs
+index c4e13fc5..eb28bcc2 100644
+--- a/crates/r2dec/src/placement.rs
++++ b/crates/r2dec/src/placement.rs
+@@ -806,8 +806,11 @@ pub(crate) fn final_observation_regions(
+     statements: &[CStmt],
+     regions: &SealedStructuredRegionArtifact,
+     count: usize,
+-) -> Vec<Option<ObservationScope>> {
+-    let mut scoped = vec![None; count];
++) -> FinalObservationScopes {
++    let mut scoped = FinalObservationScopes {
++        first: vec![None; count],
++        repeats: BTreeMap::new(),
++    };
+     let mut conditionals = 0;
+     for statement in statements {
+         collect_stmt_observation_regions(statement, None, regions, &mut conditionals, &mut scoped);
+@@ -815,6 +818,46 @@ pub(crate) fn final_observation_regions(
+     scoped
+ }
+ 
++/// Where each observation was written, and where each repeat of one was.
++///
++/// A marker written more than once is a cell discharged by more than one
++/// occurrence. That is a duplicate unless the occurrences exclude one another,
++/// and this is what the seal asks to decide it.
++#[derive(Debug, Clone, Default)]
++pub(crate) struct FinalObservationScopes {
++    first: Vec<Option<ObservationScope>>,
++    repeats: BTreeMap<RenderObservationId, Vec<ObservationScope>>,
++}
++
++impl FinalObservationScopes {
++    pub(crate) fn scope(&self, id: RenderObservationId) -> Option<&ObservationScope> {
++        self.first.get(id.index() as usize)?.as_ref()
++    }
++
++    /// The ids written more than once, with every scope they were written in.
++    pub(crate) fn repeated(
++        &self,
++    ) -> impl Iterator<Item = (RenderObservationId, Vec<&ObservationScope>)> + '_ {
++        self.repeats.iter().filter_map(|(id, extra)| {
++            let first = self.scope(*id)?;
++            Some((
++                *id,
++                std::iter::once(first).chain(extra.iter()).collect::<Vec<_>>(),
++            ))
++        })
++    }
++
++    fn record(&mut self, id: RenderObservationId, scope: ObservationScope) {
++        let Some(slot) = self.first.get_mut(id.index() as usize) else {
++            return;
++        };
++        match slot {
++            None => *slot = Some(scope),
++            Some(_) => self.repeats.entry(id).or_default().push(scope),
++        }
++    }
++}
++
+ /// Where one observation finally sits: its lexical region, and the arm of each
+ /// conditional expression it is written inside.
+ ///
+@@ -850,37 +893,39 @@ impl ObservationScope {
+ fn record_observation_region(
+     id: RenderObservationId,
+     region: Option<RegionId>,
+-    scoped: &mut [Option<ObservationScope>],
++    scoped: &mut FinalObservationScopes,
+ ) {
+-    if let Some(slot) = scoped.get_mut(id.index() as usize) {
+-        *slot = Some(ObservationScope {
++    scoped.record(
++        id,
++        ObservationScope {
+             region,
+             arms: Vec::new(),
+-        });
+-    }
++        },
++    );
+ }
+ 
+ fn collect_expr_observation_regions(
+     expr: &CExpr,
+     region: Option<RegionId>,
+     conditionals: &mut u32,
+-    scoped: &mut [Option<ObservationScope>],
++    scoped: &mut FinalObservationScopes,
+ ) {
+     fn walk(
+         expr: &CExpr,
+         region: Option<RegionId>,
+         arms: &mut Vec<(u32, bool)>,
+         conditionals: &mut u32,
+-        scoped: &mut [Option<ObservationScope>],
++        scoped: &mut FinalObservationScopes,
+     ) {
+         match expr {
+             CExpr::Observed { id, expr } => {
+-                if let Some(slot) = scoped.get_mut(id.index() as usize) {
+-                    *slot = Some(ObservationScope {
++                scoped.record(
++                    *id,
++                    ObservationScope {
+                         region,
+                         arms: arms.clone(),
+-                    });
+-                }
++                    },
++                );
+                 walk(expr, region, arms, conditionals, scoped);
+             }
+             CExpr::Ternary {
+@@ -928,7 +973,7 @@ fn collect_stmt_observation_regions(
+     current: Option<RegionId>,
+     regions: &SealedStructuredRegionArtifact,
+     conditionals: &mut u32,
+-    scoped: &mut [Option<ObservationScope>],
++    scoped: &mut FinalObservationScopes,
+ ) {
+     if let CStmt::StructuredRegion { marker, stmt } = statement {
+         let entered = regions.node_for_marker(marker).map(|(id, _)| id);
+@@ -4214,17 +4259,29 @@ fn validate_occurrence<C: PlacementControlFlow + ?Sized>(
+     if !block_indices.contains_key(&block) {
+         return Err(PlacementAnalysisError::BlockOutsideFunction { block });
+     }
+-    if !cfg.dominates(node.entry(), block) {
+-        // A region identifier says nothing on its own; the entry it fails to
+-        // dominate from is what a trace needs.
+-        r2il::refusal_evidence!(
+-            "placement-dominance",
+-            "binding {binding:?} occurs at {block:#x}, which region {region:?} at {:#x} does not dominate",
+-            node.entry()
+-        );
+-        return Err(PlacementAnalysisError::RegionDoesNotDominateOccurrence { region, block });
++    // The occurrence is lexically inside every region above it, so any of them
++    // dominating the block it names is enough. Asking only the innermost was
++    // right while one block had one occurrence: a block specialised into the
++    // arms of the conditional above it is rendered where its own entry does not
++    // dominate, and the arm region that holds the copy is the one that does.
++    let mut at = Some(region);
++    while let Some(current) = at {
++        let Some(node) = regions.node(current) else {
++            break;
++        };
++        if cfg.dominates(node.entry(), block) {
++            return Ok(());
++        }
++        at = node.parent();
+     }
+-    Ok(())
++    // A region identifier says nothing on its own; the entry it fails to
++    // dominate from is what a trace needs.
++    r2il::refusal_evidence!(
++        "placement-dominance",
++        "binding {binding:?} occurs at {block:#x}, which region {region:?} at {:#x} does not dominate, nor does any region above it",
++        node.entry()
++    );
++    Err(PlacementAnalysisError::RegionDoesNotDominateOccurrence { region, block })
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+diff --git a/crates/r2dec/src/structure/mod.rs b/crates/r2dec/src/structure/mod.rs
+index 29abc980..af34e18d 100644
+--- a/crates/r2dec/src/structure/mod.rs
++++ b/crates/r2dec/src/structure/mod.rs
+@@ -194,14 +194,17 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
+         // observed occurrence, or it is not applied.
+         let placed = self.certificate(&stmt);
+         let fold_ctx = self.fold_ctx;
+-        let shaped =
+-            self.rewrite_stage("shape", &placed, stmt, |tree| Self::shape(fold_ctx, tree))?;
++        let elisions = std::cell::RefCell::new(crate::observation_journal::RewriteElisions::default());
++        let shaped = self.rewrite_stage("shape", &placed, &elisions, stmt, |tree| {
++            Self::shape(fold_ctx, tree)
++        })?;
+         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);
+         let journal = self.fold_ctx.inputs.observation_journal;
+-        let stmt = self.rewrite_stage("cleanup", &placed, shaped, |tree| {
++        let stmt = self.rewrite_stage("cleanup", &placed, &elisions, shaped, |tree| {
+             Self::cleanup(
+                 &symbols,
+                 &|id| journal.is_some_and(|journal| journal.borrow().observation_is_write(id)),
++                &elisions,
+                 tree,
+             )
+         })?;
+@@ -224,6 +227,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
+         &mut self,
+         name: &'static str,
+         placed: &certify::ControlCertificate,
++        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
+         before: CStmt,
+         rewrite: impl FnOnce(CStmt) -> CStmt,
+     ) -> ControlFlowStructureResult<CStmt> {
+@@ -239,7 +243,19 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
+         let kept: BTreeSet<_> = crate::ast::stmt_render_observation_ids(&after)
+             .into_iter()
+             .collect();
+-        let lost = observed.iter().filter(|id| !kept.contains(id)).count();
++        // What the rewrite says it removed, and why. A cell the rewrite states
++        // an elision for is answered rather than lost: the ledger records the
++        // reason the same way it records a certificate's.
++        let stated = std::mem::take(&mut *elisions.borrow_mut());
++        let elided = stated
++            .cells
++            .iter()
++            .map(|(id, _)| *id)
++            .collect::<BTreeSet<_>>();
++        let lost = observed
++            .iter()
++            .filter(|id| !kept.contains(id) && !elided.contains(id))
++            .count();
+         let certified = certificate.ok() || !placed.ok();
+         if let Some(before_digest) = before_digest {
+             r2il::refusal_evidence!(
+@@ -249,12 +265,31 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
+             );
+         }
+         if certified && lost == 0 {
++            if let Some(journal) = self.fold_ctx.inputs.observation_journal {
++                journal.borrow_mut().record_rewrite_elisions(&stated);
++            }
+             self.rewrite_outcomes.push(format!("{name}:applied"));
+             return Ok(after);
+         }
+         r2il::refusal_evidence!(
+             "control-rewrite",
+-            "{name} not applied: certificate {certificate}; {lost} observations lost"
++            "{name} not applied: certificate {certificate}; {lost} observations lost {:?}",
++            {
++                let journal = self
++                    .fold_ctx
++                    .inputs
++                    .observation_journal
++                    .map(|journal| journal.borrow());
++                observed
++                    .iter()
++                    .filter(|id| !kept.contains(id) && !elided.contains(id))
++                    .map(|id| {
++                        journal
++                            .as_ref()
++                            .map_or_else(|| format!("{id:?}"), |j| j.observation_description(*id))
++                    })
++                    .collect::<Vec<_>>()
++            }
+         );
+         Err(ControlFlowStructureError::RewriteDeclined(name))
+     }
+diff --git a/crates/r2dec/src/structure/rewrite.rs b/crates/r2dec/src/structure/rewrite.rs
+index 98d2ddb0..8f6231ce 100644
+--- a/crates/r2dec/src/structure/rewrite.rs
++++ b/crates/r2dec/src/structure/rewrite.rs
+@@ -24,11 +24,12 @@ impl ControlFlowStructurer<'_, '_> {
+     pub(crate) fn cleanup(
+         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+         is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
++        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
+         stmt: CStmt,
+     ) -> CStmt {
+         // Recurse first, then simplify
+         let mut stmt = stmt;
+-        Self::cleanup_recurse(symbols, is_write, &mut stmt);
++        Self::cleanup_recurse(symbols, is_write, elisions, &mut stmt);
+         Self::flatten(stmt)
+     }
+ 
+@@ -44,6 +45,7 @@ impl ControlFlowStructurer<'_, '_> {
+     fn cleanup_recurse(
+         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+         is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
++        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
+         stmt: &mut CStmt,
+     ) {
+         match stmt {
+@@ -51,7 +53,7 @@ impl ControlFlowStructurer<'_, '_> {
+                 marker,
+                 stmt: inner,
+             } => {
+-                Self::cleanup_recurse(symbols, is_write, inner);
++                Self::cleanup_recurse(symbols, is_write, elisions, inner);
+                 // An empty region renders nothing and its marker goes with
+                 // it -- except the function body's. That marker is what
+                 // sealing looks for at the root, so collapsing it turned a
+@@ -66,16 +68,17 @@ impl ControlFlowStructurer<'_, '_> {
+                     *stmt = CStmt::Empty;
+                 }
+             }
+-            CStmt::Observed { stmt: inner, .. } => Self::cleanup_recurse(symbols, is_write, inner),
++            CStmt::Observed { stmt: inner, .. } => Self::cleanup_recurse(symbols, is_write, elisions, inner),
+             CStmt::Block(stmts) => {
+                 for child in stmts.iter_mut() {
+-                    Self::cleanup_recurse(symbols, is_write, child);
++                    Self::cleanup_recurse(symbols, is_write, elisions, child);
+                 }
+                 stmts.retain(|child| !matches!(child.unobserved(), CStmt::Empty));
+                 let cleaned = std::mem::take(stmts);
+                 let cleaned = Self::rewrite_block_tail_guard_clauses(cleaned);
+                 let cleaned = Self::rewrite_guarded_switch_if_else(cleaned);
+                 let cleaned = Self::rewrite_continue_tail_merges(symbols, cleaned);
++                let cleaned = Self::rewrite_return_into_arms(is_write, elisions, cleaned);
+                 let cleaned = super::self_update::coalesce_sequence(cleaned);
+                 let mut cleaned = Self::truncate_dead_straight_line_tail(cleaned);
+                 *stmt = if cleaned.is_empty() {
+@@ -91,9 +94,9 @@ impl ControlFlowStructurer<'_, '_> {
+                 else_body,
+                 ..
+             } => {
+-                Self::cleanup_recurse(symbols, is_write, then_body);
++                Self::cleanup_recurse(symbols, is_write, elisions, then_body);
+                 if let Some(body) = else_body {
+-                    Self::cleanup_recurse(symbols, is_write, body);
++                    Self::cleanup_recurse(symbols, is_write, elisions, body);
+                 }
+                 if else_body
+                     .as_ref()
+@@ -108,12 +111,12 @@ impl ControlFlowStructurer<'_, '_> {
+                 *stmt = Self::rewrite_guarded_switch_with_trailing_return(taken);
+             }
+             CStmt::While { body, .. } => {
+-                Self::cleanup_recurse(symbols, is_write, body);
++                Self::cleanup_recurse(symbols, is_write, elisions, body);
+                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
+                 **body = Self::strip_trailing_continue(taken);
+             }
+             CStmt::DoWhile { body, .. } => {
+-                Self::cleanup_recurse(symbols, is_write, body);
++                Self::cleanup_recurse(symbols, is_write, elisions, body);
+                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
+                 **body = Self::strip_trailing_continue(taken);
+             }
+@@ -123,7 +126,7 @@ impl ControlFlowStructurer<'_, '_> {
+                     let compound = Self::rewrite_compound_assignment_expr(taken);
+                     *update = super::self_update::shorten_unit_update(compound);
+                 }
+-                Self::cleanup_recurse(symbols, is_write, body);
++                Self::cleanup_recurse(symbols, is_write, elisions, body);
+                 let taken = std::mem::replace(body.as_mut(), CStmt::Empty);
+                 let cleaned = Self::strip_trailing_continue(taken);
+                 // The strip consumes the body and hands one back either way, so
+@@ -141,11 +144,12 @@ impl ControlFlowStructurer<'_, '_> {
+                     case.body = Self::cleanup_switch_body(
+                         symbols,
+                         is_write,
++                        elisions,
+                         std::mem::take(&mut case.body),
+                     );
+                 }
+                 if let Some(body) = default {
+-                    *body = Self::cleanup_switch_body(symbols, is_write, std::mem::take(body));
++                    *body = Self::cleanup_switch_body(symbols, is_write, elisions, std::mem::take(body));
+                 }
+             }
+             CStmt::Expr(expr) => {
+@@ -160,11 +164,12 @@ impl ControlFlowStructurer<'_, '_> {
+     fn cleanup_switch_body(
+         symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+         is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
++        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
+         stmts: Vec<CStmt>,
+     ) -> Vec<CStmt> {
+         let mut cleaned = stmts;
+         for stmt in cleaned.iter_mut() {
+-            Self::cleanup_recurse(symbols, is_write, stmt);
++            Self::cleanup_recurse(symbols, is_write, elisions, stmt);
+         }
+         cleaned.retain(|stmt| !matches!(stmt.unobserved(), CStmt::Empty));
+         let cleaned = super::self_update::coalesce_sequence(cleaned);
+@@ -426,6 +431,399 @@ impl ControlFlowStructurer<'_, '_> {
+         }
+     }
+ 
++    /// The last assignment an arm makes, taken out of it.
++    ///
++    /// Unlike `sole_assignment` the arm may do other work first: only its final
++    /// statement has to be the assignment, because only that is what the merge
++    /// carries out of the arm.
++    fn take_final_assignment(stmt: &mut CStmt) -> Option<SoleAssignment> {
++        match stmt {
++            CStmt::StructuredRegion { stmt: inner, .. } => Self::take_final_assignment(inner),
++            // The marker comes away with the statement. Recursing under it and
++            // then dropping the emptied statement took the wrapper's cell with
++            // it -- one store's `ObservableMemoryWrite`, and the stage declined
++            // for one lost observation.
++            CStmt::Observed { .. } => {
++                let (mut semantic, observations) =
++                    std::mem::replace(stmt, CStmt::Empty).into_semantic_with_observations();
++                match Self::take_final_assignment(&mut semantic) {
++                    Some((chain, carried, written, lhs, rhs)) => {
++                        let mut owed = observations;
++                        owed.extend(chain);
++                        *stmt = semantic;
++                        Some((owed, carried, written, lhs, rhs))
++                    }
++                    None => {
++                        *stmt = observations.reapply(semantic);
++                        None
++                    }
++                }
++            }
++            CStmt::Block(stmts) => {
++                let at = stmts
++                    .iter()
++                    .rposition(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)))?;
++                let taken = Self::take_final_assignment(&mut stmts[at])?;
++                if matches!(stmts[at].unobserved(), CStmt::Empty) {
++                    stmts.remove(at);
++                }
++                Some(taken)
++            }
++            CStmt::Expr(_) => {
++                let (semantic, observations) =
++                    std::mem::replace(stmt, CStmt::Empty).into_semantic_with_observations();
++                let CStmt::Expr(expr) = semantic else {
++                    return None;
++                };
++                let mut carried = Vec::new();
++                let mut cursor = expr;
++                while let CExpr::Observed { id, expr } = cursor {
++                    carried.push(id);
++                    cursor = *expr;
++                }
++                let CExpr::Binary {
++                    op: BinaryOp::Assign,
++                    left,
++                    right,
++                } = cursor
++                else {
++                    return None;
++                };
++                let mut written = Vec::new();
++                let mut left = *left;
++                while let CExpr::Observed { id, expr } = left {
++                    written.push(id);
++                    left = *expr;
++                }
++                Some((observations, carried, written, left, *right))
++            }
++            _ => None,
++        }
++    }
++
++    /// The value a tail that returns once returns, and where it says so.
++    fn sole_return(stmt: &CStmt) -> Option<CExpr> {
++        match stmt.clone().into_semantic_with_observations().0 {
++            CStmt::StructuredRegion { stmt, .. } => Self::sole_return(&stmt),
++            CStmt::Block(stmts) => {
++                let at = stmts.iter().rposition(|stmt| {
++                    !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_))
++                })?;
++                Self::sole_return(&stmts[at])
++            }
++            CStmt::Return(Some(expr)) => Some(expr),
++            _ => None,
++        }
++    }
++
++    /// The returned expression with the object it names replaced by `value`.
++    ///
++    /// Casts stay -- the return still converts to the declared type -- and
++    /// every marker on the way down to the name is owed by the statement
++    /// instead: the text no longer reads that object, so no expression here
++    /// can stand for reading it.
++    fn substitute_returned_var(
++        expr: &CExpr,
++        value: &CExpr,
++        owed: &mut Vec<crate::observation_journal::RenderObservationId>,
++    ) -> Option<CExpr> {
++        match expr {
++            CExpr::Observed { id, expr: inner } => {
++                let rebuilt = Self::substitute_returned_var(inner, value, owed)?;
++                owed.push(*id);
++                Some(rebuilt)
++            }
++            CExpr::Paren(inner) => Some(CExpr::Paren(Box::new(Self::substitute_returned_var(
++                inner, value, owed,
++            )?))),
++            CExpr::Cast { ty, expr: inner, role } => Some(CExpr::Cast {
++                ty: ty.clone(),
++                expr: Box::new(Self::substitute_returned_var(inner, value, owed)?),
++                role: *role,
++            }),
++            CExpr::Var(_) => Some(value.clone()),
++            _ => None,
++        }
++    }
++
++    /// The same tail, returning `value` instead, and owing `extra` as well.
++    /// A copy of the tail that returns `value`, keeping only the return.
++    ///
++    /// The tail may hold other statements -- a frame teardown store that
++    /// renders nothing is the common one -- and those are not duplicated. They
++    /// stay where they are, in a copy of the block the return has left, which
++    /// is also what keeps that block's own occurrence.
++    fn respell_return(
++        stmt: &CStmt,
++        value: &CExpr,
++        extra: &[crate::observation_journal::RenderObservationId],
++        stated: &mut Vec<crate::observation_journal::RenderObservationId>,
++    ) -> Option<CStmt> {
++        let (semantic, observations) = stmt.clone().into_semantic_with_observations();
++        let rebuilt = match semantic {
++            CStmt::StructuredRegion { marker, stmt } => CStmt::StructuredRegion {
++                marker,
++                stmt: Box::new(Self::respell_return(&stmt, value, extra, stated)?),
++            },
++            CStmt::Block(stmts) => {
++                let at = stmts.iter().rposition(|stmt| {
++                    !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_))
++                })?;
++                CStmt::Block(vec![Self::respell_return(&stmts[at], value, extra, stated)?])
++            }
++            CStmt::Return(Some(returned)) => {
++                let mut rebuilt = CStmt::Return(Some(Self::substitute_returned_var(
++                    &returned, value, stated,
++                )?));
++                for id in extra.iter().copied().rev() {
++                    rebuilt = CStmt::observed(id, rebuilt);
++                }
++                rebuilt
++            }
++            _ => return None,
++        };
++        Some(observations.reapply(rebuilt))
++    }
++
++    /// Whether a tail is a return and nothing else.
++    ///
++    /// The rewrite duplicates the tail into both arms, so anything beside the
++    /// return would be performed twice. This has to be decided before the tree
++    /// is touched: a rewrite stage is all-or-nothing, and one that starts and
++    /// then cannot account for a cell takes every other cleanup down with it.
++    fn tail_is_only_a_return(stmt: &CStmt) -> bool {
++        match stmt.clone().into_semantic_with_observations().0 {
++            CStmt::StructuredRegion { stmt, .. } => Self::tail_is_only_a_return(&stmt),
++            CStmt::Block(stmts) => {
++                let mut live = stmts
++                    .iter()
++                    .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)));
++                live.next().is_some_and(Self::tail_is_only_a_return) && live.next().is_none()
++            }
++            CStmt::Return(Some(_)) => true,
++            _ => false,
++        }
++    }
++
++    /// `if (c) { ...; x = A; } else { ...; x = B; } return x;` is two returns.
++    ///
++    /// The merge exists because the machine had one `return` and two paths to
++    /// it; the text does not have to. Each arm already computes what the merge
++    /// carries, so the return is written in each arm reading that arm's value,
++    /// and the object the merge went through stops being written or read at
++    /// all. The two returns exclude one another, which is what lets one cell be
++    /// discharged by both of them.
++    fn rewrite_return_into_arms(
++        is_write: &dyn Fn(crate::observation_journal::RenderObservationId) -> bool,
++        elisions: &std::cell::RefCell<crate::observation_journal::RewriteElisions>,
++        stmts: Vec<CStmt>,
++    ) -> Vec<CStmt> {
++        if stmts.len() < 2 {
++            return stmts;
++        }
++        let mut stmts = stmts;
++        let tail = stmts.pop().expect("two statements");
++        let branch = stmts.pop().expect("two statements");
++        let restore = |stmts: &mut Vec<CStmt>, branch, tail| {
++            stmts.push(branch);
++            stmts.push(tail);
++        };
++        if !Self::tail_is_only_a_return(&tail) {
++            r2il::refusal_evidence!("return-into-arms", "the tail does more than return");
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        }
++        let Some(returned) = Self::sole_return(&tail) else {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        };
++        let mut returned_name = &returned;
++        loop {
++            match returned_name {
++                CExpr::Observed { expr, .. } | CExpr::Paren(expr) | CExpr::Cast { expr, .. } => {
++                    returned_name = expr;
++                }
++                _ => break,
++            }
++        }
++        let returned_name = returned_name.clone();
++        if !matches!(returned_name, CExpr::Var(_)) {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        }
++        let mut candidate = branch.clone();
++        let Some((then_body, else_body)) = Self::branch_arms_mut(&mut candidate) else {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        };
++        let (Some(then_taken), Some(else_taken)) = (
++            Self::take_final_assignment(then_body),
++            Self::take_final_assignment(else_body),
++        ) else {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        };
++        let (then_marks, then_carried, then_written, then_lhs, then_rhs) = then_taken;
++        let (else_marks, else_carried, else_written, else_lhs, else_rhs) = else_taken;
++        if !then_lhs.transparently_eq(&else_lhs) || !then_lhs.transparently_eq(&returned_name) {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        }
++        // The carrier's cells are not moved anywhere: the text no longer writes
++        // it or reads it, so the rewrite states the elision and the ledger
++        // records the reason. Moving them onto the return instead would have
++        // the return's statement stand for a store it does not perform.
++        let mut stated = Vec::new();
++        // An arm's markers split the way they did for the conditional
++        // expression. The write is what stops happening -- the object is not
++        // written any more -- and the rest is the value the arm computed, which
++        // the return now spells, so it travels to that arm's return. Eliding
++        // the value markers too said a constant was not rendered while another
++        // occurrence still rendered it, which is what `pearson` refused on.
++        let arm_owed = |marks: StmtObservationChain,
++                        carried: Vec<crate::observation_journal::RenderObservationId>,
++                        written: Vec<crate::observation_journal::RenderObservationId>,
++                        stated: &mut Vec<crate::observation_journal::RenderObservationId>| {
++            let mut kept = Vec::new();
++            for id in marks.into_ids().into_iter().chain(carried).chain(written) {
++                if is_write(id) {
++                    stated.push(id);
++                } else {
++                    kept.push(id);
++                }
++            }
++            kept
++        };
++        let then_extra = arm_owed(then_marks, then_carried, then_written, &mut stated);
++        let else_extra = arm_owed(else_marks, else_carried, else_written, &mut stated);
++        let (Some(then_tail), Some(else_tail)) = (
++            Self::respell_return(&tail, &then_rhs, &then_extra, &mut stated),
++            Self::respell_return(&tail, &else_rhs, &else_extra, &mut stated),
++        ) else {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        };
++        let Some((then_body, else_body)) = Self::branch_arms_mut(&mut candidate) else {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        };
++        Self::append_to_arm(then_body, then_tail);
++        Self::append_to_arm(else_body, else_tail);
++        if Self::mentions_symbol(&candidate, &returned_name)
++            || stmts
++                .iter()
++                .any(|stmt| Self::mentions_symbol(stmt, &returned_name))
++        {
++            restore(&mut stmts, branch, tail);
++            return stmts;
++        }
++        elisions.borrow_mut().cells.extend(
++            stated
++                .into_iter()
++                .map(|id| (id, r2ssa::ledger::ElisionReason::SpecialisedMergeCarrier)),
++        );
++        stmts.push(candidate);
++        stmts
++    }
++
++    /// Whether anything here still names this object.
++    ///
++    /// The specialisation removes the object the merge went through, so nothing
++    /// else may read it. `pearson` is why this is asked: its merge is also a
++    /// loop carrier read inside the arm, and removing its writes left that read
++    /// with nothing behind it.
++    fn mentions_symbol(stmt: &CStmt, symbol: &CExpr) -> bool {
++        fn expr_mentions(expr: &CExpr, symbol: &CExpr) -> bool {
++            let mut found = false;
++            expr.visit(&mut |node| {
++                if !found && node.transparently_eq(symbol) {
++                    found = true;
++                }
++            });
++            found
++        }
++        match stmt {
++            CStmt::StructuredRegion { stmt, .. } | CStmt::Observed { stmt, .. } => {
++                Self::mentions_symbol(stmt, symbol)
++            }
++            CStmt::Expr(expr) | CStmt::Return(Some(expr)) | CStmt::Switch { expr, .. } => {
++                expr_mentions(expr, symbol)
++                    || match stmt {
++                        CStmt::Switch { cases, default, .. } => {
++                            cases.iter().any(|case| {
++                                case.body.iter().any(|stmt| Self::mentions_symbol(stmt, symbol))
++                            }) || default.iter().flatten().any(|stmt| {
++                                Self::mentions_symbol(stmt, symbol)
++                            })
++                        }
++                        _ => false,
++                    }
++            }
++            CStmt::Decl { init, .. } => init
++                .as_ref()
++                .is_some_and(|init| expr_mentions(init, symbol)),
++            CStmt::Block(stmts) => stmts.iter().any(|stmt| Self::mentions_symbol(stmt, symbol)),
++            CStmt::If {
++                cond,
++                then_body,
++                else_body,
++            } => {
++                expr_mentions(cond, symbol)
++                    || Self::mentions_symbol(then_body, symbol)
++                    || else_body
++                        .as_ref()
++                        .is_some_and(|body| Self::mentions_symbol(body, symbol))
++            }
++            CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
++                expr_mentions(cond, symbol) || Self::mentions_symbol(body, symbol)
++            }
++            CStmt::For {
++                init,
++                cond,
++                update,
++                body,
++            } => {
++                init.as_ref()
++                    .is_some_and(|init| Self::mentions_symbol(init, symbol))
++                    || cond.as_ref().is_some_and(|cond| expr_mentions(cond, symbol))
++                    || update
++                        .as_ref()
++                        .is_some_and(|update| expr_mentions(update, symbol))
++                    || Self::mentions_symbol(body, symbol)
++            }
++            _ => false,
++        }
++    }
++
++    /// The two arms of a conditional, through the markers around it.
++    fn branch_arms_mut(stmt: &mut CStmt) -> Option<(&mut CStmt, &mut CStmt)> {
++        match stmt {
++            CStmt::StructuredRegion { stmt: inner, .. } | CStmt::Observed { stmt: inner, .. } => {
++                Self::branch_arms_mut(inner)
++            }
++            CStmt::If {
++                then_body,
++                else_body: Some(else_body),
++                ..
++            } => Some((then_body.as_mut(), else_body.as_mut())),
++            _ => None,
++        }
++    }
++
++    /// Put a statement at the end of an arm, inside whatever wraps it.
++    fn append_to_arm(arm: &mut CStmt, stmt: CStmt) {
++        match arm {
++            CStmt::StructuredRegion { stmt: inner, .. } | CStmt::Observed { stmt: inner, .. } => {
++                Self::append_to_arm(inner, stmt);
++            }
++            CStmt::Block(stmts) => stmts.push(stmt),
++            other => {
++                let taken = std::mem::replace(other, CStmt::Empty);
++                *other = CStmt::Block(vec![taken, stmt]);
++            }
++        }
++    }
++
+     /// `if (c) { x = A; } else { x = B; }` is one assignment of a conditional.
+     ///
+     /// A merge of two values under one condition is a selection, and this is
+diff --git a/crates/r2ssa/src/ledger.rs b/crates/r2ssa/src/ledger.rs
+index f0388b44..b28bad11 100644
+--- a/crates/r2ssa/src/ledger.rs
++++ b/crates/r2ssa/src/ledger.rs
+@@ -122,6 +122,15 @@ pub enum ElisionReason {
+     /// Its output is not elided with it. The value is still rendered, under
+     /// the binding's name, by whatever wrote that binding.
+     CoalescedIdentityPhi,
++    /// An object written on every path only to carry a value to one reader,
++    /// where the text now reads each path's value at that reader instead.
++    ///
++    /// The machine had one `return` and two ways to reach it, so it merged
++    /// through a frame slot and returned the slot. The text writes a return in
++    /// each arm reading that arm's own value, which is what the source said;
++    /// the carrier is then written nowhere and read nowhere, and no C statement
++    /// has to carry it.
++    SpecialisedMergeCarrier,
+     /// A condition-code write no rendered predicate reads.
+     DeadCpuFlag,
+     /// A value only ever read to compute a flag that is itself elided.
+@@ -229,6 +238,7 @@ impl std::fmt::Display for ElisionReason {
+             Self::CoalescedImmutablePhi => "coalesced-immutable-phi",
+             Self::CoalescedCopy => "coalesced-copy",
+             Self::CoalescedIdentityPhi => "coalesced-identity-phi",
++            Self::SpecialisedMergeCarrier => "specialised-merge-carrier",
+             Self::DeadCpuFlag => "dead-cpu-flag",
+             Self::DeadFlagOnly => "dead-flag-only",
+             Self::DeadUnusedTemporary => "dead-unused-temp",

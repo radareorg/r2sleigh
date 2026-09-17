@@ -26280,3 +26280,66 @@ audit 60/60, and **eight cells improved**, each a dereference that became a
 subscript now that the rewriter can prove the base. `*(uint8_t*)(RDX_6 + RDI_0)`
 is `((uint8_t*)RDI_0)[RDX_6]`, and `*(uint8_t*)((uint64_t)X11_5 + 2)` is
 `X11_5[2]`.
+
+### Early returns: six model gaps cleared, one open
+
+The user chose to **extend the observation model so one cell may be discharged
+by several mutually exclusive rendered occurrences**, and to recover early
+returns from it: `alloc_and_copy` compiles its `if (!buf) return NULL; ...;
+return buf;` into one machine `return` reading a slot both paths wrote, and the
+text should say what the source said rather than keep the merged object. The
+alternatives -- keeping the slot and updating the tests, or duplicating only
+where every arm's value is already an object -- were both declined.
+
+The rewrite belongs in `structure/rewrite.rs`, beside the conditional-expression
+one: `if (c) { ...; x = A; } else { ...; x = B; } return x;` becomes a return in
+each arm reading that arm's value, and the object the merge went through stops
+being written or read. Building it walked a ladder of refusals, each one a real
+seal that had never been asked this question. Six were cleared; the seventh is
+where it stands. The whole attempt is kept as `doc/wip-return-specialisation.patch`,
+which applies to this commit.
+
+1. **`1 observation lost`.** Taking the arm's final assignment out dropped the
+   `CStmt::Observed` wrapper *around* it along with the emptied statement,
+   losing one store's `ObservableMemoryWrite`. Fixed by stripping the wrapper
+   into the returned chain rather than recursing under it.
+2. **`duplicate_observation`.** `ReachableObservations::record` refused a marker
+   the walk met twice, full stop. That is the seal the user's decision changes:
+   the walk now records the repeat, and the journal -- which can see the
+   structure -- requires every repeat's occurrences to be pairwise exclusive,
+   through the `ObservationScope` arms already built for conditional
+   expressions. A repeat that is not exclusive still refuses.
+3. **`unobserved_binding_write`.** The arms' write markers were moved onto the
+   return, which made the return's statement stand for a store it does not
+   perform. Fixed by a new channel: a rewrite *states* the cells it removed and
+   why, through `RewriteElisions`, and `rewrite_stage` subtracts those from
+   `lost` and hands them to the journal. The reason is
+   `ElisionReason::SpecialisedMergeCarrier`, and the effect ledger reads it
+   beside the certificates' own elisions.
+4. **`region_does_not_dominate_occurrence`.** `validate_occurrence` asked
+   whether the *innermost* region's entry dominates the block. A block
+   specialised into the arms above it is rendered where its own entry does not
+   dominate, so the walk now asks the regions above it too: the occurrence is
+   lexically inside all of them.
+5. **`undeclared_names`.** `alloc_and_copy`'s tail block holds a dead frame
+   teardown store beside the return. Duplicating it duplicated a statement
+   placement then removes by marker, and one copy survived while its
+   declaration went. Fixed by duplicating only the return -- the precondition is
+   checked before the tree is touched, because a rewrite stage is
+   all-or-nothing and one that starts and cannot finish takes every other
+   cleanup down with it.
+6. **`ConflictingValue`.** Eliding all of an arm's markers said a constant was
+   not rendered while another occurrence still rendered it (`pearson`). An arm's
+   markers split the way they do for the conditional expression: the write stops
+   happening and is elided, the value the arm computed travels to that arm's
+   return.
+7. **`read_before_assignment` -- open.** `pearson`'s merge is *also* a loop
+   carrier read inside the arm, so it is not read only by the return and must
+   not be specialised at all. The precondition is right and the check for it is
+   not: a mention walk over the rewritten statements found the mention in
+   `alloc_and_copy`, where there is none, and missed it in `pearson`, where
+   there is one. The question is really about the plan -- which readers a
+   binding has -- rather than about the text, and asking the binding plan
+   instead of walking the tree is the change to make next.
+
+Reverted to keep the tree green; the corpus is back to 60/60 on every column.
