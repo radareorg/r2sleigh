@@ -2000,6 +2000,25 @@ fn inlinable_core(
         }
     }
 
+    // Which objects a merge assigns at the end of each block. A merge's carrier
+    // is written on the edge, so the write sits at the end of the predecessor
+    // the edge leaves, whatever block defined the value it carries. Every edge
+    // counts as a write: the partition here is coarser than the one rendered,
+    // so two values in one group may still end up as two objects.
+    let mut edge_writes_by_block = vec![Vec::<u32>::new(); graph.blocks.len()];
+    for inst in &graph.insts {
+        let r2ssa::InstPayload::Phi { predecessors } = &inst.payload else {
+            continue;
+        };
+        let Some(written) = inst.output.and_then(group_of) else {
+            continue;
+        };
+        for predecessor in predecessors {
+            if let Some(writes) = edge_writes_by_block.get_mut(predecessor.0 as usize) {
+                writes.push(written);
+            }
+        }
+    }
     for (value, definition, reader) in hazard_candidates {
         let read_groups = hazard.get(&value).cloned().unwrap_or_default();
         let (Some(def_inst), Some(use_inst)) = (graph.inst(definition), graph.inst(reader)) else {
@@ -2032,19 +2051,9 @@ fn inlinable_core(
         // loop one turn late.
         let carried = !rewritten
             && transfers_control(use_inst)
-            && graph.insts.iter().any(|inst| {
-                matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
-                    && inst.inputs.iter().any(|input| {
-                        graph
-                            .def_inst(*input)
-                            .and_then(|def| graph.inst(def))
-                            .is_some_and(|def| def.block == def_inst.block)
-                    })
-                    && inst
-                        .output
-                        .and_then(group_of)
-                        .is_some_and(|group| read_groups.contains(&group))
-            });
+            && edge_writes_by_block
+                .get(def_inst.block.0 as usize)
+                .is_some_and(|writes| writes.iter().any(|group| read_groups.contains(group)));
         let traced = trace.is_some_and(|want| {
             want == "all"
                 || graph
