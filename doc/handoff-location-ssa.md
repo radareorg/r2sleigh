@@ -26404,3 +26404,326 @@ out-of-range half keeping its own name and its no-mutation claim.
 
 The tree is green throughout: corpus 60/60 on every column, snapshots untouched,
 and r2r **93 passing with 4 failing**, down from six.
+
+### Partition-first: liveness decides every union
+
+The binding plan decided three things in a cycle: rendered readers depended on
+the object partition, inlining on the readers, and the partition on inlining,
+because `component_eligible_with` dropped inlined values before the union-find
+ran. Removing a value can remove an interference and make a component grow, so
+no fixpoint over that cycle is both convergent and sound, and every stuck case
+of the previous arc was a reader count taken before the partition existed. The
+arc that follows cuts the third arrow: copies are forwarded in SSA before any
+fact is built, the partition is computed once over every value from a liveness
+predicate, and inlining is computed once against it. This entry records what
+landed on the way and what each step cost.
+
+**Two corrections to the design as first stated.** "A finer partition makes
+the fold hazard stricter" is inverted: finer objects mean fewer writes hit what
+an expression reads, so the test is looser, and soundness comes from judging
+the hazard against the partition that is rendered and nothing refining it
+afterwards. And forwarding copies makes the two interference proxies -- values
+read together by one instruction, and an intra-block redefinition between a
+value's definition and its last read -- unsound, because a forwarded read can
+sit past a same-storage redefinition with neither proxy seeing it. Liveness is
+the fact both were approximating.
+
+**`blocks_reachable_from` returned the one-hop successor set.** It marked
+successors seen when pushed and skipped every popped block, so a use two
+edges away read as unreachable and `run_is_read_after` said no. Fixed as its
+own commit; the corpus did not move, which agrees with the analysis that in
+storage-based SSA the walk only ever declined conservatively. The function is
+gone in the step after.
+
+**The carry guard asked the wrong question.** It fired when a merge had an
+input *defined in* the block being folded through; the edge copy sits at the
+end of every predecessor, whichever block defined the value, so an entry value
+or a dominator-defined input was missed. Merge edge writes are now indexed by
+predecessor once per plan. Eight arm64 cells gained one statement because the
+guard now fires for an entry value's edge; skipping an edge whose value shares
+the merge's group was tried and produced two wrong hashes, because the group is
+the pre-partition and the rendered partition is finer. That refinement returns
+with the exact partition.
+
+**`ValueLiveness`.** Per value, per block: live-in, live-out, the last read
+before and after its own definition, from which a half-open segment is derived,
+so a value read by the instruction that defines another ends exactly where the
+other begins. A merge reads its source at the end of the predecessor; a value
+the caller reads is read at the end of every returning block that hands it
+back (`FunctionLiveOut` now records values per return, and a value reaching two
+returns no longer marks the second unresolved); a definition holds its object
+at its own position even when nothing reads it. Merges nothing reads,
+transitively, are not reads of their sources. A naive per-point checker agrees
+on every fixture. Same-content values may overlap: a copy, a widening, a lane,
+the merges one block makes over one location, and the values a function is
+entered with in one location -- the last two because a location holds one
+state at one point and the lane SSA spells it several times, which is what the
+projected-peer fixture is.
+
+**Spans are decided by the predicate.** `run_is_read_after`, `use_point` and
+the reachability walk are gone. An operation continues a same-location input's
+run unless the two components interfere; a merge, per the user's decision,
+unions with each source in any storage unless they interfere -- standard
+out-of-SSA coalescing -- except a merge nothing reads, which performs no merge
+and so joins nothing: letting it did put two slots' reload temporaries into one
+object and refused four x86-64 -O0 cells with conflicting certified roles.
+Result: raw and differential 60/60, twenty cells changed and every one read:
+carrier copies gone (`RAX_1 = RAX_2; RDX_1 = RDX_2` at every loop tail), fewer
+declarations, `stack_m84 ^= ...` where three versions were named, a nested
+`else { if }` flattened. Two cells gained a flag temporary from the carry
+guard, to be recovered by the exact partition.
+
+**Copies are forwarded before the graph exists.** `SSAFunction::forward_copies`
+(`function/forward.rs`) runs after the entry lanes are minted and before
+`SsaGraph::from_function_with_storage`: every same-width `Copy` of a variable
+records `dst -> src`, chains resolve to their origin, and every operation
+source and merge source is rewritten. The copy stays where it was, read by
+nothing, so block positions, `CanonicalInstructionSite::Op` and the native
+spans do not move, and a dead definition is accounted by the layers that
+already know how. A copy of a constant is not forwarded: whether a literal is
+spelled at each reader is the plan's decision, made with the partition in
+hand. Trivial merges are not yet removed.
+
+What the transform found, each a consumer that assumed a copy stays a reader:
+
+  * `validate_ssa_function` cannot run after `mint_entry_lane_projections`:
+    the minted lane and root definitions are version zero. It never had; the
+    forwarding is placed after the minting and the validation before it stands.
+  * The frame round-trip certificate walks the saved register's reads and
+    declines on any it does not own. The forwarded save copy still reads the
+    register and is owned by nothing; on a fixture whose obligation inventory
+    is incomplete `DeadPhis` is empty and cannot vouch for it. A copy nothing
+    reads, judged from the graph and the live-out set, is now not a read the
+    program makes. The collector also has refusal evidence at each decline.
+  * The return-address fact took the first branch -- the return names the
+    declared storage's value directly -- for every transport shape, including
+    the two the test called corrupt for being a chain or having a `Nop` between
+    copy and return. Those are now positive cases: the value fact is exact
+    whatever the spelling.
+  * Twelve fixtures were built on copies to have a bound value and lost their
+    subject; each now computes it. The journal's default fixture, the span
+    grouping, the seal witnesses, the width refusal, the dead-merge reader and
+    the immutable merge are the ones worth knowing, and the last records why a
+    merge of two entry values cannot be one object: both are live at entry.
+
+The corpus then refused twenty-seven cells, in three classes, each traced:
+
+  * Twenty-five placement refusals, `unobserved_binding_read`, all of one
+    shape: `RDX_1 = c ? RDX_1 : RDX_1`. The loop's dead lifter temporaries
+    merge the carrier -- `tmp:4900_3 = phi(tmp:4900_0, RDX_3)` once their
+    copies are forwarded -- and normalize's own edge liveness, built over
+    every merge, saw `RDX_3` live on the loop exit, refused the plain back-edge
+    copy and emitted the select form the journal cannot classify. That
+    liveness is now built over the merges that are placed, which is the set
+    whose edges the text performs.
+  * arm64 -O0's `ret` lifts to `pc = x30; return pc`, and with the copies
+    forwarded the return names the reloaded word itself while the copy into
+    `x30` stands beside it unread. `exact_return_address_fact` accepts that
+    shape: a copy of the returned value into the return-address register, in
+    the return's block, before it. The fact reports the value the return reads.
+  * The return-control certificate's values then included the entry link
+    register, and every use of it was claimed as control -- including the
+    forwarded save copy the dead-value account already answered. The claim
+    now yields to `UnobservedValue` the way it already yielded to
+    `UnobservedMerge`: both say the read renders nothing.
+
+Forwarding also removes a merge whose every source names one value, iterated
+until none is left; that pass found nothing to remove on the corpus.
+
+`R2SLEIGH_DUMP_AST=<path>` writes the marked tree as placement sees it. It is
+how the select shape above was found once the refusal named one statement.
+
+One wrong hash after that, arm64 -O1 `xxhash32`: `X11_3 = X1_0 + X0_0 - X0_0`.
+The parameter's object had become the loop cursor. Spans, judged by liveness,
+kept them apart -- the tail recomputes `X0_0 + X1_0`, so the parameter is live
+across the loop -- but the plan's certified-entity union still asked the two
+proxies, and neither sees a cross-block read. Construction and seal now ask
+the artifact's liveness over the full merged components, and
+`values_read_together`, `set_interferes` and `set_outlives_a_redefinition` are
+gone. This is the first half of partition-first landing early, because the
+proxies became wrong the moment copies moved.
+
+Two copies are deliberately not forwarded, found by reading the sixty changed
+cells. A copy whose result a merge reads is that merge's edge write, placed by
+the program before its branch; forwarded, the write lands on every edge the
+block leaves by, and a loop latch that also exits gets it twice and a `goto`.
+And a copy into a stack slot the function proved private is the source's
+assignment to a named local; forwarded, the local vanished and its lifter
+temporary took the name, and `for (stack_m32 = 0; ...)` became a `while` over
+`tmp_11f80_2`. Loads from the slot still forward to the slot, which is what
+makes the slot the one object. The removal of merges of one value went with
+these: with edge writes kept there was nothing for it to find.
+
+**The partition is computed once, before any inlining.** `component_eligible_with`
+no longer takes the inlinable set; `rewrite_inlining_partition` builds the
+components first, over every value that can be an object, derives the fold
+guard's groups and the pointer oracle from them, admits a literal for spelling
+at its readers when it is alone in its component, and runs `inlinable_core`
+once. The second `inlinable_core`, the second eligibility pass and
+`coalescing_pre_partition` are gone. A member later folded or elided keeps
+that answer; a binding is made from a component's remaining members and a
+component with none is no object. Construction, the seal's expectation and
+the shadow oracle all apply that one rule.
+
+The corpus showed the cost the design predicted: a literal-defined value --
+`RDX_7 = 0x80078071`, the constant a path returns -- now entered the
+partition, joined its register's run, was declared and written instead of
+spelled, and its live range blocked a loop carrier's union that used to
+succeed. So a literal decides no object: literals are set aside and each is
+offered to whatever its run became, after every other union, and one that
+does not fit stays alone and is spelled where it is read. Construction and
+the seal share `literal_defined`.
+
+**Hazards are exact on the write side.** Candidates are decided per block in
+decreasing definition ordinal, so a write that could disturb a candidate's
+read -- a later definition in the same block -- has already been decided, and
+one that folds is no write. The read closure keeps a candidate leaf's own
+object beside its expansion, which covers the leaf staying bound; that is the
+one residual conservatism. A merge edge whose value is already the merge's
+object writes nothing, and with the partition rendered as computed that
+answer is exact, so the carry guard no longer fires for it.
+
+**The partition and the inlining are brought to agreement, not ordered.**
+Partition-first alone cost `fnv1a64`'s loop: the span had glued the folded
+intermediates of the update -- `zext(byte)`, the xor -- to the multiply, the
+carrier was still live where they were written, and so the carrier could not
+absorb the multiply without them. Those intermediates render nothing; they
+had no business in the liveness the union was judged against. The resolution
+is a descending chain in `rewrite_inlining_partition`: build the partition
+over every value that can be an object and decide the folds against it; then
+rebuild it without the folded values, with the reads each fold made relocated
+to its reader (`ValueLiveness::compute_with_relocations`, the reader reported
+by `inlinable_core` beside the fold), and keep only the folds still safe
+against that partition; repeat until the fold set stops changing. A fold never
+returns once dropped, so the chain ends, and it ends with a partition judged
+against exactly the values the text binds and a set of folds each safe
+against it. Two or three rounds on the corpus. The final liveness travels on
+the partition so the seal judges the same components. A value the previous
+round folded counts as alone in the next, since the partition no longer
+holds it, which is what keeps a lone literal spelled at its reader.
+
+Two rules for literals came out of the same cell. A literal-defined value --
+a copy of a constant -- seeds no object; it is set aside and offered to its
+run last. And it joins that run only where a merge of the run reads it: it
+initialises a carrier, and the object needs the write on that edge. Otherwise
+it stays alone and is spelled at its readers, which is what `RDX_1 =
+0x100000001b3` had stopped being. Construction and the seal share
+`literal_defined` and the merge-fed rule. The loop-carrier certificate no
+longer claims a member whose only role is sharing a run; that is the span's
+offer, under the liveness rule, both in `r2ssa` and in the `r2types`
+projection.
+
+Two more facts the corpus forced out. Two reads of one memory object with no
+write to it between hold one content, which the graph cannot see: at -O0
+`djb2` reloads its accumulator twice in one block for one expression, the
+two temporaries were both live and so interfered, the slot's entity union
+was declined and every reload became a statement. The artifact now derives
+such pairs from the structured memory accesses after the facts exist
+(`same_content_reads`), declares them on its liveness, and hands them to any
+relocated recomputation. And the seal's second derivation of the components
+is gone: the partition is a sequence of unions whose order matters, a second
+procedure disagreed with the first the moment it did, and what the seal
+checks is that the plan's bindings are these components, not that two
+procedures agree. `seal_binding_components_with` calls the one builder.
+
+**Two reads the graph reports and the program does not make.** A `CallUse` of
+a register the call boundary does not pass -- the convention's argument
+registers, read at every call by the lifter -- kept every value in those
+registers live to the call, and the merge that gathers a slot's reloads was
+declined its union on that account. The artifact now derives those sites from
+the boundary facts (`uncertified_call_reads`), recomputes its liveness without
+them once the facts exist, and hands the set to every relocated recomputation.
+The spans keep the earlier, conservative liveness. A companion change was
+tried and dropped: counting only live merges in the forwarding's merge-source
+exclusion, so that a copy read only by a dead merge is forwarded. It changed
+every corpus cell -- x86-64 -O2 `xxhash32` spelled `CF_38`/`ZF_19` where the
+baseline has a comparison, arm64 -O1 `pearson` renamed its parameter `X0_1`
+and gained a copy, and `X12_1 = X12_3` copies appeared in the arm64 `xxhash32`
+loop -- and the r2r shape it was meant to fix rendered identically without it.
+The lesson is the one the plan already carried: a copy whose result a merge
+reads is the program's edge write, whether or not the merge is live.
+
+**A member named through the parameter it is reached by.** `declared_member_base`
+declined every access whose address the plan bound, on the ground that the
+binding would go unspelled. With the parameter entity uniting the entry value
+and its copies into one binding, the address of an offset-zero member *is*
+that binding, and `obj->first` spells it exactly. The refusal now applies
+only where the address is bound to another name. That is the r2r
+`dec_struct_field_through_a_pointer_parameter_uses_its_name` regression.
+
+**r2r is at its recorded baseline.** Four failing, the same four the entry
+above records: `dec_alloc_and_copy_uses_callee_result_type`,
+`dec_process_string_keeps_single_strlen_owner`,
+`dec_struct_array_index_keeps_member_write_shape` and
+`taint_vuln_memcpy_call_sinks_include_arg_regs`. The first two were bisected
+against the engine at the parent of the early-returns commit and against a
+radare2 build from before the arm64 DWARF location fix, and both render the
+same shape everywhere, so they are not this arc's. What they wait on, traced:
+
+  * radare2 names the arm64 frame save `stp x29, x30, [sp, N]` as two locals
+    (`var_20h`, `var_20h_2`), the capture forwards every radare2 variable as a
+    declared slot when the function has an address-linked signature, and
+    `collect_callee_stack_allocation_certificates` skips a declared slot, so
+    the frame round trip is never certified and `var_20h = X29_0` renders. The
+    corpus never sees it because a stripped binary declares no slots. The wire
+    has no DWARF-declared flag (`RAnalFcnSlot.dwarf_declared` stops at the
+    type graph), so the engine cannot tell an inferred slot from a declaration.
+    The fix is at two layers: an inferred slot must not veto a machine-proven
+    round trip, which needs the flag on the wire; and radare2 should not name
+    the frame pair's save as variables, the way it already skips the ppc TOC
+    save (`op_is_ppc_toc_save`), which is an upstream change touching six
+    expectation lines in four test files.
+  * A call result stored into a declared slot renders as `void* X0_2 =
+    malloc(...); buf = (char*)X0_2;`: `expression_renders_inline` refuses a
+    `Source` root, and the store elision folds a stored value only when it is
+    already the slot's binding. `len = strlen(s)` needs the call result to be
+    the slot's own value, which is the single-owner rendering the post-call
+    decision already names.
+
+**What the plan listed for deletion and is not yet gone.** The journal's
+`merge_carries_only_to_return`, `nothing_wrote_the_object_between` and
+`copy_source_is_a_parameter` still stand; each is a guard the exact partition
+makes redundant in principle, and each is removed only once a cell shows the
+partition answering the same question, which none has yet. Everything else on
+the list is deleted. The design is recorded in `doc/adr-partition-first.md`.
+
+**What a whole binary said.** A locally built arm64 `bzip2` at -O2 (107
+functions) was rendered with the engine from before the arc and with the
+engine after it, through `tests/corpus/control_census.sh`. Every function that
+rendered both times rendered with fewer statements after, and four large ones
+-- the block sorter and the MTF/Huffman coders among them -- refused. Three
+causes, each fixed at its layer:
+
+  * One lifter temporary carries every `ldr` in a function, its versions do
+    not interfere, and the span made them one run; four stack slots' reloads
+    then joined one object and name resolution found a binding certified by
+    four slots. A stack slot or a parameter is an object by identity, whatever
+    its values' live ranges say, so the builder now unites certified entities
+    before spans and declines any union that would put two identities in one
+    run (`identity_conflict`, evidence `two objects`).
+  * A merge whose every input is already its own object performs nothing, and
+    `identity_merge_values` excluded a merge with an entry value among its
+    inputs on the ground that the entry value had no declaration. Under the
+    exact partition the entry value is a member, the binding is
+    caller-supplied and declared as an entry value, and the edge copy is
+    already elided as a copy into the object that is the source; the exclusion
+    had become the only thing leaving the merge's cell unobserved. It is gone.
+  * A read a gap owns is accounted: an identity merge read only inside a
+    marked gap and by a dead merge is now `CoalescedImmutablePhi` rather than
+    an unobserved cell. And a gap the retry loop planned at a merge could
+    never open -- the lowering opens gaps at operations -- while its plan
+    claimed the region and suppressed the lowering's own gap there, so the
+    region rendered as nothing; a plan seeded at a merge is anchored at the
+    first operation it covers.
+
+With the three fixes the binary has one function fewer refused than before
+the arc (56 against 57), one function rendered that refused before, and every
+one of the fifty functions both engines render is shorter or equal: 6070
+statements against 6641. Its largest function, the block sorter at 11542
+instructions, plans in 363ms against 345ms -- the descending rounds cost in
+`plan_components` and `plan_inlinable` what the deleted conservative pass
+gave back -- and the whole `pd:s` wall time is unchanged at 3.9s.
+
+**Gates at the end of the arc.** Corpus raw, differential, snapshot and all
+four audits 60/60; r2r 93 passing with the four recorded failures; unit tests
+and clippy clean on `r2ssa` and `r2dec`.
