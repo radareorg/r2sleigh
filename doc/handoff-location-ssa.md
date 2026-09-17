@@ -26749,6 +26749,31 @@ from the shell loads the user plugin directory as well, and against
 measures this tree's plugin, not r2r's environment; when an r2r expectation is
 the question, run r2r.
 
+**A store into a private slot is the slot's value -- tried whole, to be done
+as offers.** `alloc_and_copy` and `process_string` render `void* X0_2 =
+malloc(len + 1); buf = (char*)X0_2;` because nothing unites a call result with
+the slot it is stored into: a slot's certificate lists the values its reloads
+produce, not the values its stores consume, so the store stays a copy between
+two objects and a `Source` root has no inline form. Adding every full-width
+store's value to the same set the reloads use gave exactly the wanted lines --
+`char* buf = (char*)sym_imp_malloc(len + 1);` and `size_t len =
+sym_imp_strlen(...)` -- and broke twenty -O0 cells, refused x86-64 -O0
+`murmur3_32`, and lost `alloc_and_copy`'s early-return recovery. The cause is
+the union's shape, not the idea: an entity's members are united all or
+nothing, one lifter temporary carries every store at -O0, and one stored
+value that is live where another member is written declines the whole set,
+reloads included, so every reload became `tmp_11f00_5 = stack_m28`. And the
+return slot's stored values joined the slot, so the merge-through-slot
+recovery no longer saw its stores as distinct writes. The design that
+follows: keep `reload_values` as the certificate's all-or-nothing claim, carry
+`stored_values` beside it, and in `binding_components_with` offer each stored
+value to the slot's component on its own, after the entity unions and before
+the literals, judged by identity and liveness like a literal; the seal's
+`adopted_reload_binding` and `stack_object_certificate_agrees` then have to
+accept a stored member. Whether the return slot should take its stored values
+at all -- the early-return recovery reads the slot's writes as the arms'
+returns -- is the one question to settle first.
+
 **Gates at the end of the arc.** Corpus raw, differential, snapshot and all
 four audits 60/60; r2r 93 passing with the four recorded failures; unit tests
 and clippy clean on `r2ssa` and `r2dec`.
