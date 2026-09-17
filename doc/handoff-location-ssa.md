@@ -26862,4 +26862,9 @@ leading underscore in turn (radareorg/radare2#26742) and the fortify
 prototypes live in the generic table (#26743), one idea per pull request.
 The type tables are compiled into `libr_anal` through gperf, so a table
 change needs `libr/anal` relinked, not the `.sdb` copied; that cost one
-wrong conclusion.
+wrong conclusion. Upstream CI then said two things worth keeping: a `sub.`
+name is radare2's for a caller of the function, so it must not resolve
+through its underscores (a unit test pins it, and the guess now excludes
+`sub.`), and `longjmp_chk` is noreturn, so `tn` lists it and the two
+expectations that enumerate noreturn functions moved with it. Both follow-ups
+are on the pull-request branches; the CI result is to be read next session.
