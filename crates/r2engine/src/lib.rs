@@ -1349,19 +1349,6 @@ impl EngineExecutionControl {
         }
     }
 
-    /// Bound this request by counted work rather than by a clock.
-    ///
-    /// `captured_bytes` is the root and every body taken with it, which is what
-    /// the work is spent over; `work_budget_for_captured_bytes` turns it into
-    /// the number of units the corpus says that input can need.
-    #[must_use]
-    pub fn with_work_budget(mut self, captured_bytes: usize) -> Self {
-        self.meter = Arc::new(r2ssa::SsaWorkMeter::with_limit(
-            work_budget_for_captured_bytes(captured_bytes),
-        ));
-        self
-    }
-
     /// Work counted for this request so far.
     pub fn work_spent(&self) -> u64 {
         self.meter.spent()
@@ -1495,9 +1482,6 @@ fn ssa_prepare_execution_refusal(
         }
         r2ssa::SsaPrepareError::MalformedInput => {
             "malformed SSA source input during ssa phase".to_string()
-        }
-        r2ssa::SsaPrepareError::WorkExhausted => {
-            "engine request exhausted the work its input allows during ssa phase".to_string()
         }
     };
     engine_execution_refusal(reason, EnginePhase::Ssa, metrics)
@@ -3678,10 +3662,6 @@ fn engine_render_stop_reason(
             "engine request deadline exceeded during {} phase",
             phase.as_str()
         ),
-        r2ssa::SsaExecutionStopReason::WorkExhausted => format!(
-            "engine request exhausted the work its input allows during {} phase",
-            phase.as_str()
-        ),
     };
     EngineRenderExecutionStop {
         reason,
@@ -5720,10 +5700,6 @@ mod tests {
                     "engine request deadline exceeded during {} phase",
                     phase.as_str()
                 ),
-                r2ssa::SsaExecutionStopReason::WorkExhausted => format!(
-                    "engine request exhausted the work its input allows during {} phase",
-                    phase.as_str()
-                ),
             };
             assert_eq!(response.metrics.phase_timings.len(), EnginePhase::ALL.len());
             assert!(response.metrics.phase_timings.iter().any(|timing| {
@@ -5882,15 +5858,6 @@ mod tests {
                             mapped.reason,
                             format!(
                                 "engine request deadline exceeded during {} phase",
-                                engine_phase.as_str()
-                            )
-                        );
-                    }
-                    r2ssa::SsaExecutionStopReason::WorkExhausted => {
-                        assert_eq!(
-                            mapped.reason,
-                            format!(
-                                "engine request exhausted the work its input allows during {} phase",
                                 engine_phase.as_str()
                             )
                         );

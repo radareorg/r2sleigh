@@ -3165,9 +3165,9 @@ impl Decompiler {
                     "{}: {error:?}",
                     rendered_function_name(func)
                 );
-                // A run that spent its work budget is stopped, not a function
-                // whose program variables could not be authorized.
-                if let crate::binding_plan::BindingPlanBuildError::WorkExhausted(reason) = error {
+                // A stopped run is not a function whose program variables
+                // could not be authorized.
+                if let crate::binding_plan::BindingPlanBuildError::Stopped(reason) = error {
                     return Err(DecompileExecutionStop::new(work.phase(), reason));
                 }
                 let refusal = match error {

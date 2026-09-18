@@ -909,9 +909,7 @@ impl BindingPlan {
             .collect::<Vec<_>>();
 
         for (index, graph_value) in graph.values.iter().enumerate() {
-            control
-                .poll()
-                .map_err(BindingPlanBuildError::WorkExhausted)?;
+            control.poll().map_err(BindingPlanBuildError::Stopped)?;
             if graph_value.id.0 as usize != index {
                 return Err(BindingPlanBuildError::Seal(
                     BindingPlanSourceMismatch::ValueTopology {

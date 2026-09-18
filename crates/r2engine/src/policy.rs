@@ -71,56 +71,6 @@ fn per_function_budget_usec() -> u64 {
     })
 }
 
-/// Units of counted work a capture of this size may spend.
-///
-/// A wall clock answered a different question on every machine, and it was
-/// scaled by the program's function count, which says nothing about the
-/// request in front of it. Counted work answers the same question the clock
-/// was standing in for, identically on every run, and the measure it is a
-/// function of is the capture: the root and every body taken with it.
-///
-/// The shape is affine because the cost is: a fixed part that every request
-/// pays whatever its size, and a part that grows with the bytes. Over the 1444
-/// functions of the whole scratch corpus, the least affine function that
-/// dominates every measured point is `346768 + 8.34 * captured_bytes`, computed
-/// as the upper convex hull of (captured bytes, work). These constants are that
-/// bound doubled and rounded up, so the worst function measured uses 0.48 of its
-/// budget and only a run that has stopped making progress can reach it.
-///
-/// Two things this fit had to get right. A slope alone was wrong in both
-/// directions: it gave a tiny capture too little for its fixed cost, which is
-/// why it needed a floor, and a large one fifty times more than it can use. And
-/// the fit has to be over every binary measured, not one: derived from
-/// dpkg-divert alone it refused five functions of the others.
-pub const WORK_BUDGET_BASE: u64 = 786_432;
-
-/// Units per captured byte, on top of the base.
-pub const WORK_BUDGET_PER_CAPTURED_BYTE: u64 = 17;
-
-/// The work budget for a capture of this size.
-///
-/// `R2SLEIGH_WORK_BUDGET_SCALE` multiplies it. That is a measurement aid, not a
-/// policy knob: re-deriving the constants above needs the work a function spends
-/// when nothing stops it, and a bound cannot be fitted from runs the bound
-/// truncated. Nothing in production sets it.
-pub fn work_budget_for_captured_bytes(captured_bytes: usize) -> u64 {
-    let budget = (captured_bytes as u64)
-        .saturating_mul(WORK_BUDGET_PER_CAPTURED_BYTE)
-        .saturating_add(WORK_BUDGET_BASE);
-    budget.saturating_mul(work_budget_scale())
-}
-
-fn work_budget_scale() -> u64 {
-    static SCALE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *SCALE.get_or_init(|| {
-        std::env::var("R2SLEIGH_WORK_BUDGET_SCALE")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .filter(|scale| *scale > 0)
-            .unwrap_or(1)
-    })
-}
-
 /// The post-analysis budget for a program of this size.
 pub fn post_analysis_budget_usec(function_count: usize) -> u64 {
     let per_function = per_function_budget_usec();

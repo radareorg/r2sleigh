@@ -1510,10 +1510,7 @@ unsafe fn execute_request(
             .checked_add(Duration::from_micros(payload.timeout_us))
             .unwrap_or_else(Instant::now)
     });
-    // The capture is the input the work is spent over, so it is what bounds
-    // the work. The clock stays only for a caller that asked for one.
-    let execution = r2engine::EngineExecutionControl::new(cancellation, deadline)
-        .with_work_budget(payload.snapshot_buffer_len);
+    let execution = r2engine::EngineExecutionControl::new(cancellation, deadline);
     let trusted = unsafe { capture_trusted_ssa_from_buffer(payload, &execution) }?;
     let capture_comment = trusted.capture.comment();
     let ffi_conversion_elapsed_us = elapsed_us(ffi_started);
