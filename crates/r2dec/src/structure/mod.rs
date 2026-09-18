@@ -180,6 +180,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let shaped = self.rewrite_stage("shape", &placed, &elisions, stmt, |tree| {
             Self::shape(fold_ctx, tree)
         })?;
+        crate::stage_timing::mark("structure_shape");
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);
         let journal = self.fold_ctx.inputs.observation_journal;
         let stmt = self.rewrite_stage("cleanup", &placed, &elisions, shaped, |tree| {

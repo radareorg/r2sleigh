@@ -408,6 +408,108 @@ impl ControlFlowStructurer<'_, '_> {
     /// Through the region and observation wrappers, and through a block that
     /// holds nothing else: an arm that assigns once and does nothing more is
     /// the shape a selection has in the text.
+    /// The statements a statement stands for, borrowed: a block's list, or
+    /// the statement itself.
+    fn stmt_slice(stmt: &CStmt) -> &[CStmt] {
+        match Self::semantic_stmt(stmt) {
+            CStmt::Block(stmts) => stmts,
+            other => std::slice::from_ref(other),
+        }
+    }
+
+    /// The last statement of a list that is not empty or a comment.
+    fn last_live_stmt(stmts: &[CStmt]) -> Option<&CStmt> {
+        stmts
+            .iter()
+            .rev()
+            .find(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)))
+    }
+
+    /// Whether `stmt` is exactly one assignment, through regions, marks and
+    /// blocks of one: what `sole_assignment` accepts, decided without a copy.
+    fn is_sole_assignment_shape(stmt: &CStmt) -> bool {
+        let stmts = Self::stmt_slice(stmt);
+        let mut live = stmts
+            .iter()
+            .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)));
+        let Some(only) = live.next() else {
+            return false;
+        };
+        if live.next().is_some() {
+            return false;
+        }
+        match Self::semantic_stmt(only) {
+            CStmt::Expr(expr) => matches!(
+                expr.unobserved(),
+                CExpr::Binary {
+                    op: BinaryOp::Assign,
+                    ..
+                }
+            ),
+            CStmt::Block(_) | CStmt::StructuredRegion { .. } => {
+                Self::is_sole_assignment_shape(only)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the last live statement of `stmt` is an assignment.
+    fn ends_with_assignment(stmt: &CStmt) -> bool {
+        match Self::last_live_stmt(Self::stmt_slice(stmt)).map(Self::semantic_stmt) {
+            Some(CStmt::Expr(expr)) => matches!(
+                expr.unobserved(),
+                CExpr::Binary {
+                    op: BinaryOp::Assign,
+                    ..
+                }
+            ),
+            Some(inner @ (CStmt::Block(_) | CStmt::StructuredRegion { .. })) => {
+                Self::ends_with_assignment(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `stmt` is a two-armed branch whose arms both end in an assignment.
+    fn branch_arms_end_with_assignments(stmt: &CStmt) -> bool {
+        match Self::semantic_stmt(stmt) {
+            CStmt::If {
+                then_body,
+                else_body: Some(else_body),
+                ..
+            } => Self::ends_with_assignment(then_body) && Self::ends_with_assignment(else_body),
+            _ => false,
+        }
+    }
+
+    /// Whether the last live statement of `stmt` is a return.
+    fn ends_with_return(stmt: &CStmt) -> bool {
+        match Self::last_live_stmt(Self::stmt_slice(stmt)).map(Self::semantic_stmt) {
+            Some(CStmt::Return(_)) => true,
+            Some(inner @ (CStmt::Block(_) | CStmt::StructuredRegion { .. })) => {
+                Self::ends_with_return(inner)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `stmt` ends in a self-update followed by `continue`, decided
+    /// without copying the body `split_trailing_update_continue` takes.
+    fn ends_with_update_continue(
+        symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+        stmt: &CStmt,
+    ) -> bool {
+        let stmts = Self::stmt_slice(stmt);
+        let mut live = stmts
+            .iter()
+            .rev()
+            .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty));
+        matches!(live.next().map(CStmt::unobserved), Some(CStmt::Continue))
+            && live
+                .next()
+                .is_some_and(|tail| Self::stmt_is_self_update(symbols, tail))
+    }
+
     fn sole_assignment(stmt: &CStmt) -> Option<SoleAssignment> {
         let (semantic, observations) = stmt.clone().into_semantic_with_observations();
         match semantic {
@@ -716,6 +818,13 @@ impl ControlFlowStructurer<'_, '_> {
             stmts.push(branch);
             stmts.push(tail);
         };
+        // The shape is checked on borrowed statements first; the helpers
+        // below clone what they inspect, and on a body of nested branches
+        // that clone ran at every level.
+        if !Self::ends_with_return(&tail) || !Self::branch_arms_end_with_assignments(&branch) {
+            restore(&mut stmts, branch, tail);
+            return stmts;
+        }
         let Some(remainder) = Self::tail_without_return(&tail) else {
             restore(&mut stmts, branch, tail);
             return stmts;
@@ -866,6 +975,14 @@ impl ControlFlowStructurer<'_, '_> {
             then_body,
             else_body: Some(else_body),
         };
+        // Looked at before anything is cloned: `sole_assignment` copies the
+        // arm it inspects, and most arms are not one assignment.
+        if !Self::is_sole_assignment_shape(&then_body)
+            || !Self::is_sole_assignment_shape(&else_body)
+        {
+            r2il::refusal_evidence!("two-way-assignment", "an arm is not a sole assignment");
+            return restore(cond, then_body, else_body);
+        }
         let (
             Some((then_marks, then_carried, then_written, then_lhs, then_rhs)),
             Some((else_marks, else_carried, else_written, else_lhs, else_rhs)),
@@ -1148,6 +1265,7 @@ impl ControlFlowStructurer<'_, '_> {
                     then_body,
                     else_body: None,
                 } = &stmts[i]
+                && Self::ends_with_update_continue(symbols, then_body)
                 && let Some((then_prefix, tail_stmt)) =
                     Self::split_trailing_update_continue(symbols, (**then_body).clone())
             {
