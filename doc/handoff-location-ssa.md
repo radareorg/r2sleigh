@@ -27941,3 +27941,32 @@ about the partition rather than a fact about one write.
 
 Both changes are reverted. The two evidence tags stay, because they are what
 turned "somewhere a cast appears" into "this line, between these two types".
+
+### What Phase 0 still owes, measured rather than remembered
+
+The plan in `snug-booping-nautilus` lists work that has since landed, so the
+list is no longer a guide. Checking each deletion it names against the tree:
+
+Gone already are `values_read_together`, `CoreadValues`, `set_interferes`,
+`set_outlives_a_redefinition`, `blocks_reachable_from`, `run_is_read_after` and
+`use_point`, along with the journal's `nothing_wrote_the_object_between` and
+`copy_source_is_a_parameter`. `crates/r2ssa/src/liveness.rs` exists and
+`StorageSpans::compute` takes a `ValueLiveness` and decides every union with
+`union_unless_live_together`, so steps 1, 3 and 4 are done and the seal no
+longer rebuilds the partition.
+
+Three things remain. `duplicable_bound_constants` and the `alone`/`admitted`
+inputs are still in `rewrite_inlining_partition`, which still runs the
+partition and the inlinable core in a loop over rounds
+(crates/r2dec/src/binding_plan/rules.rs:1091) rather than once: that is step 6c
+and it is the largest piece left. `merge_carries_only_to_return` survives in
+the observation journal. And there is no `crates/r2ssa/src/forward.rs`, so the
+copy forwarding of step 5 was never built.
+
+This matters beyond tidiness, because the two open noise counters both end
+here. The counted-loop flag stays bound because expansion re-phrases the
+comparison over the operand, and the policy cannot know better until the
+partition exists. The assignment-side cast cannot be removed until something
+proves no rendered reader sees the carrier above the declared width. Both are
+liveness questions against a partition that is computed once, which is what 6c
+delivers.
