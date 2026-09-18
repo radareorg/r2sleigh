@@ -2154,6 +2154,7 @@ impl Disassembler {
         let expanded = match self.user_op_name(*userop) {
             Some("NEON_ext") => Self::expand_neon_ext(output.as_ref(), inputs, temp_base),
             Some("NEON_ushl") => Self::expand_neon_ushl(output.as_ref(), inputs, temp_base),
+            Some("NEON_rev64") => Self::expand_neon_rev64(output.as_ref(), inputs, temp_base),
             // A trap, and the pipeline already has one. `R2ILOp::Breakpoint` is
             // seeded as `Kind::Trap` by the obligation ledger, which is exactly
             // what these are: control leaves for an exception handler and does
@@ -2233,6 +2234,81 @@ impl Disassembler {
                 b: high,
             },
         ])
+    }
+
+    /// `NEON_rev64(rn, element_size)` -- AArch64 `REV64`.
+    ///
+    /// Each 64-bit half of the vector has its elements reversed in place. The
+    /// elements are extracted one by one and recomposed in the reversed order,
+    /// the same way `USHL` recomposes its lanes.
+    fn expand_neon_rev64(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+    ) -> Option<Vec<R2ILOp>> {
+        let [rn, element_size] = inputs else {
+            return None;
+        };
+        let output = output?;
+        if element_size.space != SpaceId::Const {
+            return None;
+        }
+        let lane_bytes = u32::try_from(element_size.offset).ok()?;
+        if lane_bytes == 0
+            || lane_bytes >= 8
+            || 8 % lane_bytes != 0
+            || output.size != rn.size
+            || output.size % 8 != 0
+        {
+            return None;
+        }
+        let per_half = 8 / lane_bytes;
+        let lanes = output.size / lane_bytes;
+
+        let mut ops = Vec::new();
+        let mut next = temp_base;
+        let temp = |size: u32, next: &mut u64| {
+            let node = Varnode::unique(*next, size);
+            *next += u64::from(size).max(1);
+            node
+        };
+        let mut lane_values = Vec::with_capacity(lanes as usize);
+        for lane in 0..lanes {
+            let half = lane / per_half;
+            let within = lane % per_half;
+            let source_lane = half * per_half + (per_half - 1 - within);
+            let value = temp(lane_bytes, &mut next);
+            ops.push(R2ILOp::Subpiece {
+                dst: value.clone(),
+                src: rn.clone(),
+                offset: source_lane * lane_bytes,
+            });
+            lane_values.push(value);
+        }
+        let mut width = lane_bytes;
+        while lane_values.len() > 1 {
+            let mut joined = Vec::with_capacity(lane_values.len() / 2);
+            for pair in lane_values.chunks(2) {
+                let [low, high] = pair else {
+                    return None;
+                };
+                let wider = temp(width * 2, &mut next);
+                ops.push(R2ILOp::Piece {
+                    dst: wider.clone(),
+                    hi: high.clone(),
+                    lo: low.clone(),
+                });
+                joined.push(wider);
+            }
+            lane_values = joined;
+            width *= 2;
+        }
+        let composed = lane_values.pop()?;
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: composed,
+        });
+        Some(ops)
     }
 
     /// `NEON_ushl(rn, rm, element_size)` -- AArch64 `USHL`.

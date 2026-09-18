@@ -346,8 +346,8 @@ mod tests {
     ///
     /// A `CallOther` states only an index, and the index is assigned by the
     /// compiled specification, so this table is the only thing that can say
-    /// which operation an instruction invoked. `NEON_ext` and `NEON_ushl` are
-    /// the two the corpus needs; asserting a name resolves back through its own
+    /// which operation an instruction invoked. `NEON_ext`, `NEON_ushl` and `NEON_rev64` are
+    /// the ones the corpus needs; asserting a name resolves back through its own
     /// index is the property a consumer depends on.
     #[test]
     fn aarch64_user_operation_names_reach_the_arch_spec() {
@@ -362,7 +362,7 @@ mod tests {
             !spec.user_ops.is_empty(),
             "AARCH64 declares user-defined operations"
         );
-        for name in ["NEON_ext", "NEON_ushl"] {
+        for name in ["NEON_ext", "NEON_ushl", "NEON_rev64"] {
             let index = spec
                 .user_ops
                 .iter()
