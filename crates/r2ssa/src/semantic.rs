@@ -1985,6 +1985,29 @@ impl PreparedFunctionFacts {
         );
         phase("call_sites", call_sites.by_id.len());
         let declared_slots = collect_declared_stack_slots(machine_context);
+        // The loops come before the objects: what a counted loop's counter
+        // reaches says how far a buffer it indexes extends, and that has to be
+        // known while the frame's objects are still being decided. Nothing in
+        // this subtree reads the object model.
+        let predicates = collect_predicate_facts(function, graph);
+        phase("predicates", 0);
+        let return_storages = machine_context
+            .into_iter()
+            .flat_map(|context| context.abi_model().return_registers())
+            .map(|slot| slot.storage())
+            .collect::<Vec<_>>();
+        let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+        let loops = collect_structured_loop_facts(
+            function,
+            graph,
+            &predicates,
+            &live_out,
+            storage_spans,
+            machine_context,
+        );
+        let inductions = collect_induction_facts(graph, &loops);
+        let induction_bounds = induction_upper_bounds(graph, &predicates, &loops, &inductions);
+        phase("loops", loops.len());
         let (objects, memory) = collect_object_and_memory_facts(
             function,
             graph,
@@ -1992,29 +2015,21 @@ impl PreparedFunctionFacts {
             &call_sites,
             machine_context,
             &declared_slots,
+            &induction_bounds,
         );
         phase("objects", objects.objects.len());
-        let predicates = collect_predicate_facts(function, graph);
-        phase("predicates", 0);
         let boundaries =
             collect_source_boundary_facts(function, graph, &call_sites, machine_context);
         phase("boundaries", boundaries.calls.len());
-        let return_storages = machine_context
-            .into_iter()
-            .flat_map(|context| context.abi_model().return_registers())
-            .map(|slot| slot.storage())
-            .collect::<Vec<_>>();
-        let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
         let structured = collect_structured_dataflow_facts(
             function,
             graph,
+            loops,
+            inductions,
             StructuredCollectionInputs {
                 objects: &objects,
                 memory: &memory,
-                predicates: &predicates,
                 call_sites: &call_sites,
-                live_out: &live_out,
-                storage_spans,
                 machine_context,
                 declared_slots: &declared_slots,
             },
@@ -2359,7 +2374,12 @@ impl<'a> ObjectModelBuilder<'a> {
         }
     }
 
-    fn build(mut self, function: &SSAFunction, graph: &SsaGraph) -> ObjectModel {
+    fn build(
+        mut self,
+        function: &SSAFunction,
+        graph: &SsaGraph,
+        induction_bounds: &BTreeMap<ValueId, u64>,
+    ) -> ObjectModel {
         if let Some(facts) = self.facts {
             self.evidenced_roots = evidenced_stack_roots(
                 facts,
@@ -2367,6 +2387,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 function,
                 graph,
                 self.stack_pointer_carrier,
+                induction_bounds,
             );
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
@@ -2819,10 +2840,11 @@ fn collect_object_and_memory_facts(
     call_sites: &CallSiteFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
+    induction_bounds: &BTreeMap<ValueId, u64>,
 ) -> (ObjectModel, MemorySSAFacts) {
     let facts = function.decompile_prep_facts();
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    let object_model = builder.build(function, graph);
+    let object_model = builder.build(function, graph, induction_bounds);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model, call_sites);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
@@ -3554,12 +3576,7 @@ fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
 struct StructuredCollectionInputs<'a> {
     objects: &'a ObjectModel,
     memory: &'a MemorySSAFacts,
-    predicates: &'a PredicateFacts,
     call_sites: &'a CallSiteFacts,
-    /// What the caller reads, so a value with no reader in this body is not
-    /// mistaken for one nothing reads at all.
-    live_out: &'a crate::liveout::FunctionLiveOut,
-    storage_spans: &'a StorageSpans,
     machine_context: Option<&'a SourceMachineContext>,
     declared_slots: &'a DeclaredStackSlots,
 }
@@ -3751,16 +3768,10 @@ fn collect_induction_facts(
 fn collect_structured_dataflow_facts(
     function: &SSAFunction,
     graph: &SsaGraph,
+    loops: BTreeMap<LoopId, StructuredLoopFact>,
+    inductions: BTreeMap<ValueId, InductionFact>,
     inputs: StructuredCollectionInputs<'_>,
 ) -> StructuredDataflowFacts {
-    let loops = collect_structured_loop_facts(
-        function,
-        graph,
-        inputs.predicates,
-        inputs.live_out,
-        inputs.storage_spans,
-        inputs.machine_context,
-    );
     let (memory_accesses, member_run_stores) = collect_structured_memory_access_facts(
         function,
         graph,
@@ -3771,7 +3782,7 @@ fn collect_structured_dataflow_facts(
     );
     StructuredDataflowFacts {
         unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
-        inductions: collect_induction_facts(graph, &loops),
+        inductions,
         loops,
         memory_accesses,
         member_run_stores,
@@ -7720,6 +7731,7 @@ fn evidenced_stack_roots(
     function: &SSAFunction,
     graph: &SsaGraph,
     stack_pointer_carrier: Option<CanonicalStorageId>,
+    induction_bounds: &BTreeMap<ValueId, u64>,
 ) -> BTreeSet<StackAddressRoot> {
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
@@ -7819,6 +7831,66 @@ fn evidenced_stack_roots(
             }
         }
     }
+    // How far each root's indexed accesses reach: the base's position plus
+    // what the index can reach plus the width read there. A position inside
+    // that span is a place in the buffer, not the start of another object,
+    // and treating it as one splits a buffer a vectoriser touched at fixed
+    // offsets into fragments nothing is proven to write.
+    let mut spans = BTreeMap::<StackAddressRoot, i64>::new();
+    let mut memo = BTreeMap::new();
+    for block in function.blocks() {
+        for (at, op) in block.ops.iter().enumerate() {
+            let (addr, width) = match op {
+                SSAOp::Load {
+                    addr, dst, space, ..
+                } if *space == SpaceId::Ram => (addr, dst.size),
+                SSAOp::Store {
+                    addr, val, space, ..
+                } if *space == SpaceId::Ram => (addr, val.size),
+                _ => continue,
+            };
+            let _ = at;
+            let Some(root) = facts.indexed_stack_address_root_of(addr) else {
+                continue;
+            };
+            let Some(index) = graph
+                .value_id_for_var(addr)
+                .and_then(|address| object_index_operand(facts, graph, address))
+            else {
+                continue;
+            };
+            let Some(bound) = indexed_offset_upper_bound(
+                graph,
+                induction_bounds,
+                true,
+                index,
+                &mut memo,
+                &mut BTreeSet::new(),
+            ) else {
+                continue;
+            };
+            let Ok(reach) = i64::try_from(bound.saturating_add(u64::from(width))) else {
+                continue;
+            };
+            let end = root.offset.saturating_add(reach);
+            spans
+                .entry(*root)
+                .and_modify(|known| *known = (*known).max(end))
+                .or_insert(end);
+        }
+    }
+    roots.retain(|root| {
+        let inside = spans.iter().any(|(base, end)| {
+            base.base == root.base && base.offset < root.offset && root.offset < *end
+        });
+        if inside {
+            r2il::refusal_evidence!(
+                "indexed-span-absorbs",
+                "{root:?} is a place inside a span an index reaches: {spans:?}"
+            );
+        }
+        !inside
+    });
     for (var, root) in &facts.stack_address_roots {
         let Some(value) = graph.value_id_for_var(var) else {
             continue;
@@ -7895,6 +7967,7 @@ fn accessed_object_extent(
             let bound = indexed_offset_upper_bound(
                 graph,
                 inductions,
+                false,
                 index,
                 &mut memo,
                 &mut BTreeSet::new(),
@@ -7908,6 +7981,27 @@ fn accessed_object_extent(
     (extent > 0).then_some(extent)
 }
 
+/// The operand of an indexed address that supplies the index.
+///
+/// The same question `ObjectModel::index_for_address` answers, asked before
+/// the object model exists: of a sum, the side that is not the stack address.
+fn object_index_operand(
+    facts: &DecompilePrepFacts,
+    graph: &SsaGraph,
+    address: ValueId,
+) -> Option<ValueId> {
+    let inst = graph.inst(graph.def_inst(address)?)?;
+    let InstPayload::Op(SSAOp::IntAdd { a, b, .. }) = &inst.payload else {
+        return None;
+    };
+    let rooted = |var: &SSAVar| resolve_stack_root(Some(facts), var).is_some();
+    match (rooted(a), rooted(b)) {
+        (true, false) => graph.value_id_for_var(b),
+        (false, true) => graph.value_id_for_var(a),
+        _ => None,
+    }
+}
+
 /// The largest value a counted loop's counter reaches, per header merge.
 ///
 /// A recurrence alone says nothing: `x = x + 1` wraps, so the only bound it
@@ -7918,7 +8012,8 @@ fn accessed_object_extent(
 fn induction_upper_bounds(
     graph: &SsaGraph,
     predicates: &PredicateFacts,
-    structured: &StructuredDataflowFacts,
+    loops: &BTreeMap<LoopId, StructuredLoopFact>,
+    inductions: &BTreeMap<ValueId, InductionFact>,
 ) -> BTreeMap<ValueId, u64> {
     let mut bounds = BTreeMap::new();
     let constant = |value: ValueId| {
@@ -7926,15 +8021,14 @@ fn induction_upper_bounds(
             .value(value)
             .and_then(|value| value.var.constant_bits())
     };
-    for induction in structured.inductions.values() {
+    for induction in inductions.values() {
         let InductionStep::AddConst(step) = induction.step else {
             continue;
         };
         if step == 0 {
             continue;
         }
-        let Some(loop_fact) = structured
-            .loops
+        let Some(loop_fact) = loops
             .values()
             .find(|loop_fact| loop_fact.id == induction.loop_id)
         else {
@@ -7992,6 +8086,30 @@ fn induction_upper_bounds(
         // so the highest it reaches in the body is that value.
         bounds.insert(induction.phi, last);
     }
+    // Which counters carry a bound, and which loops had no test to give one,
+    // is what says whether a buffer a loop fills can be sized at all.
+    if r2il::refusal_evidence::tracing() {
+        for induction in inductions.values() {
+            if bounds.contains_key(&induction.phi) {
+                continue;
+            }
+            let loop_fact = loops
+                .values()
+                .find(|loop_fact| loop_fact.id == induction.loop_id);
+            r2il::refusal_evidence!(
+                "induction-unbounded",
+                "{:?} step={:?} has no bound: condition={:?} comparison={:?} init={:?}",
+                induction.phi,
+                induction.step,
+                loop_fact.and_then(|loop_fact| loop_fact.condition),
+                loop_fact
+                    .and_then(|loop_fact| loop_fact.condition)
+                    .and_then(|condition| predicates.predicates.get(&condition))
+                    .and_then(|predicate| predicate.comparison.clone()),
+                constant(induction.init)
+            );
+        }
+    }
     bounds
 }
 
@@ -8020,6 +8138,7 @@ fn masked_upper_bound(mask: u64, bound: u64) -> u64 {
 fn indexed_offset_upper_bound(
     graph: &SsaGraph,
     inductions: &BTreeMap<ValueId, u64>,
+    strict: bool,
     value: ValueId,
     memo: &mut BTreeMap<ValueId, Option<u64>>,
     visiting: &mut BTreeSet<ValueId>,
@@ -8046,7 +8165,7 @@ fn indexed_offset_upper_bound(
         let constant =
             |index: usize| input(index).and_then(|value| graph.value(value)?.var.constant_bits());
         let mut bound_of = |index: usize| {
-            indexed_offset_upper_bound(graph, inductions, input(index)?, memo, visiting)
+            indexed_offset_upper_bound(graph, inductions, strict, input(index)?, memo, visiting)
         };
         match op {
             SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
@@ -8057,13 +8176,25 @@ fn indexed_offset_upper_bound(
             // The mask alone is not the bound: `i & 0xf8` with `i` below 64
             // reaches 56, not 248. The answer is the largest value the mask
             // admits that the other operand can reach.
+            // A mask bounds what it masks only together with what the other
+            // operand reaches. The mask's own magnitude is an assumption about
+            // that operand, and a span built on one swallowed every
+            // neighbouring local in the frame.
+            // A mask bounds what it masks together with what the other
+            // operand reaches; the mask's own magnitude is an assumption about
+            // that operand. Assuming it is safe where the answer sizes one
+            // object, since a wider local is still that local, and unsafe
+            // where the answer decides which positions are objects at all: a
+            // span built on the assumption swallowed every neighbouring local.
             SSAOp::IntAnd { .. } => match (constant(0), constant(1)) {
-                (Some(mask), _) => {
-                    Some(bound_of(1).map_or(mask, |bound| masked_upper_bound(mask, bound)))
-                }
-                (_, Some(mask)) => {
-                    Some(bound_of(0).map_or(mask, |bound| masked_upper_bound(mask, bound)))
-                }
+                (Some(mask), _) => match bound_of(1) {
+                    Some(bound) => Some(masked_upper_bound(mask, bound)),
+                    None => (!strict).then_some(mask),
+                },
+                (_, Some(mask)) => match bound_of(0) {
+                    Some(bound) => Some(masked_upper_bound(mask, bound)),
+                    None => (!strict).then_some(mask),
+                },
                 (None, None) => Some(bound_of(0)?.min(bound_of(1)?)),
             },
             SSAOp::IntRem { .. } => constant(1)?.checked_sub(1),
@@ -8190,6 +8321,7 @@ fn stack_array_layout(
         if let Some(bound) = indexed_offset_upper_bound(
             graph,
             inductions,
+            false,
             byte_offset,
             &mut memo,
             &mut BTreeSet::new(),
@@ -8786,7 +8918,8 @@ fn collect_prepared_function_certificates(
         })
         .collect();
 
-    let induction_bounds = induction_upper_bounds(graph, predicates, structured);
+    let induction_bounds =
+        induction_upper_bounds(graph, predicates, &structured.loops, &structured.inductions);
     let stack_array_layouts = objects
         .objects
         .keys()
@@ -14138,7 +14271,7 @@ mod tests {
             &stack_declared,
             Some(stack.machine_context()),
         )
-        .build(stack.function(), stack.graph());
+        .build(stack.function(), stack.graph(), &BTreeMap::new());
         let ram_stack = super::memory_location_for_addr(
             Some(&stack_facts),
             stack.addresses(),

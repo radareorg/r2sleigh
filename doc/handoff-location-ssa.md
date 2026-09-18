@@ -27555,3 +27555,36 @@ already carried the extent. It is the `-O2` pair that needs it, and that needs
 the second half: the loop and induction facts are built after the object model,
 so root evidence cannot see them. Nothing in that subtree reads the object
 model, so hoisting them above it is a move rather than a redesign.
+
+### The loops come before the objects, and a bound has two strengths
+
+The design the `-O2` split needs is for root evidence to know how far an
+indexed access reaches, which needs the loop and induction facts while the
+frame's objects are still being decided. They were built after. Nothing in
+that subtree reads the object model, so the predicates, the live-out set and
+the loop and induction collection now run before `collect_object_and_memory_facts`
+and `collect_structured_dataflow_facts` receives what was already built.
+`evidenced_stack_roots` computes a reach per root from the raw load and store
+addresses it already walks, and a frame position strictly inside another
+root's reach is absorbed rather than starting an object of its own.
+
+That regressed `BZ2_decompress` to `PlannedElidedValueRendered`, and the
+corpus never noticed: 60 of 60 on every column through the whole regression,
+because nothing in it is shaped like that function. The census is what said a
+body had been lost. The cause was the mask bound. `i & 0xf8` is bounded by the
+mask only together with what `i` reaches, and taking the mask's own magnitude
+is an assumption about `i`. One span built on that assumption reached 256
+bytes and absorbed every neighbouring local in the frame.
+
+Two consumers, two strengths. Sizing one object may assume it -- a local
+declared wider than it is, is still that local, and the index stays inside it.
+Deciding which positions are objects at all may not. `indexed_offset_upper_bound`
+now takes that strictness, permissive where it sizes and strict where it
+partitions.
+
+Still open at `-O2`: the byte loop is unrolled, its counter steps by four, and
+the loop's exit test compares a different value entirely, so the counter is
+bounded by a sibling induction rather than by the test. Bounding it needs a
+trip count shared across siblings in one loop, and the initial values here are
+not constants either. `induction-unbounded` names each counter that declines
+and what its loop's comparison was.
