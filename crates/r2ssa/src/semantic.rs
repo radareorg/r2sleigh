@@ -7711,7 +7711,7 @@ fn accessed_object_storage(
 /// A declared slot starts one; so does a direct access, an address that
 /// leaves the function as a value -- through a call, or stored into memory --
 /// a position the stack pointer itself takes, and the base of an indexed
-/// access unless that base points below the address it was displaced from.
+/// access unless that base is itself a place inside another object.
 /// A position that is only ever displaced from is not one.
 fn evidenced_stack_roots(
     facts: &DecompilePrepFacts,
@@ -7722,24 +7722,36 @@ fn evidenced_stack_roots(
 ) -> BTreeSet<StackAddressRoot> {
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
-    let negative_displacement = |var: &SSAVar| {
-        let Some(inst) = graph
+    let definition = |var: &SSAVar| {
+        graph
             .value_id_for_var(var)
             .and_then(|value| graph.def_inst(value))
             .and_then(|inst| graph.inst(inst))
-        else {
-            return false;
-        };
-        match &inst.payload {
-            InstPayload::Op(SSAOp::IntAdd { a, b, .. }) => {
-                let delta = if exact_root(a).is_some() { b } else { a };
-                delta.constant_bits().is_some_and(|bits| (bits as i64) < 0)
-            }
-            InstPayload::Op(SSAOp::IntSub { b, .. }) => {
-                b.constant_bits().is_some_and(|bits| (bits as i64) > 0)
-            }
-            _ => false,
+    };
+    // The address a constant displacement was measured from, where it was.
+    let displaced_from = |var: &SSAVar| match definition(var).map(|inst| &inst.payload) {
+        Some(InstPayload::Op(SSAOp::IntAdd { a, b, .. })) => {
+            let (base, delta) = if a.constant_bits().is_some() {
+                (b, a)
+            } else {
+                (a, b)
+            };
+            (delta.constant_bits().is_some() && exact_root(base).is_some()).then(|| base.clone())
         }
+        Some(InstPayload::Op(SSAOp::IntSub { a, b, .. })) => {
+            (b.constant_bits().is_some() && exact_root(a).is_some()).then(|| a.clone())
+        }
+        _ => None,
+    };
+    // A position measured from an object is inside it, not the start of
+    // another: `buf + 8` is a place in `buf`. A position measured from a
+    // frame base is how the frame names a local, whichever way the
+    // displacement runs -- every `rbp`-relative local is a negative one, and
+    // asking the sign instead excluded every local on a frame-pointer
+    // machine. The frame base is what a register carries; a place inside an
+    // object is what a temporary holds.
+    let interior_position = |var: &SSAVar| {
+        displaced_from(var).is_some_and(|parent| graph.canonical_storage_for_var(&parent).is_none())
     };
     for block in function.blocks() {
         for op in &block.ops {
@@ -7755,8 +7767,20 @@ fn evidenced_stack_roots(
                         && matches!(op, SSAOp::IntAdd { .. })
                     {
                         for base in [a, b] {
+                            // Which operand of an indexed address became an
+                            // object start, and why the other did not, is what
+                            // says where a buffer's accesses will be filed.
+                            r2il::refusal_evidence!(
+                                "indexed-base-root",
+                                "{} + {}: base {} root={:?} interior={}",
+                                a.display_name(),
+                                b.display_name(),
+                                base.display_name(),
+                                exact_root(base),
+                                interior_position(base)
+                            );
                             if let Some(root) = exact_root(base)
-                                && !negative_displacement(base)
+                                && !interior_position(base)
                             {
                                 roots.insert(root);
                             }

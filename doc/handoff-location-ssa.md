@@ -27494,3 +27494,32 @@ the base, so the address resolves to the frame pointer itself and the store is
 filed against the saved-frame-pointer slot. It renders as
 `stack_m8[RDX_1 - 79] = ...` against a `uint8_t[8]`, a negative subscript on
 every iteration.
+
+### A local was folded onto the saved frame pointer and indexed before itself
+
+`shape_stack_buffer` rendered its `uint8_t buffer[64]` as `uint8_t stack_m8[8]`
+at the saved-frame-pointer slot, subscripted `stack_m8[i - 80]`: a negative
+index on every iteration, in C that compiles. The buffer's own frame position
+was never an object, so the address resolved to the frame pointer's slot and
+the rewriter's `stack_element` rule computed the distance between the two as
+the subscript's displacement, which is exact arithmetic about the wrong base.
+
+`evidenced_stack_roots` decides which frame positions start an object, and one
+of its sources is the base of an indexed address -- an object start by
+construction, since the machine can only index from the start of something.
+That source was guarded against a base whose displacement is negative, meaning
+to exclude an interior address such as `buf + 8`. Every `rbp`-relative local is
+a negative displacement, so the guard excluded the whole class on x86-64. What
+separates the two cases is what the displacement was measured from: a frame
+base, which a register carries, or an object, which a temporary holds. Asking
+that instead gives `uint8_t stack_m88[64]` and `stack_m88[i]`.
+
+Two passes analyse each function and they disagreed on the first attempt,
+which tried "displaced from something itself displaced": on the prepared graph
+the frame pointer is itself a displacement from the stack pointer, so every
+local looked interior. The evidence channel now names, for each operand of an
+indexed address, whether it became a root and why, which is what showed the
+two passes disagreeing.
+
+Gates: corpus 60/60 on every column, r2r at the recorded 2 XX, bzip2 census
+unchanged at 61 bodies and no refusals.
