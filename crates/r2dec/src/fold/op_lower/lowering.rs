@@ -747,7 +747,14 @@ impl<'a> FoldingContext<'a> {
                             .plan()
                             .machine_projection()
                             .expr(read.expr)
-                            .map(|expr| format!("{:?}", expr.kind())),
+                            .map(|expr| match expr.kind() {
+                                r2ssa::MachineExprKind::Source { binding, .. } => format!(
+                                    "Source({:?} declared={:?})",
+                                    binding.value(),
+                                    self.value_declaration_type(binding.value())
+                                ),
+                                kind => format!("{kind:?}"),
+                            }),
                         _ => None,
                     },
                     typed.term_produced(id),

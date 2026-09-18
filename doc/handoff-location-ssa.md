@@ -28178,3 +28178,26 @@ and keyed by the value its instruction defines, does not cover these values. So
 the access's instruction is not the instruction that defines the value the
 `Source` names. Finding the right key is the remaining step, and the leaf's own
 `Source` binding is where to look.
+
+### The reload cast: the value does have a declaration, and who can see it
+
+The last probe answers the question the entry above left open. Printing the
+leaf's `Source` value beside `value_declaration_type` of it shows `declared=Some`
+for all fourteen conversions. The value is not unbound at all; it is inlined
+over a term that spells one object, which the renderer's own
+`value_declaration_type` resolves through `term_spells_binding` and which
+`RenderTypes::declaration_type` does not, because the plan's implementation
+answers only the `Bound` arm.
+
+Teaching the trait method the same rule was tried and is recorded as inert:
+four of the fourteen conversions change from `uint32_t` to `int32_t` produced,
+the corpus is 60 of 60 with every snapshot unchanged, and no counter moves. The
+other ten resolve through the name resolution rather than the plan, and
+`BindingNameResolution` is not reachable from where the trait is implemented.
+The change is therefore correct and unnecessary today, and it is not in the
+tree; a future session should know it was aligned rather than untried.
+
+So the remaining work on this shape is to make one answer serve both: either the
+plan's `declaration_type` gains what the name resolution knows, or the renderer
+stops keeping a second helper. That is a small consolidation rather than a
+trace, which is where this shape now sits.
