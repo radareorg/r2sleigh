@@ -24,7 +24,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
         {
             int32_t tmp_11f00_1;
             if (tmp_11f80_2 < 16) {
-                tmp_11f00_1 = (int32_t)stack_m28;
+                tmp_11f00_1 = stack_m28;
                 stack_m44 = (uint32_t)tmp_11f00_1 + 0x165667b1;
             } else {
                 int32_t stack_m60;
@@ -32,12 +32,12 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 int32_t stack_m72;
                 tmp_11f80_6 = stack_m40;
                 uint64_t stack_m56 = tmp_11f80_6 - 16;
-                tmp_11f00_1 = (int32_t)stack_m28;
+                tmp_11f00_1 = stack_m28;
                 stack_m60 = (int32_t)((uint32_t)tmp_11f00_1 + 0x24234428);
-                tmp_11f00_1 = (int32_t)stack_m28;
+                tmp_11f00_1 = stack_m28;
                 stack_m64 = (int32_t)((uint32_t)tmp_11f00_1 - 0x7a143589);
-                tmp_11f00_1 = (int32_t)stack_m28;
-                tmp_11f00_1 = (int32_t)stack_m28;
+                tmp_11f00_1 = stack_m28;
+                tmp_11f00_1 = stack_m28;
                 stack_m72 = (int32_t)((uint32_t)tmp_11f00_1 + 0x61c8864f);
                 for (; ; ) {
                     tmp_11f80_1 = stack_m16;

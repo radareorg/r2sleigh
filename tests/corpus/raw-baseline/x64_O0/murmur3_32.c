@@ -14,7 +14,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
         stack_m16 = RDI_0;
         stack_m24 = RSI_0;
         stack_m28 = (int32_t)EDX_0;
-        tmp_11f00_1 = (int32_t)stack_m28;
+        tmp_11f00_1 = stack_m28;
         tmp_11f80_1 = stack_m24;
         stack_m48 = tmp_11f80_1 >> 2;
         stack_m56 = 0;

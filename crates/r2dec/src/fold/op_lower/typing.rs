@@ -79,6 +79,15 @@ impl FoldingContext<'_> {
                 self.pointer_bits(),
             );
         }
+        // A bare name converts from what it is declared as, whatever the
+        // boundary believed its value to be: the declaration is what C reads.
+        let declared = match expr.unobserved() {
+            CExpr::Var(symbol) => Some(self.symbols.borrow().ty(*symbol).clone()),
+            _ => None,
+        }
+        .filter(|ty| !matches!(ty, CType::Unknown))
+        .map(CValue::Typed);
+        let from = declared.as_ref().or(from);
         super::convert::convert_optional(expr, from, to, self.pointer_bits())
     }
 

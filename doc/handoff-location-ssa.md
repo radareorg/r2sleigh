@@ -28386,3 +28386,15 @@ second fix changes every x64 -O0 cell that calls something.
 `observe_control_ownership` anchored on a block's last op, which for a
 switch is a merge copy normalisation appends after the transfer; it now
 anchors on the last control op.
+
+## A conversion over a name is judged against the name
+
+`tmp_11f00_1 = (int32_t)stack_m28` on every x64 -O0 reload of a promoted
+slot: the assignment typed its right-hand side from the machine value (an
+unsigned register lane) while the name it spelled is declared `int32_t`. The
+same disagreement produced the call-argument casts on arm64, where the
+argument's value is the zero-extended carrier and the expression is the
+32-bit slot. `convert_from` in `fold/op_lower/typing.rs` now reads a bare
+name's declared type from the symbol table and converts from that, whatever
+the boundary believed the value to be; the symbol carries its declaration
+from `reserve_binding`, so the answer is available while lowering runs.
