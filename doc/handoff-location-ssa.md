@@ -27663,3 +27663,43 @@ Three diagnostics were added while tracing these and are worth keeping:
 `integer-conversion-over-name` names both sides of a conversion spelled over a
 bare name, and `frame-constant` names what the machine projection and the
 canonical term each said about a value.
+
+### The sixteen shapes cells that cannot be compiled, with a cause each
+
+`blocked_compile` on the shapes matrix is not one failure. Compiling each
+`tests/corpus/artifacts/compile/<config>/raw_<shape>.c` by hand separates it
+into four causes, and only one of them is about the C being wrong.
+
+**An import keeps radare2's flag namespace.** Ten of the sixteen fail at link
+with `Undefined symbols: _sym_imp___stack_chk_fail`, and one adds
+`_sym_imp___memcpy_chk`. `c_identifier` (crates/r2dec/src/ast.rs:1622) turns
+every character C rejects into an underscore and keeps everything else, so
+`sym.imp.__stack_chk_fail` is spelled `sym_imp___stack_chk_fail`. The data
+symbol path already does the other thing: `c_identifier_for_data_symbol`
+(crates/r2dec/src/lib.rs:4376) strips `obj.`, `reloc.`, `sym.` and the rest
+before sanitizing, which is why `reloc.__stack_chk_guard` renders as
+`__stack_chk_guard` and links. A defined function in the same translation unit
+does not care which spelling is used, because its definition carries the same
+name; an import has no definition here and must be spelled the way the linker
+knows it. Both spellings are present in the current artifacts, so the two paths
+disagree today.
+
+**Mutual recursion has no definition to link against.** `shape_recurse_mutual`
+fails on `_sym__shape_mutual_even` and `_sym__shape_mutual_odd`: the rendering
+is one function and its partner is declared but never defined. This is a
+harness question, not a rendering defect.
+
+**A dead local trips `-Werror`.** `shapes_arm64_O0/shape_pointer_to_pointer`
+fails with `variable 'stack_m72' set but not used`. A slot is written and never
+read, and the store survived into the rendering.
+
+**The diagnostic program emits a malformed declaration.** Several diagnostic
+fallbacks fail with `expected identifier or '('` on a line reading
+`long (((unsigned char ...`, which is a type spelled where a declarator was
+expected. The raw program for those cells fails for one of the reasons above,
+so the cell has no basis at all.
+
+`shapes_x64_O0/shape_variadic_local` is a fifth and separate case:
+`conflicting types for 'sym__vfold'`, a definition with two parameters and a
+later declaration of the same name with six. The body-proven signature and the
+call site's interface disagree on arity and both reach the same unit.
