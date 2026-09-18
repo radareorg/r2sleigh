@@ -5253,7 +5253,7 @@ impl SSAFunction {
             );
             return None;
         };
-        self.infer_switch_selector_var_from_value(target, 0)
+        self.infer_switch_selector_var_from_value(target, 0, false)
     }
 
     fn ensure_query_index(&self) {
@@ -5279,7 +5279,14 @@ impl SSAFunction {
             .expect("SSA query index lock poisoned") = None;
     }
 
-    fn infer_switch_selector_var_from_value(&self, var: &SSAVar, depth: u32) -> Option<SSAVar> {
+    /// `as_address` says the value is being followed as part of an address:
+    /// a value loaded through a pointer there is a base, never the selector.
+    fn infer_switch_selector_var_from_value(
+        &self,
+        var: &SSAVar,
+        depth: u32,
+        as_address: bool,
+    ) -> Option<SSAVar> {
         if depth > 16 {
             return None;
         }
@@ -5293,15 +5300,24 @@ impl SSAFunction {
                     var.display_name()
                 );
             }
+            // A register the function was entered with is a base when it
+            // sits in an address: `p + i` reads through `p`, and the byte it
+            // reads is the selector rather than either register.
+            if as_address {
+                return None;
+            }
             return (!constish).then(|| var.clone());
         };
+        // A merged value is where the walk stops: the merge is the selector
+        // the source switched on, spelled once for every path that reaches
+        // the jump. Inside an address a merged register is a base.
         let DefLocation::Op(op_idx) = location else {
             r2il::refusal_evidence!(
                 "switch-selector-walk",
-                "{} is defined by a merge in {block_addr:#x}, which the walk does not cross",
+                "{} is defined by a merge in {block_addr:#x}, where the walk stops",
                 var.display_name()
             );
-            return None;
+            return (!as_address).then(|| var.clone());
         };
         let block = self.get_block(block_addr)?;
         let op = block.ops.get(op_idx)?;
@@ -5316,11 +5332,15 @@ impl SSAFunction {
             | SSAOp::IntSExt { src, .. }
             | SSAOp::Cast { src, .. }
             | SSAOp::Subpiece { src, .. } => {
-                self.infer_switch_selector_var_from_value(src, depth + 1)
+                self.infer_switch_selector_var_from_value(src, depth + 1, as_address)
             }
             SSAOp::Load { addr, .. } => {
                 if self.is_stack_slot_address_var(addr, depth + 1) {
                     Some(var.clone())
+                } else if as_address {
+                    // Inside an address a loaded value is a pointer the
+                    // address is built on, not the selector.
+                    self.infer_switch_selector_var_from_address(addr, depth + 1)
                 } else {
                     // A table load carries the index inside its address, so
                     // that is tried first. A plain dereference does not, and
@@ -5338,10 +5358,16 @@ impl SSAFunction {
                 }
             }
             SSAOp::IntAdd { a, b, .. } | SSAOp::IntSub { a, b, .. } => {
-                self.infer_switch_selector_var_from_sum(a, b, depth + 1)
+                self.infer_switch_selector_var_from_sum(a, b, depth + 1, as_address)
             }
+            // A scaled value is an index, followed as a value wherever it sits.
             SSAOp::IntMult { a, b, .. } => {
-                self.infer_switch_selector_var_from_scaled(a, b, depth + 1)
+                self.infer_switch_selector_var_from_scaled(a, b, depth + 1, false)
+            }
+            // A shift by a constant is a scale: `x8, lsl 1` indexes a table of
+            // halfwords the way `x8 * 2` would.
+            SSAOp::IntLeft { a, b, .. } if Self::is_constish_switch_value(b) => {
+                self.infer_switch_selector_var_from_value(a, depth + 1, false)
             }
             // A masked value *is* the selector, not a step towards one.
             // `switch (len & 3)` compiles to a table indexed by the mask's
@@ -5389,7 +5415,10 @@ impl SSAFunction {
                 self.infer_switch_selector_var_from_address_sum(a, b, depth + 1)
             }
             SSAOp::IntMult { a, b, .. } => {
-                self.infer_switch_selector_var_from_scaled(a, b, depth + 1)
+                self.infer_switch_selector_var_from_scaled(a, b, depth + 1, false)
+            }
+            SSAOp::IntLeft { a, b, .. } if Self::is_constish_switch_value(b) => {
+                self.infer_switch_selector_var_from_value(a, depth + 1, false)
             }
             // The address walk used to end here without a word, which is why a
             // switch on a dereferenced pointer went unexplained for so long.
@@ -5422,7 +5451,32 @@ impl SSAFunction {
         if Self::is_constish_switch_value(b) {
             return self.infer_switch_selector_var_from_address(a, depth);
         }
-        self.infer_switch_selector_var_from_sum(a, b, depth)
+        // Of two registers in an address, the scaled one is the index and the
+        // other the table's base: `x28 + (x8 << 1)`. Neither scaled is the
+        // offset-table form, where each side is tried as a value but a
+        // pointer loaded on the way is a base rather than the selector.
+        if self.is_scaled_switch_value(a) {
+            return self.infer_switch_selector_var_from_value(a, depth, false);
+        }
+        if self.is_scaled_switch_value(b) {
+            return self.infer_switch_selector_var_from_value(b, depth, false);
+        }
+        self.infer_switch_selector_var_from_sum(a, b, depth, true)
+    }
+
+    fn is_scaled_switch_value(&self, var: &SSAVar) -> bool {
+        let Some((block_addr, DefLocation::Op(op_idx))) = self.find_def(var) else {
+            return false;
+        };
+        self.get_block(block_addr)
+            .and_then(|block| block.ops.get(op_idx))
+            .is_some_and(|op| match op {
+                SSAOp::IntMult { a, b, .. } => {
+                    Self::is_constish_switch_value(a) || Self::is_constish_switch_value(b)
+                }
+                SSAOp::IntLeft { b, .. } => Self::is_constish_switch_value(b),
+                _ => false,
+            })
     }
 
     fn infer_switch_selector_var_from_sum(
@@ -5430,15 +5484,24 @@ impl SSAFunction {
         a: &SSAVar,
         b: &SSAVar,
         depth: u32,
+        as_address: bool,
     ) -> Option<SSAVar> {
         if Self::is_constish_switch_value(a) {
-            return self.infer_switch_selector_var_from_value(b, depth);
+            return self.infer_switch_selector_var_from_value(b, depth, as_address);
         }
         if Self::is_constish_switch_value(b) {
-            return self.infer_switch_selector_var_from_value(a, depth);
+            return self.infer_switch_selector_var_from_value(a, depth, as_address);
         }
-        self.infer_switch_selector_var_from_scaled(a, b, depth)
-            .or_else(|| self.infer_switch_selector_var_from_scaled(b, a, depth))
+        // The scaled side of a jump's sum is the offset the table gave, and
+        // the other side the table's base; the offset is the way to the index.
+        if self.is_scaled_switch_value(a) {
+            return self.infer_switch_selector_var_from_value(a, depth, false);
+        }
+        if self.is_scaled_switch_value(b) {
+            return self.infer_switch_selector_var_from_value(b, depth, false);
+        }
+        self.infer_switch_selector_var_from_scaled(a, b, depth, as_address)
+            .or_else(|| self.infer_switch_selector_var_from_scaled(b, a, depth, as_address))
             // Neither side is a constant, which is the offset-table form: one
             // register holds the table's address and the other the entry loaded
             // from it, and the jump adds them. Following each in turn reaches
@@ -5446,8 +5509,8 @@ impl SSAFunction {
             // because a table address is not a selector. Without this the walk
             // never reaches the mask above, and x86-64 -O1 murmur3 inferred no
             // selector at all.
-            .or_else(|| self.infer_switch_selector_var_from_value(a, depth + 1))
-            .or_else(|| self.infer_switch_selector_var_from_value(b, depth + 1))
+            .or_else(|| self.infer_switch_selector_var_from_value(a, depth + 1, as_address))
+            .or_else(|| self.infer_switch_selector_var_from_value(b, depth + 1, as_address))
     }
 
     fn infer_switch_selector_var_from_scaled(
@@ -5455,12 +5518,13 @@ impl SSAFunction {
         a: &SSAVar,
         b: &SSAVar,
         depth: u32,
+        as_address: bool,
     ) -> Option<SSAVar> {
         if Self::is_constish_switch_value(a) {
-            return self.infer_switch_selector_var_from_value(b, depth);
+            return self.infer_switch_selector_var_from_value(b, depth, as_address);
         }
         if Self::is_constish_switch_value(b) {
-            return self.infer_switch_selector_var_from_value(a, depth);
+            return self.infer_switch_selector_var_from_value(a, depth, as_address);
         }
         None
     }
@@ -6463,6 +6527,86 @@ mod tests {
             Some("fmt"),
             Some("unsigned long")
         )));
+    }
+
+    #[test]
+    fn a_halfword_offset_table_indexed_by_a_loaded_byte_selects_the_byte() {
+        // `ldrb w8, [x0, x22]; ldrh w10, [x28, x8, lsl 1]; add x9, x9, x10, lsl 2;
+        // br x9`: the selector is the byte, not the pointer it was read through
+        // and not the table entry.
+        let p = Varnode::register(0x10, 8);
+        let i = Varnode::register(0x18, 8);
+        let byte_address = Varnode::unique(0x100, 8);
+        let byte = Varnode::register(0x20, 1);
+        let index = Varnode::register(0x28, 8);
+        let scaled = Varnode::unique(0x200, 8);
+        let table = Varnode::register(0x38, 8);
+        let entry_address = Varnode::unique(0x300, 8);
+        let entry = Varnode::register(0x40, 2);
+        let wide = Varnode::register(0x48, 8);
+        let offset = Varnode::unique(0x400, 8);
+        let base = Varnode::register(0x50, 8);
+        let target = Varnode::register(0x58, 8);
+        let pc = Varnode::register(0, 8);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: byte_address.clone(),
+            a: p,
+            b: i,
+        });
+        block.push(R2ILOp::Load {
+            dst: byte.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: byte_address,
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: index.clone(),
+            src: byte.clone(),
+        });
+        block.push(R2ILOp::IntLeft {
+            dst: scaled.clone(),
+            a: index,
+            b: Varnode::constant(1, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: entry_address.clone(),
+            a: table,
+            b: scaled,
+        });
+        block.push(R2ILOp::Load {
+            dst: entry.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: entry_address,
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: wide.clone(),
+            src: entry,
+        });
+        block.push(R2ILOp::IntLeft {
+            dst: offset.clone(),
+            a: wide,
+            b: Varnode::constant(2, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: target.clone(),
+            a: base,
+            b: offset,
+        });
+        block.push(R2ILOp::Copy {
+            dst: pc.clone(),
+            src: target,
+        });
+        block.push(R2ILOp::BranchInd { target: pc });
+        let function =
+            SSAFunction::from_blocks_raw_no_arch(&[block]).expect("raw SSA should build");
+        let selector = function
+            .infer_switch_selector_var(0x1000)
+            .expect("the walk reaches a selector");
+        assert!(
+            selector.name().starts_with("reg:20"),
+            "the selector is the loaded byte, got {}",
+            selector.name()
+        );
     }
 
     #[test]

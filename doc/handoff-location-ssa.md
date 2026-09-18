@@ -27336,3 +27336,23 @@ deleted `truncate` cast and not the three floating casts, and the four
 by their root; `check_secret`'s entry block was read (`EDI` is now a
 `Subpiece` of `RDI`) and the four hashes transcribed from
 `R2SLEIGH_BLESS_LIFT_CAPTURE`.
+
+### main's switch: the selector walk learns shifts, bases and merges
+
+`main` refused at declaration placement with an unobserved read of `PC_7`:
+the switch control fact carried no selector, so the structurer fell back to
+`switch (PC_7)` on the dispatch operand, which nothing authorises. The walk
+from the indirect branch had stopped three times on the way to the byte the
+source switches on. `lsl` by a constant (`x8, lsl 1` into a halfword offset
+table, `x10, lsl 2` onto the base) was "not a selector step"; it is a scale
+and is followed like a multiply. Of two registers in an address, the scaled
+one is the index and the other the table's base, and a value loaded through a
+pointer while inside an address (`x0` in `x0 + x22`) is a base rather than the
+selector, as is a register the function was entered with. And a merged value
+is where the walk stops and what it answers -- the phi is the selector,
+spelled once for every path to the jump -- where it used to answer nothing.
+`main` renders `switch (X8_156)` with its character cases. Unit test:
+`a_halfword_offset_table_indexed_by_a_loaded_byte_selects_the_byte`.
+Gates: corpus 60/60 on every column, r2r at the recorded 2 XX. bzip2 arm64
+-O2 census: 59 bodies, 43 declarations, 3 undeclared stubs, 2 refused --
+`sendMTFValues` and `BZ2_decompress`, both on NEON user operations.
