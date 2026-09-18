@@ -27894,3 +27894,26 @@ extracted diff is kept at `scratchpad/gdb-protocol-split.patch` and the branch
 port rather than a patch application, and it cannot be verified here without a
 Rosetta x86 process under debugserver, so landing it untested would be worse
 than landing it late.
+
+### The assignment-side cast is in the write projection, not the term root
+
+Two attempts at the remaining thirty-six sites both missed, and the second
+narrowed where they are. Restating an entity root's produced type as the
+declaration, restricted to a root that is a zero or sign extension over an
+operand already at that type, changes nothing: the extension is not in the
+machine expression at all.
+
+The `write-projection` evidence names it. For the adler32 carrier the write
+disposition is `ZeroExtend { from_width_bits: 32, to_width_bits: 64 }` and the
+right-hand side already arrives as a cast to `uint64_t` with `rhs_type` to
+match, so the first downgrade in `project_planned_assignment`
+(crates/r2dec/src/fold/op_lower/lowering.rs) turns the projection into `Full`,
+`project_machine_write` passes the right-hand side through unchanged, and the
+declaration then narrows it back. Adding a second downgrade for the narrow
+width never runs, because the first one has already fired.
+
+So the question to answer next is where that `uint64_t` cast on the right-hand
+side is built, which the evidence does not yet say. One line on the
+`write-projection` tag naming whether `pending_assignment_type` supplied the
+type, or the machine root's boundary did, separates the two paths in a single
+run and points at the site that has to stop widening.
