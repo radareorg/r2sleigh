@@ -1,6 +1,6 @@
 uint64_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 160 source obligations: 133 rendered, 27 elided, 0 refused; 36 statements rendered */
+    /* r2dec proof: no individual construct is marked; 160 source obligations: 133 rendered, 27 elided, 0 refused; 35 statements rendered */
     if (RSI_0 == 0) {
         return 1;
     } else {
@@ -37,11 +37,10 @@ uint64_t sym__adler32(uint64_t RDI_0, uint64_t RSI_0)
             if ((uint8_t)((uint8_t)RSI_0 & 1) != 0) {
                 uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RDX_1];
                 uint32_t tmp_lane_1000008c5_7_3a_1 = (uint32_t)tmp_11e00_5 + RCX_1;
-                int64_t RDX_7 = 0x80078071;
-                uint32_t tmp_lane_1000008c5_49_40_1 = tmp_lane_1000008c5_7_3a_1 - (uint32_t)((uint64_t)(int32_t)((uint64_t)tmp_lane_1000008c5_7_3a_1 * (uint64_t)RDX_7 >> 47) * 0xfff1);
+                uint32_t tmp_lane_1000008c5_49_40_1 = tmp_lane_1000008c5_7_3a_1 - (uint32_t)((uint64_t)(int32_t)((uint64_t)tmp_lane_1000008c5_7_3a_1 * 0x80078071 >> 47) * 0xfff1);
                 RCX_1 = tmp_lane_1000008c5_49_40_1;
                 uint32_t tmp_lane_1000008c5_53_44_1 = (uint32_t)RAX_1 + tmp_lane_1000008c5_49_40_1;
-                RAX_1 = (uint64_t)(tmp_lane_1000008c5_53_44_1 - (uint32_t)((uint64_t)(int32_t)((uint64_t)tmp_lane_1000008c5_53_44_1 * (uint64_t)RDX_7 >> 47) * 0xfff1));
+                RAX_1 = (uint64_t)(tmp_lane_1000008c5_53_44_1 - (uint32_t)((uint64_t)(int32_t)((uint64_t)tmp_lane_1000008c5_53_44_1 * 0x80078071 >> 47) * 0xfff1));
             }
             return (uint64_t)((uint32_t)RAX_1 << 16 | RCX_1);
         }

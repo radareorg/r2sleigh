@@ -1153,6 +1153,30 @@ pub(super) fn rewrite_inlining_partition(
         alone.extend(inlined.iter().copied());
         let admitted =
             duplicable_bound_constants(projection, source_owned, &seed_canonical, &alone);
+        if let Some(want) = crate::debug::traced_inline_name() {
+            for value in &graph.values {
+                if want != "all" && !value.var.display_name().eq_ignore_ascii_case(want) {
+                    continue;
+                }
+                let members = group_members
+                    .get(&groups[value.id.0 as usize])
+                    .map(|members| {
+                        members
+                            .iter()
+                            .filter_map(|member| graph.value(*member))
+                            .map(|member| member.var.display_name())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                eprintln!(
+                    "INLINE {} {:?} round {round}: component {members:?}; alone {}; admitted {}",
+                    value.var.display_name(),
+                    value.id,
+                    alone.contains(&value.id),
+                    admitted.contains(&value.id)
+                );
+            }
+        }
         let folds = inlinable_core(
             source_owned,
             projection,
@@ -1162,10 +1186,18 @@ pub(super) fn rewrite_inlining_partition(
             &groups,
         );
         crate::stage_timing::mark("plan_inlinable");
+        // Later rounds only shrink the fold set, except for a literal the
+        // shrinking left alone in its object: spelling it at its readers
+        // removes a write and no read, so it disturbs nothing decided before.
         let next: BTreeSet<ValueId> = if round == 1 {
             folds.values
         } else {
-            folds.values.intersection(&inlined).copied().collect()
+            folds
+                .values
+                .iter()
+                .copied()
+                .filter(|value| inlined.contains(value) || admitted.contains(value))
+                .collect()
         };
         readers = folds
             .readers

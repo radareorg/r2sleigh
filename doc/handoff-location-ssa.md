@@ -28411,3 +28411,16 @@ site, the value's types and the expression when tracing.
 
 `same_type_casts` is 0 on the matrix. What remains of the cutover gate is one
 `literal_only_declarations` in x64 -O2 `adler32`.
+
+## A literal left alone by a later round is spelled at its readers
+
+`int64_t RDX_7 = 0x80078071` in x64 -O2 `adler32` was the last
+`literal_only_declarations`. `R2SLEIGH_TRACE_INLINE=RDX_7` now prints the
+value's component, whether it is alone and whether it is admitted, per round:
+round 1 had it in a component with `RDX_8` and `RDX_9`, the multiply results
+its readers fold; round 2, without them, found it alone and admitted it. The
+descending chain in `rewrite_inlining_partition` kept only round-1 folds, so
+the admission never took effect. A literal admitted in a later round now joins
+the fold set: spelling it at its readers removes a write and adds no read, so
+nothing decided in an earlier round is disturbed, and components only shrink,
+so the chain still terminates.
