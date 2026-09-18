@@ -7618,6 +7618,7 @@ fn collect_stack_geometry_certificate(
 /// a slot and slices of one variable both render through the byte spelling.
 fn accessed_object_storage(
     graph: &SsaGraph,
+    inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
@@ -7629,7 +7630,7 @@ fn accessed_object_storage(
         .values()
         .any(|access| access.object == object && objects.address_is_indexed(access.address))
     {
-        return accessed_object_extent(graph, objects, structured, object)
+        return accessed_object_extent(graph, inductions, objects, structured, object)
             .map(|extent| (extent, true));
     }
     let mut width = None;
@@ -7675,7 +7676,7 @@ fn accessed_object_storage(
                     "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
                     access.width
                 );
-                return accessed_object_extent(graph, objects, structured, object)
+                return accessed_object_extent(graph, inductions, objects, structured, object)
                     .map(|extent| (extent, true));
             }
         }
@@ -7874,6 +7875,7 @@ fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) 
 /// non-negative offset inside it; the containment proof is the offsets.
 fn accessed_object_extent(
     graph: &SsaGraph,
+    inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
@@ -7890,7 +7892,13 @@ fn accessed_object_extent(
         // frame's own layout answers instead.
         let offset = if objects.address_is_indexed(access.address) {
             let index = objects.index_for_address(access.address)?;
-            let bound = indexed_offset_upper_bound(graph, index, &mut memo, &mut BTreeSet::new())?;
+            let bound = indexed_offset_upper_bound(
+                graph,
+                inductions,
+                index,
+                &mut memo,
+                &mut BTreeSet::new(),
+            )?;
             u32::try_from(bound).ok()?
         } else {
             u32::try_from(access.object_offset?).ok()?
@@ -7898,6 +7906,93 @@ fn accessed_object_extent(
         extent = extent.max(offset.checked_add(access.width)?);
     }
     (extent > 0).then_some(extent)
+}
+
+/// The largest value a counted loop's counter reaches, per header merge.
+///
+/// A recurrence alone says nothing: `x = x + 1` wraps, so the only bound it
+/// carries is the width's. What bounds the counter is the loop's own exit
+/// test, and the test bounds every body access only where it runs before the
+/// body does -- a test in the header. A bottom test lets the body run once
+/// before it, so the counter's initial value has to satisfy the bound itself.
+fn induction_upper_bounds(
+    graph: &SsaGraph,
+    predicates: &PredicateFacts,
+    structured: &StructuredDataflowFacts,
+) -> BTreeMap<ValueId, u64> {
+    let mut bounds = BTreeMap::new();
+    let constant = |value: ValueId| {
+        graph
+            .value(value)
+            .and_then(|value| value.var.constant_bits())
+    };
+    for induction in structured.inductions.values() {
+        let InductionStep::AddConst(step) = induction.step else {
+            continue;
+        };
+        if step == 0 {
+            continue;
+        }
+        let Some(loop_fact) = structured
+            .loops
+            .values()
+            .find(|loop_fact| loop_fact.id == induction.loop_id)
+        else {
+            continue;
+        };
+        let Some(predicate) = loop_fact
+            .condition
+            .and_then(|condition| predicates.predicates.get(&condition))
+        else {
+            continue;
+        };
+        let Some(comparison) = predicate.comparison.as_ref() else {
+            continue;
+        };
+        // The counter on one side, what bounds it on the other.
+        let limit = if comparison.lhs == induction.phi {
+            comparison.rhs
+        } else if comparison.rhs == induction.phi {
+            comparison.lhs
+        } else {
+            continue;
+        };
+        let Some(limit) = constant(limit) else {
+            continue;
+        };
+        // A signed test bounds the unsigned value only where both sides stay
+        // non-negative, which a constant start at or below the limit gives.
+        let start = constant(induction.init);
+        let last = match comparison.kind {
+            CompareKind::Less | CompareKind::SignedLess => limit.checked_sub(1),
+            CompareKind::LessEqual | CompareKind::SignedLessEqual | CompareKind::NotEqual => {
+                Some(limit)
+            }
+            CompareKind::Equal => None,
+        };
+        let Some(last) = last else {
+            continue;
+        };
+        if matches!(
+            comparison.kind,
+            CompareKind::SignedLess | CompareKind::SignedLessEqual
+        ) && (limit >> 63) != 0
+        {
+            continue;
+        }
+        // In the header the test guards the first trip too; anywhere else the
+        // body has already run once with the value it started at.
+        if predicate.block_addr != loop_fact.header && start.is_none_or(|start| start > last) {
+            continue;
+        }
+        if start.is_some_and(|start| start > last) {
+            continue;
+        }
+        // The counter steps to the last value the test admits and no further,
+        // so the highest it reaches in the body is that value.
+        bounds.insert(induction.phi, last);
+    }
+    bounds
 }
 
 /// The largest value `x & mask` can take while `x` stays at or below `bound`.
@@ -7924,10 +8019,14 @@ fn masked_upper_bound(mask: u64, bound: u64) -> u64 {
 /// cyclic graph refuses without an arbitrary depth constant.
 fn indexed_offset_upper_bound(
     graph: &SsaGraph,
+    inductions: &BTreeMap<ValueId, u64>,
     value: ValueId,
     memo: &mut BTreeMap<ValueId, Option<u64>>,
     visiting: &mut BTreeSet<ValueId>,
 ) -> Option<u64> {
+    if let Some(bound) = inductions.get(&value) {
+        return Some(*bound);
+    }
     if let Some(bound) = memo.get(&value) {
         return *bound;
     }
@@ -7946,8 +8045,9 @@ fn indexed_offset_upper_bound(
         let input = |index: usize| inst.inputs.get(index).copied();
         let constant =
             |index: usize| input(index).and_then(|value| graph.value(value)?.var.constant_bits());
-        let mut bound_of =
-            |index: usize| indexed_offset_upper_bound(graph, input(index)?, memo, visiting);
+        let mut bound_of = |index: usize| {
+            indexed_offset_upper_bound(graph, inductions, input(index)?, memo, visiting)
+        };
         match op {
             SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
                 bound_of(0)
@@ -8030,6 +8130,7 @@ fn stack_array_element_index(
 /// Decide array geometry once, beside the object and memory facts that own it.
 fn stack_array_layout(
     graph: &SsaGraph,
+    inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
@@ -8086,9 +8187,13 @@ fn stack_array_layout(
         let Some(byte_offset) = objects.index_for_address(*address) else {
             continue;
         };
-        if let Some(bound) =
-            indexed_offset_upper_bound(graph, byte_offset, &mut memo, &mut BTreeSet::new())
-        {
+        if let Some(bound) = indexed_offset_upper_bound(
+            graph,
+            inductions,
+            byte_offset,
+            &mut memo,
+            &mut BTreeSet::new(),
+        ) {
             maximum_constant_offset =
                 Some(maximum_constant_offset.map_or(bound, |old: u64| old.max(bound)));
         }
@@ -8681,6 +8786,7 @@ fn collect_prepared_function_certificates(
         })
         .collect();
 
+    let induction_bounds = induction_upper_bounds(graph, predicates, structured);
     let stack_array_layouts = objects
         .objects
         .keys()
@@ -8688,7 +8794,7 @@ fn collect_prepared_function_certificates(
         .map(|object| {
             (
                 object,
-                stack_array_layout(graph, objects, structured, object),
+                stack_array_layout(graph, &induction_bounds, objects, structured, object),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -8772,7 +8878,7 @@ fn collect_prepared_function_certificates(
                 let storage = if declared {
                     None
                 } else {
-                    accessed_object_storage(graph, objects, structured, *object)
+                    accessed_object_storage(graph, &induction_bounds, objects, structured, *object)
                         // No access sizes it and nothing declares it: a buffer
                         // whose address escapes to a callee. The frame lays it
                         // out between its neighbours, and that gap is its extent,

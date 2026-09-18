@@ -27534,3 +27534,24 @@ address, which no standalone harness can map, so every cell whose function
 carries a stack protector segfaults under the oracle comparison. Spelling that
 read through a symbol the way the bzip2 renderings already do is what would
 let those cells be measured.
+
+### A counted loop's counter has a bound; the exit test is what carries it
+
+`indexed_offset_upper_bound` had no case for a merge, so a loop counter had no
+bound and a buffer written only by `for (i = 0; i < 64; i++) buf[i] = ...` had
+no provable extent. A recurrence alone cannot supply one: `x = x + 1` wraps, so
+the only bound it carries is the width's. The loop's own exit test is what
+bounds it, and it bounds every access in the body only where it runs before
+the body does. A test in the header guards the first trip too; a bottom test
+lets the body run once with the value it started at, so that case is admitted
+only when the initial value already satisfies the bound.
+
+`induction_upper_bounds` derives one map from `InductionFact` and the loop's
+condition predicate, and `indexed_offset_upper_bound` consults it for a value
+it has no operation for. Nothing in the corpus moves yet: at x86-64 `-O0` and
+`-O1` the counter lives in memory, so the index is a load rather than a
+recurrence and the frame gap still answers, and at arm64 the masked word index
+already carried the extent. It is the `-O2` pair that needs it, and that needs
+the second half: the loop and induction facts are built after the object model,
+so root evidence cannot see them. Nothing in that subtree reads the object
+model, so hoisting them above it is a move rather than a redesign.
