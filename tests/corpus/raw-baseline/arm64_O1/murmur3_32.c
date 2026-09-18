@@ -1,6 +1,6 @@
 uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 134 source obligations: 118 rendered, 16 elided, 0 refused; 41 statements rendered */
+    /* r2dec proof: no individual construct is marked; 125 source obligations: 109 rendered, 16 elided, 0 refused; 41 statements rendered */
     {
         uint32_t X2_0_2;
         X2_0_2 = W2_0;
@@ -27,12 +27,12 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             uint32_t X10_5;
             X10_5 = 0;
             uint8_t* X11_5 = (uint8_t*)((X1_0 & (uint64_t)-0x4) + X0_0);
-            uint64_t X12_5 = X1_0 & 3;
+            int64_t X12_5 = (int64_t)(X1_0 & 3);
             {
                 uint8_t tmp_25500_5;
                 uint32_t tmp_2b380_5;
-                if (X12_5 != 1 && r2sleigh_int_sborrow_64(X12_5, 1) == (int64_t)(X12_5 - 1) < 0) {
-                    if (X12_5 != 2) {
+                if (1 < X12_5) {
+                    if ((uint64_t)X12_5 != 2) {
                         uint8_t tmp_25500_1 = X11_5[2];
                         X10_5 = (uint32_t)tmp_25500_1 << 16;
                     }
@@ -45,7 +45,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                             X2_0_2 = (uint32_t)(X2_0_2 ^ (tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * 0x1b873593);
                         }
                     }
-                } else if (X12_5 != 0) {
+                } else if ((uint64_t)X12_5 != 0) {
                     tmp_25500_5 = *X11_5;
                     tmp_2b380_5 = (X10_5 ^ (uint32_t)tmp_25500_5) * 0xcc9e2d51;
                     X2_0_2 = (uint32_t)(X2_0_2 ^ (tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * 0x1b873593);

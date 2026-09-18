@@ -1527,16 +1527,6 @@ fn fold_condition_codes(
         SSAOp::IntSub { a, b, .. } => Some((a.clone(), b.clone())),
         _ => None,
     };
-    // The sign flag: `(a - b) <s 0`.
-    let sign_flag = |var: &SSAVar| match define(var)? {
-        SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
-        _ => None,
-    };
-    // The overflow flag: `sborrow(a, b)`.
-    let overflow_flag = |var: &SSAVar| match define(var)? {
-        SSAOp::IntSBorrow { a, b, .. } => Some((a.clone(), b.clone())),
-        _ => None,
-    };
     // A flag read through the copies the machine makes of it: arm64 tests
     // `ZR`, which is a copy of the `tmpZR` the subtraction wrote.
     let define_through_copies = |var: &SSAVar| {
@@ -1550,6 +1540,16 @@ fn fold_condition_codes(
             op = define(src)?;
         }
         Some(op)
+    };
+    // The sign flag: `(a - b) <s 0`.
+    let sign_flag = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+        _ => None,
+    };
+    // The overflow flag: `sborrow(a, b)`.
+    let overflow_flag = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntSBorrow { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
     };
     // The zero flag: `(a - b) == 0`, or already the equality this pass made
     // of it, since the two halves of a disjunction fold in one walk.
@@ -1657,6 +1657,46 @@ fn fold_condition_codes(
                 }
             } else {
                 SSAOp::IntLessEqual {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            })
+        }
+        // `jg` / `ja`: the non-strict ordering with the zero flag denied beside
+        // it, which is the strict ordering.
+        SSAOp::BoolAnd { dst, a, b } | SSAOp::IntAnd { dst, a, b } => {
+            let denied_zero = |var: &SSAVar| match define_through_copies(var)? {
+                SSAOp::BoolNot { src, .. } => zero_flag(src),
+                _ => None,
+            };
+            // The ordering half: the signed pair, or the comparison this pass
+            // already made of either pair.
+            let ordered = |var: &SSAVar| match define_through_copies(var)? {
+                SSAOp::IntEqual { a: x, b: y, .. } => {
+                    let (l, r) = signed_order(x, y)?;
+                    Some((r, l, true))
+                }
+                SSAOp::IntSLessEqual { a: x, b: y, .. } => Some((x.clone(), y.clone(), true)),
+                SSAOp::IntLessEqual { a: x, b: y, .. } => Some((x.clone(), y.clone(), false)),
+                _ => None,
+            };
+            let strict = |ordering: &SSAVar, zero: &SSAVar| {
+                let (left, right, signed) = ordered(ordering)?;
+                let (zero_left, zero_right) = denied_zero(zero)?;
+                let same = (zero_left == left && zero_right == right)
+                    || (zero_left == right && zero_right == left);
+                same.then_some((left, right, signed))
+            };
+            let (left, right, signed) = strict(a, b).or_else(|| strict(b, a))?;
+            Some(if signed {
+                SSAOp::IntSLess {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            } else {
+                SSAOp::IntLess {
                     dst: dst.clone(),
                     a: left,
                     b: right,
@@ -3026,5 +3066,153 @@ mod chain_tests {
             BlockTerminator::ConditionalBranch { .. }
         ));
         assert!(func.get_block(0x1004).is_some());
+    }
+}
+
+#[cfg(test)]
+mod signed_flag_tests {
+    use super::*;
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+
+    fn c(val: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Const,
+            offset: val,
+            size,
+            meta: None,
+        }
+    }
+
+    fn r(offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Register,
+            offset,
+            size,
+            meta: None,
+        }
+    }
+
+    // `cmp x, #1` as arm64 lifts it, with the flags copied out of their
+    // temporaries before the branch reads them.
+    fn compare(strict: bool) -> SSAFunction {
+        let x = r(0, 8);
+        let mut ops = vec![
+            R2ILOp::IntAnd {
+                dst: x.clone(),
+                a: r(8, 8),
+                b: c(3, 8),
+            },
+            R2ILOp::IntSBorrow {
+                dst: r(0x40, 1),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::IntSub {
+                dst: r(0x50, 8),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::IntSLess {
+                dst: r(0x41, 1),
+                a: r(0x50, 8),
+                b: c(0, 8),
+            },
+            R2ILOp::IntEqual {
+                dst: r(0x42, 1),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::Copy {
+                dst: r(0x60, 1),
+                src: r(0x41, 1),
+            },
+            R2ILOp::Copy {
+                dst: r(0x61, 1),
+                src: r(0x40, 1),
+            },
+            R2ILOp::Copy {
+                dst: r(0x62, 1),
+                src: r(0x42, 1),
+            },
+            R2ILOp::IntEqual {
+                dst: r(0x70, 1),
+                a: r(0x60, 1),
+                b: r(0x61, 1),
+            },
+        ];
+        let cond = if strict {
+            ops.push(R2ILOp::BoolNot {
+                dst: r(0x71, 1),
+                src: r(0x62, 1),
+            });
+            ops.push(R2ILOp::BoolAnd {
+                dst: r(0x72, 1),
+                a: r(0x71, 1),
+                b: r(0x70, 1),
+            });
+            r(0x72, 1)
+        } else {
+            r(0x70, 1)
+        };
+        ops.push(R2ILOp::CBranch {
+            target: c(0x1010, 8),
+            cond,
+        });
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops,
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return { target: r(0x80, 8) }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1010,
+                size: 4,
+                ops: vec![R2ILOp::Return { target: r(0x80, 8) }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        optimize_function(&mut func, &OptimizationConfig::default());
+        func
+    }
+
+    fn condition_op(func: &SSAFunction) -> SSAOp {
+        let block = func.get_block(0x1000).expect("head");
+        let SSAOp::CBranch { cond, .. } = block.ops.last().expect("branch") else {
+            panic!("no branch");
+        };
+        block
+            .ops
+            .iter()
+            .find(|op| op.dst() == Some(cond))
+            .cloned()
+            .expect("condition definition")
+    }
+
+    #[test]
+    fn sign_equals_overflow_through_copies_is_the_non_strict_ordering() {
+        assert!(matches!(
+            condition_op(&compare(false)),
+            SSAOp::IntSLessEqual { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
+        ));
+    }
+
+    #[test]
+    fn not_zero_and_sign_equals_overflow_is_the_strict_ordering() {
+        assert!(matches!(
+            condition_op(&compare(true)),
+            SSAOp::IntSLess { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
+        ));
     }
 }

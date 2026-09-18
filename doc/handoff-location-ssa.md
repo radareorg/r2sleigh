@@ -28450,3 +28450,23 @@ failure set as before this stretch (57 `raw=failed` lines, none new), and
 The `hdr_fold` files under `tests/corpus/artifacts/raw` were left by a
 harness that no longer runs and were deleted; `noise_sites.py --summary`
 over that directory had been counting them.
+
+## The signed orderings arm64 spells through copies
+
+arm64 -O1/-O2 `murmur3_32` rendered its `len & 3 > 1` test as
+`X12_5 != 1 && r2sleigh_int_sborrow_64(X12_5, 1) == (int64_t)(X12_5 - 1) < 0`,
+and -O0 `crc32_bitwise` its `>= 8` as the same helper alone. Two gaps in
+`fold_condition_codes`: the sign and overflow flags were read directly while
+arm64 reads copies of them (`NG`, `OV`), and `b.gt` -- the ordering with the
+zero flag denied beside it -- had no arm at all. Both flags now read through
+copies like the zero flag does, and a `BoolAnd`/`IntAnd` of `!ZR` with a
+non-strict ordering over the same operands, signed or unsigned, folds to the
+strict one.
+
+Five cells moved, all simplifications: `crc32_bitwise` and `unaligned_words`
+at arm64 -O0 got their loop tests back into the `for` header, arm64 -O0
+`xxhash32` lost two carriers, and `murmur3_32` at -O1/-O2 reads
+`if (1 < X12_5)`. The signed test makes `X12_5` an `int64_t`, and its other
+readers now cast it back to unsigned; the value is `len & 3`, so a type
+solution that knew the mask leaves it non-negative could keep it unsigned.
+That is a typing refinement, not a fold defect, and is left here.
