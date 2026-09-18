@@ -27988,3 +27988,35 @@ Three cells changed and each is smaller. Both `fnv1a64` renderings lose a
 declaration and spell `0x100000001b3` at the multiply. `arm64_O2/xxhash32` loses
 `X11_8 = (uint64_t)0x9e3779b1;` and, with the object no longer shared, also
 loses a lane write that preserved a high half the next statement overwrites.
+
+### The assignment cast, corrected: it is not a wrong value, it is strict C
+
+The earlier note here said the extension is observable and six differential
+cells prove it. That was two changes measured as one, and separating them says
+something better.
+
+The `width_change_expr` guard on its own -- decline the extension when the
+object is declared at the operand's own type -- passes the differential 60 of
+60. It is also inert, because `project_planned_assignment` still reads the
+entity root's produced type, which is the carrier's width, and converts down to
+the declaration, putting the cast back.
+
+Supplying the declaration as the right-hand side's type as well is what fails,
+and the failure is a compile error rather than a wrong digest:
+
+```
+error: implicit conversion loses integer precision: 'uint64_t' to 'uint32_t'
+  R9_1 = (uint64_t)(uint32_t)(RDX_0 - 0x7a143589);
+```
+
+The two halves disagree. The write side says the right-hand side is narrow, so
+no conversion is emitted, while the expression is still spelled at sixty-four
+bits because the guard above did not fire at that site. The value is the same
+either way, and `-Wshorten-64-to-32` under the corpus's strict flags is what
+refuses it.
+
+So the remaining work is not a soundness question about the carrier. It is to
+make one decision in one place: the object's declared width decides both what
+`width_change_expr` spells and what the assignment believes it has. Split across
+two guards, they disagree on exactly the sites where the operand's own type is
+not the declaration.
