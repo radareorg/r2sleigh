@@ -1707,7 +1707,43 @@ fn fold_condition_codes(
     }
 }
 
+/// The constant a value is, computed through its definitions: the decompile
+/// pipeline runs no constant propagation, so `x9 = 4; (x9 == 0)` is decided
+/// here where the operation that reads the result is simplified.
+fn constant_through_definitions(
+    var: &SSAVar,
+    defs: &HashMap<VarKey, SSAOp>,
+    depth: u32,
+) -> Option<u64> {
+    if let Some(value) = const_value(var) {
+        return Some(value);
+    }
+    if depth > 8 {
+        return None;
+    }
+    let op = defs.get(&VarKey::from_var(var))?;
+    let mut consts = HashMap::new();
+    for source in op.sources() {
+        consts.insert(
+            VarKey::from_var(source),
+            constant_through_definitions(source, defs, depth + 1)?,
+        );
+    }
+    eval_const_op(op, &consts)
+}
+
 fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+    // A selection on a condition its definitions decide is the arm decided.
+    if let SSAOp::Select(select) = op {
+        let chosen = match constant_through_definitions(&select.cond, defs, 0)? {
+            0 => &select.if_false,
+            _ => &select.if_true,
+        };
+        return Some(SSAOp::Copy {
+            dst: select.dst.clone(),
+            src: chosen.clone(),
+        });
+    }
     let SSAOp::Subpiece { dst, src, offset } = op else {
         return None;
     };
@@ -1781,6 +1817,12 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
 
     let simplified = match op {
         Copy { .. } => return None,
+        // A selection on a decided condition is the arm it decided.
+        Select(select) => match const_of(&select.cond) {
+            Some(0) => make_copy(&select.if_false),
+            Some(_) => make_copy(&select.if_true),
+            None => return None,
+        },
         IntAdd { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) => make_copy(b),
             (_, Some(0)) => make_copy(a),
@@ -3198,6 +3240,56 @@ mod signed_flag_tests {
             .find(|op| op.dst() == Some(cond))
             .cloned()
             .expect("condition definition")
+    }
+
+    #[test]
+    fn a_select_on_a_decided_condition_is_the_arm_it_decided() {
+        // arm64's udiv guard: `x9 = 4; q = x8 / x9; x8 = (x9 == 0) ? 0 : q`.
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: r(0x10, 8),
+                    src: c(4, 8),
+                },
+                R2ILOp::IntEqual {
+                    dst: r(0x20, 1),
+                    a: r(0x10, 8),
+                    b: c(0, 8),
+                },
+                R2ILOp::IntDiv {
+                    dst: r(0x30, 8),
+                    a: r(0, 8),
+                    b: r(0x10, 8),
+                },
+                R2ILOp::Select {
+                    dst: r(0x40, 8),
+                    cond: r(0x20, 1),
+                    if_true: c(0, 8),
+                    if_false: r(0x30, 8),
+                },
+                R2ILOp::Return { target: r(0x80, 8) },
+            ],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }];
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        // As the decompile pipeline runs it: no constant propagation.
+        optimize_function(
+            &mut func,
+            &OptimizationConfig {
+                enable_sccp: false,
+                ..OptimizationConfig::default()
+            },
+        );
+        let block = func.get_block(0x1000).expect("block");
+        assert!(
+            block.ops.iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
+            "ops: {:?}",
+            block.ops
+        );
     }
 
     #[test]

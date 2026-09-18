@@ -28470,3 +28470,20 @@ at arm64 -O0 got their loop tests back into the `for` header, arm64 -O0
 readers now cast it back to unsigned; the value is `len & 3`, so a type
 solution that knew the mask leaves it non-negative could keep it unsigned.
 That is a typing refinement, not a fold defect, and is left here.
+
+## A selection on a decided condition
+
+arm64's `udiv` lifts with a divide-by-zero guard, `x8 = (x9 == 0) ? 0 : x8 / x9`,
+and with `x9` a constant the condition folded to `0` while the `Select` it
+fed did not, so -O0 `murmur3_32` and `adler32` printed `0 ? 0 : q`.
+`simplify_op` now reduces a `Select` on a constant condition to the arm it
+picks. The next visible class in the corpus is the vector idiom: arm64 -O2
+`crc32_bitwise` and `xxhash32` spell every NEON lane write as
+`r2sleigh_bits_insert_256_*` (139 calls between them), because the lift
+models a `Q`/`Z` register as one 256-bit bitvector and the plan has no lane
+object to give each write.
+
+The decompile pipeline runs with `enable_sccp: false`, so the condition is
+never a literal there; `fold_through_definition` decides it by evaluating
+the condition through its definitions (`constant_through_definitions`), which
+is where the pipeline's own folding already lives.
