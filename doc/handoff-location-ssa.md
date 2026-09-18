@@ -27112,3 +27112,44 @@ volatile-or-unknown. The capture now logs each literal it sees and the
 count it writes under `R2SLEIGH_DEBUG_INTERFACE` (`R2SLEIGH_LITERAL`,
 `R2SLEIGH_LITERALS`), and the lowering has `write-projection` and
 `object-address` evidence lines from this stretch.
+
+### Every variadic call on macOS arm64 read the wrong carriers
+
+Traced from `main`'s `floating_variadic_argument` refusal: Apple's arm64
+ABI passes the whole variadic tail on the stack from `[sp, #0]`, whatever
+registers the fixed prefix leaves free (`stp x9, x8, [sp]` before the
+`fprintf` in `bzDecompress`), while radare2's `arm64` convention says
+`argn=stack` only past `x7`. The recovery read `x2`, `x3` for the tail and
+rendered stale registers on every such call -- 23 call sites in bzip2 alone,
+and `vuln_test`'s `printf("Copied: %s\n", ...)`. Four things stood between
+the machine and the right answer, all fixed at their cause:
+
+* The convention record now carries `variadic_tail_on_stack` (wire format
+  19), stated by the capture from `anal->config->os` in the Darwin family
+  with `arm` at 64 bits, since the convention table cannot say it. The
+  placement walks positions in order: a position past the fixed prefix is a
+  stack slot from the first one where the tail is on the stack, and past the
+  registers otherwise.
+* The reaching walk treated every earlier call as a barrier for the stack
+  pointer. That is right where a call pushes its return address (x86) and
+  wrong where a register carries it (arm64 `bl`): `call_moves_stack_pointer`
+  on the machine context answers from the interface's return mechanism, or
+  the architecture family, with an unknown family keeping the barrier. The
+  stack-pointer merge rule of the previous entry is keyed on the stack
+  pointer itself rather than on that carrier.
+* A constant stored through the stack pointer before a call was taken as the
+  pushed return address; it is one only where the call pushes, otherwise it
+  is an argument.
+* Promotion made the outgoing argument slot a private variable: a slot the
+  function stores and never loads cannot be proved private when the function
+  calls anything, because the callee reads it as its incoming argument.
+  Such slots stay memory. The store into the slot still renders beside the
+  call (`var_0h = var_8h; printf(..., var_8h)`), which is the argument
+  passing spelled twice; eliding it as consumed by the call is the next
+  step in the journal.
+
+`bzDecompress` prints `" {0x%08x, 0x%08x}", tmp_3a500_8, tmp_3a580_8`, the
+loaded values. Gates: unit and clippy green, r2r 99 of 101, corpus 60/60
+unchanged (no corpus cell has a variadic call), census 54 bodies, 43
+declarations, 3 undeclared stubs, 7 refusals. Unit test:
+`an_apple_arm64_variadic_tail_is_read_from_the_stack`.
