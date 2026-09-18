@@ -718,8 +718,13 @@ impl<'c> CodeGenerator<'c> {
                         .push_str(&format!("{}U", format_unsigned_literal(*val)));
                 }
             }
-            CExpr::FloatLit(val) => {
-                self.output.push_str(&format!("{:.6}", val));
+            // The shortest spelling that reads back to the same value; a
+            // `float` literal carries its suffix so it is not a double.
+            CExpr::FloatLit(val, 32) => {
+                self.output.push_str(&format!("{:?}f", *val as f32));
+            }
+            CExpr::FloatLit(val, _) => {
+                self.output.push_str(&format!("{:?}", val));
             }
             CExpr::StringLit(s) => {
                 self.output.push('"');
@@ -928,7 +933,9 @@ impl<'c> CodeGenerator<'c> {
     }
 
     fn emit_positive_literal_magnitude(&mut self, literal: PositiveLiteralMagnitude) {
-        if literal.prefer_hex {
+        if let Some((value, bits)) = literal.floating {
+            self.emit_expr(&CExpr::FloatLit(value, bits), 0);
+        } else if literal.prefer_hex {
             self.output.push_str(&format!("0x{:x}", literal.value));
         } else {
             self.output
@@ -1006,6 +1013,8 @@ fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
 struct PositiveLiteralMagnitude {
     value: u64,
     prefer_hex: bool,
+    /// A floating literal's magnitude and width, spelled as the literal is.
+    floating: Option<(f64, u32)>,
 }
 
 fn additive_negative_rhs_rewrite(
@@ -1023,14 +1032,23 @@ fn additive_negative_rhs_rewrite(
 fn negative_literal_magnitude(expr: &CExpr) -> Option<PositiveLiteralMagnitude> {
     let expr = expr.unobserved();
     match expr {
+        CExpr::FloatLit(value, bits) if value.is_sign_negative() && value.is_finite() => {
+            Some(PositiveLiteralMagnitude {
+                value: 0,
+                prefer_hex: false,
+                floating: Some((-value, *bits)),
+            })
+        }
         CExpr::IntLit(value) if *value < 0 => Some(PositiveLiteralMagnitude {
             value: value.unsigned_abs(),
             prefer_hex: false,
+            floating: None,
         }),
         CExpr::UIntLit(value) if *value > LIKELY_NEGATIVE_THRESHOLD => {
             Some(PositiveLiteralMagnitude {
                 value: (!*value).wrapping_add(1),
                 prefer_hex: true,
+                floating: None,
             })
         }
         _ => None,
@@ -1068,6 +1086,9 @@ fn negative_product_positive_rhs(expr: &CExpr) -> Option<CExpr> {
 }
 
 fn positive_product_expr(term: CExpr, magnitude: PositiveLiteralMagnitude) -> Option<CExpr> {
+    if magnitude.floating.is_some() {
+        return None;
+    }
     if magnitude.value == 1 {
         return Some(term);
     }

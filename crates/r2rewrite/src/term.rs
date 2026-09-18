@@ -11,9 +11,9 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{
     MachineArithmeticFlagOp, MachineArithmeticOp, MachineBitVector, MachineBitwiseOp,
-    MachineBooleanOp, MachineCastKind, MachineComparisonOp, MachineExprId,
-    MachineOvershiftBehavior, MachineShiftKind, MachineSignedness, MachineType, ObjectId,
-    StackAddressRoot,
+    MachineBooleanOp, MachineCastKind, MachineComparisonOp, MachineExprId, MachineFloatOp,
+    MachineFloatUnaryOp, MachineOvershiftBehavior, MachineShiftKind, MachineSignedness,
+    MachineType, ObjectId, StackAddressRoot,
 };
 use serde::Serialize;
 
@@ -163,6 +163,26 @@ pub enum TermKind {
         if_true: TermId,
         if_false: TermId,
     },
+    /// A conversion into, out of or between the floating formats. Its own
+    /// kind so no integer cast rule can see it.
+    FloatCast {
+        kind: MachineCastKind,
+        input: TermId,
+    },
+    FloatArithmetic {
+        op: MachineFloatOp,
+        left: TermId,
+        right: TermId,
+    },
+    FloatUnary {
+        op: MachineFloatUnaryOp,
+        input: TermId,
+    },
+    FloatCompare {
+        op: MachineComparisonOp,
+        left: TermId,
+        right: TermId,
+    },
 }
 
 /// The children of one term, in operand order.
@@ -197,6 +217,18 @@ impl TermKind {
             Self::BitwiseNot(_) => Self::BitwiseNot(p),
             Self::BooleanNot(_) => Self::BooleanNot(p),
             Self::Cast { kind, .. } => Self::Cast { kind, input: p },
+            Self::FloatCast { kind, .. } => Self::FloatCast { kind, input: p },
+            Self::FloatUnary { op, .. } => Self::FloatUnary { op, input: p },
+            Self::FloatArithmetic { op, .. } => Self::FloatArithmetic {
+                op,
+                left: p,
+                right: p,
+            },
+            Self::FloatCompare { op, .. } => Self::FloatCompare {
+                op,
+                left: p,
+                right: p,
+            },
             Self::Extract { lsb_bits, .. } => Self::Extract { lsb_bits, input: p },
             Self::Load { object, .. } => Self::Load { object, address: p },
             Self::Arithmetic { op, .. } => Self::Arithmetic {
@@ -258,12 +290,16 @@ impl TermKind {
             | Self::BitwiseNot(input)
             | Self::BooleanNot(input)
             | Self::Cast { input, .. }
+            | Self::FloatCast { input, .. }
+            | Self::FloatUnary { input, .. }
             | Self::Extract { input, .. }
             | Self::Load { address: input, .. } => ([input, placeholder, placeholder], 1),
             Self::Arithmetic { left, right, .. }
             | Self::Bitwise { left, right, .. }
             | Self::Boolean { left, right, .. }
             | Self::Compare { left, right, .. }
+            | Self::FloatArithmetic { left, right, .. }
+            | Self::FloatCompare { left, right, .. }
             | Self::Flag { left, right, .. } => ([left, right, placeholder], 2),
             Self::Shift { value, count, .. } => ([value, count, placeholder], 2),
             Self::Concat { high, low } => ([high, low, placeholder], 2),
@@ -320,6 +356,21 @@ impl TermKind {
             Self::Cast { kind, .. } => Self::Cast {
                 kind,
                 input: new[0],
+            },
+            Self::FloatCast { kind, .. } => Self::FloatCast {
+                kind,
+                input: new[0],
+            },
+            Self::FloatUnary { op, .. } => Self::FloatUnary { op, input: new[0] },
+            Self::FloatArithmetic { op, .. } => Self::FloatArithmetic {
+                op,
+                left: new[0],
+                right: new[1],
+            },
+            Self::FloatCompare { op, .. } => Self::FloatCompare {
+                op,
+                left: new[0],
+                right: new[1],
             },
             Self::Extract { lsb_bits, .. } => Self::Extract {
                 input: new[0],

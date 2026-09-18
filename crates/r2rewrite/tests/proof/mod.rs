@@ -312,7 +312,20 @@ impl<'a> Encoder<'a> {
                     MachineCastKind::BitReinterpret
                     | MachineCastKind::IntegerToAddress
                     | MachineCastKind::AddressToInteger => x,
+                    MachineCastKind::IntegerToFloat
+                    | MachineCastKind::FloatToInteger
+                    | MachineCastKind::FloatToFloat => {
+                        BV::new_const(format!("float{}_{width}", id.index()), width)
+                    }
                 }
+            }
+            // No rule rewrites a floating term, so each is an uninterpreted
+            // symbol: a rule that touched one could not be proved.
+            TermKind::FloatCast { .. }
+            | TermKind::FloatArithmetic { .. }
+            | TermKind::FloatUnary { .. }
+            | TermKind::FloatCompare { .. } => {
+                BV::new_const(format!("float{}_{width}", id.index()), width)
             }
             TermKind::Extract { input, lsb_bits } => {
                 self.encode(input).extract(lsb_bits + width - 1, lsb_bits)

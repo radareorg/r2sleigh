@@ -520,7 +520,12 @@ impl<'a> FoldingContext<'a> {
                 binding,
                 value: literal,
             } => {
-                let rendered = wide_aware_literal(literal.bits(), literal.width_bits());
+                let rendered = if machine_expr.ty().is_float() {
+                    super::float_literal(literal.bits(), literal.width_bits())
+                        .ok_or_else(invalid)?
+                } else {
+                    wide_aware_literal(literal.bits(), literal.width_bits())
+                };
                 // Every value owes a cell, and a constant reached as a leaf of
                 // a moved expression is rendered here rather than as an operand
                 // of an emitted statement, so this is where it is marked.
@@ -604,6 +609,21 @@ impl<'a> FoldingContext<'a> {
             ),
             Kind::BitwiseNot { input } => CExpr::unary(UnaryOp::BitNot, child(0, *input)?),
             Kind::BooleanNot { input } => CExpr::unary(UnaryOp::Not, child(0, *input)?),
+            Kind::FloatArithmetic { op, left, right } => {
+                CExpr::binary(float_binary_op(*op), child(0, *left)?, child(1, *right)?)
+            }
+            Kind::FloatUnary { op, input } => {
+                let width = names
+                    .plan()
+                    .machine_projection()
+                    .expr(*input)
+                    .map(|expr| expr.ty().width_bits())
+                    .ok_or_else(invalid)?;
+                float_unary(*op, width, child(0, *input)?)
+            }
+            Kind::FloatCompare { op, left, right } => {
+                CExpr::binary(comparison_op(*op), child(0, *left)?, child(1, *right)?)
+            }
             Kind::Negate { input, .. } => CExpr::unary(UnaryOp::Neg, child(0, *input)?),
             Kind::Select {
                 condition,
@@ -669,7 +689,35 @@ impl<'a> FoldingContext<'a> {
             Kind::Leaf(read) => {
                 self.materialize_machine_expr(names, value, term, read.expr, depth + 1)?
             }
-            Kind::Literal(bits) => literal(bits),
+            Kind::Literal(bits) => {
+                if node.ty.is_float() {
+                    super::float_literal(bits.bits(), bits.width_bits()).ok_or_else(invalid)?
+                } else {
+                    literal(bits)
+                }
+            }
+            Kind::FloatArithmetic { op, left, right } => {
+                CExpr::binary(float_binary_op(op), child(0, left)?, child(1, right)?)
+            }
+            Kind::FloatUnary { op, input } => {
+                let width = arena.term(input).width_bits();
+                float_unary(op, width, child(0, input)?)
+            }
+            Kind::FloatCompare { op, left, right } => {
+                CExpr::binary(comparison_op(op), child(0, left)?, child(1, right)?)
+            }
+            // The conversion the machine states, spelled as the C cast to the
+            // type it produces; the operand arrives at the type it reads.
+            Kind::FloatCast { input, .. } => {
+                let rendered = child(0, input)?;
+                let Some(produced) = typed
+                    .term_produced(term)
+                    .and_then(r2rewrite::CValue::as_type)
+                else {
+                    return Err(invalid());
+                };
+                CExpr::cast(produced.clone(), rendered)
+            }
             Kind::Arithmetic { op, left, right } => CExpr::binary(
                 match op {
                     r2ssa::MachineArithmeticOp::Add => BinaryOp::Add,
@@ -1811,6 +1859,45 @@ impl<'a> FoldingContext<'a> {
             func_expr,
         ))
     }
+}
+
+fn float_binary_op(op: r2ssa::MachineFloatOp) -> BinaryOp {
+    match op {
+        r2ssa::MachineFloatOp::Add => BinaryOp::Add,
+        r2ssa::MachineFloatOp::Subtract => BinaryOp::Sub,
+        r2ssa::MachineFloatOp::Multiply => BinaryOp::Mul,
+        r2ssa::MachineFloatOp::Divide => BinaryOp::Div,
+    }
+}
+
+fn comparison_op(op: r2ssa::MachineComparisonOp) -> BinaryOp {
+    match op {
+        r2ssa::MachineComparisonOp::Equal => BinaryOp::Eq,
+        r2ssa::MachineComparisonOp::NotEqual => BinaryOp::Ne,
+        r2ssa::MachineComparisonOp::LessThan => BinaryOp::Lt,
+        r2ssa::MachineComparisonOp::LessThanOrEqual => BinaryOp::Le,
+    }
+}
+
+/// Negation is the operator; the rest are the intrinsic header's helpers over
+/// the compiler builtins, at the operand's width.
+fn float_unary(op: r2ssa::MachineFloatUnaryOp, width: u32, operand: CExpr) -> CExpr {
+    let name = match op {
+        r2ssa::MachineFloatUnaryOp::Negate => return CExpr::unary(UnaryOp::Neg, operand),
+        r2ssa::MachineFloatUnaryOp::Absolute => "abs",
+        r2ssa::MachineFloatUnaryOp::SquareRoot => "sqrt",
+        r2ssa::MachineFloatUnaryOp::Ceiling => "ceil",
+        r2ssa::MachineFloatUnaryOp::Floor => "floor",
+        r2ssa::MachineFloatUnaryOp::Round => "round",
+        r2ssa::MachineFloatUnaryOp::IsNan => "isnan",
+    };
+    CExpr::call(
+        CExpr::External {
+            name: format!("r2sleigh_float_{name}_{width}"),
+            kind: crate::symbol::ExternalKind::Intrinsic,
+        },
+        vec![operand],
+    )
 }
 
 #[cfg(test)]

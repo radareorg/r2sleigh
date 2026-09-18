@@ -5747,7 +5747,7 @@ fn classify_value_node(
             expr,
             CExpr::IntLit(_)
                 | CExpr::UIntLit(_)
-                | CExpr::FloatLit(_)
+                | CExpr::FloatLit(..)
                 | CExpr::StringLit(_)
                 | CExpr::CharLit(_)
         )

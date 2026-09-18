@@ -308,9 +308,16 @@ impl<'a> FoldingContext<'a> {
                     r2ssa::MachineCastKind::Truncate => CExpr::cast(unsigned(width), inner),
                     r2ssa::MachineCastKind::BitReinterpret => inner,
                     r2ssa::MachineCastKind::IntegerToAddress
-                    | r2ssa::MachineCastKind::AddressToInteger => return None,
+                    | r2ssa::MachineCastKind::AddressToInteger
+                    | r2ssa::MachineCastKind::IntegerToFloat
+                    | r2ssa::MachineCastKind::FloatToInteger
+                    | r2ssa::MachineCastKind::FloatToFloat => return None,
                 }
             }
+            TermKind::FloatCast { .. }
+            | TermKind::FloatArithmetic { .. }
+            | TermKind::FloatUnary { .. }
+            | TermKind::FloatCompare { .. } => return None,
             TermKind::Extract { input, lsb_bits } => {
                 let inner = child(input)?;
                 let shifted = if lsb_bits == 0 {

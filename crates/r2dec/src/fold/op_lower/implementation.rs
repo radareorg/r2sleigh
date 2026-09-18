@@ -2097,10 +2097,7 @@ impl<'a> FoldingContext<'a> {
             // the conversion already, in which case the operand arrives at
             // the produced type and nothing more is said; the assignment then
             // meets the declared object from that type.
-            SSAOp::IntZExt { dst, src }
-            | SSAOp::IntSExt { dst, src }
-            | SSAOp::Trunc { dst, src }
-            | SSAOp::Cast { dst, src } => {
+            SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } | SSAOp::Cast { dst, src } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let rhs = self.width_change_expr(frame, dst, src)?;
                 let rhs = self.resolve_predicate_rhs_for_var(dst, rhs);
@@ -2264,101 +2261,75 @@ impl<'a> FoldingContext<'a> {
                 };
                 self.assign_stmt(lhs, rhs)
             }
-            SSAOp::FloatAdd { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Add),
-            SSAOp::FloatSub { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Sub),
-            SSAOp::FloatMult { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Mul),
-            SSAOp::FloatDiv { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Div),
+            SSAOp::FloatAdd { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::Add),
+            SSAOp::FloatSub { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::Sub),
+            SSAOp::FloatMult { dst, a, b } => {
+                self.float_binary_stmt(frame, dst, a, b, BinaryOp::Mul)
+            }
+            SSAOp::FloatDiv { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::Div),
+            SSAOp::FloatLess { dst, a, b } => self.float_binary_stmt(frame, dst, a, b, BinaryOp::Lt),
+            SSAOp::FloatLessEqual { dst, a, b } => {
+                self.float_binary_stmt(frame, dst, a, b, BinaryOp::Le)
+            }
+            SSAOp::FloatEqual { dst, a, b } => {
+                self.float_binary_stmt(frame, dst, a, b, BinaryOp::Eq)
+            }
+            SSAOp::FloatNotEqual { dst, a, b } => {
+                self.float_binary_stmt(frame, dst, a, b, BinaryOp::Ne)
+            }
             SSAOp::FloatNeg { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::unary(UnaryOp::Neg, input(0, src)?);
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::Negate)
             }
             SSAOp::FloatAbs { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::call(
-                    CExpr::External {
-                        name: "fabs".to_string(),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![input(0, src)?],
-                );
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::Absolute)
             }
             SSAOp::FloatSqrt { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::call(
-                    CExpr::External {
-                        name: "sqrt".to_string(),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![input(0, src)?],
-                );
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::SquareRoot)
             }
             SSAOp::FloatCeil { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::call(
-                    CExpr::External {
-                        name: "ceil".to_string(),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![input(0, src)?],
-                );
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::Ceiling)
             }
             SSAOp::FloatFloor { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::call(
-                    CExpr::External {
-                        name: "floor".to_string(),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![input(0, src)?],
-                );
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::Floor)
             }
             SSAOp::FloatRound { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::call(
-                    CExpr::External {
-                        name: "round".to_string(),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![input(0, src)?],
-                );
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::Round)
             }
             SSAOp::FloatNaN { dst, src } => {
-                let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = CExpr::call(
-                    CExpr::External {
-                        name: "isnan".to_string(),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![input(0, src)?],
-                );
-                self.assign_stmt(lhs, rhs)
+                self.float_unary_stmt(frame, dst, src, r2ssa::MachineFloatUnaryOp::IsNan)
             }
-            SSAOp::FloatLess { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Lt),
-            SSAOp::FloatLessEqual { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Le),
-            SSAOp::FloatEqual { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Eq),
-            SSAOp::FloatNotEqual { dst, a, b } => self.binary_stmt(frame, dst, a, b, BinaryOp::Ne),
+            // The conversions the machine states: an integer read signed into
+            // the nearest floating value, a floating value toward zero into a
+            // signed integer, and a change of floating width.
             SSAOp::Int2Float { dst, src } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let ty = CType::Float(dst.size.saturating_mul(8));
-                let rhs = CExpr::cast(ty.clone(), input(0, src)?);
+                let operand = self.required_input(frame, 0, src, Some(&type_from_size(src.size)))?;
+                let rhs = CExpr::cast(ty.clone(), operand);
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(ty)))
             }
-            SSAOp::Float2Int { dst, src } => {
+            SSAOp::Float2Int { dst, src } | SSAOp::Trunc { dst, src } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let ty = type_from_size(dst.size);
-                let rhs = CExpr::cast(ty.clone(), input(0, src)?);
+                let operand = self.required_input(
+                    frame,
+                    0,
+                    src,
+                    Some(&CType::Float(src.size.saturating_mul(8))),
+                )?;
+                let rhs = CExpr::cast(ty.clone(), operand);
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(ty)))
             }
             SSAOp::FloatFloat { dst, src } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let ty = CType::Float(dst.size.saturating_mul(8));
-                let rhs = CExpr::cast(ty.clone(), input(0, src)?);
+                let operand = self.required_input(
+                    frame,
+                    0,
+                    src,
+                    Some(&CType::Float(src.size.saturating_mul(8))),
+                )?;
+                let rhs = CExpr::cast(ty.clone(), operand);
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(ty)))
             }
             SSAOp::Call { target, .. } => {
@@ -2562,6 +2533,75 @@ impl<'a> FoldingContext<'a> {
         op: BinaryOp,
     ) -> Option<CStmt> {
         self.binary_stmt_typed(frame, dst, a, b, op, None)
+    }
+
+    /// A floating operation in the operands' own format. No integer identity
+    /// or literal folding applies: `x + 0.0` is not `x` at negative zero, and
+    /// the bits of a floating literal are not an integer to fold.
+    fn float_binary_stmt(
+        &self,
+        frame: &LowerFrame,
+        dst: &SSAVar,
+        a: &SSAVar,
+        b: &SSAVar,
+        op: BinaryOp,
+    ) -> Option<CStmt> {
+        let lhs = self.retain_lowering_result(self.assignment_lhs_expr(dst))?;
+        let comparison = comparison_op(op);
+        let operand = CType::Float(a.size.saturating_mul(8));
+        let left = self.retain_lowering_result(self.required_input(frame, 0, a, Some(&operand)))?;
+        let right =
+            self.retain_lowering_result(self.required_input(frame, 1, b, Some(&operand)))?;
+        let rhs = CExpr::binary(op, left, right);
+        let (rhs, produced) = if comparison {
+            (
+                self.resolve_predicate_rhs_for_var(dst, rhs),
+                Some(CValue::Typed(CType::Bool)),
+            )
+        } else {
+            (rhs, Some(CValue::Typed(operand)))
+        };
+        self.assign_typed(lhs, rhs, produced)
+    }
+
+    /// Negation is the operator; the rest are the intrinsic header's helpers
+    /// over the compiler builtins, at the operand's width.
+    fn float_unary_stmt(
+        &self,
+        frame: &LowerFrame,
+        dst: &SSAVar,
+        src: &SSAVar,
+        op: r2ssa::MachineFloatUnaryOp,
+    ) -> Option<CStmt> {
+        let lhs = self.retain_lowering_result(self.assignment_lhs_expr(dst))?;
+        let width = src.size.saturating_mul(8);
+        let operand = CType::Float(width);
+        let input =
+            self.retain_lowering_result(self.required_input(frame, 0, src, Some(&operand)))?;
+        let name = match op {
+            r2ssa::MachineFloatUnaryOp::Negate => {
+                let rhs = CExpr::unary(UnaryOp::Neg, input);
+                return self.assign_typed(lhs, rhs, Some(CValue::Typed(operand)));
+            }
+            r2ssa::MachineFloatUnaryOp::Absolute => "abs",
+            r2ssa::MachineFloatUnaryOp::SquareRoot => "sqrt",
+            r2ssa::MachineFloatUnaryOp::Ceiling => "ceil",
+            r2ssa::MachineFloatUnaryOp::Floor => "floor",
+            r2ssa::MachineFloatUnaryOp::Round => "round",
+            r2ssa::MachineFloatUnaryOp::IsNan => "isnan",
+        };
+        let rhs = CExpr::call(
+            CExpr::External {
+                name: format!("r2sleigh_float_{name}_{width}"),
+                kind: crate::symbol::ExternalKind::Intrinsic,
+            },
+            vec![input],
+        );
+        if op == r2ssa::MachineFloatUnaryOp::IsNan {
+            let rhs = self.resolve_predicate_rhs_for_var(dst, rhs);
+            return self.assign_typed(lhs, rhs, Some(CValue::Typed(CType::Bool)));
+        }
+        self.assign_typed(lhs, rhs, Some(CValue::Typed(operand)))
     }
 
     /// A machine integer operation, computed in the unsigned carrier its result has.

@@ -72,7 +72,7 @@ pub(crate) fn affine_of(arena: &TermArena, address: TermId) -> Option<Affine> {
         MachineType::Address { .. } => {
             coefficients.insert(address, 1);
         }
-        MachineType::Bool { .. } => return None,
+        MachineType::Bool { .. } | MachineType::Float { .. } => return None,
     }
     coefficients.retain(|_, k| *k != 0);
     Some(Affine {

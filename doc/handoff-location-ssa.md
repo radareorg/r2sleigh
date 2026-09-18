@@ -27153,3 +27153,78 @@ loaded values. Gates: unit and clippy green, r2r 99 of 101, corpus 60/60
 unchanged (no corpus cell has a variadic call), census 54 bodies, 43
 declarations, 3 undeclared stubs, 7 refusals. Unit test:
 `an_apple_arm64_variadic_tail_is_read_from_the_stack`.
+
+### Floating point, end to end
+
+Taken from the `floating_variadic_argument` refusal in `bzip2`'s `main`:
+lifting the gate showed the machine projection had no floating type at all,
+and the fixtures under `tests/r2r/bins/stress_test*` showed worse -- with the
+interface naming `x0` for a `double` return, the floating body was dead,
+elided, and `fp_interpolate` rendered as `return (double)X0_0;`. The design
+is `doc/adr-floating-point.md`; what landed, layer by layer:
+
+* radare2 fork: `cc.<cc>.fpret0` names the floating return register per
+  convention, beside `fparg`, with `r_anal_cc_fpret`.
+* Capture: parameters are placed by class -- integer and floating sequences
+  counted separately -- with the carrier the width of the operand (`s0` for a
+  `float`, the low lane of `xmm0` on x86-64), and a floating return comes
+  from `fpret0`. `fp_magnitude` had refused at the wire because its `float`
+  parameters were given eight-byte carriers.
+* Machine projection: `MachineType::Float`, `FloatArithmetic`, `FloatUnary`,
+  `FloatCompare`, and the `IntegerToFloat`, `FloatToInteger`, `FloatToFloat`
+  casts. `SSAOp::Trunc` is p-code `TRUNC`, float to integer; it had been
+  lowered as an integer truncation. A floating comparison counts as a
+  boolean producer, which is what let `fp_classify`'s `csel` chain project.
+* Rewriter: distinct term kinds so no integer rule can fire on IEEE values; a
+  producer's term is substituted only in the reader's class, a literal being
+  re-typed; the evaluator computes floats exactly.
+* Renderer: C operators for arithmetic and comparison, the intrinsic header's
+  `r2sleigh_float_*` helpers for the unary operations and for a floating
+  value met at an integer boundary (a reinterpretation, never `(double)x`),
+  the shortest round-trip literal (`1.0`, `3.0f`), and a binding declared
+  `double` when its definition or every non-copy read is floating.
+* Entry lanes: `d1` is a lane of `z1` the way `edi` is one of `rdi`, but the
+  lane minting keyed lanes by the ABI storage and so never folded a
+  `Subpiece(z1)` read into the formal; `b` rendered as an extract of an
+  uninitialised `Z1_0`. Lanes are keyed by the entry root containing the
+  formal.
+* Reaching walk: a lane `Insert` into the root is the value at the boundary
+  when its lane is the storage wanted, an older definition when beside it;
+  before, every floating return through `z0` failed closed.
+
+Two defects outside the tree surfaced on the way. The bundled Ghidra 11.4
+AArch64 specification writes the 32-bit `fmadd` as `Rn + Rm * Ra` where the
+64- and 16-bit forms and Ghidra master write `Ra + Rm * Rn`; `fp_magnitude`
+rendered `x * (y*y) + x`. The Sleigh dependencies are now owned forks --
+`sleigh-config`, `libsla`, `libsla-sys` under `0verflowme`, consumed from
+their `main` branches -- and the fix is on `sleigh-config` main with the
+Ghidra processor files carried in tree (`tests/fmadd_operands.rs` pins it).
+And a dereferenced constant address was spelled as a string literal when the
+freshly installed radare2 found printable bytes there: `xxhash32`'s 16-byte
+constant load became `*(__uint128_t*)"(D#$w"` and the differential gate
+caught it. A string stands for a constant only where the reader wants a
+pointer to characters or `void`.
+
+Diagnostics added: `R2SLEIGH_DUMP_IL` prints the lifted blocks;
+`tests/corpus/lldb_probe.sh` stops radare2 in the plugin this tree built
+(`[profile.probe]` now keeps full debug info at `opt-level = 1`); evidence
+tags `machine-expression-type`, `machine-lowering`, `machine-use-slice`,
+`entry-lane`.
+
+Gates: unit and clippy green, r2r 102 of 104 with the two recorded
+failures, corpus 60/60 on the differential, census 54 bodies and 7 refusals
+as before -- `compress` and `BZ2_compressBlock` pass the floating layer and
+stop at the next class (`format_argument_not_literal` and a program-variable
+authorization). r2r: `pd:s renders arm64 floating parameters, arithmetic and
+a floating return`, `pd:s renders an x86-64 floating polynomial from its
+constant pool`; unit: `floating_arithmetic_lowers_in_the_operands_own_format`
+and its neighbours in `machine.rs`, `fmadd_operands.rs` in the lifter.
+
+Open, in order of cost: an x86-64 constant-pool load renders as
+`r2sleigh_float_from_bits_64(*(uint64_t*)0x...)` where `*(double*)0x...`
+is the object's type (Phase 2, the memory renderer decides the load's
+type); `fp_classify` at -O2 renders the `fcmp` NaN tests as separate
+`isnan` temporaries and one long conditional; `(double)0` for a
+zero-compare constant is exact but `0.0` reads better; the floating
+variadic tail on Linux arm64 and x86-64 (registers `v0..`, `xmm0..`) is not
+placed, only Darwin's stack tail is.

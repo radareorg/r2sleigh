@@ -3353,6 +3353,16 @@ impl SSAFunction {
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
+        // The lifted text as it arrived, for a reader tracing a defect that
+        // the SSA may already have folded away; the SSA dump is r2dec's.
+        if dump_il() {
+            for block in blocks {
+                eprintln!("R2IL block {:#x} ({} ops)", block.addr, block.ops.len());
+                for (index, op) in block.ops.iter().enumerate() {
+                    eprintln!("  {index}: {op:?}");
+                }
+            }
+        }
         control.poll()?;
         // The convention says the callee leaves this carrier where it found
         // it, and the machine's own p-code moved it to transfer control. Both
@@ -4442,25 +4452,48 @@ impl SSAFunction {
             (CanonicalStorageId, u32, u32),
             (Option<SSAVar>, Vec<(u64, usize, u32)>),
         >::new();
+        // The entry registers the renamer read whole: a formal inside one of
+        // them is a lane of that root, whatever width the convention names
+        // it at -- `d1` is a lane of `z1` as much as `edi` is one of `rdi`.
+        let entry_roots = self
+            .canonical_storage_by_var
+            .iter()
+            .filter(|(var, storage)| {
+                var.version == 0
+                    && storage.space == CanonicalStorageSpace::Register
+                    && storage.size == var.size
+            })
+            .map(|(_, storage)| *storage)
+            .collect::<Vec<_>>();
         for projection in crate::semantic::source_formal_parameter_projections(machine_context) {
-            if projection.graph_storage == projection.abi_storage {
+            let lane = projection.graph_storage;
+            let root = entry_roots
+                .iter()
+                .copied()
+                .find(|root| {
+                    *root != lane
+                        && root.offset <= lane.offset
+                        && lane.offset + u64::from(lane.size) <= root.offset + u64::from(root.size)
+                })
+                .unwrap_or(projection.abi_storage);
+            if root == lane {
                 continue;
             }
-            let Some(offset) = projection
-                .graph_storage
+            let Some(offset) = lane
                 .offset
-                .checked_sub(projection.abi_storage.offset)
+                .checked_sub(root.offset)
                 .and_then(|offset| u32::try_from(offset).ok())
             else {
                 continue;
             };
-            lanes
-                .entry((
-                    projection.abi_storage,
-                    offset,
-                    projection.graph_storage.size,
-                ))
-                .or_default();
+            r2il::refusal_evidence!(
+                "entry-lane",
+                "formal {} lane {:?} of root {:?}",
+                projection.index,
+                lane,
+                root
+            );
+            lanes.entry((root, offset, lane.size)).or_default();
         }
         if lanes.is_empty() {
             return;
@@ -4488,6 +4521,12 @@ impl SSAFunction {
                     (key.0 == root && key.1 <= *offset && *offset + dst.size <= key.1 + key.2)
                         .then_some((*key, *offset - key.1))
                 }) else {
+                    r2il::refusal_evidence!(
+                        "entry-lane",
+                        "({addr:#x}, {op_index}) reads {offset}+{} of entry root {:?}, no declared lane",
+                        dst.size,
+                        root
+                    );
                     continue;
                 };
                 let lane = lanes.get_mut(&key).expect("a key just found");
@@ -5041,7 +5080,7 @@ impl SSAFunction {
                                 );
                             }
                         }
-                        SSAOp::Trunc { dst, src } | SSAOp::Subpiece { dst, src, .. } => {
+                        SSAOp::Subpiece { dst, src, .. } => {
                             let src_root = canonical_root_in(&facts.canonical_value_roots, src);
                             let adapted = adapt_root_width(src_root, dst.size)
                                 .unwrap_or_else(|| src_root.clone());
@@ -5260,7 +5299,6 @@ impl SSAFunction {
             SSAOp::Copy { src, .. }
             | SSAOp::IntZExt { src, .. }
             | SSAOp::IntSExt { src, .. }
-            | SSAOp::Trunc { src, .. }
             | SSAOp::Cast { src, .. }
             | SSAOp::Subpiece { src, .. } => {
                 self.infer_switch_selector_var_from_value(src, depth + 1)
@@ -5328,7 +5366,6 @@ impl SSAFunction {
             SSAOp::Copy { src, .. }
             | SSAOp::IntZExt { src, .. }
             | SSAOp::IntSExt { src, .. }
-            | SSAOp::Trunc { src, .. }
             | SSAOp::Cast { src, .. }
             | SSAOp::Subpiece { src, .. } => {
                 self.infer_switch_selector_var_from_address(src, depth + 1)
@@ -5437,7 +5474,6 @@ impl SSAFunction {
             SSAOp::Copy { src, .. }
             | SSAOp::IntZExt { src, .. }
             | SSAOp::IntSExt { src, .. }
-            | SSAOp::Trunc { src, .. }
             | SSAOp::Cast { src, .. }
             | SSAOp::Subpiece { src, .. } => self.is_stack_slot_address_var(src, depth + 1),
             SSAOp::IntAdd { a, b, .. } | SSAOp::IntSub { a, b, .. } => {
@@ -5461,6 +5497,12 @@ impl SSAFunction {
 
 /// One storage range inside a register family, identified by where it starts
 /// and how wide it is rather than by any name the architecture gives it.
+/// Whether `R2SLEIGH_DUMP_IL` asks for the lifted blocks on stderr.
+fn dump_il() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("R2SLEIGH_DUMP_IL").is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegisterFamilySlot {
     pub family_id: usize,
@@ -12183,9 +12225,10 @@ mod tests {
                     a: rbp,
                     b: make_const(0x10, 8),
                 },
-                R2ILOp::Trunc {
+                R2ILOp::Subpiece {
                     dst: make_unique(0x20, 4),
                     src: rsp.clone(),
+                    offset: 0,
                 },
                 R2ILOp::Cast {
                     dst: make_unique(0x24, 4),

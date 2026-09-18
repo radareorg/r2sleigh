@@ -481,8 +481,7 @@ impl<'a> AddressCollector<'a> {
                 .map(|expression| (dst, expression)),
             // A narrowed address is not the address: the low lane of a
             // pointer parameter is a scalar the body computes with.
-            SSAOp::Trunc { dst, src }
-            | SSAOp::Subpiece {
+            SSAOp::Subpiece {
                 dst,
                 src,
                 offset: 0,
@@ -600,7 +599,6 @@ impl<'a> AddressCollector<'a> {
             | SSAOp::New { src, .. }
             | SSAOp::IntZExt { src, .. }
             | SSAOp::IntSExt { src, .. }
-            | SSAOp::Trunc { src, .. }
             | SSAOp::Subpiece { src, offset: 0, .. } => self.scalar_for_var(&src),
             SSAOp::IntNegate { src, .. } => self.scalar_for_var(&src)?.scale(-1),
             SSAOp::IntAdd { a, b, .. } => self

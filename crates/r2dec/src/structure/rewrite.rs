@@ -1992,7 +1992,7 @@ impl ControlFlowStructurer<'_, '_> {
             }
             CExpr::IntLit(_)
             | CExpr::UIntLit(_)
-            | CExpr::FloatLit(_)
+            | CExpr::FloatLit(..)
             | CExpr::StringLit(_)
             | CExpr::CharLit(_)
             | CExpr::SizeofType(_) => {}

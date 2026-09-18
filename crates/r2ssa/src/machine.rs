@@ -467,22 +467,37 @@ pub enum MachineType {
         space: MachineAddressSpace,
         provenance: MachineAddressProvenance,
     },
+    /// An IEEE binary32 or binary64 value.
+    Float {
+        width_bits: u32,
+    },
 }
 
 impl MachineType {
     pub const fn width_bits(&self) -> u32 {
         match self {
             Self::Bool { storage_bits } => *storage_bits,
-            Self::Integer { width_bits, .. } | Self::Address { width_bits, .. } => *width_bits,
+            Self::Integer { width_bits, .. }
+            | Self::Address { width_bits, .. }
+            | Self::Float { width_bits } => *width_bits,
         }
     }
 
     pub const fn signedness(&self) -> Option<MachineSignedness> {
         match self {
             Self::Integer { signedness, .. } => Some(*signedness),
-            Self::Bool { .. } | Self::Address { .. } => None,
+            Self::Bool { .. } | Self::Address { .. } | Self::Float { .. } => None,
         }
     }
+
+    pub const fn is_float(&self) -> bool {
+        matches!(self, Self::Float { .. })
+    }
+}
+
+/// The widths a floating value may have: the two IEEE formats C spells.
+pub const fn float_width_is_supported(width_bits: u32) -> bool {
+    matches!(width_bits, 32 | 64)
 }
 
 /// The widest constant a C integer literal can spell.
@@ -561,6 +576,27 @@ pub enum MachineArithmeticMode {
     Checked,
 }
 
+/// A binary IEEE operation under the default rounding mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum MachineFloatOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+/// A unary IEEE operation; `IsNan` yields a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum MachineFloatUnaryOp {
+    Negate,
+    Absolute,
+    SquareRoot,
+    Ceiling,
+    Floor,
+    Round,
+    IsNan,
+}
+
 /// Result policy when an integer divisor is zero.
 ///
 /// Raw p-code division and remainder do not model a processor trap or choose a
@@ -629,6 +665,12 @@ pub enum MachineCastKind {
     BitReinterpret,
     IntegerToAddress,
     AddressToInteger,
+    /// A signed integer converted to the nearest floating value.
+    IntegerToFloat,
+    /// A floating value converted to a signed integer, rounding toward zero.
+    FloatToInteger,
+    /// A floating value converted to the other floating width.
+    FloatToFloat,
 }
 
 /// A typed conversion applied after selecting the exact source bit slice.
@@ -894,6 +936,20 @@ pub enum MachineExprKind {
         lsb_bits: u32,
         width_bits: u32,
     },
+    FloatArithmetic {
+        op: MachineFloatOp,
+        left: MachineExprId,
+        right: MachineExprId,
+    },
+    FloatUnary {
+        op: MachineFloatUnaryOp,
+        input: MachineExprId,
+    },
+    FloatCompare {
+        op: MachineComparisonOp,
+        left: MachineExprId,
+        right: MachineExprId,
+    },
     Select {
         condition: MachineExprId,
         if_true: MachineExprId,
@@ -916,12 +972,15 @@ impl MachineExprKind {
             | Self::Negate { input, .. }
             | Self::PopulationCount { input }
             | Self::Cast { input, .. }
+            | Self::FloatUnary { input, .. }
             | Self::Extract { input, .. } => vec![*input],
             Self::Arithmetic { left, right, .. }
             | Self::ArithmeticFlag { left, right, .. }
             | Self::Bitwise { left, right, .. }
             | Self::Boolean { left, right, .. }
-            | Self::Compare { left, right, .. } => vec![*left, *right],
+            | Self::Compare { left, right, .. }
+            | Self::FloatArithmetic { left, right, .. }
+            | Self::FloatCompare { left, right, .. } => vec![*left, *right],
             Self::Divide {
                 dividend, divisor, ..
             }
@@ -1189,6 +1248,12 @@ impl MachineProjection {
                     });
                 }
                 Err(error) if is_local_projection_failure(&error, inst.id) => {
+                    r2il::refusal_evidence!(
+                        "machine-lowering",
+                        "{:?} at {:?} not projected: {error:?}",
+                        inst.id,
+                        inst.payload
+                    );
                     builder.refuse_inst_uses(graph, inst, use_refusal_for_error(&error))?;
                     write_dispositions.push(Some(MachineWriteDisposition::Refused(
                         write_refusal_for_error(&error),
@@ -1787,8 +1852,14 @@ fn canonical_machine_use_disposition(
         .value(input)
         .ok_or(MachineBuildError::MissingGraphValue(input))?;
     let source = binding_for_value(graph_value)?;
-    validate_machine_use_slice(slice, source.width_bits)
-        .map_err(|_| MachineBuildError::UseDispositionMismatch(site))?;
+    validate_machine_use_slice(slice, source.width_bits).map_err(|_| {
+        r2il::refusal_evidence!(
+            "machine-use-slice",
+            "{site:?} states {slice:?} of a {}-bit carrier",
+            source.width_bits
+        );
+        MachineBuildError::UseDispositionMismatch(site)
+    })?;
 
     let address_use = match MachineValueUse::memory_address_for_use(artifact, site) {
         Ok(address_use) => address_use,
@@ -1854,7 +1925,13 @@ fn validate_canonical_machine_use_disposition(
     operation_relative: MachineUseDisposition,
     actual: MachineUseDisposition,
 ) -> Result<(), MachineBuildError> {
-    let mismatch = || MachineBuildError::UseDispositionMismatch(site);
+    let mismatch = || {
+        r2il::refusal_evidence!(
+            "machine-use-slice",
+            "{site:?} operation states {operation_relative:?}, projection states {actual:?}"
+        );
+        MachineBuildError::UseDispositionMismatch(site)
+    };
     let MachineUseDisposition::Exact(operation_slice) = operation_relative else {
         return (actual == operation_relative)
             .then_some(())
@@ -2191,6 +2268,10 @@ fn validate_machine_use_slice(slice: MachineUseSlice, carrier_width_bits: u32) -
         MachineCastKind::BitReinterpret
         | MachineCastKind::IntegerToAddress
         | MachineCastKind::AddressToInteger => conversion.to_width_bits == slice.width_bits,
+        // A floating conversion reads its operand whole; it is never a slice.
+        MachineCastKind::IntegerToFloat
+        | MachineCastKind::FloatToInteger
+        | MachineCastKind::FloatToFloat => false,
     };
     valid.then_some(()).ok_or(())
 }
@@ -2220,14 +2301,23 @@ fn machine_use_slice_for_input(
         if *input != child_id {
             return None;
         }
+        // A floating conversion is an operation over its whole operand, not a
+        // projection of the use; the slice carries no conversion.
+        let conversion = (!matches!(
+            kind,
+            MachineCastKind::IntegerToFloat
+                | MachineCastKind::FloatToInteger
+                | MachineCastKind::FloatToFloat
+        ))
+        .then_some(MachineUseConversion {
+            kind: *kind,
+            to_width_bits: root.ty.width_bits(),
+        });
         return Some(MachineUseSlice {
             bit_offset: 0,
             width_bits: source.width_bits,
             carrier_width_bits: source.width_bits,
-            conversion: Some(MachineUseConversion {
-                kind: *kind,
-                to_width_bits: root.ty.width_bits(),
-            }),
+            conversion,
         });
     }
     if let MachineExprKind::Extract { input, lsb_bits } = &root.kind {
@@ -2568,6 +2658,11 @@ impl MachineFunction {
                         MachineType::Address { width_bits, .. }
                             if width_bits == binding.width_bits
                     )
+                    || matches!(
+                        expr.ty,
+                        MachineType::Float { width_bits }
+                            if width_bits == binding.width_bits && float_width_is_supported(width_bits)
+                    )
             }
             MachineExprKind::MemoryRead {
                 space,
@@ -2675,7 +2770,8 @@ impl MachineFunction {
                     && child(*left)?.ty.width_bits() == child(*right)?.ty.width_bits()
             }
             MachineExprKind::Cast { kind, input } => {
-                let from = child(*input)?.ty.width_bits();
+                let input = child(*input)?;
+                let from = input.ty.width_bits();
                 let to = expr.ty.width_bits();
                 match kind {
                     MachineCastKind::ZeroExtend | MachineCastKind::SignExtend => to > from,
@@ -2684,7 +2780,46 @@ impl MachineFunction {
                     MachineCastKind::IntegerToAddress | MachineCastKind::AddressToInteger => {
                         to == from
                     }
+                    MachineCastKind::IntegerToFloat => {
+                        matches!(input.ty, MachineType::Integer { .. })
+                            && expr.ty.is_float()
+                            && float_width_is_supported(to)
+                    }
+                    MachineCastKind::FloatToInteger => {
+                        input.ty.is_float()
+                            && float_width_is_supported(from)
+                            && expr.ty == integer_type(to, MachineSignedness::Signed)
+                    }
+                    MachineCastKind::FloatToFloat => {
+                        input.ty.is_float()
+                            && expr.ty.is_float()
+                            && float_width_is_supported(from)
+                            && float_width_is_supported(to)
+                            && from != to
+                    }
                 }
+            }
+            MachineExprKind::FloatArithmetic { left, right, .. } => {
+                expr.ty.is_float()
+                    && float_width_is_supported(expr.ty.width_bits())
+                    && child(*left)?.ty == expr.ty
+                    && child(*right)?.ty == expr.ty
+            }
+            MachineExprKind::FloatUnary { op, input } => {
+                let input = child(*input)?;
+                input.ty.is_float()
+                    && float_width_is_supported(input.ty.width_bits())
+                    && match op {
+                        MachineFloatUnaryOp::IsNan => matches!(expr.ty, MachineType::Bool { .. }),
+                        _ => expr.ty == input.ty,
+                    }
+            }
+            MachineExprKind::FloatCompare { left, right, .. } => {
+                let left = child(*left)?;
+                matches!(expr.ty, MachineType::Bool { .. })
+                    && left.ty.is_float()
+                    && float_width_is_supported(left.ty.width_bits())
+                    && child(*right)?.ty == left.ty
             }
             MachineExprKind::Extract { input, lsb_bits } => {
                 let input_bits = child(*input)?.ty.width_bits();
@@ -2750,6 +2885,17 @@ impl MachineFunction {
         if valid {
             Ok(())
         } else {
+            r2il::refusal_evidence!(
+                "machine-expression-type",
+                "{id:?} {:?} {:?} over {:?}",
+                expr.ty,
+                expr.kind,
+                expr.kind
+                    .children()
+                    .iter()
+                    .map(|child| self.arena.get(*child).map(|child| child.ty))
+                    .collect::<Vec<_>>()
+            );
             Err(MachineBuildError::InvalidExpressionType { expr: id })
         }
     }
@@ -2966,8 +3112,15 @@ impl MachineBuilder {
                 .value(input)
                 .ok_or(MachineBuildError::MissingGraphValue(input))?,
         )?;
-        validate_machine_use_slice(slice, source.width_bits)
-            .map_err(|_| MachineBuildError::UseDispositionMismatch(site))?;
+        validate_machine_use_slice(slice, source.width_bits).map_err(|_| {
+            r2il::refusal_evidence!(
+                "machine-use-slice",
+                "{site:?} reads {slice:?} of a {}-bit carrier in {:?}",
+                source.width_bits,
+                inst.payload
+            );
+            MachineBuildError::UseDispositionMismatch(site)
+        })?;
         let cell = self
             .use_slot_index(inst.id, input_idx)
             .and_then(|at| self.use_slots.get_mut(at))
@@ -3387,6 +3540,78 @@ impl MachineBuilder {
         Ok(inputs)
     }
 
+    /// The floating type of `width_bits`, refusing the widths C cannot spell.
+    fn float_type(
+        &self,
+        inst: &GraphInst,
+        width_bits: u32,
+    ) -> Result<MachineType, MachineBuildError> {
+        if !float_width_is_supported(width_bits) {
+            return Err(MachineBuildError::UnsupportedOperation {
+                inst: inst.id,
+                op: Box::new(match &inst.payload {
+                    InstPayload::Op(op) => op.clone(),
+                    InstPayload::Phi { .. } => SSAOp::Unimplemented,
+                }),
+            });
+        }
+        Ok(MachineType::Float { width_bits })
+    }
+
+    fn operand_width(
+        &self,
+        graph: &crate::graph::SsaGraph,
+        inst: &GraphInst,
+        input_idx: usize,
+    ) -> Result<u32, MachineBuildError> {
+        let value = *inst
+            .inputs
+            .get(input_idx)
+            .ok_or(MachineBuildError::MissingUseDisposition(UseSite {
+                inst: inst.id,
+                input_idx,
+            }))?;
+        let graph_value = graph
+            .value(value)
+            .ok_or(MachineBuildError::MissingGraphValue(value))?;
+        Ok(binding_for_value(graph_value)?.width_bits)
+    }
+
+    /// Operands read as floating values of exactly `expected_bits`.
+    fn float_operand_nodes(
+        &mut self,
+        graph: &crate::graph::SsaGraph,
+        inst: &GraphInst,
+        expected: usize,
+        expected_bits: u32,
+    ) -> Result<Vec<MachineExprId>, MachineBuildError> {
+        if inst.inputs.len() != expected {
+            return Err(MachineBuildError::WrongOperandCount {
+                inst: inst.id,
+                expected,
+                actual: inst.inputs.len(),
+            });
+        }
+        let float = self.float_type(inst, expected_bits)?;
+        let mut inputs = Vec::with_capacity(expected);
+        for (input_idx, value) in inst.inputs.iter().copied().enumerate() {
+            let graph_value = graph
+                .value(value)
+                .ok_or(MachineBuildError::MissingGraphValue(value))?;
+            let actual_bits = binding_for_value(graph_value)?.width_bits;
+            if actual_bits != expected_bits {
+                return Err(MachineBuildError::WidthMismatch {
+                    inst: inst.id,
+                    expected_bits,
+                    actual_bits,
+                });
+            }
+            inputs.push(self.intern_value_with_type(graph_value, float)?);
+            self.record_whole_use(graph, inst, input_idx)?;
+        }
+        Ok(inputs)
+    }
+
     fn lower_inst(
         &mut self,
         artifact: &SsaArtifact,
@@ -3800,10 +4025,119 @@ impl MachineBuilder {
                     },
                 ))
             }
-            SSAOp::IntZExt { .. }
-            | SSAOp::IntSExt { .. }
+            SSAOp::FloatAdd { .. }
+            | SSAOp::FloatSub { .. }
+            | SSAOp::FloatMult { .. }
+            | SSAOp::FloatDiv { .. } => {
+                let float = self.float_type(inst, output.width_bits)?;
+                let inputs = self.float_operand_nodes(graph, inst, 2, output.width_bits)?;
+                let op = match op {
+                    SSAOp::FloatAdd { .. } => MachineFloatOp::Add,
+                    SSAOp::FloatSub { .. } => MachineFloatOp::Subtract,
+                    SSAOp::FloatMult { .. } => MachineFloatOp::Multiply,
+                    _ => MachineFloatOp::Divide,
+                };
+                Ok((
+                    float,
+                    MachineExprKind::FloatArithmetic {
+                        op,
+                        left: inputs[0],
+                        right: inputs[1],
+                    },
+                ))
+            }
+            SSAOp::FloatNeg { .. }
+            | SSAOp::FloatAbs { .. }
+            | SSAOp::FloatSqrt { .. }
+            | SSAOp::FloatCeil { .. }
+            | SSAOp::FloatFloor { .. }
+            | SSAOp::FloatRound { .. } => {
+                let float = self.float_type(inst, output.width_bits)?;
+                let inputs = self.float_operand_nodes(graph, inst, 1, output.width_bits)?;
+                let op = match op {
+                    SSAOp::FloatNeg { .. } => MachineFloatUnaryOp::Negate,
+                    SSAOp::FloatAbs { .. } => MachineFloatUnaryOp::Absolute,
+                    SSAOp::FloatSqrt { .. } => MachineFloatUnaryOp::SquareRoot,
+                    SSAOp::FloatCeil { .. } => MachineFloatUnaryOp::Ceiling,
+                    SSAOp::FloatFloor { .. } => MachineFloatUnaryOp::Floor,
+                    _ => MachineFloatUnaryOp::Round,
+                };
+                Ok((
+                    float,
+                    MachineExprKind::FloatUnary {
+                        op,
+                        input: inputs[0],
+                    },
+                ))
+            }
+            SSAOp::FloatNaN { .. } => {
+                let width = self.operand_width(graph, inst, 0)?;
+                let inputs = self.float_operand_nodes(graph, inst, 1, width)?;
+                Ok((
+                    MachineType::Bool {
+                        storage_bits: output.width_bits,
+                    },
+                    MachineExprKind::FloatUnary {
+                        op: MachineFloatUnaryOp::IsNan,
+                        input: inputs[0],
+                    },
+                ))
+            }
+            SSAOp::FloatEqual { .. }
+            | SSAOp::FloatNotEqual { .. }
+            | SSAOp::FloatLess { .. }
+            | SSAOp::FloatLessEqual { .. } => {
+                let width = self.operand_width(graph, inst, 0)?;
+                let inputs = self.float_operand_nodes(graph, inst, 2, width)?;
+                let op = match op {
+                    SSAOp::FloatEqual { .. } => MachineComparisonOp::Equal,
+                    SSAOp::FloatNotEqual { .. } => MachineComparisonOp::NotEqual,
+                    SSAOp::FloatLess { .. } => MachineComparisonOp::LessThan,
+                    _ => MachineComparisonOp::LessThanOrEqual,
+                };
+                Ok((
+                    MachineType::Bool {
+                        storage_bits: output.width_bits,
+                    },
+                    MachineExprKind::FloatCompare {
+                        op,
+                        left: inputs[0],
+                        right: inputs[1],
+                    },
+                ))
+            }
+            SSAOp::Int2Float { .. }
+            | SSAOp::Float2Int { .. }
             | SSAOp::Trunc { .. }
-            | SSAOp::Cast { .. } => {
+            | SSAOp::FloatFloat { .. } => {
+                let from = self.operand_width(graph, inst, 0)?;
+                let (kind, ty, input) = match op {
+                    SSAOp::Int2Float { .. } => {
+                        let float = self.float_type(inst, output.width_bits)?;
+                        let inputs = self.exact_width_operand_nodes(graph, inst, 1, from)?;
+                        (MachineCastKind::IntegerToFloat, float, inputs[0])
+                    }
+                    SSAOp::FloatFloat { .. } => {
+                        let float = self.float_type(inst, output.width_bits)?;
+                        if from == output.width_bits {
+                            return Err(MachineBuildError::InvalidCastWidth {
+                                inst: inst.id,
+                                kind: MachineCastKind::FloatToFloat,
+                                from_bits: from,
+                                to_bits: output.width_bits,
+                            });
+                        }
+                        let inputs = self.float_operand_nodes(graph, inst, 1, from)?;
+                        (MachineCastKind::FloatToFloat, float, inputs[0])
+                    }
+                    _ => {
+                        let inputs = self.float_operand_nodes(graph, inst, 1, from)?;
+                        (MachineCastKind::FloatToInteger, signed, inputs[0])
+                    }
+                };
+                Ok((ty, MachineExprKind::Cast { kind, input }))
+            }
+            SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. } | SSAOp::Cast { .. } => {
                 if inst.inputs.len() != 1 {
                     return Err(MachineBuildError::WrongOperandCount {
                         inst: inst.id,
@@ -3826,11 +4160,6 @@ impl MachineBuilder {
                         MachineCastKind::SignExtend,
                         signed,
                         output.width_bits > from,
-                    ),
-                    SSAOp::Trunc { .. } => (
-                        MachineCastKind::Truncate,
-                        unsigned,
-                        output.width_bits < from,
                     ),
                     SSAOp::Cast { .. } => (
                         MachineCastKind::BitReinterpret,
@@ -4423,9 +4752,128 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
                 }
             )
             | (
-                SSAOp::Trunc { .. },
+                SSAOp::Trunc { .. } | SSAOp::Float2Int { .. },
                 MachineExprKind::Cast {
-                    kind: MachineCastKind::Truncate,
+                    kind: MachineCastKind::FloatToInteger,
+                    ..
+                }
+            )
+            | (
+                SSAOp::Int2Float { .. },
+                MachineExprKind::Cast {
+                    kind: MachineCastKind::IntegerToFloat,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatFloat { .. },
+                MachineExprKind::Cast {
+                    kind: MachineCastKind::FloatToFloat,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatAdd { .. },
+                MachineExprKind::FloatArithmetic {
+                    op: MachineFloatOp::Add,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatSub { .. },
+                MachineExprKind::FloatArithmetic {
+                    op: MachineFloatOp::Subtract,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatMult { .. },
+                MachineExprKind::FloatArithmetic {
+                    op: MachineFloatOp::Multiply,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatDiv { .. },
+                MachineExprKind::FloatArithmetic {
+                    op: MachineFloatOp::Divide,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatNeg { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::Negate,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatAbs { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::Absolute,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatSqrt { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::SquareRoot,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatCeil { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::Ceiling,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatFloor { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::Floor,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatRound { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::Round,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatNaN { .. },
+                MachineExprKind::FloatUnary {
+                    op: MachineFloatUnaryOp::IsNan,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatEqual { .. },
+                MachineExprKind::FloatCompare {
+                    op: MachineComparisonOp::Equal,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatNotEqual { .. },
+                MachineExprKind::FloatCompare {
+                    op: MachineComparisonOp::NotEqual,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatLess { .. },
+                MachineExprKind::FloatCompare {
+                    op: MachineComparisonOp::LessThan,
+                    ..
+                }
+            )
+            | (
+                SSAOp::FloatLessEqual { .. },
+                MachineExprKind::FloatCompare {
+                    op: MachineComparisonOp::LessThanOrEqual,
                     ..
                 }
             )
@@ -4450,8 +4898,31 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         SSAOp::IntSRight { .. }
         | SSAOp::IntSExt { .. }
         | SSAOp::IntSDiv { .. }
-        | SSAOp::IntSRem { .. } => *ty == signed,
-        SSAOp::IntEqual { .. }
+        | SSAOp::IntSRem { .. }
+        | SSAOp::Trunc { .. }
+        | SSAOp::Float2Int { .. } => *ty == signed,
+        SSAOp::FloatAdd { .. }
+        | SSAOp::FloatSub { .. }
+        | SSAOp::FloatMult { .. }
+        | SSAOp::FloatDiv { .. }
+        | SSAOp::FloatNeg { .. }
+        | SSAOp::FloatAbs { .. }
+        | SSAOp::FloatSqrt { .. }
+        | SSAOp::FloatCeil { .. }
+        | SSAOp::FloatFloor { .. }
+        | SSAOp::FloatRound { .. }
+        | SSAOp::Int2Float { .. }
+        | SSAOp::FloatFloat { .. } => {
+            *ty == MachineType::Float {
+                width_bits: output_bits,
+            }
+        }
+        SSAOp::FloatNaN { .. }
+        | SSAOp::FloatEqual { .. }
+        | SSAOp::FloatNotEqual { .. }
+        | SSAOp::FloatLess { .. }
+        | SSAOp::FloatLessEqual { .. }
+        | SSAOp::IntEqual { .. }
         | SSAOp::IntNotEqual { .. }
         | SSAOp::IntLess { .. }
         | SSAOp::IntSLess { .. }
@@ -4485,7 +4956,6 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         | SSAOp::IntLeft { .. }
         | SSAOp::IntRight { .. }
         | SSAOp::IntZExt { .. }
-        | SSAOp::Trunc { .. }
         | SSAOp::Cast { .. }
         | SSAOp::Piece { .. }
         | SSAOp::Subpiece { .. }
@@ -4534,7 +5004,12 @@ fn value_has_boolean_producer(graph: &crate::graph::SsaGraph, value: ValueId) ->
                     | SSAOp::BoolNot { .. }
                     | SSAOp::BoolAnd { .. }
                     | SSAOp::BoolOr { .. }
-                    | SSAOp::BoolXor { .. },
+                    | SSAOp::BoolXor { .. }
+                    | SSAOp::FloatNaN { .. }
+                    | SSAOp::FloatEqual { .. }
+                    | SSAOp::FloatNotEqual { .. }
+                    | SSAOp::FloatLess { .. }
+                    | SSAOp::FloatLessEqual { .. },
                 ) => true,
                 InstPayload::Op(SSAOp::Copy { .. }) => inst
                     .inputs
@@ -4591,6 +5066,116 @@ mod tests {
         RegisterProjectionDisposition, RegisterProjectionRefusal, RegisterStorage, SpaceId,
         Varnode,
     };
+
+    #[test]
+    fn floating_arithmetic_lowers_in_the_operands_own_format() {
+        let artifact = artifact_with_ops([R2ILOp::FloatMult {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::register(16, 8),
+        }]);
+        let machine = MachineFunction::from_artifact(&artifact).expect("float multiply");
+        let root = machine
+            .entities()
+            .iter()
+            .find_map(|entity| {
+                matches!(
+                    machine.expr(entity.root()).map(MachineExpr::kind),
+                    Some(MachineExprKind::FloatArithmetic {
+                        op: MachineFloatOp::Multiply,
+                        ..
+                    })
+                )
+                .then_some(entity.root())
+            })
+            .expect("the multiply is projected");
+        let expr = machine.expr(root).expect("root");
+        assert_eq!(expr.ty(), &MachineType::Float { width_bits: 64 });
+        for child in expr.kind().children() {
+            assert_eq!(
+                machine.expr(child).map(MachineExpr::ty),
+                Some(&MachineType::Float { width_bits: 64 })
+            );
+        }
+    }
+
+    #[test]
+    fn a_floating_constant_is_a_floating_source() {
+        let artifact = artifact_with_ops([R2ILOp::FloatSub {
+            dst: Varnode::register(0, 8),
+            a: Varnode::constant(0x3ff0_0000_0000_0000, 8),
+            b: Varnode::register(8, 8),
+        }]);
+        let machine = MachineFunction::from_artifact(&artifact).expect("float subtract");
+        assert!(machine.arena().iter().any(|(_, expr)| {
+            matches!(expr.kind(), MachineExprKind::Constant { .. })
+                && expr.ty() == &MachineType::Float { width_bits: 64 }
+        }));
+    }
+
+    #[test]
+    fn trunc_is_the_floating_to_integer_conversion() {
+        let artifact = artifact_with_ops([R2ILOp::Trunc {
+            dst: Varnode::register(0, 4),
+            src: Varnode::register(8, 8),
+        }]);
+        let machine = MachineFunction::from_artifact(&artifact).expect("trunc");
+        let root = machine
+            .entities()
+            .iter()
+            .find_map(|entity| {
+                matches!(
+                    machine.expr(entity.root()).map(MachineExpr::kind),
+                    Some(MachineExprKind::Cast {
+                        kind: MachineCastKind::FloatToInteger,
+                        ..
+                    })
+                )
+                .then_some(entity.root())
+            })
+            .expect("trunc converts a floating value");
+        assert_eq!(
+            machine.expr(root).map(MachineExpr::ty),
+            Some(&integer_type(32, MachineSignedness::Signed))
+        );
+    }
+
+    #[test]
+    fn an_unspellable_floating_width_is_refused() {
+        let artifact = artifact_with_ops([R2ILOp::FloatAdd {
+            dst: Varnode::register(0, 10),
+            a: Varnode::register(16, 10),
+            b: Varnode::register(32, 10),
+        }]);
+        assert!(matches!(
+            MachineFunction::from_artifact(&artifact),
+            Err(MachineBuildError::UnsupportedOperation { op, .. })
+                if matches!(*op, SSAOp::FloatAdd { .. })
+        ));
+    }
+
+    #[test]
+    fn a_floating_comparison_is_a_boolean_producer() {
+        let compared = Varnode::unique(0x10, 1);
+        let artifact = artifact_with_ops([
+            R2ILOp::FloatLess {
+                dst: compared.clone(),
+                a: Varnode::register(0, 8),
+                b: Varnode::register(8, 8),
+            },
+            R2ILOp::BoolNot {
+                dst: Varnode::unique(0x20, 1),
+                src: compared,
+            },
+        ]);
+        let machine = MachineFunction::from_artifact(&artifact).expect("float compare");
+        assert!(machine.entities().iter().any(|entity| {
+            matches!(
+                machine.expr(entity.root()).map(MachineExpr::kind),
+                Some(MachineExprKind::BooleanNot { .. })
+            )
+        }));
+    }
 
     fn artifact_with_ops(ops: impl IntoIterator<Item = R2ILOp>) -> SsaArtifact {
         let mut block = R2ILBlock::new(0x1000, 4);
@@ -6288,9 +6873,10 @@ mod tests {
                 dst: Varnode::unique(0x30, 8),
                 src: Varnode::unique(0x119, 1),
             },
-            R2ILOp::Trunc {
+            R2ILOp::Subpiece {
                 dst: Varnode::unique(0x38, 4),
                 src: Varnode::unique(0x120, 8),
+                offset: 0,
             },
             R2ILOp::Cast {
                 dst: Varnode::unique(0x40, 4),
@@ -6360,10 +6946,19 @@ mod tests {
                 }
             );
         }
+        // A low subpiece reads its source whole; the narrowing is the node.
+        assert_eq!(
+            exact_use(&projection, &artifact, 5, 0),
+            MachineUseSlice {
+                bit_offset: 0,
+                width_bits: 64,
+                carrier_width_bits: 64,
+                conversion: None,
+            }
+        );
         for (op_index, kind, source_bits, target_bits) in [
             (3, MachineCastKind::ZeroExtend, 8, 64),
             (4, MachineCastKind::SignExtend, 8, 64),
-            (5, MachineCastKind::Truncate, 64, 32),
             (6, MachineCastKind::BitReinterpret, 32, 32),
         ] {
             assert_eq!(

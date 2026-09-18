@@ -54,7 +54,8 @@ integer sequences and the capture used them for every class.
 
 ## Consequences
 
-Two `bzip2` bodies and the four `stress_test` floating fixtures become
-renderable; `fp_magnitude` stops refusing at the wire because its `float`
-parameters now have four-byte carriers. Variadic floating operands on Darwin
+The four `stress_test` floating fixtures render on arm64 and x86-64;
+`fp_magnitude` stops refusing at the wire because its `float` parameters now
+have four-byte carriers. `bzip2`'s `compress` and `BZ2_compressBlock` pass the
+floating layer and stop at the next class each. Variadic floating operands on Darwin
 arm64 render from their stack slots. x87 80-bit values still refuse.

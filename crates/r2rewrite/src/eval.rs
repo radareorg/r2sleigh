@@ -6,9 +6,74 @@
 
 use r2ssa::{
     MachineArithmeticFlagOp, MachineArithmeticOp, MachineBitwiseOp, MachineBooleanOp,
-    MachineCastKind, MachineComparisonOp, MachineExprId, MachineOvershiftBehavior,
-    MachineShiftKind, MachineSignedness, MachineType, ObjectId,
+    MachineCastKind, MachineComparisonOp, MachineExprId, MachineFloatOp, MachineFloatUnaryOp,
+    MachineOvershiftBehavior, MachineShiftKind, MachineSignedness, MachineType, ObjectId,
 };
+
+/// The floating value `bits` encodes at `width_bits`, widened to `f64`; a
+/// `float` widens exactly.
+fn float_of(bits: u128, width_bits: u32) -> f64 {
+    if width_bits == 32 {
+        f64::from(f32::from_bits(bits as u32))
+    } else {
+        f64::from_bits(bits as u64)
+    }
+}
+
+/// The encoding of `value` at `width_bits`, rounded to nearest at 32.
+fn float_bits(value: f64, width_bits: u32) -> u128 {
+    if width_bits == 32 {
+        u128::from((value as f32).to_bits())
+    } else {
+        u128::from(value.to_bits())
+    }
+}
+
+/// A binary IEEE operation at `width_bits`, performed in that format so a
+/// `float` result rounds once.
+fn float_binary(op: MachineFloatOp, l: f64, r: f64, width_bits: u32) -> f64 {
+    if width_bits == 32 {
+        let (l, r) = (l as f32, r as f32);
+        f64::from(match op {
+            MachineFloatOp::Add => l + r,
+            MachineFloatOp::Subtract => l - r,
+            MachineFloatOp::Multiply => l * r,
+            MachineFloatOp::Divide => l / r,
+        })
+    } else {
+        match op {
+            MachineFloatOp::Add => l + r,
+            MachineFloatOp::Subtract => l - r,
+            MachineFloatOp::Multiply => l * r,
+            MachineFloatOp::Divide => l / r,
+        }
+    }
+}
+
+fn float_unary(op: MachineFloatUnaryOp, x: f64, width_bits: u32) -> f64 {
+    if width_bits == 32 {
+        let x = x as f32;
+        f64::from(match op {
+            MachineFloatUnaryOp::Negate => -x,
+            MachineFloatUnaryOp::Absolute => x.abs(),
+            MachineFloatUnaryOp::SquareRoot => x.sqrt(),
+            MachineFloatUnaryOp::Ceiling => x.ceil(),
+            MachineFloatUnaryOp::Floor => x.floor(),
+            MachineFloatUnaryOp::Round => (x + 0.5).floor(),
+            MachineFloatUnaryOp::IsNan => return f64::from(u8::from(x.is_nan())),
+        })
+    } else {
+        match op {
+            MachineFloatUnaryOp::Negate => -x,
+            MachineFloatUnaryOp::Absolute => x.abs(),
+            MachineFloatUnaryOp::SquareRoot => x.sqrt(),
+            MachineFloatUnaryOp::Ceiling => x.ceil(),
+            MachineFloatUnaryOp::Floor => x.floor(),
+            MachineFloatUnaryOp::Round => (x + 0.5).floor(),
+            MachineFloatUnaryOp::IsNan => f64::from(u8::from(x.is_nan())),
+        }
+    }
+}
 
 use crate::term::{TermArena, TermId, TermKind};
 
@@ -199,7 +264,7 @@ pub fn eval(
             };
             u128::from(result)
         }
-        TermKind::Cast { kind, input } => {
+        TermKind::Cast { kind, input } | TermKind::FloatCast { kind, input } => {
             let x = eval(arena, input, leaf);
             let from = arena.term(input).width_bits();
             match kind {
@@ -209,7 +274,36 @@ pub fn eval(
                 | MachineCastKind::BitReinterpret
                 | MachineCastKind::IntegerToAddress
                 | MachineCastKind::AddressToInteger => x,
+                MachineCastKind::IntegerToFloat => float_bits(signed(x, from) as f64, width),
+                MachineCastKind::FloatToInteger => (float_of(x, from) as i128) as u128,
+                MachineCastKind::FloatToFloat => float_bits(float_of(x, from), width),
             }
+        }
+        TermKind::FloatArithmetic { op, left, right } => {
+            let l = float_of(eval(arena, left, leaf), width);
+            let r = float_of(eval(arena, right, leaf), width);
+            float_bits(float_binary(op, l, r, width), width)
+        }
+        TermKind::FloatUnary { op, input } => {
+            let from = arena.term(input).width_bits();
+            let x = float_of(eval(arena, input, leaf), from);
+            let result = float_unary(op, x, from);
+            if op == MachineFloatUnaryOp::IsNan {
+                u128::from(result != 0.0)
+            } else {
+                float_bits(result, from)
+            }
+        }
+        TermKind::FloatCompare { op, left, right } => {
+            let from = arena.term(left).width_bits();
+            let l = float_of(eval(arena, left, leaf), from);
+            let r = float_of(eval(arena, right, leaf), from);
+            u128::from(match op {
+                MachineComparisonOp::Equal => l == r,
+                MachineComparisonOp::NotEqual => l != r,
+                MachineComparisonOp::LessThan => l < r,
+                MachineComparisonOp::LessThanOrEqual => l <= r,
+            })
         }
         TermKind::Extract { input, lsb_bits } => eval(arena, input, leaf) >> lsb_bits,
         TermKind::Concat { high, low } => {

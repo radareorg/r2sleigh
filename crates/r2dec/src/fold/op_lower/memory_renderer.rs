@@ -561,7 +561,7 @@ impl<'a> FoldingContext<'a> {
             CExpr::Paren(inner) => CExpr::Paren(Box::new(
                 self.integerize_certified_address_expr(inner, pointer_bits)?,
             )),
-            CExpr::FloatLit(_)
+            CExpr::FloatLit(..)
             | CExpr::StringLit(_)
             | CExpr::CharLit(_)
             | CExpr::Unary { .. }

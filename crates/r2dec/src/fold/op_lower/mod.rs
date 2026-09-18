@@ -237,7 +237,7 @@ pub(crate) fn expr_is_side_effect_free(expr: &CExpr) -> bool {
         CExpr::Observed { expr, .. } => expr_is_side_effect_free(expr),
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::Var(_)
@@ -456,6 +456,40 @@ fn type_from_size(size: u32) -> CType {
 
 /// One constant, spelled as a literal or -- where the width is one only the
 /// bit-vector prelude carries -- as the zero extension of its `u64` payload.
+/// A floating constant's spelling: a finite value as the shortest literal
+/// that reads back exactly, an infinity as the builtin, the canonical quiet
+/// NaN as the builtin, and any other NaN payload as nothing, since no C
+/// literal states it.
+pub(super) fn float_literal(bits: u64, width_bits: u32) -> Option<CExpr> {
+    let (value, canonical_nan) = match width_bits {
+        32 => (f64::from(f32::from_bits(bits as u32)), bits == 0x7fc0_0000),
+        64 => (f64::from_bits(bits), bits == 0x7ff8_0000_0000_0000),
+        _ => return None,
+    };
+    let suffix = if width_bits == 32 { "f" } else { "" };
+    let builtin = |name: &str, args: Vec<CExpr>| {
+        CExpr::call(
+            CExpr::External {
+                name: format!("__builtin_{name}{suffix}"),
+                kind: crate::symbol::ExternalKind::Intrinsic,
+            },
+            args,
+        )
+    };
+    if value.is_nan() {
+        return canonical_nan.then(|| builtin("nan", vec![CExpr::StringLit(String::new())]));
+    }
+    if value.is_infinite() {
+        let inf = builtin("inf", Vec::new());
+        return Some(if value < 0.0 {
+            CExpr::unary(crate::ast::UnaryOp::Neg, inf)
+        } else {
+            inf
+        });
+    }
+    Some(CExpr::FloatLit(value, width_bits))
+}
+
 fn wide_aware_literal(bits: u64, width_bits: u32) -> CExpr {
     if projection::c_bitvector_width_is_supported(width_bits) {
         return CExpr::call(

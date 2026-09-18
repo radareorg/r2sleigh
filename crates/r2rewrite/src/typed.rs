@@ -93,6 +93,21 @@ pub fn c_type_of(ty: &MachineType) -> CTypeLike {
         MachineType::Address { width_bits, .. } => {
             integer(*width_bits, MachineSignedness::Unsigned)
         }
+        MachineType::Float { width_bits } => CTypeLike::Float(*width_bits),
+    }
+}
+
+/// The operand type a conversion requires: the signed integer an
+/// `IntegerToFloat` reads, or the floating value the other two read.
+fn cast_operand(kind: &MachineCastKind, from: u32) -> CTypeLike {
+    match kind {
+        MachineCastKind::SignExtend | MachineCastKind::IntegerToFloat => signed(from),
+        MachineCastKind::ZeroExtend
+        | MachineCastKind::Truncate
+        | MachineCastKind::BitReinterpret
+        | MachineCastKind::IntegerToAddress
+        | MachineCastKind::AddressToInteger => unsigned(from),
+        MachineCastKind::FloatToInteger | MachineCastKind::FloatToFloat => CTypeLike::Float(from),
     }
 }
 
@@ -385,19 +400,34 @@ impl Builder<'_> {
                 self.require_term(id, 1, operand);
                 CValue::Typed(CTypeLike::u8())
             }
-            TermKind::Cast { kind, input } => {
+            TermKind::Cast { kind, input } | TermKind::FloatCast { kind, input } => {
                 self.term_produced(*input);
                 let from = self.term_width(*input);
-                let operand = match kind {
-                    MachineCastKind::SignExtend => signed(from),
-                    MachineCastKind::ZeroExtend
-                    | MachineCastKind::Truncate
-                    | MachineCastKind::BitReinterpret
-                    | MachineCastKind::IntegerToAddress
-                    | MachineCastKind::AddressToInteger => unsigned(from),
-                };
-                self.require_term(id, 0, operand);
+                self.require_term(id, 0, cast_operand(kind, from));
                 CValue::Typed(own)
+            }
+            // Floating arithmetic is performed in the operands' own format;
+            // C promotes nothing narrower than `float`.
+            TermKind::FloatArithmetic { left, right, .. } => {
+                self.term_produced(*left);
+                self.term_produced(*right);
+                self.require_term(id, 0, own.clone());
+                self.require_term(id, 1, own.clone());
+                CValue::Typed(own)
+            }
+            TermKind::FloatUnary { input, .. } => {
+                self.term_produced(*input);
+                let from = self.term_width(*input);
+                self.require_term(id, 0, CTypeLike::Float(from));
+                CValue::Typed(own)
+            }
+            TermKind::FloatCompare { left, right, .. } => {
+                self.term_produced(*left);
+                self.term_produced(*right);
+                let operand = CTypeLike::Float(self.term_width(*left));
+                self.require_term(id, 0, operand.clone());
+                self.require_term(id, 1, operand);
+                CValue::Typed(CTypeLike::Bool)
             }
             TermKind::Extract { input, .. } => {
                 self.term_produced(*input);
@@ -542,16 +572,29 @@ impl Builder<'_> {
             MachineExprKind::Cast { kind, input } => {
                 self.produced(*input);
                 let from = self.width(*input);
-                let operand = match kind {
-                    MachineCastKind::SignExtend => signed(from),
-                    MachineCastKind::ZeroExtend
-                    | MachineCastKind::Truncate
-                    | MachineCastKind::BitReinterpret
-                    | MachineCastKind::IntegerToAddress
-                    | MachineCastKind::AddressToInteger => unsigned(from),
-                };
-                self.require(id, 0, operand);
+                self.require(id, 0, cast_operand(kind, from));
                 CValue::Typed(own)
+            }
+            MachineExprKind::FloatArithmetic { left, right, .. } => {
+                self.produced(*left);
+                self.produced(*right);
+                self.require(id, 0, own.clone());
+                self.require(id, 1, own.clone());
+                CValue::Typed(own)
+            }
+            MachineExprKind::FloatUnary { input, .. } => {
+                self.produced(*input);
+                let from = self.width(*input);
+                self.require(id, 0, CTypeLike::Float(from));
+                CValue::Typed(own)
+            }
+            MachineExprKind::FloatCompare { left, right, .. } => {
+                self.produced(*left);
+                self.produced(*right);
+                let operand = CTypeLike::Float(self.width(*left));
+                self.require(id, 0, operand.clone());
+                self.require(id, 1, operand);
+                CValue::Typed(CTypeLike::Bool)
             }
             MachineExprKind::Extract { input, .. } => {
                 self.produced(*input);

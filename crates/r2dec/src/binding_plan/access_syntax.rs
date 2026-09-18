@@ -329,7 +329,11 @@ fn term_renderable(inputs: &AccessSyntaxInputs<'_>, arena: &TermArena, term: Ter
         | TermKind::Flag { .. }
         | TermKind::Concat { .. }
         | TermKind::Load { .. }
-        | TermKind::Subscript { .. } => false,
+        | TermKind::Subscript { .. }
+        | TermKind::FloatCast { .. }
+        | TermKind::FloatArithmetic { .. }
+        | TermKind::FloatUnary { .. }
+        | TermKind::FloatCompare { .. } => false,
     }
 }
 

@@ -346,7 +346,7 @@ pub fn import_with(
             MachineType::Address { .. } => {
                 address_typed.insert(binding.value());
             }
-            MachineType::Integer { .. } | MachineType::Bool { .. } => {
+            MachineType::Integer { .. } | MachineType::Bool { .. } | MachineType::Float { .. } => {
                 // A truth value is read by name like any other. Leaving the
                 // boolean carriers out meant a condition code was embedded in
                 // its reader's term instead of named there, so nothing could
@@ -582,7 +582,10 @@ impl Importer<'_> {
             Some((arena.leaf_from(ty, id, origin), Vec::new(), BTreeSet::new()))
         };
         match kind {
-            MachineExprKind::Source { binding, .. } => match self.try_substitute(binding.value()) {
+            MachineExprKind::Source { binding, .. } => match self
+                .try_substitute(binding.value())
+                .and_then(|substitution| self.in_readers_class(substitution, ty))
+            {
                 Some(substituted) => Some(substituted),
                 None => {
                     // The exact base address of a declarable stack object is
@@ -902,17 +905,73 @@ impl Importer<'_> {
             MachineExprKind::Cast { kind, input } => {
                 let (x, trace, substituted) = self.import_expr(input)?;
                 let from = self.width_of(x);
+                let floating = matches!(
+                    kind,
+                    MachineCastKind::IntegerToFloat
+                        | MachineCastKind::FloatToInteger
+                        | MachineCastKind::FloatToFloat
+                );
                 let valid = match kind {
                     MachineCastKind::ZeroExtend | MachineCastKind::SignExtend => from < width,
                     MachineCastKind::Truncate => from > width,
                     MachineCastKind::BitReinterpret => from == width,
                     MachineCastKind::IntegerToAddress | MachineCastKind::AddressToInteger => false,
+                    MachineCastKind::IntegerToFloat | MachineCastKind::FloatToInteger => true,
+                    MachineCastKind::FloatToFloat => from != width,
                 };
                 if !valid {
                     return None;
                 }
+                let kind = if floating {
+                    TermKind::FloatCast { kind, input: x }
+                } else {
+                    TermKind::Cast { kind, input: x }
+                };
+                Some((self.arena.intern(ty, kind), trace, substituted))
+            }
+            MachineExprKind::FloatArithmetic { op, left, right } => {
+                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                if self.width_of(l) != width || self.width_of(r) != width {
+                    return None;
+                }
                 Some((
-                    self.arena.intern(ty, TermKind::Cast { kind, input: x }),
+                    self.arena.intern(
+                        ty,
+                        TermKind::FloatArithmetic {
+                            op,
+                            left: l,
+                            right: r,
+                        },
+                    ),
+                    trace,
+                    substituted,
+                ))
+            }
+            MachineExprKind::FloatUnary { op, input } => {
+                let (x, trace, substituted) = self.import_expr(input)?;
+                if op != r2ssa::MachineFloatUnaryOp::IsNan && self.width_of(x) != width {
+                    return None;
+                }
+                Some((
+                    self.arena.intern(ty, TermKind::FloatUnary { op, input: x }),
+                    trace,
+                    substituted,
+                ))
+            }
+            MachineExprKind::FloatCompare { op, left, right } => {
+                let (l, r, trace, substituted) = self.import_pair(left, right)?;
+                if self.width_of(l) != self.width_of(r) {
+                    return None;
+                }
+                Some((
+                    self.arena.intern(
+                        ty,
+                        TermKind::FloatCompare {
+                            op,
+                            left: l,
+                            right: r,
+                        },
+                    ),
                     trace,
                     substituted,
                 ))
@@ -1296,6 +1355,31 @@ impl Importer<'_> {
 
     /// The producer's term in place of a read of `value`, under the policy in
     /// the module doc; `None` keeps the read as a leaf.
+    #[allow(clippy::type_complexity)]
+    /// A producer's term stands in for a read only in the class the reader
+    /// reads: a floating reader over an integer term is a reinterpretation,
+    /// not a substitution. A literal is bits and takes the reader's type.
+    #[allow(clippy::type_complexity)]
+    fn in_readers_class(
+        &mut self,
+        substitution: (TermId, Vec<Rewrite>, BTreeSet<CanonicalInstructionId>),
+        ty: MachineType,
+    ) -> Option<(TermId, Vec<Rewrite>, BTreeSet<CanonicalInstructionId>)> {
+        let (term, trace, substituted) = substitution;
+        let produced = self.arena.term(term);
+        if produced.ty.is_float() == ty.is_float() {
+            return Some((term, trace, substituted));
+        }
+        match produced.kind {
+            TermKind::Literal(bits) => Some((
+                self.arena.intern(ty, TermKind::Literal(bits)),
+                trace,
+                substituted,
+            )),
+            _ => None,
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     fn try_substitute(
         &mut self,

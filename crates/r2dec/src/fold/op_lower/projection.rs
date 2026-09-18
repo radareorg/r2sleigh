@@ -168,6 +168,12 @@ pub(super) fn project_machine_use_of(
                 CValue::Typed(target),
             ))
         }
+        // A floating conversion is an operation of its own, never a use slice.
+        MachineCastKind::IntegerToFloat
+        | MachineCastKind::FloatToInteger
+        | MachineCastKind::FloatToFloat => Err(MachineUseProjectionError::UnsupportedIntegerWidth(
+            target_width,
+        )),
         MachineCastKind::IntegerToAddress => Err(
             MachineUseProjectionError::IntegerToAddressRequiresType(target_width),
         ),

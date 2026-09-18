@@ -1625,7 +1625,7 @@ fn collect_expr_observation_scopes(
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::Var(_)
@@ -1816,7 +1816,7 @@ fn visit_expr_observations(expr: &CExpr, visit: &mut impl FnMut(RenderObservatio
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::Var(_)
@@ -2285,7 +2285,7 @@ fn audit_expr(
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::External { .. }
@@ -2774,7 +2774,7 @@ pub(crate) fn expr_reads_symbol(expr: &CExpr, symbol: crate::symbol::SymbolId) -
         CExpr::Observed { .. } => unreachable!("unobserved expression returned a wrapper"),
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::External { .. }

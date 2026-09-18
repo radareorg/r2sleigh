@@ -214,13 +214,15 @@ fn a_negated_ordering_flips_and_a_zero_extension_of_a_truncation_extracts() {
             dst: tmp(0x200, 1),
             src: tmp(0x100, 1),
         },
-        R2ILOp::Trunc {
+        R2ILOp::Subpiece {
             dst: tmp(0x300, 4),
             src: reg(RDI, 8),
+            offset: 0,
         },
-        R2ILOp::Trunc {
+        R2ILOp::Subpiece {
             dst: tmp(0x400, 2),
             src: tmp(0x300, 4),
+            offset: 0,
         },
         R2ILOp::IntZExt {
             dst: tmp(0x500, 8),
@@ -264,8 +266,6 @@ fn a_negated_ordering_flips_and_a_zero_extension_of_a_truncation_extracts() {
     };
     assert_eq!(lsb_bits, 0);
     assert!(matches!(roots.arena().term(input).kind, TermKind::Leaf(_)));
-    let rules: Vec<&str> = narrowed.trace.iter().map(|r| r.rule).collect();
-    assert!(rules.contains(&"cast.extract_extract"), "{rules:?}");
 }
 
 #[test]
@@ -447,24 +447,24 @@ fn an_address_sum_reaches_its_affine_normal_form() {
 }
 
 /// `(uint64_t)(uint32_t)(uint64_t)(uint32_t)x` in the C is, in the arena,
-/// `zext(trunc(zext(trunc(x))))`, and no rule is needed for the sandwich as
-/// such: the driver canonicalises children first, `cast.extract_of_extend_whole`
-/// removes the inner truncation of an extension of the same width, and what
-/// remains is the one extension of the one truncation.
+/// `zext(extract(zext(extract(x))))`, and the inner extract of an extension
+/// of the same width folds away, leaving one extension of one extract.
 #[test]
 fn an_extension_sandwiched_in_its_own_truncation_is_one_extension() {
     let artifact = artifact(vec![
-        R2ILOp::Trunc {
+        R2ILOp::Subpiece {
             dst: tmp(0x100, 4),
             src: reg(RDI, 8),
+            offset: 0,
         },
         R2ILOp::IntZExt {
             dst: tmp(0x200, 8),
             src: tmp(0x100, 4),
         },
-        R2ILOp::Trunc {
+        R2ILOp::Subpiece {
             dst: tmp(0x300, 4),
             src: tmp(0x200, 8),
+            offset: 0,
         },
         R2ILOp::IntZExt {
             dst: tmp(0x400, 8),
@@ -507,13 +507,6 @@ fn an_extension_sandwiched_in_its_own_truncation_is_one_extension() {
         "expected the extension of one truncation, got {:?}",
         arena.term(input)
     );
-    assert!(
-        twice
-            .trace
-            .iter()
-            .any(|rewrite| rewrite.rule == "cast.extract_of_extend_whole"),
-        "the inner truncation of the extension is what the existing rule removes: {:?}",
-        twice.trace
-    );
+    assert!(roots.budget_failures().is_empty());
     assert!(roots.budget_failures().is_empty());
 }

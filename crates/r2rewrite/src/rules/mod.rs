@@ -116,11 +116,14 @@ fn measure_memo(
         }
         if matches!(
             term.kind,
-            TermKind::Select { .. } | TermKind::Compare { .. }
+            TermKind::Select { .. } | TermKind::Compare { .. } | TermKind::FloatCompare { .. }
         ) {
             m.selections = 1;
         }
-        if matches!(term.kind, TermKind::Cast { .. } | TermKind::Extract { .. }) {
+        if matches!(
+            term.kind,
+            TermKind::Cast { .. } | TermKind::FloatCast { .. } | TermKind::Extract { .. }
+        ) {
             m.cast_width = u64::from(term.width_bits());
         }
         let children: Vec<TermId> = term.kind.children().collect();

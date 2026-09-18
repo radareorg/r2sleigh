@@ -92,9 +92,10 @@ fn a_signed_comparison_requires_signed_operands_and_produces_a_truth_value() {
 #[test]
 fn narrow_arithmetic_is_computed_in_int_and_read_back_at_its_width() {
     let artifact = artifact(vec![
-        R2ILOp::Trunc {
+        R2ILOp::Subpiece {
             dst: tmp(0x100, 1),
             src: reg(RDI, 8),
+            offset: 0,
         },
         R2ILOp::IntAdd {
             dst: tmp(0x200, 1),

@@ -1313,6 +1313,15 @@ impl BindingMachineProjectionFailure {
                 r2ssa::MachineCastKind::AddressToInteger => {
                     "binding_plan_machine_invalid_address_to_integer_width"
                 }
+                r2ssa::MachineCastKind::IntegerToFloat => {
+                    "binding_plan_machine_invalid_integer_to_float_width"
+                }
+                r2ssa::MachineCastKind::FloatToInteger => {
+                    "binding_plan_machine_invalid_float_to_integer_width"
+                }
+                r2ssa::MachineCastKind::FloatToFloat => {
+                    "binding_plan_machine_invalid_float_to_float_width"
+                }
             },
             Self::InvalidSubpiece { .. } => "binding_plan_machine_invalid_subpiece",
             Self::InvalidChild { .. } => "binding_plan_machine_invalid_child",
@@ -4078,7 +4087,7 @@ pub(crate) fn collect_expr_var_names(expr: &CExpr, out: &mut HashSet<crate::symb
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::CharLit(_)
         | CExpr::StringLit(_)
         | CExpr::Sizeof(_)

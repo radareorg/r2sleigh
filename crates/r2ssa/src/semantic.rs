@@ -5916,6 +5916,32 @@ fn reaching_abi_value_before(
             {
                 continue;
             }
+            // A lane write into the root: the value at the boundary is the
+            // inserted value when the lane is the storage wanted, an older
+            // definition when the lane is beside it.
+            if let SSAOp::Insert(insert) = op
+                && contained_register_storage_offset(dst_storage, storage).is_some()
+                && let Some(lsb_bits) = insert.position.constant_bits()
+            {
+                let lane = CanonicalStorageId {
+                    space: dst_storage.space,
+                    offset: dst_storage.offset + lsb_bits / 8,
+                    size: insert.value.size,
+                };
+                if lane == storage {
+                    r2il::refusal_evidence!(
+                        "reaching-abi-value",
+                        "({block_addr:#x}, {op_index}) inserts {storage:?} into {dst_storage:?}"
+                    );
+                    return graph
+                        .inst(producer)
+                        .and_then(|inst| inst.inputs.get(1).copied())
+                        .map(|value| ReachingAbiPath::Reaches(ReachingAbiState::Value(value)));
+                }
+                if lsb_bits % 8 == 0 && !register_storages_overlap(lane, storage) {
+                    continue;
+                }
+            }
             // A later overlapping slice means an older exact-width definition
             // is not the value at this boundary. Generic boundary recovery has
             // no implicit register-merge semantics, so it must fail closed.
@@ -9782,10 +9808,14 @@ pub(crate) fn exact_logical_return_projection(
         return None;
     }
     match projection.kind() {
+        // The value the walk reached is the carrier's own, or the operand a
+        // lane insert wrote into it, which has no storage of its own.
         SourceCarrierKind::Full
             if projection.size_bits() == physical_bits
                 && physical_value.var.size == storage.size
-                && physical_value.canonical_storage == Some(storage) =>
+                && physical_value
+                    .canonical_storage
+                    .is_none_or(|reached| reached == storage) =>
         {
             Some((boundary.value, storage.size, Some(logical)))
         }

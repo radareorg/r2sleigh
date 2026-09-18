@@ -325,6 +325,40 @@ pd:s | jq -Rs 'test("int32_t dbg_complex_check[(]int32_t a, int32_t b[)]") and c
 EOF
 RUN
 
+NAME=pd:s renders arm64 floating parameters, arithmetic and a floating return
+FILE=bins/stress_test_opt
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+true
+true
+true
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s sym._fp_interpolate > /dev/null
+pd:s | jq -Rs 'contains("double dbg_fp_interpolate(double a, double b, double t)") and contains(" = 1.0 - t;") and contains(" = b * t;")'
+s sym._fp_magnitude > /dev/null
+pd:s | jq -Rs 'contains("float dbg_fp_magnitude(float x, float y, float z)") and contains(" = x * x;") and contains("r2sleigh_float_sqrt_32(")'
+s sym._fp_polynomial > /dev/null
+pd:s | jq -Rs 'contains(" = x * 3.0;") and contains("- 7.0;")'
+EOF
+RUN
+
+NAME=pd:s renders an x86-64 floating polynomial from its constant pool
+FILE=bins/stress_test_opt_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+true
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s dbg.fp_magnitude > /dev/null
+pd:s | jq -Rs 'contains("float dbg_fp_magnitude(float x, float y, float z)") and contains("r2sleigh_float_sqrt_32(")'
+EOF
+RUN
+
 NAME=pd:s renders an x86-64 import thunk without a prototype as a residual naming the import
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

@@ -62,7 +62,8 @@ pub enum CExpr {
     /// Unsigned integer literal.
     UIntLit(u64),
     /// Float literal.
-    FloatLit(f64),
+    /// A floating literal and the width it is spelled at, 32 or 64.
+    FloatLit(f64, u32),
     /// String literal.
     StringLit(String),
     /// Character literal.
@@ -240,7 +241,9 @@ impl CExpr {
         match (left, right) {
             (Self::IntLit(left), Self::IntLit(right)) => left == right,
             (Self::UIntLit(left), Self::UIntLit(right)) => left == right,
-            (Self::FloatLit(left), Self::FloatLit(right)) => left == right,
+            (Self::FloatLit(left, lw), Self::FloatLit(right, rw)) => {
+                left.to_bits() == right.to_bits() && lw == rw
+            }
             (Self::StringLit(left), Self::StringLit(right)) => left == right,
             (Self::CharLit(left), Self::CharLit(right)) => left == right,
             (Self::Var(left), Self::Var(right)) => left == right,
@@ -804,7 +807,7 @@ impl CExpr {
             }
             Self::IntLit(_)
             | Self::UIntLit(_)
-            | Self::FloatLit(_)
+            | Self::FloatLit(..)
             | Self::StringLit(_)
             | Self::CharLit(_)
             | Self::Var(_)
@@ -871,7 +874,7 @@ impl CExpr {
             Self::Comma(items) => items.iter_mut().for_each(|item| item.visit_types_mut(f)),
             Self::IntLit(_)
             | Self::UIntLit(_)
-            | Self::FloatLit(_)
+            | Self::FloatLit(..)
             | Self::StringLit(_)
             | Self::CharLit(_)
             | Self::Var(_)
@@ -2015,7 +2018,7 @@ pub(crate) fn remap_render_observation_ids<E>(
             }
             CExpr::IntLit(_)
             | CExpr::UIntLit(_)
-            | CExpr::FloatLit(_)
+            | CExpr::FloatLit(..)
             | CExpr::StringLit(_)
             | CExpr::CharLit(_)
             | CExpr::Var(_)
@@ -2168,7 +2171,7 @@ fn inspect_expr_observations<E>(
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::Var(_)
@@ -2255,7 +2258,7 @@ fn visit_expr_observations<E>(
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::Var(_)
@@ -2312,7 +2315,7 @@ fn strip_expr_observations(expr: &mut CExpr) {
         }
         CExpr::IntLit(_)
         | CExpr::UIntLit(_)
-        | CExpr::FloatLit(_)
+        | CExpr::FloatLit(..)
         | CExpr::StringLit(_)
         | CExpr::CharLit(_)
         | CExpr::Var(_)

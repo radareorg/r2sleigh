@@ -1091,6 +1091,7 @@ impl BindingPlan {
 
         crate::stage_timing::mark("plan_partition");
         let mut bindings = Vec::with_capacity(components.len());
+        let floating_views = super::rules::floating_views(&machine_projection);
 
         let mut call_clobbers = BTreeSet::new();
         for mut component in components {
@@ -1152,6 +1153,7 @@ impl BindingPlan {
                         .machine_context()
                         .memory_model()
                         .default_address_bits(),
+                    super::rules::floating_width_of_component(&floating_views, &component.members),
                 ),
                 certificate: BindingCertificate {
                     sources: component

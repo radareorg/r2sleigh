@@ -124,6 +124,14 @@ fn spell_constant(expr: CExpr, to: &CType, pointer_bits: u32) -> CExpr {
     if matches!(to, CType::Pointer(_)) {
         return CExpr::cast(to.clone(), expr);
     }
+    // A constant read as a floating value is that value's bits; a payload no
+    // literal spells keeps the integer spelling and reinterprets.
+    if let CType::Float(bits) = to
+        && let Some(raw) = literal_bits(&expr)
+        && let Some(spelled) = super::float_literal(raw, *bits)
+    {
+        return crate::ast::carry_all_expr_observations(&expr, spelled);
+    }
     let Some((signed, bits)) = integer_meta(to, pointer_bits) else {
         return expr;
     };
@@ -280,10 +288,46 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
     ) {
         return expr;
     }
-    // A floating-point conversion is a value conversion, and it is what the
-    // operation asked for.
-    if matches!(from, CType::Float(_)) || matches!(to, CType::Float(_)) {
-        return CExpr::cast(to.clone(), expr);
+    // A floating value met at an integer boundary, or the reverse, is the
+    // same bits read the other way: the machine states every value
+    // conversion as its own operation, so a boundary never converts.
+    match (from, to) {
+        (CType::Float(from_bits), CType::Float(to_bits)) => {
+            return if from_bits == to_bits {
+                expr
+            } else {
+                CExpr::cast(to.clone(), expr)
+            };
+        }
+        (CType::Float(bits), _) => {
+            let raw = CExpr::call(
+                CExpr::External {
+                    name: format!("r2sleigh_float_to_bits_{bits}"),
+                    kind: crate::symbol::ExternalKind::Intrinsic,
+                },
+                vec![expr],
+            );
+            return if *to == CType::uint(*bits) {
+                raw
+            } else {
+                CExpr::cast(to.clone(), raw)
+            };
+        }
+        (_, CType::Float(bits)) => {
+            let raw = if *from == CType::uint(*bits) {
+                expr
+            } else {
+                CExpr::cast(CType::uint(*bits), expr)
+            };
+            return CExpr::call(
+                CExpr::External {
+                    name: format!("r2sleigh_float_from_bits_{bits}"),
+                    kind: crate::symbol::ExternalKind::Intrinsic,
+                },
+                vec![raw],
+            );
+        }
+        _ => {}
     }
     let from_integer = integer_meta(from, pointer_bits);
     let to_integer = integer_meta(to, pointer_bits);

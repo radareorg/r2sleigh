@@ -754,6 +754,7 @@ pub(super) fn declaration_type_for_binding(
     members: impl IntoIterator<Item = ValueId>,
     width_bits: u32,
     ptr_bits: u32,
+    floating_bits: Option<u32>,
 ) -> r2types::CTypeLike {
     let machine = r2types::CTypeLike::machine_bits(width_bits);
     let evidence = source_owned.evidence_types();
@@ -768,10 +769,88 @@ pub(super) fn declaration_type_for_binding(
             Some(_) => return machine,
         }
     }
-    let Some(agreed) = agreed else {
+    // With nothing stated, an object the machine defines or only ever reads
+    // as a floating value is one; its integer reads reinterpret.
+    let Some(agreed) = agreed.or(floating_bits.map(r2types::CTypeLike::Float)) else {
         return machine;
     };
     admit_declaration(agreed, width_bits, ptr_bits)
+}
+
+/// How the machine projection views one value: the floating width its
+/// definition produces, and the floating and other widths its reads take.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct FloatingView {
+    pub(super) defined: Option<u32>,
+    pub(super) float_read: Option<u32>,
+    pub(super) other_reads: u32,
+}
+
+/// One pass over the projection: every value's floating view.
+pub(super) fn floating_views(
+    projection: &r2ssa::MachineProjection,
+) -> std::collections::BTreeMap<ValueId, FloatingView> {
+    let mut views: std::collections::BTreeMap<ValueId, FloatingView> = Default::default();
+    // A copy or a merge reads whatever type its source has; such a read says
+    // nothing about the source's class.
+    let mut neutral = std::collections::BTreeSet::new();
+    for entity in projection.entities() {
+        let Some(root) = projection.expr(entity.root()) else {
+            continue;
+        };
+        if let r2ssa::MachineType::Float { width_bits } = *root.ty() {
+            views.entry(entity.output().value()).or_default().defined = Some(width_bits);
+        }
+        match root.kind() {
+            r2ssa::MachineExprKind::Copy { input } => {
+                neutral.insert(*input);
+            }
+            r2ssa::MachineExprKind::Phi { inputs } => neutral.extend(inputs.iter().copied()),
+            _ => {}
+        }
+    }
+    for (id, expr) in projection.arena().iter() {
+        let r2ssa::MachineExprKind::Source { binding, .. } = expr.kind() else {
+            continue;
+        };
+        if neutral.contains(&id) {
+            continue;
+        }
+        let view = views.entry(binding.value()).or_default();
+        match expr.ty() {
+            r2ssa::MachineType::Float { width_bits } => view.float_read = Some(*width_bits),
+            _ => view.other_reads += 1,
+        }
+    }
+    views
+}
+
+/// The floating width a component is declared at, if any member is defined
+/// floating or every read of every member is floating at one width.
+pub(super) fn floating_width_of_component(
+    views: &std::collections::BTreeMap<ValueId, FloatingView>,
+    members: &std::collections::BTreeSet<ValueId>,
+) -> Option<u32> {
+    if let Some(width) = members
+        .iter()
+        .find_map(|value| views.get(value).and_then(|view| view.defined))
+    {
+        return Some(width);
+    }
+    let mut width = None;
+    for value in members {
+        let view = views.get(value).copied().unwrap_or_default();
+        if view.other_reads > 0 {
+            return None;
+        }
+        match (width, view.float_read) {
+            (_, None) => {}
+            (None, Some(read)) => width = Some(read),
+            (Some(agreed), Some(read)) if agreed == read => {}
+            _ => return None,
+        }
+    }
+    width
 }
 
 /// The type a stack object is declared with.
@@ -2052,7 +2131,10 @@ fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
         | Kind::Cast { .. }
         | Kind::Extract { .. }
         | Kind::Concat { .. }
-        | Kind::ArithmeticFlag { .. } => true,
+        | Kind::ArithmeticFlag { .. }
+        | Kind::FloatArithmetic { .. }
+        | Kind::FloatUnary { .. }
+        | Kind::FloatCompare { .. } => true,
         // A read is a memory effect and a merge is not an expression; the
         // remaining four have no form in the materialiser.
         Kind::Source { .. }
