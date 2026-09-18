@@ -516,6 +516,36 @@ impl NormalizationOrigins {
         &self.removed_phis
     }
 
+    /// Header-phi inputs a relocated initializer stands for without spelling:
+    /// every replaced edge but the one carrying the value the initializer
+    /// copies. Nothing renders those reads, so nothing they read is spelled
+    /// through them.
+    pub(crate) fn superseded_phi_edges(&self, graph: &r2ssa::SsaGraph) -> BTreeSet<UseSite> {
+        let spelled = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.rows.iter())
+            .filter_map(|origin| match origin {
+                NormalizedOpOrigin::RelocatedInitializer(origin) => Some(origin.source_value),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let input_of = |site: &UseSite| {
+            graph
+                .inst(site.inst)
+                .and_then(|inst| inst.inputs.get(site.input_idx).copied())
+        };
+        let mut sites = BTreeSet::new();
+        for origin in self.blocks.iter().flat_map(|block| block.rows.iter()) {
+            if let NormalizedOpOrigin::RelocatedInitializer(origin) = origin {
+                sites.extend(origin.replaced_sites.iter().copied());
+            }
+        }
+        sites.extend(self.replaced_phi_edges.iter().map(|edge| edge.incoming));
+        sites.retain(|site| input_of(site).is_none_or(|input| !spelled.contains(&input)));
+        sites
+    }
+
     #[cfg(test)]
     pub(crate) fn replaced_phi_edges(&self) -> &[PhiEdgeOrigin] {
         &self.replaced_phi_edges

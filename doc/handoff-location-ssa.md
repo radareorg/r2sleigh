@@ -27371,3 +27371,46 @@ moves on to `unprovable_execution_order`: a gap opened at `0x10000c67c:4`,
 the `ldr d0, [x12, w4, uxtw]` of a copy loop, because the stack access
 `*(uint64_t*)(x12 + w4)` is spelled from the address operands and so never
 reads the bound object's symbol. bzip2 census: 60 bodies, 1 refused.
+
+### BZ2_decompress: a byte-indexed slot access, and what naming the object owes
+
+The last bzip2 refusal was traced through five layers with lldb stopped in
+`syntax_for` and in the journal's discharge walk; each layer was a fact the
+observation model had wrong about a stack buffer read at an offset the machine
+computes (`ldr d0, [x12, w4, uxtw]`, `str d0, [x10, x11]` with `x11 = x8 &
+0xf8`), where the buffer's base is `x29 - 0x80` and that base also flows into a
+pointer merge.
+
+* The access syntax had no arm for it. The rewriter's subscript needs an index
+  the stride divides; a byte offset into a buffer read eight bytes at a time is
+  not an element of anything but the byte array. `AccessSyntax::SlotIndexedBytes`
+  spells it `*(uint64_t *)((uint8_t *)buf + index)`, with the index taken from
+  `index_for_address`.
+* The discharge walk then asked the access expression to represent the base
+  register (`x10`, planned Inline because merges read it too). The object's
+  name stands for every operand of the address that resolves to the object, so
+  those are seeded as represented, and one whose producer the access itself
+  discharges has its value cell elided once as `DeadStackBase` rather than
+  occurring at every access (eleven conflicts, otherwise). A producer the
+  expression's own replacement already marks is not discharged a second time.
+* A read of the frame pointer inside a discharged address producer was "exact
+  and unaccounted": a stack address the plan never renders is absorbed the way
+  a bound base already was.
+* `inlined_address_producers` kept `x10`'s producer out because `x10 + i`
+  reads `x10` -- a read by a producer the same walk had discharged now counts
+  as spelling nothing.
+* Three promoted-slot copies whose readers were all dead were elided as
+  `DeadUnusedTemporary` without their live-value obligations being closed;
+  the propagation loop now closes them as the plan-elided path does.
+
+Diagnostics added on the way: `address-producer-kept`, `effect-occurrence`
+(every effect marker with its origin), `zero-occurrence-cells`, the operand's
+disposition on the seal's unaccounted-use dump, and the superseded-phi-edge
+set (which was empty here; the accessor stays).
+
+`BZ2_decompress` renders, 6.6k lines; every bzip2 body renders. The
+`sendMTFValues` and `BZ2_compressBlock` NEON bodies are exact but spell every
+lane, which is the next quality class for those two.
+Gates: corpus 60/60 on every column, r2r at the recorded 2 XX, bzip2 census
+61 bodies, 43 declarations, 3 undeclared stubs, 0 refused. The shape is pinned
+in the shapes corpus as `shape_byte_indexed_buffer`.

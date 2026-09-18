@@ -24,6 +24,10 @@ pub(crate) enum AccessSyntax {
     /// Bytes of the slot at an offset, at the access's own width: a slot read
     /// at several widths, or narrower than it is declared, or inside it.
     SlotBytes { binding: BindingId, offset: i64 },
+    /// Bytes of the slot at an offset the machine computes, at the access's
+    /// own width: `*(T *)((uint8_t *)&slot + index)`, the byte-indexed copy
+    /// loop that reads eight bytes at a time from a buffer of bytes.
+    SlotIndexedBytes { binding: BindingId, index: ValueId },
     /// An element of an array a parameter points at, optionally a member of it.
     ParamArray {
         base: ValueId,
@@ -146,6 +150,16 @@ fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) ->
         if let Some(offset) = fact.object_offset.filter(|offset| *offset >= 0) {
             return AccessSyntax::SlotBytes { binding, offset };
         }
+    }
+    // An offset the machine computes into a bound slot: the object's own
+    // name plus the index, in bytes, since an index no stride divides is not
+    // an element of anything but the byte array.
+    if fact.width > 0
+        && indexed
+        && let Some(binding) = bound
+        && let Some(index) = inputs.objects.index_for_address(fact.address)
+    {
+        return AccessSyntax::SlotIndexedBytes { binding, index };
     }
     // A member fact blocks the subscript spelling above, because `s.field`
     // beats `s[3]` when a slot arm can spell it. Where none could -- the base

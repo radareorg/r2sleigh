@@ -886,6 +886,8 @@ pub(crate) struct LegacyObservationJournal {
     coalesced_carrier_uses: BTreeSet<UseSite>,
     /// Bindings whose every read is a return or a merge of the binding itself.
     return_only_carriers: BTreeSet<crate::binding_plan::BindingId>,
+    /// Phi inputs a relocated initializer supersedes: reads no text spells.
+    superseded_phi_edges: BTreeSet<UseSite>,
     /// Removed carrier phis for which every incoming edge is already accounted
     /// by SSA identity or one of `coalesced_carrier_copy_sites`.
     coalesced_carrier_phi_writes: BTreeSet<InstId>,
@@ -2591,6 +2593,13 @@ impl LegacyObservationJournal {
             .map(|id| (id, 0))
             .collect();
         let materialized_edges = origins.materialized_phi_edges_by_definition();
+        let superseded_phi_edges = origins.superseded_phi_edges(graph);
+        r2il::refusal_evidence!(
+            "superseded-phi-edges",
+            "{} header inputs a relocated initializer stands for: {:?}",
+            superseded_phi_edges.len(),
+            superseded_phi_edges.iter().take(12).collect::<Vec<_>>()
+        );
         let materialized_removed_phis = origins
             .removed_phis()
             .iter()
@@ -2613,6 +2622,7 @@ impl LegacyObservationJournal {
             coalesced_store_sites,
             coalesced_carrier_uses,
             return_only_carriers,
+            superseded_phi_edges,
             coalesced_carrier_phi_writes,
             coalesced_copy_writes,
             coalesced_copy_outputs,
@@ -2938,6 +2948,18 @@ impl LegacyObservationJournal {
                 elided_writes
                     .entry(definition)
                     .or_insert(r2ssa::ledger::ElisionReason::DeadUnusedTemporary);
+                // The statement renders nothing, so the value it owed the
+                // ledger is closed the same way a plan-elided one is.
+                self.dead_unused_value_effects.extend(
+                    source
+                        .source()
+                        .obligations()
+                        .obligations_for_inst(definition)
+                        .filter(|obligation| {
+                            obligation.id.kind == r2ssa::SemanticObligationKind::LiveValueProducer
+                        })
+                        .map(|obligation| obligation.id),
+                );
             }
         }
         for value in dead_inline_values {
@@ -3283,8 +3305,19 @@ impl LegacyObservationJournal {
         discharged: &[InstId],
         expr: Option<&CExpr>,
     ) -> Result<Vec<ObservationTarget>, LegacyObservationJournalError> {
+        let rendered = rendered.into_iter().collect::<Vec<_>>();
+        self.discharged_instruction_targets_with(&rendered, discharged, expr)
+    }
+
+    /// The discharge walk with every value the expression already stands for.
+    fn discharged_instruction_targets_with(
+        &mut self,
+        rendered: &[ValueId],
+        discharged: &[InstId],
+        expr: Option<&CExpr>,
+    ) -> Result<Vec<ObservationTarget>, LegacyObservationJournalError> {
         let mut targets = Vec::new();
-        let mut represented_values: BTreeSet<ValueId> = rendered.into_iter().collect();
+        let mut represented_values: BTreeSet<ValueId> = rendered.iter().copied().collect();
         if let Some(expr) = expr {
             represented_values.extend(self.expr_value_observations(expr));
         }
@@ -3319,7 +3352,7 @@ impl LegacyObservationJournal {
             // of the expression now standing in the reader's place.
             if let Some(output) = inst.output {
                 if expr.is_some()
-                    && Some(output) != rendered
+                    && !rendered.contains(&output)
                     && !matches!(
                         self.plan.disposition(output),
                         Some(ValueDisposition::Inline { .. })
@@ -3372,6 +3405,29 @@ impl LegacyObservationJournal {
                 // occurrence, and saying it was rendered would leave the
                 // pointer's value cell owed to nothing.
                 if expr.is_some() && self.stack_base_absorbed_by(input, &rendered_symbols) {
+                    targets.push(ObservationTarget::Use {
+                        site,
+                        observation: LegacyUseObservation::Elided(
+                            r2ssa::ledger::ElisionReason::DeadStackBase,
+                        ),
+                        block,
+                    });
+                    continue;
+                }
+                // A stack address the plan never renders -- the frame pointer
+                // an address was measured from -- is absorbed the same way:
+                // the object's name stands for every step from the frame to it.
+                if expr.is_some()
+                    && !matches!(
+                        self.plan.disposition(input),
+                        Some(ValueDisposition::Bound { .. })
+                    )
+                    && self
+                        .source
+                        .objects()
+                        .object_for_value(input, r2il::SpaceId::Ram)
+                        .is_some()
+                {
                     targets.push(ObservationTarget::Use {
                         site,
                         observation: LegacyUseObservation::Elided(
@@ -3739,7 +3795,18 @@ impl LegacyObservationJournal {
         // The address the machine computed has no separate spelling here: the
         // rendered lvalue names the object it addressed, so the statements that
         // computed the address vanished into it and it answers for their cells.
-        let discharged = self.inlined_address_producers(fact.address);
+        // A producer the expression's own replacement already stands for --
+        // the rewriter's subscript marks every value it absorbed -- is not
+        // discharged a second time here.
+        let already_represented = self.expr_value_observations(&expr);
+        let mut discharged = self.inlined_address_producers(fact.address);
+        discharged.retain(|inst| {
+            self.source
+                .graph()
+                .inst(*inst)
+                .and_then(|inst| inst.output)
+                .is_none_or(|output| !already_represented.contains(&output))
+        });
         let mut targets = vec![ObservationTarget::StackAccess {
             access,
             object: fact.object,
@@ -3748,7 +3815,44 @@ impl LegacyObservationJournal {
             is_write,
             rendered_block: None,
         }];
-        targets.extend(self.discharged_instruction_targets(None, &discharged, Some(&expr))?);
+        // An operand of the address that is the object's own address is
+        // spelled by the object's name: `buf + i` reads `buf` by naming it,
+        // whatever else the base register was read for.
+        let graph = self.source.graph();
+        let objects = self.source.objects();
+        let spelled_by_the_object = discharged
+            .iter()
+            .filter_map(|inst| graph.inst(*inst))
+            .flat_map(|inst| inst.inputs.iter().copied())
+            .filter(|input| {
+                objects.object_for_value(*input, r2il::SpaceId::Ram) == Some(fact.object)
+            })
+            .collect::<Vec<_>>();
+        // One whose producer this access discharges has no occurrence of its
+        // own anywhere: the object's name stands for it, so its cell is
+        // elided once, the way the geometry elides a frame address. One spelled
+        // somewhere else keeps the cell its own spelling owns.
+        let elided_bases = spelled_by_the_object
+            .iter()
+            .copied()
+            .filter(|value| {
+                matches!(
+                    self.plan.disposition(*value),
+                    Some(ValueDisposition::Inline { .. })
+                ) && graph
+                    .def_inst(*value)
+                    .is_some_and(|definition| discharged.contains(&definition))
+            })
+            .collect::<Vec<_>>();
+        for value in elided_bases {
+            let slot = self.value_slot_mut(value)?;
+            Self::record_removed_value(slot, r2ssa::ledger::ElisionReason::DeadStackBase);
+        }
+        targets.extend(self.discharged_instruction_targets_with(
+            &spelled_by_the_object,
+            &discharged,
+            Some(&expr),
+        )?);
         // The statements went here, and so did the obligations they owed: a
         // frame address computation carries a live-value producer, and its
         // occurrence is this access.
@@ -3780,6 +3884,7 @@ impl LegacyObservationJournal {
             .unobserved_merges()
             .unobserved_uses()
             .contains(&site)
+            || self.superseded_phi_edges.contains(&site)
     }
 
     /// The definitions an inlined address computation is made of.
@@ -3820,11 +3925,33 @@ impl LegacyObservationJournal {
             // that spells it is answered there, and answering again here
             // reports one effect discharged twice; a read on an unobserved
             // merge edge spells nothing and does not disqualify it.
-            if !graph
-                .use_sites(value)
-                .iter()
-                .all(|site| self.use_spells_nothing_but_an_address(*site))
-            {
+            // A read by a producer this same walk has already discharged is
+            // part of the address being spelled: `x10 + i` reads `x10` on the
+            // way to the object's name, not anywhere a reader could see it.
+            if !graph.use_sites(value).iter().all(|site| {
+                discharged.contains(&site.inst) || self.use_spells_nothing_but_an_address(*site)
+            }) {
+                r2il::refusal_evidence!(
+                    "address-producer-kept",
+                    "{value:?} defined by {definition:?} is read where something spells it: {:?}",
+                    graph
+                        .use_sites(value)
+                        .iter()
+                        .map(|site| (
+                            *site,
+                            self.plan.use_disposition(*site),
+                            self.source
+                                .unobserved_merges()
+                                .unobserved_uses()
+                                .contains(site),
+                            self.uses
+                                .get(site.inst.0 as usize)
+                                .and_then(|row| row.get(site.input_idx))
+                                .cloned()
+                                .flatten()
+                        ))
+                        .collect::<Vec<_>>()
+                );
                 continue;
             }
             discharged.push(definition);
@@ -4345,7 +4472,11 @@ impl LegacyObservationJournal {
                                     .object_for_value(value, r2il::SpaceId::Ram)
                             });
                         eprintln!(
-                            "unaccounted use inst={inst} input={input_idx} object={addressed:?} kind={:?} accesses={:?} payload={:?} targets={targets:?}",
+                            "unaccounted use inst={inst} input={input_idx} disposition={:?} object={addressed:?} kind={:?} accesses={:?} payload={:?} targets={targets:?}",
+                            graph
+                                .inst(InstId(inst as u32))
+                                .and_then(|inst| inst.inputs.get(input_idx).copied())
+                                .and_then(|input| self.plan.disposition(input)),
                             addressed
                                 .and_then(|object| self.source.objects().object(object))
                                 .map(|object| format!("{:?}", object.kind)
@@ -5134,6 +5265,15 @@ impl LegacyObservationJournal {
                         *occurrences = occurrences
                             .checked_add(1)
                             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
+                        if r2il::refusal_evidence::tracing() {
+                            r2il::refusal_evidence!(
+                                "effect-occurrence",
+                                "{effect:?} occurrence {} by marker {id:?} from {:?} on {}",
+                                *occurrences,
+                                self.target_origins.get(id.index() as usize).map(ToString::to_string),
+                                format!("{node:?}").chars().take(160).collect::<String>()
+                            );
+                        }
                         let nth = seen_markers.entry(id).or_insert(0);
                         let at = *nth;
                         *nth += 1;
@@ -5463,6 +5603,32 @@ impl LegacyObservationJournal {
         mut self,
         source: &SourceOwnedFunctionFacts,
     ) -> SealedLegacyObservations {
+        if r2il::refusal_evidence::tracing() {
+            for (id, count) in &self.effect_occurrences {
+                if *count != 0 {
+                    continue;
+                }
+                let inst = match id.instruction.site {
+                    r2ssa::CanonicalInstructionSite::Op(op) => {
+                        usize::try_from(op).ok().and_then(|op| {
+                            self.source
+                                .graph()
+                                .inst_id_for_op_site(id.instruction.block_addr, op)
+                        })
+                    }
+                    _ => None,
+                };
+                let write =
+                    inst.and_then(|inst| self.writes.get(inst.0 as usize).cloned().flatten());
+                let value = inst
+                    .and_then(|inst| self.source.graph().inst(inst).and_then(|inst| inst.output))
+                    .and_then(|value| self.values.get(value.0 as usize).cloned().flatten());
+                r2il::refusal_evidence!(
+                    "zero-occurrence-cells",
+                    "{id:?} inst={inst:?} write={write:?} value={value:?}"
+                );
+            }
+        }
         let coverage = self.final_coverage();
         let rewrite_elided = self.rewrite_elided_effects();
         let exclusive = std::mem::take(&mut self.exclusive_duplicate_effects);

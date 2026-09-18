@@ -733,6 +733,9 @@ impl<'a> FoldingContext<'a> {
             AccessSyntax::SlotBytes { binding, offset } => self
                 .planned_slot_bytes_expr(*binding, *offset, &elem_ty)
                 .map(PendingMemoryAccessExpr::Planned),
+            AccessSyntax::SlotIndexedBytes { binding, index } => self
+                .planned_slot_indexed_bytes_expr(*binding, *index, fact.access, &elem_ty)
+                .map(PendingMemoryAccessExpr::Planned),
             AccessSyntax::Address { .. } => {
                 self.render_certified_memory_address_access(fact, elem_ty)
             }
@@ -753,15 +756,9 @@ impl<'a> FoldingContext<'a> {
         Some(CExpr::Var(symbol))
     }
 
-    /// Bytes of the slot at the plan's offset and the access's own width:
-    /// `*(T *)((uint8_t *)&slot + n)`, without the address-of where the
+    /// The slot's bytes as a `uint8_t *`, without the address-of where the
     /// declaration decays to one already.
-    fn planned_slot_bytes_expr(
-        &self,
-        binding: crate::binding_plan::BindingId,
-        offset: i64,
-        elem_ty: &CType,
-    ) -> Option<CExpr> {
+    fn planned_slot_bytes_base(&self, binding: crate::binding_plan::BindingId) -> Option<CExpr> {
         let names = self.inputs.binding_names?;
         let owner = self.planned_binding_expr(binding)?;
         let decays = matches!(
@@ -772,7 +769,44 @@ impl<'a> FoldingContext<'a> {
             Some(CType::Array(..))
         );
         let base = if decays { owner } else { CExpr::addr_of(owner) };
-        let bytes = CExpr::cast(CType::ptr(CType::uint(8)), base);
+        Some(CExpr::cast(CType::ptr(CType::uint(8)), base))
+    }
+
+    /// Bytes of the slot at an offset the machine computes:
+    /// `*(T *)((uint8_t *)&slot + index)`.
+    fn planned_slot_indexed_bytes_expr(
+        &self,
+        binding: crate::binding_plan::BindingId,
+        index: r2ssa::ValueId,
+        access: r2ssa::StructuredAccessId,
+        elem_ty: &CType,
+    ) -> Option<CExpr> {
+        let bytes = self.planned_slot_bytes_base(binding)?;
+        let index_expr = match self.planned_value_expr(index) {
+            Ok(expr) => expr,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                return None;
+            }
+        };
+        let index_expr = self.observe_certified_address_read_expr(index, access, index_expr);
+        let address = CExpr::binary(BinaryOp::Add, bytes, index_expr);
+        Some(CExpr::Deref(Box::new(CExpr::cast(
+            CType::ptr(elem_ty.clone()),
+            address,
+        ))))
+    }
+
+    /// Bytes of the slot at the plan's offset and the access's own width:
+    /// `*(T *)((uint8_t *)&slot + n)`, without the address-of where the
+    /// declaration decays to one already.
+    fn planned_slot_bytes_expr(
+        &self,
+        binding: crate::binding_plan::BindingId,
+        offset: i64,
+        elem_ty: &CType,
+    ) -> Option<CExpr> {
+        let bytes = self.planned_slot_bytes_base(binding)?;
         let address = if offset == 0 {
             bytes
         } else {
