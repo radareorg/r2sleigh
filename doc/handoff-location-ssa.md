@@ -28153,3 +28153,28 @@ What is left is to find the call site rather than the type. `#[track_caller]`
 on the conversion emitter, reporting `Location::caller()` beside the two types
 it already prints, names it in one run. That is the next step, and it is one
 attribute and one format argument.
+
+### The reload cast, named end to end
+
+Two lines of diagnostics turned the unfindable cast into a chain. The
+conversion emitter is `#[track_caller]` and reports where it was called from,
+and the term-operand tag now spells the machine expression a leaf reads.
+
+Ten of the fifteen conversions come from the term-operand conversion at
+`crates/r2dec/src/fold/op_lower/lowering.rs`, four from the assignment's
+conversion to the declared object, one from an implementation site. All ten of
+the first are `TermKind::Leaf` over `MachineExprKind::Source`, produced
+`uint32_t`, required `int32_t`.
+
+So the chain is: the slot read is a leaf over a `Source` naming the value the
+load defines; that value is not bound, because the slot is the bound thing; so
+`RenderTypes::declaration_type` says nothing and `value_type` falls back to the
+machine's width and signedness; and the parent then converts it to the `int32_t`
+the page declares.
+
+What did not work, and why it is worth knowing: a map from that value to the
+slot's binding, built at construction over every `AccessSyntax::SlotName` access
+and keyed by the value its instruction defines, does not cover these values. So
+the access's instruction is not the instruction that defines the value the
+`Source` names. Finding the right key is the remaining step, and the leaf's own
+`Source` binding is where to look.

@@ -740,8 +740,16 @@ impl<'a> FoldingContext<'a> {
             if r2il::refusal_evidence::tracing() {
                 r2il::refusal_evidence!(
                     "term-operand-conversion",
-                    "term={term:?} index={index} kind={:?} produced={:?} required={required:?} rendered={:?}",
+                    "term={term:?} index={index} kind={:?} leaf={:?} produced={:?} required={required:?} rendered={:?}",
                     arena.term(id).kind,
+                    match arena.term(id).kind {
+                        r2rewrite::TermKind::Leaf(read) => names
+                            .plan()
+                            .machine_projection()
+                            .expr(read.expr)
+                            .map(|expr| format!("{:?}", expr.kind())),
+                        _ => None,
+                    },
                     typed.term_produced(id),
                     rendered.unobserved()
                 );

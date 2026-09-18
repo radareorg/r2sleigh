@@ -59,6 +59,7 @@ impl FoldingContext<'_> {
     /// instead of leaving it to the rule above. A call whose result is
     /// assigned to a pointer-declared object rendered
     /// `uint8_t *X0_9 = sym__rotl32(...)` on exactly that path.
+    #[track_caller]
     pub(super) fn convert_from(&self, expr: CExpr, from: Option<&CValue>, to: &CType) -> CExpr {
         // A constant address is named here, where the requirement is stated.
         if matches!(from, Some(CValue::Constant))

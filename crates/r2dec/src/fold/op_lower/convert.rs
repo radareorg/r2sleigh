@@ -228,6 +228,7 @@ fn reads_as_a_small_negative(value: u64, bits: u32) -> bool {
 /// recovered prototype renders `uint8_t *X0_9 = sym__rotl32(...)`. That one arm
 /// is the rule three copies of this disagreed about -- the two in `projection`
 /// did not filter `Unknown`, so they skipped the cast the third emitted.
+#[track_caller]
 pub(crate) fn convert_optional(
     expr: CExpr,
     from: Option<&CValue>,
@@ -241,6 +242,7 @@ pub(crate) fn convert_optional(
     }
 }
 
+#[track_caller]
 pub(crate) fn convert(expr: CExpr, from: &CValue, to: &CType, pointer_bits: u32) -> CExpr {
     // A literal has no type but the one its spelling gives it.
     if is_literal(&expr) {
@@ -262,6 +264,7 @@ fn is_literal(expr: &CExpr) -> bool {
     }
 }
 
+#[track_caller]
 fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CExpr {
     if same_type(from, to, pointer_bits) {
         return expr;
@@ -342,7 +345,8 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
                 if r2il::refusal_evidence::tracing() && matches!(expr.unobserved(), CExpr::Var(_)) {
                     r2il::refusal_evidence!(
                         "integer-conversion-over-name",
-                        "from={from:?} to={to:?}"
+                        "from={from:?} to={to:?} at={}",
+                        std::panic::Location::caller()
                     );
                 }
                 CExpr::cast(to.clone(), expr)
