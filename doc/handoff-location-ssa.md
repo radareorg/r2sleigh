@@ -28099,3 +28099,26 @@ our own follow-up and upstream held the merged one; upstream's side is ours.
 
 Corpus 60 of 60 on every column against the merged fork, r2r at the recorded two
 failures.
+
+### The reload cast is a signedness step, and the type does not come from the read
+
+Nine of the fifteen remaining casts are `tmp_11f00_3 = (int32_t)stack_m60` in
+the x86-64 `-O0` cells. The `integer-conversion-over-name` evidence names it
+exactly: fifteen conversions in that one function from `uint32_t` to `int32_t`
+over a name. It is a signedness step between the machine's spelling and the
+page's, not a width one.
+
+An attempt at the obvious fix is recorded here so it is not repeated. Adding
+`access_value_type` to `RenderTypes`, answered from
+`AccessSyntax::SlotName`'s binding, and using it in the `MemoryRead` arm of
+`typed_boundaries` does work in the sense that matters: the evidence shows the
+method reached for every slot read and returning the slot's declaration. The
+rendered cast does not move. The `TermKind::Load` arm is never reached for these
+reads either, so the canonical term the assignment asks about is neither a leaf
+over the `MemoryRead` nor a load. `TermKind::Variable(u32)` is the remaining
+candidate, and it carries an opaque index with no object or access, so nothing
+in the typed builder can resolve it back to the slot.
+
+So the next step is to find which term the rewriter imports a slot read as, and
+give that term a way to name the object it reads. Until then the read's type is
+the machine's, and the declaration converts from it at the assignment.
