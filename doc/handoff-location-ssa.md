@@ -28122,3 +28122,34 @@ in the typed builder can resolve it back to the slot.
 So the next step is to find which term the rewriter imports a slot read as, and
 give that term a way to name the object it reads. Until then the read's type is
 the machine's, and the declaration converts from it at the assignment.
+
+### Four candidates eliminated for the reload cast, and the one instrument left
+
+The x86-64 `-O0` reload cast is `convert_from(expr, from, to)` with `from =
+uint32_t` and `to = int32_t` over a name, fifteen times in one function; the
+`integer-conversion-over-name` tag says so directly. Four sources for that
+`from` have been tried and each ruled out by evidence rather than by reasoning:
+
+`RenderTypes::declaration_type` does not supply it. Falling back to the slot's
+declaration for a value the plan does not bind, keyed from a map built at
+construction over every `AccessSyntax::SlotName` access and the value its
+instruction defines, changes nothing.
+
+The `MemoryRead` arm of `typed_boundaries` does not supply it. An
+`access_value_type` method on `RenderTypes`, answered from the same slot
+binding, is reached for every slot read -- the evidence fired -- and returns
+the declaration, and the rendered cast does not move.
+
+The `TermKind::Load` arm does not supply it: an `object_value_type` method
+placed there is never called at all for this function.
+
+The entity root does not supply it either. Printing the root kind for every
+value the fallback saw returned `Phi`, `Bitwise`, `Copy`, `Compare`,
+`Arithmetic`, `Cast`, `BooleanNot`, `PopulationCount`, `Extract`, `Shift`,
+`ArithmeticFlag` and `Source` -- and no `MemoryRead` at all, so the read never
+becomes an entity whose root could be asked.
+
+What is left is to find the call site rather than the type. `#[track_caller]`
+on the conversion emitter, reporting `Location::caller()` beside the two types
+it already prints, names it in one run. That is the next step, and it is one
+attribute and one format argument.
