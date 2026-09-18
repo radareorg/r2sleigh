@@ -4,17 +4,17 @@ struct r2sleigh_bits_256 {
 
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 409 source obligations: 380 rendered, 29 elided, 0 refused; 210 statements rendered */
+    /* r2dec proof: no individual construct is marked; 409 source obligations: 380 rendered, 29 elided, 0 refused; 209 statements rendered */
     {
         struct r2sleigh_bits_256 Z0_1;
         struct r2sleigh_bits_256 Z1_1;
-        uint64_t X11_8;
         uint64_t X12_1;
+        uint64_t X11_9;
         Z0_1 = r2sleigh_bits_zero_extend_64_256(0U);
         Z1_1 = r2sleigh_bits_zero_extend_64_256(0U);
         uint64_t X9_1 = X1_0 + X0_0;
         if (X1_0 < 16) {
-            X11_8 = (uint64_t)(W2_0 + 0x165667b1);
+            X11_9 = (uint64_t)(W2_0 + 0x165667b1);
             X12_1 = X0_0;
         } else {
             uint32_t tmp_lane_1000009ac_21_6f_1;
@@ -47,7 +47,6 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             Z0_1 = r2sleigh_bits_insert_256_64(Z0_1, tmp_lane_100000964_23_24_1, 64);
             Z0_1 = r2sleigh_bits_insert_256_64(Z0_1, 0, 128);
             Z0_1 = r2sleigh_bits_insert_256_64(Z0_1, 0, 192);
-            X11_8 = (uint64_t)0x9e3779b1;
             X12_1 = X0_0;
             for (; ; ) {
                 struct r2sleigh_bits_256 Z0_17;
@@ -183,14 +182,14 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 uint32_t tmp_lane_1000009c8_84_ba_1 = r2sleigh_bits_extract_256_32(Z0_34, 32U);
                 uint32_t tmp_lane_1000009c8_85_bb_1 = r2sleigh_bits_extract_256_32(Z0_38, 64U);
                 uint32_t tmp_lane_1000009c8_85_bc_1 = r2sleigh_bits_extract_256_32(Z0_42, 96U);
-                X11_8 = (uint64_t)(uint32_t)(X11_8 >> 32) << 32 | (uint64_t)(tmp_lane_1000009c8_85_bc_1 + (tmp_lane_1000009c8_84_b9_1 + tmp_lane_1000009c8_84_ba_1 + tmp_lane_1000009c8_85_bb_1));
-                X11_8 = (X11_8 & ~((uint64_t)~(uint32_t)0U << 32U)) | (uint64_t)0 << 32;
+                X11_9 = (uint64_t)(tmp_lane_1000009c8_85_bc_1 + (tmp_lane_1000009c8_84_b9_1 + tmp_lane_1000009c8_84_ba_1 + tmp_lane_1000009c8_85_bb_1));
+                X11_9 = (X11_9 & ~((uint64_t)~(uint32_t)0U << 32U)) | (uint64_t)0 << 32;
             }
         }
         {
             uint32_t X11_13;
             uint64_t X13_2;
-            X11_13 = (uint32_t)((uint32_t)X1_0 + (uint32_t)X11_8);
+            X11_13 = (uint32_t)((uint32_t)X1_0 + (uint32_t)X11_9);
             uint64_t X13_1 = X12_1 + 4;
             if (X13_1 <= X9_1) {
                 for (; ; ) {

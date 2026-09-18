@@ -1875,7 +1875,19 @@ fn inlinable_core(
             rejected("the one reader is a merge");
             continue;
         }
-        if def_inst.block != use_inst.block || def_inst.ordinal >= use_inst.ordinal {
+        // A term that reads nothing computes the same value wherever it is
+        // spelled, so where its reader sits says nothing about whether it may
+        // be spelled there. A loop-invariant constant hoisted above the loop
+        // that reads it was kept as a declaration for exactly this reason.
+        let duplicable = canonical.value(value.id).is_some_and(|canonical_value| {
+            canonical.import().is_duplicable(
+                projection,
+                canonical.arena(),
+                canonical_value.canonical,
+            )
+        });
+        if !duplicable && (def_inst.block != use_inst.block || def_inst.ordinal >= use_inst.ordinal)
+        {
             rejected("the one reader is in another block or does not follow the definition");
             continue;
         }

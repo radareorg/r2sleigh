@@ -27970,3 +27970,21 @@ partition exists. The assignment-side cast cannot be removed until something
 proves no rendered reader sees the carrier above the declared width. Both are
 liveness questions against a partition that is computed once, which is what 6c
 delivers.
+
+### A term that reads nothing may be spelled anywhere
+
+`literal_only_declarations` fell from three to one. The remaining matrix sites
+were loop-invariant constants hoisted above the loop that reads them, kept as
+declarations because `inlinable_core` rejects a value whose one reader is in
+another block (crates/r2dec/src/binding_plan/rules.rs).
+
+That gate is about moving a read, and a term that reads nothing has no read to
+move: it computes the same value wherever it is spelled. The gate now asks
+`Import::is_duplicable` first, which is the same predicate the expansion policy
+uses, and declines to apply to a duplicable term. The merge-reader gate above it
+is untouched.
+
+Three cells changed and each is smaller. Both `fnv1a64` renderings lose a
+declaration and spell `0x100000001b3` at the multiply. `arm64_O2/xxhash32` loses
+`X11_8 = (uint64_t)0x9e3779b1;` and, with the object no longer shared, also
+loses a lane write that preserved a high half the next statement overwrites.
