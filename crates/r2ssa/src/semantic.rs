@@ -6101,7 +6101,10 @@ fn value_is_entry_stack_pointer(
         .is_some_and(|root| root.base == StackAddressBase::StackPointer && root.offset == 0)
 }
 
-fn register_storages_overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
+pub(crate) fn register_storages_overlap(
+    left: CanonicalStorageId,
+    right: CanonicalStorageId,
+) -> bool {
     if left.space != CanonicalStorageSpace::Register
         || right.space != CanonicalStorageSpace::Register
     {

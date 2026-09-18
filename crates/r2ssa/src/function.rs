@@ -4785,16 +4785,31 @@ impl SSAFunction {
                     self.call_preserved_carriers,
                     function_interface,
                 );
+        // A user operation writes only its output varnode, so one whose output
+        // is not a frame carrier -- a NEON reduction into a vector register --
+        // leaves the entry-relative facts standing; one without an output, a
+        // syscall, may have done anything.
+        let frame_carriers = [
+            self.stack_pointer_carrier(),
+            function_interface.and_then(SourceFunctionInterface::frame_pointer_storage),
+        ];
+        let writes_no_frame_carrier = |output: &Option<SSAVar>| {
+            output.as_ref().is_some_and(|dst| {
+                self.canonical_storage_for_var(dst).is_none_or(|storage| {
+                    !frame_carriers.iter().flatten().any(|carrier| {
+                        crate::semantic::register_storages_overlap(storage, *carrier)
+                    })
+                })
+            })
+        };
         let entry_stack_roots_are_stable = self.blocks().iter().all(|block| {
             block.ops.iter().all(|op| match op {
                 SSAOp::Call { .. }
                 | SSAOp::CallInd { .. }
                 | SSAOp::CallDefine { .. }
                 | SSAOp::CallRestore { .. } => call_carriers_are_restored,
-                SSAOp::CallOther { .. }
-                | SSAOp::Unimplemented
-                | SSAOp::CpuId { .. }
-                | SSAOp::New { .. } => false,
+                SSAOp::CallOther { output, .. } => writes_no_frame_carrier(output),
+                SSAOp::Unimplemented | SSAOp::CpuId { .. } | SSAOp::New { .. } => false,
                 _ => true,
             })
         });
