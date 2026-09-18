@@ -28501,3 +28501,51 @@ the named symbol, `(uint64_t)&__stack_chk_guard`, in
 `render_certified_memory_address_access`. Seven shapes cells went from a
 crash to passing; the matrix did not move. `constant-address` evidence says
 which literals were asked and whether a symbol answered.
+
+## shape_stack_buffer, traced to four causes
+
+The buffer was declared one byte and every configuration crashed. Four
+defects stood in the way, each fixed where it lived.
+
+The counted-loop bound never attached. The counter's start is `mov rdx, 1`,
+a copy of a constant, and the exit test compares the *updated* counter
+(`add rdx, 2; cmp rdx, 65`), which is a different value from the header
+merge; both are now resolved through copies, a test on the update is
+accepted, and the arithmetic says what the body sees: the last admitted value
+of the compared quantity (one step short of the limit for `!=`, which only
+stops a counter that lands on it), plus one step when a bottom test admits
+the merge itself. `induction-unbounded` names the case when none applies.
+
+clang addresses the unrolled `buffer[rdx-1]` from one byte below the buffer.
+The base of an indexed access is a root only at the first byte its index
+reaches -- `indexed_offset_lower_bound`, from the counter's start -- and an
+address at a proven frame position that is not a root resolves to the
+evidenced root whose indexed span contains it, or, for an indexed base, the
+root containing `base + lower bound`, at a negative displacement. That is
+what spells `stack_m88[RDX_1 - 1]` and `stack_m88[RDX_1]` against one
+64-byte object. The old path resolved such a base to the frame-pointer slot
+at an offset of -80 and split the buffer.
+
+An object whose element layout is refused (`DisplacedIndexBase`) took the
+stack-allocation certificate's size as one element. It now takes the reach
+of its accesses and declares as bytes. `stack-slot-storage` and
+`stack-array-layout` evidence name the declarer and the layout answer.
+
+`__stack_chk_fail` rendered with four or six parameters because the plugin's
+own-prototype gate asks for the exact key and radare2's type databases keyed
+it `stack_chk_fail`, unlike every other underscore-named prototype. The fork
+keys it by its symbol (PR 26761 upstream). radare2 compiles the type
+databases in as gperf tables, so `libr/anal/d/*.c` and `libr_anal` must be
+rebuilt for a `.sdb.txt` change to be seen; the on-disk `.sdb` is not read.
+The installed `r2` still reports 6.2.2 while the tree says 6.2.3, so
+`symstall` populated the wrong version directory; the running version's
+`fcnsign` directory was pointed at the fork's files by hand until the fork is
+fully rebuilt.
+
+Chained-fixup `fixup.*` flags are excluded from data symbols: they name a
+slot's encoding, not what it holds, and naming every literal address had
+started declaring them.
+
+`shape_stack_buffer` passes on all six configurations; the shapes gate is at
+26 passing cells from 17 at the start of this stretch. The matrix did not
+move (60/60 snapshot match).

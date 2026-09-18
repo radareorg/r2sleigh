@@ -1549,6 +1549,9 @@ pub struct CalleeStackAllocationCertificate {
     /// True when the proof uses source-declared implicit storage beyond the
     /// active SP. Such a certificate is issued only for a call-free function.
     pub uses_implicit_area: bool,
+    /// The size is the reach of the accesses rather than an element layout,
+    /// so the object declares as bytes.
+    pub byte_array: bool,
 }
 
 /// Exact proof that one anonymous callee-owned stack object is only a
@@ -2007,6 +2010,7 @@ impl PreparedFunctionFacts {
         );
         let inductions = collect_induction_facts(graph, &loops);
         let induction_bounds = induction_upper_bounds(graph, &predicates, &loops, &inductions);
+        let induction_starts = induction_lower_bounds(graph, &inductions);
         phase("loops", loops.len());
         let (objects, memory) = collect_object_and_memory_facts(
             function,
@@ -2015,7 +2019,10 @@ impl PreparedFunctionFacts {
             &call_sites,
             machine_context,
             &declared_slots,
-            &induction_bounds,
+            &InductionBounds {
+                upper: &induction_bounds,
+                lower: &induction_starts,
+            },
         );
         phase("objects", objects.objects.len());
         let boundaries =
@@ -2303,6 +2310,10 @@ struct ObjectModelBuilder<'a> {
     /// Frame positions something proves an object starts at: a declared slot,
     /// a direct access, or an address that leaves as a value.
     evidenced_roots: BTreeSet<StackAddressRoot>,
+    /// How far each evidenced root's indexed accesses reach.
+    evidenced_spans: BTreeMap<StackAddressRoot, i64>,
+    /// Where each counted loop's counter starts, for an index's lower bound.
+    induction_starts: BTreeMap<ValueId, u64>,
     /// Addresses whose displaced parent is being resolved, against a cycle.
     resolving: BTreeSet<ValueId>,
     stack_pointer_carrier: Option<CanonicalStorageId>,
@@ -2359,6 +2370,8 @@ impl<'a> ObjectModelBuilder<'a> {
             interior_offsets: BTreeMap::new(),
             displaced_indexed_addresses: BTreeSet::new(),
             evidenced_roots: BTreeSet::new(),
+            evidenced_spans: BTreeMap::new(),
+            induction_starts: BTreeMap::new(),
             resolving: BTreeSet::new(),
             stack_pointer_carrier: machine_context
                 .and_then(SourceMachineContext::stack_pointer_carrier),
@@ -2379,16 +2392,21 @@ impl<'a> ObjectModelBuilder<'a> {
         function: &SSAFunction,
         graph: &SsaGraph,
         induction_bounds: &BTreeMap<ValueId, u64>,
+        induction_starts: &BTreeMap<ValueId, u64>,
     ) -> ObjectModel {
+        self.induction_starts = induction_starts.clone();
         if let Some(facts) = self.facts {
-            self.evidenced_roots = evidenced_stack_roots(
+            let (roots, spans) = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
                 function,
                 graph,
                 self.stack_pointer_carrier,
                 induction_bounds,
+                induction_starts,
             );
+            self.evidenced_roots = roots;
+            self.evidenced_spans = spans;
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
             stack_roots.sort_unstable();
@@ -2490,14 +2508,34 @@ impl<'a> ObjectModelBuilder<'a> {
                     Some((container, displacement)) => (container, Some(displacement)),
                     None => (root, None),
                 };
-                // A position nothing proves an object starts at is not one:
-                // the address is its operand's object, displaced.
-                if interior.is_none()
-                    && !self.evidenced_roots.contains(&root)
-                    && let Some(object) = self.displaced_object(graph, value_id)
-                {
-                    self.value_objects.insert(key, object);
-                    return object;
+                // A position nothing proves an object starts at is not one.
+                // Inside the span an evidenced root's index reaches it is a
+                // place in that buffer, whichever register it was measured
+                // from; otherwise the address is its operand's object,
+                // displaced.
+                if interior.is_none() && !self.evidenced_roots.contains(&root) {
+                    let containing = self
+                        .evidenced_spans
+                        .iter()
+                        .filter(|(base, end)| {
+                            base.base == root.base
+                                && base.offset < root.offset
+                                && root.offset < **end
+                                && self.evidenced_roots.contains(base)
+                        })
+                        .map(|(base, _)| *base)
+                        .max_by_key(|base| base.offset);
+                    if let Some(container) = containing {
+                        let object = self.ensure_stack_object(container);
+                        self.interior_offsets
+                            .insert(value_id, root.offset - container.offset);
+                        self.value_objects.insert(key, object);
+                        return object;
+                    }
+                    if let Some(object) = self.displaced_object(graph, value_id) {
+                        self.value_objects.insert(key, object);
+                        return object;
+                    }
                 }
                 let object = self.ensure_stack_object(root);
                 if let Some(displacement) = interior {
@@ -2632,7 +2670,49 @@ impl<'a> ObjectModelBuilder<'a> {
                 _ => return None,
             };
             let base_var = graph.value(base)?.var.clone();
-            let object = self.object_for_address_value(graph, &base_var, SpaceId::Ram);
+            // A base nothing proves an object starts at reaches its object
+            // at the first byte its index takes, and is that object at a
+            // negative displacement: `buf[i - 1]` is `buf` from one below.
+            let contained = index.and_then(|index| {
+                let position = resolve_stack_root(self.facts, &base_var)?;
+                if self.evidenced_roots.contains(&position) {
+                    return None;
+                }
+                let first = indexed_offset_lower_bound(graph, &self.induction_starts, index, 0)
+                    .and_then(|lower| i64::try_from(lower).ok())?;
+                let reached = position.offset.checked_add(first)?;
+                let container = self
+                    .evidenced_roots
+                    .iter()
+                    .filter(|root| root.base == position.base && root.offset <= reached)
+                    .filter(|root| {
+                        root.offset == reached
+                            || self
+                                .evidenced_spans
+                                .get(root)
+                                .is_some_and(|end| reached < *end)
+                    })
+                    .max_by_key(|root| root.offset)
+                    .copied()?;
+                Some((container, position.offset - container.offset))
+            });
+            let object = match contained {
+                Some((container, displacement)) => {
+                    let object = self.ensure_stack_object(container);
+                    if displacement != 0 {
+                        self.interior_offsets.insert(base, displacement);
+                    }
+                    self.value_objects.insert(
+                        MemoryObjectKey {
+                            value: base,
+                            space: SpaceId::Ram,
+                        },
+                        object,
+                    );
+                    object
+                }
+                None => self.object_for_address_value(graph, &base_var, SpaceId::Ram),
+            };
             if !matches!(
                 self.objects.get(&object).map(|fact| &fact.kind),
                 Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
@@ -2840,11 +2920,11 @@ fn collect_object_and_memory_facts(
     call_sites: &CallSiteFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
-    induction_bounds: &BTreeMap<ValueId, u64>,
+    induction: &InductionBounds<'_>,
 ) -> (ObjectModel, MemorySSAFacts) {
     let facts = function.decompile_prep_facts();
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    let object_model = builder.build(function, graph, induction_bounds);
+    let object_model = builder.build(function, graph, induction.upper, induction.lower);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model, call_sites);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
@@ -6569,8 +6649,12 @@ fn collect_callee_stack_allocation_certificates(
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     exact_stack_slots: &BTreeMap<(StackAddressBase, i64), SourceStackSlotSpec>,
-    array_layouts: &BTreeMap<ObjectId, StackArrayLayoutDisposition>,
+    sizing: &AllocationSizing<'_>,
 ) -> BTreeMap<ObjectId, CalleeStackAllocationCertificate> {
+    let AllocationSizing {
+        array_layouts,
+        induction_bounds,
+    } = sizing;
     let Some(machine_context) = machine_context else {
         return BTreeMap::new();
     };
@@ -6646,16 +6730,21 @@ fn collect_callee_stack_allocation_certificates(
         {
             continue;
         }
-        let size_bytes = match array_layouts.get(object) {
+        // Without an element layout the object is still as large as its
+        // accesses reach; only where nothing bounds them is it one element.
+        let (size_bytes, byte_array) = match array_layouts.get(object) {
             Some(StackArrayLayoutDisposition::Proven(layout)) => {
                 let Ok(extent) = u32::try_from(layout.extent) else {
                     continue;
                 };
-                extent
+                (extent, false)
             }
             Some(StackArrayLayoutDisposition::NotIndexed)
             | Some(StackArrayLayoutDisposition::Refused(_))
-            | None => element_width,
+            | None => {
+                accessed_object_storage(graph, induction_bounds, objects, structured, *object)
+                    .unwrap_or((element_width, false))
+            }
         };
 
         let mut active_sp_offsets = BTreeSet::new();
@@ -6703,6 +6792,7 @@ fn collect_callee_stack_allocation_certificates(
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 uses_implicit_area,
+                byte_array,
             },
         );
     }
@@ -7733,7 +7823,8 @@ fn evidenced_stack_roots(
     graph: &SsaGraph,
     stack_pointer_carrier: Option<CanonicalStorageId>,
     induction_bounds: &BTreeMap<ValueId, u64>,
-) -> BTreeSet<StackAddressRoot> {
+    induction_starts: &BTreeMap<ValueId, u64>,
+) -> (BTreeSet<StackAddressRoot>, BTreeMap<StackAddressRoot, i64>) {
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
     let definition = |var: &SSAVar| {
@@ -7780,7 +7871,19 @@ fn evidenced_stack_roots(
                     if facts.indexed_stack_address_root_of(dst).is_some()
                         && matches!(op, SSAOp::IntAdd { .. })
                     {
-                        for base in [a, b] {
+                        // The first byte an index reaches is the object's
+                        // start: `buf[i - 1]` addressed from one below `buf`
+                        // starts `buf`, not the byte below it.
+                        let first_reached = |index: &SSAVar| {
+                            graph
+                                .value_id_for_var(index)
+                                .and_then(|index| {
+                                    indexed_offset_lower_bound(graph, induction_starts, index, 0)
+                                })
+                                .and_then(|lower| i64::try_from(lower).ok())
+                                .unwrap_or(0)
+                        };
+                        for (base, index) in [(a, b), (b, a)] {
                             // Which operand of an indexed address became an
                             // object start, and why the other did not, is what
                             // says where a buffer's accesses will be filed.
@@ -7796,7 +7899,10 @@ fn evidenced_stack_roots(
                             if let Some(root) = exact_root(base)
                                 && !interior_position(base)
                             {
-                                roots.insert(root);
+                                roots.insert(StackAddressRoot {
+                                    base: root.base,
+                                    offset: root.offset.saturating_add(first_reached(index)),
+                                });
                             }
                         }
                     }
@@ -7874,8 +7980,15 @@ fn evidenced_stack_roots(
                 continue;
             };
             let end = root.offset.saturating_add(reach);
+            let first = indexed_offset_lower_bound(graph, induction_starts, index, 0)
+                .and_then(|lower| i64::try_from(lower).ok())
+                .unwrap_or(0);
+            let start = StackAddressRoot {
+                base: root.base,
+                offset: root.offset.saturating_add(first),
+            };
             spans
-                .entry(*root)
+                .entry(start)
                 .and_modify(|known| *known = (*known).max(end))
                 .or_insert(end);
         }
@@ -7913,7 +8026,7 @@ fn evidenced_stack_roots(
             roots.insert(*root);
         }
     }
-    roots
+    (roots, spans)
 }
 
 fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) -> Option<u32> {
@@ -8010,6 +8123,86 @@ fn object_index_operand(
 /// test, and the test bounds every body access only where it runs before the
 /// body does -- a test in the header. A bottom test lets the body run once
 /// before it, so the counter's initial value has to satisfy the bound itself.
+/// What sizes a stack allocation: the element layouts proven for the
+/// objects and the bounds their indices stay within.
+struct AllocationSizing<'a> {
+    array_layouts: &'a BTreeMap<ObjectId, StackArrayLayoutDisposition>,
+    induction_bounds: &'a BTreeMap<ValueId, u64>,
+}
+
+/// What each counted loop's counter is known to stay within.
+struct InductionBounds<'a> {
+    upper: &'a BTreeMap<ValueId, u64>,
+    lower: &'a BTreeMap<ValueId, u64>,
+}
+
+/// Where each counted loop's counter starts, when that is a constant: the
+/// least value it takes while stepping up.
+fn induction_lower_bounds(
+    graph: &SsaGraph,
+    inductions: &BTreeMap<ValueId, InductionFact>,
+) -> BTreeMap<ValueId, u64> {
+    inductions
+        .values()
+        .filter(|induction| matches!(induction.step, InductionStep::AddConst(step) if step > 0))
+        .filter_map(|induction| {
+            constant_through_copies(graph, induction.init).map(|start| (induction.phi, start))
+        })
+        .collect()
+}
+
+/// A constant, or a copy of one: a counter starts from `mov rdx, 1`.
+fn constant_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64> {
+    let mut value = value;
+    for _ in 0..8 {
+        let var = &graph.value(value)?.var;
+        if let Some(bits) = var.constant_bits() {
+            return Some(bits);
+        }
+        let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
+        let InstPayload::Op(SSAOp::Copy { .. }) = inst.payload else {
+            return None;
+        };
+        value = *inst.inputs.first()?;
+    }
+    None
+}
+
+/// The least value an index takes: a constant, a counter's start, and sums
+/// and products of those; anything else is at least zero.
+fn indexed_offset_lower_bound(
+    graph: &SsaGraph,
+    starts: &BTreeMap<ValueId, u64>,
+    value: ValueId,
+    depth: u32,
+) -> Option<u64> {
+    if let Some(start) = starts.get(&value) {
+        return Some(*start);
+    }
+    if let Some(constant) = graph.value(value)?.var.constant_bits() {
+        return Some(constant);
+    }
+    if depth > 16 {
+        return Some(0);
+    }
+    let inst = graph.inst(graph.def_inst(value)?)?;
+    let InstPayload::Op(op) = &inst.payload else {
+        return Some(0);
+    };
+    let input = |index: usize| inst.inputs.get(index).copied();
+    let lower = |index: usize| {
+        input(index).and_then(|value| indexed_offset_lower_bound(graph, starts, value, depth + 1))
+    };
+    Some(match op {
+        SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
+            lower(0)?
+        }
+        SSAOp::IntAdd { .. } => lower(0)?.checked_add(lower(1)?)?,
+        SSAOp::IntMult { .. } => lower(0)?.checked_mul(lower(1)?)?,
+        _ => 0,
+    })
+}
+
 fn induction_upper_bounds(
     graph: &SsaGraph,
     predicates: &PredicateFacts,
@@ -8017,11 +8210,7 @@ fn induction_upper_bounds(
     inductions: &BTreeMap<ValueId, InductionFact>,
 ) -> BTreeMap<ValueId, u64> {
     let mut bounds = BTreeMap::new();
-    let constant = |value: ValueId| {
-        graph
-            .value(value)
-            .and_then(|value| value.var.constant_bits())
-    };
+    let constant = |value: ValueId| constant_through_copies(graph, value);
     for induction in inductions.values() {
         let InductionStep::AddConst(step) = induction.step else {
             continue;
@@ -8044,11 +8233,36 @@ fn induction_upper_bounds(
         let Some(comparison) = predicate.comparison.as_ref() else {
             continue;
         };
-        // The counter on one side, what bounds it on the other.
-        let limit = if comparison.lhs == induction.phi {
-            comparison.rhs
-        } else if comparison.rhs == induction.phi {
-            comparison.lhs
+        // The counter on one side, what bounds it on the other, either read
+        // through the copies the machine makes of it.
+        let through_copies = |value: ValueId| {
+            let mut value = value;
+            for _ in 0..8 {
+                let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+                    break;
+                };
+                let InstPayload::Op(SSAOp::Copy { .. }) = inst.payload else {
+                    break;
+                };
+                let Some(source) = inst.inputs.first() else {
+                    break;
+                };
+                value = *source;
+            }
+            value
+        };
+        let phi = through_copies(induction.phi);
+        let update = through_copies(induction.update);
+        let lhs = through_copies(comparison.lhs);
+        let rhs = through_copies(comparison.rhs);
+        let (limit, on_update) = if lhs == phi {
+            (comparison.rhs, false)
+        } else if rhs == phi {
+            (comparison.lhs, false)
+        } else if lhs == update {
+            (comparison.rhs, true)
+        } else if rhs == update {
+            (comparison.lhs, true)
         } else {
             continue;
         };
@@ -8058,15 +8272,28 @@ fn induction_upper_bounds(
         // A signed test bounds the unsigned value only where both sides stay
         // non-negative, which a constant start at or below the limit gives.
         let start = constant(induction.init);
-        let last = match comparison.kind {
+        // The last value of the compared quantity the test admits. An
+        // inequality admits everything before the limit, and only stops a
+        // counter that lands on it at all.
+        let admitted = match comparison.kind {
             CompareKind::Less | CompareKind::SignedLess => limit.checked_sub(1),
-            CompareKind::LessEqual | CompareKind::SignedLessEqual | CompareKind::NotEqual => {
-                Some(limit)
-            }
+            CompareKind::LessEqual | CompareKind::SignedLessEqual => Some(limit),
+            CompareKind::NotEqual => limit.checked_sub(step),
             CompareKind::Equal => None,
         };
-        let Some(last) = last else {
+        let Some(admitted) = admitted else {
             continue;
+        };
+        // What the body sees: the admitted value when the test is on the
+        // update or guards the trip in the header, and one more step when a
+        // bottom test admits the merge itself, since the body runs once more.
+        let last = if on_update || predicate.block_addr == loop_fact.header {
+            admitted
+        } else {
+            match admitted.checked_add(step) {
+                Some(last) => last,
+                None => continue,
+            }
         };
         if matches!(
             comparison.kind,
@@ -8081,6 +8308,13 @@ fn induction_upper_bounds(
             continue;
         }
         if start.is_some_and(|start| start > last) {
+            continue;
+        }
+        // An inequality only stops a counter that lands on the limit: from 0
+        // by twos, 65 is never reached and the loop is not bounded by it.
+        if comparison.kind == CompareKind::NotEqual
+            && start.is_none_or(|start| (limit - start) % step != 0)
+        {
             continue;
         }
         // The counter steps to the last value the test admits and no further,
@@ -8336,6 +8570,14 @@ fn stack_array_layout(
             element_index: stack_array_element_index(graph, byte_offset, element_width),
         });
     }
+    r2il::refusal_evidence!(
+        "stack-array-layout",
+        "{object:?} element_width={element_width} max_offset={maximum_constant_offset:?} indexed={:?}",
+        indexed_elements
+            .iter()
+            .map(|element| (element.address, element.byte_offset))
+            .collect::<Vec<_>>()
+    );
     let Some(maximum_constant_offset) = maximum_constant_offset else {
         return StackArrayLayoutDisposition::Refused(
             StackArrayLayoutRefusal::MissingConstantOffset,
@@ -8939,7 +9181,10 @@ fn collect_prepared_function_certificates(
         objects,
         structured,
         &exact_stack_slots,
-        &stack_array_layouts,
+        &AllocationSizing {
+            array_layouts: &stack_array_layouts,
+            induction_bounds: &induction_bounds,
+        },
     );
     let (stack_frame_round_trips, stack_frame_round_trip_by_inst) =
         collect_stack_frame_round_trip_certificates(
@@ -9021,6 +9266,28 @@ fn collect_prepared_function_certificates(
                             frame_gap_extent(objects, base, offset).map(|extent| (extent, true))
                         })
                 };
+                r2il::refusal_evidence!(
+                    "stack-slot-storage",
+                    "{object:?} at {base:?}{offset:+} declared={declared} (layout={:?} slot={} callee={}) storage={storage:?} accesses={:?}",
+                    stack_array_layouts.get(object).map(|layout| match layout {
+                        StackArrayLayoutDisposition::Proven(layout) => format!("proven {}", layout.extent),
+                        StackArrayLayoutDisposition::NotIndexed => "not indexed".to_string(),
+                        StackArrayLayoutDisposition::Refused(reason) => format!("{reason:?}"),
+                    }),
+                    exact_stack_slots.contains_key(&(base, offset)),
+                    callee_stack_allocations.contains_key(object),
+                    structured
+                        .memory_accesses
+                        .values()
+                        .filter(|access| access.object == *object)
+                        .map(|access| (
+                            access.address,
+                            access.width,
+                            objects.address_is_indexed(access.address),
+                            access.object_offset
+                        ))
+                        .collect::<Vec<_>>()
+                );
                 Some((
                     *object,
                     StackSlotCertificate {
@@ -9028,7 +9295,10 @@ fn collect_prepared_function_certificates(
                         space: SpaceId::Ram,
                         base,
                         offset,
-                        byte_array: storage.is_some_and(|(_, bytes)| bytes),
+                        byte_array: storage.is_some_and(|(_, bytes)| bytes)
+                            || callee_stack_allocations
+                                .get(object)
+                                .is_some_and(|allocation| allocation.byte_array),
                         // Failing both, the object's own accesses say how wide it
                         // is. Every access reaching it at one width, with complete
                         // provenance, is a fact about the program rather than an
@@ -14272,7 +14542,12 @@ mod tests {
             &stack_declared,
             Some(stack.machine_context()),
         )
-        .build(stack.function(), stack.graph(), &BTreeMap::new());
+        .build(
+            stack.function(),
+            stack.graph(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
         let ram_stack = super::memory_location_for_addr(
             Some(&stack_facts),
             stack.addresses(),
