@@ -37,7 +37,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             stack_m32 = (uint32_t)tmp_11f00_3 ^ tmp_11f00_10;
             tmp_11f00_10 = stack_m32;
             uint32_t RAX_13 = sym__rotl32((uint32_t)tmp_11f00_10, 13);
-            stack_m32 = (uint32_t)RAX_13;
+            stack_m32 = RAX_13;
             tmp_11f00_10 = stack_m32;
             stack_m32 = (uint32_t)((uint64_t)(int32_t)tmp_11f00_10 * 5) - 0x19ab949c;
             stack_m56++;
@@ -83,7 +83,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                 stack_m76 = (uint32_t)((uint64_t)(int32_t)tmp_11f00_11 * 0xffffffffcc9e2d51U);
                 tmp_11f00_11 = stack_m76;
                 uint32_t RAX_41 = sym__rotl32((uint32_t)tmp_11f00_11, 15);
-                stack_m76 = (uint32_t)RAX_41;
+                stack_m76 = RAX_41;
                 tmp_11f00_11 = stack_m76;
                 stack_m76 = (uint32_t)((uint64_t)(int32_t)tmp_11f00_11 * 0x1b873593);
                 tmp_11f00_11 = stack_m76;

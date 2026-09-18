@@ -27703,3 +27703,145 @@ so the cell has no basis at all.
 `conflicting types for 'sym__vfold'`, a definition with two parameters and a
 later declaration of the same name with six. The body-proven signature and the
 call site's interface disagree on arity and both reach the same unit.
+
+### Every redundant cast comes from one disagreement
+
+`same_type_casts` stood at 131 in the matrix and 174 across every rendered
+artifact, and 135 of those sites are one shape: a conversion stated in machine
+terms applied to an expression whose type is a rendered declaration.
+
+`binding_width` (crates/r2dec/src/binding_plan/construction.rs:814, through
+`read_end_bits_through_merges` at :714) declares an object as wide as the
+widest read any member takes of it, so a 64-bit register every one of whose
+reads is 32 bits wide is declared `uint32_t`. `MachineUseSlice` still calls its
+carrier 64. `project_machine_use_of` (crates/r2dec/src/fold/op_lower/projection.rs:83)
+asked whether the slice covers the *carrier*, decided it does not, widened the
+name to `uint64_t` and narrowed it back to `uint32_t`. `CExpr::cast_with_role`
+then collapses that round trip into a single cast, because a narrowing absorbs
+the conversion beneath it (crates/r2dec/src/ast.rs:552), and what reaches the
+page is `(uint32_t)X9_1` on a name already declared `uint32_t`.
+
+The collapse rule is right and is what makes the defect visible. The round trip
+is what should not have been spelled. `arm64_O1_adler32.c` settles it in one
+function: `X9_1` and `tmp_2b000_2` are both declared `uint32_t` in the same
+loop, and only `X9_1` -- a lane of the 64-bit X9 -- wears the cast.
+
+The same disagreement produces the rest. Twenty-four sites are a signedness
+disagreement, where the machine word is unsigned and the declaration is signed.
+Eight are the `SignExtend` arm at projection.rs:178, which casts to
+`checked_int_type(source_width)` without going through the conversion emitter.
+Five are a width round trip under a zero extension. Two are a pointer: an
+address is an unsigned integer on the machine side and `uint8_t *` in the
+declaration. Sixty more are on the write side, where `typed.rs` gives a `Phi`,
+`Cast` or `Copy` root the machine type rather than the declared type of the
+value the root defines.
+
+The invariant to restore is one sentence: a conversion is stated between what
+the rendered expression is declared as and what the boundary requires, never
+between the machine location's type and either of them.
+
+### A GOT slot is named now, and read one level too deep
+
+Eleven shapes cells segfaulted with `act=None` because the rendering read an
+absolute address out of the image and dereferenced what it found there. On
+arm64 the sequence is `adrp x8, reloc.__stack_chk_guard; ldr x8, [x8]; ldr x8,
+[x8]`, and the first load was rendered as a read of the file bytes at
+0x100004000, which hold the chained-fixup placeholder 0x8010000000000000.
+
+The capture never saw the name. Three flags sit on that address --
+`segment.__DATA_CONST` covering the whole segment, `section.4.__DATA_CONST.__got`
+covering the section, and `reloc.__stack_chk_guard` covering its own eight
+bytes -- and `anal->flb.get_at` answers with the container, which the collector
+then skipped by its own `segment.` rule. Choosing the narrowest flag that
+starts exactly at the referenced address fixes the name.
+
+What remains is the indirection. A `reloc.` flag on a GOT slot says the slot
+*holds* the address of that symbol, so a pointer-width load from it yields
+`&__stack_chk_guard`. The rendering instead spells `*(uint64_t*)&__stack_chk_guard`,
+which is the guard's value, and the second load then dereferences a cookie.
+The rule to add is that a pointer-width load from an address a `reloc.` flag
+names folds to the address of the named symbol.
+
+### The redundant cast, traced to one disagreement and mostly removed
+
+`same_type_casts` fell from 131 to 46 on the matrix by fixing the read side of
+one disagreement. The arena keeps a leaf at the machine carrier's width; the
+binding plan declares the object as wide as the widest read any member takes of
+it. Every narrowed binding therefore has two widths, and the rendering spelled
+the journey between them.
+
+Three changes, all in the lowering.
+
+`project_machine_use_of` decided "whole" against the machine carrier
+(crates/r2dec/src/fold/op_lower/projection.rs). It now decides it against what
+the base is spelled as, and `planned_input_expr` hands it the binding's
+declaration rather than the value's machine type. A name declared exactly as
+wide as the selection is the selection.
+
+The slice's own zero extension was spelled with a bare cast even when the name
+was already exactly the selected width. It is now deferred: the name is
+unsigned, so a consumer that wants the carrier's width converts at its own
+boundary and zero-fills there.
+
+The remaining and largest read shape was `Kind::Extract` in the term renderer
+(crates/r2dec/src/fold/op_lower/lowering.rs). Selecting the low bits of a name
+declared exactly that wide is the name, and `term_declaration_type` answers
+whether the operand term spells one object. That alone closed most of the
+eighty-five casts this fix removed.
+
+What is left is the assignment side, thirty-six of the located sites. The
+machine root produces the carrier's width because the machine writes the whole
+register, the object is declared narrower, and the declaration narrows the
+widened right-hand side straight back. The same rule applies -- a conversion
+between the machine location's type and the declaration is never stated -- but
+it has to be made where the typed boundary produces the root's type, not at the
+assignment, because the type and the expression have to change together.
+
+### The flag carrier is the partition cycle, not the lift
+
+The counted-loop flag -- `TMPZR_4 = X1_0 == 1; X1_0--; if (TMPZR_4)` -- is
+forty-eight of the ninety-two flag-carrier sites. It is not a duplicated
+subtraction in the lift: `a:sla.debug.json` on `subs x1, x1, 1` shows sleigh
+computing the difference once into one temporary, testing that temporary for
+zero, and copying it to `x1`. The flag is already phrased over the value the
+instruction defines.
+
+What phrases it over the operand is expansion. The difference has one use site
+by the time the policy is asked, so `default_expansion_policy` expands it into
+the comparison, `boolean.sub_eq_zero` normalises `(x - 1) == 0` to `x == 1`,
+and the comparison now reads the object the instruction writes. The hazard scan
+then correctly refuses to fold it past the decrement.
+
+Refusing the expansion where the producer's value is written to a location the
+expansion reads was tried and does nothing, because at import the difference is
+a `Unique` with no canonical storage: it is the *span* that later puts it in
+the same object as `x1`. The information the policy needs does not exist until
+the partition does, which is the cycle Phase 0 exists to cut. This shape is
+therefore a Phase 0 case and not a separate defect.
+
+### The write side, and the one thing that blocks it
+
+The thirty-six assignment-side casts have the same cause and a harder fix. The
+obvious move -- make an entity root produce the declared type of the value it
+defines, in `typed_boundaries` (crates/r2rewrite/src/typed.rs) -- breaks
+`a_copy_converts_nothing` (crates/r2rewrite/tests/typed.rs:231), and the test is
+right: a copy from a pointer-declared register into an integer-declared one must
+produce the pointer, so the conversion is met at the assignment where it belongs.
+
+So the override cannot be unconditional. What is redundant is narrower: a root
+that is a widening whose operand already has the object's declared type. There
+the extension has nowhere to go, the declaration narrows it straight back, and
+the two collapse into a cast that converts nothing. Restricting the override to
+that shape keeps the copy case intact and closes the assignment side, and it has
+to be done in `typed_boundaries` rather than at the assignment, because the type
+and the expression have to change together.
+
+### The pull-request queue was not being watched
+
+Eight pull requests were open, not the three this session was tracking by
+number. Two had been waiting months on a maintainer request -- 25942 wants a
+rebase and a rewrite onto RSearch with one generic aligned-pattern scan instead
+of per-arch collectors, and 25935 wants the gdb protocol part split into its own
+pull request. Both now have a reply. 26744, the arm64 adrp fix, has merged;
+26742 was withdrawn. One comment on 26629 carried an assistant attribution
+footer and has been edited to remove it.

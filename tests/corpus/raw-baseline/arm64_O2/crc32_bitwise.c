@@ -25,7 +25,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                 uint8_t* tmp_7400_2 = (uint8_t*)X0_0;
                 X0_0++;
                 uint8_t tmp_25400_2 = *tmp_7400_2;
-                uint32_t tmp_20380_2 = (uint32_t)X10_1 ^ (uint32_t)tmp_25400_2;
+                uint32_t tmp_20380_2 = X10_1 ^ (uint32_t)tmp_25400_2;
                 uint32_t tmp_20380_3 = tmp_20380_2 >> 1 ^ ((tmp_20380_2 & 1) * 0xffffffff & 0xedb88320);
                 uint32_t tmp_20380_4 = tmp_20380_3 >> 1 ^ ((uint32_t)((int32_t)(tmp_20380_2 << 30) >> 31) & 0xedb88320);
                 Z2_1 = r2sleigh_bits_insert_256_32(Z2_1, tmp_20380_2, 0);

@@ -1853,6 +1853,57 @@ static bool function_image_string_literals_collect(RAnal *anal,
 	}
 	return true;
 }
+// Strings have their own table, and a code label is not data. A segment or a
+// section is not a program datum either: it is a load command or a section
+// header, and radare2 flags the whole image's first byte `segment.LOAD0`. A
+// reference to address zero -- which is every null pointer the code
+// materialises -- then found that flag and the renderer spelled `p == &LOAD0`
+// where the program says `p == 0`.
+static bool function_image_data_symbol_name_excluded(const char *name) {
+	return !strncmp (name, "str.", 4) || !strncmp (name, "fcn.", 4)
+		|| !strncmp (name, "loc.", 4)
+		|| !strncmp (name, "segment.", 8)
+		|| !strncmp (name, "section.", 8);
+}
+
+// Several flags name one address. A GOT slot carries `segment.__DATA_CONST`
+// covering the whole segment, `section.4.__DATA_CONST.__got` covering the
+// section, and `reloc.__stack_chk_guard` covering its own eight bytes, and
+// `get_at` answers with the container. The name of what a reference points at
+// is the narrowest flag that starts exactly there, so the smallest one wins
+// and the containers are skipped rather than deciding the answer.
+static RFlagItem *function_image_data_symbol_flag(RAnal *anal, ut64 addr) {
+	RFlagItem *best = NULL;
+	if (anal->flb.get_vec) {
+		const RVecFlagItemPtr *flags = anal->flb.get_vec (anal->flb.f, addr);
+		RFlagItem **iter;
+		RFlagItem *flag;
+		r_flag_item_vec_foreach (flags, iter, flag) {
+			if (!flag || !flag->name || !*flag->name || flag->addr != addr) {
+				continue;
+			}
+			if (function_image_data_symbol_name_excluded (flag->name)) {
+				continue;
+			}
+			if (!best || flag->size < best->size) {
+				best = flag;
+			}
+		}
+	}
+	if (!best) {
+		best = anal->flb.get_at (anal->flb.f, addr, false);
+	}
+	if (!best || !best->name || !*best->name) {
+		return NULL;
+	}
+	// The fallback answers with whatever covers the address, container or
+	// not, so the exclusion is applied here rather than only in the loop.
+	if (function_image_data_symbol_name_excluded (best->name)) {
+		return NULL;
+	}
+	return best;
+}
+
 static bool function_image_data_symbols_collect(RAnal *anal,
 		RAnalFunctionImageSnapshot *image,
 		const RAnalFunctionSnapshotLimits *limits) {
@@ -1870,8 +1921,8 @@ static bool function_image_data_symbols_collect(RAnal *anal,
 			}
 			RAnalRef *ref;
 			R_VEC_FOREACH (refs, ref) {
-				RFlagItem *flag = anal->flb.get_at (anal->flb.f, ref->addr, false);
-				if (!flag || !flag->name || !*flag->name) {
+				RFlagItem *flag = function_image_data_symbol_flag (anal, ref->addr);
+				if (!flag) {
 					continue;
 				}
 				// What the reference is decides this, not how the flag is
@@ -1892,20 +1943,6 @@ static bool function_image_data_symbols_collect(RAnal *anal,
 					continue;
 				}
 				if (r_anal_get_function_at (anal, ref->addr)) {
-					continue;
-				}
-				// Strings have their own table, and a code label is not data.
-				//
-				// A segment or a section is not a program datum either: it is
-				// a load command or a section header, and radare2 flags the
-				// whole image's first byte `segment.LOAD0`. A reference to
-				// address zero -- which is every null pointer the code
-				// materialises -- then found that flag and the renderer
-				// spelled `p == &LOAD0` where the program says `p == 0`.
-				if (!strncmp (flag->name, "str.", 4) || !strncmp (flag->name, "fcn.", 4)
-					|| !strncmp (flag->name, "loc.", 4)
-					|| !strncmp (flag->name, "segment.", 8)
-					|| !strncmp (flag->name, "section.", 8)) {
 					continue;
 				}
 				size_t existing;

@@ -80,7 +80,19 @@ pub(super) fn project_machine_use_of(
     let convert = |expr: CExpr, from: Option<&CValue>, to: &CType| {
         super::convert::convert_optional(expr, from, to, pointer_bits)
     };
-    let whole = slice.bit_offset() == 0 && slice.width_bits() == slice.carrier_width_bits();
+    // Whole against what is rendered, not against the machine carrier. A
+    // binding is declared as wide as the widest read any member takes of it,
+    // so a 64-bit register read only 32 bits at a time is declared
+    // `uint32_t`; the slice still calls its carrier 64. Widening that name to
+    // the carrier and narrowing it back selects the bits it already holds,
+    // and the two conversions collapse into one that converts nothing, which
+    // is where nearly every redundant cast in the output came from.
+    let base_width_bits = base_type
+        .and_then(CValue::as_type)
+        .and_then(|ty| r2types::declaration_type_width_bits(ty, pointer_bits));
+    let whole = slice.bit_offset() == 0
+        && (slice.width_bits() == slice.carrier_width_bits()
+            || base_width_bits == Some(slice.width_bits()));
     let (projected, projected_type) = if whole {
         let ty = base_type
             .cloned()
@@ -160,6 +172,16 @@ pub(super) fn project_machine_use_of(
     let projected = convert(projected, Some(&projected_type), &operand_type);
     match conversion.kind() {
         MachineCastKind::ZeroExtend => {
+            // A name already exactly as wide as the selection needs no cast
+            // to carry a zero extension: it is unsigned, so every consumer
+            // that wants a wider type states so at its own boundary and the
+            // conversion there zero-fills. Spelling it here instead widened
+            // the name and let the next narrowing absorb the pair into one
+            // cast that converts nothing, which is most of this output's
+            // redundant casts.
+            if base_width_bits == Some(source_width) {
+                return Ok((projected, CValue::Typed(operand_type)));
+            }
             let target = checked_uint_type(target_width)?;
             Ok((
                 CExpr::cast(target.clone(), projected),

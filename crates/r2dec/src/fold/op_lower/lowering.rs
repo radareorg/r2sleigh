@@ -513,6 +513,17 @@ impl<'a> FoldingContext<'a> {
                 );
                 return Err(invalid());
             };
+            // The same statement of a machine operand's two types as the term
+            // closure below makes, so a cast that converts nothing can be
+            // traced to whichever of the two layers spelled it.
+            if r2il::refusal_evidence::tracing() {
+                r2il::refusal_evidence!(
+                    "machine-operand-conversion",
+                    "machine={expr:?} index={index} produced={:?} required={required:?} rendered={:?}",
+                    typed.produced(id),
+                    rendered.unobserved()
+                );
+            }
             Ok(self.convert_from(rendered, typed.produced(id), required))
         };
         Ok(match machine_expr.kind() {
@@ -647,6 +658,20 @@ impl<'a> FoldingContext<'a> {
     /// admitted modeled machine kind imports to one of these arms. A leaf is
     /// the only escape back to the machine arena, where the existing value path
     /// accounts for the exact source value it names.
+    /// The type a term is declared with, when the term spells one object.
+    ///
+    /// The arena's width for a leaf is the machine carrier's; what the page
+    /// says is the binding's declaration. A conversion between the two is the
+    /// identity in the rendered program and has to be recognised as one.
+    fn term_declaration_type(
+        &self,
+        names: &crate::binding_plan::BindingNameResolution,
+        term: r2rewrite::TermId,
+    ) -> Option<CType> {
+        let binding = crate::binding_plan::term_spells_binding(names.plan(), term)?;
+        Some(names.plan().binding(binding)?.declaration_type().clone())
+    }
+
     fn materialize_term(
         &self,
         names: &crate::binding_plan::BindingNameResolution,
@@ -681,6 +706,19 @@ impl<'a> FoldingContext<'a> {
                 );
                 return Err(invalid());
             };
+            // What each operand of a term was produced as and what its parent
+            // asked for. A cast in the output that converts nothing is always
+            // a disagreement between these two, and this is where it is
+            // stated.
+            if r2il::refusal_evidence::tracing() {
+                r2il::refusal_evidence!(
+                    "term-operand-conversion",
+                    "term={term:?} index={index} kind={:?} produced={:?} required={required:?} rendered={:?}",
+                    arena.term(id).kind,
+                    typed.term_produced(id),
+                    rendered.unobserved()
+                );
+            }
             Ok(self.convert_from(rendered, typed.term_produced(id), required))
         };
         let literal =
@@ -761,27 +799,51 @@ impl<'a> FoldingContext<'a> {
                 child(1, right)?,
             ),
             Kind::Cast { input, .. } => {
-                let rendered = child(0, input)?;
                 let Some(produced) = typed
                     .term_produced(term)
                     .and_then(r2rewrite::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
-                let from = typed
-                    .term_required(term, 0)
-                    .cloned()
-                    .map(r2rewrite::CValue::Typed);
-                self.convert_from(rendered, from.as_ref(), produced)
+                // A conversion whose operand already has the type it produces
+                // is the identity, whatever the arena calls the carrier in
+                // between. Spelling it made the operand travel out to the
+                // carrier's width and straight back, and the two conversions
+                // collapse into one cast that converts nothing.
+                if typed
+                    .term_produced(input)
+                    .and_then(r2rewrite::CValue::as_type)
+                    == Some(produced)
+                {
+                    self.materialize_term(names, value, input, depth + 1)?
+                } else {
+                    let rendered = child(0, input)?;
+                    let from = typed
+                        .term_required(term, 0)
+                        .cloned()
+                        .map(r2rewrite::CValue::Typed);
+                    self.convert_from(rendered, from.as_ref(), produced)
+                }
             }
             Kind::Extract { input, lsb_bits } => {
-                let rendered = child(0, input)?;
                 let Some(produced) = typed
                     .term_produced(term)
                     .and_then(r2rewrite::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
+                // Selecting the low bits of a name that is declared exactly
+                // that wide is the name. The arena keeps the register's
+                // carrier width while the plan declares the object as wide as
+                // the widest read of it, so the two disagree on every narrowed
+                // binding and the truncation is spelled over a name that has
+                // nothing above the bits it selects.
+                if lsb_bits == 0
+                    && self.term_declaration_type(names, input).as_ref() == Some(produced)
+                {
+                    return self.materialize_term(names, value, input, depth + 1);
+                }
+                let rendered = child(0, input)?;
                 // The operand arrives at the type this term requires of it; a
                 // shift leaves it at that type promoted. The piece's width is
                 // a conversion from there, spelled only where it is not the
@@ -963,9 +1025,13 @@ impl<'a> FoldingContext<'a> {
             .normalization_origins?
             .projection(site, prepared)
             .ok()??;
-        let mut rhs = self
-            .materialize_term(names, value, rewrite.canonical, 0)
-            .ok()?;
+        // The object's declaration is the last word on what the assignment
+        // holds. A widening at the root has nowhere to go when the object is
+        // declared at its operand's width: rendering it and narrowing back at
+        // the declaration produced a cast that converts nothing, which is most
+        // of the redundant casts on the assignment side.
+        let root = rewrite.canonical;
+        let mut rhs = self.materialize_term(names, value, root, 0).ok()?;
         // The operand reads the base path would have marked one at a time,
         // marked on the whole right-hand side instead. The rewrite may have
         // absorbed the operand that carried a read -- `x & x` reads `x` once
@@ -977,13 +1043,8 @@ impl<'a> FoldingContext<'a> {
         // What the right-hand side has is now the term's produced type, not the
         // machine root's; the write projection reads this to decide how the
         // carrier is written.
-        self.pending_assignment_type.set(
-            names
-                .plan()
-                .typed_boundaries()
-                .term_produced(rewrite.canonical)
-                .cloned(),
-        );
+        self.pending_assignment_type
+            .set(names.plan().typed_boundaries().term_produced(root).cloned());
         Some(CanonicalBoundAssignment {
             stmt: CStmt::Expr(CExpr::assign(CExpr::Var(symbol), rhs)),
             value,
@@ -1217,7 +1278,14 @@ impl<'a> FoldingContext<'a> {
         match first_disposition {
             r2ssa::MachineUseDisposition::Exact(slice) => {
                 let base = self.planned_value_expr(input.value)?;
-                let base_type = self.value_type(input.value);
+                // What the base is spelled as, which is its declaration when
+                // the expression is an object. Handing the projection the
+                // machine type instead made it widen a name to a carrier the
+                // name does not hold and narrow it straight back.
+                let base_type = self
+                    .value_declaration_type(input.value)
+                    .map(CValue::Typed)
+                    .or_else(|| self.value_type(input.value));
                 super::projection::project_machine_use_of(
                     base,
                     base_type.as_ref(),

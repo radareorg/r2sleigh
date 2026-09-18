@@ -79,13 +79,13 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                     uint32_t stack_m88;
                     int32_t stack_m84;
                     uint32_t RAX_43 = sym__rotl32((uint32_t)stack_m60, 1);
-                    stack_m92 = (uint32_t)RAX_43;
+                    stack_m92 = RAX_43;
                     uint32_t RAX_44 = sym__rotl32((uint32_t)stack_m64, 7);
-                    stack_m88 = (uint32_t)RAX_44 + stack_m92;
+                    stack_m88 = RAX_44 + stack_m92;
                     uint32_t RAX_47 = sym__rotl32((uint32_t)stack_m68, 12);
-                    stack_m84 = (int32_t)((uint32_t)RAX_47 + stack_m88);
+                    stack_m84 = (int32_t)(RAX_47 + stack_m88);
                     uint32_t RAX_50 = sym__rotl32((uint32_t)stack_m72, 18);
-                    stack_m44 = (uint32_t)RAX_50 + (uint32_t)stack_m84;
+                    stack_m44 = RAX_50 + (uint32_t)stack_m84;
                 }
             }
         }

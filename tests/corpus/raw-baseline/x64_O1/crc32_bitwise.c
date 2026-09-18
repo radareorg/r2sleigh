@@ -17,7 +17,7 @@ uint32_t sym__crc32_bitwise(uint64_t RDI_0, uint64_t RSI_0)
             for (; ; ) {
                 tmp_lane_100000740_2d_17_1 = (uint32_t)RAX_1 >> 1 ^ (-((uint32_t)RAX_1 & 1) & 0xedb88320);
                 RAX_1 = (uint64_t)tmp_lane_100000740_2d_17_1;
-                uint32_t tmp_lane_100000740_36_1a_1 = (uint32_t)RDX_5 - 1;
+                uint32_t tmp_lane_100000740_36_1a_1 = RDX_5 - 1;
                 RDX_5 = (uint32_t)tmp_lane_100000740_36_1a_1;
                 if (tmp_lane_100000740_36_1a_1 == 0) {
                     break;

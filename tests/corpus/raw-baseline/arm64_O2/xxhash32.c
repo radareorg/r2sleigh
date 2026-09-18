@@ -198,7 +198,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     uint64_t tmp_7400_5 = X12_1;
                     X12_1 += 8;
                     uint32_t tmp_24e00_2 = *(uint32_t*)tmp_7400_5;
-                    uint32_t tmp_28e80_2 = (uint32_t)X11_13 - tmp_24e00_2 * 0x3d4d51c3;
+                    uint32_t tmp_28e80_2 = X11_13 - tmp_24e00_2 * 0x3d4d51c3;
                     X11_13 = (uint32_t)((tmp_28e80_2 >> 15 | tmp_28e80_2 << 17) * 0x27d4eb2f);
                     uint8_t ZR_7 = X12_1 == X9_1;
                     uint8_t CY_7 = X9_1 <= X12_1;
@@ -218,7 +218,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         uint64_t tmp_7400_8 = X13_2;
                         X13_2++;
                         uint8_t tmp_25400_2 = *(uint8_t*)tmp_7400_8;
-                        uint32_t tmp_28e80_5 = (uint32_t)X11_13 + (uint32_t)tmp_25400_2 * 0x165667b1;
+                        uint32_t tmp_28e80_5 = X11_13 + (uint32_t)tmp_25400_2 * 0x165667b1;
                         X11_13 = (uint32_t)((tmp_28e80_5 >> 21 | tmp_28e80_5 << 11) * 0x9e3779b1);
                         uint8_t TMPZR_18 = X9_3 == 1;
                         X9_3--;

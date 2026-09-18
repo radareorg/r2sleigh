@@ -14,7 +14,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 X12_1 = (uint8_t*)((uint64_t)X12_1 + 4);
                 uint32_t tmp_24e00_2 = (uint32_t)*(int32_t*)tmp_7400_2;
                 uint32_t tmp_2b380_2 = tmp_24e00_2 * 0xcc9e2d51;
-                uint32_t tmp_20380_2 = (uint32_t)X2_0_2 ^ (tmp_2b380_2 >> 17 | tmp_2b380_2 << 15) * 0x1b873593;
+                uint32_t tmp_20380_2 = X2_0_2 ^ (tmp_2b380_2 >> 17 | tmp_2b380_2 << 15) * 0x1b873593;
                 uint32_t tmp_31880_3 = tmp_20380_2 >> 19 | tmp_20380_2 << 13;
                 X2_0_2 = (uint32_t)(tmp_31880_3 * 4 + tmp_31880_3 - 0x19ab949c);
                 uint8_t TMPZR_5 = X10_1 == 1;
@@ -39,21 +39,21 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     }
                     {
                         uint8_t tmp_25500_3 = X11_5[1];
-                        X10_5 = (uint32_t)((uint32_t)tmp_25500_3 << 8 | (uint32_t)X10_5);
+                        X10_5 = (uint32_t)((uint32_t)tmp_25500_3 << 8 | X10_5);
                         {
                             tmp_25500_5 = *X11_5;
-                            tmp_2b380_5 = ((uint32_t)X10_5 ^ (uint32_t)tmp_25500_5) * 0xcc9e2d51;
-                            X2_0_2 = (uint32_t)((uint32_t)X2_0_2 ^ (tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * 0x1b873593);
+                            tmp_2b380_5 = (X10_5 ^ (uint32_t)tmp_25500_5) * 0xcc9e2d51;
+                            X2_0_2 = (uint32_t)(X2_0_2 ^ (tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * 0x1b873593);
                         }
                     }
                 } else if (X12_5 != 0) {
                     tmp_25500_5 = *X11_5;
-                    tmp_2b380_5 = ((uint32_t)X10_5 ^ (uint32_t)tmp_25500_5) * 0xcc9e2d51;
-                    X2_0_2 = (uint32_t)((uint32_t)X2_0_2 ^ (tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * 0x1b873593);
+                    tmp_2b380_5 = (X10_5 ^ (uint32_t)tmp_25500_5) * 0xcc9e2d51;
+                    X2_0_2 = (uint32_t)(X2_0_2 ^ (tmp_2b380_5 >> 17 | tmp_2b380_5 << 15) * 0x1b873593);
                 }
             }
             {
-                uint32_t tmp_20380_7 = (uint32_t)X2_0_2 ^ (uint32_t)X1_0;
+                uint32_t tmp_20380_7 = X2_0_2 ^ (uint32_t)X1_0;
                 uint32_t tmp_2b380_8 = (tmp_20380_7 >> 16 ^ tmp_20380_7) * 0x85ebca6b;
                 uint32_t tmp_2b380_9 = (tmp_2b380_8 >> 13 ^ tmp_2b380_8) * 0xc2b2ae35;
                 return tmp_2b380_9 >> 16 ^ tmp_2b380_9;
