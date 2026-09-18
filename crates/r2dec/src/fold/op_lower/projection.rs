@@ -127,6 +127,17 @@ pub(super) fn project_machine_use_of(
         ));
     };
 
+    // What each use slice selected and converted, so a cast in the output can
+    // be traced to the slice that asked for it.
+    r2il::refusal_evidence!(
+        "use-slice-projection",
+        "slice offset={} width={} carrier={} conversion={:?} base_type={:?} whole={whole}",
+        slice.bit_offset(),
+        slice.width_bits(),
+        slice.carrier_width_bits(),
+        slice.conversion().map(|conversion| conversion.kind()),
+        base_type
+    );
     let Some(conversion) = slice.conversion() else {
         return Ok((projected, projected_type));
     };

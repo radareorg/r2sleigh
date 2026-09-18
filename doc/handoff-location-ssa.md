@@ -27616,3 +27616,50 @@ that map from somewhere else.
 Worth doing: bzip2 names its guard correctly, so the two binaries differ in
 something specific, and the comparison between them is the shortest route to
 the answer.
+
+### The four noise counters, with a cause each
+
+`--gate cutover` requires the machine-noise counters to be zero and they are
+not: same-type casts 131, literal-only declarations 35, flag carriers 23,
+gotos 4 of which 2 are in the unoptimized cells the gate requires zero for.
+Every one now has a named cause rather than a count.
+
+**Literal-only declarations.** The plan asks the machine projection whether a
+value is a literal, and the projection is one instruction deep, so an arm64
+constant built by `movz` then `movk` reads as an `or` of a value. The renderer
+spells the folded constant and the effect ledger scores it as a repeated
+literal, both asking the canonical term; only the plan asked something else,
+and the ledger's own comment already claimed the three agreed. The predicate
+now asks the canonical term. That is inert today and deliberately committed
+as such: the canonical term for these values is still an unfolded `Or`,
+because the `movz` result reaches the `movk` as a leaf rather than a literal,
+so `literal.or` never fires. Where the substitution stops is the open half.
+
+**Flag carriers.** `uint8_t TMPZR_4 = X1_0 == 1; X1_0--; if (TMPZR_4) break;`
+on every arm64 counted loop. The comparison is recognised; what refuses to
+fold it into the branch is the write-after-read gate, correctly, because the
+counter is decremented between the two. The remedy is to state the comparison
+over the value the flag-setting instruction defines rather than over its
+operand -- `X1_0 - 1 == 0`, not `X1_0 == 1` -- which folds and renders
+`do { ... } while (--X1_0 != 0);`. That is a rule in the rewriter's flag
+group, with the proof obligation its rules carry.
+
+**Gotos.** Both are murmur3's `switch (len & 3)` tail, rendered as a chain of
+inequality tests with fall-through. The bounded-duplication rewrite that would
+remove the jump never sees it: `count_arm_ends` descends only into the last
+statement of a block, and this `goto` is in a nested first element. Widening
+the scan is not enough on its own, because the jump skips three case tails and
+all of them would have to be duplicated. Recognising an equality chain on one
+value as a `switch` is the better answer and nothing does that today.
+
+**Same-type casts.** The conversion boundary and the declaration disagree
+about an operand's type: `(uint32_t)X0_3` where `X0_3` is declared `uint32_t`
+is emitted because the boundary believes the operand is 64-bit. The use-slice
+path was ruled out by measurement -- every slice in the cell is whole with no
+conversion.
+
+Three diagnostics were added while tracing these and are worth keeping:
+`use-slice-projection` names what each slice selected and converted,
+`integer-conversion-over-name` names both sides of a conversion spelled over a
+bare name, and `frame-constant` names what the machine projection and the
+canonical term each said about a value.

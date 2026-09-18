@@ -1395,6 +1395,27 @@ fn frame_constant(
     expr_by_value: &std::collections::BTreeMap<ValueId, r2ssa::MachineExprId>,
     value: ValueId,
 ) -> bool {
+    // Asked of the canonical term, which is what the renderer spells and what
+    // the effect ledger already scores as a repeated literal. Asking the
+    // machine projection instead saw one instruction at a time, so an arm64
+    // constant built by `movz` then `movk` read as an `or` of a value rather
+    // than as the literal the rewriter had already folded it into, and every
+    // such constant took a declaration of its own.
+    // What the two answers were, so a constant that keeps a declaration of
+    // its own names the term that failed to be one.
+    if r2il::refusal_evidence::tracing() {
+        r2il::refusal_evidence!(
+            "frame-constant",
+            "{value:?} machine={:?} canonical={:?}",
+            expr_by_value
+                .get(&value)
+                .copied()
+                .map(|root| r2rewrite::machine_expr_is_literal(projection, root)),
+            canonical
+                .value(value)
+                .map(|canonical_value| canonical.arena().term(canonical_value.canonical).kind)
+        );
+    }
     expr_by_value
         .get(&value)
         .copied()
@@ -1402,7 +1423,7 @@ fn frame_constant(
         || canonical.value(value).is_some_and(|canonical_value| {
             matches!(
                 canonical.arena().term(canonical_value.canonical).kind,
-                r2rewrite::TermKind::ObjectAddress(_)
+                r2rewrite::TermKind::ObjectAddress(_) | r2rewrite::TermKind::Literal(_)
             )
         })
 }

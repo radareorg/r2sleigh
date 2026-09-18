@@ -332,10 +332,19 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
     let from_integer = integer_meta(from, pointer_bits);
     let to_integer = integer_meta(to, pointer_bits);
     match (from_integer, to_integer) {
-        (Some(from), Some(to_meta)) => {
-            if implicit_is_exact(from, to_meta) {
+        (Some(from_meta), Some(to_meta)) => {
+            if implicit_is_exact(from_meta, to_meta) {
                 expr
             } else {
+                // What the two sides were, where a name is being converted:
+                // a conversion over a name that changes nothing is noise the
+                // reader cannot act on, and this says which boundary asked.
+                if r2il::refusal_evidence::tracing() && matches!(expr.unobserved(), CExpr::Var(_)) {
+                    r2il::refusal_evidence!(
+                        "integer-conversion-over-name",
+                        "from={from:?} to={to:?}"
+                    );
+                }
                 CExpr::cast(to.clone(), expr)
             }
         }
