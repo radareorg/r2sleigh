@@ -1,6 +1,6 @@
 uint64_t sym__djb2(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 120 source obligations: 91 rendered, 29 elided, 0 refused; 34 statements rendered */
+    /* r2dec proof: no individual construct is marked; 122 source obligations: 93 rendered, 29 elided, 0 refused; 34 statements rendered */
     if (RSI_0 == 0) {
         return 0x1505;
     } else {

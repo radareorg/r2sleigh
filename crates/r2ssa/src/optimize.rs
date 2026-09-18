@@ -1084,13 +1084,65 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
         .flat_map(|block| block.ops.iter())
         .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
         .collect::<HashMap<_, _>>();
+    // Values a statement other than a flag test reads. A difference read only
+    // by the flags of its own instruction does go unread once they fold; one a
+    // register receives does not.
+    let kept = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter(|op| {
+            !matches!(
+                op,
+                SSAOp::IntEqual { .. }
+                    | SSAOp::IntNotEqual { .. }
+                    | SSAOp::IntSLess { .. }
+                    | SSAOp::IntSLessEqual { .. }
+                    | SSAOp::IntLess { .. }
+                    | SSAOp::IntLessEqual { .. }
+                    | SSAOp::IntSBorrow { .. }
+                    | SSAOp::IntCarry { .. }
+            )
+        })
+        .flat_map(|op| op.sources())
+        .map(VarKey::from_var)
+        .collect::<HashSet<_>>();
+    // Flags a disjunction reads: those are halves of one combined condition.
+    // The machine copies a flag out of its scratch register before testing it,
+    // so the disjunction names the copy and the fold has to look through it.
+    let mut combined = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter(|op| matches!(op, SSAOp::IntOr { .. } | SSAOp::BoolOr { .. }))
+        .flat_map(|op| op.sources())
+        .map(VarKey::from_var)
+        .collect::<HashSet<_>>();
+    loop {
+        let grown = func
+            .blocks()
+            .iter()
+            .flat_map(|block| block.ops.iter())
+            .filter_map(|op| match op {
+                SSAOp::Copy { dst, src } if combined.contains(&VarKey::from_var(dst)) => {
+                    Some(VarKey::from_var(src))
+                }
+                _ => None,
+            })
+            .filter(|key| !combined.contains(key))
+            .collect::<Vec<_>>();
+        if grown.is_empty() {
+            break;
+        }
+        combined.extend(grown);
+    }
     let mut changed = false;
     for addr in func.block_addrs().to_vec() {
         let Some(block) = func.get_block_mut(addr) else {
             continue;
         };
         for op in &mut block.ops {
-            let Some(folded) = fold_condition_codes(op, &defs) else {
+            let Some(folded) = fold_condition_codes(op, &defs, &kept, &combined) else {
                 continue;
             };
             if &folded == op {
@@ -1118,7 +1170,12 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
 ///
 /// The flag definitions are left where they are. They become unread, and the
 /// passes that remove unread values already know what to do with them.
-fn fold_condition_codes(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+fn fold_condition_codes(
+    op: &SSAOp,
+    defs: &HashMap<VarKey, SSAOp>,
+    kept: &HashSet<VarKey>,
+    combined: &HashSet<VarKey>,
+) -> Option<SSAOp> {
     let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
     let is_zero = |var: &SSAVar| const_value(var) == Some(0);
     // `d = a - b`, whether the flag reads the difference by name or the
@@ -1137,9 +1194,35 @@ fn fold_condition_codes(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSA
         SSAOp::IntSBorrow { a, b, .. } => Some((a.clone(), b.clone())),
         _ => None,
     };
-    // The zero flag: `(a - b) == 0`.
-    let zero_flag = |var: &SSAVar| match define(var)? {
+    // A flag read through the copies the machine makes of it: arm64 tests
+    // `ZR`, which is a copy of the `tmpZR` the subtraction wrote.
+    let define_through_copies = |var: &SSAVar| {
+        let mut op = define(var)?;
+        let mut hops = 0;
+        while let SSAOp::Copy { src, .. } = op {
+            hops += 1;
+            if hops > 8 {
+                return None;
+            }
+            op = define(src)?;
+        }
+        Some(op)
+    };
+    // The zero flag: `(a - b) == 0`, or already the equality this pass made
+    // of it, since the two halves of a disjunction fold in one walk.
+    let zero_flag = |var: &SSAVar| match define_through_copies(var)? {
         SSAOp::IntEqual { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+        SSAOp::IntEqual { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
+    };
+    // The unsigned ordering: the carry of `a - b` is `b <= a`, and the machine
+    // tests its negation for `a < b`.
+    let unsigned_order = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntLess { a, b, .. } => Some((a.clone(), b.clone())),
+        SSAOp::BoolNot { src, .. } => match define_through_copies(src)? {
+            SSAOp::IntLessEqual { a: y, b: x, .. } => Some((x.clone(), y.clone())),
+            _ => None,
+        },
         _ => None,
     };
     // `SF != OF` is `a <s b`, and `SF == OF` is `b <=s a`. Either order.
@@ -1160,6 +1243,9 @@ fn fold_condition_codes(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSA
                     b: right,
                 });
             }
+            if kept.contains(&VarKey::from_var(a)) && !combined.contains(&VarKey::from_var(dst)) {
+                return None;
+            }
             let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
             Some(SSAOp::IntNotEqual {
                 dst: dst.clone(),
@@ -1178,6 +1264,16 @@ fn fold_condition_codes(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSA
             // The zero flag of a subtraction is an equality between its
             // operands. True of two's complement at any width, and it is what
             // lets the difference itself go unread.
+            // Only where the difference really does go unread. When a
+            // register receives it, restating the test over the operands moves
+            // the read to before the write, and the comparison can no longer be
+            // spelled after it -- which is what leaves the flag in a local.
+            // Unless the flag is half of a combined condition: `jle` and
+            // `jbe` are an ordering beside this test, and that fold needs the
+            // test in its operand form to recognise the pair.
+            if kept.contains(&VarKey::from_var(a)) && !combined.contains(&VarKey::from_var(dst)) {
+                return None;
+            }
             let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
             Some(SSAOp::IntEqual {
                 dst: dst.clone(),
@@ -1193,19 +1289,35 @@ fn fold_condition_codes(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSA
             // comparison this pass made of it, because the two are folded in
             // one walk and the operand may have been reached first.
             let ordered = |ordering: &SSAVar, zero: &SSAVar| {
-                let (left, right) = match define(ordering)? {
-                    SSAOp::IntNotEqual { a: x, b: y, .. } => signed_order(x, y)?,
-                    SSAOp::IntSLess { a: x, b: y, .. } => (x.clone(), y.clone()),
-                    _ => return None,
+                let (left, right, signed) = match define(ordering)? {
+                    SSAOp::IntNotEqual { a: x, b: y, .. } => {
+                        let (l, r) = signed_order(x, y)?;
+                        (l, r, true)
+                    }
+                    SSAOp::IntSLess { a: x, b: y, .. } => (x.clone(), y.clone(), true),
+                    _ => {
+                        let (l, r) = unsigned_order(ordering)?;
+                        (l, r, false)
+                    }
                 };
                 let (zero_left, zero_right) = zero_flag(zero)?;
-                (zero_left == left && zero_right == right).then_some((left, right))
+                let same = (zero_left == left && zero_right == right)
+                    || (zero_left == right && zero_right == left);
+                same.then_some((left, right, signed))
             };
-            let (left, right) = ordered(a, b).or_else(|| ordered(b, a))?;
-            Some(SSAOp::IntSLessEqual {
-                dst: dst.clone(),
-                a: left,
-                b: right,
+            let (left, right, signed) = ordered(a, b).or_else(|| ordered(b, a))?;
+            Some(if signed {
+                SSAOp::IntSLessEqual {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            } else {
+                SSAOp::IntLessEqual {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
             })
         }
         _ => None,

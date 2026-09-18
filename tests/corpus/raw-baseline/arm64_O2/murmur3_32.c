@@ -1,6 +1,6 @@
 uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 134 source obligations: 119 rendered, 15 elided, 0 refused; 42 statements rendered */
+    /* r2dec proof: no individual construct is marked; 134 source obligations: 118 rendered, 16 elided, 0 refused; 41 statements rendered */
     {
         uint32_t X2_0_2;
         X2_0_2 = W2_0;
@@ -17,9 +17,8 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 uint32_t tmp_20380_2 = X2_0_2 ^ (tmp_2b380_2 >> 17 | tmp_2b380_2 << 15) * 0x1b873593;
                 uint32_t tmp_31880_3 = tmp_20380_2 >> 19 | tmp_20380_2 << 13;
                 X2_0_2 = (uint32_t)(tmp_31880_3 * 4 + tmp_31880_3 - 0x19ab949c);
-                uint8_t TMPZR_5 = X10_1 == 1;
                 X10_1--;
-                if (TMPZR_5) {
+                if (X10_1 == 0) {
                     break;
                 }
             }

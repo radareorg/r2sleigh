@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 257 source obligations: 209 rendered, 48 elided, 0 refused; 64 statements rendered */
+    /* r2dec proof: no individual construct is marked; 251 source obligations: 203 rendered, 48 elided, 0 refused; 62 statements rendered */
     {
         int32_t tmp_11f00_5;
         uint32_t RCX_6;
@@ -37,8 +37,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                 tmp_lane_100000910_c1_26_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000910_99_1f_1 << 13 | tmp_lane_100000910_99_1f_1 >> 19) * 0xffffffff9e3779b1U);
                 RCX_1 = tmp_lane_100000910_c1_26_1;
                 RDI_0 += 16;
-                uint64_t tmp_3f080_2 = RDI_0;
-                if (R8_1 < tmp_3f080_2) {
+                if (R8_1 < RDI_0) {
                     break;
                 }
             }
@@ -48,8 +47,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
             uint32_t RSI_1;
             uint64_t RCX_10;
             RSI_1 = (uint32_t)RSI_0 + RCX_6;
-            uint64_t tmp_3f080_4 = RDI_0 + 4;
-            if (tmp_3f080_4 <= tmp_4a00_1) {
+            if (RDI_0 + 4 <= tmp_4a00_1) {
                 for (; ; ) {
                     tmp_11f00_5 = (int32_t)*(uint32_t*)RDI_0;
                     uint32_t tmp_lane_1000009a0_c_47_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffffc2b2ae3dU) + RSI_1;

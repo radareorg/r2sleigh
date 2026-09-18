@@ -1967,6 +1967,10 @@ fn inlinable_core(
     // expansions and fewer reads, so a hazard computed from the candidates
     // covers the hazard of any subset. There is no fixpoint to iterate.
     let mut hazard = BTreeMap::<ValueId, BTreeSet<u32>>::new();
+    // The same closure over the values themselves. A write that stores one of
+    // them into an object the expression reads leaves the object holding what
+    // the expression would have read anyway, so it is not a hazard.
+    let mut hazard_values = BTreeMap::<ValueId, BTreeSet<ValueId>>::new();
     let mut visited = BTreeSet::<ValueId>::new();
     for root in direct_reads.keys().copied().collect::<Vec<_>>() {
         if hazard.contains_key(&root) {
@@ -1976,7 +1980,12 @@ fn inlinable_core(
         while let Some((value, expanded)) = stack.pop() {
             if expanded {
                 let mut groups = BTreeSet::new();
+                let mut values = BTreeSet::new();
                 for read in direct_reads.get(&value).into_iter().flatten() {
+                    values.insert(*read);
+                    if let Some(closed) = hazard_values.get(read) {
+                        values.extend(closed.iter().copied());
+                    }
                     // The leaf's own object, whether or not it folds: a leaf
                     // that is a candidate may still stay bound, and then a
                     // write to its object between here and the reader is the
@@ -1990,6 +1999,7 @@ fn inlinable_core(
                     }
                 }
                 hazard.insert(value, groups);
+                hazard_values.insert(value, values);
                 continue;
             }
             if hazard.contains_key(&value) || !visited.insert(value) {
@@ -2041,6 +2051,7 @@ fn inlinable_core(
     let mut readers = BTreeMap::new();
     for (value, definition, reader) in hazard_candidates {
         let read_groups = hazard.get(&value).cloned().unwrap_or_default();
+        let read_values = hazard_values.get(&value).cloned().unwrap_or_default();
         let (Some(def_inst), Some(use_inst)) = (graph.inst(definition), graph.inst(reader)) else {
             continue;
         };
@@ -2065,6 +2076,13 @@ fn inlinable_core(
                         .output
                         .and_then(group_of)
                         .is_some_and(|group| read_groups.contains(&group))
+                    // A copy of a value the expression reads stores what that
+                    // expression would have read anyway, so reading the object
+                    // after it is reading the same bits. `subs x1, x1, 1`
+                    // writes the difference into the counter, and the flag
+                    // tests that difference.
+                    && !(matches!(inst.payload, r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }))
+                        && inst.inputs.iter().all(|input| read_values.contains(input)))
             });
         let rewritten = rewritten_by.is_some();
         // A merge this block feeds is copied to its carrier at the block's end,

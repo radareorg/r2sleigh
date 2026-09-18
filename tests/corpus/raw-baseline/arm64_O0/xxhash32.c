@@ -2,7 +2,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 383 source obligations: 304 rendered, 79 elided, 0 refused; 90 statements rendered */
+    /* r2dec proof: no individual construct is marked; 379 source obligations: 300 rendered, 79 elided, 0 refused; 89 statements rendered */
     {
         uint32_t stack_m36;
         uint64_t stack_m32;
@@ -61,8 +61,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     stack_m24 = X8_5 + 4;
                     {
                         X8_5 = stack_m24;
-                        uint64_t tmp_3e680_2 = stack_m64;
-                        if (tmp_3e680_2 < X8_5) {
+                        if (stack_m64 < X8_5) {
                             break;
                         }
                     }

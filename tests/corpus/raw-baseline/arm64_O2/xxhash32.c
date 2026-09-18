@@ -4,7 +4,7 @@ struct r2sleigh_bits_256 {
 
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 409 source obligations: 380 rendered, 29 elided, 0 refused; 209 statements rendered */
+    /* r2dec proof: no individual construct is marked; 394 source obligations: 365 rendered, 29 elided, 0 refused; 205 statements rendered */
     {
         struct r2sleigh_bits_256 Z0_1;
         struct r2sleigh_bits_256 Z1_1;
@@ -190,19 +190,16 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             uint32_t X11_13;
             uint64_t X13_2;
             X11_13 = (uint32_t)((uint32_t)X1_0 + (uint32_t)X11_9);
-            uint64_t X13_1 = X12_1 + 4;
-            if (X13_1 <= X9_1) {
+            if (X12_1 + 4 <= X9_1) {
                 for (; ; ) {
                     X13_2 = X12_1 + 4;
-                    uint64_t tmp_7400_5 = X12_1;
-                    X12_1 += 8;
-                    uint32_t tmp_24e00_2 = *(uint32_t*)tmp_7400_5;
+                    uint32_t tmp_24e00_2 = *(uint32_t*)X12_1;
                     uint32_t tmp_28e80_2 = X11_13 - tmp_24e00_2 * 0x3d4d51c3;
                     X11_13 = (uint32_t)((tmp_28e80_2 >> 15 | tmp_28e80_2 << 17) * 0x27d4eb2f);
-                    uint8_t ZR_7 = X12_1 == X9_1;
-                    uint8_t CY_7 = X9_1 <= X12_1;
-                    X12_1 = X13_2;
-                    if (!(!CY_7 || ZR_7)) {
+                    uint64_t X12_8 = X13_2;
+                    uint8_t tmp_1000_6 = X12_1 + 8 <= X9_1;
+                    X12_1 = X12_8;
+                    if (!tmp_1000_6) {
                         break;
                     }
                 }
@@ -219,9 +216,8 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         uint8_t tmp_25400_2 = *(uint8_t*)tmp_7400_8;
                         uint32_t tmp_28e80_5 = X11_13 + (uint32_t)tmp_25400_2 * 0x165667b1;
                         X11_13 = (uint32_t)((tmp_28e80_5 >> 21 | tmp_28e80_5 << 11) * 0x9e3779b1);
-                        uint8_t TMPZR_18 = X9_3 == 1;
                         X9_3--;
-                        if (TMPZR_18) {
+                        if (X9_3 == 0) {
                             break;
                         }
                     }

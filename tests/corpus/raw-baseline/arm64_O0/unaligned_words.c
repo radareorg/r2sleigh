@@ -1,6 +1,6 @@
 uint32_t sym__unaligned_words(uint64_t X0_0, uint64_t X1_0)
 {
-    /* r2dec proof: no individual construct is marked; 97 source obligations: 60 rendered, 37 elided, 0 refused; 20 statements rendered */
+    /* r2dec proof: no individual construct is marked; 98 source obligations: 61 rendered, 37 elided, 0 refused; 20 statements rendered */
     {
         uint64_t stack_m16;
         uint8_t* stack_m8;

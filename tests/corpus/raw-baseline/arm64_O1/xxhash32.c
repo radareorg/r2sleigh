@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
-    /* r2dec proof: no individual construct is marked; 245 source obligations: 207 rendered, 38 elided, 0 refused; 78 statements rendered */
+    /* r2dec proof: no individual construct is marked; 230 source obligations: 192 rendered, 38 elided, 0 refused; 74 statements rendered */
     {
         uint32_t X2_0_2;
         uint64_t X12_5;
@@ -53,19 +53,16 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             uint32_t X14_11;
             uint64_t X15_10;
             X14_11 = (uint32_t)((uint32_t)X1_0 + X14_8);
-            uint64_t X15_9 = X12_5 + 4;
-            if (X15_9 <= X11_1) {
+            if (X12_5 + 4 <= X11_1) {
                 for (; ; ) {
                     X15_10 = X12_5 + 4;
-                    uint64_t tmp_7400_2 = X12_5;
-                    X12_5 += 8;
-                    uint32_t tmp_24e00_2 = *(uint32_t*)tmp_7400_2;
+                    uint32_t tmp_24e00_2 = *(uint32_t*)X12_5;
                     uint32_t tmp_28e80_8 = X14_11 - tmp_24e00_2 * 0x3d4d51c3;
                     X14_11 = (uint32_t)((tmp_28e80_8 >> 15 | tmp_28e80_8 << 17) * 0x27d4eb2f);
-                    uint8_t ZR_7 = X12_5 == X11_1;
-                    uint8_t CY_7 = X11_1 <= X12_5;
-                    X12_5 = X15_10;
-                    if (!(!CY_7 || ZR_7)) {
+                    uint64_t X12_12 = X15_10;
+                    uint8_t tmp_1000_6 = X12_5 + 8 <= X11_1;
+                    X12_5 = X12_12;
+                    if (!tmp_1000_6) {
                         break;
                     }
                 }
@@ -82,9 +79,8 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                         uint8_t tmp_25400_2 = *(uint8_t*)tmp_7400_5;
                         uint32_t tmp_28e80_11 = X14_11 + (uint32_t)tmp_25400_2 * 0x165667b1;
                         X14_11 = (uint32_t)((tmp_28e80_11 >> 21 | tmp_28e80_11 << 11) * 0x9e3779b1);
-                        uint8_t TMPZR_24 = X11_3 == 1;
                         X11_3--;
-                        if (TMPZR_24) {
+                        if (X11_3 == 0) {
                             break;
                         }
                     }

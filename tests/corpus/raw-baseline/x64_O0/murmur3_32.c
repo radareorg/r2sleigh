@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 338 source obligations: 222 rendered, 116 elided, 0 refused; 95 statements rendered */
+    /* r2dec proof: no individual construct is marked; 341 source obligations: 225 rendered, 116 elided, 0 refused; 95 statements rendered */
     {
         uint64_t stack_m56;
         uint64_t stack_m48;

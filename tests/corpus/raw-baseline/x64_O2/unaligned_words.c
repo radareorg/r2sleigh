@@ -1,6 +1,6 @@
 uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
 {
-    /* r2dec proof: no individual construct is marked; 155 source obligations: 120 rendered, 35 elided, 0 refused; 42 statements rendered */
+    /* r2dec proof: no individual construct is marked; 152 source obligations: 116 rendered, 36 elided, 0 refused; 39 statements rendered */
     {
         uint64_t RAX_1;
         uint64_t RCX_1;
@@ -32,27 +32,22 @@ uint64_t sym__unaligned_words(uint64_t RDI_0, uint64_t RSI_0)
                         uint8_t tmp_11e00_2 = ((uint8_t*)RDI_0)[RCX_1];
                         RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_2 ^ (uint32_t)RAX_1) * 0x1000193);
                         RCX_1++;
-                        uint64_t R8_5 = R8_3 - 1;
-                        uint8_t tmp_12800_2 = R8_3 != 1;
-                        R8_3 = R8_5;
-                        if (!tmp_12800_2) {
+                        R8_3--;
+                        if (R8_3 == 0) {
                             break;
                         }
                     }
                 }
-                {
-                    uint64_t tmp_3ea80_2 = RDX_7;
-                    if ((uint64_t)-0x4 >= tmp_3ea80_2) {
-                        for (; ; ) {
-                            uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RCX_1];
-                            uint8_t tmp_11e00_6 = ((uint8_t*)RDI_0)[RCX_1 + 1];
-                            uint8_t tmp_11e00_7 = ((uint8_t*)RDI_0)[RCX_1 + 2];
-                            uint8_t tmp_11e00_8 = ((uint8_t*)RDI_0)[RCX_1 + 3];
-                            RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_8 ^ (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_7 ^ (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_5 ^ (uint32_t)RAX_1) * 0x1000193) ^ (uint32_t)tmp_11e00_6) * 0x1000193)) * 0x1000193)) * 0x1000193);
-                            RCX_1 += 4;
-                            if (RSI_0 == RCX_1) {
-                                break;
-                            }
+                if ((uint64_t)-0x4 >= RDX_7) {
+                    for (; ; ) {
+                        uint8_t tmp_11e00_5 = ((uint8_t*)RDI_0)[RCX_1];
+                        uint8_t tmp_11e00_6 = ((uint8_t*)RDI_0)[RCX_1 + 1];
+                        uint8_t tmp_11e00_7 = ((uint8_t*)RDI_0)[RCX_1 + 2];
+                        uint8_t tmp_11e00_8 = ((uint8_t*)RDI_0)[RCX_1 + 3];
+                        RAX_1 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_8 ^ (uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_7 ^ (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint64_t)(int32_t)((uint32_t)tmp_11e00_5 ^ (uint32_t)RAX_1) * 0x1000193) ^ (uint32_t)tmp_11e00_6) * 0x1000193)) * 0x1000193)) * 0x1000193);
+                        RCX_1 += 4;
+                        if (RSI_0 == RCX_1) {
+                            break;
                         }
                     }
                 }

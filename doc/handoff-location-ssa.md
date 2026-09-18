@@ -28298,3 +28298,52 @@ So Phase 1's remaining work is exactly the noise counters, and the two that
 still hold it are `flag_carriers` at 23 and `gotos` at 4. Both are traced. The
 flag carrier needs the partition that Phase 0's single-pass step delivers; the
 two gated gotos need equality-chain-to-switch recovery, which nothing does yet.
+
+### The flag carrier was one rewrite in r2ssa, and the partition was never needed
+
+`flag_carriers` fell from twenty-three to four, and the cells failing cutover's
+noise requirement from twenty-four to seven. The cause was not the lift, not the
+term rewriter, and not the missing single-pass partition this handoff had
+predicted -- three earlier claims, each wrong, and each retired by a measurement.
+
+`fold_condition_codes` (crates/r2ssa/src/optimize.rs) restates the zero flag of
+a subtraction, `(a - b) == 0`, as `a == b`. Its own comment gives the reason:
+it lets the difference go unread. That is right for a bare `cmp` and wrong for
+`subs x1, x1, 1`, where the difference is the value the counter receives.
+Restating the test moves its read from the defined value to the operand, so it
+can never be spelled after the decrement, and the flag has to be held in a
+local across it. Disabling `boolean.sub_eq_zero` in the rewriter proved it was
+not the rewriter: the SSA already held the operand form.
+
+Two changes. The fold now declines when a statement other than a flag test
+reads the difference, unless the flag is one half of a combined condition --
+`jle` and `jbe` are an ordering beside the zero test, that fold needs the
+operand form to recognise the pair, and it reaches its flags through the copies
+the machine makes of them. And the binding plan's hazard scan
+(crates/r2dec/src/binding_plan/rules.rs) now knows that a copy of a value the
+expression reads leaves the object holding what the expression would have read
+anyway, which is provable from the graph.
+
+Forty-three cells changed, net twenty-three statements fewer. Nineteen lose a
+flag carrier and the branch takes the comparison: `TMPZR_4 = X1_0 == 1;
+X1_0--; if (TMPZR_4)` becomes `X1_0--; if (X1_0 == 0)`. Two recover a
+compound decrement. One names the difference where it had named a lane. The
+rest are the branch condition alone.
+
+The last four flag carriers were the unsigned half of the same fold. arm64's
+`b.hi` tests `!CY || ZR`, where `CY` is the carry of `a - b`, which is
+`b <= a`; the disjunction is `a < b || a == b`, which is `a <= b`. The
+disjunction arm of `fold_condition_codes` recognised only the signed ordering,
+`SF != OF`, and read its flags directly, while arm64 reaches them through the
+copies the machine makes of its scratch flags. The arm now accepts the unsigned
+ordering -- `IntLess`, or `BoolNot` of `IntLessEqual` with the operands swapped
+-- looks through copies, and emits `IntLessEqual` for it. `xxhash32`'s loop exit
+went from `ZR_7 = X12_5 == X11_1; CY_7 = X11_1 <= X12_5; if (!(!CY_7 || ZR_7))`
+to one comparison in the branch.
+
+One rendering got a copy for it: arm64 -O1 `xxhash32`'s loop now spells
+`X12_12 = X15_10; ... X12_5 = X12_12` where it used to write `X12_5 = X15_10`
+directly, because the folded comparison `X12_5 + 8 <= X11_1` reads `X12_5`
+after the point where the phi edge copy used to sit and the copy moved below
+it through a fresh name. Not a counter, but a statement the source does not
+have; it belongs to the phi-edge placement, not to the fold.

@@ -17,9 +17,9 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
             for (; ; ) {
                 tmp_20380_4 = X8_1 >> 1 ^ ((X8_1 & 1) * 0xffffffff & 0xedb88320);
                 X8_1 = tmp_20380_4;
-                uint32_t tmp_lane_1000006d0_a_8_1 = X11_5;
-                X11_5 = tmp_lane_1000006d0_a_8_1 - 1;
-                if (tmp_lane_1000006d0_a_8_1 == 1) {
+                uint32_t tmp_3de80_3 = X11_5 - 1;
+                X11_5 = tmp_3de80_3;
+                if (tmp_3de80_3 == 0) {
                     break;
                 }
             }
