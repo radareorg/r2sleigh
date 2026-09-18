@@ -3,7 +3,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
     /* r2dec proof: no individual construct is marked; 139 source obligations: 115 rendered, 24 elided, 0 refused; 32 statements rendered */
     {
         uint32_t RDX_0_2;
-        RDX_0_2 = (uint32_t)EDX_0;
+        RDX_0_2 = EDX_0;
         if (RSI_0 >= 4) {
             uint64_t RCX_1;
             uint64_t RAX_2 = RSI_0 >> 2;
@@ -29,7 +29,7 @@ uint32_t sym__murmur3_32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
             case 3:
                 {
                     uint8_t tmp_11e00_1 = ((uint8_t*)RDI_0)[RAX_5 + 2];
-                    RCX_5 = (uint32_t)((uint32_t)tmp_11e00_1 << 16);
+                    RCX_5 = (uint32_t)tmp_11e00_1 << 16;
                 }
             case 2:
                 {

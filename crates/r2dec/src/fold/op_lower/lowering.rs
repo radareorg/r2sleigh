@@ -363,6 +363,22 @@ impl<'a> FoldingContext<'a> {
                     {
                         r2ssa::MachineWriteProjection::Full
                     }
+                    // The right-hand side already has the narrow width the
+                    // object is declared at, so the write is the whole of what
+                    // the object holds and the extension has nowhere to go.
+                    // The lowering that built the right-hand side said so by
+                    // handing back the narrow type.
+                    r2ssa::MachineWriteProjection::ZeroExtend {
+                        from_width_bits, ..
+                    } if rhs_type.as_ref().and_then(CValue::as_type).and_then(|ty| {
+                        r2types::declaration_type_width_bits(ty, self.pointer_bits())
+                    }) == Some(from_width_bits)
+                        && self.value_declaration_type(output.value).and_then(|ty| {
+                            r2types::declaration_type_width_bits(&ty, self.pointer_bits())
+                        }) == Some(from_width_bits) =>
+                    {
+                        r2ssa::MachineWriteProjection::Full
+                    }
                     projection => projection,
                 };
                 let (lhs, rhs, projected_type) = project_machine_write(

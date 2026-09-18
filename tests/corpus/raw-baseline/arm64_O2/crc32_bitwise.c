@@ -150,7 +150,7 @@ uint64_t sym__crc32_bitwise(uint64_t X0_0, uint64_t X1_0)
                 uint64_t tmp_lane_1000006d8_79_bb_1 = r2sleigh_bits_extract_256_64(Z2_48, 0U);
                 uint64_t X13_2 = tmp_lane_1000006d8_79_bb_1;
                 tmp_20380_8 = (uint32_t)(X13_2 >> 32) ^ ((uint32_t)X13_2 ^ ((uint32_t)((int32_t)(tmp_20380_3 << 26) >> 31) & 0x76dc4190)) ^ (tmp_20380_4 >> 6 ^ ((uint32_t)((int32_t)(tmp_20380_4 << 26) >> 31) & 0xedb88320));
-                X10_1 = (uint32_t)tmp_20380_8;
+                X10_1 = tmp_20380_8;
                 uint8_t TMPZR_2 = X1_0 == 1;
                 X1_0--;
                 if (TMPZR_2) {

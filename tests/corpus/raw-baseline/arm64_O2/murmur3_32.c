@@ -3,7 +3,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
     /* r2dec proof: no individual construct is marked; 134 source obligations: 119 rendered, 15 elided, 0 refused; 42 statements rendered */
     {
         uint32_t X2_0_2;
-        X2_0_2 = (uint32_t)W2_0;
+        X2_0_2 = W2_0;
         if (X1_0 >= 4) {
             uint64_t X10_1;
             uint8_t* X12_1;
@@ -35,7 +35,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 if (X12_5 != 1 && r2sleigh_int_sborrow_64(X12_5, 1) == (int64_t)(X12_5 - 1) < 0) {
                     if (X12_5 != 2) {
                         uint8_t tmp_25500_1 = X11_5[2];
-                        X10_5 = (uint32_t)((uint32_t)tmp_25500_1 << 16);
+                        X10_5 = (uint32_t)tmp_25500_1 << 16;
                     }
                     {
                         uint8_t tmp_25500_3 = X11_5[1];

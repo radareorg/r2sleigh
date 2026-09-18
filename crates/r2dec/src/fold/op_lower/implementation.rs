@@ -2099,9 +2099,9 @@ impl<'a> FoldingContext<'a> {
             // meets the declared object from that type.
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } | SSAOp::Cast { dst, src } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
-                let rhs = self.width_change_expr(frame, dst, src)?;
+                let (rhs, rhs_type) = self.width_change_expr(frame, dst, src)?;
                 let rhs = self.resolve_predicate_rhs_for_var(dst, rhs);
-                self.assign_stmt(lhs, rhs)
+                self.assign_typed(lhs, rhs, rhs_type)
             }
             SSAOp::Piece { dst, hi, lo } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
@@ -2758,7 +2758,7 @@ impl<'a> FoldingContext<'a> {
         frame: &LowerFrame,
         dst: &SSAVar,
         src: &SSAVar,
-    ) -> OpLoweringResult<CExpr> {
+    ) -> OpLoweringResult<(CExpr, Option<CValue>)> {
         let (expr, ty) = self.typed_input(frame, 0, src)?;
         let produced = self
             .produced_at(frame)
@@ -2775,13 +2775,25 @@ impl<'a> FoldingContext<'a> {
             self.declared_output_type_at(frame)
         );
         if ty.as_ref().and_then(CValue::as_type) == Some(&produced) {
-            return Ok(expr);
+            return Ok((expr, ty));
+        }
+        // The object this writes is the last word on what it holds. An
+        // extension into an object declared at the operand's own type has
+        // nowhere to go, so it is not spelled and the assignment is told the
+        // narrow type, which is what it is handed.
+        if let Some(declared) = self.declared_output_type_at(frame)
+            && ty.as_ref().and_then(CValue::as_type) == Some(&declared)
+        {
+            return Ok((expr, ty));
         }
         let operand = match self.required_at(frame, 0) {
             Some(required) => self.convert_from(expr, ty.as_ref(), &required),
             None => expr,
         };
-        Ok(CExpr::cast(produced, operand))
+        Ok((
+            CExpr::cast(produced.clone(), operand),
+            Some(CValue::Typed(produced)),
+        ))
     }
 }
 

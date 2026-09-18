@@ -6,7 +6,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
         uint32_t RCX_6;
         uint64_t tmp_4a00_1 = RDI_0 + RSI_0;
         if (RSI_0 < 16) {
-            RCX_6 = (uint32_t)((uint32_t)RDX_0 + 0x165667b1);
+            RCX_6 = (uint32_t)RDX_0 + 0x165667b1;
         } else {
             uint32_t R10_1;
             uint32_t R9_1;
@@ -30,12 +30,12 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                 uint32_t tmp_lane_100000910_67_16_1 = (uint32_t)((uint64_t)tmp_11f00_4 * 0xffffffff85ebca77U) + (uint32_t)RDX_0;
                 tmp_11f00_5 = (int32_t)((uint32_t*)RDI_0)[3];
                 tmp_lane_100000910_91_1c_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000910_35_d_1 << 13 | tmp_lane_100000910_35_d_1 >> 19) * 0xffffffff9e3779b1U);
-                R9_1 = (uint32_t)tmp_lane_100000910_91_1c_1;
+                R9_1 = tmp_lane_100000910_91_1c_1;
                 uint32_t tmp_lane_100000910_99_1f_1 = (uint32_t)((uint64_t)tmp_11f00_5 * 0xffffffff85ebca77U) + RCX_1;
                 tmp_lane_100000910_b8_24_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000910_67_16_1 << 13 | tmp_lane_100000910_67_16_1 >> 19) * 0xffffffff9e3779b1U);
                 RDX_0 = (uint64_t)tmp_lane_100000910_b8_24_1;
                 tmp_lane_100000910_c1_26_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_100000910_99_1f_1 << 13 | tmp_lane_100000910_99_1f_1 >> 19) * 0xffffffff9e3779b1U);
-                RCX_1 = (uint32_t)tmp_lane_100000910_c1_26_1;
+                RCX_1 = tmp_lane_100000910_c1_26_1;
                 RDI_0 += 16;
                 uint64_t tmp_3f080_2 = RDI_0;
                 if (R8_1 < tmp_3f080_2) {
@@ -47,7 +47,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
         {
             uint32_t RSI_1;
             uint64_t RCX_10;
-            RSI_1 = (uint32_t)((uint32_t)RSI_0 + RCX_6);
+            RSI_1 = (uint32_t)RSI_0 + RCX_6;
             uint64_t tmp_3f080_4 = RDI_0 + 4;
             if (tmp_3f080_4 <= tmp_4a00_1) {
                 for (; ; ) {

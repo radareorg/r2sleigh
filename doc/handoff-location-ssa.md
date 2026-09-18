@@ -28020,3 +28020,25 @@ make one decision in one place: the object's declared width decides both what
 `width_change_expr` spells and what the assignment believes it has. Split across
 two guards, they disagree on exactly the sites where the operand's own type is
 not the declaration.
+
+### The assignment cast, closed: one decision, in one place
+
+`same_type_casts` fell from forty-six to twenty-three once the two halves stopped
+disagreeing. The note above had it right about what was wrong and wrong about
+where the disagreement lived.
+
+`assign_stmt` calls `assign_typed(lhs, rhs, None)`, which sets the pending
+assignment type to `None`. So `width_change_expr` could decline the extension all
+it liked, and the assignment would still ask the entity root what the right-hand
+side has, be told the carrier's width, and convert down to the declaration.
+
+`width_change_expr` now returns the type along with the expression, and the zero
+and sign extension arm hands both to `assign_typed`. When the object is declared
+at the operand's own type the extension is not spelled and the narrow type is
+what the assignment is told; a matching downgrade in `project_planned_assignment`
+turns the write into `Full` only when the right-hand side really is that narrow
+and the object is declared that way, so the two can no longer disagree.
+
+Fourteen cells changed and every one is smaller. `arm64_O1/crc32_bitwise` gets a
+compound assignment back -- `X8_1 ^= ...` where the outer cast had been hiding
+it -- and the rest lose a cast and a pair of parentheses each.

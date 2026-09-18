@@ -5,7 +5,7 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         uint32_t X2_0_2;
         uint64_t X12_5;
         uint32_t X14_8;
-        X2_0_2 = (uint32_t)W2_0;
+        X2_0_2 = W2_0;
         uint64_t X11_1 = X1_0 + X0_0;
         if (X1_0 < 16) {
             X14_8 = (uint32_t)(W2_0 + 0x165667b1);
@@ -34,14 +34,14 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                 uint32_t tmp_24480_3 = tmp_7b80_2[1];
                 uint32_t tmp_28e80_4 = X2_0_2 - tmp_24280_3 * 0x7a143589;
                 tmp_2b380_2 = (tmp_28e80_2 >> 19 | tmp_28e80_2 << 13) * 0x9e3779b1;
-                X15_1 = (uint32_t)tmp_2b380_2;
+                X15_1 = tmp_2b380_2;
                 tmp_2b380_3 = (tmp_28e80_3 >> 19 | tmp_28e80_3 << 13) * 0x9e3779b1;
-                X16_1 = (uint32_t)tmp_2b380_3;
+                X16_1 = tmp_2b380_3;
                 tmp_2b380_4 = (tmp_28e80_4 >> 19 | tmp_28e80_4 << 13) * 0x9e3779b1;
-                X2_0_2 = (uint32_t)tmp_2b380_4;
+                X2_0_2 = tmp_2b380_4;
                 uint32_t tmp_28e80_5 = X14_1 - tmp_24480_3 * 0x7a143589;
                 tmp_2b380_5 = (tmp_28e80_5 >> 19 | tmp_28e80_5 << 13) * 0x9e3779b1;
-                X14_1 = (uint32_t)tmp_2b380_5;
+                X14_1 = tmp_2b380_5;
                 X12_5 += 16;
                 if (X13_1 < X12_5) {
                     break;
