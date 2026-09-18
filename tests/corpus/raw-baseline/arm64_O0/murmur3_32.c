@@ -2,7 +2,7 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 194 source obligations: 147 rendered, 47 elided, 0 refused; 43 statements rendered */
+    /* r2dec proof: no individual construct is marked; 194 source obligations: 147 rendered, 47 elided, 0 refused; 41 statements rendered */
     {
         uint32_t stack_m36;
         uint64_t stack_m32;
@@ -10,8 +10,6 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         uint32_t tmp_24d00_1;
         uint64_t X8_3;
         uint64_t stack_m64;
-        uint32_t tmp_2a000_2 = 0xcc9e2d51;
-        uint32_t tmp_2a000_4 = 0x1b873593;
         stack_m24 = X0_0;
         stack_m32 = X1_0;
         stack_m36 = W2_0;
@@ -21,8 +19,8 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
         uint64_t X8_4 = 0 ? 0 : tmp_42488_1;
         for (stack_m64 = 0; stack_m64 < X8_4; stack_m64++) {
             uint32_t tmp_25180_2 = ((uint32_t*)stack_m24)[stack_m64];
-            uint32_t X0_3 = sym__rotl32((uint32_t)(tmp_25180_2 * tmp_2a000_2), 15);
-            uint32_t X0_5 = sym__rotl32((uint32_t)((uint32_t)X0_3 * tmp_2a000_4 ^ tmp_24d00_1), 13);
+            uint32_t X0_3 = sym__rotl32((uint32_t)(tmp_25180_2 * 0xcc9e2d51), 15);
+            uint32_t X0_5 = sym__rotl32((uint32_t)(tmp_24d00_1 ^ (uint32_t)X0_3 * 0x1b873593), 13);
             tmp_24d00_1 = (uint32_t)X0_5 * 5 - 0x19ab949c;
         }
         {
@@ -47,8 +45,8 @@ uint32_t sym__murmur3_32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
             }
             {
                 uint8_t tmp_25500_5 = *tmp_12480_1;
-                uint32_t X0_7 = sym__rotl32((uint32_t)(tmp_2a000_2 * ((uint32_t)tmp_25500_5 ^ stack_m84)), 15);
-                tmp_24d00_1 ^= (uint32_t)X0_7 * tmp_2a000_4;
+                uint32_t X0_7 = sym__rotl32((uint32_t)(((uint32_t)tmp_25500_5 ^ stack_m84) * 0xcc9e2d51), 15);
+                tmp_24d00_1 ^= (uint32_t)X0_7 * 0x1b873593;
             }
             {
 L3: ;

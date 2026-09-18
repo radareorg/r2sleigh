@@ -1336,8 +1336,10 @@ mod tests {
             dst: Varnode::unique(0x108, 8),
             src: Varnode::unique(0x100, 1),
         });
-        // Two live readers keep the widening bound, giving the canonical flag
-        // expression a concrete assignment in which it must be rendered.
+        // Two readers, and the widening is a constant all the same: its term
+        // reads nothing but literals, so it is spelled at each reader rather
+        // than given a declaration. What must hold is that the spelling is the
+        // folded literal and never the machine flag re-lowered.
         for (offset, address) in [(0x110, 0x2000), (0x118, 0x2008)] {
             entry.push(R2ILOp::IntAdd {
                 dst: Varnode::unique(offset, 8),
@@ -1388,17 +1390,21 @@ mod tests {
         ));
         assert!(matches!(
             plan.disposition(widened),
-            Some(crate::binding_plan::ValueDisposition::Bound { .. })
+            Some(crate::binding_plan::ValueDisposition::Inline { .. })
         ));
 
-        enter_exact_test_site(&ctx, block.addr, 1);
+        // Every value here reads nothing but literals, so the store is the
+        // only statement left, and it is where the spelled constant shows.
+        enter_exact_test_site(&ctx, block.addr, 3);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[1], block.addr, 1)
+            .op_to_stmt_with_args(&block.ops[3], block.addr, 3)
             .expect("canonical literal has exact scalar lowering")
-            .expect("bound widening definition");
+            .expect("the store of the constant");
         let rendered = format!("{stmt:?}");
+        // The flag folds to one and the reader adds one, so the store spells
+        // the sum: the canonical literal is what reaches the reader.
         assert!(
-            rendered.contains("IntLit(1)"),
+            rendered.contains("Lit(2)"),
             "the canonical literal must be the rendered expression: {rendered}"
         );
         assert!(

@@ -1077,8 +1077,9 @@ pub(super) fn rewrite_inlining_partition(
     // on the partition except for how a pointer is spelled, so one seed
     // canonicalisation without the pointer oracle decides it for every round.
     let unrendered = {
-        let seed = r2rewrite::canonicalize_with(source, projection, &|_| false, &|_| None)
-            .map_err(BindingPlanBuildError::Canonicalisation)?;
+        let seed =
+            r2rewrite::canonicalize_with(source, projection, &seed_absorbs_literal, &|_| None)
+                .map_err(BindingPlanBuildError::Canonicalisation)?;
         unrendered_defined_values(source, projection, &seed)
     };
     for value in &unrendered {
@@ -1133,9 +1134,13 @@ pub(super) fn rewrite_inlining_partition(
         let declared_pointers = |value: ValueId| {
             declared_pointer_of_object(source_owned, &groups, &group_members, value)
         };
-        let seed_canonical =
-            r2rewrite::canonicalize_with(source, projection, &|_| false, &declared_pointers)
-                .map_err(BindingPlanBuildError::Canonicalisation)?;
+        let seed_canonical = r2rewrite::canonicalize_with(
+            source,
+            projection,
+            &seed_absorbs_literal,
+            &declared_pointers,
+        )
+        .map_err(BindingPlanBuildError::Canonicalisation)?;
         crate::stage_timing::mark("plan_seed");
         // Alone in its object: a one-member component, or a value the
         // previous round folded and this round's partition therefore does
@@ -1426,6 +1431,29 @@ fn frame_constant(
                 r2rewrite::TermKind::ObjectAddress(_) | r2rewrite::TermKind::Literal(_)
             )
         })
+}
+
+/// Whether the seed may absorb this producer: only one that computes the same
+/// value at every reader and observes nothing.
+///
+/// The seed exists to answer questions that must not depend on the partition,
+/// and it was built substituting nothing at all. That made it unable to
+/// answer the question asked of it most: a constant the machine assembles
+/// across two instructions -- `movz` then `movk` on arm64 -- reads there as an
+/// `or` of a value, while the arena the renderer uses substitutes and folds it
+/// to the constant it is, so the plan called a constant something else and
+/// gave it a declaration of its own.
+///
+/// The condition is the default policy's second arm, which reads only
+/// literals and entry values nothing redefines. It cannot depend on the
+/// partition, so the seed stays an answer every round can share.
+fn seed_absorbs_literal(query: &r2rewrite::ExpansionQuery<'_>) -> bool {
+    r2rewrite::term_is_duplicable(
+        query.projection,
+        query.arena,
+        query.entry_never_redefined,
+        query.producer_term,
+    )
 }
 
 /// Which values fold into their one reader, and for each non-literal fold
