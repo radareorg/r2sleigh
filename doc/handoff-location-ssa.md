@@ -27523,3 +27523,14 @@ two passes disagreeing.
 
 Gates: corpus 60/60 on every column, r2r at the recorded 2 XX, bzip2 census
 unchanged at 61 bodies and no refusals.
+
+Shapes matrix after this run: 84 cells (the new shape adds six), 27 rendering
+and compiling, 19 passing the differential, against the recorded 17 of 78.
+`shape_stack_buffer` was recorded as refusing on five of six and rendering
+uncompilable C on the sixth; it now renders correctly everywhere its
+architecture allows. Its differential still fails for a reason outside the
+decompiler: the rendering reads the stack guard through a bare literal
+address, which no standalone harness can map, so every cell whose function
+carries a stack protector segfaults under the oracle comparison. Spelling that
+read through a symbol the way the bzip2 renderings already do is what would
+let those cells be measured.
