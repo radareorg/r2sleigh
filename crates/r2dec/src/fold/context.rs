@@ -1047,6 +1047,28 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Run `f` with `block_addr` as the block being rendered, for a statement
+    /// the structurer spells at a block's end rather than from one of its ops.
+    pub(crate) fn with_current_block<R>(&self, block_addr: u64, f: impl FnOnce() -> R) -> R {
+        let saved = (
+            self.current_block_addr.get(),
+            self.current_block_id.get(),
+            self.current_op_idx.get(),
+        );
+        self.current_block_addr.set(Some(block_addr));
+        self.current_block_id.set(
+            self.inputs
+                .prepared_ssa
+                .and_then(|prepared| prepared.graph().block_id_for_addr(block_addr)),
+        );
+        self.current_op_idx.set(None);
+        let out = f();
+        self.current_block_addr.set(saved.0);
+        self.current_block_id.set(saved.1);
+        self.current_op_idx.set(saved.2);
+        out
+    }
+
     /// Mark one spelled frame-object address as a placement read of the object.
     pub(crate) fn observe_object_address_expr(
         &self,
@@ -1059,6 +1081,10 @@ impl<'a> FoldingContext<'a> {
         };
         let fallback = expr.clone();
         let Some(block) = self.current_block_addr.get() else {
+            r2il::refusal_evidence!(
+                "object-address",
+                "{value:?} names {object:?} outside any block's fold"
+            );
             self.retain_first_observation_error(
                 crate::observation_journal::LegacyObservationJournalError::MissingNormalizedSiteContext,
             );

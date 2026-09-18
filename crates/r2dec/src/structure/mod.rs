@@ -696,7 +696,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             {
                 continue;
             }
-            let target_expr = match self.fold_ctx.planned_value_expr(target_value) {
+            // The edge's write happens at the end of the source block, and
+            // that is where its reads are journaled.
+            let fold_ctx = self.fold_ctx;
+            let target_expr = match fold_ctx
+                .with_current_block(source, || fold_ctx.planned_value_expr(target_value))
+            {
                 Ok(expr) => expr,
                 Err(error) => {
                     r2il::refusal_evidence!(
@@ -707,9 +712,8 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     return Err(OpLoweringRefusal::missing_program_variable().into());
                 }
             };
-            let source_expr = self
-                .fold_ctx
-                .planned_value_expr(source_value)
+            let source_expr = fold_ctx
+                .with_current_block(source, || fold_ctx.planned_value_expr(source_value))
                 .map_err(|error| {
                     r2il::refusal_evidence!(
                         "program-variable",

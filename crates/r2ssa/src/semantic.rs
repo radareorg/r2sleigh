@@ -16079,6 +16079,123 @@ mod tests {
         assert!(convergent_boundary.complete);
     }
 
+    #[test]
+    fn exit_stack_pointer_survives_an_early_return_that_skips_the_frame() {
+        // `if (!x) return;` before the prologue and the epilogue that
+        // unwinds the frame meet at one `ret`: the stack pointer merges two
+        // values that are both the entry pointer.
+        let sp = Varnode::register(32, 8);
+        let mut entry = R2ILBlock::new(0x6200, 4);
+        entry.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x6230, 8),
+            cond: Varnode::register(24, 1),
+        });
+        let mut body = R2ILBlock::new(0x6204, 4);
+        body.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(0x40, 8),
+        });
+        body.push(R2ILOp::Copy {
+            dst: Varnode::register(0, 8),
+            src: Varnode::constant(7, 8),
+        });
+        body.push(R2ILOp::IntAdd {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(0x40, 8),
+        });
+        body.push(R2ILOp::Branch {
+            target: Varnode::ram(0x6230, 8),
+        });
+        let mut exit = R2ILBlock::new(0x6230, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[entry, body, exit],
+            Some(&return_boundary_arch()),
+            preserved_stack_interface(),
+        )
+        .expect("early-return stack artifact");
+        let boundary = artifact
+            .facts()
+            .boundaries
+            .returns
+            .values()
+            .next()
+            .expect("return boundary");
+        assert_eq!(
+            boundary.exit_stack_pointer,
+            Some(super::SourceReturnStackPointerFact::PreservedEntry {
+                storage: register_storage(32, 8),
+            })
+        );
+        assert!(boundary.complete);
+    }
+
+    #[test]
+    fn reaching_abi_value_walks_a_diamond_chain_once() {
+        // Twenty-four diamonds in a row have sixteen million paths; the walk
+        // answers per block, so the value set before them reaches the end.
+        let diamonds = 24u64;
+        let mut blocks = Vec::new();
+        let mut entry = R2ILBlock::new(0x8000, 4);
+        entry.push(R2ILOp::Copy {
+            dst: Varnode::register(8, 8),
+            src: Varnode::constant(7, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x8010, 8),
+        });
+        blocks.push(entry);
+        for i in 0..diamonds {
+            let base = 0x8010 + i * 0x40;
+            let mut head = R2ILBlock::new(base, 4);
+            head.push(R2ILOp::CBranch {
+                target: Varnode::ram(base + 0x20, 8),
+                cond: Varnode::register(24, 1),
+            });
+            let mut left = R2ILBlock::new(base + 4, 4);
+            left.push(R2ILOp::Branch {
+                target: Varnode::ram(base + 0x40, 8),
+            });
+            let mut right = R2ILBlock::new(base + 0x20, 4);
+            right.push(R2ILOp::Branch {
+                target: Varnode::ram(base + 0x40, 8),
+            });
+            blocks.extend([head, left, right]);
+        }
+        let mut exit = R2ILBlock::new(0x8010 + diamonds * 0x40, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        blocks.push(exit);
+        let artifact = SsaArtifact::raw_with_interface(
+            &blocks,
+            Some(&return_boundary_arch()),
+            return_boundary_interface(),
+        )
+        .expect("diamond chain artifact");
+        let reaching = super::reaching_abi_value_in_block(
+            artifact.function(),
+            artifact.graph(),
+            artifact.machine_context(),
+            0x8010 + diamonds * 0x40,
+            0,
+            register_storage(8, 8),
+        )
+        .expect("the definition before the diamonds reaches the end");
+        assert!(matches!(
+            artifact
+                .graph()
+                .def_inst(reaching)
+                .and_then(|inst| artifact.graph().inst(inst))
+                .map(|inst| &inst.payload),
+            Some(InstPayload::Op(SSAOp::Copy { .. }))
+        ));
+    }
+
     /// A counting loop: `x = 0` on entry, `x = x + step` round the latch.
     ///
     /// `step_op` builds the latch update from the header phi's register, so a

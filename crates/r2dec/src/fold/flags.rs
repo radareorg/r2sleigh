@@ -22,6 +22,15 @@ impl<'a> FoldingContext<'a> {
         &self,
         block: &FunctionSSABlock,
     ) -> Option<(CExpr, r2ssa::PredicateId, r2ssa::ValueId)> {
+        // The structurer asks after the fold, when no block is current; the
+        // condition's reads are the block's own and are journaled there.
+        self.with_current_block(block.addr, || self.branch_condition_in_block(block))
+    }
+
+    fn branch_condition_in_block(
+        &self,
+        block: &FunctionSSABlock,
+    ) -> Option<(CExpr, r2ssa::PredicateId, r2ssa::ValueId)> {
         let declined = |gate: &str| {
             r2il::refusal_evidence!("branch-condition", "block {:#x}: {gate}", block.addr);
             None::<(CExpr, r2ssa::PredicateId, r2ssa::ValueId)>
