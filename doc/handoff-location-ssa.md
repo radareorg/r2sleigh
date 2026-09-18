@@ -28274,3 +28274,27 @@ operation index the key wants.
 One subtlety is left and it is the only one: an operand's `input_idx` is not the
 callee's parameter index, so the argument has to be matched to its parameter
 before its type can be read. That mapping is what to settle first.
+
+### Phase 1 is not finished, and its verification entry is stale
+
+The "Phase 1 verification" section above records `--gate cutover` passing on a
+clean tree. It does not pass today and it should not be read as if it did.
+
+Run now on a clean tree, cutover exits 1. Twenty-four of the sixty cells fail
+its noise requirement: nineteen on `flag_carriers`, three on `same_type_casts`,
+two on `gotos` -- the two unoptimized murmur3 cells, the only configurations
+where `gotos` is required -- and one on `literal_only_declarations`. Everything
+else the gate asks for passes: differential 60 of 60, snapshot 60 of 60, all
+four audits 60 of 60, and r2r at its two recorded failures.
+
+Why the entry was true when written and is not now: the noise detector
+undercounted. `casts_to_declared_type` did not exist, so a lone cast was never
+examined and the column read zero while, as the note that added it says,
+thousands were in the rendered C. Correcting the detector revealed 131
+same-type casts on the matrix. This session took that to 15 and
+`literal_only_declarations` from 35 to 1.
+
+So Phase 1's remaining work is exactly the noise counters, and the two that
+still hold it are `flag_carriers` at 23 and `gotos` at 4. Both are traced. The
+flag carrier needs the partition that Phase 0's single-pass step delivers; the
+two gated gotos need equality-chain-to-switch recovery, which nothing does yet.
