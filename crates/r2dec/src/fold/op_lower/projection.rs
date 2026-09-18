@@ -165,10 +165,17 @@ pub(super) fn project_machine_use_of(
         ));
     }
     // The conversion is the use's own operation, and its operand has to be
-    // the unsigned integer of the selected width -- an address takes its
-    // step here, a signed spelling loses its sign -- so that a zero
-    // extension zero-fills and a truncation keeps the low bits.
-    let operand_type = checked_uint_type(source_width)?;
+    // the integer of the selected width whose sign makes the conversion do
+    // what the machine states: unsigned so a zero extension zero-fills and a
+    // truncation keeps the low bits, signed so a sign extension sign-fills.
+    // Bringing a sign extension's operand to the unsigned spelling first put
+    // the sign back with a second cast, and over a name already declared at
+    // the signed narrow type both of them converted nothing.
+    let operand_type = if matches!(conversion.kind(), MachineCastKind::SignExtend) {
+        checked_int_type(source_width)?
+    } else {
+        checked_uint_type(source_width)?
+    };
     let projected = convert(projected, Some(&projected_type), &operand_type);
     match conversion.kind() {
         MachineCastKind::ZeroExtend => {
@@ -194,10 +201,9 @@ pub(super) fn project_machine_use_of(
             Ok((converted, CValue::Typed(target)))
         }
         MachineCastKind::SignExtend => {
-            let narrow = checked_int_type(source_width)?;
             let target = checked_int_type(target_width)?;
             Ok((
-                CExpr::cast(target.clone(), CExpr::cast(narrow, projected)),
+                CExpr::cast(target.clone(), projected),
                 CValue::Typed(target),
             ))
         }

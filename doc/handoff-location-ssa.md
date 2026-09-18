@@ -28042,3 +28042,24 @@ and the object is declared that way, so the two can no longer disagree.
 Fourteen cells changed and every one is smaller. `arm64_O1/crc32_bitwise` gets a
 compound assignment back -- `X8_1 ^= ...` where the outer cast had been hiding
 it -- and the rest lose a cast and a pair of parentheses each.
+
+### A sign extension takes a signed operand
+
+`same_type_casts` fell from twenty-three to fifteen. The use-slice projection
+brought every conversion's operand to the unsigned integer of the selected
+width, which is right for a zero extension and for a truncation and wrong for a
+sign extension: the operand has to be signed for the extension to sign-fill, so
+the arm put the sign back with a second cast. Over a name already declared at
+the signed narrow type both of them converted nothing, and
+`arm64_O2/xxhash32` carried eight of those as `(uint32_t)(int8_t)tmp_8_1`.
+
+The operand type now follows the conversion's own kind, and the `SignExtend`
+arm no longer re-spells what it was handed.
+
+Fifteen sites remain, in four shapes. Six are call arguments, where
+`call_argument_as_declared` (crates/r2dec/src/fold/op_lower/calls.rs) converts
+from `value_declaration_type` or the machine type to the callee's parameter,
+and the two agree. Nine are the x86-64 `-O0` reload, `tmp_11f00_3 =
+(int32_t)stack_m60`, where both names are declared `int32_t`. Five are the
+`(uint64_t)(uint8_t)` pair in `hdr_fold`, the zero-extension twin of the shape
+just fixed. Two are a pointer.
