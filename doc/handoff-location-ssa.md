@@ -27845,3 +27845,52 @@ of per-arch collectors, and 25935 wants the gdb protocol part split into its own
 pull request. Both now have a reply. 26744, the arm64 adrp fix, has merged;
 26742 was withdrawn. One comment on 26629 carried an assistant attribution
 footer and has been edited to remove it.
+
+### The fork caught up with upstream, and the corpus did not move
+
+Upstream had merged nine commits the fork lacked, including our own arm64
+`adrp` fix (26744), ARM jump slots under `bin.relocs.apply`, thumb ARM import
+resolution, arm64 DWARF variable locations against `sp` and `x29`, and argument
+class homing for spills. `anal/subregister-argument-spills` now carries them.
+
+Four conflicts, all from our own unmerged pull requests living on the
+integration branch. The dead function-context API that 26702 removes was
+resolved in our favour, because upstream has no caller for it. The prototype
+argument count in `fcn.c` was resolved in upstream's favour: `61e9aba9fe`
+reworked `r_type_func_args_count` to report whether the count is known at all,
+returning a negative count for an unstated prototype, which supersedes the
+hand-rolled `has_prototype` witness the fork carried and removes fork surface.
+
+That API change reaches the plugin, which keeps its own copy of the signature
+builder: `r_type_func_args_count` now returns a bool and takes the count as an
+out parameter, and `snapshot_capture.c` follows it.
+
+One trap worth recording. The matrix ran entirely `blocked_generation` after
+the merge and the cause was not the merge: the harness runs the radare2 on
+`PATH`, which was the previously installed build at ABI 142, while the freshly
+compiled plugin was ABI 143. `make symstall` in the fork is part of carrying a
+merge, not an afterthought. With it done the corpus is 60/60 differential and
+every snapshot matches, so nine upstream commits changed no rendered output.
+
+### Where the upstream queue stands
+
+26751 had a full review with a reproducer: `tcc*` replays a convention, the
+redefinition clears the floating-return keys, and a project save and reload
+loses them. The exporter now emits `k anal/cc/cc.<name>.fpretN=...` after each
+`tcc` line, `cc.ms.fpret0` is added, the contract is documented in
+`doc/dyncc.md`, and `cmd_tcc` grew four cases including both round trips; the
+two round-trip cases fail without the exporter commit, which is how they were
+checked.
+
+26682 and 26629 are answered and waiting. 25942 asks the maintainer whether the
+RSearch rewrite should replace this pull request or land as a fresh one.
+
+25935 is the one still owed. The maintainer wants the gdb protocol part split
+out, and the mechanical extraction does not apply: upstream has since changed
+the same register-cache code, adding `read_max` and `data_max` guards where the
+Rosetta work makes the buffer grow, and renaming the cache helpers. The
+extracted diff is kept at `scratchpad/gdb-protocol-split.patch` and the branch
+`pr/gdb-rosetta-protocol` is prepared on upstream master. It needs a re-derived
+port rather than a patch application, and it cannot be verified here without a
+Rosetta x86 process under debugserver, so landing it untested would be worse
+than landing it late.
