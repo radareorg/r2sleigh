@@ -161,7 +161,7 @@ static SnapshotStorageResult snapshot_return_address_storage_collect( RAnal *ana
 static SnapshotStorageResult snapshot_stack_pointer_storage_collect( RAnal *anal, const RAnalFunction *fcn, RAnalSnapshotRegisterStorage *storage);
 static bool snapshot_register_storage_resolve(RAnal *anal, const char *name, ut64 *offset, ut32 *size);
 static bool snapshot_cc_argument_storage(RAnal *anal, const char *calling_convention, int index, int count, ut64 *offset, ut32 *size);
-static bool snapshot_cc_maps_register_interface(RAnal *anal, const RAnalFunctionSignature *signature, const char *calling_convention);
+static bool snapshot_cc_maps_register_interface(RAnal *anal, const RList *base_types, const RAnalFunctionSignature *signature, const char *calling_convention);
 static bool snapshot_promote_exact_dwarf_stack_homes( RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx, RAnalFunctionInterfaceSnapshot *interface, const char *calling_convention);
 static bool snapshot_parameter_storages_overlap( const RAnalSnapshotParameter *parameters, size_t count);
 static bool snapshot_register_storages_overlap( const RAnalSnapshotRegisterStorage *left, const RAnalSnapshotRegisterStorage *right);
@@ -171,7 +171,7 @@ static bool snapshot_stack_resources_complete(const RAnalFcnContext *ctx);
 static bool snapshot_stack_slot_roles_complete( const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface);
 static void snapshot_drop_variadic_tail_slots(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface);
 static bool snapshot_convention_slots_collect( RAnal *anal, RAnalFunction *fcn, RAnalFunctionInterfaceSnapshot *interface);
-static bool function_interface_snapshot_collect( RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx, RAnalFunctionInterfaceSnapshot *interface, const RAnalFunctionSnapshotLimits *limits);
+static bool function_interface_snapshot_collect( RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx, const RList *base_types, RAnalFunctionInterfaceSnapshot *interface, const RAnalFunctionSnapshotLimits *limits);
 static void snapshot_return_mechanism_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotReturnMechanismView *view);
 static void snapshot_stack_allocation_contract_collect(RAnal *anal, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotStackAllocationContractView *view);
 static bool snapshot_frame_pointer_storage_conflicts_interface( const RAnalSnapshotRegisterStorage *storage, const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
@@ -243,7 +243,7 @@ static void snapshot_type_note_alias( SnapshotTypeGraphBuilder *builder, const c
 static bool snapshot_type_carrier_project( const RAnalSnapshotTypeGraph *graph, RAnalSnapshotTypeId type_id, const RAnalSnapshotRegisterStorage *storage, RAnalSnapshotCarrierProjection *projection);
 static SnapshotTypeGraphResult function_type_graph_snapshot_collect( RAnal *anal, const RAnalFcnContext *ctx, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits);
 static int call_site_interface_snapshot_compare(const void *left, const void *right);
-static bool call_site_interface_snapshot_collect_one( RAnal *anal, const RAnalFcnCallee *callee, RAnalCallSiteInterfaceSnapshot *interface, const RAnalFunctionSnapshotLimits *limits);
+static bool call_site_interface_snapshot_collect_one( RAnal *anal, const RAnalFcnCallee *callee, const RList *base_types, RAnalCallSiteInterfaceSnapshot *interface, const RAnalFunctionSnapshotLimits *limits);
 static bool call_site_interfaces_snapshot_collect( RAnal *anal, const RAnalFcnContext *ctx, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits);
 static bool snapshot_string_budget_add(const char *string, size_t limit, size_t *used);
 static bool snapshot_signature_budget_add(const RAnalFunctionSignature *signature, const RAnalFunctionSnapshotLimits *limits, size_t *items, size_t *strings);
@@ -2687,6 +2687,169 @@ static bool snapshot_register_storage_resolve(RAnal *anal, const char *name, ut6
 	r_unref (item);
 	return true;
 }
+/* Integer and floating operands take separate register sequences: AAPCS64's
+ * NGRN and NSRN, SysV's INTEGER and SSE classes. A parameter's position is
+ * counted in its own class. */
+typedef struct {
+	int integer;
+	int floating;
+} SnapshotArgumentPositions;
+typedef struct {
+	const char *reg;
+	RAnalSnapshotRegisterStorage floating;
+	bool on_stack;
+	int stack_index;
+} SnapshotParameterPlace;
+/* Whether a type spelling names a floating-point scalar, and its width. */
+static bool snapshot_type_is_floating(RAnal *anal, const RList *base_types, const char *type, ut64 *bits) {
+	if (R_STR_ISEMPTY (type) || !base_types) {
+		return false;
+	}
+	RAnalSnapshotTypeKind char_kind = R_ANAL_SNAPSHOT_TYPE_SIGNED_INTEGER;
+	const bool char_kind_known = snapshot_arch_char_kind (
+		anal->config? anal->config->arch: NULL, &char_kind);
+	const SnapshotTypeGraphBuilder builder = {
+		.base_types = (RList *)base_types,
+		.char_kind = char_kind,
+		.char_kind_known = char_kind_known,
+	};
+	RAnalSnapshotTypeKind kind = R_ANAL_SNAPSHOT_TYPE_SIGNED_INTEGER;
+	return snapshot_type_scalar_spec (&builder, type, &kind, bits) == SNAPSHOT_TYPE_GRAPH_VALID
+		&& kind == R_ANAL_SNAPSHOT_TYPE_FLOAT;
+}
+/* The carrier of a floating operand of `bits` in a convention home: the listed
+ * register of that width (`{d0,s0,v0,q0}`), or the low lane of a wider one
+ * (`xmm0` carries a double in its low eight bytes). */
+static SnapshotStorageResult snapshot_floating_carrier_collect(RAnal *anal, const char *place, ut64 bits, bool copy_name, RAnalSnapshotRegisterStorage *storage) {
+	if (R_STR_ISEMPTY (place) || *place == '^' || !anal->reg || !bits || bits % 8) {
+		return SNAPSHOT_STORAGE_INVALID;
+	}
+	char list[128];
+	if (r_str_ncpy (list, place, sizeof (list)) >= sizeof (list)) {
+		return SNAPSHOT_STORAGE_INVALID;
+	}
+	char *cursor = list;
+	RRegItem *lane_home = NULL;
+	while (*cursor) {
+		while (*cursor == '{' || *cursor == ' ' || *cursor == ',') {
+			cursor++;
+		}
+		char *end = cursor;
+		while (*end && *end != ',' && *end != '}' && *end != ' ') {
+			end++;
+		}
+		if (end == cursor) {
+			break;
+		}
+		const char saved = *end;
+		*end = 0;
+		RRegItem *item = r_reg_get (anal->reg, cursor, -1);
+		*end = saved;
+		cursor = end;
+		if (!item || item->offset < 0 || item->offset % 8 || item->size <= 0) {
+			r_unref (item);
+			continue;
+		}
+		if ((ut64)item->size == bits) {
+			r_unref (lane_home);
+			lane_home = item;
+			break;
+		}
+		if ((ut64)item->size > bits && !lane_home) {
+			lane_home = item;
+			continue;
+		}
+		r_unref (item);
+	}
+	if (!lane_home) {
+		return SNAPSHOT_STORAGE_INVALID;
+	}
+	const char *name = lane_home->name;
+	if ((ut64)lane_home->size != bits) {
+		RListIter *iter;
+		RRegItem *candidate;
+		r_list_foreach (anal->reg->allregs, iter, candidate) {
+			if (candidate && candidate->offset == lane_home->offset
+				&& (ut64)candidate->size == bits) {
+				name = candidate->name;
+				break;
+			}
+		}
+	}
+	if (copy_name) {
+		storage->name = strdup (r_str_get (name));
+		if (!storage->name) {
+			r_unref (lane_home);
+			return SNAPSHOT_STORAGE_NO_MEMORY;
+		}
+	}
+	storage->offset = (ut64)(lane_home->offset / 8);
+	storage->size = (ut32)(bits / 8);
+	r_unref (lane_home);
+	return SNAPSHOT_STORAGE_VALID;
+}
+/* Count the parameters the integer sequence places. */
+static int snapshot_integer_parameter_count(RAnal *anal, const RList *base_types, const RList *params, size_t count) {
+	int integer = 0;
+	RListIter *iter;
+	RAnalFunctionParam *parameter;
+	size_t index = 0;
+	r_list_foreach (params, iter, parameter) {
+		if (index++ >= count) {
+			break;
+		}
+		ut64 bits;
+		if (!parameter || !snapshot_type_is_floating (anal, base_types, parameter->type, &bits)) {
+			integer++;
+		}
+	}
+	return integer;
+}
+/* Place one parameter in its class's sequence. A floating operand past the
+ * floating registers is not placed: its stack slot interleaves with the
+ * integer tail in an order this walk does not model. */
+static SnapshotStorageResult snapshot_cc_place_parameter(RAnal *anal, const char *calling_convention, const RList *base_types, const char *type, int integer_count, bool copy_name, SnapshotArgumentPositions *positions, SnapshotParameterPlace *out) {
+	memset (out, 0, sizeof (*out));
+	ut64 bits = 0;
+	if (snapshot_type_is_floating (anal, base_types, type, &bits)) {
+		const char *place = r_anal_cc_argloc (anal, calling_convention,
+			R_ANAL_CC_MAXARG + positions->floating, 0, integer_count);
+		positions->floating++;
+		return snapshot_floating_carrier_collect (anal, place, bits, copy_name, &out->floating);
+	}
+	const int index = positions->integer++;
+	const char *place = r_anal_cc_argloc (anal, calling_convention, index, 0, integer_count);
+	if (R_STR_ISEMPTY (place) || *place == '{') {
+		return SNAPSHOT_STORAGE_INVALID;
+	}
+	if (*place == '^') {
+		out->on_stack = true;
+		out->stack_index = index;
+		return SNAPSHOT_STORAGE_VALID;
+	}
+	RAnalCCArgSlot slot = {0};
+	if (!r_anal_cc_argslot (anal, calling_convention, index, integer_count, false, &slot) || !slot.reg) {
+		return SNAPSHOT_STORAGE_INVALID;
+	}
+	out->reg = slot.reg;
+	return SNAPSHOT_STORAGE_VALID;
+}
+/* The register a value of `ret_type` comes back in: the floating return
+ * register for a floating scalar, the integer one otherwise. */
+static SnapshotStorageResult snapshot_cc_return_carrier_collect(RAnal *anal, const char *calling_convention, const RList *base_types, const char *ret_type, bool copy_name, RAnalSnapshotRegisterStorage *storage) {
+	ut64 bits = 0;
+	if (snapshot_type_is_floating (anal, base_types, ret_type, &bits)) {
+		return snapshot_floating_carrier_collect (anal,
+			r_anal_cc_fpret (anal, calling_convention, 0), bits, copy_name, storage);
+	}
+	const char *return_name = r_anal_cc_ret (anal, calling_convention, 0);
+	const char *second_return = r_anal_cc_ret (anal, calling_convention, 1);
+	if (R_STR_ISEMPTY (return_name) || *return_name == '{' || *return_name == '^'
+		|| R_STR_ISNOTEMPTY (second_return)) {
+		return SNAPSHOT_STORAGE_INVALID;
+	}
+	return snapshot_register_storage_collect (anal, return_name, copy_name, storage);
+}
 static bool snapshot_cc_argument_storage(RAnal *anal, const char *calling_convention, int index, int count, ut64 *offset, ut32 *size) {
 	const char *place = r_anal_cc_argloc (anal, calling_convention, index, 0, count);
 	RAnalCCArgSlot slot = {0};
@@ -2694,7 +2857,7 @@ static bool snapshot_cc_argument_storage(RAnal *anal, const char *calling_conven
 		&& r_anal_cc_argslot (anal, calling_convention, index, count, false, &slot)
 		&& slot.reg && snapshot_register_storage_resolve (anal, slot.reg, offset, size);
 }
-static bool snapshot_cc_maps_register_interface(RAnal *anal, const RAnalFunctionSignature *signature, const char *calling_convention) {
+static bool snapshot_cc_maps_register_interface(RAnal *anal, const RList *base_types, const RAnalFunctionSignature *signature, const char *calling_convention) {
 	if (!signature || R_STR_ISEMPTY (calling_convention)
 		|| !r_anal_cc_exist (anal, calling_convention)) {
 		return false;
@@ -2703,30 +2866,36 @@ static bool snapshot_cc_maps_register_interface(RAnal *anal, const RAnalFunction
 	if (parameter_count > INT_MAX) {
 		return false;
 	}
-	size_t i;
-	for (i = 0; i < parameter_count; i++) {
-		ut64 offset;
-		ut32 size;
-		if (!snapshot_cc_argument_storage (anal, calling_convention, (int)i,
-				(int)parameter_count, &offset, &size)) {
+	const int integer_count = snapshot_integer_parameter_count (
+		anal, base_types, signature->params, parameter_count);
+	SnapshotArgumentPositions positions = {0};
+	RAnalSnapshotRegisterStorage placed[R_ANAL_CC_MAXARG * 2] = {{0}};
+	size_t placed_count = 0;
+	RListIter *iter;
+	RAnalFunctionParam *parameter;
+	r_list_foreach (signature->params, iter, parameter) {
+		SnapshotParameterPlace place;
+		if (!parameter || placed_count >= R_ANAL_CC_MAXARG * 2
+			|| snapshot_cc_place_parameter (anal, calling_convention, base_types,
+				parameter->type, integer_count, false, &positions, &place) != SNAPSHOT_STORAGE_VALID
+			|| place.on_stack) {
 			return false;
 		}
-		ut64 end;
-		if (r_add_overflow (offset, (ut64)size, &end)) {
-			return false;
+		RAnalSnapshotRegisterStorage *storage = &placed[placed_count];
+		if (place.reg) {
+			if (!snapshot_register_storage_resolve (anal, place.reg, &storage->offset, &storage->size)) {
+				return false;
+			}
+		} else {
+			*storage = place.floating;
 		}
 		size_t j;
-		for (j = 0; j < i; j++) {
-			ut64 previous_offset;
-			ut32 previous_size;
-			ut64 previous_end;
-			if (!snapshot_cc_argument_storage (anal, calling_convention, (int)j,
-					(int)parameter_count, &previous_offset, &previous_size)
-				|| r_add_overflow (previous_offset, (ut64)previous_size, &previous_end)
-				|| (offset < previous_end && previous_offset < end)) {
+		for (j = 0; j < placed_count; j++) {
+			if (snapshot_register_storages_overlap (&placed[j], storage)) {
 				return false;
 			}
 		}
+		placed_count++;
 	}
 	if (!strcmp (r_str_get (signature->ret_type), "void")) {
 		return true;
@@ -2734,14 +2903,9 @@ static bool snapshot_cc_maps_register_interface(RAnal *anal, const RAnalFunction
 	if (R_STR_ISEMPTY (signature->ret_type)) {
 		return false;
 	}
-	const char *return_name = r_anal_cc_ret (anal, calling_convention, 0);
-	const char *second_return = r_anal_cc_ret (anal, calling_convention, 1);
-	ut64 return_offset;
-	ut32 return_size;
-	return R_STR_ISNOTEMPTY (return_name) && *return_name != '{'
-		&& *return_name != '^' && R_STR_ISEMPTY (second_return)
-		&& snapshot_register_storage_resolve (
-			anal, return_name, &return_offset, &return_size);
+	RAnalSnapshotRegisterStorage returned = {0};
+	return snapshot_cc_return_carrier_collect (anal, calling_convention, base_types,
+		signature->ret_type, false, &returned) == SNAPSHOT_STORAGE_VALID;
 }
 static bool snapshot_promote_exact_dwarf_stack_homes(
 	RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx,
@@ -3363,7 +3527,7 @@ static bool snapshot_convention_slots_collect(
 }
 static bool function_interface_snapshot_collect(
 	RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx,
-	RAnalFunctionInterfaceSnapshot *interface,
+	const RList *base_types, RAnalFunctionInterfaceSnapshot *interface,
 	const RAnalFunctionSnapshotLimits *limits) {
 	interface->return_type_id = R_ANAL_SNAPSHOT_TYPE_ID_INVALID;
 	/* Whether a function takes a variadic tail is a fact about its prototype,
@@ -3453,11 +3617,11 @@ static bool function_interface_snapshot_collect(
 		: live_calling_convention;
 	if (R_STR_ISNOTEMPTY (signature_calling_convention)
 		&& !snapshot_cc_maps_register_interface (
-			anal, ctx->signature, signature_calling_convention)
+			anal, base_types, ctx->signature, signature_calling_convention)
 		&& R_STR_ISNOTEMPTY (live_calling_convention)
 		&& strcmp (signature_calling_convention, live_calling_convention)
 		&& snapshot_cc_maps_register_interface (
-			anal, ctx->signature, live_calling_convention)) {
+			anal, base_types, ctx->signature, live_calling_convention)) {
 		calling_convention = live_calling_convention;
 	}
 	if (R_STR_ISEMPTY (calling_convention) || !r_anal_cc_exist (anal, calling_convention)) {
@@ -3509,6 +3673,9 @@ static bool function_interface_snapshot_collect(
 	RListIter *iter;
 	RAnalFunctionParam *parameter;
 	size_t index = 0;
+	const int integer_count = snapshot_integer_parameter_count (
+		anal, base_types, ctx->signature->params, parameter_count);
+	SnapshotArgumentPositions positions = {0};
 	r_list_foreach (ctx->signature->params, iter, parameter) {
 		if (index >= parameter_count) {
 			break;
@@ -3525,25 +3692,31 @@ static bool function_interface_snapshot_collect(
 		if (!parameter || R_STR_ISEMPTY (parameter->type)) {
 			parameters_complete = false;
 		}
-		const char *place = r_anal_cc_argloc (
-			anal, calling_convention, (int)index, 0, (int)parameter_count);
-		RAnalCCArgSlot slot = {0};
-		if (R_STR_ISNOTEMPTY (place) && *place == '^'
+		SnapshotParameterPlace place;
+		SnapshotStorageResult placed = snapshot_cc_place_parameter (anal,
+			calling_convention, base_types, parameter? parameter->type: NULL,
+			integer_count, true, &positions, &place);
+		if (placed == SNAPSHOT_STORAGE_NO_MEMORY) {
+			return false;
+		}
+		if (placed == SNAPSHOT_STORAGE_VALID && place.on_stack
 			&& snapshot_stack_parameter_collect (anal, calling_convention,
-				(int)index, (int)parameter_count, true, snapshot_parameter)) {
+				place.stack_index, integer_count, true, snapshot_parameter)) {
 			index++;
 			continue;
 		}
-		if (R_STR_ISEMPTY (place) || *place == '^' || *place == '{'
-			|| !r_anal_cc_argslot (anal, calling_convention,
-				(int)index, (int)parameter_count, false, &slot)
-			|| !slot.reg) {
+		if (placed != SNAPSHOT_STORAGE_VALID || place.on_stack) {
 			parameters_complete = false;
 			index++;
 			continue;
 		}
+		if (!place.reg) {
+			snapshot_parameter->storage = place.floating;
+			index++;
+			continue;
+		}
 		SnapshotStorageResult collected = snapshot_register_storage_collect (
-			anal, slot.reg, true, &snapshot_parameter->storage);
+			anal, place.reg, true, &snapshot_parameter->storage);
 		if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
 			return false;
 		}
@@ -3568,19 +3741,15 @@ static bool function_interface_snapshot_collect(
 		interface->return_kind = R_ANAL_SNAPSHOT_RETURN_VOID;
 		return_complete = true;
 	} else if (R_STR_ISNOTEMPTY (ctx->signature->ret_type)) {
-		const char *return_name = r_anal_cc_ret (anal, calling_convention, 0);
-		const char *second_return = r_anal_cc_ret (anal, calling_convention, 1);
-		if (R_STR_ISNOTEMPTY (return_name) && *return_name != '{'
-			&& *return_name != '^' && R_STR_ISEMPTY (second_return)) {
-			SnapshotStorageResult collected = snapshot_register_storage_collect (
-				anal, return_name, false, &interface->return_storage);
-			if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
-				return false;
-			}
-			if (collected == SNAPSHOT_STORAGE_VALID) {
-				interface->return_kind = R_ANAL_SNAPSHOT_RETURN_REGISTER;
-				return_complete = true;
-			}
+		SnapshotStorageResult collected = snapshot_cc_return_carrier_collect (anal,
+			calling_convention, base_types, ctx->signature->ret_type, false,
+			&interface->return_storage);
+		if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
+			return false;
+		}
+		if (collected == SNAPSHOT_STORAGE_VALID) {
+			interface->return_kind = R_ANAL_SNAPSHOT_RETURN_REGISTER;
+			return_complete = true;
 		}
 	}
 	const bool final_return_address_conflict = return_address_complete
@@ -5561,7 +5730,7 @@ static int call_site_interface_snapshot_compare(const void *left, const void *ri
 	return a->target_addr > b->target_addr? 1: 0;
 }
 static bool call_site_interface_snapshot_collect_one(
-	RAnal *anal, const RAnalFcnCallee *callee,
+	RAnal *anal, const RAnalFcnCallee *callee, const RList *base_types,
 	RAnalCallSiteInterfaceSnapshot *interface,
 	const RAnalFunctionSnapshotLimits *limits) {
 	interface->instruction_addr = callee->call_addr;
@@ -5632,6 +5801,9 @@ static bool call_site_interface_snapshot_collect_one(
 	RListIter *iter;
 	RAnalFunctionParam *argument;
 	size_t index = 0;
+	const int integer_count = snapshot_integer_parameter_count (
+		anal, base_types, callee->signature->params, argument_count);
+	SnapshotArgumentPositions positions = {0};
 	r_list_foreach (callee->signature->params, iter, argument) {
 		if (index >= argument_count) {
 			break;
@@ -5643,25 +5815,28 @@ static bool call_site_interface_snapshot_collect_one(
 		if (!argument || R_STR_ISEMPTY (argument->type)) {
 			arguments_complete = false;
 		}
-		const char *place = r_anal_cc_argloc (
-			anal, calling_convention, (int)index, 0, (int)argument_count);
-		RAnalCCArgSlot slot = {0};
-		if (R_STR_ISNOTEMPTY (place) && *place == '^'
+		SnapshotParameterPlace place;
+		SnapshotStorageResult placed = snapshot_cc_place_parameter (anal,
+			calling_convention, base_types, argument? argument->type: NULL,
+			integer_count, false, &positions, &place);
+		if (placed == SNAPSHOT_STORAGE_VALID && place.on_stack
 			&& snapshot_stack_parameter_collect (anal, calling_convention,
-				(int)index, (int)argument_count, false, snapshot_argument)) {
+				place.stack_index, integer_count, false, snapshot_argument)) {
 			index++;
 			continue;
 		}
-		if (R_STR_ISEMPTY (place) || *place == '^' || *place == '{'
-			|| !r_anal_cc_argslot (anal, calling_convention,
-				(int)index, (int)argument_count, false, &slot)
-			|| !slot.reg) {
+		if (placed != SNAPSHOT_STORAGE_VALID || place.on_stack) {
 			arguments_complete = false;
 			index++;
 			continue;
 		}
+		if (!place.reg) {
+			snapshot_argument->storage = place.floating;
+			index++;
+			continue;
+		}
 		SnapshotStorageResult collected = snapshot_register_storage_collect (
-			anal, slot.reg, false, &snapshot_argument->storage);
+			anal, place.reg, false, &snapshot_argument->storage);
 		if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
 			return false;
 		}
@@ -5683,19 +5858,15 @@ static bool call_site_interface_snapshot_collect_one(
 		interface->result_kind = R_ANAL_SNAPSHOT_RETURN_VOID;
 		result_complete = true;
 	} else if (R_STR_ISNOTEMPTY (callee->signature->ret_type)) {
-		const char *return_name = r_anal_cc_ret (anal, calling_convention, 0);
-		const char *second_return = r_anal_cc_ret (anal, calling_convention, 1);
-		if (R_STR_ISNOTEMPTY (return_name) && *return_name != '{'
-			&& *return_name != '^' && R_STR_ISEMPTY (second_return)) {
-			SnapshotStorageResult collected = snapshot_register_storage_collect (
-				anal, return_name, false, &interface->result_storage);
-			if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
-				return false;
-			}
-			if (collected == SNAPSHOT_STORAGE_VALID) {
-				interface->result_kind = R_ANAL_SNAPSHOT_RETURN_REGISTER;
-				result_complete = true;
-			}
+		SnapshotStorageResult collected = snapshot_cc_return_carrier_collect (anal,
+			calling_convention, base_types, callee->signature->ret_type, false,
+			&interface->result_storage);
+		if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
+			return false;
+		}
+		if (collected == SNAPSHOT_STORAGE_VALID) {
+			interface->result_kind = R_ANAL_SNAPSHOT_RETURN_REGISTER;
+			result_complete = true;
 		}
 	}
 	// Completeness describes the prototype, not the call instruction. Xrefs
@@ -5755,7 +5926,7 @@ static bool call_site_interfaces_snapshot_collect(
 	r_list_foreach (ctx->callees, iter, callee) {
 		if (!callee || index >= count
 			|| !call_site_interface_snapshot_collect_one (
-				anal, callee, &snapshot->call_site_interfaces[index], limits)) {
+				anal, callee, snapshot->base_types, &snapshot->call_site_interfaces[index], limits)) {
 			return false;
 		}
 		index++;
@@ -6128,7 +6299,7 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 		SNAPSHOT_REFUSE ("the function context exceeds its limits");
 	}
 	if (!function_interface_snapshot_collect (
-			anal, fcn, ctx, &snapshot->function_interface, limits)) {
+			anal, fcn, ctx, snapshot->base_types, &snapshot->function_interface, limits)) {
 		SNAPSHOT_REFUSE ("the function interface could not be collected");
 	}
 	if (!snapshot_frame_pointer_storage_collect (anal, fcn, ctx,
