@@ -27588,3 +27588,31 @@ bounded by a sibling induction rather than by the test. Bounding it needs a
 trip count shared across siblings in one loop, and the initial values here are
 not constants either. `induction-unbounded` names each counter that declines
 and what its loop's comparison was.
+
+### Why a stack-protected function cannot be measured against its oracle
+
+Every rendered function carrying a stack protector reads the guard as
+`*(uint64_t*)0x100002000`, a bare literal. No standalone harness can map that
+page, so the cell segfaults under the differential whatever the decompilation
+says. It is why `shape_stack_buffer` and `shape_byte_indexed_buffer` fail the
+shapes differential on every configuration that renders them, and it caps what
+that gate can measure for any function with a buffer.
+
+What was checked, so the next attempt starts further along. The reference
+exists and radare2 classifies it as one the capture accepts. The flag exists:
+with relocations applied the address carries `reloc.__stack_chk_guard`
+alongside `section.__DATA_CONST.__got` and `segment.__DATA_CONST`. Applying
+relocations in the corpus sweep changes nothing -- neither the corpus, whose
+sixty snapshots all still match, nor the rendering, which keeps the literal --
+so the loss is not there and the flag was reverted rather than left as noise.
+Taking a naming flag over the section flag in
+`function_image_data_symbols_collect` was tried and also changed nothing, and
+was reverted for the same reason; whether `RFlagBind::get_vec` is even bound
+in this path was not established. The next thing to establish is which table
+the renderer's `name_of_constant_address` actually consults, since
+`DecompilerContext::symbols` is `#[cfg(test)]` and the production path fills
+that map from somewhere else.
+
+Worth doing: bzip2 names its guard correctly, so the two binaries differ in
+something specific, and the comparison between them is the shortest route to
+the answer.
