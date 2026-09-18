@@ -1153,6 +1153,8 @@ bool r2sleigh_wire_write_snapshot(R2SleighWireWriter *writer, const void *snapsh
 		r2sleigh_wire_i64 (writer, interface->convention_stack_argument_offset);
 		r2sleigh_wire_u32 (writer, interface->convention_stack_argument_stride);
 	}
+	r2sleigh_wire_bool (writer,
+		stack_arguments_known && interface->convention_variadic_tail_on_stack);
 
 	uint16_t captured = 0;
 	if (source->capabilities & R_ANAL_FUNCTION_SNAPSHOT_CAP_OWNED_BOUNDED_FUNCTION_IMAGE) {

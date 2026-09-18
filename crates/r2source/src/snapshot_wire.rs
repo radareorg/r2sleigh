@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 18;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 19;
 /// The reader speaks exactly the format the writer writes.
 ///
 /// Producer and consumer are one build: `r2plugin/snapshot_wire.c` writes the
@@ -960,6 +960,7 @@ fn write_convention_slots_for_format(
             }
             None => writer.bool(false),
         }
+        writer.bool(slots.variadic_tail_on_stack());
     }
     Ok(())
 }
@@ -998,7 +999,10 @@ pub fn read_convention_slots(
             contract: "SourceConventionSlots::new",
             reason: format!("{error:?}"),
         })?;
-    let slots = slots.with_stack_arguments(stack_arguments);
+    let variadic_tail_on_stack = reader.bool()?;
+    let slots = slots
+        .with_stack_arguments(stack_arguments)
+        .with_variadic_tail_on_stack(variadic_tail_on_stack);
     Ok(slots)
 }
 

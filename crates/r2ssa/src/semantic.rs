@@ -4253,42 +4253,54 @@ fn variadic_callsite_arguments(
     // prefix is all there is, and calling it the complete call would be a
     // false claim about a call that passes more.
     let stack_placement = convention.stack_arguments();
-    if evidence.total_argument_count > slots.len() && stack_placement.is_none() {
+    // Where a position past the fixed prefix sits: the next register, or the
+    // stack. Apple's arm64 ABI puts the whole variadic tail on the stack from
+    // its first slot, whatever registers the prefix left free.
+    let fixed = interface.arguments().len();
+    let tail_on_stack = convention.variadic_tail_on_stack();
+    let stack_index_of = |position: usize| -> Option<usize> {
+        if tail_on_stack && position >= fixed {
+            Some(position - fixed)
+        } else if position >= slots.len() {
+            Some(position - slots.len())
+        } else {
+            None
+        }
+    };
+    if (0..evidence.total_argument_count).any(|position| stack_index_of(position).is_some())
+        && stack_placement.is_none()
+    {
         return Err(VariadicCallsiteArgumentCountRefusal::InsufficientRegisterArgumentCarriers);
     }
 
     let mut arguments = Vec::with_capacity(evidence.total_argument_count);
-    for position in slots.len()..evidence.total_argument_count {
-        let placement = stack_placement
+    for position in 0..evidence.total_argument_count {
+        if let Some(stack_index) = stack_index_of(position) {
+            let placement = stack_placement
+                .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
+            let offset = placement
+                .offset_of(stack_index)
+                .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+            let (value, entry_offset) = reaching_stack_argument_before_call(
+                recovery.function,
+                recovery.graph,
+                recovery.block_addr,
+                recovery.op_index,
+                offset,
+                offset,
+                placement.stride_bytes(),
+                recovery.machine_context.call_moves_stack_pointer(),
+            )
             .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
-        let offset = placement
-            .offset_of(position - slots.len())
-            .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
-        let (value, entry_offset) = reaching_stack_argument_before_call(
-            recovery.function,
-            recovery.graph,
-            recovery.block_addr,
-            recovery.op_index,
-            offset,
-            // The convention's derived placement is the caller's view and
-            // carries no second coordinate; a variadic tail call would want
-            // one, and none has been captured for a derived position.
-            offset,
-            placement.stride_bytes(),
-        )
-        .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
-        arguments.push(SourceCallArgumentFact {
-            slot: CallBoundarySlot::Stack(entry_offset),
-            value: SourceCallArgumentValue::Value(value),
-        });
-    }
-    let stack_arguments = std::mem::take(&mut arguments);
-    for (position, slot) in slots
-        .iter()
-        .copied()
-        .enumerate()
-        .take(evidence.total_argument_count)
-    {
+            arguments.push(SourceCallArgumentFact {
+                slot: CallBoundarySlot::Stack(entry_offset),
+                value: SourceCallArgumentValue::Value(value),
+            });
+            continue;
+        }
+        let slot = *slots
+            .get(position)
+            .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
         if let Some(argument) = fixed_arguments.get(position).and_then(|fact| *fact) {
             arguments.push(argument);
             continue;
@@ -4313,8 +4325,6 @@ fn variadic_callsite_arguments(
             value,
         });
     }
-    // The register prefix first, in convention order, then the stack tail.
-    arguments.extend(stack_arguments);
     Ok(arguments)
 }
 
@@ -4372,6 +4382,7 @@ fn call_entering_stack_pointer_offset(
     graph: &SsaGraph,
     block: &crate::function::SSABlock,
     call_op_index: usize,
+    calls_move_stack_pointer: bool,
 ) -> Option<(i64, bool)> {
     let recorded = block
         .ops
@@ -4397,8 +4408,14 @@ fn call_entering_stack_pointer_offset(
                 );
                 return None;
             };
-            match reaching_stack_pointer_before(function, graph, storage, block.addr, call_op_index)
-            {
+            match reaching_stack_pointer_before(
+                function,
+                graph,
+                storage,
+                block.addr,
+                call_op_index,
+                calls_move_stack_pointer,
+            ) {
                 Some(ReachingAbiState::PreservedEntry) => return Some((0, false)),
                 Some(ReachingAbiState::Value(value)) => graph.value(value)?.var.clone(),
                 None => {
@@ -4514,6 +4531,7 @@ fn call_entering_stack_pointer_offset(
 /// the run of operations since the previous call, which is where a compiler
 /// materialises the arguments it cannot pass in registers. Returns the value
 /// and the slot's entry-relative coordinate.
+#[allow(clippy::too_many_arguments)]
 fn reaching_stack_argument_before_call(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -4522,11 +4540,16 @@ fn reaching_stack_argument_before_call(
     offset: i64,
     callee_offset: i64,
     size_bytes: u32,
+    calls_move_stack_pointer: bool,
 ) -> Option<(ValueId, i64)> {
     let block = function.get_block(block_addr)?;
-    let Some((entering, transfer_moved_carrier)) =
-        call_entering_stack_pointer_offset(function, graph, block, call_op_index)
-    else {
+    let Some((entering, transfer_moved_carrier)) = call_entering_stack_pointer_offset(
+        function,
+        graph,
+        block,
+        call_op_index,
+        calls_move_stack_pointer,
+    ) else {
         r2il::refusal_evidence!(
             "call-argument-stack-store",
             "callsite ({block_addr:#x}, {call_op_index}) has no entry-relative stack pointer entering the call"
@@ -4573,6 +4596,25 @@ fn reaching_stack_argument_before_call(
             _ => {}
         }
     }
+    r2il::refusal_evidence!(
+        "call-argument-stack-store",
+        "callsite ({block_addr:#x}, {call_op_index}) has no store at entry offset {entry_offset} (entering {entering}, slot {offset}) before the call; stores seen: {:?}",
+        block
+            .ops
+            .get(..call_op_index)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|op| match op {
+                SSAOp::Store { addr, val, .. } => Some((
+                    addr.to_string(),
+                    resolve_entry_stack_root(function.decompile_prep_facts(), addr)
+                        .map(|root| root.offset),
+                    val.size,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     None
 }
 
@@ -4802,6 +4844,7 @@ fn collect_source_boundary_facts(
                                 offset,
                                 callee_offset,
                                 size_bytes,
+                                machine_context.call_moves_stack_pointer(),
                             );
                             if found.is_none() {
                                 r2il::refusal_evidence!(
@@ -5433,6 +5476,8 @@ enum ReachingAbiPath {
 struct ReachingAbiPolicy {
     allow_distinct_phi_inputs: bool,
     calls_are_barriers: bool,
+    /// The stack pointer, whose merges of entry pointers are the entry pointer.
+    stack_pointer: Option<CanonicalStorageId>,
     /// The carrier a call transfer moves by itself: the stack pointer, which
     /// the callee's return puts back only where the convention states it. A
     /// call is a barrier for this carrier and for nothing else, because every
@@ -5682,6 +5727,7 @@ fn reaching_stack_pointer_before(
     storage: CanonicalStorageId,
     block_addr: u64,
     boundary_op_index: usize,
+    calls_move_stack_pointer: bool,
 ) -> Option<ReachingAbiState> {
     let visited = BTreeMap::new();
     match reaching_abi_value_before(
@@ -5694,7 +5740,8 @@ fn reaching_stack_pointer_before(
         ReachingAbiPolicy {
             allow_distinct_phi_inputs: false,
             calls_are_barriers: true,
-            transfer_carrier: Some(storage),
+            stack_pointer: Some(storage),
+            transfer_carrier: calls_move_stack_pointer.then_some(storage),
         },
         &mut BTreeMap::new(),
     )? {
@@ -5723,7 +5770,11 @@ fn reaching_abi_value_in_block_with_policy(
         ReachingAbiPolicy {
             allow_distinct_phi_inputs,
             calls_are_barriers: true,
-            transfer_carrier: machine_context.stack_pointer_carrier(),
+            stack_pointer: machine_context.stack_pointer_carrier(),
+            transfer_carrier: machine_context
+                .call_moves_stack_pointer()
+                .then(|| machine_context.stack_pointer_carrier())
+                .flatten(),
         },
         &mut BTreeMap::new(),
     )? {
@@ -5901,7 +5952,7 @@ fn reaching_abi_value_before(
         // A merge of the transfer carrier whose every input is the entry's
         // own stack pointer is that pointer: an early return that never
         // built the frame meets the epilogue that has unwound it.
-        if policy.transfer_carrier == Some(storage)
+        if policy.stack_pointer == Some(storage)
             && phi
                 .inputs
                 .iter()
@@ -8571,7 +8622,12 @@ fn collect_prepared_function_certificates(
     // The stores of a constant through the stack pointer, per block: on
     // amd64 the nearest one before a call is the return address the call
     // pushed, and nothing else stores a literal there just before calling.
-    let stack_pointer = machine_context.and_then(SourceMachineContext::stack_pointer_carrier);
+    // A constant stored through the stack pointer just before a call is the
+    // return address only where the call pushes one; where a register carries
+    // it, such a store is an argument like any other.
+    let stack_pointer = machine_context
+        .filter(|context| context.call_moves_stack_pointer())
+        .and_then(SourceMachineContext::stack_pointer_carrier);
     let mut constant_stack_stores: BTreeMap<crate::BlockId, Vec<(usize, InstId)>> = BTreeMap::new();
     if let Some(stack_pointer) = stack_pointer {
         for inst in &graph.insts {
@@ -8607,8 +8663,14 @@ fn collect_prepared_function_certificates(
         .iter()
         .map(|(id, fact)| {
             let (block_addr, op_index) = graph.op_site_for_inst(fact.at).unwrap_or_default();
-            let stack_argument_values =
-                collect_stack_call_argument_values(function, graph, objects, structured, fact);
+            let stack_argument_values = collect_stack_call_argument_values(
+                function,
+                graph,
+                objects,
+                structured,
+                fact,
+                machine_context.is_none_or(SourceMachineContext::call_moves_stack_pointer),
+            );
             let boundary = boundaries
                 .calls
                 .get(id)
@@ -12777,6 +12839,7 @@ fn collect_stack_call_argument_values(
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     call_site: &CallSiteFact,
+    calls_move_stack_pointer: bool,
 ) -> Vec<StackCallArgumentCertificate> {
     let Some((block_addr, op_idx)) = graph.op_site_for_inst(call_site.at) else {
         return Vec::new();
@@ -12789,8 +12852,13 @@ fn collect_stack_call_argument_values(
     // instruction finds it. Objects are keyed by their entry-relative
     // position, so the boundary is that pointer's entry-relative position:
     // anything below it is this function's own frame, not an argument.
-    let Some((entering, _)) = call_entering_stack_pointer_offset(function, graph, block, op_idx)
-    else {
+    let Some((entering, _)) = call_entering_stack_pointer_offset(
+        function,
+        graph,
+        block,
+        op_idx,
+        calls_move_stack_pointer,
+    ) else {
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();

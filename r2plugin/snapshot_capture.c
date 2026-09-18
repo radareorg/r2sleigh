@@ -3349,6 +3349,16 @@ static bool snapshot_convention_slots_collect(
 		interface->convention_stack_argument_stride = (ut32)(second.off - first.off);
 		interface->convention_stack_arguments_known = true;
 	}
+	/* Apple's arm64 ABI puts every variadic argument on the stack, from the
+	 * first slot, whatever registers remain: a fact about the binary's
+	 * platform that the convention table does not state. */
+	const char *os = anal->config? anal->config->os: NULL;
+	const bool darwin = os
+		&& (!strcmp (os, "macos") || !strcmp (os, "darwin") || !strcmp (os, "ios")
+			|| !strcmp (os, "tvos") || !strcmp (os, "watchos"));
+	interface->convention_variadic_tail_on_stack = darwin
+		&& interface->convention_stack_arguments_known
+		&& anal->config->bits == 64 && !strcmp (anal->config->arch, "arm");
 	return true;
 }
 static bool function_interface_snapshot_collect(

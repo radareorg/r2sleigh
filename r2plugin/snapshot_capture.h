@@ -346,6 +346,8 @@ typedef struct r_anal_function_interface_snapshot_t {
 	st64 convention_stack_argument_offset;
 	ut32 convention_stack_argument_stride;
 	bool convention_stack_arguments_known;
+	/* Every variadic argument travels on the stack from the first slot, as Apple's arm64 ABI puts it. */
+	bool convention_variadic_tail_on_stack;
 	/* The prototype is radare2's, found by the import's name; no address or debug information links it. */
 	bool prototype_from_types;
 } RAnalFunctionInterfaceSnapshot;

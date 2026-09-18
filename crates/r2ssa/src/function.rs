@@ -9030,6 +9030,129 @@ mod tests {
         );
     }
 
+    /// Apple's arm64 ABI puts the variadic tail on the stack from its first
+    /// slot whatever registers are free, and a `bl` there moves no stack
+    /// pointer: the store before the call is the argument.
+    #[test]
+    fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
+        let mut arch = ArchSpec::new("arm64");
+        arch.addr_size = 8;
+        for (index, name) in ["x0", "x1", "x2", "x3"].iter().enumerate() {
+            arch.add_register(RegisterDef::new(*name, (index as u64) * 8, 8));
+        }
+        arch.add_register(RegisterDef::new("sp", 64, 8));
+        arch.add_register(RegisterDef::new("x30", 72, 8));
+        let slot = |index: usize| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: (index as u64) * 8,
+            size: 8,
+        };
+        let register = |offset: u64| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let ops = vec![
+            R2ILOp::IntSub {
+                dst: make_reg(64, 8),
+                a: make_reg(64, 8),
+                b: make_const(0x20, 8),
+            },
+            R2ILOp::Copy {
+                dst: make_reg(0, 8),
+                src: make_const(0x3000, 8),
+            },
+            R2ILOp::Store {
+                space: r2il::SpaceId::Ram,
+                addr: make_reg(64, 8),
+                val: make_const(0x11, 8),
+            },
+            R2ILOp::Call {
+                target: make_const(0x2000, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: make_reg(64, 8),
+                a: make_reg(64, 8),
+                b: make_const(0x20, 8),
+            },
+            R2ILOp::Return {
+                target: make_reg(72, 8),
+            },
+        ];
+        let mut block = R2ILBlock {
+            addr: 0x1600,
+            size: 4,
+            ops,
+            switch_info: None,
+            op_metadata: Default::default(),
+        };
+        block.stamp_instruction(3, 0x1603);
+        let blocks = vec![block];
+        let interface = SourceCallSiteInterface::new(
+            b"apple-variadic-tail".to_vec(),
+            SourceCallSiteIdentity::new(
+                0x1603,
+                CanonicalStorageId {
+                    space: CanonicalStorageSpace::Constant,
+                    offset: 0x2000,
+                    size: 8,
+                },
+            ),
+            true,
+            "arm64",
+            [SourceCallArgumentSpec::new(0, slot(0))],
+            true,
+            false,
+            SourceCallResult::Void,
+        )
+        .expect("exact callsite interface")
+        .with_radare2_format_parameter(0)
+        .expect("format parameter belongs to the fixed prefix");
+        let convention =
+            SourceConventionSlots::new("arm64", (0..4).map(slot).collect::<Vec<_>>(), None)
+                .expect("convention slots")
+                .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8))
+                .with_variadic_tail_on_stack(true);
+        let roles = SourceMachineRoles::new(Some(register(72)), Some(register(64)))
+            .expect("machine roles")
+            .with_call_preserved_carriers(r2source::SourceCallPreservedCarriers::new(true, true));
+        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
+            &blocks,
+            Some(&arch),
+            None,
+            roles,
+            Some(convention),
+            vec![interface],
+        );
+        machine_context.bind_source_string_literals(&[(0x3000, "%d".to_string())]);
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            &blocks,
+            Some(&arch),
+            InterfaceQuestions::new(&machine_context),
+            machine_context.machine_roles().call_preserved_carriers(),
+            machine_context.stack_pointer_carrier(),
+            &CalleePreservedCarriers::new(),
+            None,
+            &UncheckedSsaWorkControl,
+        )
+        .expect("decompile SSA");
+        let artifact = SsaArtifact::new_with_context(
+            function,
+            FunctionPrepareMode::Decompile,
+            machine_context,
+        );
+        let call = artifact
+            .sole_callsite_certificate_in_block(0x1600)
+            .expect("callsite certificate")
+            .clone();
+        assert_eq!(call.argument_values.len(), 2, "{call:?}");
+        let passed = artifact
+            .graph()
+            .value(call.argument_values[1])
+            .expect("the stack argument's value");
+        assert_eq!(passed.var.constant_bits(), Some(0x11));
+    }
+
     /// Two sites reaching one variadic callee keep separate literal-count
     /// evidence. Both sites write every convention register, so a result of
     /// four for either call would expose the old register-write guess.
@@ -13337,6 +13460,13 @@ fn promote_private_stack_slots(
 
     let mut accesses = Vec::new();
     let mut widths = BTreeMap::<i64, BTreeSet<u32>>::new();
+    let mut loaded = BTreeSet::<i64>::new();
+    let calls = blocks.iter().any(|block| {
+        block
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }))
+    });
     for (index, block) in blocks.iter().enumerate() {
         // Everything this block derives from the stack pointer. A derived value
         // used as anything but the address of an access has escaped, and then
@@ -13369,6 +13499,7 @@ fn promote_private_stack_slots(
                             displacement,
                         )?;
                         widths.entry(displacement).or_default().insert(dst.size);
+                        loaded.insert(displacement);
                         accesses.push(SlotAccess {
                             block: index,
                             op: at,
@@ -13529,6 +13660,16 @@ fn promote_private_stack_slots(
             || declared.contains(displacement)
             || parameter_homes.contains(displacement)
         {
+            continue;
+        }
+        // A slot this function stores and never loads is what a callee reads
+        // as its incoming argument: the outgoing argument area. Nothing here
+        // proves a callee does not read it, so it is memory, not a variable.
+        if calls && !loaded.contains(displacement) {
+            r2il::refusal_evidence!(
+                "promote-stack-slot",
+                "slot at {displacement} is stored and never loaded here; a callee may read it"
+            );
             continue;
         }
         let width = *sizes.iter().next().expect("one width");

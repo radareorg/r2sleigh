@@ -3717,6 +3717,9 @@ pub struct SourceConventionSlots {
     argument_slots: Box<[CanonicalStorageId]>,
     result_slot: Option<CanonicalStorageId>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
+    /// Every variadic argument travels on the stack from the first slot,
+    /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
+    variadic_tail_on_stack: bool,
 }
 
 /// Where the convention puts an argument its registers cannot carry.
@@ -3777,6 +3780,18 @@ impl SourceConventionSlots {
         self
     }
 
+    /// Whether the variadic tail starts on the stack whatever registers are
+    /// free, as Apple's arm64 ABI has it.
+    pub const fn variadic_tail_on_stack(&self) -> bool {
+        self.variadic_tail_on_stack
+    }
+
+    #[must_use]
+    pub fn with_variadic_tail_on_stack(mut self, on_stack: bool) -> Self {
+        self.variadic_tail_on_stack = on_stack;
+        self
+    }
+
     /// Build the candidate slots, rejecting anything that is not a well-formed
     /// register location or that names the same register twice.
     pub fn new(
@@ -3807,6 +3822,7 @@ impl SourceConventionSlots {
             argument_slots: argument_slots.into_boxed_slice(),
             result_slot,
             stack_arguments: None,
+            variadic_tail_on_stack: false,
         })
     }
 
