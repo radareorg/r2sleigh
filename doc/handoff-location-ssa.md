@@ -28260,3 +28260,17 @@ names.
 That needs the certified call site's argument type inside
 `frame_objects_with_escaped_address`, which today takes only the artifact and
 the projection. The plumbing is the work; the rule is settled.
+
+The plumbing is smaller than it looked. `frame_objects_with_escaped_address` is
+called from plan construction where `source_owned` is already in scope, and the
+callee parameter types are reachable from there as
+`source_owned.report().type_facts().callsites()`, giving
+`FunctionCallsiteFacts::arguments_for_site(CallsiteKey { block_addr, op_index })`
+-- the same `CallsiteArgumentFacts` the renderer's `certified_callsite_for_op`
+uses. A use site carries `UseSite { inst, input_idx }` and
+`graph.op_site_for_inst` turns the instruction into the block address and
+operation index the key wants.
+
+One subtlety is left and it is the only one: an operand's `input_idx` is not the
+callee's parameter index, so the argument has to be matched to its parameter
+before its type can be read. That mapping is what to settle first.
