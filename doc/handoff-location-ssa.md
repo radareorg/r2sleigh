@@ -28063,3 +28063,28 @@ and the two agree. Nine are the x86-64 `-O0` reload, `tmp_11f00_3 =
 (int32_t)stack_m60`, where both names are declared `int32_t`. Five are the
 `(uint64_t)(uint8_t)` pair in `hdr_fold`, the zero-extension twin of the shape
 just fixed. Two are a pointer.
+
+### The last fifteen casts, and the one thing they are waiting on
+
+Nine of the fifteen are the x86-64 `-O0` reload, `tmp_11f00_3 =
+(int32_t)stack_m60`, where both names are declared `int32_t`. The
+`write-projection` evidence says the write is `Full` and the right-hand side is
+stated `uint32_t`, so the conversion to the declared `int32_t` is a signedness
+step between the machine's spelling and the page's.
+
+`MachineExprKind::Source` already asks `value_type`, which prefers the plan's
+declaration (crates/r2rewrite/src/typed.rs). It does not help here because a
+stack slot is not a bound value: it is a memory access rendered through
+`AccessSyntax::SlotName`, so `RenderTypes::declaration_type` has nothing to say
+about it and the machine width and signedness stand. Giving a slot read the
+slot's declared type is the fix, and it belongs with the access syntax and the
+object model rather than with the binding plan.
+
+Six more are call arguments, where `call_argument_as_declared`
+(crates/r2dec/src/fold/op_lower/calls.rs) converts from `value_declaration_type`
+or the machine type to the callee's parameter and the two already agree; that
+one still needs its own trace.
+
+One experiment is recorded as not the answer: making `typed_input` prefer the
+declaration, the way `planned_input_expr` does, changes nothing anywhere. The
+operand type was never the disagreement on these sites.
