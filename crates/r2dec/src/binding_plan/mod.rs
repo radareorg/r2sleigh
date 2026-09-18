@@ -321,6 +321,12 @@ pub(crate) fn certified_address_read(
     {
         return false;
     }
+    // The index of an address the object model placed inside an object is a
+    // read of that index: it is the fact the plan chose the spelling by, and
+    // asking it here keeps the marking and the audit on one question.
+    if source.objects().index_for_address(memory.address) == Some(value) {
+        return true;
+    }
     let Some(address) = source.addresses().parameter_expression(memory.address) else {
         return false;
     };

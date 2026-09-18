@@ -860,11 +860,21 @@ fn control_op_is_intra_instruction(block: &GenuineLiftedBlock, op_index: usize) 
     let Some(target) = target else {
         return false;
     };
-    block.instruction_spans.iter().any(|span| {
+    if block.instruction_spans.iter().any(|span| {
         span.addr == instruction
             && target >= span.addr
             && target < span.addr.saturating_add(u64::from(span.size))
-    })
+    }) {
+        return true;
+    }
+    // A branch to a later instruction of this same block leaves nothing: the
+    // block goes where it was going. `-O0` arm64 emits `b` to the very next
+    // instruction before a `__stack_chk_fail` call, and radare2 keeps the two
+    // in one block, which read as an instruction after the terminator.
+    block
+        .instruction_spans
+        .iter()
+        .any(|span| span.addr == target && target > instruction)
 }
 
 /// The operation that decides where this block goes, if any.
@@ -3794,6 +3804,26 @@ mod tests {
             "instruction-local temporaries must feed the selected register candidates instead of preserving an undefined temporary: {:?}",
             lifted.block().ops
         );
+    }
+
+    #[cfg(feature = "arm")]
+    #[test]
+    fn a_branch_to_the_next_instruction_of_its_own_block_is_not_a_terminator() {
+        // `b .+4; bl target`, which is what arm64 -O0 emits before a
+        // `__stack_chk_fail` call and radare2 keeps in one block. The branch
+        // goes where the block was going, so the block still ends at the call.
+        let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+            .expect("trusted AArch64 specification");
+        let mut bytes = [0_u8; 16];
+        bytes[..4].copy_from_slice(&[0x01, 0x00, 0x00, 0x14]);
+        bytes[4..8].copy_from_slice(&[0x02, 0x00, 0x00, 0x94]);
+        let lifted = disassembler
+            .lift_genuine_block(&bytes, 0x1000, 8)
+            .expect("the block lifts");
+        // The call returns, so the block's one successor is its fallthrough;
+        // taking the branch as the terminator would name `0x1004` instead.
+        let successors = genuine_block_successors(&lifted).expect("the block names successors");
+        assert_eq!(successors, vec![0x1008], "{successors:?}");
     }
 
     #[cfg(feature = "x86")]
