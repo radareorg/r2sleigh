@@ -27309,3 +27309,30 @@ tool. Two things learned: the session is asynchronous, so the caller polls
 `--shlib libr2sleigh_plugin.dylib`. Running `script` through the session, or
 launching an inferior that inherits the backend's stdio, takes the backend
 down.
+
+### REV64 expanded, the work limit deleted, two fixtures re-read
+
+`BZ2_compressBlock` refused on a `CallOther`: its byte-reversal loop is
+`rev64` + `ext`, and `ext` was already expanded but `NEON_rev64` was not. It
+is now expanded per element and recomposed with `Piece`, the way `USHL` is
+(`crates/r2sleigh-lift/tests/neon_rev64.rs`). The function renders; the
+reversal is spelled as the shifts and ors it is, which a later pass may
+recognise as `__builtin_bswap64`. `sendMTFValues` still refuses on five
+user operations the vectoriser used there -- `cmgt`, `umaxv`, `umin`/`umax`,
+`cmtst`, `uzp1`, `tbl`, `xtn`, `ushll`, `uminv`, `zip1` -- which is a
+campaign of its own.
+
+`BZ2_decompress` (32k instructions) refused with "exhausted the work its
+input allows": the affine work budget fitted to captured bytes, exceeded by a
+function that finishes in six seconds when the budget is scaled away. The
+budget was a cap and is deleted -- `SsaWorkMeter` keeps counting for the
+timing line, `WorkExhausted` and `work_budget_for_captured_bytes` are gone --
+and the function now refuses with `unobserved_binding_read` at declaration
+placement, the same class as `fcn_100000638`.
+
+The plugin's own tests had drifted: the binding-audit schema still listed the
+deleted `truncate` cast and not the three floating casts, and the four
+`plain_o2` lift fixtures pinned SSA hashes from before entry lanes were keyed
+by their root; `check_secret`'s entry block was read (`EDI` is now a
+`Subpiece` of `RDI`) and the four hashes transcribed from
+`R2SLEIGH_BLESS_LIFT_CAPTURE`.

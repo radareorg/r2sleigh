@@ -112,10 +112,12 @@ BINDING_AUDIT_JOURNAL_CAUSE_FIELDS = {
         for kind in (
             "zero_extend",
             "sign_extend",
-            "truncate",
             "bit_reinterpret",
             "integer_to_address",
             "address_to_integer",
+            "integer_to_float",
+            "float_to_integer",
+            "float_to_float",
         )
     },
     "binding_plan_machine_invalid_subpiece": frozenset(

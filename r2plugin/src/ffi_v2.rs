@@ -4267,10 +4267,12 @@ mod tests {
         for kind in [
             r2ssa::MachineCastKind::ZeroExtend,
             r2ssa::MachineCastKind::SignExtend,
-            r2ssa::MachineCastKind::Truncate,
             r2ssa::MachineCastKind::BitReinterpret,
             r2ssa::MachineCastKind::IntegerToAddress,
             r2ssa::MachineCastKind::AddressToInteger,
+            r2ssa::MachineCastKind::IntegerToFloat,
+            r2ssa::MachineCastKind::FloatToInteger,
+            r2ssa::MachineCastKind::FloatToFloat,
         ] {
             machine.push(MachineFailure::InvalidCastWidth {
                 inst,
@@ -4337,7 +4339,7 @@ mod tests {
             },
             MachineFailure::UnsupportedOperation { inst },
         ]);
-        assert_eq!(machine.len(), 39, "machine wire-leaf inventory drifted");
+        assert_eq!(machine.len(), 41, "machine wire-leaf inventory drifted");
         cases.extend(
             machine
                 .into_iter()
@@ -4455,7 +4457,7 @@ mod tests {
         ]);
         assert_eq!(
             cases.len(),
-            98,
+            100,
             "public journal wire-leaf inventory drifted"
         );
         cases
@@ -4501,7 +4503,7 @@ mod tests {
             }
             causes.push(expected_cause);
         }
-        assert_eq!(kinds.len(), 98);
+        assert_eq!(kinds.len(), 100);
 
         let checker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/corpus/check_binding_audit_schema.py");
@@ -4526,7 +4528,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "98");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "100");
     }
 
     fn every_placement_refusal_wire_leaf() -> Vec<r2engine::PlacementAuditRefusal> {
