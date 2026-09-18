@@ -1,6 +1,6 @@
 uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
 {
-    /* r2dec proof: no individual construct is marked; 251 source obligations: 203 rendered, 48 elided, 0 refused; 62 statements rendered */
+    /* r2dec proof: no individual construct is marked; 251 source obligations: 203 rendered, 48 elided, 0 refused; 59 statements rendered */
     {
         int32_t tmp_11f00_5;
         uint32_t RCX_6;
@@ -59,19 +59,14 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
                         break;
                     }
                 }
-                goto L3;
             } else {
                 RCX_10 = RDI_0;
-                goto L3;
             }
-            {
-L3: ;
-                while (RCX_10 < tmp_4a00_1) {
-                    uint8_t tmp_11e00_2 = *(uint8_t*)RCX_10;
-                    uint32_t tmp_lane_1000009d0_e_52_1 = (uint32_t)((uint64_t)tmp_11e00_2 * 0x165667b1) + RSI_1;
-                    RSI_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_1000009d0_e_52_1 << 11 | tmp_lane_1000009d0_e_52_1 >> 21) * 0xffffffff9e3779b1U);
-                    RCX_10++;
-                }
+            while (RCX_10 < tmp_4a00_1) {
+                uint8_t tmp_11e00_2 = *(uint8_t*)RCX_10;
+                uint32_t tmp_lane_1000009d0_e_52_1 = (uint32_t)((uint64_t)tmp_11e00_2 * 0x165667b1) + RSI_1;
+                RSI_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_1000009d0_e_52_1 << 11 | tmp_lane_1000009d0_e_52_1 >> 21) * 0xffffffff9e3779b1U);
+                RCX_10++;
             }
             {
                 uint32_t tmp_lane_1000009ec_35_62_1 = (uint32_t)((uint64_t)(int32_t)(RSI_1 >> 15 ^ RSI_1) * 0xffffffff85ebca77U);

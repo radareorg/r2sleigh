@@ -28424,3 +28424,15 @@ the admission never took effect. A literal admitted in a later round now joins
 the fold set: spelling it at its readers removes a write and adds no read, so
 nothing decided in an earlier round is disturbed, and components only shrink,
 so the chain still terminates.
+
+## A jump to the loop that follows is falling into it
+
+The two `goto L3`s left in x64 -O1 `xxhash32` jumped, from both arms of an
+`if`, to the header of the `while` written immediately after it. The shape
+pass resolves a `goto` against the label that leads the next statement, and
+`leading_label` did not look inside a loop, so a header label sitting first
+in a `for (;;)` body was invisible and the jumps stayed. For a body-first
+loop -- `for (;;)` with no test in its head, or `do ... while` -- entering at
+the header is entering the loop, so `leading_label` now descends into those
+bodies. `gotos` is 0 on the matrix; every noise counter the cutover gate
+checks is 0 on all 60 cells.

@@ -446,6 +446,14 @@ impl ControlFlowStructurer<'_, '_> {
             }
             CStmt::Block(stmts) => stmts.first().and_then(Self::leading_label),
             CStmt::Label(name) => Some(name.clone()),
+            // Entering a body-first loop at its header is entering the loop.
+            CStmt::For {
+                init: None,
+                cond: None,
+                body,
+                ..
+            }
+            | CStmt::DoWhile { body, .. } => Self::leading_label(body),
             _ => None,
         }
     }
