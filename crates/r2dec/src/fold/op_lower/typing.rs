@@ -81,14 +81,66 @@ impl FoldingContext<'_> {
         }
         // A bare name converts from what it is declared as, whatever the
         // boundary believed its value to be: the declaration is what C reads.
-        let declared = match expr.unobserved() {
-            CExpr::Var(symbol) => Some(self.symbols.borrow().ty(*symbol).clone()),
-            _ => None,
-        }
-        .filter(|ty| !matches!(ty, CType::Unknown))
-        .map(CValue::Typed);
+        // A lossless conversion already spelled over the name is peeled first,
+        // so `(uint32_t)(uint64_t)x` on a `uint32_t` is `x`.
+        let (expr, declared) = self.name_under_lossless_conversions(expr);
+        let declared = declared.map(CValue::Typed);
         let from = declared.as_ref().or(from);
         super::convert::convert_optional(expr, from, to, self.pointer_bits())
+    }
+
+    /// The name an expression is, through integer conversions that lose no
+    /// value, with its declared type; or the expression itself and nothing.
+    fn name_under_lossless_conversions(&self, expr: CExpr) -> (CExpr, Option<CType>) {
+        let declared_name = |expr: &CExpr| match expr.unobserved() {
+            CExpr::Var(symbol) => Some(self.symbols.borrow().ty(*symbol).clone())
+                .filter(|ty| !matches!(ty, CType::Unknown)),
+            _ => None,
+        };
+        if let Some(declared) = declared_name(&expr) {
+            return (expr, Some(declared));
+        }
+        let CExpr::Cast {
+            ty: mid,
+            expr: inner,
+            role: crate::ast::CastRole::Conversion,
+        } = expr.unobserved()
+        else {
+            return (expr, None);
+        };
+        let Some(declared) = declared_name(inner) else {
+            return (expr, None);
+        };
+        let lossless = match (
+            super::convert::integer_meta(&declared, self.pointer_bits()),
+            super::convert::integer_meta(mid, self.pointer_bits()),
+        ) {
+            (Some((from_signed, from_bits)), Some((mid_signed, mid_bits))) => {
+                (from_bits < mid_bits && (!from_signed || mid_signed))
+                    || (from_bits == mid_bits && from_signed == mid_signed)
+            }
+            _ => false,
+        };
+        if lossless {
+            (
+                Self::under_observations(&expr, &|_| (**inner).clone()),
+                Some(declared),
+            )
+        } else {
+            (expr, None)
+        }
+    }
+
+    /// `expr` with what sits under its observation markers replaced, the
+    /// markers kept: a read stays recorded where it was recorded.
+    fn under_observations(expr: &CExpr, replace: &dyn Fn(&CExpr) -> CExpr) -> CExpr {
+        match expr {
+            CExpr::Observed { id, expr } => CExpr::Observed {
+                id: *id,
+                expr: Box::new(Self::under_observations(expr, replace)),
+            },
+            other => replace(other),
+        }
     }
 
     /// What a read of `value` renders as, before any use projection.

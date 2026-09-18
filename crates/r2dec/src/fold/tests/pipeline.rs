@@ -3147,8 +3147,13 @@ mod tests {
                 argument.transparently_eq(&expected),
                 "argument {argument:?} is not the plan's spelling {expected:?}"
             );
+            // The read may sit under the conversion the parameter's type asks for.
+            let mut read = argument;
+            while let CExpr::Cast { expr, .. } = read {
+                read = expr;
+            }
             assert!(
-                matches!(argument, CExpr::Observed { .. }),
+                matches!(read, CExpr::Observed { .. }),
                 "a bound call argument is a read and must carry its read marker: {argument:?}"
             );
         }

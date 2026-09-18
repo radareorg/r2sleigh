@@ -68,7 +68,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint64_t RDX_0)
 L3: ;
                 while (RCX_10 < tmp_4a00_1) {
                     uint8_t tmp_11e00_2 = *(uint8_t*)RCX_10;
-                    uint32_t tmp_lane_1000009d0_e_52_1 = (uint32_t)((uint64_t)(int32_t)tmp_11e00_2 * 0x165667b1) + RSI_1;
+                    uint32_t tmp_lane_1000009d0_e_52_1 = (uint32_t)((uint64_t)tmp_11e00_2 * 0x165667b1) + RSI_1;
                     RSI_1 = (uint32_t)((uint64_t)(int32_t)(tmp_lane_1000009d0_e_52_1 << 11 | tmp_lane_1000009d0_e_52_1 >> 21) * 0xffffffff9e3779b1U);
                     RCX_10++;
                 }

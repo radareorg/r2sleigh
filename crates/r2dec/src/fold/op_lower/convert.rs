@@ -20,7 +20,7 @@ use crate::ast::{CExpr, CType};
 /// exactly zero or one, and every integer type holds it. An enumeration is
 /// an `int`. A typedef is resolved to the integer it names, at the pointer
 /// width for the types whose width the target decides.
-fn integer_meta(ty: &CType, pointer_bits: u32) -> Option<(bool, u32)> {
+pub(super) fn integer_meta(ty: &CType, pointer_bits: u32) -> Option<(bool, u32)> {
     match ty {
         CType::Int { bits, signedness } => Some((*signedness == Signedness::Signed, *bits)),
         CType::Bool => Some((false, 1)),

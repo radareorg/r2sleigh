@@ -28398,3 +28398,16 @@ argument's value is the zero-extended carrier and the expression is the
 name's declared type from the symbol table and converts from that, whatever
 the boundary believed the value to be; the symbol carries its declaration
 from `reserve_binding`, so the answer is available while lowering runs.
+
+The call-argument half needed one more step: the argument arrives as
+`(uint64_t)stack_m68`, the zero extension the plan spelled over the slot, and
+converting that to the `uint32_t` parameter collapsed to `(uint32_t)stack_m68`.
+A conversion that loses no value over a declared name is peeled first, with
+the read's observation markers kept where they were, so the conversion is
+made from the name's own type. The same peel turns
+`(uint64_t)(int32_t)byte` into `(uint64_t)byte` in `xxhash32`, which is the
+same value for a `uint8_t`. `call-argument-conversion` evidence names the
+site, the value's types and the expression when tracing.
+
+`same_type_casts` is 0 on the matrix. What remains of the cutover gate is one
+`literal_only_declarations` in x64 -O2 `adler32`.

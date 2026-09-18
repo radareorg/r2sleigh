@@ -67,10 +67,10 @@ uint32_t sym__xxhash32(uint64_t X0_0, uint64_t X1_0, uint32_t W2_0)
                     }
                 }
                 {
-                    uint32_t X0_11 = sym__rotl32((uint32_t)stack_m68, 1);
-                    uint32_t X0_13 = sym__rotl32((uint32_t)stack_m72, 7);
-                    uint32_t X0_16 = sym__rotl32((uint32_t)tmp_24d00_1, 12);
-                    uint32_t X0_18 = sym__rotl32((uint32_t)stack_m80, 18);
+                    uint32_t X0_11 = sym__rotl32(stack_m68, 1);
+                    uint32_t X0_13 = sym__rotl32(stack_m72, 7);
+                    uint32_t X0_16 = sym__rotl32(tmp_24d00_1, 12);
+                    uint32_t X0_18 = sym__rotl32(stack_m80, 18);
                     stack_m52 = X0_11 + X0_13 + X0_16 + X0_18;
                 }
             }

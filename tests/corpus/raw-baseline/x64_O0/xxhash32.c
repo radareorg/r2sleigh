@@ -105,7 +105,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
                     } else {
                         tmp_11f80_1 = stack_m16;
                         uint8_t tmp_11e00_2 = *(uint8_t*)tmp_11f80_1;
-                        uint32_t RAX_73 = sym__rotl32((uint32_t)(stack_m44_2 + (uint32_t)((uint64_t)(int32_t)tmp_11e00_2 * 0x165667b1)), 11);
+                        uint32_t RAX_73 = sym__rotl32((uint32_t)(stack_m44_2 + (uint32_t)((uint64_t)tmp_11e00_2 * 0x165667b1)), 11);
                         stack_m44_2 = (uint32_t)((uint64_t)(int32_t)RAX_73 * 0xffffffff9e3779b1U);
                         tmp_11f80_1 = stack_m16;
                         stack_m16 = tmp_11f80_1 + 1;

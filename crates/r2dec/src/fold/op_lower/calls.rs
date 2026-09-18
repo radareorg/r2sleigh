@@ -358,6 +358,12 @@ impl<'a> FoldingContext<'a> {
             .value_declaration_type(value)
             .map(CValue::Typed)
             .or_else(|| self.value_type(value));
+        r2il::refusal_evidence!(
+            "call-argument-conversion",
+            "{:#x}:{} arg {argument_index} {value:?} source={source:?} declared={declared:?} expr={expr:?}",
+            site.0,
+            site.1
+        );
         self.convert_from(expr, source.as_ref(), &declared)
     }
 
