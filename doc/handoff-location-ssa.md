@@ -28201,3 +28201,35 @@ So the remaining work on this shape is to make one answer serve both: either the
 plan's `declaration_type` gains what the name resolution knows, or the renderer
 stops keeping a second helper. That is a small consolidation rather than a
 trace, which is where this shape now sits.
+
+### Thirteen shapes refusals are one cause: an escape covers only its own object
+
+`blocked_generation` is twenty-four of the eighty-four shapes cells and thirteen
+of those are `native declaration placement refused: missing_definition`, all on
+`shape_variadic` and `shape_struct_pointer` across every configuration.
+
+The rule that should cover them already exists.
+`BindingPlan::binding_is_entry_declared` returns true for a
+`BindingRole::StackObject { object }` whose object is in
+`escaped_frame_objects`, on the stated ground that an object whose address this
+function passed to a call is written through that pointer by a statement this
+function does not contain.
+
+It does not fire because the escape is recorded against one object and the reads
+are of others. For `shape_struct_pointer` the evidence is direct: the refusing
+bindings have `role = StackObject { object: ObjectId(2) }` and
+`StackObject { object: ObjectId(3) }` while the escaped set is `{ObjectId(1)}`.
+The source passes `&value` for a `struct mixed`, so the address that escaped is
+the struct's base, and the members read afterwards are separate objects in the
+model.
+
+`frame_objects_with_escaped_address`
+(crates/r2dec/src/binding_plan/rules.rs) inserts exactly the object
+`exact_stack_object_address` names. What it should insert is every stack object
+the escaped address reaches: a callee handed `&value` may write any byte of
+`value`, so every object at the same `StackAddressRoot::base` whose offset lies
+inside the escaped object's extent is written through that pointer too. The
+object model carries what this needs -- `ObjectModel::stack_objects` is keyed by
+`StackObjectKey { root: StackAddressRoot { base, offset }, space }` -- so the
+widening is a range query over that map once the escaped object's extent is in
+hand.
