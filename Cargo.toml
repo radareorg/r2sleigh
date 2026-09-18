@@ -86,5 +86,7 @@ opt-level = 1
 # branches combine the exact diffs on those pull requests. Drop this block for
 # the released crates once they land.
 [patch.crates-io]
-libsla = { git = "https://github.com/0verflowme/libsla.git", branch = "user-op-names-clear-cache" }
-libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "expose-user-op-names-clear-cache" }
+# The Sleigh dependencies are owned forks; every fix lands on their main branch.
+sleigh-config = { git = "https://github.com/0verflowme/sleigh-config.git", branch = "main" }
+libsla = { git = "https://github.com/0verflowme/libsla.git", branch = "main" }
+libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "main" }

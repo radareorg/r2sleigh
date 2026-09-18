@@ -479,7 +479,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libsla"
 version = "1.2.0"
-source = "git+https://github.com/0verflowme/libsla.git?branch=user-op-names-clear-cache#2167bfed01426b1dc00ff13b2724327e2bec9ca5"
+source = "git+https://github.com/0verflowme/libsla.git?branch=main#ebf9232181426d8945506f7ce804247fffb5428e"
 dependencies = [
  "libsla-sys",
  "thiserror",
@@ -488,7 +488,7 @@ dependencies = [
 [[package]]
 name = "libsla-sys"
 version = "0.1.5"
-source = "git+https://github.com/0verflowme/libsla-sys.git?branch=expose-user-op-names-clear-cache#3ef61aadfec09652d82366b9bfa22ec6a55afc35"
+source = "git+https://github.com/0verflowme/libsla-sys.git?branch=main#2ddd71acaad1d69c7d7c171bee645a6191001f43"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -964,8 +964,7 @@ dependencies = [
 [[package]]
 name = "sleigh-config"
 version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36c03500e884ff5312b820b4cdd329e119522ec109b7869333d4a889bdb62fe1"
+source = "git+https://github.com/0verflowme/sleigh-config.git?branch=main#f582c0fcebfcd40b29fec739a0a30ba49a78d7c4"
 dependencies = [
  "heck",
  "sleigh-compiler",
