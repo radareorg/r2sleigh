@@ -2211,7 +2211,7 @@ mod tests {
             stmt,
             CStmt::Expr(CExpr::call(
                 CExpr::External {
-                    name: "sym_imp_printf".to_string(),
+                    name: "printf".to_string(),
                     kind: crate::symbol::ExternalKind::Import,
                 },
                 vec![]
@@ -2913,10 +2913,11 @@ mod tests {
         assert!(identity.aliases.contains("sym.function_name"));
         assert!(identity.aliases.contains("sym.symbol_name"));
 
+        // The name a linker resolves, not the flag radare2 spells it with.
         assert_eq!(
             ctx.resolve_call_target_for_site(block.addr, 1, target),
             Ok(CExpr::External {
-                name: "sym_imp_fact_helper".to_string(),
+                name: "fact_helper".to_string(),
                 kind: crate::symbol::ExternalKind::Import,
             })
         );

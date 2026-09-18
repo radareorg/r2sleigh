@@ -247,9 +247,12 @@ for entry in sorted(entries, key=lambda item: (item["function"], item["config"])
     if generation["status"] != "present":
         # The renderer names why it declined, in a comment where the function
         # would have been. That name is the finding; "unparsable" is not.
+        # A status with no error text is normal -- a gapped cell states the
+        # gap and nothing else -- so the first line is taken only if there is
+        # one, rather than indexing an empty list and losing the whole map.
+        lines = str(generation.get("error", "")).strip().splitlines()
         detail = generation.get("fallback_reason") or (
-            f"{generation['status']}: "
-            + str(generation.get("error", "")).strip().splitlines()[0][:160]
+            f"{generation['status']}: " + (lines[0][:160] if lines else "")
         )
     elif entry["raw"]["status"] == "signature_mismatch":
         detail = (

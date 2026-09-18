@@ -1612,6 +1612,16 @@ pub struct CExternObject {
     pub type_refusal: Option<r2types::DataObjectTypeRefusal>,
 }
 
+/// The name a linker knows an import by, with radare2's flag namespace removed.
+fn import_namespace_stripped(name: &str) -> &str {
+    for space in ["sym.imp.", "imp.", "reloc.imp.", "sym.func.imp."] {
+        if let Some(stripped) = name.strip_prefix(space) {
+            return stripped;
+        }
+    }
+    name
+}
+
 /// A machine symbol spelled as a C identifier.
 ///
 /// radare2 names a symbol `sym._rotl32`, and a decompiler that puts that in its
@@ -1619,7 +1629,17 @@ pub struct CExternObject {
 /// member access on an undeclared `sym`. The name still has to be recognisable,
 /// so every character C does not allow becomes an underscore and nothing else
 /// changes.
+///
+/// An import is the exception, because it is the one name here that a linker
+/// has to resolve. `sym.imp.__stack_chk_fail` spelled with its namespace
+/// intact is `sym_imp___stack_chk_fail`, which nothing defines, and every
+/// stack-protected rendering failed to link on that symbol. The namespace is
+/// radare2's, not the program's, so an import carries the name the program
+/// was linked against. A defined symbol keeps its namespace: its definition
+/// is rendered here under the same spelling, and stripping `sym.` from
+/// `sym._rotl32` would make the rendering collide with the real `_rotl32`.
 pub fn c_identifier(name: &str) -> String {
+    let name = import_namespace_stripped(name);
     let mut identifier = String::with_capacity(name.len());
     for character in name.chars() {
         if character.is_ascii_alphanumeric() || character == '_' {
@@ -2694,6 +2714,17 @@ mod tests {
     /// The names a fixture in this module declares.
     fn test_table() -> std::cell::RefCell<crate::symbol::SymbolTable> {
         std::cell::RefCell::new(crate::symbol::SymbolTable::new())
+    }
+
+    /// An import is spelled the way the linker knows it; a defined symbol is
+    /// not, because its definition is rendered here under the same spelling.
+    #[test]
+    fn an_import_loses_the_flag_namespace_and_a_defined_symbol_keeps_it() {
+        assert_eq!(c_identifier("sym.imp.__stack_chk_fail"), "__stack_chk_fail");
+        assert_eq!(c_identifier("imp.__memcpy_chk"), "__memcpy_chk");
+        assert_eq!(c_identifier("sym._rotl32"), "sym__rotl32");
+        assert_eq!(c_identifier("sym.imp."), "_");
+        assert_eq!(c_identifier("7up"), "_7up");
     }
 
     #[test]

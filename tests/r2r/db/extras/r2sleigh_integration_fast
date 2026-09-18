@@ -387,7 +387,7 @@ CMDS=<<EOF
 a:sla > /dev/null
 aaa
 s dbg.vuln_memcpy > /dev/null
-pd:s | jq -Rs 'contains("sym_imp_printf((uint64_t)\"Copied: %s\\\\n\", (uint64_t)var_8h);")'
+pd:s | jq -Rs 'contains("printf((uint64_t)\"Copied: %s\\\\n\", (uint64_t)var_8h);")'
 EOF
 RUN
 
