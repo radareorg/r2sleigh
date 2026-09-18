@@ -28571,3 +28571,28 @@ bytes through argument 0). `shape_variadic` does not: its escape is
 `char *` parameter whose pointee is one byte. What bounds that write is the
 size argument, a libc contract the summaries do not carry; a transfer-style
 model for the `n`-bounded string functions is the missing piece.
+
+## A call's unread result is no object
+
+`shape_struct_pointer` on x64 rendered `uint64_t RAX_2 = sym__mixed_touch(...)`
+and failed the strict compile with an unused variable. radare2 types the
+callee as returning `uint64_t`, the result `RAX_2` has exactly one graph
+reader -- the next call's `CallUse RAX`, a register that call's prototype does
+not name -- and the certificates already elide that use, so nothing in the
+text ever reads it. `unread_defined_values` now counts a certificate-elided
+`CallUse` as no read, and the value owes no object: the call renders as a
+statement. The rule is deliberately that narrow; the elided set also holds
+the memory-address reads the geometry spells, and those still own the
+address value when it is read twice. `UNREAD` under `R2SLEIGH_TRACE_INLINE`
+prints a value's definition, readers with their dispositions and certified
+readers.
+
+What remains on `shape_struct_pointer` is a genuine two-register return:
+`mixed_from` returns `struct mixed` (16 bytes) in `RAX:RDX` / `X0:X1`, the
+callee's inferred signature says `uint64_t`, and only the first register is
+stored, so the aggregate's last member is read uninitialised. The earlier note
+that a two-register reading was wrong was about a different site (one
+register defined twice); here it is right. The recovery follows
+"body-proven callee signature wins": the callee's live-out names both
+carriers, the call defines both, and the caller consumes them as one 16-byte
+value. It is the same defect as `shape_multiword_return`, and is not built.

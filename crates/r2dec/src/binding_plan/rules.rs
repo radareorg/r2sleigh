@@ -638,6 +638,50 @@ pub(super) fn unread_defined_values(
     projection: &r2ssa::MachineProjection,
 ) -> BTreeSet<ValueId> {
     let certified = certified_value_readers(source);
+    // A call's `CallUse` of a register its prototype does not name is a use
+    // the certificates elide and the text never spells, so a value only that
+    // reads is unread and owes no object.
+    let graph = source.graph();
+    let elided = certificate_elided_cells(source, projection)
+        .map(|cells| cells.uses)
+        .unwrap_or_default()
+        .into_keys()
+        .filter(|site| {
+            graph.inst(site.inst).is_some_and(|inst| {
+                matches!(
+                    inst.payload,
+                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. })
+                )
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if let Some(want) = crate::debug::traced_inline_name() {
+        for value in &source.graph().values {
+            if want != "all" && !value.var.display_name().eq_ignore_ascii_case(want) {
+                continue;
+            }
+            let definition = source.graph().def_inst(value.id);
+            eprintln!(
+                "UNREAD {} {:?}: definition={:?} write={:?} uses={:?} certified={:?} caller_supplied={}",
+                value.var.display_name(),
+                value.id,
+                definition,
+                definition.and_then(|definition| projection.write_disposition(definition)),
+                source
+                    .graph()
+                    .use_sites(value.id)
+                    .iter()
+                    .map(|site| (
+                        site.inst,
+                        source.graph().inst(site.inst).map(|inst| &inst.payload),
+                        projection.use_disposition(*site)
+                    ))
+                    .collect::<Vec<_>>(),
+                certified.get(&value.id),
+                source.graph().caller_supplied(value.id)
+            );
+        }
+    }
     source
         .graph()
         .values
@@ -664,7 +708,13 @@ pub(super) fn unread_defined_values(
                 })
             })
         })
-        .filter(|value| source.graph().use_sites(value.id).is_empty())
+        .filter(|value| {
+            source
+                .graph()
+                .use_sites(value.id)
+                .iter()
+                .all(|site| elided.contains(site))
+        })
         .filter(|value| !certified.contains_key(&value.id))
         // A formal the body never reads is still declared; it is not dead.
         .filter(|value| !source.graph().caller_supplied(value.id))
