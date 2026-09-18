@@ -5895,10 +5895,26 @@ fn reaching_abi_value_before(
         let [first, rest @ ..] = phi.inputs.as_slice() else {
             return None;
         };
-        return rest
-            .iter()
-            .all(|input| input == first)
-            .then_some(ReachingAbiPath::Reaches(ReachingAbiState::Value(*first)));
+        if rest.iter().all(|input| input == first) {
+            return Some(ReachingAbiPath::Reaches(ReachingAbiState::Value(*first)));
+        }
+        // A merge of the transfer carrier whose every input is the entry's
+        // own stack pointer is that pointer: an early return that never
+        // built the frame meets the epilogue that has unwound it.
+        if policy.transfer_carrier == Some(storage)
+            && phi
+                .inputs
+                .iter()
+                .all(|input| value_is_entry_stack_pointer(function, graph, *input, storage))
+        {
+            return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
+        }
+        r2il::refusal_evidence!(
+            "reaching-abi-value",
+            "{block_addr:#x} merges {storage:?} from inputs that disagree: {:?}",
+            phi.inputs
+        );
+        return None;
     }
     if !phi_insts.is_empty() {
         r2il::refusal_evidence!(
@@ -5971,6 +5987,30 @@ fn reaching_abi_value_before(
         return None;
     }
     Some(ReachingAbiPath::Reaches(*first))
+}
+
+/// Whether `value` is the stack pointer the function was entered with: the
+/// entry value itself, or one the geometry roots at the entry pointer with no
+/// offset.
+fn value_is_entry_stack_pointer(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    value: ValueId,
+    storage: CanonicalStorageId,
+) -> bool {
+    let Some(graph_value) = graph.value(value) else {
+        return false;
+    };
+    if graph.def_inst(value).is_none()
+        && graph_value.var.version == 0
+        && graph_value.canonical_storage == Some(storage)
+    {
+        return true;
+    }
+    function
+        .decompile_prep_facts()
+        .and_then(|facts| facts.entry_stack_address_root_of(&graph_value.var))
+        .is_some_and(|root| root.base == StackAddressBase::StackPointer && root.offset == 0)
 }
 
 fn register_storages_overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
