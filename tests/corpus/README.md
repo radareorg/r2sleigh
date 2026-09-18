@@ -149,3 +149,13 @@ unaccounted = 0
 `refused` is an explicit failure, not a successful result. Raw compilation is an
 external type tripwire; the internal requirement that every surviving `UseSite`
 has an upstream-backed exact projection is the width proof.
+
+## Debugging the plugin under lldb
+
+`tests/corpus/probe_plugin.sh install` builds the plugin with symbols
+(`[profile.probe]`) and puts it where radare2 loads it; `restore` puts the
+release build back. `tests/corpus/lldb_probe.sh` runs one command under lldb in
+batch and prints the frame at each stop. For an interactive session,
+`tests/corpus/lldb_mcp.sh` serves lldb over MCP with radare2 as the target
+(`.mcp.json` registers it for Claude Code as `lldb`); its header has the
+breakpoint and launch recipe.

@@ -27289,3 +27289,23 @@ Left open from the same reading: `stack_m5372` still appears in compress as an
 uninitialised local -- the load from inside the escaped `stat` buffer is
 rendered by the memory path as a fresh variable rather than as a read of the
 buffer. That is the stack object model's, not the promoter's.
+
+### lldb over MCP
+
+The debugger is now reachable as a tool. Homebrew `lldb` 23.1.1 ships
+`lldb-mcp`, a multiplexer over lldb sessions that register under `~/.lldb`;
+its own spawn of a backend gives that lldb no stdin and lldb quits on EOF
+before it registers, so `tests/corpus/lldb_mcp.sh` starts the backend itself
+with stdin held open, waits for the registration, then hands stdio to
+`lldb-mcp`. `.mcp.json` registers it for Claude Code as `lldb`. The backend
+starts with the fork's radare2 as target and the probe environment
+(`R2DEC_TRACE_REFUSAL=1`, so evidence lines execute and can be stopped at).
+`tests/corpus/probe_plugin.sh install|restore` swaps the symbol-carrying
+plugin in and out; `lldb_probe.sh` now uses it too. Verified end to end:
+a name breakpoint on `promote_private_stack_slots` stops radare2 rendering
+`compress`, and `frame variable`, `bt`, `continue` work through the `command`
+tool. Two things learned: the session is asynchronous, so the caller polls
+`process status`; and a file breakpoint set before launch resolves only with
+`--shlib libr2sleigh_plugin.dylib`. Running `script` through the session, or
+launching an inferior that inherits the backend's stdio, takes the backend
+down.

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lldb": {
+      "type": "stdio",
+      "command": "./tests/corpus/lldb_mcp.sh"
+    }
+  }
+}
