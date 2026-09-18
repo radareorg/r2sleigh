@@ -270,7 +270,6 @@ pub fn eval(
             match kind {
                 MachineCastKind::SignExtend => signed(x, from) as u128,
                 MachineCastKind::ZeroExtend
-                | MachineCastKind::Truncate
                 | MachineCastKind::BitReinterpret
                 | MachineCastKind::IntegerToAddress
                 | MachineCastKind::AddressToInteger => x,

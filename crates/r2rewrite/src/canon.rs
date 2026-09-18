@@ -62,20 +62,6 @@ pub fn literal_bits(arena: &TermArena, id: TermId) -> Option<u64> {
     }
 }
 
-/// A truncation is the extraction of the low bits, and the extract rules
-/// compose where two spellings of one operation would not. Same node count,
-/// same width, idempotent.
-pub fn truncate_as_extract(arena: &mut TermArena, id: TermId) -> TermId {
-    let term = arena.term(id);
-    match term.kind {
-        TermKind::Cast {
-            kind: r2ssa::MachineCastKind::Truncate,
-            input,
-        } => arena.intern(term.ty, TermKind::Extract { input, lsb_bits: 0 }),
-        _ => id,
-    }
-}
-
 /// An arithmetic right shift that sign-fills on overshift shifts by at most
 /// width minus one: a literal count beyond that is the same operation with
 /// the count clamped. Same node count, idempotent.
@@ -331,7 +317,6 @@ pub(crate) fn emit_affine(
 
 /// Every normaliser, in the order the driver applies them.
 pub fn normalize(arena: &mut TermArena, id: TermId) -> TermId {
-    let id = truncate_as_extract(arena, id);
     let id = clamp_arithmetic_shift_count(arena, id);
     let id = affine_normalize(arena, id);
     order_operands(arena, id)

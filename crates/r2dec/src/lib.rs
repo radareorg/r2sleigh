@@ -1303,7 +1303,6 @@ impl BindingMachineProjectionFailure {
                 r2ssa::MachineCastKind::SignExtend => {
                     "binding_plan_machine_invalid_sign_extend_width"
                 }
-                r2ssa::MachineCastKind::Truncate => "binding_plan_machine_invalid_truncate_width",
                 r2ssa::MachineCastKind::BitReinterpret => {
                     "binding_plan_machine_invalid_bit_reinterpret_width"
                 }

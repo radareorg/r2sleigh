@@ -661,7 +661,6 @@ pub enum MachineComparisonOp {
 pub enum MachineCastKind {
     ZeroExtend,
     SignExtend,
-    Truncate,
     BitReinterpret,
     IntegerToAddress,
     AddressToInteger,
@@ -1384,13 +1383,7 @@ impl MachineProjection {
                             source,
                             false,
                         )
-                        .map(|slice| match slice.conversion() {
-                            // A truncation reads only the bits it keeps; an extension reads its operand whole.
-                            Some(conversion) if conversion.kind == MachineCastKind::Truncate => {
-                                conversion.to_width_bits.min(slice.width_bits())
-                            }
-                            _ => slice.bit_offset() + slice.width_bits(),
-                        })
+                        .map(|slice| slice.bit_offset() + slice.width_bits())
                     }),
                     (None, _) if inst.output.is_none() => Some(source.width_bits),
                     _ => None,
@@ -2264,7 +2257,6 @@ fn validate_machine_use_slice(slice: MachineUseSlice, carrier_width_bits: u32) -
         MachineCastKind::ZeroExtend | MachineCastKind::SignExtend => {
             conversion.to_width_bits > slice.width_bits
         }
-        MachineCastKind::Truncate => conversion.to_width_bits < slice.width_bits,
         MachineCastKind::BitReinterpret
         | MachineCastKind::IntegerToAddress
         | MachineCastKind::AddressToInteger => conversion.to_width_bits == slice.width_bits,
@@ -2775,7 +2767,6 @@ impl MachineFunction {
                 let to = expr.ty.width_bits();
                 match kind {
                     MachineCastKind::ZeroExtend | MachineCastKind::SignExtend => to > from,
-                    MachineCastKind::Truncate => to < from,
                     MachineCastKind::BitReinterpret => to == from,
                     MachineCastKind::IntegerToAddress | MachineCastKind::AddressToInteger => {
                         to == from

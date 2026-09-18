@@ -469,16 +469,6 @@ literal_rule!(
             )
         },
         |arena, w, _| {
-            let x = lit(arena, 64, 0x1234_5678_9abc_def0);
-            arena.intern(
-                unsigned(w.min(32)),
-                TermKind::Cast {
-                    kind: MachineCastKind::Truncate,
-                    input: x,
-                },
-            )
-        },
-        |arena, w, _| {
             let x = lit(arena, w, 0x85);
             arena.intern(
                 unsigned(w),

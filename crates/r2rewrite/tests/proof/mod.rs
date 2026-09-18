@@ -308,7 +308,6 @@ impl<'a> Encoder<'a> {
                 match kind {
                     MachineCastKind::ZeroExtend => x.zero_ext(width - from),
                     MachineCastKind::SignExtend => x.sign_ext(width - from),
-                    MachineCastKind::Truncate => x.extract(width - 1, 0),
                     MachineCastKind::BitReinterpret
                     | MachineCastKind::IntegerToAddress
                     | MachineCastKind::AddressToInteger => x,

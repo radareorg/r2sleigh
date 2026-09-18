@@ -329,38 +329,26 @@ fn operand_ordering_is_an_idempotent_equivalence() {
     check_normaliser(shapes, canon::order_operands);
 }
 
-/// A truncation is an extract at offset zero; an arithmetic right shift by a
-/// literal count at or past the width shifts by the width minus one.
+/// An arithmetic right shift by a literal count at or past the width shifts
+/// by the width minus one.
 #[test]
-fn truncation_and_shift_clamp_are_idempotent_equivalences() {
-    use r2ssa::{MachineCastKind, MachineOvershiftBehavior, MachineShiftKind};
-    let shapes: &[r2rewrite::rules::Template] = &[
-        |arena, w, _| {
-            let wide = arena.intern(unsigned((w * 2).min(64).max(w + 4)), TermKind::Variable(7));
-            arena.intern(
-                unsigned(w),
-                TermKind::Cast {
-                    kind: MachineCastKind::Truncate,
-                    input: wide,
-                },
-            )
-        },
-        |arena, w, l| {
-            let count = arena.intern(
-                unsigned(8),
-                TermKind::Literal(r2ssa::MachineBitVector::new(8, u64::from(w) + 5).unwrap()),
-            );
-            arena.intern(
-                unsigned(w),
-                TermKind::Shift {
-                    kind: MachineShiftKind::ArithmeticRight,
-                    overshift: MachineOvershiftBehavior::SignFill,
-                    value: l[0],
-                    count,
-                },
-            )
-        },
-    ];
+fn shift_clamp_is_an_idempotent_equivalence() {
+    use r2ssa::{MachineOvershiftBehavior, MachineShiftKind};
+    let shapes: &[r2rewrite::rules::Template] = &[|arena, w, l| {
+        let count = arena.intern(
+            unsigned(8),
+            TermKind::Literal(r2ssa::MachineBitVector::new(8, u64::from(w) + 5).unwrap()),
+        );
+        arena.intern(
+            unsigned(w),
+            TermKind::Shift {
+                kind: MachineShiftKind::ArithmeticRight,
+                overshift: MachineOvershiftBehavior::SignFill,
+                value: l[0],
+                count,
+            },
+        )
+    }];
     check_normaliser(shapes, canon::normalize);
 }
 

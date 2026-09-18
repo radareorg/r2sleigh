@@ -305,7 +305,6 @@ impl<'a> FoldingContext<'a> {
                     r2ssa::MachineCastKind::SignExtend => {
                         CExpr::cast(signed(width), CExpr::cast(signed(from), inner))
                     }
-                    r2ssa::MachineCastKind::Truncate => CExpr::cast(unsigned(width), inner),
                     r2ssa::MachineCastKind::BitReinterpret => inner,
                     r2ssa::MachineCastKind::IntegerToAddress
                     | r2ssa::MachineCastKind::AddressToInteger

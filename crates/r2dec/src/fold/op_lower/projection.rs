@@ -148,7 +148,7 @@ pub(super) fn project_machine_use_of(
     let operand_type = checked_uint_type(source_width)?;
     let projected = convert(projected, Some(&projected_type), &operand_type);
     match conversion.kind() {
-        MachineCastKind::ZeroExtend | MachineCastKind::Truncate => {
+        MachineCastKind::ZeroExtend => {
             let target = checked_uint_type(target_width)?;
             Ok((
                 CExpr::cast(target.clone(), projected),

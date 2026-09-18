@@ -315,7 +315,6 @@ fn term_renderable(inputs: &AccessSyntaxInputs<'_>, arena: &TermArena, term: Ter
                 kind,
                 r2ssa::MachineCastKind::ZeroExtend
                     | r2ssa::MachineCastKind::SignExtend
-                    | r2ssa::MachineCastKind::Truncate
                     | r2ssa::MachineCastKind::BitReinterpret
             ) && child(input)
         }

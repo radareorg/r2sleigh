@@ -194,8 +194,7 @@ fn term_is_parameter(
         },
         TermKind::Cast {
             kind:
-                r2ssa::MachineCastKind::Truncate
-                | r2ssa::MachineCastKind::ZeroExtend
+                r2ssa::MachineCastKind::ZeroExtend
                 | r2ssa::MachineCastKind::SignExtend
                 | r2ssa::MachineCastKind::BitReinterpret,
             input,

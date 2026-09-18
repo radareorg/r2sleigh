@@ -913,7 +913,6 @@ impl Importer<'_> {
                 );
                 let valid = match kind {
                     MachineCastKind::ZeroExtend | MachineCastKind::SignExtend => from < width,
-                    MachineCastKind::Truncate => from > width,
                     MachineCastKind::BitReinterpret => from == width,
                     MachineCastKind::IntegerToAddress | MachineCastKind::AddressToInteger => false,
                     MachineCastKind::IntegerToFloat | MachineCastKind::FloatToInteger => true,

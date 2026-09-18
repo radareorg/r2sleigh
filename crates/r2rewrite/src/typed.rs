@@ -103,7 +103,6 @@ fn cast_operand(kind: &MachineCastKind, from: u32) -> CTypeLike {
     match kind {
         MachineCastKind::SignExtend | MachineCastKind::IntegerToFloat => signed(from),
         MachineCastKind::ZeroExtend
-        | MachineCastKind::Truncate
         | MachineCastKind::BitReinterpret
         | MachineCastKind::IntegerToAddress
         | MachineCastKind::AddressToInteger => unsigned(from),
