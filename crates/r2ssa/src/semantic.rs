@@ -1691,6 +1691,11 @@ pub enum CallArgumentLocation {
         offset: i64,
         memory_access: StructuredAccessId,
     },
+    /// An outgoing slot promotion made a variable: the argument is the value
+    /// that variable holds at the call, and no memory access carries it.
+    Variable {
+        offset: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8843,6 +8848,19 @@ fn collect_prepared_function_certificates(
                                 memory_access: stack_arg.memory_access,
                             },
                             source_inst: Some(stack_arg.memory_access.inst),
+                        });
+                    }
+                    None if graph.values.iter().any(|value| {
+                        value.var.name() == crate::naming::frame_slot_name(declared.entry_offset)
+                    }) =>
+                    {
+                        argument_certificates.push(CallArgumentCertificate {
+                            index: declared.index,
+                            value: declared.value,
+                            location: CallArgumentLocation::Variable {
+                                offset: declared.entry_offset,
+                            },
+                            source_inst: None,
                         });
                     }
                     None => {

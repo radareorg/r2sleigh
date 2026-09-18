@@ -27228,3 +27228,64 @@ type); `fp_classify` at -O2 renders the `fcmp` NaN tests as separate
 zero-compare constant is exact but `0.0` reads better; the floating
 variadic tail on Linux arm64 and x86-64 (registers `v0..`, `xmm0..`) is not
 placed, only Darwin's stack tail is.
+
+### Shared call tails: outgoing argument slots become variables
+
+`compress`, `uncompress` and `testf` refused with
+`unresolved_argument_carrier`. Each has a block that several predecessors
+reach after filling the outgoing argument area for one `fprintf` with
+different values, so the memory walk saw two stores for one slot and declined.
+The answer is to let `promote_private_stack_slots` promote the outgoing slots,
+so the shared tail reads a phi, and to certify such an argument as
+`CallArgumentLocation::Variable` with no memory access. Getting compress's
+frame through the promoter took six fixes, each a fact the scan had wrong:
+
+* The prologue is a chain of constant stack-pointer decrements (`steps`), the
+  operand folded through the lift's `1 lsl 12` temporaries by
+  `r2il_constant_before`, and it continues past the `___chkstk_darwin` call.
+* A per-block running `delta` -- the whole frame before the prologue, nothing
+  once it is open -- replaces the "returning block" epilogue check; a block
+  `leaves` by a return or by a branch to an address no block owns.
+* `resolved_stack_address` follows non-frame registers defined earlier in the
+  block and folds its add and subtract operands through the same constant
+  walk, since an arm64 add-immediate lifts as an add of a temporary.
+* A reused lift temporary holds a frame address only until it is next
+  written: the derived set is now killed on redefinition. `tmp:6800` first
+  held `sp` and later `x19`, and the load through `x19` "resolved to no place".
+* A parameter home is a slot the prologue fills from an incoming value **and
+  the function loads back**; the detection runs inside the frame-coordinate
+  scan rather than in a separate stack-pointer-relative pass that had flagged
+  the outgoing slots at displacement 0..32 as homes.
+* A declared object excludes every place it covers, not only its base --
+  the second member of a declared aggregate had been promoted on its own.
+
+And one soundness defect the same trace exposed. A derived address that
+reached a register refused promotion outright, but only when the add's
+operand was a literal constant; an arm64 `add x1, sp, 0x30` lifts through a
+temporary, matched no arm, and the frame address escaped to `stat` unseen
+while the `st_mode` load inside that buffer was promoted as an uninitialised
+`stack_m5372`. Derived values now carry their frame displacement, an escape
+(register, store, or an op that is not a comparison) taints the place it
+points at and everything above it, and unknown pointer arithmetic still
+refuses the frame. The taint is the C object rule: a pointer reaches its
+object upward, never below its base, so the outgoing area at the bottom of
+the frame stays promotable in a function whose locals escape.
+
+Promoting the slot changed `alloc_and_copy` (arm64 -O0), whose early returns
+had been recovered from a merge through memory: the merge is now a phi of a
+promoted variable, read into `x0` by a copy the machine returns, and the
+journal's return-only-carrier gate saw the copy as a reader and declined. The
+gate now follows a copy to what reads it, so a value reaches only the return
+through the return register too, and the three `alloc_and_copy` tests pass
+again.
+
+Gates: r2ssa and r2dec unit tests, clippy, corpus 60/60 on every column with
+eight -O0 snapshots re-read and accepted (each promotes more slots and merges
+the statements that had gone through memory), r2r at the recorded 2 XX.
+bzip2 arm64 -O2 census: 57 bodies, 43 declarations, 3 undeclared stubs, 4
+refused (was 54 / 7); compress, uncompress and testf render.
+
+Left open from the same reading: `stack_m5372` still appears in compress as an
+uninitialised local -- the load from inside the escaped `stat` buffer is
+rendered by the memory path as a fresh variable rather than as a read of the
+buffer. That is the stack object model's, not the promoter's.
