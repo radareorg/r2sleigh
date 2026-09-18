@@ -27049,3 +27049,66 @@ classes (four `format_argument_not_literal`, two
 authorization, unobserved binding read at placement, and an effect
 obligation at a call). Those are next, one class at a time, starting with
 the largest.
+
+### The refusing bodies, taken by class
+
+bzip2 went from 13 refusals to 7 (bodies 48 to 54) in four fixes, each with
+its unit test and each measured on the whole census.
+
+**A format formed by constant arithmetic.** The reaching-format walk saw
+literals through copies, merges and selects and stopped at the `IntAdd` of
+a page and an offset, which is how arm64 spells every string address.
+`constant_address_of` evaluates integer arithmetic over constants (add,
+sub, or, shift, zero extension, four deep) and the walk takes the result as
+the literal. `usage` renders.
+
+**The reaching ABI walk enumerated paths.** `reaching_abi_value_before`
+recursed into every predecessor with a per-path visited map, which on a
+body of diamonds is exponential: `main` never finished, and one trace of
+it wrote 51 GB of evidence before the disk filled. `reaching_abi_value_at_end`
+memoizes each block's answer within one query, keeping the path's own scan
+only for the root and for blocks still on the path (the back-edge case).
+`main` takes seven seconds; the unit test walks twenty-four diamonds.
+
+**A stack pointer merged at a shared return.** `if (!p) return;` before
+the prologue and the epilogue that unwinds the frame meet at one `ret`; the
+walk saw two different values for `sp` and declined. When every input of
+that merge is the entry pointer -- the entry value itself, or one the
+geometry roots at the entry with no offset -- the merge is the entry
+pointer (`value_is_entry_stack_pointer`). `BZ2_bzclose` and
+`showFileNames` render.
+
+**Expressions the structurer spells with no current block.** Shared-exit
+edge writes and branch conditions are rendered after the per-block fold,
+when no block is current, so a frame-object address inside them could not
+be journaled and the function refused with `MissingNormalizedSiteContext`.
+`with_current_block` runs such a render under the block the statement
+belongs to: the source block of an edge write, the block of a condition.
+`BZ2_bzBuffToBuffCompress` and `Decompress` render.
+
+**The variadic proof ran once without literals.** The provisional machine
+context that interface recovery builds never received the literal table,
+so every format was unproven there; it is bound now. No output changed,
+which says the final pass was the one that decided, and the recovery is
+merely consistent with it.
+
+**Left, with the reason each is not a fix of the same size.**
+`compress` and `uncompress` (2): one `fprintf` reached by formats that
+consume three arguments on some paths and two on others -- the compiler
+merged the calls, and no single C call site is faithful; the honest
+rendering un-merges the tail per incoming format, which is a structuring
+transform, and the interim is a marked gap at the call, which the effect
+ledger does not yet accept for a call. `main` (1): a `%f`-style float
+argument to a variadic call, `floating_variadic_argument`; the count walk
+follows the integer sequence only. `sendMTFValues` (1): `umaxv` and
+`cmtst`, NEON reductions Sleigh models as `CALLOTHER`, outside the machine
+vocabulary; a prelude helper per user-op is the shape of the fix.
+`BZ2_compressBlock`'s callee `mainSort` (1): a NEON `Z0` lane store with no
+planned program-variable expression. `main` (0x100000638): a `br` through
+a jump table that placement reads as the variable `PC_7`, and the
+structure certificate reports `return-where-machine-continues`.
+`compressedStreamEOF`: an effect obligation at a call the ledger marks
+volatile-or-unknown. The capture now logs each literal it sees and the
+count it writes under `R2SLEIGH_DEBUG_INTERFACE` (`R2SLEIGH_LITERAL`,
+`R2SLEIGH_LITERALS`), and the lowering has `write-projection` and
+`object-address` evidence lines from this stretch.

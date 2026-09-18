@@ -8680,6 +8680,18 @@ mod tests {
         format_parameter: Option<u32>,
         format: Option<&str>,
     ) -> SsaArtifact {
+        variadic_format_call_artifact_formed(defined, variadic, format_parameter, format, false)
+    }
+
+    /// The same, with the format address formed by constant arithmetic when
+    /// `arithmetic` is set: a page constant plus an offset, as arm64 spells it.
+    fn variadic_format_call_artifact_formed(
+        defined: usize,
+        variadic: bool,
+        format_parameter: Option<u32>,
+        format: Option<&str>,
+        arithmetic: bool,
+    ) -> SsaArtifact {
         let mut arch = ArchSpec::new("x86-64");
         arch.addr_size = 8;
         for (index, name) in ["rdi", "rsi", "rdx", "rcx"].iter().enumerate() {
@@ -8692,16 +8704,33 @@ mod tests {
         };
 
         let mut ops = (0..defined)
-            .map(|index| R2ILOp::Copy {
-                dst: make_reg((index as u64) * 8, 8),
-                src: make_const(
-                    if u32::try_from(index).ok() == format_parameter {
-                        0x3000
-                    } else {
-                        0x10 + index as u64
-                    },
-                    8,
-                ),
+            .flat_map(|index| {
+                let register = make_reg((index as u64) * 8, 8);
+                if u32::try_from(index).ok() == format_parameter && arithmetic {
+                    vec![
+                        R2ILOp::Copy {
+                            dst: register.clone(),
+                            src: make_const(0x2f00, 8),
+                        },
+                        R2ILOp::IntAdd {
+                            dst: register.clone(),
+                            a: register,
+                            b: make_const(0x100, 8),
+                        },
+                    ]
+                } else {
+                    vec![R2ILOp::Copy {
+                        dst: register,
+                        src: make_const(
+                            if u32::try_from(index).ok() == format_parameter {
+                                0x3000
+                            } else {
+                                0x10 + index as u64
+                            },
+                            8,
+                        ),
+                    }]
+                }
             })
             .collect::<Vec<_>>();
         let call_index = ops.len();
@@ -8981,6 +9010,23 @@ mod tests {
                 .expect("literal count evidence")
                 .format_argument_index,
             0
+        );
+    }
+
+    /// A format address the code forms from a page and an offset is the
+    /// literal at that address, the way `adrp`/`add` spells every string.
+    #[test]
+    fn a_variadic_call_reads_a_format_formed_by_constant_arithmetic() {
+        let call = variadic_format_call_artifact_formed(4, true, Some(1), Some("%d %s"), true)
+            .sole_callsite_certificate_in_block(0x1600)
+            .expect("callsite certificate")
+            .clone();
+        assert_eq!(call.argument_values.len(), 4);
+        assert_eq!(
+            call.variadic_argument_count_evidence
+                .expect("literal count evidence")
+                .format_consumed_argument_count,
+            2
         );
     }
 
