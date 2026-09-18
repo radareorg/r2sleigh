@@ -156,6 +156,7 @@ pub enum ExecutionOpcode {
     Branch,
     CBranch,
     BranchInd,
+    Switch,
     Call,
     CallInd,
     CallDefine,
@@ -421,6 +422,7 @@ fn opcode_for_op(op: &SSAOp) -> ExecutionOpcode {
         SSAOp::Branch { .. } => ExecutionOpcode::Branch,
         SSAOp::CBranch { .. } => ExecutionOpcode::CBranch,
         SSAOp::BranchInd { .. } => ExecutionOpcode::BranchInd,
+        SSAOp::Switch { .. } => ExecutionOpcode::Switch,
         SSAOp::Call { .. } => ExecutionOpcode::Call,
         SSAOp::CallInd { .. } => ExecutionOpcode::CallInd,
         SSAOp::CallDefine { .. } => ExecutionOpcode::CallDefine,
@@ -541,6 +543,7 @@ fn effect_for_op(inst: InstId, op: &SSAOp) -> Result<ExecutionEffect, ExecutionV
         | SSAOp::Branch { .. }
         | SSAOp::CBranch { .. }
         | SSAOp::BranchInd { .. }
+        | SSAOp::Switch { .. }
         | SSAOp::Call { .. }
         | SSAOp::CallInd { .. }
         | SSAOp::CallDefine { .. }
@@ -1267,6 +1270,7 @@ mod tests {
                 target: v(),
                 instruction: None,
             },
+            SSAOp::Switch { selector: v() },
             SSAOp::Call {
                 target: v(),
                 instruction: None,

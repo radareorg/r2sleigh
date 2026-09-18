@@ -2406,7 +2406,10 @@ impl<'a> FoldingContext<'a> {
             SSAOp::Return { .. } => {
                 return Err(OpLoweringRefusal::missing_machine_projection());
             }
-            SSAOp::Branch { .. } | SSAOp::CBranch { .. } | SSAOp::BranchInd { .. } => {
+            SSAOp::Branch { .. }
+            | SSAOp::CBranch { .. }
+            | SSAOp::BranchInd { .. }
+            | SSAOp::Switch { .. } => {
                 // Handled by control flow structuring
                 None
             }

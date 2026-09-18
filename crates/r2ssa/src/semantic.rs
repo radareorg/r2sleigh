@@ -3290,6 +3290,7 @@ fn stack_address_escape(
                     | SSAOp::CallInd { .. }
                     | SSAOp::CallOther { .. }
                     | SSAOp::BranchInd { .. }
+                    | SSAOp::Switch { .. }
                     | SSAOp::Return { .. } => return Some(*site),
                     _ => {}
                 },

@@ -2139,6 +2139,7 @@ fn transfers_control(inst: &r2ssa::GraphInst) -> bool {
             r2ssa::SSAOp::Branch { .. }
                 | r2ssa::SSAOp::CBranch { .. }
                 | r2ssa::SSAOp::BranchInd { .. }
+                | r2ssa::SSAOp::Switch { .. }
                 | r2ssa::SSAOp::Return { .. }
         )
     )

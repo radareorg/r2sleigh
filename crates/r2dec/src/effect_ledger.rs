@@ -325,11 +325,11 @@ fn upstream_zero_occurrence_outcome(
                 // A certified jump table transfers by which case block the
                 // structured form put the code in, exactly as an unconditional
                 // branch transfers by where its block sits.
-                r2ssa::InstPayload::Op(r2ssa::SSAOp::BranchInd { .. }) => {
-                    graph.block(inst.block).is_some_and(|block| {
-                        prepared.certificates().switches.contains_key(&block.addr)
-                    })
-                }
+                r2ssa::InstPayload::Op(
+                    r2ssa::SSAOp::BranchInd { .. } | r2ssa::SSAOp::Switch { .. },
+                ) => graph.block(inst.block).is_some_and(|block| {
+                    prepared.certificates().switches.contains_key(&block.addr)
+                }),
                 _ => false,
             })
     {

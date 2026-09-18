@@ -3404,6 +3404,7 @@ impl SSAFunction {
             stack_pointer_carrier,
             questions.interface,
             &abi_carriers,
+            stack_pointer_restored_by_callee.is_some(),
         )
         .unwrap_or_default();
         // The same phase report the semantic collector gives, for the half of
@@ -3450,7 +3451,10 @@ impl SSAFunction {
             control,
         )?;
         phase("prep_facts", func.num_blocks());
-        validate_ssa_function(&func).map_err(|_| malformed_ssa_input())?;
+        validate_ssa_function(&func).map_err(|error| {
+            r2il::refusal_evidence!("ssa-integrity", "{error:?}");
+            malformed_ssa_input()
+        })?;
         phase("validated", 0);
         control.poll()?;
         Ok(func)
@@ -5243,6 +5247,13 @@ impl SSAFunction {
     /// Get the switch-selector SSA value that drives a switch block, if recoverable.
     pub fn infer_switch_selector_var(&self, block_addr: u64) -> Option<SSAVar> {
         let block = self.get_block(block_addr)?;
+        // A fused comparison chain names its selector outright.
+        if let Some(selector) = block.ops.iter().rev().find_map(|op| match op {
+            SSAOp::Switch { selector } => Some(selector.clone()),
+            _ => None,
+        }) {
+            return Some(selector);
+        }
         let Some(target) = block.ops.iter().rev().find_map(|op| match op {
             SSAOp::BranchInd { target, .. } => Some(target),
             _ => None,
@@ -13373,6 +13384,82 @@ mod tests {
     }
 
     #[test]
+    fn a_calls_return_address_push_is_refunded_by_the_callee() {
+        // sp -= 16; r2 = 7; [sp] = r2; sp -= 8; [sp] = return address; call; load [sp].
+        let sp = make_reg(0, 8);
+        let mut arch = ArchSpec::new("promotion-test");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("sp", 0, 8));
+        arch.add_register(RegisterDef::new("ra", 8, 8));
+        arch.add_register(RegisterDef::new("r1", 16, 8));
+        arch.add_register(RegisterDef::new("r2", 24, 8));
+        arch.add_space(r2il::AddressSpace::ram(8));
+        let storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"promotion-test".to_vec(),
+            "test-abi",
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_return_address_storage(storage(8)))
+        .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
+        .expect("interface")
+        .with_preserved_call_carriers(true, false);
+        let mut block = R2ILBlock::new(0x4000, 4);
+        for op in [
+            R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: make_const(16, 8),
+            },
+            R2ILOp::Copy {
+                dst: make_reg(24, 8),
+                src: make_const(7, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: make_reg(24, 8),
+            },
+            R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: make_const(8, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: make_const(0x4010, 8),
+            },
+            R2ILOp::Call {
+                target: make_ram(0x5000, 8),
+            },
+            R2ILOp::Load {
+                dst: make_reg(16, 8),
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+            },
+            R2ILOp::Return {
+                target: make_reg(8, 8),
+            },
+        ] {
+            block.push(op);
+        }
+        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+            .expect("artifact");
+        assert_eq!(
+            artifact.function().promoted_slot_sites().clone(),
+            BTreeSet::from([(0x4000, 2), (0x4000, 6)]),
+            "the slot is written before the call and read after it"
+        );
+    }
+
+    #[test]
     fn a_redefined_temporary_stops_holding_the_frame_address() {
         // t = sp; ...; t = r1; load [t]: the second load is not a frame access.
         let sp = make_reg(0, 8);
@@ -13748,6 +13835,7 @@ fn promote_private_stack_slots(
     stack_pointer: Option<CanonicalStorageId>,
     interface: Option<&SourceFunctionInterface>,
     argument_carriers: &[CanonicalStorageId],
+    calls_refund_stack: bool,
 ) -> Option<crate::phi::PromotedStackSlots> {
     r2il::refusal_evidence!(
         "promote-stack-slot",
@@ -13922,7 +14010,32 @@ fn promote_private_stack_slots(
         let holds = |set: &Vec<(r2il::Varnode, i64)>, want: &r2il::Varnode| {
             set.iter().any(|(held, _)| held == want)
         };
+        // The slot a call spends on its return address: the callee refunds
+        // it, so neither the move nor the store is the frame's.
+        let call_pushes = block
+            .ops
+            .windows(3)
+            .enumerate()
+            .filter(|(_, ops)| {
+                calls_refund_stack
+                    && matches!(
+                        (&ops[0], &ops[1], &ops[2]),
+                        (
+                            R2ILOp::IntSub { dst, a, .. },
+                            R2ILOp::Store { addr, val, .. },
+                            R2ILOp::Call { .. } | R2ILOp::CallInd { .. },
+                        ) if is_stack_pointer(dst)
+                            && is_stack_pointer(a)
+                            && addr == dst
+                            && val.space == r2il::SpaceId::Const
+                    )
+            })
+            .map(|(at, _)| at)
+            .collect::<BTreeSet<_>>();
         for (at, op) in block.ops.iter().enumerate() {
+            if call_pushes.contains(&at) || at > 0 && call_pushes.contains(&(at - 1)) {
+                continue;
+            }
             if let Some(dst) = op.output()
                 && is_stack_pointer(dst)
             {

@@ -4,7 +4,7 @@
 //! intended to simplify analysis and decompilation output.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::control::{SsaExecutionStopReason, SsaWorkControl, UncheckedSsaWorkControl};
 use crate::{
@@ -73,6 +73,7 @@ pub struct OptimizationStats {
     pub sccp_blocks_removed: usize,
     pub constants_propagated: usize,
     pub ops_simplified: usize,
+    pub chains_fused: usize,
 }
 
 /// Run the SSA optimization pipeline on a function.
@@ -124,6 +125,10 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
         // machine comparison is a comparison in the graph, not a flag algebra
         // for a later stage to undo.
         if fold_condition_codes_in_function(func, &mut stats) {
+            changed = true;
+        }
+
+        if fuse_compare_chains_in_function(func, &mut stats) {
             changed = true;
         }
 
@@ -1077,6 +1082,344 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
 /// are left alone: a copy is a statement the prepared SSA keeps.
 /// Replace every condition assembled from condition codes with the comparison
 /// the source wrote. Always runs: the graph is what every later stage reads.
+/// One equality test a block ends in: `selector == value` sends control to
+/// `equal`, anything else to `other`.
+struct EqualityTest {
+    selector: SSAVar,
+    value: u64,
+    equal: u64,
+    other: u64,
+}
+
+/// A comparison chain, fused into the multiway branch it lowers.
+///
+/// A `switch` too small for a jump table compiles to one equality test per
+/// case, each falling to the next, and the case bodies fall into each other
+/// exactly as the source's `case` labels did. Structured as tests, that shape
+/// needs a `goto`: the default edge leaves from the innermost test and jumps
+/// over every body. The tests are one branch on one value, so the graph says
+/// so, and the structurer prints the `switch` it already prints for a table.
+///
+/// Only a chain whose bodies fall into each other is fused. Tests whose bodies
+/// each rejoin the same successor structure as `else if`, and that is what the
+/// source most likely wrote.
+fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
+    let defs = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
+        .collect::<HashMap<_, _>>();
+    let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
+    // The value a copy chain carries: a promoted slot's reload is a copy of
+    // the store, and the store a copy of the register.
+    let root = |var: &SSAVar| {
+        let mut var = var.clone();
+        for _ in 0..16 {
+            match define(&var) {
+                Some(SSAOp::Copy { src, .. }) => var = src.clone(),
+                _ => break,
+            }
+        }
+        var
+    };
+    // `x == c`, or the zero flag of `x - c` where the difference also lands in
+    // a register and so was left as the flag fold found it.
+    let against_constant = |a: &SSAVar, b: &SSAVar| {
+        let (selector, value) = match (const_value(a), const_value(b)) {
+            (None, Some(value)) => (a, value),
+            (Some(value), None) => (b, value),
+            _ => return None,
+        };
+        if value == 0
+            && let Some(SSAOp::IntSub { a: x, b: c, .. }) = define(&root(selector))
+            && let Some(c) = const_value(&root(c))
+        {
+            return Some((root(x), c));
+        }
+        Some((root(selector), value))
+    };
+    let equality = |var: &SSAVar| {
+        let mut op = define(var)?;
+        let mut negated = false;
+        for _ in 0..16 {
+            match op {
+                SSAOp::Copy { src, .. } => op = define(src)?,
+                SSAOp::BoolNot { src, .. } => {
+                    negated = !negated;
+                    op = define(src)?;
+                }
+                SSAOp::IntEqual { a, b, .. } => {
+                    let (selector, value) = against_constant(a, b)?;
+                    return Some((selector, value, negated));
+                }
+                SSAOp::IntNotEqual { a, b, .. } => {
+                    let (selector, value) = against_constant(a, b)?;
+                    return Some((selector, value, !negated));
+                }
+                _ => return None,
+            }
+        }
+        None
+    };
+    let test_of = |addr: u64| {
+        let block = func.get_block(addr)?;
+        let SSAOp::CBranch { cond, .. } = block.ops.last()? else {
+            return None;
+        };
+        let BlockTerminator::ConditionalBranch {
+            true_target,
+            false_target,
+        } = func.cfg().get_block(addr)?.terminator
+        else {
+            return None;
+        };
+        if true_target == false_target {
+            return None;
+        }
+        let (selector, value, negated) = equality(cond)?;
+        let (equal, other) = if negated {
+            (false_target, true_target)
+        } else {
+            (true_target, false_target)
+        };
+        Some(EqualityTest {
+            selector,
+            value,
+            equal,
+            other,
+        })
+    };
+    // A block that computes nothing the fused branch does not: values only,
+    // no memory and no call, and it is entered from the chain alone.
+    let pure_link = |addr: u64| {
+        let block = func.get_block(addr)?;
+        if !block.phis.is_empty() || func.predecessors(addr).len() != 1 {
+            return None;
+        }
+        let (last, body) = block.ops.split_last()?;
+        let pure = body.iter().all(|op| {
+            op.dst().is_some()
+                && !matches!(
+                    op,
+                    SSAOp::Load { .. }
+                        | SSAOp::LoadLinked { .. }
+                        | SSAOp::LoadGuarded { .. }
+                        | SSAOp::AtomicCAS { .. }
+                        | SSAOp::CallOther { .. }
+                        | SSAOp::CallDefine { .. }
+                        | SSAOp::CallRestore { .. }
+                        | SSAOp::StoreConditional { .. }
+                )
+        }) || body.iter().all(|op| matches!(op, SSAOp::Nop));
+        pure.then_some(last)
+    };
+
+    struct Fusion {
+        block: u64,
+        selector: SSAVar,
+        cases: Vec<(u64, u64)>,
+        default: u64,
+        links: Vec<u64>,
+    }
+    let mut fusions: Vec<Fusion> = Vec::new();
+    let mut claimed = HashSet::new();
+    for addr in func.block_addrs().to_vec() {
+        if claimed.contains(&addr) {
+            continue;
+        }
+        let Some(head) = test_of(addr) else {
+            continue;
+        };
+        let mut cases = vec![(head.value, head.equal)];
+        let mut links = Vec::new();
+        let mut cur = head.other;
+        loop {
+            if cur == addr || links.contains(&cur) || claimed.contains(&cur) {
+                r2il::refusal_evidence!("fuse-compare-chain", "{addr:#x}: {cur:#x} closes a cycle");
+                break;
+            }
+            let Some(last) = pure_link(cur) else {
+                r2il::refusal_evidence!(
+                    "fuse-compare-chain",
+                    "{addr:#x}: {cur:#x} is not a pure single-entry link"
+                );
+                break;
+            };
+            match last {
+                SSAOp::Branch { .. } => {
+                    let Some(BlockTerminator::Branch { target }) = func
+                        .cfg()
+                        .get_block(cur)
+                        .map(|block| block.terminator.clone())
+                    else {
+                        break;
+                    };
+                    links.push(cur);
+                    cur = target;
+                }
+                SSAOp::CBranch { .. } => {
+                    let Some(test) = test_of(cur) else {
+                        r2il::refusal_evidence!(
+                            "fuse-compare-chain",
+                            "{addr:#x}: {cur:#x} tests no equality against a constant"
+                        );
+                        break;
+                    };
+                    if test.selector != head.selector
+                        || cases.iter().any(|(value, _)| *value == test.value)
+                    {
+                        r2il::refusal_evidence!(
+                            "fuse-compare-chain",
+                            "{addr:#x}: {cur:#x} tests {} == {}, not {}",
+                            test.selector.display_name(),
+                            test.value,
+                            head.selector.display_name()
+                        );
+                        break;
+                    }
+                    cases.push((test.value, test.equal));
+                    links.push(cur);
+                    cur = test.other;
+                }
+                _ => break,
+            }
+        }
+        if cases.len() < 2 {
+            continue;
+        }
+        let default = cur;
+        let chain = std::iter::once(addr)
+            .chain(links.iter().copied())
+            .collect::<HashSet<_>>();
+        let falls_through = cases.iter().any(|(_, target)| {
+            !chain.contains(target)
+                && func
+                    .predecessors(*target)
+                    .iter()
+                    .any(|pred| !chain.contains(pred))
+        });
+        if !falls_through {
+            r2il::refusal_evidence!(
+                "fuse-compare-chain",
+                "{addr:#x}: {} tests whose bodies rejoin, left as else-if",
+                cases.len()
+            );
+            continue;
+        }
+        if cases.iter().any(|(_, target)| chain.contains(target)) || chain.contains(&default) {
+            continue;
+        }
+        // A phi at a target reads what the chain passed it: one value from
+        // every chain edge, or the fused edge cannot say which it carries.
+        let targets = cases
+            .iter()
+            .map(|(_, target)| *target)
+            .chain(std::iter::once(default))
+            .collect::<BTreeSet<_>>();
+        let phis_agree = targets.iter().all(|target| {
+            func.get_block(*target).is_none_or(|block| {
+                block.phis.iter().all(|phi| {
+                    let mut carried = phi
+                        .sources
+                        .iter()
+                        .filter(|(pred, _)| chain.contains(pred))
+                        .map(|(_, var)| var);
+                    let first = carried.next();
+                    carried.all(|var| Some(var) == first)
+                })
+            })
+        });
+        if !phis_agree {
+            r2il::refusal_evidence!(
+                "fuse-compare-chain",
+                "{addr:#x}: a target merges different values from the chain"
+            );
+            continue;
+        }
+        claimed.extend(chain.iter().copied());
+        fusions.push(Fusion {
+            block: addr,
+            selector: head.selector,
+            cases,
+            default,
+            links,
+        });
+    }
+    if fusions.is_empty() {
+        return false;
+    }
+    for fusion in fusions {
+        r2il::refusal_evidence!(
+            "fuse-compare-chain",
+            "{:#x}: {} cases on {} through {} links, default {:#x}",
+            fusion.block,
+            fusion.cases.len(),
+            fusion.selector.display_name(),
+            fusion.links.len(),
+            fusion.default
+        );
+        // The links' values stay defined: they are pure, the head dominates
+        // every reader, and the merges at the targets still name them.
+        let hoisted = fusion
+            .links
+            .iter()
+            .filter_map(|link| func.get_block(*link))
+            .flat_map(|block| {
+                block.ops[..block.ops.len().saturating_sub(1)]
+                    .iter()
+                    .filter(|op| !matches!(op, SSAOp::Nop))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if let Some(block) = func.get_block_mut(fusion.block) {
+            let terminator = block.ops.len() - 1;
+            block.ops[terminator] = SSAOp::Switch {
+                selector: fusion.selector.clone(),
+            };
+            block.ops.splice(terminator..terminator, hoisted);
+        }
+        let targets = fusion
+            .cases
+            .iter()
+            .map(|(_, target)| *target)
+            .chain(std::iter::once(fusion.default))
+            .collect::<BTreeSet<_>>();
+        for target in &targets {
+            if let Some(block) = func.get_block_mut(*target) {
+                for phi in &mut block.phis {
+                    let carried = phi
+                        .sources
+                        .iter()
+                        .find(|(pred, _)| *pred == fusion.block || fusion.links.contains(pred))
+                        .map(|(_, var)| var.clone());
+                    phi.sources
+                        .retain(|(pred, _)| *pred != fusion.block && !fusion.links.contains(pred));
+                    if let Some(var) = carried {
+                        phi.sources.push((fusion.block, var));
+                    }
+                    // A merge lists its sources in predecessor order.
+                    phi.sources.sort_by_key(|(pred, _)| *pred);
+                }
+            }
+        }
+        for link in &fusion.links {
+            func.cfg_mut().remove_block(*link);
+        }
+        func.cfg_mut().set_terminator(
+            fusion.block,
+            BlockTerminator::Switch {
+                cases: fusion.cases.clone(),
+                default: Some(fusion.default),
+            },
+        );
+        stats.chains_fused += 1;
+    }
+    func.refresh_after_cfg_mutation();
+    true
+}
+
 fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let defs = func
         .blocks()
@@ -1884,6 +2227,9 @@ where
             target: map(target),
             instruction: *instruction,
         },
+        Switch { selector } => Switch {
+            selector: map(selector),
+        },
         Call {
             target,
             instruction,
@@ -2544,5 +2890,141 @@ mod sccp_tests {
         });
         assert_eq!(fold_through_definition(&read(0, 4), &copied), None);
         let _ = byte;
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+
+    fn c(val: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Const,
+            offset: val,
+            size,
+            meta: None,
+        }
+    }
+
+    fn r(offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Register,
+            offset,
+            size,
+            meta: None,
+        }
+    }
+
+    fn block(addr: u64, ops: Vec<R2ILOp>) -> R2ILBlock {
+        R2ILBlock {
+            addr,
+            size: 4,
+            ops,
+            switch_info: None,
+            op_metadata: Default::default(),
+        }
+    }
+
+    fn test(value: u64, target: u64, negated: bool) -> Vec<R2ILOp> {
+        let mut ops = vec![R2ILOp::IntEqual {
+            dst: r(9, 1),
+            a: r(8, 8),
+            b: c(value, 8),
+        }];
+        let cond = if negated {
+            ops.push(R2ILOp::BoolNot {
+                dst: r(10, 1),
+                src: r(9, 1),
+            });
+            r(10, 1)
+        } else {
+            r(9, 1)
+        };
+        ops.push(R2ILOp::CBranch {
+            target: c(target, 8),
+            cond,
+        });
+        ops
+    }
+
+    fn body(addend: u64, next: u64) -> Vec<R2ILOp> {
+        vec![
+            R2ILOp::IntAdd {
+                dst: r(16, 8),
+                a: r(16, 8),
+                b: c(addend, 8),
+            },
+            R2ILOp::Branch { target: c(next, 8) },
+        ]
+    }
+
+    fn chain(case3_next: u64, case2_next: u64) -> SSAFunction {
+        let mut head = vec![R2ILOp::IntAnd {
+            dst: r(8, 8),
+            a: r(0, 8),
+            b: c(3, 8),
+        }];
+        head.extend(test(1, 0x1030, false));
+        let blocks = vec![
+            block(0x1000, head),
+            block(0x1004, test(2, 0x1020, false)),
+            block(0x1008, test(3, 0x1040, true)),
+            block(0x100c, body(3, case3_next)),
+            block(0x1020, body(2, case2_next)),
+            block(0x1030, body(1, 0x1040)),
+            block(0x1040, vec![R2ILOp::Return { target: r(0, 8) }]),
+        ];
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        optimize_function(&mut func, &OptimizationConfig::default());
+        func
+    }
+
+    #[test]
+    fn a_chain_whose_cases_fall_through_fuses_into_one_switch() {
+        let func = chain(0x1020, 0x1030);
+        let terminator = func
+            .cfg()
+            .get_block(0x1000)
+            .expect("head")
+            .terminator
+            .clone();
+        assert_eq!(
+            terminator,
+            BlockTerminator::Switch {
+                cases: vec![(1, 0x1030), (2, 0x1020), (3, 0x100c)],
+                default: Some(0x1040),
+            }
+        );
+        assert!(matches!(
+            func.get_block(0x1000).expect("head").ops.last(),
+            Some(SSAOp::Switch { .. })
+        ));
+        assert!(func.get_block(0x1004).is_none());
+        assert!(func.get_block(0x1008).is_none());
+        let mut successors = func.successors(0x1000);
+        successors.sort_unstable();
+        successors.dedup();
+        assert_eq!(successors, vec![0x100c, 0x1020, 0x1030, 0x1040]);
+        let merge = func.get_block(0x1020).expect("case 2");
+        assert!(
+            merge.phis.iter().all(|phi| phi
+                .sources
+                .iter()
+                .all(|(pred, _)| *pred == 0x1000 || *pred == 0x100c)),
+            "phi sources: {:?}",
+            merge.phis
+        );
+    }
+
+    #[test]
+    fn a_chain_whose_cases_rejoin_stays_an_else_if_ladder() {
+        let func = chain(0x1040, 0x1040);
+        assert!(matches!(
+            func.cfg().get_block(0x1000).expect("head").terminator,
+            BlockTerminator::ConditionalBranch { .. }
+        ));
+        assert!(func.get_block(0x1004).is_some());
     }
 }

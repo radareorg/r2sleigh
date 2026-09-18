@@ -304,6 +304,7 @@ fn hash_op(writer: &mut FingerprintWriter, op: &SSAOp) {
             writer.tag(47);
             write_instruction(writer, *instruction);
         }
+        Switch { .. } => writer.tag(86),
         Call { instruction, .. } => {
             writer.tag(48);
             write_instruction(writer, *instruction);

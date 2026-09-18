@@ -313,6 +313,7 @@ fn operation_kind(op: &crate::SSAOp) -> &'static str {
         Branch,
         CBranch,
         BranchInd,
+        Switch,
         Call,
         CallInd,
         CallDefine,

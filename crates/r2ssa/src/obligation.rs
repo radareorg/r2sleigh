@@ -1474,7 +1474,7 @@ fn seed_direct_obligations(
             seed_instruction(inst.id, Kind::Call, Component::Whole, required);
         }
         SSAOp::Return { .. } => seed_instruction(inst.id, Kind::Return, Component::Whole, required),
-        SSAOp::CBranch { .. } => {
+        SSAOp::CBranch { .. } | SSAOp::Switch { .. } => {
             let predicate = inst.inputs.last().copied().into_iter().collect();
             seed_instruction_with_inputs(
                 inst.id,

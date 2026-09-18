@@ -220,6 +220,9 @@ pub enum SSAOp {
         instruction: Option<u64>,
     },
 
+    /// Multiway branch on `selector`; the block's terminator carries the cases.
+    Switch { selector: SSAVar },
+
     /// Call a subroutine
     Call {
         target: SSAVar,
@@ -552,6 +555,7 @@ impl SSAOp {
             | Branch { .. }
             | CBranch { .. }
             | BranchInd { .. }
+            | Switch { .. }
             | Call { .. }
             | CallInd { .. }
             | Return { .. }
@@ -707,6 +711,8 @@ impl SSAOp {
             | CallInd { target, .. }
             | Return { target } => f(target),
 
+            Switch { selector } => f(selector),
+
             CBranch { target, cond } => {
                 f(target);
                 f(cond);
@@ -738,6 +744,7 @@ impl SSAOp {
             SSAOp::Branch { .. }
                 | SSAOp::CBranch { .. }
                 | SSAOp::BranchInd { .. }
+                | SSAOp::Switch { .. }
                 | SSAOp::Call { .. }
                 | SSAOp::CallInd { .. }
                 | SSAOp::Return { .. }
@@ -932,6 +939,7 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Branch { target, .. } => write!(f, "BRANCH {}", target),
             SSAOp::CBranch { target, cond } => write!(f, "CBRANCH {} if {}", target, cond),
             SSAOp::BranchInd { target, .. } => write!(f, "BRANCHIND {}", target),
+            SSAOp::Switch { selector } => write!(f, "SWITCH {}", selector),
             SSAOp::Call { target, .. } => write!(f, "CALL {}", target),
             SSAOp::CallInd { target, .. } => write!(f, "CALLIND {}", target),
             SSAOp::CallDefine { dst } => write!(f, "{} = CALLDEF", dst),

@@ -28347,3 +28347,42 @@ directly, because the folded comparison `X12_5 + 8 <= X11_1` reads `X12_5`
 after the point where the phi edge copy used to sit and the copy moved below
 it through a fresh name. Not a counter, but a statement the source does not
 have; it belongs to the phi-edge placement, not to the fold.
+
+## A comparison chain is one multiway branch
+
+The two gated `goto`s were `murmur3_32`'s tail `switch (len & 3)` at -O0,
+which clang lowers to one equality test per case. The case bodies fall into
+each other as the source's labels did, so structuring the tests as `if`s
+needs a jump from the innermost test over every body to the join. The graph
+now says what the source said: `fuse_compare_chains_in_function` in
+`crates/r2ssa/src/optimize.rs` recognises a block whose branch tests one value
+against a constant, walks the not-equal edge through single-entry blocks that
+compute nothing but the next test (a promoted slot's reload is a copy), and
+fuses the chain into a `BlockTerminator::Switch` on the head with a new
+`SSAOp::Switch { selector }` as the head's transfer. The links' pure
+definitions are hoisted into the head before the transfer, because the
+unpruned SSA merges every one of them at the targets and deleting them would
+leave dangling sources; hoisting keeps every phi valid and the executor exact.
+Downstream the fused switch is the jump-table switch: same terminator, same
+`SwitchPredicateFact` (`infer_switch_selector_var` reads the op), same
+`switch_arms`, same certifier. Only the selector is spelled differently, as
+the op's operand through `planned_input_expr_at`, since it is a real read
+rather than a value upstream of a dispatch address.
+
+The rule for when to fuse is exact, not a case count: a chain is fused only
+when some case body is entered from outside the chain, that is, when a body
+falls into another. Tests whose bodies each rejoin are left as `else if`,
+which is what the source most likely wrote and renders without a `goto`.
+
+Two things stood in the way and were fixed at their cause. arm64's chain
+compares are `(x - c) == 0` with the difference landing in `x8`, so the flag
+fold keeps them; the recogniser reads that form directly. x64 never promoted
+any slot in a function that makes a call, because the promotion walk read a
+call's `sub rsp, 8; push return address` as the frame moving under its
+accesses; the callee refunds that slot, which `stack_pointer_restored_by_callee`
+already knew, so the walk now skips the push and the store it feeds. That
+second fix changes every x64 -O0 cell that calls something.
+
+`observe_control_ownership` anchored on a block's last op, which for a
+switch is a merge copy normalisation appends after the transfer; it now
+anchors on the last control op.

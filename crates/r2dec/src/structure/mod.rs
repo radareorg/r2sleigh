@@ -415,15 +415,28 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             let Some(block) = self.func.blocks().iter().find(|block| block.addr == anchor) else {
                 continue;
             };
-            let Some(op_idx) = block.ops.len().checked_sub(1) else {
+            // The transfer, not whatever merge copy normalisation appended after it.
+            let Some(op_idx) = block
+                .ops
+                .iter()
+                .rposition(|op| op.is_control_flow())
+                .or_else(|| block.ops.len().checked_sub(1))
+            else {
                 continue;
             };
-            obligations.extend(self.fold_ctx.exact_effect_obligations_for_normalized_value(
+            let owned = self.fold_ctx.exact_effect_obligations_for_normalized_value(
                 crate::fold::context::EffectOccurrenceKind::Expression,
                 anchor,
                 op_idx,
                 None,
-            ));
+            );
+            r2il::refusal_evidence!(
+                "control-ownership",
+                "{anchor:#x} op {op_idx} {:?} owns {} obligations",
+                block.ops[op_idx],
+                owned.len()
+            );
+            obligations.extend(owned);
         }
         obligations
     }
@@ -563,13 +576,16 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // a merge's incoming edges appends copies after the terminator, and
         // taking the last op then found one of those and declined, which is one
         // of the two reasons no real jump table has ever structured.
-        let mut dispatches = block.ops.iter().enumerate().filter_map(|(index, op)| {
-            if let SSAOp::BranchInd { target, .. } = op {
-                Some((index, target))
-            } else {
-                None
-            }
-        });
+        let mut dispatches = block
+            .ops
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                SSAOp::BranchInd { target, .. } | SSAOp::Switch { selector: target } => {
+                    Some((index, target))
+                }
+                _ => None,
+            });
         let Some((op_idx, target)) = dispatches.next() else {
             r2il::refusal_evidence!("switch-selector", "{switch_addr:#x} has no indirect branch");
             return Ok(None);
@@ -604,6 +620,23 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             );
             return Ok(None);
         };
+        // A fused comparison chain reads its selector as an operand, so the
+        // plan spells it exactly as it spells an `if` condition.
+        if matches!(block.ops.get(op_idx), Some(SSAOp::Switch { .. })) {
+            let expr = self.fold_ctx.with_current_block(switch_addr, || {
+                self.fold_ctx.planned_input_expr_at(switch_addr, op_idx, 0)
+            });
+            return match expr {
+                Ok(expr) => Ok(Some((expr, selector))),
+                Err(refusal) => {
+                    r2il::refusal_evidence!(
+                        "switch-selector",
+                        "{switch_addr:#x} selector operand has no planned expression: {refusal:?}"
+                    );
+                    Ok(None)
+                }
+            };
+        }
         // The dispatch operand is not the selector, and requiring it to be was
         // why no real jump table ever structured. `switch (len & 3)` computes
         // the index, loads an address out of a table, and dispatches through

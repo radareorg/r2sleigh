@@ -422,6 +422,7 @@ impl<'a> FoldingContext<'a> {
                     | r2ssa::SSAOp::Branch { .. }
                     | r2ssa::SSAOp::CBranch { .. }
                     | r2ssa::SSAOp::BranchInd { .. }
+                    | r2ssa::SSAOp::Switch { .. }
             )
         {
             r2il::refusal_evidence!(
@@ -609,6 +610,7 @@ impl<'a> FoldingContext<'a> {
                         | r2ssa::SSAOp::Branch { .. }
                         | r2ssa::SSAOp::CBranch { .. }
                         | r2ssa::SSAOp::BranchInd { .. }
+                        | r2ssa::SSAOp::Switch { .. }
                 ))
             )
         }) {
@@ -1485,7 +1487,9 @@ impl<'a> FoldingContext<'a> {
                                                 .all(|input| fact.proof_values.contains(input))))
                             })
                     }
-                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CBranch { .. }) => matches!(
+                    r2ssa::InstPayload::Op(
+                        r2ssa::SSAOp::CBranch { .. } | r2ssa::SSAOp::Switch { .. },
+                    ) => matches!(
                         obligation.id.kind,
                         ObligationKind::ControlPredicate | ObligationKind::ControlTransfer
                     ),
