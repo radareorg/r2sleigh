@@ -3867,7 +3867,10 @@ fn variadic_callsite_argument_count(
         })?;
     let consumed = crate::printf::printf_consumed_arguments(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
-    if consumed.any_floating {
+    // A floating operand travels in the convention's floating sequence, which
+    // this recovery does not walk; where the whole tail is on the stack it
+    // sits in the same slots as any other operand.
+    if consumed.any_floating && !variadic_tail_on_stack(machine_context) {
         r2il::refusal_evidence!(
             "variadic-format-literal",
             "format argument {format_argument_index} at {format_literal_address:#x} consumes a floating operand, which this recovery cannot place"
@@ -4139,6 +4142,14 @@ fn constant_address_of(
     Some(result & mask)
 }
 
+/// Whether the convention puts every variadic operand on the stack, where a
+/// floating one is placed like any other.
+fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
+    machine_context
+        .convention_slots()
+        .is_some_and(r2source::SourceConventionSlots::variadic_tail_on_stack)
+}
+
 /// Prove a merged variadic count from formats that agree.
 fn merged_format_literal_argument_count(
     context: FormatLiteralContext<'_>,
@@ -4171,7 +4182,7 @@ fn merged_format_literal_argument_count(
         };
         let consumed = crate::printf::printf_consumed_arguments(format)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
-        if consumed.any_floating {
+        if consumed.any_floating && !variadic_tail_on_stack(machine_context) {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
                 "merged format argument {format_argument_index} reaches {address:#x}, which consumes a floating operand"

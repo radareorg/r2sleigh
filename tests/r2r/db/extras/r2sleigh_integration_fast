@@ -343,6 +343,20 @@ pd:s
 EOF
 RUN
 
+NAME=pd:s passes an Apple arm64 variadic argument from its stack slot
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+true
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s dbg.vuln_memcpy > /dev/null
+pd:s | jq -Rs 'contains("sym_imp_printf((uint64_t)\"Copied: %s\\\\n\", (uint64_t)var_8h);")'
+EOF
+RUN
+
 NAME=pd:s renders an x86-64 import thunk with a prototype as the import's declaration
 FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
