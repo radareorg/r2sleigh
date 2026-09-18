@@ -28088,3 +28088,14 @@ one still needs its own trace.
 One experiment is recorded as not the answer: making `typed_input` prefer the
 declaration, the way `planned_input_expr` does, changes nothing anywhere. The
 operand type was never the disagreement on these sites.
+
+### 26751 merged, and the fork carries it
+
+The floating-return work merged upstream as `39b18895dc`, exporter fix and all.
+`anal/subregister-argument-spills` now carries it, along with the C++ demangler
+infinite-loop fix and a `fcn_scan` change. The only conflict was
+`test/db/cmd/cmd_tcc`, where the integration branch held the version from before
+our own follow-up and upstream held the merged one; upstream's side is ours.
+
+Corpus 60 of 60 on every column against the merged fork, r2r at the recorded two
+failures.
