@@ -2512,6 +2512,43 @@ impl LegacyObservationJournal {
                 Some(ValueDisposition::Bound { binding }) => Some(*binding),
                 _ => None,
             };
+            // A value reaches only the return when every use is the return
+            // itself, the merge that feeds the same object back, or a copy
+            // whose own value reaches only the return: a promoted slot is
+            // read into the return register before the machine returns it.
+            fn reaches_only_return(
+                graph: &r2ssa::SsaGraph,
+                returns: &BTreeMap<InstId, usize>,
+                owner: &dyn Fn(ValueId) -> Option<crate::binding_plan::BindingId>,
+                binding: crate::binding_plan::BindingId,
+                value: ValueId,
+                depth: usize,
+            ) -> bool {
+                depth < 8
+                    && graph.use_sites(value).iter().all(|site| {
+                        returns.contains_key(&site.inst)
+                            || graph
+                                .inst(site.inst)
+                                .is_some_and(|inst| match &inst.payload {
+                                    r2ssa::InstPayload::Phi { .. } => inst
+                                        .output
+                                        .is_some_and(|output| owner(output) == Some(binding)),
+                                    r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) => {
+                                        inst.output.is_some_and(|output| {
+                                            reaches_only_return(
+                                                graph,
+                                                returns,
+                                                owner,
+                                                binding,
+                                                output,
+                                                depth + 1,
+                                            )
+                                        })
+                                    }
+                                    _ => false,
+                                })
+                    })
+            }
             let mut carriers = BTreeMap::<crate::binding_plan::BindingId, bool>::new();
             for index in 0..graph.values.len() {
                 let value = ValueId(index as u32);
@@ -2519,23 +2556,9 @@ impl LegacyObservationJournal {
                     continue;
                 };
                 let only_returns = carriers.entry(binding).or_insert(true);
-                if !*only_returns {
-                    continue;
-                }
-                for site in graph.use_sites(value) {
-                    if returns.contains_key(&site.inst) {
-                        continue;
-                    }
-                    let own_merge = graph.inst(site.inst).is_some_and(|inst| {
-                        matches!(inst.payload, r2ssa::InstPayload::Phi { .. })
-                            && inst
-                                .output
-                                .is_some_and(|output| owner(output) == Some(binding))
-                    });
-                    if !own_merge {
-                        *only_returns = false;
-                        break;
-                    }
+                if *only_returns && !reaches_only_return(graph, returns, &owner, binding, value, 0)
+                {
+                    *only_returns = false;
                 }
             }
             carriers
