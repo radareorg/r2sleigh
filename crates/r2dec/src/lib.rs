@@ -4297,7 +4297,7 @@ fn simplify_data_object_loads_in_stmt(
 }
 
 /// The unsigned value of an integer literal, ignoring any cast around it.
-fn literal_value(expr: &CExpr) -> Option<u64> {
+pub(crate) fn literal_value(expr: &CExpr) -> Option<u64> {
     match expr {
         CExpr::Observed { expr, .. } => literal_value(expr),
         CExpr::UIntLit(value) => Some(*value),
@@ -4335,7 +4335,13 @@ pub(crate) fn name_of_constant_address(
             CType::ptr(plain_char_type()),
         ));
     }
-    let flag = symbols.get(&value)?;
+    let flag = symbols.get(&value);
+    r2il::refusal_evidence!(
+        "constant-address",
+        "{value:#x}: {}",
+        flag.map_or("no symbol", String::as_str)
+    );
+    let flag = flag?;
     let rendered = c_identifier_for_data_symbol(flag);
     let type_fact = object_types.get(value).cloned();
     // An object radare2 gave no type to is a run of bytes, which is what

@@ -894,6 +894,34 @@ impl<'a> FoldingContext<'a> {
                 CExpr::cast(CType::ptr(elem_ty), byte_address),
             ))));
         }
+        // A `reloc.` flag says the slot holds the address of the named symbol,
+        // so a pointer-width load from it is that address, not the object.
+        if let Some(value) = crate::literal_value(&addr_expr)
+            && r2types::declaration_type_width_bits(&elem_ty, self.pointer_bits())
+                == Some(self.pointer_bits())
+            && self
+                .inputs
+                .function_facts
+                .display_names()
+                .symbols()
+                .get(&value)
+                .is_some_and(|flag| flag.starts_with("reloc."))
+            && let Some((named, named_type)) = crate::name_of_constant_address(
+                &addr_expr,
+                self.inputs.function_facts.display_names().strings(),
+                self.inputs.function_facts.display_names().symbols(),
+                &self.inputs.function_facts.type_facts().program_data_objects,
+                &mut self.named_data_objects.borrow_mut(),
+                false,
+            )
+        {
+            return Some(PendingMemoryAccessExpr::Planned(super::convert::convert(
+                named,
+                &CValue::Typed(named_type),
+                &elem_ty,
+                self.pointer_bits(),
+            )));
+        }
         // The address is a value, and what it is declared as is what the
         // conversion to the pointee's pointer is made from.
         let ptr_ty = CType::ptr(elem_ty);

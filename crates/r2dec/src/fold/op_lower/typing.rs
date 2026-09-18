@@ -62,7 +62,9 @@ impl FoldingContext<'_> {
     #[track_caller]
     pub(super) fn convert_from(&self, expr: CExpr, from: Option<&CValue>, to: &CType) -> CExpr {
         // A constant address is named here, where the requirement is stated.
-        if matches!(from, Some(CValue::Constant))
+        // Asked of the literal itself: an address the lift folded into a load
+        // arrives typed as the carrier and is still the number it spells.
+        if (matches!(from, Some(CValue::Constant)) || crate::literal_value(&expr).is_some())
             && let Some((named, named_type)) = crate::name_of_constant_address(
                 &expr,
                 self.inputs.function_facts.display_names().strings(),

@@ -28487,3 +28487,17 @@ The decompile pipeline runs with `enable_sccp: false`, so the condition is
 never a literal there; `fold_through_definition` decides it by evaluating
 the condition through its definitions (`constant_through_definitions`), which
 is where the pipeline's own folding already lives.
+
+## The GOT slot rule, landed
+
+`shape_stack_buffer` crashed on every configuration and `shape_byte_indexed_buffer`
+on three, all from the stack guard: x64 read it as `*(uint64_t*)0x100002008`
+because the memory renderer named a constant address only when the plan
+typed the value as a constant, and a RIP-relative address the lift folds
+into the load arrives typed as the carrier. `convert_from` now names any
+literal address. The indirection recorded above is folded too: a
+pointer-width load from an address a `reloc.` flag names is the address of
+the named symbol, `(uint64_t)&__stack_chk_guard`, in
+`render_certified_memory_address_access`. Seven shapes cells went from a
+crash to passing; the matrix did not move. `constant-address` evidence says
+which literals were asked and whether a symbol answered.
