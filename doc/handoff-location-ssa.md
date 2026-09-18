@@ -28233,3 +28233,30 @@ object model carries what this needs -- `ObjectModel::stack_objects` is keyed by
 `StackObjectKey { root: StackAddressRoot { base, offset }, space }` -- so the
 widening is a range query over that map once the escaped object's extent is in
 hand.
+
+### What bounds an escape, and why the object model cannot answer it
+
+Following the thirteen refusals one layer further: the members of the escaped
+struct are `ObjectId(2)`, `(3)` and `(4)`, declared `uint16_t`, `uint32_t` and
+`uint64_t` -- `half`, `word` and `quad` of `struct mixed` -- while the escape is
+recorded against `ObjectId(1)`, the first member, whose address is the struct's.
+
+So widening by extent needs the extent, and the model does not carry one.
+`ObjectKind` is `StackSlot { space, base, offset }` or
+`FrameObject { space, base, offset }`: an offset and nothing more. There is no
+relation saying these four objects are one aggregate, and no size on any of
+them. `ObjectModel::stack_objects` can be queried by offset range, but nothing
+says where the range ends.
+
+Two bounds are available and only one is sound. Taking every object at or above
+the escaped offset over-claims: it would mark unrelated locals as written by a
+callee that never saw them, which is the kind of claim this project refuses.
+The callee's parameter type is the honest bound -- `mixed_touch(struct mixed *)`
+gives the pointee size, and DWARF supplies it for this corpus -- so the rule is
+that an escaped address writes the objects inside the pointee's extent, and a
+call whose parameter type is unknown escapes nothing more than the object it
+names.
+
+That needs the certified call site's argument type inside
+`frame_objects_with_escaped_address`, which today takes only the artifact and
+the projection. The plumbing is the work; the rule is settled.
