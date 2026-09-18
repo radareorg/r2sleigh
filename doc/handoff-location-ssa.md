@@ -28436,3 +28436,17 @@ loop -- `for (;;)` with no test in its head, or `do ... while` -- entering at
 the header is entering the loop, so `leading_label` now descends into those
 bodies. `gotos` is 0 on the matrix; every noise counter the cutover gate
 checks is 0 on all 60 cells.
+
+## Phase 1 verification, current
+
+`tests/corpus/locked_matrix.sh --gate cutover` exits 0 on a clean tree at
+this commit: differential, snapshot, binding, effect, placement and render
+audits 60/60, and every machine-noise counter zero on every cell. This
+supersedes the stale claim recorded above and the list of cells it named.
+`locked_shapes.sh --gate shapes-differential` is unchanged at the same
+failure set as before this stretch (57 `raw=failed` lines, none new), and
+`make -C tests/r2r run` is at its baseline of two known failures.
+
+The `hdr_fold` files under `tests/corpus/artifacts/raw` were left by a
+harness that no longer runs and were deleted; `noise_sites.py --summary`
+over that directory had been counting them.
