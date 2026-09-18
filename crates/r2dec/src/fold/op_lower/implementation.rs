@@ -2746,6 +2746,13 @@ impl<'a> FoldingContext<'a> {
     /// signedness the conversion extends by, then to the conversion's own
     /// type. Where the use projection already spelled the conversion the
     /// operand arrives at that type and nothing more is said.
+    /// What the object an operation writes is declared as, where it has one.
+    fn declared_output_type_at(&self, frame: &LowerFrame) -> Option<CType> {
+        let site = frame.normalized_site?;
+        let output = self.normalized_output_projection(site).ok()?;
+        self.value_declaration_type(output.value)
+    }
+
     fn width_change_expr(
         &self,
         frame: &LowerFrame,
@@ -2757,6 +2764,16 @@ impl<'a> FoldingContext<'a> {
             .produced_at(frame)
             .and_then(|produced| produced.as_type().cloned())
             .unwrap_or_else(|| uint_type_from_size(dst.size));
+        // The two types a width change is spelled between: what the operand
+        // has and what the operation produces. A cast that converts nothing
+        // is these two agreeing while the declaration disagrees with both.
+        r2il::refusal_evidence!(
+            "width-change",
+            "dst={dst:?} src={src:?} operand={:?} produced={produced:?} stated={} declared={:?}",
+            ty,
+            self.produced_at(frame).is_some(),
+            self.declared_output_type_at(frame)
+        );
         if ty.as_ref().and_then(CValue::as_type) == Some(&produced) {
             return Ok(expr);
         }

@@ -27917,3 +27917,27 @@ side is built, which the evidence does not yet say. One line on the
 `write-projection` tag naming whether `pending_assignment_type` supplied the
 type, or the machine root's boundary did, separates the two paths in a single
 run and points at the site that has to stop widening.
+
+### The assignment-side extension is observable, and the corpus said so
+
+The write side was traced to its site and the fix was wrong, which is worth
+recording because the reasoning looked sound.
+
+`width_change_expr` (crates/r2dec/src/fold/op_lower/implementation.rs) spells
+the extension: for `X9_1 = zext32to64(tmp_2b000_2)` its operand has `uint32_t`
+and its produced type is `uint64_t`, because the machine writes the whole
+register. The `width-change` evidence tag now states both, beside the object's
+declaration. `project_planned_assignment` then converts that `uint64_t` down to
+the declared `uint32_t`, and the two collapse into a cast that converts nothing.
+
+Declining the extension when the object is declared at the operand's own width
+removes the cast and renders `X9_1 = tmp_2b000_2;`. It also breaks six cells of
+the differential. The declaration is not the whole story: the object is narrow
+in the rendering, but the machine register is not, and something reads the wider
+carrier, so the zero fill is observable. A narrow declaration is therefore not a
+licence to drop the extension; what would license it is a proof that no rendered
+reader sees the carrier above the declared width, which is a liveness question
+about the partition rather than a fact about one write.
+
+Both changes are reverted. The two evidence tags stay, because they are what
+turned "somewhere a cast appears" into "this line, between these two types".

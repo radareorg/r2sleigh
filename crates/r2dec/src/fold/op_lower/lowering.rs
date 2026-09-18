@@ -319,7 +319,9 @@ impl<'a> FoldingContext<'a> {
                 // What the right-hand side has: stated by the lowering that
                 // built it, or, where it built the assignment directly, by
                 // the typed boundaries of the operation's root.
-                let rhs_type = self.pending_assignment_type.take().or_else(|| {
+                let taken = self.pending_assignment_type.take();
+                let pending = taken.is_some();
+                let rhs_type = taken.or_else(|| {
                     let root = names
                         .plan()
                         .machine_projection()
@@ -338,7 +340,16 @@ impl<'a> FoldingContext<'a> {
                 // projection describing the same write must not say it twice.
                 r2il::refusal_evidence!(
                     "write-projection",
-                    "{:?} {:?} rhs_type={:?} rhs={:?}",
+                    "{:?} {:?} pending={pending} root={:?} rhs_type={:?} rhs={:?}",
+                    names
+                        .plan()
+                        .machine_projection()
+                        .entity_for_output(output.value)
+                        .and_then(|entity| names
+                            .plan()
+                            .machine_projection()
+                            .expr(entity.root())
+                            .map(|expr| format!("{:?}", expr.kind()))),
                     output.value,
                     projection,
                     rhs_type,
