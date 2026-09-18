@@ -409,6 +409,7 @@ SHAPE_SPECS: dict[str, ScalarSpec] = {
         "shape_multiword_return",
         "shape_pointer_to_pointer",
         "shape_function_pointer",
+        "shape_byte_indexed_buffer",
     )
 }
 

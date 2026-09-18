@@ -43,6 +43,7 @@ static const struct entry entries[] = {
     {"shape_multiword_return", shape_multiword_return},
     {"shape_pointer_to_pointer", shape_pointer_to_pointer},
     {"shape_function_pointer", shape_function_pointer},
+    {"shape_byte_indexed_buffer", shape_byte_indexed_buffer},
 };
 
 static void usage(const char *program) {

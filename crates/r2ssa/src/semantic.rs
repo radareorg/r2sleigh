@@ -7618,9 +7618,20 @@ fn collect_stack_geometry_certificate(
 /// a slot and slices of one variable both render through the byte spelling.
 fn accessed_object_storage(
     graph: &SsaGraph,
+    objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
 ) -> Option<(u32, bool)> {
+    // An access at a computed index lands wherever the index reaches, so the
+    // widths its accesses share say nothing about how far the object goes.
+    if structured
+        .memory_accesses
+        .values()
+        .any(|access| access.object == object && objects.address_is_indexed(access.address))
+    {
+        return accessed_object_extent(graph, objects, structured, object)
+            .map(|extent| (extent, true));
+    }
     let mut width = None;
     let mut seen = 0usize;
     for access in structured.memory_accesses.values() {
@@ -7664,7 +7675,8 @@ fn accessed_object_storage(
                     "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
                     access.width
                 );
-                return accessed_object_extent(structured, object).map(|extent| (extent, true));
+                return accessed_object_extent(graph, objects, structured, object)
+                    .map(|extent| (extent, true));
             }
         }
     }
@@ -7836,16 +7848,47 @@ fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) 
 
 /// The extent an object's accesses reach, when every one lands at a known
 /// non-negative offset inside it; the containment proof is the offsets.
-fn accessed_object_extent(structured: &StructuredDataflowFacts, object: ObjectId) -> Option<u32> {
+fn accessed_object_extent(
+    graph: &SsaGraph,
+    objects: &ObjectModel,
+    structured: &StructuredDataflowFacts,
+    object: ObjectId,
+) -> Option<u32> {
     let mut extent = 0u32;
+    let mut memo = BTreeMap::new();
     for access in structured.memory_accesses.values() {
         if access.object != object {
             continue;
         }
-        let offset = u32::try_from(access.object_offset?).ok()?;
+        // An indexed access files its offset as zero because the machine
+        // computes it; how far it reaches is what the index can reach. One
+        // whose index has no proven bound leaves the extent unproven, and the
+        // frame's own layout answers instead.
+        let offset = if objects.address_is_indexed(access.address) {
+            let index = objects.index_for_address(access.address)?;
+            let bound = indexed_offset_upper_bound(graph, index, &mut memo, &mut BTreeSet::new())?;
+            u32::try_from(bound).ok()?
+        } else {
+            u32::try_from(access.object_offset?).ok()?
+        };
         extent = extent.max(offset.checked_add(access.width)?);
     }
     (extent > 0).then_some(extent)
+}
+
+/// The largest value `x & mask` can take while `x` stays at or below `bound`.
+///
+/// Every mask bit outranks all the bits under it, so taking the highest one
+/// that still fits is the maximum; nothing here approximates.
+fn masked_upper_bound(mask: u64, bound: u64) -> u64 {
+    let mut taken = 0u64;
+    for bit in (0..u64::BITS).rev() {
+        let candidate = taken | (1u64 << bit);
+        if mask & (1u64 << bit) != 0 && candidate <= bound {
+            taken = candidate;
+        }
+    }
+    taken
 }
 
 /// Exact unsigned byte bound carried by one index computation.
@@ -7887,8 +7930,16 @@ fn indexed_offset_upper_bound(
             }
             SSAOp::IntAdd { .. } => bound_of(0)?.checked_add(bound_of(1)?),
             SSAOp::IntMult { .. } => bound_of(0)?.checked_mul(bound_of(1)?),
+            // The mask alone is not the bound: `i & 0xf8` with `i` below 64
+            // reaches 56, not 248. The answer is the largest value the mask
+            // admits that the other operand can reach.
             SSAOp::IntAnd { .. } => match (constant(0), constant(1)) {
-                (Some(mask), _) | (_, Some(mask)) => Some(mask),
+                (Some(mask), _) => {
+                    Some(bound_of(1).map_or(mask, |bound| masked_upper_bound(mask, bound)))
+                }
+                (_, Some(mask)) => {
+                    Some(bound_of(0).map_or(mask, |bound| masked_upper_bound(mask, bound)))
+                }
                 (None, None) => Some(bound_of(0)?.min(bound_of(1)?)),
             },
             SSAOp::IntRem { .. } => constant(1)?.checked_sub(1),
@@ -8697,7 +8748,7 @@ fn collect_prepared_function_certificates(
                 let storage = if declared {
                     None
                 } else {
-                    accessed_object_storage(graph, structured, *object)
+                    accessed_object_storage(graph, objects, structured, *object)
                         // No access sizes it and nothing declares it: a buffer
                         // whose address escapes to a callee. The frame lays it
                         // out between its neighbours, and that gap is its extent,

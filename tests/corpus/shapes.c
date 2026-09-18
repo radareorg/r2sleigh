@@ -319,6 +319,38 @@ NOINL uint64_t shape_function_pointer(uint64_t a, uint64_t b) {
     return accumulator;
 }
 
+/* ---- 15. A local byte buffer read and written eight bytes at a time at an
+        offset the machine computes, with the buffer's base also flowing into
+        a pointer merge.  This is bzip2's `BZ2_decompress` copy loops
+        (`ldr d0, [x12, w4, uxtw]`, `str d0, [x10, x11]` with `x11 = x8 & 0xf8`):
+        the rewriter cannot make an element of an index no stride divides, and
+        the object's name has to stand for a base register the plan keeps as a
+        value because the merge reads it. ---- */
+NOINL uint64_t shape_byte_indexed_buffer(uint64_t a, uint64_t b) {
+    uint8_t buf[64];
+    uint64_t total = 0;
+    unsigned i;
+    for (i = 0; i < 64; i++) {
+        buf[i] = (uint8_t)((a >> (i & 56)) ^ (b >> ((i * 3) & 56)) ^ i);
+    }
+    /* Words at byte offsets the low bits cannot reach, `x8 & 0xf8`. */
+    for (i = 0; i < 64; i += 8) {
+        uint64_t word;
+        memcpy(&word, buf + (i & 0xf8u), 8);
+        word += a ^ (uint64_t)i;
+        memcpy(buf + (i & 0xf8u), &word, 8);
+    }
+    /* A word at an offset that came from a 32-bit register. */
+    unsigned off = (unsigned)(b % 57u);
+    uint64_t word;
+    memcpy(&word, buf + off, 8);
+    total = word * 31u;
+    /* The base escapes into a merge with another pointer. */
+    const uint8_t *p = (a & 1u) ? buf : (const uint8_t *)&total;
+    total += (uint64_t)p[(unsigned)(a % 8u)];
+    return total;
+}
+
 /* A main so the corpus binary links, and so nothing is dead-stripped. */
 /* A callee whose boolean result the caller tests, which is how radare2 comes to
  * believe a fixed function is variadic.
@@ -362,5 +394,6 @@ int main(void) {
     printf("%016llx\n", (unsigned long long)shape_pointer_to_pointer(a, b));
     printf("%016llx\n", (unsigned long long)shape_function_pointer(a, b));
     printf("%016llx\n", (unsigned long long)shape_bool_caller(a, b));
+    printf("%016llx\n", (unsigned long long)shape_byte_indexed_buffer(a, b));
     return 0;
 }

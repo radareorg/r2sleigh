@@ -27414,3 +27414,83 @@ lane, which is the next quality class for those two.
 Gates: corpus 60/60 on every column, r2r at the recorded 2 XX, bzip2 census
 61 bodies, 43 declarations, 3 undeclared stubs, 0 refused. The shape is pinned
 in the shapes corpus as `shape_byte_indexed_buffer`.
+
+### An indexed access files offset zero, so every indexed buffer was mis-sized
+
+`shape_byte_indexed_buffer`, added to the shapes corpus for the
+`BZ2_decompress` copy loop, failed on five of six configurations. Four causes,
+traced in parallel by four agents:
+
+* **The lift ended a block early.** arm64 `-O0` emits `b` to the very next
+  instruction before a `__stack_chk_fail` call, and radare2 keeps both in one
+  block, which read as an instruction after the terminator. A branch to a
+  later instruction of its own block decides no successors; the block goes
+  where it was going.
+* **The slot-index mark asked the wrong question.** The new
+  `SlotIndexedBytes` spelling marked its index with the certified *address*
+  read, which only `parameter_expression` answers, and a stack-rooted address
+  has none. The fact that certifies it is the object model's own index table,
+  the one the plan chose the spelling by. Both the journal's marking and the
+  placement audit go through `certified_value_read`, so widening it there
+  keeps them asking one question.
+* **An indexed access files `object_offset = Some(0)`**, because the relative
+  address is `Exact(interior_offset.unwrap_or(0))` and an indexed address is
+  recorded in `indexed_addresses`, never in `interior_offsets`. That zero is
+  confidently wrong, and `accessed_object_extent` believed it: a 64-byte
+  buffer came out as the width of its widest single access. Every
+  `uint8_t stack_mNNN[8]` and `[16]` in the corpus is this rule. An object
+  with an indexed access is now sized by what its index can reach, and an
+  index with no proven bound leaves the extent to the frame's own layout.
+* **The mask bound ignored its other operand.** `i & 0xf8` was bounded at 248
+  whatever `i` is. The largest value a mask admits below a bound is the
+  highest mask bit that fits, then the next, and so on; `i < 64` gives 56.
+
+arm64 `-O0` now declares the buffer exactly, at 64 bytes; x86-64 `-O0` falls
+back to the frame gap, 72, because its loop counter lives in memory and a load
+carries no bound. Three of six configurations render.
+
+Open on this shape: x86-64 `-O1` has one unjustified effect-occurrence
+conflict, and both `-O2` cells refuse with `read_before_assignment` where the
+vectoriser's read-modify-write leaves fragments of the buffer read with
+nothing having written them. Separately, `shape_stack_buffer` at x86-64 `-O0`
+attributes its `buffer[64]` to the saved-frame-pointer slot at `-8` and
+indexes it at `- 80`, which is out of bounds in the rendered C; that is a base
+attribution defect, not an extent one.
+
+The `-O1` conflict was the same spelling seen from the ledger's side. The
+plan binds the address of the read-modify-write (`&buf + i` is a loop-carried
+phi source, so it has a statement of its own) *and* the access re-derives it
+from the object's name, so the rendered text computes it twice and the index
+temporary's live-value obligation is discharged once by the assignment and
+again at each access. `named_object_address_effects` would have justified the
+repetition, but it requires every use of the value to spell nothing but an
+address, and the use that builds the address is an `IntAdd`, whose machine
+disposition is `Exact` rather than `MemoryAddress`. The duplication is real
+rather than a marking artefact, so the object spelling now stands down where
+the address is itself a rendered object, and the access names it.
+
+Both `-O2` cells refuse for one reason, and it is geometry rather than
+placement. The vectoriser turns the word loop into fixed-offset vector
+accesses inside the buffer, and every direct access address is an evidenced
+root, so `buf` is split into the base plus three or four sixteen-byte slices.
+The first loop's byte-indexed stores are filed against the base alone, so the
+slices are read with nothing having written them and placement refuses at the
+first read. The order it reports is honest: the machine really does load,
+modify and store each slice. What is wrong is that the slices are objects at
+all.
+
+Absorbing them needs the base object's extent at the time roots are decided,
+and the only indexed access left at `-O2` is the byte loop, whose index is a
+loop phi. `indexed_offset_upper_bound` has no phi case, and the induction and
+trip-count facts that would give it one are not built until later. The masked
+word index carried the extent at `-O0` and `-O1`; at `-O2` there is nothing
+left to carry it. So this waits on a bound for a counted loop's induction
+variable, available early enough for root evidence to use it.
+
+The same trace found a correctness defect in existing output, worth more than
+the cell that surfaced it: at x86-64 `-O0` and `-O2` the second byte store of
+`shape_stack_buffer`'s loop has its constant folded into the index rather than
+the base, so the address resolves to the frame pointer itself and the store is
+filed against the saved-frame-pointer slot. It renders as
+`stack_m8[RDX_1 - 79] = ...` against a `uint8_t[8]`, a negative subscript on
+every iteration.
