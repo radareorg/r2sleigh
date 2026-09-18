@@ -9014,14 +9014,18 @@ mod tests {
         assert!(call.variadic_argument_count_refusal.is_none());
     }
 
+    /// The shared call passes the carriers of the format that consumes most;
+    /// on the other path the surplus operand is what the machine passed too.
     #[test]
-    fn merged_formats_that_disagree_prove_nothing() {
+    fn merged_formats_that_disagree_pass_the_larger_count() {
         let call = merged_format_call("opened %d", "closed %d as %s");
-        assert!(call.variadic_argument_count_evidence.is_none());
-        assert_eq!(
-            call.variadic_argument_count_refusal,
-            Some(crate::VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral)
-        );
+        let evidence = call
+            .variadic_argument_count_evidence
+            .expect("merged literal count");
+        assert!(evidence.merged_literals);
+        assert_eq!(evidence.format_consumed_argument_count, 2);
+        assert_eq!(evidence.total_argument_count, 4);
+        assert!(call.variadic_argument_count_refusal.is_none());
     }
 
     fn variadic_format_call(

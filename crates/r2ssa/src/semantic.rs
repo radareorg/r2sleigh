@@ -4132,6 +4132,7 @@ fn constant_address_of(
             .and_then(|input| constant_address_of(function, graph, *input, depth + 1))
     };
     let result = match &definition.payload {
+        InstPayload::Op(SSAOp::Copy { .. }) => operand(0)?,
         InstPayload::Op(SSAOp::IntAdd { .. }) => operand(0)?.wrapping_add(operand(1)?),
         InstPayload::Op(SSAOp::IntSub { .. }) => operand(0)?.wrapping_sub(operand(1)?),
         InstPayload::Op(SSAOp::IntOr { .. }) => operand(0)? | operand(1)?,
@@ -4189,6 +4190,9 @@ fn merged_format_literal_argument_count(
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
         }
+        // A call two paths share passes the same carriers on both, so the
+        // call passes as many operands as the format that consumes most; on
+        // the other path the surplus is what the machine passed too.
         let count = consumed.count;
         match agreed {
             None => agreed = Some(count),
@@ -4196,9 +4200,10 @@ fn merged_format_literal_argument_count(
             Some(existing) => {
                 r2il::refusal_evidence!(
                     "variadic-format-literal",
-                    "merged format argument {format_argument_index} reaches formats consuming {existing} and {count} arguments; addresses={addresses:?}"
+                    "merged format argument {format_argument_index} reaches formats consuming {existing} and {count} arguments; the call passes {}",
+                    existing.max(count)
                 );
-                return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
+                agreed = Some(existing.max(count));
             }
         }
     }
@@ -4573,60 +4578,153 @@ fn reaching_stack_argument_before_call(
         callee_offset
     };
     let entry_offset = entering.checked_add(offset)?;
-    for op in block.ops.get(..call_op_index)?.iter().rev() {
+    let slot_name = crate::naming::frame_slot_name(entry_offset);
+    // Promotion named the slot's variable after its entry coordinate; the
+    // graph has such a value exactly when the slot left memory.
+    let promoted = graph
+        .values
+        .iter()
+        .any(|value| value.var.name() == slot_name);
+    let mut visited = BTreeSet::new();
+    reaching_stack_slot_value(
+        function,
+        graph,
+        block_addr,
+        call_op_index,
+        StackSlotQuery {
+            entry_offset,
+            slot_name: &slot_name,
+            size_bytes,
+            promoted,
+        },
+        &mut visited,
+    )
+    .map(|value| (value, entry_offset))
+}
+
+/// The outgoing slot an argument walk looks for.
+#[derive(Clone, Copy)]
+struct StackSlotQuery<'a> {
+    entry_offset: i64,
+    slot_name: &'a str,
+    size_bytes: u32,
+    /// The slot is a promoted variable: its store is a copy into the slot's
+    /// variable, its merge is a phi, and a call does not disturb it.
+    promoted: bool,
+}
+
+/// The value held by an outgoing stack slot at `boundary` in `block_addr`:
+/// the last store to it in the block, or the slot variable's reaching version
+/// when the slot was promoted. A shared call tail has its arguments stored in
+/// each predecessor, so a block that says nothing asks its predecessors, which
+/// must agree -- for a promoted slot the renamer put a phi where they differ.
+fn reaching_stack_slot_value(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    block_addr: u64,
+    boundary: usize,
+    query: StackSlotQuery<'_>,
+    visited: &mut BTreeSet<u64>,
+) -> Option<ValueId> {
+    if !visited.insert(block_addr) {
+        return None;
+    }
+    let block = function.get_block(block_addr)?;
+    for op in block.ops.get(..boundary)?.iter().rev() {
         match op {
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. } => return None,
+            SSAOp::Copy { dst, src } if query.promoted && dst.name() == query.slot_name => {
+                if dst.size != query.size_bytes {
+                    r2il::refusal_evidence!(
+                        "call-argument-stack-store",
+                        "({block_addr:#x}) promoted slot {} is {} bytes, the argument is {}",
+                        query.slot_name,
+                        dst.size,
+                        query.size_bytes
+                    );
+                    return None;
+                }
+                return graph.value_id_for_var(src);
+            }
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
+                if !query.promoted =>
+            {
+                r2il::refusal_evidence!(
+                    "call-argument-stack-store",
+                    "({block_addr:#x}) an earlier call stands between the argument slot at {} and the call",
+                    query.entry_offset
+                );
+                return None;
+            }
             SSAOp::Store {
                 space: SpaceId::Ram,
                 addr,
                 val,
-            } => {
+            } if !query.promoted => {
                 let Some(root) = resolve_entry_stack_root(function.decompile_prep_facts(), addr)
                 else {
                     r2il::refusal_evidence!(
                         "call-argument-stack-store",
-                        "callsite ({block_addr:#x}, {call_op_index}) store through {addr} has no entry-relative root (wanted {entry_offset})"
+                        "({block_addr:#x}) store through {addr} has no entry-relative root (wanted {})",
+                        query.entry_offset
                     );
                     continue;
                 };
-                if root.base != StackAddressBase::StackPointer || root.offset != entry_offset {
+                if root.base != StackAddressBase::StackPointer || root.offset != query.entry_offset
+                {
                     continue;
                 }
-                if val.size != size_bytes {
+                if val.size != query.size_bytes {
                     r2il::refusal_evidence!(
                         "call-argument-stack-store",
-                        "callsite ({block_addr:#x}, {call_op_index}) store at entry offset {entry_offset} is {} bytes, slot is {size_bytes}",
-                        val.size
+                        "({block_addr:#x}) store at entry offset {} is {} bytes, slot is {}",
+                        query.entry_offset,
+                        val.size,
+                        query.size_bytes
                     );
                     return None;
                 }
-                return graph
-                    .value_id_for_var(val)
-                    .map(|value| (value, entry_offset));
+                return graph.value_id_for_var(val);
             }
             _ => {}
         }
     }
-    r2il::refusal_evidence!(
-        "call-argument-stack-store",
-        "callsite ({block_addr:#x}, {call_op_index}) has no store at entry offset {entry_offset} (entering {entering}, slot {offset}) before the call; stores seen: {:?}",
-        block
-            .ops
-            .get(..call_op_index)
-            .unwrap_or_default()
+    if query.promoted
+        && let Some(phi) = block
+            .phis
             .iter()
-            .filter_map(|op| match op {
-                SSAOp::Store { addr, val, .. } => Some((
-                    addr.to_string(),
-                    resolve_entry_stack_root(function.decompile_prep_facts(), addr)
-                        .map(|root| root.offset),
-                    val.size,
-                )),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    );
-    None
+            .find(|phi| phi.dst.name() == query.slot_name && phi.dst.size == query.size_bytes)
+    {
+        return graph.value_id_for_var(&phi.dst);
+    }
+    let predecessors = function.predecessors(block_addr);
+    if predecessors.is_empty() {
+        r2il::refusal_evidence!(
+            "call-argument-stack-store",
+            "({block_addr:#x}) no store reaches the argument slot at {} (promoted={})",
+            query.entry_offset,
+            query.promoted
+        );
+        return None;
+    }
+    let mut agreed = None;
+    for predecessor in predecessors {
+        let boundary = function.get_block(predecessor)?.ops.len();
+        let value =
+            reaching_stack_slot_value(function, graph, predecessor, boundary, query, visited)?;
+        match agreed {
+            None => agreed = Some(value),
+            Some(existing) if existing == value => {}
+            Some(existing) => {
+                r2il::refusal_evidence!(
+                    "call-argument-stack-store",
+                    "({block_addr:#x}) predecessors leave {existing:?} and {value:?} in the argument slot at {}",
+                    query.entry_offset
+                );
+                return None;
+            }
+        }
+    }
+    agreed
 }
 
 fn convention_call_boundary(
