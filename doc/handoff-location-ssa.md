@@ -27356,3 +27356,18 @@ spelled once for every path to the jump -- where it used to answer nothing.
 Gates: corpus 60/60 on every column, r2r at the recorded 2 XX. bzip2 arm64
 -O2 census: 59 bodies, 43 declarations, 3 undeclared stubs, 2 refused --
 `sendMTFValues` and `BZ2_decompress`, both on NEON user operations.
+
+### The NEON user operations bzip2 uses, expanded per element
+
+`sendMTFValues` and `BZ2_decompress` refused on `NEON_umax`, `NEON_umin`,
+`NEON_umaxv`, `NEON_uminv` and `a64_TBL`. All five are now expanded in the
+lift the way `USHL` and `REV64` are: min and max per element with a compare
+and a select, the across-vector forms as a fold to one element, and the
+single-register `TBL`/`TBX` as sixteen variable shifts of the table with the
+fill byte where the index reaches past it (`tests/neon_lanes.rs`). The
+multi-register table forms stay unexpanded. `sendMTFValues` renders -- at
+eight thousand lines, since every lane is spelled -- and `BZ2_decompress`
+moves on to `unprovable_execution_order`: a gap opened at `0x10000c67c:4`,
+the `ldr d0, [x12, w4, uxtw]` of a copy loop, because the stack access
+`*(uint64_t*)(x12 + w4)` is spelled from the address operands and so never
+reads the bound object's symbol. bzip2 census: 60 bodies, 1 refused.

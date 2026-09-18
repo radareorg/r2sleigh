@@ -362,7 +362,16 @@ mod tests {
             !spec.user_ops.is_empty(),
             "AARCH64 declares user-defined operations"
         );
-        for name in ["NEON_ext", "NEON_ushl", "NEON_rev64"] {
+        for name in [
+            "NEON_ext",
+            "NEON_ushl",
+            "NEON_rev64",
+            "NEON_umax",
+            "NEON_umin",
+            "NEON_umaxv",
+            "NEON_uminv",
+            "a64_TBL",
+        ] {
             let index = spec
                 .user_ops
                 .iter()

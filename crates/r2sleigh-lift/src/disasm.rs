@@ -2155,6 +2155,17 @@ impl Disassembler {
             Some("NEON_ext") => Self::expand_neon_ext(output.as_ref(), inputs, temp_base),
             Some("NEON_ushl") => Self::expand_neon_ushl(output.as_ref(), inputs, temp_base),
             Some("NEON_rev64") => Self::expand_neon_rev64(output.as_ref(), inputs, temp_base),
+            Some("NEON_umax") => Self::expand_neon_minmax(output.as_ref(), inputs, temp_base, true),
+            Some("NEON_umin") => {
+                Self::expand_neon_minmax(output.as_ref(), inputs, temp_base, false)
+            }
+            Some("NEON_umaxv") => {
+                Self::expand_neon_minmax_across(output.as_ref(), inputs, temp_base, true)
+            }
+            Some("NEON_uminv") => {
+                Self::expand_neon_minmax_across(output.as_ref(), inputs, temp_base, false)
+            }
+            Some("a64_TBL") => Self::expand_neon_tbl(output.as_ref(), inputs, temp_base),
             // A trap, and the pipeline already has one. `R2ILOp::Breakpoint` is
             // seeded as `Kind::Trap` by the obligation ledger, which is exactly
             // what these are: control leaves for an exception handler and does
@@ -2234,6 +2245,232 @@ impl Disassembler {
                 b: high,
             },
         ])
+    }
+
+    /// A fresh temporary allocator over `temp_base`.
+    fn lane_temp(next: &mut u64, size: u32) -> Varnode {
+        let node = Varnode::unique(*next, size);
+        *next += u64::from(size).max(1);
+        node
+    }
+
+    /// The elements of a vector, low lane first.
+    fn split_lanes(
+        ops: &mut Vec<R2ILOp>,
+        next: &mut u64,
+        vector: &Varnode,
+        lane_bytes: u32,
+    ) -> Vec<Varnode> {
+        (0..vector.size / lane_bytes)
+            .map(|lane| {
+                let value = Self::lane_temp(next, lane_bytes);
+                ops.push(R2ILOp::Subpiece {
+                    dst: value.clone(),
+                    src: vector.clone(),
+                    offset: lane * lane_bytes,
+                });
+                value
+            })
+            .collect()
+    }
+
+    /// The vector the elements make, recomposed pairwise until one is left.
+    fn join_lanes(
+        ops: &mut Vec<R2ILOp>,
+        next: &mut u64,
+        mut lanes: Vec<Varnode>,
+        lane_bytes: u32,
+    ) -> Option<Varnode> {
+        let mut width = lane_bytes;
+        while lanes.len() > 1 {
+            let mut joined = Vec::with_capacity(lanes.len() / 2);
+            for pair in lanes.chunks(2) {
+                let [low, high] = pair else {
+                    return None;
+                };
+                let wider = Self::lane_temp(next, width * 2);
+                ops.push(R2ILOp::Piece {
+                    dst: wider.clone(),
+                    hi: high.clone(),
+                    lo: low.clone(),
+                });
+                joined.push(wider);
+            }
+            lanes = joined;
+            width *= 2;
+        }
+        lanes.pop()
+    }
+
+    /// The larger or smaller of two unsigned elements.
+    fn lane_minmax(
+        ops: &mut Vec<R2ILOp>,
+        next: &mut u64,
+        a: &Varnode,
+        b: &Varnode,
+        max: bool,
+    ) -> Varnode {
+        let less = Self::lane_temp(next, 1);
+        ops.push(R2ILOp::IntLess {
+            dst: less.clone(),
+            a: a.clone(),
+            b: b.clone(),
+        });
+        let chosen = Self::lane_temp(next, a.size);
+        let (if_true, if_false) = if max { (b, a) } else { (a, b) };
+        ops.push(R2ILOp::Select {
+            dst: chosen.clone(),
+            cond: less,
+            if_true: if_true.clone(),
+            if_false: if_false.clone(),
+        });
+        chosen
+    }
+
+    /// `NEON_umax(rn, rm, element_size)` / `NEON_umin` -- AArch64 `UMAX`, `UMIN`.
+    fn expand_neon_minmax(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+        max: bool,
+    ) -> Option<Vec<R2ILOp>> {
+        let [rn, rm, element_size] = inputs else {
+            return None;
+        };
+        let output = output?;
+        if element_size.space != SpaceId::Const {
+            return None;
+        }
+        let lane_bytes = u32::try_from(element_size.offset).ok()?;
+        if lane_bytes == 0
+            || output.size != rn.size
+            || output.size != rm.size
+            || output.size % lane_bytes != 0
+        {
+            return None;
+        }
+        let mut ops = Vec::new();
+        let mut next = temp_base;
+        let a = Self::split_lanes(&mut ops, &mut next, rn, lane_bytes);
+        let b = Self::split_lanes(&mut ops, &mut next, rm, lane_bytes);
+        let lanes = a
+            .iter()
+            .zip(&b)
+            .map(|(a, b)| Self::lane_minmax(&mut ops, &mut next, a, b, max))
+            .collect();
+        let composed = Self::join_lanes(&mut ops, &mut next, lanes, lane_bytes)?;
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: composed,
+        });
+        Some(ops)
+    }
+
+    /// `NEON_umaxv(rn, element_size)` / `NEON_uminv` -- AArch64 `UMAXV`, `UMINV`.
+    ///
+    /// The result is one element: the largest or smallest across the vector.
+    fn expand_neon_minmax_across(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+        max: bool,
+    ) -> Option<Vec<R2ILOp>> {
+        let [rn, element_size] = inputs else {
+            return None;
+        };
+        let output = output?;
+        if element_size.space != SpaceId::Const {
+            return None;
+        }
+        let lane_bytes = u32::try_from(element_size.offset).ok()?;
+        if lane_bytes == 0 || output.size != lane_bytes || rn.size % lane_bytes != 0 {
+            return None;
+        }
+        let mut ops = Vec::new();
+        let mut next = temp_base;
+        let lanes = Self::split_lanes(&mut ops, &mut next, rn, lane_bytes);
+        let mut lanes = lanes.into_iter();
+        let mut best = lanes.next()?;
+        for lane in lanes {
+            best = Self::lane_minmax(&mut ops, &mut next, &best, &lane, max);
+        }
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: best,
+        });
+        Some(ops)
+    }
+
+    /// `a64_TBL(fill, table, indices)` -- AArch64 `TBL` and `TBX` with one
+    /// table register.
+    ///
+    /// Each result byte is the table byte its index names, or the fill byte
+    /// when the index reaches past the table: zero for `TBL`, the old value
+    /// for `TBX`. The forms that concatenate several table registers are not
+    /// expanded.
+    fn expand_neon_tbl(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+    ) -> Option<Vec<R2ILOp>> {
+        let [fill, table, indices] = inputs else {
+            return None;
+        };
+        let output = output?;
+        if output.size != indices.size || output.size > fill.size || table.size != 16 {
+            return None;
+        }
+        let table_bytes = u64::from(table.size);
+        let mut ops = Vec::new();
+        let mut next = temp_base;
+        let index_lanes = Self::split_lanes(&mut ops, &mut next, indices, 1);
+        let fill_lanes = Self::split_lanes(&mut ops, &mut next, fill, 1);
+        let mut lanes = Vec::with_capacity(index_lanes.len());
+        for (index, fill) in index_lanes.iter().zip(&fill_lanes) {
+            let wide = Self::lane_temp(&mut next, table.size);
+            ops.push(R2ILOp::IntZExt {
+                dst: wide.clone(),
+                src: index.clone(),
+            });
+            let distance = Self::lane_temp(&mut next, table.size);
+            ops.push(R2ILOp::IntLeft {
+                dst: distance.clone(),
+                a: wide,
+                b: Varnode::constant(3, table.size),
+            });
+            let shifted = Self::lane_temp(&mut next, table.size);
+            ops.push(R2ILOp::IntRight {
+                dst: shifted.clone(),
+                a: table.clone(),
+                b: distance,
+            });
+            let byte = Self::lane_temp(&mut next, 1);
+            ops.push(R2ILOp::Subpiece {
+                dst: byte.clone(),
+                src: shifted,
+                offset: 0,
+            });
+            let in_range = Self::lane_temp(&mut next, 1);
+            ops.push(R2ILOp::IntLess {
+                dst: in_range.clone(),
+                a: index.clone(),
+                b: Varnode::constant(table_bytes, 1),
+            });
+            let chosen = Self::lane_temp(&mut next, 1);
+            ops.push(R2ILOp::Select {
+                dst: chosen.clone(),
+                cond: in_range,
+                if_true: byte,
+                if_false: fill.clone(),
+            });
+            lanes.push(chosen);
+        }
+        let composed = Self::join_lanes(&mut ops, &mut next, lanes, 1)?;
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: composed,
+        });
+        Some(ops)
     }
 
     /// `NEON_rev64(rn, element_size)` -- AArch64 `REV64`.
