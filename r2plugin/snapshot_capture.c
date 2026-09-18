@@ -7052,7 +7052,9 @@ static RAnalFunctionSignature *function_signature_build(RAnal *anal, RAnalFuncti
 			goto beach;
 		}
 	}
-	int argc = r_type_func_args_count (anal->sdb_types, type_name);
+	// radare2 now reports whether the count is known; negative means unstated
+	int argc = -1;
+	r_type_func_args_count (anal->sdb_types, type_name, &argc);
 	for (i = 0; i < argc; i++) {
 		const char *param_name = r_type_func_args_name (anal->sdb_types, type_name, i);
 		RAnalFunctionParam *param = R_NEW0 (RAnalFunctionParam);
