@@ -68,6 +68,7 @@ impl FoldingContext<'_> {
                 self.inputs.function_facts.display_names().symbols(),
                 &self.inputs.function_facts.type_facts().program_data_objects,
                 &mut self.named_data_objects.borrow_mut(),
+                crate::string_literal_serves(to, self.pointer_bits()),
             )
         {
             return super::convert::convert(

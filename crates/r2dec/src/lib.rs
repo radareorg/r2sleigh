@@ -4298,6 +4298,19 @@ fn literal_value(expr: &CExpr) -> Option<u64> {
         _ => None,
     }
 }
+/// Whether a string literal can stand where a value of `required` is wanted:
+/// anywhere but behind a pointer to something wider than a character, since a
+/// load of a word through a string's address reads an object, not text.
+pub(crate) fn string_literal_serves(required: &CType, ptr_bits: u32) -> bool {
+    match required {
+        CType::Pointer(inner) => {
+            matches!(**inner, CType::Void | CType::Unknown)
+                || r2types::declaration_type_width_bits(inner, ptr_bits) == Some(8)
+        }
+        _ => true,
+    }
+}
+
 /// The name this constant address is, the type that name has, and the object it declares.
 pub(crate) fn name_of_constant_address(
     expr: &CExpr,
@@ -4305,9 +4318,10 @@ pub(crate) fn name_of_constant_address(
     symbols: &std::collections::BTreeMap<u64, String>,
     object_types: &r2types::ProgramDataObjectTypeFacts,
     named: &mut std::collections::BTreeMap<u64, crate::ast::CExternObject>,
+    string_serves: bool,
 ) -> Option<(CExpr, CType)> {
     let value = literal_value(expr)?;
-    if let Some(text) = strings.get(&value) {
+    if string_serves && let Some(text) = strings.get(&value) {
         return Some((
             crate::ast::carry_all_expr_observations(expr, CExpr::StringLit(text.clone())),
             CType::ptr(plain_char_type()),
@@ -4482,6 +4496,7 @@ mod tests {
             &symbols,
             &object_types,
             &mut named,
+            true,
         )
         .expect("the string table answers for the address");
         assert_eq!(text, CExpr::StringLit("usage: %s\n".to_string()));
@@ -4496,6 +4511,7 @@ mod tests {
             &symbols,
             &object_types,
             &mut named,
+            true,
         )
         .expect("the symbol table answers for the address");
         assert_eq!(
@@ -4521,6 +4537,7 @@ mod tests {
                 &symbols,
                 &object_types,
                 &mut named,
+                true,
             )
             .is_none()
         );
@@ -5069,6 +5086,7 @@ mod tests {
             &no_symbols,
             &no_object_types,
             &mut unused_objects,
+            true,
         )
         .expect("the string table answers for the address");
         expr = named;
@@ -5120,6 +5138,7 @@ mod tests {
             &symbols,
             &object_types,
             &mut used,
+            true,
         )
         .expect("the symbol table answers for the address");
         let mut function =
@@ -5175,6 +5194,7 @@ mod tests {
             &symbols,
             &object_types,
             &mut used,
+            true,
         )
         .expect("the symbol table answers for the address");
         let mut function =
