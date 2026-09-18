@@ -153,9 +153,15 @@ fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) ->
     }
     // An offset the machine computes into a bound slot: the object's own
     // name plus the index, in bytes, since an index no stride divides is not
-    // an element of anything but the byte array.
+    // an element of anything but the byte array. Only where the address is
+    // not itself a rendered object: one that is has a statement computing it
+    // already, and naming the slot again would compute it twice.
     if fact.width > 0
         && indexed
+        && !matches!(
+            inputs.dispositions.get(fact.address.0 as usize),
+            Some(ValueDisposition::Bound { .. })
+        )
         && let Some(binding) = bound
         && let Some(index) = inputs.objects.index_for_address(fact.address)
     {
