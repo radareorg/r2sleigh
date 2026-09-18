@@ -692,9 +692,10 @@ fn distinct_reader_count(use_sites: &[r2ssa::UseSite], boundary_readers: &[InstI
 /// afterwards is ordinary C and needs no assignment here. A read that is the
 /// address of a memory access, or the frame geometry itself, is not an escape.
 pub(super) fn frame_objects_with_escaped_address(
-    source: &r2ssa::SsaArtifact,
+    source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
 ) -> BTreeSet<r2ssa::ObjectId> {
+    let source = source_owned.source();
     let graph = source.graph();
     let geometry = &source.certificates().stack_geometry.insts;
     let boundary_readers = certified_value_readers(source);
@@ -711,11 +712,156 @@ pub(super) fn frame_objects_with_escaped_address(
                         Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
                     )
             });
-        if escapes {
-            escaped.insert(object);
+        if !escapes {
+            continue;
+        }
+        escaped.insert(object);
+        // A callee handed `&value` may write any byte of `value`: every
+        // object inside the parameter's pointee is written through that
+        // pointer too. A parameter whose pointee has no known size escapes
+        // nothing beyond the object the address names.
+        let Some(size) = escaped_pointee_size_bytes(source_owned, value.id) else {
+            continue;
+        };
+        let objects = source.objects();
+        let Some(root) = objects
+            .stack_objects
+            .iter()
+            .find(|(_, other)| **other == object)
+            .map(|(key, _)| key.root)
+        else {
+            continue;
+        };
+        let Some(end) = i64::try_from(size)
+            .ok()
+            .and_then(|size| root.offset.checked_add(size))
+        else {
+            continue;
+        };
+        for (key, other) in &objects.stack_objects {
+            if key.root.base == root.base && key.root.offset > root.offset && key.root.offset < end
+            {
+                r2il::refusal_evidence!(
+                    "escape-reaches",
+                    "{object:?} at {root:?} escapes {size} bytes and covers {other:?} at {:?}",
+                    key.root
+                );
+                escaped.insert(*other);
+            }
         }
     }
     escaped
+}
+
+/// How many bytes the callee an address is passed to may write through it:
+/// the size of the parameter's pointee, from the declared signature.
+fn escaped_pointee_size_bytes(
+    source_owned: &SourceOwnedFunctionFacts,
+    value: ValueId,
+) -> Option<u64> {
+    let source = source_owned.source();
+    let ptr_bits = source
+        .machine_context()
+        .memory_model()
+        .default_address_bits();
+    let type_graph = source
+        .machine_context()
+        .function_interface()
+        .and_then(r2ssa::SourceFunctionInterface::type_graph);
+    let callsites = source_owned.report().callsites()?;
+    // The argument is the address or a register's copy of it.
+    let graph = source.graph();
+    let through_copies = |mut value: ValueId| {
+        for _ in 0..8 {
+            let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+                break;
+            };
+            let r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) = inst.payload else {
+                break;
+            };
+            let Some(source) = inst.inputs.first() else {
+                break;
+            };
+            value = *source;
+        }
+        value
+    };
+    callsites.by_callsite.values().find_map(|facts| {
+        let argument = facts
+            .argument_values
+            .iter()
+            .find(|argument| through_copies(argument.value) == value)?;
+        r2il::refusal_evidence!(
+            "escape-callee",
+            "{value:?} is argument {} at {:?}: signature={:?}",
+            argument.index,
+            facts.callsite,
+            facts
+                .callee_signature
+                .as_ref()
+                .map(|signature| &signature.params)
+        );
+        // The declared pointee, where the signature is a source's. radare2's
+        // inferred `uint64_t` is evidence and says nothing about a pointee.
+        let declared = facts
+            .callee_signature
+            .as_ref()
+            .filter(|_| facts.callee_signature_from_source_types)
+            .and_then(|signature| match signature.params.get(argument.index)? {
+                r2types::CTypeLike::Pointer(pointee) => Some(pointee.as_ref().clone()),
+                _ => None,
+            })
+            .and_then(|pointee| match &pointee {
+                r2types::CTypeLike::Struct(name) | r2types::CTypeLike::Union(name) => type_graph?
+                    .aggregates()
+                    .iter()
+                    .find(|aggregate| aggregate.name() == name)
+                    .map(|aggregate| aggregate.size_bits().div_ceil(8)),
+                scalar => r2types::declaration_type_width_bits(scalar, ptr_bits)
+                    .map(|bits| u64::from(bits).div_ceil(8)),
+            });
+        if declared.is_some() {
+            return declared;
+        }
+        // Failing a declaration, the callee's own body: the bytes it is
+        // proven to write through this argument, and nothing if it hands the
+        // pointer on to something the summary does not see.
+        let summary = source_owned
+            .report()
+            .interproc_summary_set()?
+            .summaries
+            .get(&r2ssa::InterprocFunctionId(facts.direct_target?))?;
+        r2il::refusal_evidence!(
+            "escape-callee",
+            "summary for {:#x}: unknown_calls={} unknown_memory={} effects={:?}",
+            facts.direct_target?,
+            summary.has_unknown_calls,
+            summary.touches_unknown_memory,
+            summary.memory_effects
+        );
+        if summary.has_unknown_calls || summary.touches_unknown_memory {
+            return None;
+        }
+        let mut end = None::<i64>;
+        for effect in &summary.memory_effects {
+            let r2ssa::SummaryMemoryRegion::Arg { index } = effect.location.region else {
+                continue;
+            };
+            if index != argument.index {
+                continue;
+            }
+            match effect.kind {
+                r2ssa::SummaryMemoryEffectKind::Write => {}
+                r2ssa::SummaryMemoryEffectKind::Read => continue,
+                r2ssa::SummaryMemoryEffectKind::Escape | r2ssa::SummaryMemoryEffectKind::Free => {
+                    return None;
+                }
+            }
+            let range = effect.location.range?;
+            end = Some(end.map_or(range.offset_hi, |end| end.max(range.offset_hi)));
+        }
+        u64::try_from(end?.checked_add(1)?).ok()
+    })
 }
 
 fn certified_value_readers(source: &r2ssa::SsaArtifact) -> BTreeMap<ValueId, Vec<InstId>> {

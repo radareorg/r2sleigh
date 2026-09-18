@@ -28549,3 +28549,25 @@ started declaring them.
 `shape_stack_buffer` passes on all six configurations; the shapes gate is at
 26 passing cells from 17 at the start of this stretch. The matrix did not
 move (60/60 snapshot match).
+
+## An escape covers what the callee is proven to write
+
+The thirteen `missing_definition` cells were the rule recorded above,
+plumbed. `frame_objects_with_escaped_address` now takes the source-owned
+facts, matches an escaping stack address to the call argument it becomes
+(through the register copy the ABI makes of it), and widens the escape to
+every stack object at the same base inside the bytes the callee may write.
+Two bounds, in order: the declared pointee, only where the signature is a
+source's (`callee_signature_from_source_types`) -- radare2's inferred
+`uint64_t` is evidence and names no pointee -- and otherwise the callee's own
+body, from the interprocedural summary: the highest `offset_hi` of a `Write`
+effect on that argument, refused outright if the callee has unknown calls,
+touches unknown memory, or escapes or frees the argument. `escape-callee` and
+`escape-reaches` evidence show the match, the summary and each object covered.
+
+`shape_struct_pointer` renders on x64 -O0 through `mixed_touch`'s summary (16
+bytes through argument 0). `shape_variadic` does not: its escape is
+`snprintf(buffer, sizeof buffer, ...)`, an import with no body summary and a
+`char *` parameter whose pointee is one byte. What bounds that write is the
+size argument, a libc contract the summaries do not carry; a transfer-style
+model for the `n`-bounded string functions is the missing piece.

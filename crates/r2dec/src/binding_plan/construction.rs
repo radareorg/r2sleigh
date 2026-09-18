@@ -1645,7 +1645,7 @@ impl BindingPlan {
             .unwrap_or_default();
         crate::stage_timing::mark("plan_objects");
         let escaped_frame_objects =
-            super::rules::frame_objects_with_escaped_address(source, &machine_projection);
+            super::rules::frame_objects_with_escaped_address(source_owned, &machine_projection);
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,

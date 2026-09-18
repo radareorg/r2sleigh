@@ -1864,6 +1864,7 @@ static bool function_image_data_symbol_name_excluded(const char *name) {
 	return !strncmp (name, "str.", 4) || !strncmp (name, "fcn.", 4)
 		|| !strncmp (name, "loc.", 4)
 		|| !strncmp (name, "fixup.", 6)
+		|| !strncmp (name, "reloc.fixup.", 12)
 		|| !strncmp (name, "segment.", 8)
 		|| !strncmp (name, "section.", 8);
 }
