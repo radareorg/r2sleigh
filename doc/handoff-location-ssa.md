@@ -29516,3 +29516,36 @@ uint64_t stack_m48[3];
 ((uint64_t*)stack_m48)[1] = (uint64_t)sym__op_xor;
 stack_m48[2] = (uint64_t)sym__op_mul;
 ```
+
+## The next thread: an argument's reach is scaled by what the caller passes
+
+`shape_pointer_to_pointer` fails in all six cells with one diagnostic,
+`variable 'stack_m48' set but not used`, and the rendering says why: the
+four-element `rows` array is four separate scalars.
+
+```c
+uint64_t tmp_4700_14 = (uint64_t)&stack_m80;
+stack_m56 = tmp_4700_14;
+uint64_t tmp_4700_16 = (uint64_t)&stack_m88;
+stack_m48 = tmp_4700_16;
+...
+uint64_t RAX_16 = sym__indirect_load((uint64_t)&stack_m56, stack_m124);
+```
+
+`stack_m56` is passed as the base and the callee indexes from it, so the three
+slots above it are written here and read only there. Each is its own object, so
+each write has no reader and the rendering sets a variable it never uses.
+
+What would join them is the callee's reach through that argument, which
+`callee_argument_reach` already carries -- but `indirect_load(ptr, index)`
+touches `ptr + index * 8` with `index` a parameter, so its range is
+`SummaryTransferLength::Arg` and `argument_touch_reach` drops it as unbounded.
+It is unbounded in the callee and bounded at every call site: the loop proves
+`index < 4`, and the two stores name 1 and 3 outright.
+
+So the reach a call site hands the object model should be the callee's range
+resolved against the bounds the caller proves for the arguments it passes --
+`k * (bound + 1)` where the callee touches `base + k * arg`. That is the
+argument-scaled summary range this document already lists as open for the
+pointer table, and it is what sizes `rows` at thirty-two bytes and makes the
+three writes readable.
