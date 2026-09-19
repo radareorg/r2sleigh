@@ -21,6 +21,7 @@ pub(crate) mod address;
 pub(crate) mod aggregate_access;
 pub(crate) mod assumption;
 pub mod block;
+pub mod body;
 pub mod cfg;
 pub(crate) mod constant;
 pub(crate) mod control;

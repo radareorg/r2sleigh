@@ -175,7 +175,7 @@ impl BasicBlock {
     /// control may run off its end into the next address. That is a fact the
     /// operations do not carry: a call's return depends on the callee, and a
     /// trap has no successor at all.
-    fn from_r2il_continuing(block: &R2ILBlock, continues: bool) -> Self {
+    pub(crate) fn from_r2il_continuing(block: &R2ILBlock, continues: bool) -> Self {
         // Check if this block has switch info
         let terminator = if let Some(ref switch_info) = block.switch_info {
             // Use switch terminator with cases from switch_info

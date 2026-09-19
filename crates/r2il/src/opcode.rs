@@ -1370,4 +1370,24 @@ impl R2ILBlock {
     pub fn set_switch_info(&mut self, info: SwitchInfo) {
         self.switch_info = Some(info);
     }
+
+    /// One block from the instructions it runs, in order.
+    ///
+    /// Each part is a single instruction's lift and keeps its own address on
+    /// every operation it contributed, which is what lets a consumer say which
+    /// instruction an operation came from after the parts are one sequence.
+    pub fn join(addr: u64, size: u32, parts: impl IntoIterator<Item = Self>) -> Self {
+        let mut joined = Self::new(addr, size);
+        for part in parts {
+            let base = joined.ops.len();
+            let mut metadata = part.op_metadata;
+            for (index, op) in part.ops.into_iter().enumerate() {
+                joined.ops.push(op);
+                let mut meta = metadata.remove(&index).unwrap_or_default();
+                meta.instruction_addr = Some(part.addr);
+                joined.set_op_metadata(base + index, meta);
+            }
+        }
+        joined
+    }
 }

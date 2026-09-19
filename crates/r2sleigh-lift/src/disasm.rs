@@ -1926,9 +1926,10 @@ impl Disassembler {
         enrichment: Option<SemanticMetadataOptions>,
     ) -> Result<(R2ILBlock, Vec<GenuineInstructionSpan>)> {
         self.clear_decode_cache()?;
-        let block_size_u32 = u32::try_from(block_size)
+        u32::try_from(block_size)
             .map_err(|_| LiftError::Parse("block size exceeds r2il range".to_string()))?;
-        let mut combined_block = R2ILBlock::new(addr, block_size_u32);
+        let mut parts: Vec<R2ILBlock> = Vec::new();
+        let mut op_count = 0usize;
         let mut instruction_spans = Vec::new();
         let mut offset = 0usize;
 
@@ -1964,43 +1965,27 @@ impl Disassembler {
                 });
             match lifted {
                 Ok(instr_block) => {
-                    let R2ILBlock {
-                        size: instr_size_u32,
-                        ops,
-                        op_metadata,
-                        ..
-                    } = instr_block;
-                    let instr_size = instr_size_u32 as usize;
+                    let instr_size = instr_block.size as usize;
                     if instr_size == 0 {
                         // Prevent infinite loop on zero-size instruction
                         break;
                     }
-                    let base_op_index = combined_block.ops.len();
-                    let canonical_op_count = ops.len();
-                    let first_canonical_op = u64::try_from(base_op_index).map_err(|_| {
+                    let first_canonical_op = u64::try_from(op_count).map_err(|_| {
                         LiftError::Parse("canonical P-code index exceeds u64".to_string())
                     })?;
-                    let canonical_op_count = u64::try_from(canonical_op_count).map_err(|_| {
-                        LiftError::Parse("canonical P-code count exceeds u64".to_string())
-                    })?;
+                    let canonical_op_count =
+                        u64::try_from(instr_block.ops.len()).map_err(|_| {
+                            LiftError::Parse("canonical P-code count exceeds u64".to_string())
+                        })?;
                     instruction_spans.push(GenuineInstructionSpan {
                         addr: instr_addr,
-                        size: instr_size_u32,
+                        size: instr_block.size,
                         first_canonical_op,
                         canonical_op_count,
                     });
 
-                    let mut instr_op_metadata = op_metadata;
-                    // Append all ops from this instruction
-                    for op in ops {
-                        combined_block.push(op);
-                    }
-                    for local_idx in 0..(combined_block.ops.len() - base_op_index) {
-                        let mut meta = instr_op_metadata.remove(&local_idx).unwrap_or_default();
-                        meta.instruction_addr = Some(instr_addr);
-                        combined_block.set_op_metadata(base_op_index + local_idx, meta);
-                    }
-
+                    op_count += instr_block.ops.len();
+                    parts.push(instr_block);
                     offset += instr_size;
                 }
                 Err(error) if enrichment.is_none() => return Err(error),
@@ -2011,11 +1996,11 @@ impl Disassembler {
             }
         }
 
-        // Update the block size to reflect actual bytes consumed
-        combined_block.size = u32::try_from(offset)
+        // The size is what the instructions consumed, not what was asked for.
+        let consumed = u32::try_from(offset)
             .map_err(|_| LiftError::Parse("lifted block size exceeds r2il range".to_string()))?;
 
-        Ok((combined_block, instruction_spans))
+        Ok((R2ILBlock::join(addr, consumed, parts), instruction_spans))
     }
 
     /// Lift one complete block and retain unforgeable, immutable origin.
