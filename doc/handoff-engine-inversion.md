@@ -18,8 +18,19 @@ Checked by hand on a three-function binary built at `-O0` for both machines:
 recovers the conditional, and `main` renders `_add_two(1, 2)` with the callee's
 recovered prototype declared above it.
 
-Sequencing items one to three of `doc/engine-vision.md` are done. Item four, the
-name database, is next.
+Sequencing items one to four of `doc/engine-vision.md` are done. `main` in an
+ELF hello world renders its string literals as text, names its imports, and
+calls them with the arguments their declared prototypes state:
+
+```c
+stack_m32 = (uint64_t)"Hello";
+uint32_t RAX_4 = strlen(tmp_11f80_1);
+uint64_t RAX_11 = malloc((uint64_t)(int32_t)(tmp_11f00_2 + stack_m40 + 1));
+strcpy(tmp_11f80_3, tmp_11f80_1);
+```
+
+Against radare2 over its ELF corpus, `pd` agreement went from six of thirty to
+thirteen of the twenty-four `r2s` opens.
 
 ## What the route does not do yet
 
@@ -33,10 +44,14 @@ as the `cc` data because the word size is refined by the first register argloc.
 **Callees are walked one level deep.** Deeper is what an interprocedural
 fixpoint is for. A callee that fails to walk leaves its call unproven.
 
-**Nothing reads the data section.** String literals, named globals and code
-pointer tables are all captured empty, so a constant that points at text renders
-as the constant. This is the same gap the decompiler-quality thread has, and it
-closes for both at once.
+**Declared types do not reach the rendering, only arity.** `strlen(uint64_t)`
+rather than `size_t strlen(const char *)`. The prototypes are handed to the
+request as `known_function_signatures` and the arity arrives through a
+synthesised call-site interface; the type layer does not appear to consume the
+former. Tracing that is the next refinement.
+
+**Code pointer tables are captured empty**, because finding one means proving
+what indexes it, which needs the value domain.
 
 **Only the default convention is used.** Every function is assumed to use the
 convention `default.cc` names. A binary mixing conventions needs per-function
@@ -75,6 +90,20 @@ instruction as a local skip. That idiom is real 32-bit PIC code
 `.cspec` also carries the prototype models; they are deliberately not read,
 because calling conventions come from the vendored `cc` data and two owners for
 one fact is worse than either.
+
+## What the differential oracle still reports
+
+`scripts/diff_r2.py` over radare2's ELF corpus, thirty binaries, twenty-four of
+which `r2s` opens: `px` twenty agree, `pd` thirteen, `ie` twenty-three, `iS`
+twenty-four, `is` twenty-one.
+
+The remaining `pd` disagreements are four causes, none of them analysis:
+radare2 resolves an ARM literal pool to the symbol it holds and prints
+`ldr ip, sym.x` where the bare load says `[0x817c]`; Sleigh and Capstone spell
+some ARM instructions differently (`pop {r1}` against `ldr r1, [sp], 0x4`);
+radare2 maps a relocatable object at `0x8000000` where `r2s` maps it at zero;
+and one Thumb function decodes differently, which is a real gap rather than a
+spelling.
 
 ## Peeling: what is now dead
 

@@ -517,13 +517,15 @@ this document had that the other way round.
    branches, refusing at indirect transfers. Nothing below this is callable
    without it. *Done: `r2ssa::body`.*
 2. **The sdb type and convention import.** A dependency of a useful `pdd`
-   through `callee_facts`, not an independent win. *Conventions done: `r2abi`.
-   Types not yet.*
+   through `callee_facts`, not an independent win. *Done: `r2abi` reads the
+   conventions and the five hundred library prototypes.*
 3. **Native request construction**, and `pdd` end to end in `r2s`. The
    milestone. *Done, on x86-64 and aarch64; open threads in
    `doc/handoff-engine-inversion.md`.*
 4. **The name database.** Closes eighteen of the twenty-four `pd` disagreements
-   and unblocks the differential oracle for everything after it.
+   and unblocks the differential oracle for everything after it. *Done:
+   symbols, entry, import stubs from their relocations, and the text a body
+   points at.*
 5. **Delete the bridge that is now dead.** Build, prove, then delete.
 6. **Discovery**, with confidence attached, and the fact lattice split at that
    moment, because that is where the first inferred fact appears.
