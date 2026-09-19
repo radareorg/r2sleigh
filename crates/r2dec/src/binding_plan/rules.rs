@@ -730,14 +730,6 @@ pub(super) fn unread_defined_values(
 /// A graph use site and a certified boundary read can name the same
 /// instruction, and that is one reader, not two. Two use sites on one
 /// instruction remain two readers: `a + a` spells the value twice.
-fn distinct_reader_count(use_sites: &[r2ssa::UseSite], boundary_readers: &[InstId]) -> usize {
-    use_sites.len()
-        + boundary_readers
-            .iter()
-            .filter(|reader| !use_sites.iter().any(|site| site.inst == **reader))
-            .count()
-}
-
 /// The frame objects whose address leaves this function as a value.
 ///
 /// An out-parameter is the case: the callee writes through the pointer, so the
@@ -1827,19 +1819,13 @@ fn inlinable_core(
 ) -> Folds {
     let source = source_owned.source();
     let graph = source.graph();
-    let unobserved_uses = source.unobserved_merges().unobserved_uses();
-    // Boundary certificates record reads that do not exist as SSA operands:
-    // return values, call arguments, switch selectors and identity call-result
-    // carriers read by derived-width results. A graph-only count made call
-    // arguments look dead here before that case was fixed; counting only that
-    // certificate kind would make the same mistake for the other three.
-    let certified_readers = certified_value_readers(source);
     // A certificate that reads a value as a lane is answered from that value's
     // binding symbol, so it must keep one. An address read is not: a folded
     // address is spelled by its own expression.
     let certified_read_values = super::certified_lane_read_values(source);
     // A certificate on a value nothing reads states a read that renders nothing.
     let dead_readers = unread_defined_values(source, projection);
+    let readers = super::readers::RenderedReaders::compute(source_owned, unrendered, &dead_readers);
     // A read is a read only if what it feeds reaches the page. At -O0 and again
     // under x86-64's flag lanes a value carries several graph readers and one
     // rendered one, and counting the graph's is what keeps it named.
@@ -1962,66 +1948,16 @@ fn inlinable_core(
             rejected("a certified lane read is answered from a binding");
             continue;
         }
-        // A dead phi has no rendered statement and therefore makes no program
-        // read. Its edge uses are still present in the SSA topology, so
-        // counting one here makes a live one-reader temporary look
-        // multi-reader. The dead-phi analysis is the canonical owner of that
-        // distinction. Restrict the exception to Sleigh `Unique` temporaries;
-        // architectural-register topology remains conservative because it
-        // participates in persistent object identity across blocks.
-        let use_sites = graph
-            .use_sites(value.id)
-            .iter()
-            .copied()
-            // A call boundary's read is counted once, as a certified boundary
-            // read below. `SSAOp::CallUse` states the same read in the graph so
-            // liveness can see it, and counting both would make every inlined
-            // call argument look like a two-reader value.
-            .filter(|site| {
-                !matches!(
-                    graph.inst(site.inst).map(|inst| &inst.payload),
-                    Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. }))
-                )
-            })
-            // A merge nothing observes renders nothing, so it reads nothing.
-            // That is a fact about the merge rather than about where the value
-            // is kept, and restricting it to the lifter's own scratch space is
-            // what makes a condition code look multi-reader: a flag register
-            // merges at every loop header, and the merge was counted as a read
-            // of it. Across the local census 5,303 of 6,959 emitted conditions
-            // test a flag variable rather than a comparison, and this gate is
-            // why each of them keeps a name.
-            .filter(|site| {
-                value
-                    .canonical_storage
-                    .is_none_or(|storage| storage.space != r2ssa::CanonicalStorageSpace::Unique)
-                    || !unobserved_uses.contains(site)
-                    || !graph
-                        .inst(site.inst)
-                        .is_some_and(|inst| matches!(inst.payload, r2ssa::InstPayload::Phi { .. }))
-            })
-            .collect::<Vec<_>>();
-        let boundary_readers = certified_readers
-            .get(&value.id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let all_reader_count = distinct_reader_count(&use_sites, boundary_readers);
-        if all_reader_count == 0 {
+        // Who reads this value in the rendered text, stated once in
+        // `readers` rather than re-derived here.
+        let readers_of = readers.get(value.id);
+        if readers_of.all == 0 {
             rejected("no readers");
             continue;
         }
-        // Deadness counts every read; every rule below counts rendered ones.
-        let boundary_readers = boundary_readers
-            .iter()
-            .copied()
-            .filter(|reader| !renders_nothing(*reader))
-            .collect::<Vec<_>>();
-        let boundary_readers = boundary_readers.as_slice();
-        let use_sites = use_sites
-            .into_iter()
-            .filter(|site| !renders_nothing(site.inst))
-            .collect::<Vec<_>>();
-        let reader_count = distinct_reader_count(&use_sites, boundary_readers);
+        let use_sites = readers_of.sites.as_slice();
+        let boundary_readers = readers_of.boundary.as_slice();
+        let reader_count = readers_of.rendered();
         // A value that reads nothing but literals is the same at every reader
         // and costs nothing to spell there, so the single-reader rule does not
         // apply to it. The broader question `r2rewrite` answers for expansion,
@@ -2060,64 +1996,7 @@ fn inlinable_core(
         // single-use and produced wrong hashes. Only source-certified dead-phi
         // edges on lowering temporaries are absent above.
         if !literal_only && reader_count != 1 {
-            rejected(&format!(
-                "{reader_count} of {all_reader_count} readers rendered ({} of them certified boundary reads), of which {} sit in a \
-                 certificate-elided instruction; root {root_kind}; sites [{}]; boundary [{}]",
-                boundary_readers.len(),
-                use_sites
-                    .iter()
-                    .filter(|site| elided_reads.contains(&site.inst))
-                    .count(),
-                use_sites
-                    .iter()
-                    .map(|site| {
-                        // Which operation reads it, not only where: a reader
-                        // that renders nothing looks the same as one that does
-                        // until the operation is named.
-                        let out = graph.inst(site.inst).and_then(|inst| inst.output);
-                        format!(
-                            "i{}#{}={}->{}[{} uses]",
-                            site.inst.0,
-                            site.input_idx,
-                            graph.inst(site.inst).map_or("-".to_string(), |inst| {
-                                match &inst.payload {
-                                    r2ssa::InstPayload::Op(op) => format!("{op:?}")
-                                        .split_whitespace()
-                                        .next()
-                                        .unwrap_or("Op")
-                                        .to_string(),
-                                    r2ssa::InstPayload::Phi { .. } => "Phi".to_string(),
-                                }
-                            }),
-                            out.and_then(|out| graph.value(out))
-                                .map_or("-".to_string(), |v| v.var.display_name().to_string()),
-                            out.map_or(0, |out| graph.use_sites(out).len())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                boundary_readers
-                    .iter()
-                    .map(|inst| {
-                        let out = graph.inst(*inst).and_then(|inst| inst.output);
-                        format!(
-                            "i{}={}[{} uses]{}",
-                            inst.0,
-                            out.and_then(|out| graph.value(out))
-                                .map_or("-".to_string(), |v| v.var.display_name().to_string()),
-                            out.map_or(0, |out| graph.use_sites(out).len()),
-                            graph.inst(*inst).map_or(String::new(), |inst| format!(
-                                " {:?}",
-                                inst.payload
-                            )
-                            .chars()
-                            .take(70)
-                            .collect::<String>()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            ));
+            rejected(&readers_of.describe(graph, &elided_reads, root_kind));
             continue;
         }
         let renderable = expr_by_value
@@ -2210,11 +2089,9 @@ fn inlinable_core(
         // The one reader, whether the graph recorded it or a boundary
         // certificate did. Only its position is wanted from here on: which
         // block it sits in, and what runs between the definition and it.
-        let reader = match (use_sites.as_slice(), boundary_readers) {
-            ([site], []) => site.inst,
-            ([], [inst]) => *inst,
-            _ => unreachable!("a value that is not literal-only was required to have one reader"),
-        };
+        let reader = readers_of
+            .sole()
+            .expect("a value that is not literal-only was required to have one reader");
         let Some(use_inst) = graph.inst(reader) else {
             rejected("reading instruction missing from the graph");
             continue;
@@ -3061,39 +2938,4 @@ pub(super) fn identity_merge_values(
         }
     }
     merges
-}
-
-#[cfg(test)]
-mod tests {
-    use super::distinct_reader_count;
-    use r2ssa::{InstId, UseSite};
-
-    #[test]
-    fn a_boundary_read_on_an_instruction_that_already_reads_the_value_counts_once() {
-        let call = InstId(7);
-        let graph_read = UseSite {
-            inst: call,
-            input_idx: 0,
-        };
-        assert_eq!(distinct_reader_count(&[graph_read], &[call]), 1);
-    }
-
-    #[test]
-    fn a_boundary_read_elsewhere_is_its_own_reader() {
-        let read = UseSite {
-            inst: InstId(3),
-            input_idx: 0,
-        };
-        assert_eq!(distinct_reader_count(&[read], &[InstId(7)]), 2);
-    }
-
-    #[test]
-    fn two_reads_in_one_instruction_are_two_readers() {
-        let inst = InstId(3);
-        let sites = [
-            UseSite { inst, input_idx: 0 },
-            UseSite { inst, input_idx: 1 },
-        ];
-        assert_eq!(distinct_reader_count(&sites, &[]), 2);
-    }
 }

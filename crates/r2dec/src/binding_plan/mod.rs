@@ -1400,6 +1400,7 @@ impl BindingPlan {
 pub(crate) mod access_syntax;
 mod construction;
 mod name_resolution;
+mod readers;
 mod rules;
 pub(crate) use rules::admit_declaration;
 mod seal;

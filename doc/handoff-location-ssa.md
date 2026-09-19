@@ -29806,3 +29806,45 @@ one variable a signature parameter is declared from, and reading
 a lane projection -- an `int` in `edi` while the ABI storage is `rdi` -- and cut
 the recovered arity. The boundary facts state the inverse directly and remain
 its source.
+
+## Who reads a value, stated once
+
+`inlinable_core` was the largest function in the tree at 665 lines with
+thirty-one branches, and its middle was a single loop over every value that ran
+for 370 of them. Decomposing what that loop asked, it was three relations
+tangled together: who reads this value in the rendered text, whether the value
+can be spelled as an expression at all, and whether the read may move to the
+reader. The first was never named. It was rebuilt inside the loop one filter arm
+at a time, and every comment in it records a case someone found the hard way --
+a call boundary whose read the graph states twice through `SSAOp::CallUse`, a
+merge nothing observes, a lane answered from a binding, a reader whose own
+output reaches the page nowhere.
+
+That is the same shape as the nine constant walkers, and it has the same cost:
+a new case has nowhere to go except as one more arm in the middle of a loop,
+where nothing else can see it. The fold rule needs the relation, the deadness
+rule needs a different count of it, and the placement rule needs the one reader
+it names, so three rules were each reading a locally-computed answer.
+
+`binding_plan/readers.rs` states it once. `RenderedReaders::compute` walks the
+graph and the certificates a single time and gives each value two counts and its
+reader sets: `all`, which counts every instruction that reads the value whether
+or not it renders, because that is what deadness asks; and the rendered readers,
+because that is how many places a folded expression would have to be spelled.
+`sole()` names the one reader when there is one, and `describe()` carries the
+trace text that used to be sixty lines inline.
+
+`distinct_reader_count` moved there with its three tests, and the per-value
+reader computation, the `certified_value_readers` call and the `renders_nothing`
+filtering left `inlinable_core` entirely. The function is 550 lines from 665,
+and 170 lines left `rules.rs`.
+
+The remaining bulk is the other two relations, which are still stated inline:
+four gates asking whether the definition and its operands have exact machine
+dispositions and whether the expression renders inline, and two asking whether
+the one reader follows the definition closely enough for the read to move.
+Those are the next two to name.
+
+Three call sites still rebuild the certificate reader index themselves --
+`certified_value_readers` at `rules.rs`'s escape, dead-value and
+boundary-reader helpers. They should read the index rather than recompute it.
