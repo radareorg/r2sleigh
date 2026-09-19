@@ -1923,7 +1923,10 @@ impl TrustedSsaArtifact {
         control: &C,
         callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
         callee_preserved_carriers: &CalleePreservedCarriers,
-        callee_argument_reach: &BTreeMap<u64, BTreeMap<usize, u64>>,
+        callee_argument_reach: &BTreeMap<
+            u64,
+            BTreeMap<usize, crate::interproc::SummaryArgumentReach>,
+        >,
     ) -> Result<Self, SsaPrepareError> {
         let source = lifted.source().clone();
         let genuine = lifted.lifted();

@@ -30090,3 +30090,59 @@ Eleven variants are nine. The wider pattern is unchanged and still worth
 sweeping: a hundred and eighty-two functions are named `..._with_...` and
 thirty base names have two or more variants, `new` with eleven and `from_blocks`
 with five.
+
+## A callee's stride times the caller's bound sizes the object
+
+`shape_pointer_to_pointer` builds `uint64_t *rows[4] = {&zero, &one, &two,
+&three}` on its frame and hands `rows` to `indirect_load(cursor, index)`. It
+failed on all four configurations with `variable 'stack_m48' set but not used`:
+the four slots at -56, -48, -40 and -32 were four independent locals, each
+written and never read, because every read of them happens inside the callee.
+
+The thread stalled twice before because the reach was recorded as unbounded.
+The trace this time found why, and it was one line. The callee's own address
+relation states the read exactly -- `parameter 0 expression: offset=0
+terms=[AffineAddressTerm { value: ValueId(14), coefficient: 8 }]`, which is
+`arg0 + 8 * index` with the array's stride as the coefficient -- and then
+`arg_location(parameter, expression.terms.is_empty().then_some(...), ...)`
+threw it away, because `SummaryMemoryRange` could hold only constant bounds.
+The summary said "somewhere through argument 0", which sizes nothing.
+
+Three things were needed and each is a fact that already existed.
+
+`SummaryMemoryRange` gained `scaled_by`, and `SummaryArgumentReach` states a
+reach either as bytes or as `base + stride * <the callee's own argument>`. The
+stride is a fact about the callee and nothing about the caller decides it; how
+far the read goes is a fact about the caller, so the two are multiplied at the
+call site rather than in the summary.
+
+`callee_write_spans` does that multiplication. It already had the call's
+argument values, and `induction_bounds` was one parameter away in its caller, so
+the index the caller passes is bounded by the loop that drives it -- or is its
+own bound when it is a literal, which is what makes `indirect_store(cursor, 1,
+...)` reach exactly that element.
+
+The third was the reason the first two would not have fired. The index is an
+`unsigned`, so it arrives in `w1` while the convention names `x1`: it is a lane
+projection rather than a full-width base, and the address collector seeded only
+from `formal_parameter_bases`. A narrow parameter therefore propagated nowhere,
+its spill and reload carried no parameter expression, and the coefficient's
+value could not be recognised as an argument at all. The collector now seeds
+from every formal.
+
+The result is `uint8_t stack_m56[32]` where there were four scalars, with the
+initialisers rendering as `((uint64_t*)stack_m56)[1] = ...` and the callee taking
+`stack_m56` itself. The extent is exact: the last index reaches `stride * bound`
+and the element there is `width` wide.
+
+This also corrects something recorded earlier in this session. The
+formal-identity fact was measured as adding nothing, but that was measured on
+`shape_pointer_to_pointer`, whose five formals all arrive at entry. Elsewhere it
+adds a great deal -- one function in this same corpus has twelve values that are
+a formal against two proved at entry -- and it is what makes the scaling
+argument recognisable through its home slot here. It was not inert; the
+measurement was.
+
+The element type is still `uint8_t[32]` read through a cast rather than
+`uint64_t[4]`. The stride is known, so the element width is available to say so,
+and that is the next refinement rather than a defect.

@@ -15971,6 +15971,7 @@ mod tests {
                     offset_lo: 0,
                     offset_hi: 3,
                     width: Some(4),
+                    scaled_by: None,
                 }),
             },
         });
@@ -16778,6 +16779,7 @@ mod tests {
                                 offset_lo: 0,
                                 offset_hi: 7,
                                 width: Some(8),
+                                scaled_by: None,
                             }),
                         },
                     }],

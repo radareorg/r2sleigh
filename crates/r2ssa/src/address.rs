@@ -258,11 +258,23 @@ impl<'a> AddressCollector<'a> {
             .collect();
         let mut expressions = BTreeMap::new();
         if let Some(prep) = function.decompile_prep_facts() {
-            for (var, parameter) in &prep.formal_parameter_bases {
+            // Every formal, not only those that arrived at their ABI storage's
+            // full width. A narrow parameter -- an `unsigned` in `w1` where
+            // the convention names `x1` -- is a lane projection rather than a
+            // base, and seeding only the bases left it unpropagated: its spill
+            // and reload carried no parameter expression, so a callee indexing
+            // through it stated a reach nothing could scale. The storage kept
+            // beside the index is still the value's own, so a consumer that
+            // maps storage back to an argument sees what it saw before.
+            for (var, parameter) in prep
+                .formal_parameter_bases
+                .iter()
+                .chain(prep.formal_parameters.iter())
+            {
                 if let Some(value) = graph.value_id_for_var(var) {
-                    expressions.insert(
-                        value,
-                        AddressExpression {
+                    expressions
+                        .entry(value)
+                        .or_insert_with(|| AddressExpression {
                             base: AddressBase::Parameter {
                                 index: *parameter,
                                 storage: graph
@@ -271,8 +283,7 @@ impl<'a> AddressCollector<'a> {
                             },
                             terms: Vec::new(),
                             offset: 0,
-                        },
-                    );
+                        });
                 }
             }
         }

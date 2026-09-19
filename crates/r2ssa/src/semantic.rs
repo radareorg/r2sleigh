@@ -2501,7 +2501,13 @@ impl<'a> ObjectModelBuilder<'a> {
     ) -> ObjectModel {
         self.induction_starts = induction_starts.clone();
         if let Some(facts) = self.facts {
-            for (start, end) in callee_write_spans(facts, function, graph, self.machine_context) {
+            for (start, end) in callee_write_spans(
+                facts,
+                function,
+                graph,
+                self.machine_context,
+                induction_bounds,
+            ) {
                 self.callee_write_spans
                     .entry(start)
                     .and_modify(|known| *known = (*known).max(end))
@@ -7993,6 +7999,7 @@ fn callee_write_spans(
     function: &SSAFunction,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
+    induction_bounds: &BTreeMap<ValueId, u64>,
 ) -> Vec<(StackAddressRoot, i64)> {
     let Some(machine_context) = machine_context else {
         return Vec::new();
@@ -8045,21 +8052,43 @@ fn callee_write_spans(
             if let Some(target) = resolve_graph_literal_value(graph, Some(facts), target)
                 && let Some(reach) = machine_context.callee_argument_reach(target)
             {
-                for (index, bytes) in reach {
+                for (index, proven) in reach {
                     let Some(root) =
                         argument(*index).and_then(|var| resolve_stack_root(Some(facts), var))
                     else {
                         continue;
                     };
-                    let Some(end) = i64::try_from(*bytes)
-                        .ok()
+                    // A reach stated per index is multiplied out here, where
+                    // the value this body passes for that index is known and
+                    // the loop that drives it has a proven bound.
+                    let mut bound = |scaling: usize| {
+                        let var = argument(scaling)?;
+                        let value = graph.value_id_for_var(var)?;
+                        // A counted loop bounds the index it drives; a literal
+                        // index is its own bound, which is how a call that
+                        // names one element reaches exactly that far.
+                        induction_bounds
+                            .get(&value)
+                            .or_else(|| {
+                                induction_bounds.get(&crate::constant::root_of(graph, value))
+                            })
+                            .copied()
+                            .or_else(|| crate::constant::folded_value(graph, value))
+                    };
+                    let Some(end) = proven
+                        .bytes(&mut bound)
+                        .and_then(|bytes| i64::try_from(bytes).ok())
                         .and_then(|bytes| root.offset.checked_add(bytes))
                     else {
+                        r2il::refusal_evidence!(
+                            "callee-write-span",
+                            "{name} at {instruction:#x} reaches argument {index} at {root:?} by {proven:?}, unbounded here"
+                        );
                         continue;
                     };
                     r2il::refusal_evidence!(
                         "callee-write-span",
-                        "{name} at {instruction:#x} reaches argument {index} at {root:?} up to {end}"
+                        "{name} at {instruction:#x} reaches argument {index} at {root:?} up to {end} by {proven:?}"
                     );
                     spans.push((root, end));
                 }

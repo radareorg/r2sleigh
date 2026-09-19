@@ -2102,7 +2102,9 @@ impl CalleeFacts {
 
     /// Registers this callee's body proves it leaves untouched at every exit.
     /// How far this callee is proven to touch through each pointer argument.
-    pub fn argument_touch_reach(&self) -> std::collections::BTreeMap<usize, u64> {
+    pub fn argument_touch_reach(
+        &self,
+    ) -> std::collections::BTreeMap<usize, r2ssa::SummaryArgumentReach> {
         self.summary.argument_touch_reach()
     }
 

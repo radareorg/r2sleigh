@@ -1213,8 +1213,10 @@ unsafe fn capture_trusted_ssa_from_buffer(
     let mut callee_facts = Vec::new();
     let mut callee_interfaces = std::collections::BTreeMap::new();
     let mut callee_preserved_carriers = r2ssa::CalleePreservedCarriers::new();
-    let mut callee_argument_reach =
-        std::collections::BTreeMap::<u64, std::collections::BTreeMap<usize, u64>>::new();
+    let mut callee_argument_reach = std::collections::BTreeMap::<
+        u64,
+        std::collections::BTreeMap<usize, r2ssa::SummaryArgumentReach>,
+    >::new();
     let callee_started = Instant::now();
     let callee_count = callees.len();
     let mut callee_hits = 0usize;
@@ -1444,7 +1446,10 @@ fn trusted_from_source_with_callees(
     execution: &r2engine::EngineExecutionControl,
     callee_interfaces: &std::collections::BTreeMap<u64, r2source::SourceFunctionInterface>,
     callee_preserved_carriers: &r2ssa::CalleePreservedCarriers,
-    callee_argument_reach: &std::collections::BTreeMap<u64, std::collections::BTreeMap<usize, u64>>,
+    callee_argument_reach: &std::collections::BTreeMap<
+        u64,
+        std::collections::BTreeMap<usize, r2ssa::SummaryArgumentReach>,
+    >,
 ) -> Result<Arc<r2ssa::TrustedSsaArtifact>, BoundaryError> {
     let ssa_control = execution.ssa_execution_control();
     r2ssa::SsaWorkControl::poll(&ssa_control).map_err(|error| {

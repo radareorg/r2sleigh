@@ -59,11 +59,67 @@ pub enum SummaryMemoryRegion {
     Unknown,
 }
 
+/// How far a callee reaches through one pointer argument.
+///
+/// A constant reach is a span the caller can use as it stands. A scaled reach
+/// is one the callee states per index -- `base + stride * <its own argument>`
+/// -- and only the caller knows how far the index goes, so it is carried in
+/// this form until a call site can multiply it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SummaryArgumentReach {
+    Bytes(u64),
+    Scaled {
+        argument: usize,
+        stride: i64,
+        base: i64,
+        width: u32,
+    },
+}
+
+impl SummaryArgumentReach {
+    /// The bytes this reaches when the scaling argument runs up to `bound`.
+    pub fn bytes(self, mut bound: impl FnMut(usize) -> Option<u64>) -> Option<u64> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Scaled {
+                argument,
+                stride,
+                base,
+                width,
+            } => {
+                // The last index reaches `stride * bound`, and the element
+                // there occupies `width` bytes, so that is where the object
+                // ends. Counting `bound + 1` elements and adding the width on
+                // top of them measures one element too many.
+                let last = stride.checked_mul(i64::try_from(bound(argument)?).ok()?)?;
+                u64::try_from(base.checked_add(last)?.checked_add(i64::from(width))?).ok()
+            }
+        }
+    }
+}
+
+/// An offset that grows with one of the callee's own arguments.
+///
+/// `indirect_load(base, index)` reads at `base + 8 * index`. The stride is a
+/// fact about the callee and nothing about the caller decides it; how far the
+/// read actually goes is a fact about the caller, which knows what it passed
+/// for `index`. Carrying the stride is what lets the two be multiplied at the
+/// call site: without it the reach is only "somewhere through argument 0",
+/// which sizes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SummaryScaledOffset {
+    /// Which of the callee's arguments the offset scales with.
+    pub argument: usize,
+    pub stride: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SummaryMemoryRange {
     pub offset_lo: i64,
     pub offset_hi: i64,
     pub width: Option<u32>,
+    /// Set when the offset is not constant but affine in an argument.
+    pub scaled_by: Option<SummaryScaledOffset>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -770,7 +826,27 @@ fn exact_range(offset: i64, size: u32) -> Option<SummaryMemoryRange> {
         offset_lo: offset,
         offset_hi: offset.saturating_add(size as i64).saturating_sub(1),
         width: Some(size),
+        scaled_by: None,
     })
+}
+
+/// The reach through one argument at `stride * <argument>`, for a callee that
+/// indexes what it was handed.
+fn scaled_arg_location(
+    index: usize,
+    scaled: SummaryScaledOffset,
+    offset: i64,
+    width: Option<u32>,
+) -> SummaryMemoryLocation {
+    SummaryMemoryLocation {
+        region: SummaryMemoryRegion::Arg { index },
+        range: Some(SummaryMemoryRange {
+            offset_lo: offset,
+            offset_hi: offset,
+            width,
+            scaled_by: Some(scaled),
+        }),
+    }
 }
 
 fn arg_location(index: usize, offset: Option<i64>, width: Option<u32>) -> SummaryMemoryLocation {
@@ -907,6 +983,7 @@ fn shifted_range(
             offset_lo: range.offset_lo.saturating_add(delta),
             offset_hi: range.offset_hi.saturating_add(delta),
             width: range.width.or(Some(width)),
+            scaled_by: range.scaled_by,
         }),
         None => exact_range(delta, width),
     }
@@ -1206,7 +1283,12 @@ impl PreparedCalleeSummary {
     /// rather than a neighbouring local. An argument the body hands on to
     /// something the summary cannot see, or accesses at a place it cannot
     /// state, has no entry -- an unbounded reach is not a span.
-    pub fn argument_touch_reach(&self) -> BTreeMap<usize, u64> {
+    /// `argument_bounds` is the greatest value the caller passes for each
+    /// argument, where it knows one. An offset that scales with an argument
+    /// reaches `stride * (bound + 1)`, and is unbounded without a bound, which
+    /// is what an empty map says.
+    pub fn argument_touch_reach(&self) -> BTreeMap<usize, SummaryArgumentReach> {
+        let mut scaled = BTreeMap::<usize, SummaryArgumentReach>::new();
         let mut reach = BTreeMap::<usize, u64>::new();
         let mut unbounded = BTreeSet::<usize>::new();
         if self.local.has_unknown_calls {
@@ -1227,6 +1309,19 @@ impl PreparedCalleeSummary {
                 unbounded.insert(index);
                 continue;
             };
+            if let Some(term) = range.scaled_by {
+                // Stated per index; the caller multiplies it out.
+                scaled.insert(
+                    index,
+                    SummaryArgumentReach::Scaled {
+                        argument: term.argument,
+                        stride: term.stride,
+                        base: range.offset_lo,
+                        width: range.width.unwrap_or(0),
+                    },
+                );
+                continue;
+            }
             let Some(end) = range
                 .offset_hi
                 .checked_add(1)
@@ -1259,9 +1354,16 @@ impl PreparedCalleeSummary {
             }
         }
         reach.retain(|index, _| !unbounded.contains(index));
+        scaled.retain(|index, _| !unbounded.contains(index));
+        let mut proven = scaled;
+        for (index, bytes) in reach {
+            // A constant span and a scaled one through the same argument both
+            // hold; the constant is the one this body states on its own.
+            proven.insert(index, SummaryArgumentReach::Bytes(bytes));
+        }
         r2il::refusal_evidence!(
             "argument-reach",
-            "{:#x}: reach={reach:?} unbounded={unbounded:?} unknown_calls={} effects={:?}",
+            "{:#x}: reach={proven:?} unbounded={unbounded:?} unknown_calls={} effects={:?}",
             self.id.0,
             self.local.has_unknown_calls,
             self.local
@@ -1270,7 +1372,7 @@ impl PreparedCalleeSummary {
                 .map(|effect| (effect.kind, effect.location))
                 .collect::<Vec<_>>()
         );
-        reach
+        proven
     }
 }
 
@@ -2351,6 +2453,20 @@ fn classify_memory_access_location(
     classify_memory_access_location_value(prepared, abi, value_id, space, width, 0)
 }
 
+/// Which of the callee's own arguments a scaling value is, if it is one.
+///
+/// The value is usually not the argument as it arrived: at `-O0` the index is
+/// spilled to its home slot in the prologue and the indexing reads it back, so
+/// the question is answered from the formal-identity fact rather than from the
+/// value's storage, which is the slot's.
+fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<usize> {
+    let var = prepared.value_var(value)?;
+    prepared
+        .function()
+        .decompile_prep_facts()?
+        .formal_parameter_of(var)
+}
+
 fn classify_memory_access_location_value(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
@@ -2385,11 +2501,27 @@ fn classify_memory_access_location_value(
                 expression.offset,
                 expression.terms
             );
-            return arg_location(
-                parameter,
-                expression.terms.is_empty().then_some(expression.offset),
-                expression.terms.is_empty().then_some(width),
-            );
+            if expression.terms.is_empty() {
+                return arg_location(parameter, Some(expression.offset), Some(width));
+            }
+            // One term scaled by another argument is an indexed read of what
+            // this one points at, and the stride is the fact the caller needs:
+            // it knows what it passed for the index and so how far the read
+            // goes. Discarding it left the reach merely "through argument n".
+            if let [term] = expression.terms.as_slice()
+                && let Some(index) = scaled_argument_index(prepared, term.value)
+            {
+                return scaled_arg_location(
+                    parameter,
+                    SummaryScaledOffset {
+                        argument: index,
+                        stride: term.coefficient,
+                    },
+                    expression.offset,
+                    Some(width),
+                );
+            }
+            return arg_location(parameter, None, None);
         }
         if let Some(address) = crate::constant::value_of(prepared.graph(), *candidate) {
             return global_location(address, Some(0), Some(width));
