@@ -257,6 +257,17 @@ impl FunctionSemanticSummary {
         }
     }
 
+    /// The seed for a bodiless callee named bare or marked. The names table
+    /// spells an import bare; having no body is the externality the seed
+    /// table asks the name to carry.
+    pub(crate) fn seed_for_callee_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
+        if name.contains("imp.") || name.contains("reloc.") {
+            Self::seed_for_name(id, name)
+        } else {
+            Self::seed_for_name(id, &format!("sym.imp.{name}"))
+        }
+    }
+
     fn seed_for_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
         let normalized = normalize_seed_name(name)?;
         let mut arg_effects = BTreeMap::new();
@@ -1304,16 +1315,9 @@ fn seed_named_callees(
         if current.contains_key(&id) {
             continue;
         }
-        // The names table spells an import bare; having no body is the
-        // externality the seed table asks the name to carry.
-        let seed = names.get(&callee).and_then(|name| {
-            let marked = if name.contains("imp.") || name.contains("reloc.") {
-                name.clone()
-            } else {
-                format!("sym.imp.{name}")
-            };
-            FunctionSemanticSummary::seed_for_name(id, &marked)
-        });
+        let seed = names
+            .get(&callee)
+            .and_then(|name| FunctionSemanticSummary::seed_for_callee_name(id, name));
         r2il::refusal_evidence!(
             "summary-seed",
             "callee {callee:#x} name={:?} seeded={}",

@@ -325,6 +325,8 @@ pub struct ObjectModel {
     /// Indexed addresses whose base is displaced from the object's base, so
     /// the index alone does not say where in the object the element is.
     pub displaced_indexed_addresses: BTreeSet<ValueId>,
+    /// How many bytes a callee is proven to write into each object from its base.
+    pub callee_write_reach: BTreeMap<ObjectId, u32>,
 }
 
 impl ObjectModel {
@@ -2312,11 +2314,14 @@ struct ObjectModelBuilder<'a> {
     evidenced_roots: BTreeSet<StackAddressRoot>,
     /// How far each evidenced root's indexed accesses reach.
     evidenced_spans: BTreeMap<StackAddressRoot, i64>,
+    /// How far a callee writes from each root it is handed.
+    callee_write_spans: BTreeMap<StackAddressRoot, i64>,
     /// Where each counted loop's counter starts, for an index's lower bound.
     induction_starts: BTreeMap<ValueId, u64>,
     /// Addresses whose displaced parent is being resolved, against a cycle.
     resolving: BTreeSet<ValueId>,
     stack_pointer_carrier: Option<CanonicalStorageId>,
+    machine_context: Option<&'a SourceMachineContext>,
     stack_objects: BTreeMap<StackObjectKey, ObjectId>,
     entry_stack_roots: BTreeMap<ObjectId, StackAddressRoot>,
     ambiguous_entry_stack_objects: BTreeSet<ObjectId>,
@@ -2333,7 +2338,7 @@ impl<'a> ObjectModelBuilder<'a> {
         facts: Option<&'a DecompilePrepFacts>,
         addresses: &'a AddressProvenanceFacts,
         declared_slots: &'a DeclaredStackSlots,
-        machine_context: Option<&SourceMachineContext>,
+        machine_context: Option<&'a SourceMachineContext>,
     ) -> Self {
         let escaped_unknown_id = ObjectId(0);
         let mut objects = BTreeMap::new();
@@ -2371,10 +2376,12 @@ impl<'a> ObjectModelBuilder<'a> {
             displaced_indexed_addresses: BTreeSet::new(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
+            callee_write_spans: BTreeMap::new(),
             induction_starts: BTreeMap::new(),
             resolving: BTreeSet::new(),
             stack_pointer_carrier: machine_context
                 .and_then(SourceMachineContext::stack_pointer_carrier),
+            machine_context,
             stack_objects: BTreeMap::new(),
             entry_stack_roots: BTreeMap::new(),
             ambiguous_entry_stack_objects: BTreeSet::new(),
@@ -2396,14 +2403,23 @@ impl<'a> ObjectModelBuilder<'a> {
     ) -> ObjectModel {
         self.induction_starts = induction_starts.clone();
         if let Some(facts) = self.facts {
+            for (start, end) in callee_write_spans(facts, function, graph, self.machine_context) {
+                self.callee_write_spans
+                    .entry(start)
+                    .and_modify(|known| *known = (*known).max(end))
+                    .or_insert(end);
+            }
             let (roots, spans) = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
                 function,
                 graph,
                 self.stack_pointer_carrier,
-                induction_bounds,
-                induction_starts,
+                &InductionBounds {
+                    upper: induction_bounds,
+                    lower: induction_starts,
+                },
+                &self.callee_write_spans,
             );
             self.evidenced_roots = roots;
             self.evidenced_spans = spans;
@@ -2466,7 +2482,17 @@ impl<'a> ObjectModelBuilder<'a> {
             }
         }
 
+        let callee_write_reach = self
+            .stack_objects
+            .iter()
+            .filter_map(|(key, object)| {
+                let end = self.callee_write_spans.get(&key.root)?;
+                let reach = u32::try_from(end.checked_sub(key.root.offset)?).ok()?;
+                Some((*object, reach))
+            })
+            .collect();
         ObjectModel {
+            callee_write_reach,
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,
@@ -7725,6 +7751,12 @@ fn accessed_object_storage(
     structured: &StructuredDataflowFacts,
     object: ObjectId,
 ) -> Option<(u32, bool)> {
+    // A callee proven to write the object from its base wrote that far,
+    // whatever this body reads of it afterwards.
+    if let Some(reach) = objects.callee_write_reach.get(&object) {
+        let accessed = accessed_object_extent(graph, inductions, objects, structured, object);
+        return Some((accessed.map_or(*reach, |extent| extent.max(*reach)), true));
+    }
     // An access at a computed index lands wherever the index reaches, so the
     // widths its accesses share say nothing about how far the object goes.
     if structured
@@ -7816,15 +7848,108 @@ fn accessed_object_storage(
 /// a position the stack pointer itself takes, and the base of an indexed
 /// access unless that base is itself a place inside another object.
 /// A position that is only ever displaced from is not one.
+/// How far a callee is proven to write through a frame address it is
+/// handed: the bytes a modelled import fills from a length argument that is
+/// a constant at the call. Those bytes are one object, whatever this body
+/// later reads of them one at a time.
+fn callee_write_spans(
+    facts: &DecompilePrepFacts,
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+) -> Vec<(StackAddressRoot, i64)> {
+    let Some(machine_context) = machine_context else {
+        return Vec::new();
+    };
+    let registers = machine_context.abi_model().argument_registers();
+    let mut reaching =
+        BTreeMap::<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>::new();
+    let mut spans = Vec::new();
+    for block in function.blocks() {
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            let SSAOp::Call {
+                target,
+                instruction: Some(instruction),
+            } = op
+            else {
+                continue;
+            };
+            let Some(name) = machine_context
+                .raw_call_site_at(*instruction)
+                .and_then(|identity| machine_context.callee_name(identity))
+            else {
+                continue;
+            };
+            let id = crate::interproc::InterprocFunctionId(
+                resolve_graph_literal_value(graph, Some(facts), target).unwrap_or(0),
+            );
+            let Some(seed) =
+                crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name)
+            else {
+                continue;
+            };
+            let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+                continue;
+            };
+            let mut argument = |index: usize| -> Option<&SSAVar> {
+                let storage = registers
+                    .iter()
+                    .find(|slot| slot.index() as usize == index)?
+                    .storage();
+                let states = reaching
+                    .entry(storage)
+                    .or_insert_with(|| reaching_storage_states_before(function, graph, storage));
+                match states.get(&call)? {
+                    ReachingStorageState::Value(value) => {
+                        graph.value(*value).map(|value| &value.var)
+                    }
+                    _ => None,
+                }
+            };
+            for transfer in &seed.transfer_effects {
+                let crate::interproc::SummaryMemoryRegion::Arg { index } = transfer.dst.region
+                else {
+                    continue;
+                };
+                let Some(root) =
+                    argument(index).and_then(|var| resolve_stack_root(Some(facts), var))
+                else {
+                    continue;
+                };
+                let length = match transfer.len {
+                    crate::interproc::SummaryTransferLength::Const(length) => Some(length),
+                    crate::interproc::SummaryTransferLength::Arg(length) => argument(length)
+                        .and_then(|var| resolve_graph_literal_value(graph, Some(facts), var)),
+                    crate::interproc::SummaryTransferLength::Unknown => None,
+                };
+                let Some(end) = length
+                    .and_then(|length| i64::try_from(length).ok())
+                    .and_then(|length| root.offset.checked_add(length))
+                else {
+                    continue;
+                };
+                r2il::refusal_evidence!(
+                    "callee-write-span",
+                    "{name} at {instruction:#x} writes argument {index} at {root:?} up to {end}"
+                );
+                spans.push((root, end));
+            }
+        }
+    }
+    spans
+}
+
 fn evidenced_stack_roots(
     facts: &DecompilePrepFacts,
     declared_slots: &DeclaredStackSlots,
     function: &SSAFunction,
     graph: &SsaGraph,
     stack_pointer_carrier: Option<CanonicalStorageId>,
-    induction_bounds: &BTreeMap<ValueId, u64>,
-    induction_starts: &BTreeMap<ValueId, u64>,
+    induction: &InductionBounds<'_>,
+    callee_write_spans: &BTreeMap<StackAddressRoot, i64>,
 ) -> (BTreeSet<StackAddressRoot>, BTreeMap<StackAddressRoot, i64>) {
+    let induction_bounds = induction.upper;
+    let induction_starts = induction.lower;
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
     let definition = |var: &SSAVar| {
@@ -7992,6 +8117,12 @@ fn evidenced_stack_roots(
                 .and_modify(|known| *known = (*known).max(end))
                 .or_insert(end);
         }
+    }
+    for (start, end) in callee_write_spans {
+        spans
+            .entry(*start)
+            .and_modify(|known| *known = (*known).max(*end))
+            .or_insert(*end);
     }
     roots.retain(|root| {
         let inside = spans.iter().any(|(base, end)| {

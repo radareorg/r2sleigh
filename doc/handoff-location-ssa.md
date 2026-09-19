@@ -28709,3 +28709,33 @@ return kind is the join of its direct return paths and its tail callees'
 kinds, and an SCC with agreeing direct paths resolves to them. Recovery runs
 per function today and has no callee body in hand, so this needs the solve to
 happen where the prepared set is.
+
+## A callee's proven write is an object's extent
+
+The 160-byte buffer `shape_variadic` hands to `__snprintf_chk` rendered as
+four `uint8_t` objects at the bytes the body reads back, each a separate C
+variable, so the rendering read three of them uninitialised and the C was
+wrong even where it compiled. The geometry knew only what this body accessed;
+what the callee wrote through the address it was handed never reached it.
+
+`callee_write_spans` (semantic.rs) now asks, for every direct call whose
+callee the seed table models, how far the callee writes through each frame
+address it receives: the transfer length of the seed, a constant at the
+call. Those spans join the indexed spans: a root strictly inside one is a
+place in the buffer (`indexed-span-absorbs`), and `ObjectModel::
+callee_write_reach` sizes the object from its base to the end of the span, so
+`accessed_object_storage` answers `uint8_t[160]` where the accesses alone said
+one byte. The machine context carries each raw call site's callee name for
+this (`callee_name`), beside the linkage it already carried.
+
+Only seeded imports contribute today. A local callee's own write extent is
+the same fact -- its summary already names the bytes it writes through each
+argument -- but the summary is solved in r2dec after this geometry, so it does
+not reach here yet.
+
+Still open on the same shape at -O1 and -O2: `snprintf` is a name clang knows,
+and the declaration `int32_t snprintf(char*, size_t, char*, ...)` contradicts
+the library's `const char *` parameter, so a strict compile refuses the
+redeclaration. The type model drops qualifiers when it parses a spelling
+(`strip_type_qualifiers`), and `CTypeLike` has no way to carry one back; a
+declaration of any libc function that takes `const char *` fails the same way.

@@ -1558,6 +1558,8 @@ struct CorrelatedCallSites {
     interfaces: Vec<SourceCallSiteInterface>,
     /// Who each correlated site calls, where the source knew: the binary's own function or an import.
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
+    /// The name the source gave each correlated site's callee.
+    callee_names: BTreeMap<SourceCallSiteIdentity, String>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1568,6 +1570,7 @@ fn correlate_call_site_interfaces(
     let mut tail_calls = Vec::new();
     let mut interfaces = Vec::new();
     let mut callee_linkages = BTreeMap::new();
+    let mut callee_names = BTreeMap::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, call) else {
             // The source named a call the lift does not have exactly one
@@ -1589,6 +1592,9 @@ fn correlate_call_site_interfaces(
         }
         if call.linkage() != r2source::AdvisoryCalleeLinkage::Unknown {
             callee_linkages.insert(identity, call.linkage());
+        }
+        if let Some(name) = call.target_name() {
+            callee_names.insert(identity, name.to_string());
         }
         // A prototype the source recovered supplies the physical call
         // contract. When this capture also carries the callee body, retain its
@@ -1712,6 +1718,7 @@ fn correlate_call_site_interfaces(
         tail_calls,
         interfaces,
         callee_linkages,
+        callee_names,
     }
 }
 
@@ -2107,6 +2114,7 @@ impl TrustedSsaArtifact {
                 &declared_successors.terminal_blocks(),
             );
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
+        machine_context.set_callee_names(correlated_call_sites.callee_names);
         r2il::refusal_evidence!(
             "snapshot-literals",
             "the decoded image delivers {} string literals",

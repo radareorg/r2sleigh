@@ -573,6 +573,8 @@ pub struct SourceMachineContext {
     tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// Who each raw call site calls, where the source knew.
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
+    /// The name the source gave each raw call site's callee.
+    callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     call_site_interfaces: BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface>,
     /// Literal bytes captured by the same immutable source transaction as the
     /// callsite interfaces. Unlike display strings, these participate in
@@ -1345,6 +1347,7 @@ impl SourceMachineContext {
             raw_call_sites,
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
+            callee_names: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             memory_spaces_by_op,
@@ -1602,6 +1605,18 @@ impl SourceMachineContext {
         callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     ) {
         self.callee_linkages = callee_linkages;
+    }
+
+    pub(crate) fn set_callee_names(
+        &mut self,
+        callee_names: BTreeMap<SourceCallSiteIdentity, String>,
+    ) {
+        self.callee_names = callee_names;
+    }
+
+    /// The name the source gave the site's callee, where it gave one.
+    pub fn callee_name(&self, identity: SourceCallSiteIdentity) -> Option<&str> {
+        self.callee_names.get(&identity).map(String::as_str)
     }
 
     /// Who the site calls, as the source's symbol or relocation said; unknown where it said nothing.
