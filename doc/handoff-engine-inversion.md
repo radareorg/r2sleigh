@@ -178,6 +178,27 @@ radare2 maps a relocatable object at `0x8000000` where `r2s` maps it at zero;
 and one Thumb function decodes differently, which is a real gap rather than a
 spelling.
 
+## A disagreement can be radare2's defect
+
+Two of the three symbol-listing disagreements were radare2's, and matching them
+would have meant adopting the bug. `_set_arm_thumb_bits`
+(`libr/bin/format/elf/elf.c`) cleared the low bit of *any* symbol whose address
+was odd. On ARM that bit selects Thumb on a **function** address; a data object
+at an odd address is at an odd address. The ELF says
+`zeroes` is `STT_OBJECT` at `0x677d7`, and radare2 reported `0x677d6` -- one
+byte before the object, labelled sixteen-bit code.
+
+Fixed in the fork on `fix/arm-thumb-bit-on-data-symbols`, with a regression
+test in radare2's own suite, and waiting to be raised upstream. The format
+suite goes from 241 passing to 242 with nothing else moved. Symbol-listing
+agreement went from twenty-one of twenty-four to twenty-three.
+
+The engine had the matching defect in the other direction and it is fixed too:
+an entry point kept its Thumb bit, so a Thumb `_start` decoded from an odd
+address and every instruction after it read from the wrong place. Entry-point
+agreement is now complete. What is still missing is acting on the bit: the
+decoder reads ARM whatever the bit said.
+
 ## The certification gate is red, deliberately
 
 `scripts/diff_capture.py --native-only` renders every named function and fails
