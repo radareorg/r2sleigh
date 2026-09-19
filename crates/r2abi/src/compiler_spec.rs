@@ -25,6 +25,11 @@ pub struct CompilerSpec {
     /// uses one. A machine that pushes it names a stack location instead, and
     /// this is then `None`.
     pub return_address: Option<String>,
+    /// Where a machine that pushes the return address leaves it: the offset
+    /// from the stack pointer entering the call, and how many bytes it takes.
+    /// The specification states a location, not a register, so the slot is
+    /// recorded as one rather than being lost.
+    pub return_address_slot: Option<(i64, u32)>,
     /// The registers a call leaves as it found them, as the default prototype
     /// declares them.
     pub unaffected: Vec<String>,
@@ -48,6 +53,7 @@ impl CompilerSpec {
                 _ => StackAllocation::Lower,
             },
             return_address: return_address(text),
+            return_address_slot: return_address_slot(text),
             unaffected: unaffected(text),
             stack_arguments: stack_arguments(text),
         }
@@ -100,6 +106,25 @@ fn stack_arguments(text: &str) -> Option<(i64, u32)> {
     None
 }
 
+/// Where a machine that pushes the return address leaves it.
+///
+/// x86 declares `<varnode space="stack" offset="0" size="4"/>`, which says the
+/// slot the call pushed is at the stack pointer entering the function. A
+/// machine that uses a link register names one instead and has no slot.
+fn return_address_slot(text: &str) -> Option<(i64, u32)> {
+    let start = text.find("<returnaddress>")? + "<returnaddress>".len();
+    let end = text[start..].find("</returnaddress>")? + start;
+    let varnode = element(&text[start..end], "varnode")?;
+    (attribute(varnode, "space") == Some("stack"))
+        .then(|| {
+            Some((
+                attribute(varnode, "offset")?.parse().ok()?,
+                attribute(varnode, "size")?.parse().ok()?,
+            ))
+        })
+        .flatten()
+}
+
 /// The registers the default prototype says a call does not disturb.
 fn unaffected(text: &str) -> Vec<String> {
     let Some(start) = text.find("<unaffected>") else {
@@ -149,6 +174,17 @@ fn attribute<'a>(element: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_machine_that_pushes_the_return_address_states_the_slot() {
+        let spec = CompilerSpec::parse(
+            r#"<returnaddress>
+    <varnode space="stack" offset="0" size="4"/>
+  </returnaddress>"#,
+        );
+        assert_eq!(spec.return_address, None);
+        assert_eq!(spec.return_address_slot, Some((0, 4)));
+    }
 
     #[test]
     fn a_stack_only_convention_states_where_its_arguments_are() {
