@@ -62,3 +62,5 @@ tests/coverage/artifacts/
 # machine, so tracking them made every worktree's merge collide on a file
 # nobody reads.
 tests/decbench/artifacts/
+
+.claude/settings.local.json

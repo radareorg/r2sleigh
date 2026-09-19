@@ -133,81 +133,81 @@ pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
         .iter()
         .filter(|section| stubs(&section.name))
     {
-        let mut stub = section.vaddr;
-        let mut pc = section.vaddr;
-        let end = section.vaddr + section.vsize;
-        while pc < end {
-            let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
-                break;
-            };
-            let mut fetch = window.into_owned();
-            fetch.resize(DECODE_WINDOW, 0);
-            // Padding between stubs is zero bytes, and zero bytes are not an
-            // instruction. Skipping them is what puts the name on the stub a
-            // call reaches rather than on the padding before it.
-            if fetch[0] == 0 {
-                pc += 1;
-                stub = pc;
-                continue;
-            }
-            let Ok(lifted) = decoder.lift(&fetch, pc) else {
-                break;
-            };
-            if lifted.size == 0 {
-                break;
-            }
-
-            // Alignment padding between stubs is an instruction like
-            // `nop dword [rax]` as often as it is zero bytes. It writes
-            // nothing the program can read, and the stub begins after it.
-            if is_padding(&lifted) {
-                pc += u64::from(lifted.size);
-                stub = pc;
-                continue;
-            }
-
-            let mut leaves = false;
-            for op in &lifted.ops {
-                match op {
-                    R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. }
-                        if matches!(addr.space, SpaceId::Ram | SpaceId::Const) =>
-                    {
-                        if let Some(symbol) = slots.get(&addr.offset) {
-                            named.entry(stub).or_insert_with(|| (*symbol).to_owned());
-                        }
-                    }
-                    // An unconditional transfer ends the stub, so whatever
-                    // follows begins the next one.
-                    R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. } => leaves = true,
-                    _ => {}
-                }
-            }
-
-            pc += u64::from(lifted.size);
-            if leaves {
-                stub = pc;
-            }
+        for (start, symbol) in section_stubs(image, decoder, section, &slots) {
+            named.entry(start).or_insert(symbol);
         }
     }
+
     named
 }
 
-/// Whether an instruction only occupies space.
+/// Where each stub in one section begins, and which import it stands for.
 ///
-/// Padding leaves nothing behind: it writes no memory, transfers nowhere, and
-/// whatever it computes stays in the temporaries the lift invented for it.
-fn is_padding(lifted: &r2il::R2ILBlock) -> bool {
-    // An instruction that lifts to nothing at all did nothing at all.
-    lifted.ops.iter().all(|op| match op {
-        R2ILOp::Store { .. }
-        | R2ILOp::Branch { .. }
-        | R2ILOp::CBranch { .. }
-        | R2ILOp::BranchInd { .. }
-        | R2ILOp::Call { .. }
-        | R2ILOp::CallInd { .. }
-        | R2ILOp::Return { .. } => false,
-        _ => op.output().is_none_or(|out| out.space == SpaceId::Unique),
-    })
+/// A stub ends at the transfer it makes, and every stub in a section is the
+/// same size, so the distance between two consecutive ends is the size the
+/// linker gave them. Measuring it from the stubs themselves is what keeps a
+/// landing pad at a stub's head inside the stub: nothing has to decide whether
+/// an instruction that writes nothing is padding before a stub or the first
+/// instruction of one.
+fn section_stubs(
+    image: &Image,
+    decoder: &Disassembler,
+    section: &r2image::Section,
+    slots: &BTreeMap<u64, &str>,
+) -> Vec<(u64, String)> {
+    let mut ends: Vec<(u64, Option<String>)> = Vec::new();
+    let mut symbol: Option<String> = None;
+    let mut pc = section.vaddr;
+    let end = section.vaddr + section.vsize;
+    while pc < end {
+        let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
+            break;
+        };
+        let mut fetch = window.into_owned();
+        fetch.resize(DECODE_WINDOW, 0);
+        // Zero bytes are not an instruction, so nothing can be read out of them.
+        if fetch[0] == 0 {
+            pc += 1;
+            continue;
+        }
+        let Ok(lifted) = decoder.lift(&fetch, pc) else {
+            break;
+        };
+        if lifted.size == 0 {
+            break;
+        }
+        let mut leaves = false;
+        for op in &lifted.ops {
+            match op {
+                R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. }
+                    if matches!(addr.space, SpaceId::Ram | SpaceId::Const) =>
+                {
+                    if let Some(found) = slots.get(&addr.offset) {
+                        symbol = Some((*found).to_owned());
+                    }
+                }
+                R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. } => leaves = true,
+                _ => {}
+            }
+        }
+        pc += u64::from(lifted.size);
+        if leaves {
+            ends.push((pc, symbol.take()));
+        }
+    }
+
+    let stride = match ends.as_slice() {
+        [first, second, ..] => second.0 - first.0,
+        [_] | [] => section.vsize.max(1),
+    };
+    // The section is a run of equal cells from its first address, and the
+    // transfer a stub makes falls in the cell the stub occupies.
+    ends.into_iter()
+        .filter_map(|(end, symbol)| {
+            let cell = end.checked_sub(1)?.checked_sub(section.vaddr)? / stride;
+            Some((section.vaddr + cell * stride, symbol?))
+        })
+        .collect()
 }
 
 /// The sections a format puts import stubs in.
