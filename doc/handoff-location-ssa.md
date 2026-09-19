@@ -29261,3 +29261,35 @@ the read spelled `stack_m40[index]`. The cell still fails its differential,
 because the indirect call through the chosen pointer passes four arguments
 where the source passes two -- the same call-site arity question the variadic
 local raises, and the next thing to fix in this function.
+
+## A function pointer read from the image is rendered as its bytes
+
+With the table sized correctly, `shape_function_pointer` still computes the
+wrong answer, and the reason is what the three loads that fill it say:
+
+```c
+uint64_t RAX_3 = *(uint64_t*)0x100002030;
+*(uint64_t*)stack_m40 = RAX_3;
+```
+
+The address is where the original binary keeps `{op_add, op_xor, op_mul}`, and
+the rendering reads it as data. Recompiled, that load takes whatever the
+harness put at that address, so the call through the chosen entry goes
+somewhere that has nothing to do with `op_add`. The verifier substitutes a blob
+for the address, which keeps the C compiling and makes the wrongness quiet
+rather than loud.
+
+The facts to do better are already captured. `SourceCodePointerTable` carries a
+table's address, entry size and the functions its entries point at, the plugin
+collects one for every data reference a function makes
+(`function_image_code_pointer_tables_collect` in `r2plugin/snapshot_capture.c`),
+and `crates/r2ssa/src/indirect.rs` already resolves an indirect call through
+such a table to its set of targets. Nothing carries that through to the
+rendering, which still meets the load as an ordinary read of a constant
+address.
+
+What is missing is one spelling rule: a load of pointer width from an address
+that is an entry of a captured code pointer table is the function that entry
+names, so it renders as that function's name rather than as a read of the
+image. The table's own storage then needs no blob, the local array holds
+three names, and the indirect call goes where the program sends it.
