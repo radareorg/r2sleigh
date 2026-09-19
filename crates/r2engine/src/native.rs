@@ -209,6 +209,13 @@ fn declared_interface(
 ) -> Option<r2source::SourceFunctionInterface> {
     let slots = machine.slots.argument_slots();
     if prototype.parameters.len() > slots.len() {
+        r2il::refusal_evidence!(
+            "declared-interface",
+            "{} declares {} parameters and the convention has {} registers",
+            prototype.name,
+            prototype.parameters.len(),
+            slots.len()
+        );
         return None;
     }
     let parameters = prototype
@@ -237,6 +244,14 @@ fn declared_interface(
             .ok()?
             .with_stack_pointer_storage(roles.stack_pointer_storage()?)
             .ok()
+    })
+    .or_else(|| {
+        r2il::refusal_evidence!(
+            "declared-interface",
+            "{} could not be stated in this machine's carriers",
+            prototype.name
+        );
+        None
     })
 }
 

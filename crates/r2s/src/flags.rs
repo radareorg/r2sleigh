@@ -115,6 +115,19 @@ pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
         return named;
     }
 
+    // Mach-O names the stub itself rather than a slot the stub reads, so a
+    // relocation landing inside a stub section already is the answer.
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| stubs(&section.name))
+    {
+        let end = section.vaddr + section.vsize;
+        for (vaddr, symbol) in slots.range(section.vaddr..end) {
+            named.insert(*vaddr, (*symbol).to_owned());
+        }
+    }
+
     for section in image
         .sections()
         .iter()

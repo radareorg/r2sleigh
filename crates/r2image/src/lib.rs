@@ -142,6 +142,138 @@ pub struct Relocation {
     pub symbol: String,
 }
 
+/// Which symbol each stub and pointer slot stands for, in a Mach-O.
+///
+/// A section of stubs or of symbol pointers says where its entries begin in the
+/// indirect symbol table (`reserved1`) and how wide one entry is
+/// (`reserved2`), and the table says which symbol each entry stands for. That
+/// is the whole mapping, and it needs no bind-opcode interpreter.
+fn macho_indirect_symbols(file: &object::File<'_>, data: &[u8]) -> Vec<Relocation> {
+    match file {
+        object::File::MachO64(macho) => indirect_symbols(macho, data),
+        object::File::MachO32(macho) => indirect_symbols(macho, data),
+        _ => Vec::new(),
+    }
+}
+
+/// The two fields a Mach-O section uses to point into the indirect symbol
+/// table. They are struct fields rather than trait methods in `object`, so a
+/// generic walk over both widths needs this to reach them.
+trait IndirectRange {
+    fn first_indirect(&self, endian: object::Endianness) -> u32;
+    fn entry_stride(&self, endian: object::Endianness) -> u32;
+}
+
+impl IndirectRange for object::macho::Section64<object::Endianness> {
+    fn first_indirect(&self, endian: object::Endianness) -> u32 {
+        self.reserved1.get(endian)
+    }
+
+    fn entry_stride(&self, endian: object::Endianness) -> u32 {
+        self.reserved2.get(endian)
+    }
+}
+
+impl IndirectRange for object::macho::Section32<object::Endianness> {
+    fn first_indirect(&self, endian: object::Endianness) -> u32 {
+        self.reserved1.get(endian)
+    }
+
+    fn entry_stride(&self, endian: object::Endianness) -> u32 {
+        self.reserved2.get(endian)
+    }
+}
+
+fn indirect_symbols<'data, Mach, R>(
+    file: &object::read::macho::MachOFile<'data, Mach, R>,
+    data: &'data [u8],
+) -> Vec<Relocation>
+where
+    Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
+    Mach::Section: IndirectRange,
+    R: object::ReadRef<'data>,
+{
+    use object::read::macho::{Nlist as _, Section as _};
+    use object::{Object, ObjectSection, macho};
+
+    let endian = match file.macho_header().endian() {
+        Ok(endian) => endian,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(mut commands) = file.macho_header().load_commands(endian, data, 0) else {
+        return Vec::new();
+    };
+    let mut table = None;
+    while let Ok(Some(command)) = commands.next() {
+        if let Ok(Some(dysymtab)) = command.dysymtab() {
+            table = Some(dysymtab);
+            break;
+        }
+    }
+    let Some(dysymtab) = table else {
+        return Vec::new();
+    };
+    let offset = dysymtab.indirectsymoff.get(endian) as usize;
+    let count = dysymtab.nindirectsyms.get(endian) as usize;
+    let Some(bytes) = data.get(offset..offset + count.saturating_mul(4)) else {
+        return Vec::new();
+    };
+    let indirect: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+
+    let symbols = file.macho_symbol_table();
+    let mut named = Vec::new();
+    for section in file.sections() {
+        let raw = section.macho_section();
+        let kind = raw.flags(endian) & macho::SECTION_TYPE;
+        if !matches!(
+            kind,
+            macho::S_NON_LAZY_SYMBOL_POINTERS
+                | macho::S_LAZY_SYMBOL_POINTERS
+                | macho::S_SYMBOL_STUBS
+        ) {
+            continue;
+        }
+        let stride = match kind {
+            macho::S_SYMBOL_STUBS => u64::from(raw.entry_stride(endian)),
+            _ if file.is_64() => 8,
+            _ => 4,
+        };
+        if stride == 0 {
+            continue;
+        }
+        let first = raw.first_indirect(endian) as usize;
+        let entries = section.size() / stride;
+        for entry in 0..entries {
+            let Some(index) = indirect.get(first + entry as usize).copied() else {
+                break;
+            };
+            if index & (macho::INDIRECT_SYMBOL_LOCAL | macho::INDIRECT_SYMBOL_ABS) != 0 {
+                continue;
+            }
+            let Ok(symbol) = symbols.symbol(object::SymbolIndex(index as usize)) else {
+                continue;
+            };
+            let Ok(name) = symbol.name(endian, symbols.strings()) else {
+                continue;
+            };
+            let Ok(name) = core::str::from_utf8(name) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            named.push(Relocation {
+                vaddr: section.address() + entry * stride,
+                symbol: name.to_owned(),
+            });
+        }
+    }
+    named
+}
+
 /// A parsed binary, with its bytes retained for address reads.
 #[derive(Debug, Clone)]
 pub struct Image {
@@ -257,6 +389,9 @@ impl Image {
                 })
             })
             .collect();
+        // Mach-O states its imports through the indirect symbol table rather
+        // than through relocations, and `object` reports none for it.
+        relocations.extend(macho_indirect_symbols(&file, data.as_slice()));
         relocations.sort_by(|left, right| left.vaddr.cmp(&right.vaddr));
         relocations.dedup_by_key(|relocation| relocation.vaddr);
 
@@ -600,6 +735,7 @@ mod tests {
             sections: Vec::new(),
             symbols: Vec::new(),
             entry_points: Vec::new(),
+            relocations: Vec::new(),
         }
     }
 
