@@ -2410,7 +2410,7 @@ fn classify_memory_access_location_value(
                 expression.terms.is_empty().then_some(width),
             );
         }
-        if let Some(address) = exact_constant_value(prepared, *candidate) {
+        if let Some(address) = crate::constant::value_of(prepared.graph(), *candidate) {
             return global_location(address, Some(0), Some(width));
         }
 
@@ -2566,7 +2566,7 @@ fn classify_memory_additive_location(
 fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId, depth: u32) -> Option<u64> {
     match classify_value_operand(prepared, value_id, depth) {
         SummaryOperand::Const(value) => Some(value),
-        _ => exact_constant_value(prepared, canonical_root_value(prepared, value_id)),
+        _ => crate::constant::value_of(prepared.graph(), canonical_root_value(prepared, value_id)),
     }
 }
 
@@ -3042,7 +3042,7 @@ fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar, depth: u32) -> Sum
     let Some(value_id) = prepared.graph().value_id_for_var(var) else {
         return SummaryOperand::Unknown;
     };
-    if let Some(bits) = exact_constant_value(prepared, value_id) {
+    if let Some(bits) = crate::constant::value_of(prepared.graph(), value_id) {
         return SummaryOperand::Const(bits);
     }
     if let Some(idx) = formal_arg_index_for_var(prepared, var) {
@@ -3059,7 +3059,7 @@ fn classify_value_operand(prepared: &SsaArtifact, value_id: ValueId, depth: u32)
     let Some(root_var) = prepared.value_var(rooted) else {
         return SummaryOperand::Unknown;
     };
-    if let Some(bits) = exact_constant_value(prepared, rooted) {
+    if let Some(bits) = crate::constant::value_of(prepared.graph(), rooted) {
         return SummaryOperand::Const(bits);
     }
     if let Some(idx) = formal_arg_index_for_var(prepared, root_var) {
@@ -3122,18 +3122,6 @@ fn global_address_for_value_id(prepared: &SsaArtifact, value_id: ValueId) -> Opt
         ObjectKind::Global { address, .. } => Some(address),
         _ => None,
     }
-}
-
-fn exact_constant_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64> {
-    let value = prepared.graph().value(value_id)?;
-    let bits = value.var.constant_bits()?;
-    (value.canonical_storage
-        == Some(crate::CanonicalStorageId {
-            space: crate::CanonicalStorageSpace::Constant,
-            offset: bits,
-            size: value.var.size,
-        }))
-    .then_some(bits)
 }
 
 fn normalize_seed_name(name: &str) -> Option<&'static str> {

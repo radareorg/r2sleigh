@@ -16,10 +16,10 @@
 //! Failing closed is the point. An unproven target set would be a guess about
 //! control flow, and a wrong edge is worse than a missing one.
 
+use crate::SSAOp;
 use crate::cfg::BlockTerminator;
 use crate::function::{SSAFunction, SsaArtifact};
 use crate::graph::{GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
-use crate::{CanonicalStorageId, CanonicalStorageSpace, SSAOp};
 use std::collections::BTreeMap;
 
 /// A call site and the table entries it can reach.
@@ -111,134 +111,6 @@ pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) 
         .then_some(value)
 }
 
-fn exact_constant(graph: &SsaGraph, value: ValueId) -> Option<u64> {
-    let value = graph.value(value)?;
-    let bits = value.var.constant_bits()?;
-    (value.canonical_storage
-        == Some(CanonicalStorageId {
-            space: CanonicalStorageSpace::Constant,
-            offset: bits,
-            size: value.var.size,
-        }))
-    .then_some(bits)
-}
-
-/// Read a folded value as signed at the width it was computed at.
-fn signed(value: u64, size: u32) -> i128 {
-    let bits = size * 8;
-    if bits == 0 || bits >= 64 {
-        return i128::from(value as i64);
-    }
-    i128::from((value as i64) << (64 - bits) >> (64 - bits))
-}
-
-/// Keep a folded value inside the width it was computed at.
-fn truncate(value: u64, size: u32) -> u64 {
-    match size {
-        0 | 8.. => value,
-        bytes => value & (u64::MAX >> (64 - bytes * 8)),
-    }
-}
-
-/// The one value a variable can hold, when its definitions leave only one.
-///
-/// A literal operand is the base case, but real code rarely offers one: an
-/// address is materialized across several instructions and moved through
-/// temporaries before it is used. Each step folded here is exact -- a copy, a
-/// widening, or arithmetic on values already pinned -- so what comes back is
-/// the value, not an estimate of it.
-pub(crate) fn resolve_constant(graph: &SsaGraph, value: ValueId, depth: usize) -> Option<u64> {
-    if let Some(value) = exact_constant(graph, value) {
-        return Some(value);
-    }
-    if depth >= MAX_DEFINITION_DEPTH {
-        return None;
-    }
-    let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-    let InstPayload::Op(op) = &inst.payload else {
-        return None;
-    };
-    let fold = |input_idx| resolve_constant(graph, exact_input(graph, inst, input_idx)?, depth + 1);
-    let folded = match op {
-        SSAOp::Copy { .. } | SSAOp::IntZExt { .. } => fold(0)?,
-        SSAOp::IntSExt { .. } => {
-            let source = exact_input(graph, inst, 0)?;
-            let source_value = graph.value(source)?;
-            let output = graph.value(value)?;
-            let value = fold(0)?;
-            // Sign-extending is only exact if we know the width it came from.
-            let bits = source_value.var.size * 8;
-            if bits == 0 || bits >= 64 || output.var.size <= source_value.var.size {
-                return None;
-            }
-            ((value as i64) << (64 - bits) >> (64 - bits)) as u64
-        }
-        SSAOp::IntAdd { .. } => fold(0)?.wrapping_add(fold(1)?),
-        SSAOp::IntSub { .. } => fold(0)?.wrapping_sub(fold(1)?),
-        SSAOp::IntMult { .. } => fold(0)?.wrapping_mul(fold(1)?),
-        SSAOp::IntLeft { .. } => {
-            let shift = fold(1)?;
-            if shift >= 64 {
-                return None;
-            }
-            fold(0)?.wrapping_shl(u32::try_from(shift).ok()?)
-        }
-        SSAOp::IntOr { .. } => fold(0)? | fold(1)?,
-        SSAOp::IntAnd { .. } => fold(0)? & fold(1)?,
-        // A condition is decided when the comparison behind it is, which is
-        // what makes a branch on it not a branch at all.
-        SSAOp::IntEqual { .. } => u64::from(fold(0)? == fold(1)?),
-        SSAOp::IntNotEqual { .. } => u64::from(fold(0)? != fold(1)?),
-        SSAOp::IntLess { .. } => u64::from(fold(0)? < fold(1)?),
-        SSAOp::IntLessEqual { .. } => u64::from(fold(0)? <= fold(1)?),
-        SSAOp::IntSLess { .. } => {
-            let left = graph.value(exact_input(graph, inst, 0)?)?;
-            let right = graph.value(exact_input(graph, inst, 1)?)?;
-            u64::from(signed(fold(0)?, left.var.size) < signed(fold(1)?, right.var.size))
-        }
-        SSAOp::IntSLessEqual { .. } => {
-            let left = graph.value(exact_input(graph, inst, 0)?)?;
-            let right = graph.value(exact_input(graph, inst, 1)?)?;
-            u64::from(signed(fold(0)?, left.var.size) <= signed(fold(1)?, right.var.size))
-        }
-        SSAOp::BoolNot { .. } => u64::from(fold(0)? == 0),
-        SSAOp::BoolAnd { .. } => u64::from(fold(0)? != 0 && fold(1)? != 0),
-        SSAOp::BoolOr { .. } => u64::from(fold(0)? != 0 || fold(1)? != 0),
-        SSAOp::BoolXor { .. } => u64::from((fold(0)? != 0) != (fold(1)? != 0)),
-        _ => return None,
-    };
-    Some(truncate(folded, graph.value(value)?.var.size))
-}
-
-/// The exact SSA value a copied/projected value ultimately stands for.
-///
-/// A bound is proven against the value one instruction compared, and the index
-/// is read several copies later. They are the same value, and the proof only
-/// connects them if both are named by where the value came from rather than by
-/// which temporary happened to be holding it.
-pub(crate) fn canonical_value(graph: &SsaGraph, value: ValueId) -> ValueId {
-    let mut current = value;
-    for _ in 0..MAX_DEFINITION_DEPTH {
-        let Some(inst) = graph.def_inst(current).and_then(|inst| graph.inst(inst)) else {
-            return current;
-        };
-        let next = match &inst.payload {
-            InstPayload::Op(SSAOp::Copy { .. } | SSAOp::IntZExt { .. }) => {
-                let Some(input) = exact_input(graph, inst, 0) else {
-                    return current;
-                };
-                input
-            }
-            _ => return current,
-        };
-        if next == current {
-            return current;
-        }
-        current = next;
-    }
-    current
-}
-
 /// Move a bound off a computed value and onto the value it was computed from.
 ///
 /// Hardware compares by subtracting: the zero flag is not `x == 3` but
@@ -258,7 +130,7 @@ fn rebase(graph: &SsaGraph, value: ValueId, interval: Interval) -> Option<(Value
         };
         let (source, offset) = match &inst.payload {
             InstPayload::Op(SSAOp::IntSub { .. }) => {
-                match resolve_constant(graph, exact_input(graph, inst, 1)?, 0) {
+                match crate::constant::folded_value(graph, exact_input(graph, inst, 1)?) {
                     Some(constant) => (exact_input(graph, inst, 0)?, i128::from(constant)),
                     None => return Some((value, interval)),
                 }
@@ -267,8 +139,8 @@ fn rebase(graph: &SsaGraph, value: ValueId, interval: Interval) -> Option<(Value
                 let left = exact_input(graph, inst, 0)?;
                 let right = exact_input(graph, inst, 1)?;
                 match (
-                    resolve_constant(graph, right, 0),
-                    resolve_constant(graph, left, 0),
+                    crate::constant::folded_value(graph, right),
+                    crate::constant::folded_value(graph, left),
                 ) {
                     (Some(constant), _) => (left, -i128::from(constant)),
                     (_, Some(constant)) => (right, -i128::from(constant)),
@@ -293,7 +165,7 @@ fn rebase(graph: &SsaGraph, value: ValueId, interval: Interval) -> Option<(Value
         {
             return Some((value, interval));
         }
-        let next = canonical_value(graph, source);
+        let next = crate::constant::root_of(graph, source);
         if next == value {
             return Some((value, interval));
         }
@@ -325,11 +197,11 @@ fn bound_from_comparison(
         let left = exact_input(graph, inst, 0)?;
         let right = exact_input(graph, inst, 1)?;
         for (value, other) in [(left, right), (right, left)] {
-            if let Some(pinned) = resolve_constant(graph, other, 0) {
+            if let Some(pinned) = crate::constant::folded_value(graph, other) {
                 let pinned = i128::from(pinned);
                 return rebase(
                     graph,
-                    canonical_value(graph, value),
+                    crate::constant::root_of(graph, value),
                     Interval {
                         low: pinned,
                         high: pinned,
@@ -354,7 +226,7 @@ fn bound_from_comparison(
     // A signed comparison reads its literal as signed at the compared width;
     // an unsigned one reads the same bits as a magnitude.
     let literal = |value: ValueId| -> Option<i128> {
-        let bits = resolve_constant(graph, value, 0)?;
+        let bits = crate::constant::folded_value(graph, value)?;
         let width = graph.value(value)?.var.size * 8;
         if signed && (1..64).contains(&width) {
             Some(i128::from((bits as i64) << (64 - width) >> (64 - width)))
@@ -377,7 +249,7 @@ fn bound_from_comparison(
                 high: i128::MAX,
             }
         };
-        return rebase(graph, canonical_value(graph, a), interval);
+        return rebase(graph, crate::constant::root_of(graph, a), interval);
     }
     if let Some(limit) = literal(a) {
         // limit < b, or its negation b <= limit
@@ -392,7 +264,7 @@ fn bound_from_comparison(
                 high: if strict { limit } else { limit - 1 },
             }
         };
-        return rebase(graph, canonical_value(graph, b), interval);
+        return rebase(graph, crate::constant::root_of(graph, b), interval);
     }
     None
 }
@@ -519,7 +391,7 @@ fn proven_bounds(
 
 /// Split an address into the table it indexes and the value indexing it.
 fn table_and_index(graph: &SsaGraph, address: ValueId) -> Option<(u64, ValueId, u64)> {
-    let address = canonical_value(graph, address);
+    let address = crate::constant::root_of(graph, address);
     let inst = graph.def_inst(address).and_then(|inst| graph.inst(inst))?;
     let InstPayload::Op(SSAOp::IntAdd { .. }) = &inst.payload else {
         return None;
@@ -528,10 +400,10 @@ fn table_and_index(graph: &SsaGraph, address: ValueId) -> Option<(u64, ValueId, 
     let right = exact_input(graph, inst, 1)?;
     // Either operand may carry the base; the other has to scale an index.
     for (base, scaled) in [(left, right), (right, left)] {
-        let Some(base_value) = resolve_constant(graph, base, 0) else {
+        let Some(base_value) = crate::constant::folded_value(graph, base) else {
             continue;
         };
-        let scaled = canonical_value(graph, scaled);
+        let scaled = crate::constant::root_of(graph, scaled);
         let Some(scale_inst) = graph.def_inst(scaled).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
@@ -539,7 +411,10 @@ fn table_and_index(graph: &SsaGraph, address: ValueId) -> Option<(u64, ValueId, 
             InstPayload::Op(SSAOp::IntMult { .. }) => {
                 let a = exact_input(graph, scale_inst, 0)?;
                 let b = exact_input(graph, scale_inst, 1)?;
-                match (resolve_constant(graph, b, 0), resolve_constant(graph, a, 0)) {
+                match (
+                    crate::constant::folded_value(graph, b),
+                    crate::constant::folded_value(graph, a),
+                ) {
                     (Some(scale), _) => (a, scale),
                     (_, Some(scale)) => (b, scale),
                     _ => continue,
@@ -548,7 +423,7 @@ fn table_and_index(graph: &SsaGraph, address: ValueId) -> Option<(u64, ValueId, 
             InstPayload::Op(SSAOp::IntLeft { .. }) => {
                 let index = exact_input(graph, scale_inst, 0)?;
                 let shift = exact_input(graph, scale_inst, 1)?;
-                match resolve_constant(graph, shift, 0) {
+                match crate::constant::folded_value(graph, shift) {
                     Some(shift) if shift < 8 => (index, 1u64 << shift),
                     _ => continue,
                 }
@@ -558,7 +433,7 @@ fn table_and_index(graph: &SsaGraph, address: ValueId) -> Option<(u64, ValueId, 
         if scale == 0 {
             continue;
         }
-        return Some((base_value, canonical_value(graph, index), scale));
+        return Some((base_value, crate::constant::root_of(graph, index), scale));
     }
     None
 }
@@ -591,7 +466,7 @@ fn resolve_indirect_calls_in_graph<T: PointerTable>(
             }
             // The callee is whatever the table held, so the target has to be a
             // load rather than a computed address.
-            let target_value = canonical_value(graph, target_value);
+            let target_value = crate::constant::root_of(graph, target_value);
             let Some(load_inst) = graph
                 .def_inst(target_value)
                 .and_then(|inst| graph.inst(inst))

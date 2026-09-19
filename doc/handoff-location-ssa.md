@@ -29696,3 +29696,56 @@ The question is therefore why `induction_upper_bounds` proves nothing for
 step of sixteen, a counter that counts down, or a comparison it does not
 recognise. That is one analysis falling short of one loop shape, not a
 partition policy and not a layering fault.
+
+## Nine constant walkers replaced by two questions
+
+The engine asked two questions of an SSA value all over the tree, and every
+caller answered its own with its own walk. There were nine of them:
+`constant_through_copies` and `constant_bits_through_copies` in `semantic.rs`
+followed copies only; `widened_constant` followed copies, widenings and two
+arithmetic shapes; `constant_address_of` followed copies and six arithmetic
+shapes and consulted preparation's root relation; `resolve_constant` in
+`indirect.rs` folded twenty operations; `exact_constant` there and
+`exact_constant_value` in `interproc.rs` were byte-for-byte identical and
+folded nothing; `signed_constant_of` read a literal as signed; `canonical_value`
+walked copies and widenings to name a value's origin. Each carried its own
+depth limit -- 4, 8, 16 and 32 all appeared -- and its own idea of what counts
+as a literal.
+
+The consequence was not untidiness. Which of the nine a call site happened to
+reach decided whether a fact was found, so a value one part of the engine could
+prove constant was opaque to the part beside it. The byte-buffer placement
+refusal traced to exactly this: `induction_lower_bounds` reached
+`constant_through_copies`, which follows `Copy` and stops, and the counter's
+initializer is `IntZExt(const 0)` because the compiler starts the index in a
+32-bit register. The loop therefore had no proven start, `induction_upper_bounds`
+had no bound to offer, and `accessed_object_extent` could not size the object.
+
+`crates/r2ssa/src/constant.rs` now answers both questions once. `value_of` says
+what a value *is*: a literal read through the operations that move a value
+without changing it, which are `Copy`, `New`, `Cast` and `IntZExt`. `root_of` is
+the same walk returning the value it arrived at rather than its bits, which is
+what a proof about one temporary needs in order to meet a use several
+temporaries later. `folded_value` says what a value *computes to*: `value_of`
+widened with integer and boolean arithmetic over operands that are themselves
+constant, evaluated at the width the machine evaluated it at.
+
+Three things changed besides the consolidation. The fold covers every exact
+integer and boolean operation rather than the union of what the nine happened
+to need, so division, remainder, exclusive or, both shifts right, negation,
+complement and the three carry predicates now fold. The depth limits are gone:
+a definition chain in SSA is acyclic and the fold expands no phi, so recording
+each value once both terminates the walk and stops a shared subexpression from
+being evaluated twice, which the recursive `resolve_constant` did exponentially.
+And the strict-literal check that `exact_constant` and `exact_constant_value`
+carried -- a value's constant bits had to agree with its canonical storage --
+is gone; `constant_bits()` reads the var's own `is_constant` flag, so a
+disagreement would be an SSA integrity defect rather than something each query
+should re-check.
+
+`prepared_folded_value` is the one entry that takes preparation's facts, for the
+single caller that had them. Threading them through the other call sites would
+strengthen those too, because the root relation closes over phis and no walk
+over definitions does; that is available and not taken here.
+
+271 lines left the call sites; `constant.rs` is 311 including its four tests.

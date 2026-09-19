@@ -10,9 +10,7 @@ use crate::cfg::{BlockTerminator, CFG};
 use crate::function::{SSABlock, SSAFunction, SsaArtifact};
 use crate::graph::SsaGraph;
 
-use crate::indirect::{
-    PointerTable, ResolvedIndirectCall, exact_input, resolve_constant, resolve_indirect_calls,
-};
+use crate::indirect::{PointerTable, ResolvedIndirectCall, exact_input, resolve_indirect_calls};
 use crate::{SSAOp, SSAVar};
 use std::collections::BTreeMap;
 
@@ -115,7 +113,7 @@ fn decided_condition_in_graph(
     if graph.value_id_for_var(cond) != Some(condition) {
         return None;
     }
-    resolve_constant(graph, condition, 0).map(|value| value != 0)
+    crate::constant::folded_value(graph, condition).map(|value| value != 0)
 }
 
 fn unreachable_blocks_in_graph(function: &SSAFunction, graph: &SsaGraph) -> Vec<UnreachableBlock> {

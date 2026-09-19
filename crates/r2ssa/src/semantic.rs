@@ -1431,7 +1431,7 @@ fn code_pointer_run_bytes(
     if entry_bytes == 0 || !size.is_multiple_of(entry_bytes) {
         return None;
     }
-    let address = crate::indirect::resolve_constant(graph, *inst.inputs.first()?, 0)?;
+    let address = crate::constant::folded_value(graph, *inst.inputs.first()?)?;
     let mut bytes = Vec::with_capacity(size as usize);
     for entry in 0..size / entry_bytes {
         let at = address.checked_add(u64::from(entry) * u64::from(entry_bytes))?;
@@ -1522,7 +1522,7 @@ fn value_byte_sources(
             InstPayload::Op(SSAOp::Insert { .. }) => {
                 let mut bytes = value_byte_sources(graph, machine_context, *inst.inputs.first()?)?;
                 let lane = value_byte_sources(graph, machine_context, *inst.inputs.get(1)?)?;
-                let position = constant_bits_through_copies(graph, *inst.inputs.get(2)?)?;
+                let position = crate::constant::value_of(graph, *inst.inputs.get(2)?)?;
                 if position % 8 != 0 {
                     return None;
                 }
@@ -2844,7 +2844,7 @@ impl<'a> ObjectModelBuilder<'a> {
             // displacement, which is how a machine that folds a member offset
             // into its addressing mode spells the second half of a pair.
             let folded_constant = index
-                .and_then(|index| signed_constant_of(&graph.value(index)?.var))
+                .and_then(|index| crate::constant::signed_value_of(graph, index))
                 .filter(|_| self.indexed_addresses.contains_key(&base));
             let inherited = index.is_none() || folded_constant.is_some();
             let index = folded_constant
@@ -4182,7 +4182,11 @@ fn reaching_format_literals(
         InstPayload::Op(op) => {
             // An address the code computes from constants -- a page and an
             // offset, the way arm64 spells one -- is the literal it names.
-            if let Some(address) = constant_address_of(function, graph, value, 0) {
+            if let Some(address) = crate::constant::prepared_folded_value(
+                graph,
+                function.decompile_prep_facts(),
+                value,
+            ) {
                 found.insert(address);
                 return true;
             }
@@ -4338,47 +4342,6 @@ impl FormatForwardingLookup<'_> {
             SourceCallArgumentValue::PreservedEntry => None,
         }
     }
-}
-
-/// The constant `value` evaluates to when it is a constant or integer
-/// arithmetic over constants, at the value's width; `depth` bounds the
-/// walk to the address-forming shapes.
-fn constant_address_of(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    value: ValueId,
-    depth: usize,
-) -> Option<u64> {
-    let graph_value = graph.value(value)?;
-    if let Some(bits) = resolve_const_value(function.decompile_prep_facts(), &graph_value.var) {
-        return Some(bits);
-    }
-    if depth >= 4 {
-        return None;
-    }
-    let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-    let width_bits = graph_value.var.size.checked_mul(8)?;
-    let mask = if width_bits >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << width_bits) - 1
-    };
-    let operand = |index: usize| {
-        definition
-            .inputs
-            .get(index)
-            .and_then(|input| constant_address_of(function, graph, *input, depth + 1))
-    };
-    let result = match &definition.payload {
-        InstPayload::Op(SSAOp::Copy { .. }) => operand(0)?,
-        InstPayload::Op(SSAOp::IntAdd { .. }) => operand(0)?.wrapping_add(operand(1)?),
-        InstPayload::Op(SSAOp::IntSub { .. }) => operand(0)?.wrapping_sub(operand(1)?),
-        InstPayload::Op(SSAOp::IntOr { .. }) => operand(0)? | operand(1)?,
-        InstPayload::Op(SSAOp::IntLeft { .. }) => operand(0)?.checked_shl(operand(1)? as u32)?,
-        InstPayload::Op(SSAOp::IntZExt { .. }) => operand(0)?,
-        _ => return None,
-    };
-    Some(result & mask)
 }
 
 /// Whether the convention puts every variadic operand on the stack, where a
@@ -8421,55 +8384,6 @@ fn accessed_object_extent(
 ///
 /// A zero extension, a cast or a copy of a constant is that constant; the
 /// widening is how the operation is spelled and says nothing about the value.
-fn widened_constant(graph: &SsaGraph, value: ValueId, depth: u32) -> Option<u64> {
-    if let Some(constant) = graph.value(value)?.var.constant_bits() {
-        return Some(constant);
-    }
-    if depth >= 8 {
-        return None;
-    }
-    let inst = graph.inst(graph.def_inst(value)?)?;
-    let InstPayload::Op(op) = &inst.payload else {
-        return None;
-    };
-    match op {
-        SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
-            widened_constant(graph, *inst.inputs.first()?, depth + 1)
-        }
-        // The half the machine assembles a wide value from: `hi << 64 | lo`
-        // is the constant when the shifted half is zero.
-        SSAOp::IntOr { .. } => {
-            let left = widened_constant(graph, *inst.inputs.first()?, depth + 1)?;
-            let right = widened_constant(graph, *inst.inputs.get(1)?, depth + 1)?;
-            Some(left | right)
-        }
-        SSAOp::IntLeft { .. } => {
-            let value = widened_constant(graph, *inst.inputs.first()?, depth + 1)?;
-            let shift =
-                u32::try_from(widened_constant(graph, *inst.inputs.get(1)?, depth + 1)?).ok()?;
-            (value == 0)
-                .then_some(0)
-                .or_else(|| value.checked_shl(shift))
-        }
-        _ => None,
-    }
-}
-
-/// A constant varnode's value, read at its own width as a signed number.
-///
-/// `[x3, #-3]` lifts to an addition of `0xfffffffffffffffd`, and taking that
-/// unsigned makes a three-byte step backwards into an index the size of the
-/// address space.
-fn signed_constant_of(var: &SSAVar) -> Option<i64> {
-    let value = var.constant_bits()?;
-    let bits = var.size.saturating_mul(8).min(64);
-    if bits == 0 || bits >= 64 {
-        return Some(value as i64);
-    }
-    let shift = 64 - bits;
-    Some(((value << shift) as i64) >> shift)
-}
-
 /// The operand of an indexed address that supplies the index.
 ///
 /// The same question `ObjectModel::index_for_address` answers, asked before
@@ -8521,26 +8435,9 @@ fn induction_lower_bounds(
         .values()
         .filter(|induction| matches!(induction.step, InductionStep::AddConst(step) if step > 0))
         .filter_map(|induction| {
-            constant_through_copies(graph, induction.init).map(|start| (induction.phi, start))
+            crate::constant::folded_value(graph, induction.init).map(|start| (induction.phi, start))
         })
         .collect()
-}
-
-/// A constant, or a copy of one: a counter starts from `mov rdx, 1`.
-fn constant_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64> {
-    let mut value = value;
-    for _ in 0..8 {
-        let var = &graph.value(value)?.var;
-        if let Some(bits) = var.constant_bits() {
-            return Some(bits);
-        }
-        let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-        let InstPayload::Op(SSAOp::Copy { .. }) = inst.payload else {
-            return None;
-        };
-        value = *inst.inputs.first()?;
-    }
-    None
 }
 
 /// The least value an index takes: a constant, a counter's start, and sums
@@ -8585,7 +8482,7 @@ fn induction_upper_bounds(
     inductions: &BTreeMap<ValueId, InductionFact>,
 ) -> BTreeMap<ValueId, u64> {
     let mut bounds = BTreeMap::new();
-    let constant = |value: ValueId| constant_through_copies(graph, value);
+    let constant = |value: ValueId| crate::constant::folded_value(graph, value);
     for induction in inductions.values() {
         let InductionStep::AddConst(step) = induction.step else {
             continue;
@@ -8791,14 +8688,12 @@ fn divided_remainder_divisor(graph: &SsaGraph, dividend: ValueId, product: Value
     // Every operand is taken through the copies that carry it: the quotient
     // reaches the multiplication in a register of its own, and the divisor is
     // a register the machine loaded the constant into.
-    let canonical = |value: ValueId| crate::indirect::canonical_value(graph, value);
+    let canonical = |value: ValueId| crate::constant::root_of(graph, value);
     let inst = graph.inst(graph.def_inst(canonical(product))?)?;
     let InstPayload::Op(SSAOp::IntMult { .. }) = &inst.payload else {
         return None;
     };
-    let constant_of = |value: ValueId| {
-        widened_constant(graph, value, 0).or_else(|| constant_bits_through_copies(graph, value))
-    };
+    let constant_of = |value: ValueId| crate::constant::folded_value(graph, value);
     let operands = [
         (*inst.inputs.first()?, *inst.inputs.get(1)?),
         (*inst.inputs.get(1)?, *inst.inputs.first()?),
@@ -8890,7 +8785,7 @@ fn indexed_offset_upper_bound(
             // that divisor. x86-64 divides a 128-bit dividend, so `(a + i) % 3`
             // reaches here with the three zero-extended into a sixteen-byte
             // value and the constant no longer the operand itself.
-            SSAOp::IntRem { .. } => widened_constant(graph, input(1)?, 0)?.checked_sub(1),
+            SSAOp::IntRem { .. } => crate::constant::folded_value(graph, input(1)?)?.checked_sub(1),
             // A machine with no remainder instruction spells one as
             // `x - (x / k) * k`, which is below `k` whatever `x` reaches.
             // AArch64 divides and multiplies back, so the modulo that picks a
@@ -10352,35 +10247,6 @@ fn member_run_layout(graph: &crate::SourceTypeGraph, type_id: u32) -> Option<Mem
         }
         _ => None,
     }
-}
-
-/// The bits a value carries when it is constant, followed through copies.
-///
-/// A constant-space varnode states its value as its storage offset, which is
-/// how a value too wide for the bit accessor is still proved constant. The
-/// walk ends because each step moves to a value it has not seen and the graph
-/// is finite.
-fn constant_bits_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64> {
-    let mut current = value;
-    let mut visited = BTreeSet::new();
-    while visited.insert(current) {
-        let carrier = graph.value(current)?;
-        if let Some(bits) = carrier.var.constant_bits() {
-            return Some(bits);
-        }
-        if let Some(storage) = carrier
-            .canonical_storage
-            .filter(|storage| storage.space == crate::CanonicalStorageSpace::Constant)
-        {
-            return Some(storage.offset);
-        }
-        let inst = graph.inst(graph.def_inst(current)?)?;
-        if !matches!(inst.payload, InstPayload::Op(SSAOp::Copy { .. })) {
-            return None;
-        }
-        current = *inst.inputs.first()?;
-    }
-    None
 }
 
 /// The members an access of `width_bits` at `offset_bits` covers exactly,
