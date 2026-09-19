@@ -30158,3 +30158,33 @@ corpus binary has no names and gets `uint8_t[32]`.
 Two of the four `shape_pointer_to_pointer` cells now pass, both at `-O0`. The
 `-O1` and `-O2` cells still fail with the same class of message against a
 different slot, `stack_m80`, which is the next thread here.
+
+## A narrowing lane is its own scalar
+
+The `-O1` and `-O2` cells of `shape_pointer_to_pointer` failed after the `-O0`
+ones passed, and the trace ran through two more layers, each a case of the same
+mistake: treating a value as equal to the wider one it was cut from.
+
+The callee's address relation stated the read correctly at `-O1` too --
+`terms=[{value: ValueId(0), coefficient: 8}]` -- but `ValueId(0)` was `X1_0`,
+the whole sixty-four bit entry register, and the formal is the `w1` lane the
+declaration names. The scaling argument was therefore not a formal at all.
+`compute_scalar` forwards through `Subpiece { offset: 0 }` to its source
+whatever the widths, so `uxtw`, which scales only the low half of a register and
+says nothing about the rest, named the whole register. The address rule three
+hundred lines away in the same file already guards exactly this by requiring
+`dst.size == src.size`; the scalar rule now does too, and the term becomes the
+lane, which is the formal.
+
+The second layer was the bound rather than the argument. At `-O1` the loop hands
+the callee `(uint32_t)X20_1`, a truncation of the counter the loop proves is at
+most three, and the bound was looked up under the counter rather than the
+narrowed value. A bound survives a narrowing when it still fits: an index proven
+at most three is at most three as a `uint32_t`. That is what `narrowed_bound`
+states, and it refuses where the bound would not fit the width.
+
+All four `shape_pointer_to_pointer` cells now recover the array. The evidence
+channel gained `scaling-argument`, which names the value a scaled reach is
+indexed by and which formal it is, because that single line is what separated
+"the expression is wrong" from "the expression is right and the formal lookup
+missed".

@@ -609,8 +609,17 @@ impl<'a> AddressCollector<'a> {
             | SSAOp::Cast { src, .. }
             | SSAOp::New { src, .. }
             | SSAOp::IntZExt { src, .. }
-            | SSAOp::IntSExt { src, .. }
-            | SSAOp::Subpiece { src, offset: 0, .. } => self.scalar_for_var(&src),
+            | SSAOp::IntSExt { src, .. } => self.scalar_for_var(&src),
+            // A narrowing lane is its own scalar: `uxtw` scales the low half
+            // of a register and says nothing about the rest, so forwarding to
+            // the whole register names a value the arithmetic never used. The
+            // address rule beside this one guards the same case by width.
+            SSAOp::Subpiece {
+                ref dst,
+                ref src,
+                offset: 0,
+                ..
+            } if dst.size == src.size => self.scalar_for_var(src),
             SSAOp::IntNegate { src, .. } => self.scalar_for_var(&src)?.scale(-1),
             SSAOp::IntAdd { a, b, .. } => self
                 .scalar_for_var(&a)?

@@ -7994,6 +7994,30 @@ fn accessed_object_storage(
 /// handed: the bytes a modelled import fills from a length argument that is
 /// a constant at the call. Those bytes are one object, whatever this body
 /// later reads of them one at a time.
+/// The bound a narrowed counter keeps from the value it was narrowed from.
+fn narrowed_bound(
+    graph: &SsaGraph,
+    induction_bounds: &BTreeMap<ValueId, u64>,
+    value: ValueId,
+) -> Option<u64> {
+    let width_bits = graph.value(value)?.var.size.checked_mul(8)?;
+    let inst = graph.inst(graph.def_inst(value)?)?;
+    let InstPayload::Op(SSAOp::Subpiece { offset: 0, .. }) = &inst.payload else {
+        return None;
+    };
+    let source = *inst.inputs.first()?;
+    let bound = induction_bounds
+        .get(&source)
+        .or_else(|| induction_bounds.get(&crate::constant::root_of(graph, source)))
+        .copied()?;
+    let fits = if width_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width_bits) - 1
+    };
+    (bound <= fits).then_some(bound)
+}
+
 fn callee_write_spans(
     facts: &DecompilePrepFacts,
     function: &SSAFunction,
@@ -8074,6 +8098,11 @@ fn callee_write_spans(
                             })
                             .copied()
                             .or_else(|| crate::constant::folded_value(graph, value))
+                            // A counter narrowed to the width the callee takes
+                            // keeps its bound, so long as the bound still fits:
+                            // an index proven at most three is at most three as
+                            // a `uint32_t` too.
+                            .or_else(|| narrowed_bound(graph, induction_bounds, value))
                     };
                     let Some(end) = proven
                         .bytes(&mut bound)

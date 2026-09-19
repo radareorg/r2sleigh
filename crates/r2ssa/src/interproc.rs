@@ -2461,10 +2461,16 @@ fn classify_memory_access_location(
 /// value's storage, which is the slot's.
 fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<usize> {
     let var = prepared.value_var(value)?;
-    prepared
+    let index = prepared
         .function()
-        .decompile_prep_facts()?
-        .formal_parameter_of(var)
+        .decompile_prep_facts()
+        .and_then(|facts| facts.formal_parameter_of(var));
+    r2il::refusal_evidence!(
+        "scaling-argument",
+        "{value:?} {} is formal {index:?}",
+        var.display_name()
+    );
+    index
 }
 
 fn classify_memory_access_location_value(
