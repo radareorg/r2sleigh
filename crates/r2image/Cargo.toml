@@ -1,0 +1,10 @@
+[package]
+name = "r2image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Program image: binary format parsing and virtual address mapping"
+
+[dependencies]
+object.workspace = true
+thiserror.workspace = true

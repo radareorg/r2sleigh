@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/r2il",
+    "crates/r2image",
     "crates/r2sleigh-lift",
     "crates/r2sleigh-export",
     "crates/r2sleigh-cli",
@@ -30,6 +31,7 @@ libsla = "=1.2.0"
 sleigh-config = "=1.0.1"
 serde_json = "1"
 hex = "0.4"
+object = { version = "0.37", default-features = false, features = ["read", "std"] }
 z3 = "0.21.0"
 
 [profile.dev]

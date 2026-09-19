@@ -74,6 +74,20 @@ enum Commands {
     /// Show version and format information
     Version,
 
+    /// Report what a binary's image says: architecture, segments, entry points
+    Image {
+        /// Binary file to open
+        file: PathBuf,
+
+        /// Also list defined function symbols
+        #[arg(short, long)]
+        symbols: bool,
+
+        /// Hex dump this many bytes at each entry point
+        #[arg(long, default_value_t = 0)]
+        peek: usize,
+    },
+
     /// Disassemble instruction bytes to r2il
     #[cfg(feature = "sleigh-config")]
     Disasm {
@@ -169,6 +183,90 @@ impl From<RunFormatArg> for ExportFormat {
     }
 }
 
+/// Report a binary's image without radare2: r2image parses, nothing else is asked.
+fn cmd_image(file: &Path, symbols: bool, peek: usize) -> Result<(), String> {
+    let image = r2image::Image::open(file).map_err(|e| e.to_string())?;
+    let arch = image.arch();
+
+    println!("file        {}", file.display());
+    println!("format      {:?}", image.format());
+    println!(
+        "arch        {} {}-bit {:?}-endian",
+        arch.name, arch.bits, arch.endian
+    );
+    println!("base        {:#x}", image.base_address());
+
+    println!("\nsegments    {}", image.segments().len());
+    for segment in image.segments() {
+        let perms = [
+            if segment.permissions.read { 'r' } else { '-' },
+            if segment.permissions.write { 'w' } else { '-' },
+            if segment.permissions.execute {
+                'x'
+            } else {
+                '-'
+            },
+        ];
+        let zero_fill = segment.vsize.saturating_sub(segment.file_size);
+        println!(
+            "  {:#018x} {:#10x} {}{}{}  file {:#x}+{:#x}{}  {}",
+            segment.vaddr,
+            segment.vsize,
+            perms[0],
+            perms[1],
+            perms[2],
+            segment.file_offset,
+            segment.file_size,
+            if zero_fill > 0 {
+                format!(" zero {:#x}", zero_fill)
+            } else {
+                String::new()
+            },
+            segment.name.as_deref().unwrap_or("")
+        );
+    }
+
+    let entries = image.entry_points();
+    println!("\nentries     {}", entries.len());
+    for entry in entries.iter().take(32) {
+        print!("  {:#018x} {:?}", entry.vaddr, entry.kind);
+        if peek > 0 {
+            match image.read(entry.vaddr, peek) {
+                Some(bytes) => print!("  {}", hex_bytes(&bytes)),
+                None => print!("  <unmapped>"),
+            }
+        }
+        println!();
+    }
+    if entries.len() > 32 {
+        println!("  ... {} more", entries.len() - 32);
+    }
+
+    if symbols {
+        let functions: Vec<_> = image
+            .symbols()
+            .iter()
+            .filter(|symbol| symbol.kind == r2image::SymbolKind::Function && symbol.defined)
+            .collect();
+        println!("\nfunctions   {}", functions.len());
+        for symbol in functions.iter().take(64) {
+            println!(
+                "  {:#018x} {:#8x}  {}",
+                symbol.vaddr, symbol.size, symbol.name
+            );
+        }
+        if functions.len() > 64 {
+            println!("  ... {} more", functions.len() - 64);
+        }
+    }
+
+    Ok(())
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -188,6 +286,12 @@ fn main() {
         Commands::TestArch { arch, output } => cmd_test_arch(&arch, output.as_ref()),
 
         Commands::Version => cmd_version(),
+
+        Commands::Image {
+            file,
+            symbols,
+            peek,
+        } => cmd_image(&file, symbols, peek),
 
         #[cfg(feature = "sleigh-config")]
         Commands::Disasm {

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 r2il = { path = "../r2il" }
+r2image = { path = "../r2image" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
 r2sleigh-export = { path = "../r2sleigh-export", optional = true }
 clap.workspace = true
