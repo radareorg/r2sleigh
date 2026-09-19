@@ -29226,3 +29226,10 @@ co-read by one instruction and intra-block outlives-redefinition, and neither
 sees a pair whose ranges cross across the unrolled body. A real liveness
 interference predicate over the merged component is what settles it, and this
 function is the corpus evidence that the proxies are not enough.
+
+The contract change is the cost, and it is worth knowing before starting: a
+pair variant on `SourceFunctionReturn` and `SourceCallResult` reaches a hundred
+non-test match sites across the crates, each of which has to decide what a pair
+means for it rather than take a default arm. That is a session of its own, and
+half of it is worse than none: the corpus compiles the callee and its caller in
+one unit, so both sides have to agree about the return before anything renders.
