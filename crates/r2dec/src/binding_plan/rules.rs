@@ -39,6 +39,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::binding_plan::BindingCertificateSource;
 use r2ssa::ledger::ElisionReason;
 use r2ssa::{InstId, SsaGraph, UseSite, ValueId};
 use r2types::SourceOwnedFunctionFacts;
@@ -86,6 +87,31 @@ pub(super) enum ParameterCandidate {
 /// it is the caller's storage: the return address, a stack-passed argument, or
 /// -- at a process entry -- what the loader left there. Nothing in this body
 /// assigns it, and requiring a definition asks for one that cannot exist.
+/// Whether the caller supplied what this binding holds.
+///
+/// One question, one answer. A member with no defining instruction entered
+/// the function already holding its value, and a source that is the caller's
+/// storage says the same thing about a slot. The plan and the seal both ask
+/// here: while they asked separately they disagreed about the slot a call
+/// pushes the return address into, and the seal refused every function that
+/// reads it.
+pub(super) fn is_caller_supplied<'a>(
+    source_owned: &SourceOwnedFunctionFacts,
+    graph: &SsaGraph,
+    members: impl IntoIterator<Item = &'a ValueId>,
+    sources: impl IntoIterator<Item = &'a BindingCertificateSource>,
+) -> bool {
+    members
+        .into_iter()
+        .any(|value| graph.caller_supplied(*value))
+        || sources.into_iter().any(|source| match source {
+            BindingCertificateSource::CertifiedEntity(SemanticId::StackSlot(object)) => {
+                stack_object_is_caller_storage(source_owned, *object)
+            }
+            _ => false,
+        })
+}
+
 pub(super) fn stack_object_is_caller_storage(
     source_owned: &SourceOwnedFunctionFacts,
     object: r2ssa::ObjectId,

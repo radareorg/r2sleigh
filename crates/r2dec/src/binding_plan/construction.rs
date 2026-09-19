@@ -1161,10 +1161,12 @@ impl BindingPlan {
             // already holding its value, so the object exists from entry; so
             // does a lane of an entry register, which is minted from its root
             // (doc/adr-register-identity.md §8, 6).
-            let caller_supplied = component
-                .members
-                .iter()
-                .any(|value| graph.caller_supplied(*value));
+            let caller_supplied = super::rules::is_caller_supplied(
+                source_owned,
+                graph,
+                &component.members,
+                &component.sources,
+            );
             let mut call_clobbered = false;
             for value in &component.members {
                 if value_is_unclaimed_call_clobber(source_owned, graph, *value) {

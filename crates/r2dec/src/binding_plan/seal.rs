@@ -567,18 +567,12 @@ impl BindingPlan {
                     let expected_sources = component.sources.iter().copied().collect::<Vec<_>>();
                     // Re-derive whether the caller supplies a member rather
                     // than trusting the plan's own answer.
-                    let expected_caller_supplied = component
-                        .members
-                        .iter()
-                        .any(|value| graph.caller_supplied(*value))
-                        || component.sources.iter().any(|source| match source {
-                            BindingCertificateSource::CertifiedEntity(SemanticId::StackSlot(
-                                object,
-                            )) => {
-                                super::rules::stack_object_is_caller_storage(source_owned, *object)
-                            }
-                            _ => false,
-                        });
+                    let expected_caller_supplied = super::rules::is_caller_supplied(
+                        source_owned,
+                        graph,
+                        &component.members,
+                        &component.sources,
+                    );
                     // Re-derived here too rather than trusting the plan: a
                     // call clobber nothing claims is supplied from outside.
                     let mut expected_call_clobbered = false;
