@@ -80,6 +80,15 @@ as the `cc` data because the word size is refined by the first register argloc.
 **Callees are walked one level deep.** Deeper is what an interprocedural
 fixpoint is for. A callee that fails to walk leaves its call unproven.
 
+**A saved callee register renders as a read of nothing, under `0 refused`.**
+The prologue's `stp x29, x30, [sp, N]` on aarch64, and `push rbp` on x86-64,
+render as `stack_m8 = X30_0` and `stack_m8 = RBP_0`. The entry value is
+declared as a local, never assigned, and then read -- while the proof line says
+nothing was refused. That is a certification defect rather than a quality one:
+the output claims a fact the program does not make. The oracle counts these
+separately, and there are two in a three-function binary. The plugin's capture
+elides the save entirely, so the question never reaches its renderer.
+
 **Three functions in the sample refuse natively where the plugin renders.**
 That is the number to drive to zero, and the oracle names which ones.
 
