@@ -515,10 +515,13 @@ this document had that the other way round.
 
 1. **Native body lift at a given address.** Recursive descent over direct
    branches, refusing at indirect transfers. Nothing below this is callable
-   without it.
+   without it. *Done: `r2ssa::body`.*
 2. **The sdb type and convention import.** A dependency of a useful `pdd`
-   through `callee_facts`, not an independent win.
-3. **Native request construction**, and `pdd` end to end in `r2s`. The milestone.
+   through `callee_facts`, not an independent win. *Conventions done: `r2abi`.
+   Types not yet.*
+3. **Native request construction**, and `pdd` end to end in `r2s`. The
+   milestone. *Done, on x86-64 and aarch64; open threads in
+   `doc/handoff-engine-inversion.md`.*
 4. **The name database.** Closes eighteen of the twenty-four `pd` disagreements
    and unblocks the differential oracle for everything after it.
 5. **Delete the bridge that is now dead.** Build, prove, then delete.
