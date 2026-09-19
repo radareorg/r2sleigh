@@ -2132,7 +2132,7 @@ fn raw_value_origin(
 /// The pass is `O(n log s)` for `n` operations and `s` distinct storages in the
 /// block. Unsupported definitions clear their destination, so an older origin
 /// can never survive a clobber and become false evidence.
-pub(crate) fn terminal_indirect_loaded_slot(
+pub fn terminal_indirect_loaded_slot(
     block: &R2ILBlock,
     branch_op_index: usize,
 ) -> Option<CanonicalStorageId> {

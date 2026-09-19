@@ -140,6 +140,7 @@ pub use machine_context::{
     SourceMachineRoles, SourceMachineRolesError, SourceParameterLocation,
     SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
     SourceType, SourceTypeAlias, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
+    terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationCoverageReport,

@@ -678,8 +678,8 @@ const LITERAL_LIMIT: usize = 4096;
 fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
-        for (index, op) in block.lifted.ops.iter().enumerate() {
-            let Some((target, transfer)) = transfer(op, body) else {
+        for index in 0..block.lifted.ops.len() {
+            let Some((target, transfer)) = transfer(&block.lifted, index, body) else {
                 continue;
             };
             let Some(instruction) = block
@@ -708,18 +708,26 @@ fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall
 ///
 /// A call comes back and a tail jump does not, and which this is a fact about
 /// the body rather than about the callee: the walk decided it when it stopped
-/// at the target's entry.
+/// at the target's entry. A jump through a loaded value names no code address
+/// at all, so its target is the slot the jump reads, which is what the
+/// relocation on that slot licenses. The slot is read by the same pass that
+/// reads it again when the site is correlated, so the two cannot disagree.
 fn transfer(
-    op: &r2il::R2ILOp,
+    block: &r2il::R2ILBlock,
+    index: usize,
     body: &r2ssa::body::Body,
 ) -> Option<(u64, r2source::AdvisoryCallTransfer)> {
-    match op {
+    match block.ops.get(index)? {
         r2il::R2ILOp::Call { target } => {
             Some((target.offset, r2source::AdvisoryCallTransfer::Call))
         }
         r2il::R2ILOp::Branch { target } if body.tail_calls.contains(&target.offset) => {
             Some((target.offset, r2source::AdvisoryCallTransfer::TailJump))
         }
+        r2il::R2ILOp::BranchInd { .. } => Some((
+            r2ssa::terminal_indirect_loaded_slot(block, index)?.offset,
+            r2source::AdvisoryCallTransfer::TailSlot,
+        )),
         _ => None,
     }
 }
