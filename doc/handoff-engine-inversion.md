@@ -178,6 +178,24 @@ radare2 maps a relocatable object at `0x8000000` where `r2s` maps it at zero;
 and one Thumb function decodes differently, which is a real gap rather than a
 spelling.
 
+## The certification gate is red, deliberately
+
+`scripts/diff_capture.py --native-only` renders every named function and fails
+on any rendering that reads a value nothing assigned while its proof line
+claims nothing was refused. It runs in CI as *Native Capture Certification
+Gate*, needs no radare2, and is the first automated coverage the native route
+has had.
+
+It is red today: over twelve binaries, twenty-nine functions render, eight
+refuse, and eleven of the renderings are uncertified. Two causes, both traced
+and neither hidden behind a threshold. The aarch64 saved link register waits on
+the return-address declaration reaching the `sleigh-config` fork. The C++ cold
+partitions read `RAX_1` and `RAX_2`, which are post-call values and a different
+defect.
+
+A gate that is green because its threshold was raised to meet the defect would
+be worth nothing.
+
 ## Two plugin lift fixtures drift, and it is not the inversion
 
 `plain_o2_check_secret_has_exact_offline_lift` and
