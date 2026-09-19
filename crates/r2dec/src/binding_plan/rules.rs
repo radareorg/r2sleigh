@@ -860,27 +860,43 @@ fn escaped_pointee_size_bytes(
             .and_then(|signature| match signature.params.get(argument.index)? {
                 r2types::CTypeLike::Pointer(pointee) => Some(pointee.as_ref().clone()),
                 _ => None,
-            })
-            .and_then(|pointee| match &pointee {
-                r2types::CTypeLike::Struct(name) | r2types::CTypeLike::Union(name) => type_graph?
-                    .aggregates()
-                    .iter()
-                    .find(|aggregate| aggregate.name() == name)
-                    .map(|aggregate| aggregate.size_bits().div_ceil(8)),
-                scalar => r2types::declaration_type_width_bits(scalar, ptr_bits)
-                    .map(|bits| u64::from(bits).div_ceil(8)),
             });
-        if declared.is_some() {
-            return declared;
+        // An aggregate pointee bounds the write: the callee stays inside the
+        // object it was declared to take.
+        if let Some(r2types::CTypeLike::Struct(name) | r2types::CTypeLike::Union(name)) = &declared
+        {
+            return type_graph?
+                .aggregates()
+                .iter()
+                .find(|aggregate| aggregate.name() == name)
+                .map(|aggregate| aggregate.size_bits().div_ceil(8));
         }
-        // Failing a declaration, the callee's own body: the bytes it is
-        // proven to write through this argument, and nothing if it hands the
-        // pointer on to something the summary does not see.
-        let summary = source_owned
+        // A scalar pointee is an element, not an extent: `char *s` is as often
+        // an array as one byte. It is the floor under what the callee's own
+        // body proves it writes.
+        let scalar_floor = declared.as_ref().and_then(|scalar| {
+            r2types::declaration_type_width_bits(scalar, ptr_bits)
+                .map(|bits| u64::from(bits).div_ceil(8))
+        });
+        // The callee's own body: the bytes it is proven to write through this
+        // argument, and nothing if it hands the pointer on to something the
+        // summary does not see.
+        let Some(summary) = source_owned
             .report()
-            .interproc_summary_set()?
-            .summaries
-            .get(&r2ssa::InterprocFunctionId(facts.direct_target?))?;
+            .interproc_summary_set()
+            .and_then(|set| {
+                set.summaries
+                    .get(&r2ssa::InterprocFunctionId(facts.direct_target?))
+            })
+        else {
+            r2il::refusal_evidence!(
+                "escape-callee",
+                "no summary for {:?} (set present: {})",
+                facts.direct_target,
+                source_owned.report().interproc_summary_set().is_some()
+            );
+            return scalar_floor;
+        };
         r2il::refusal_evidence!(
             "escape-callee",
             "summary for {:#x}: unknown_calls={} unknown_memory={} effects={:?}",
@@ -890,9 +906,46 @@ fn escaped_pointee_size_bytes(
             summary.memory_effects
         );
         if summary.has_unknown_calls || summary.touches_unknown_memory {
-            return None;
+            return scalar_floor;
         }
+        // A bounded transfer into the argument writes at most its length,
+        // where the length is a constant at this call.
+        let constant_argument = |index: usize| {
+            let value = facts
+                .argument_values
+                .iter()
+                .find(|argument| argument.index == index)?
+                .value;
+            let mut value = value;
+            for _ in 0..8 {
+                if let Some(bits) = graph.value(value)?.var.constant_bits() {
+                    return Some(bits);
+                }
+                let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
+                let r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) = inst.payload else {
+                    return None;
+                };
+                value = *inst.inputs.first()?;
+            }
+            None
+        };
         let mut end = None::<i64>;
+        for transfer in &summary.transfer_effects {
+            let r2ssa::SummaryMemoryRegion::Arg { index } = transfer.dst.region else {
+                continue;
+            };
+            if index != argument.index {
+                continue;
+            }
+            let length = match transfer.len {
+                r2ssa::SummaryTransferLength::Const(length) => Some(length),
+                r2ssa::SummaryTransferLength::Arg(length) => constant_argument(length),
+                r2ssa::SummaryTransferLength::Unknown => None,
+            };
+            let length = length.and_then(|length| i64::try_from(length).ok())?;
+            end = Some(end.map_or(length - 1, |end| end.max(length - 1)));
+        }
+        let has_transfer = end.is_some();
         for effect in &summary.memory_effects {
             let r2ssa::SummaryMemoryRegion::Arg { index } = effect.location.region else {
                 continue;
@@ -907,10 +960,20 @@ fn escaped_pointee_size_bytes(
                     return None;
                 }
             }
-            let range = effect.location.range?;
+            // A write the transfer already bounds carries no range of its own.
+            let Some(range) = effect.location.range else {
+                if has_transfer {
+                    continue;
+                }
+                return None;
+            };
             end = Some(end.map_or(range.offset_hi, |end| end.max(range.offset_hi)));
         }
-        u64::try_from(end?.checked_add(1)?).ok()
+        let proven = end.and_then(|end| u64::try_from(end.checked_add(1)?).ok());
+        match (proven, scalar_floor) {
+            (Some(proven), Some(floor)) => Some(proven.max(floor)),
+            (proven, floor) => proven.or(floor),
+        }
     })
 }
 

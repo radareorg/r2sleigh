@@ -1536,7 +1536,14 @@ def extract_function(section: str, name: str) -> tuple[str | None, str | None]:
     candidates: list[tuple[int, int]] = []
     for line_match in re.finditer(r"(?m)^.*$", section):
         line = line_match.group(0)
-        if re.search(rf"(?:^|[._]){re.escape(name)}\s*\(", line):
+        # A definition starts the line and is not a prototype; a call or the
+        # function's own forward declaration inside its body is neither.
+        if (
+            line
+            and not line[0].isspace()
+            and not line.rstrip().endswith(";")
+            and re.search(rf"(?:^|[._]){re.escape(name)}\s*\(", line)
+        ):
             candidates.append((line_match.start(), line_match.end()))
     if len(candidates) != 1:
         return None, f"expected one signature for {name}, found {len(candidates)}"
@@ -1550,19 +1557,49 @@ def extract_function(section: str, name: str) -> tuple[str | None, str | None]:
     return section[start : closing + 1].rstrip() + "\n", None
 
 
+def file_scope_preamble(section: str, name: str) -> list[str]:
+    """What the rendering declares at file scope ahead of `name`'s definition.
+
+    A `typedef uint64_t size_t;` that its callee prototypes spell, an `extern`
+    for a data object it reads: the definition does not compile without them,
+    and they are the rendering's own text rather than the harness's.
+    """
+    body, _ = extract_function(section, name)
+    if body is None:
+        return []
+    start = section.find(body.rstrip())
+    return [
+        line
+        for line in section[:start].splitlines()
+        if line
+        and not line[0].isspace()
+        and (line.rstrip().endswith(";") or line.startswith("#define "))
+        and not line.startswith("R2SLEIGH_")
+    ]
+
+
 def normalize_linkage_name(source: str, name: str) -> tuple[str, dict[str, Any]]:
     opening = source.find("{")
     signature = source[:opening]
     pattern = re.compile(
         rf"[A-Za-z_][A-Za-z0-9_.$:]*(?:[._]){re.escape(name)}(?=\s*\()"
     )
+    matched = pattern.search(signature)
     normalized_signature, count = pattern.subn(f"dec_{name}", signature, count=1)
     if count == 0:
         fallback = re.compile(rf"\b{re.escape(name)}(?=\s*\()")
+        matched = fallback.search(signature)
         normalized_signature, count = fallback.subn(
             f"dec_{name}", signature, count=1
         )
-    return normalized_signature + source[opening:], {
+    body = source[opening:]
+    # A recursive call spells the function's own linkage name inside its body;
+    # the definition was renamed, so the calls follow it.
+    if matched is not None:
+        body = re.sub(
+            rf"\b{re.escape(matched.group(0))}(?=\s*\()", f"dec_{name}", body
+        )
+    return normalized_signature + body, {
         "kind": "linkage_name",
         "count": count,
         "semantic": False,
@@ -1634,7 +1671,7 @@ def callee_definitions(
         if body is None:
             notes.append({"callee": bare, "status": "unparsable", "detail": error})
             continue
-        definitions.append(body)
+        definitions.append("\n".join([*file_scope_preamble(section, bare), body]))
         notes.append({"callee": bare, "status": "rendered"})
         pending.extend(
             spelled.removeprefix("sym__") for spelled in declared_callees(body)
@@ -2202,7 +2239,8 @@ def runner_source(
     diagnostic: bool,
     callee_sources: list[str] | None = None,
     declared_parameters: list[str] | None = None,
-) -> str:
+    preamble: list[str] | None = None,
+) -> tuple[str, str]:
     arrays = []
     arms = []
     for index, case in enumerate(cases):
@@ -2276,20 +2314,32 @@ def runner_source(
     # declared signature equals the source's own types is a separate question,
     # reported as the typed-recovery score, because the decompiler documents
     # that it never claims pointer-ness or signedness.
-    type_check: list[str] = []
-    return "\n".join(
+    # The rendering is its own translation unit, with nothing but the fixed
+    # width integer types in scope: it declares the libc it calls and the
+    # typedefs those declarations need, and a libc header in the same unit
+    # would contradict both (`size_t` is `unsigned long` there and a
+    # `uint64_t` here; `snprintf` is a fortify macro). The harness main lives
+    # in a second unit and reaches the function through its own prototype.
+    function_unit = "\n".join(
+        [
+            "#include <stdint.h>",
+            BITVECTOR_PRELUDE,
+            *(preamble or []),
+            *blobs,
+            *(callee_sources or []),
+            function_source,
+            "",
+        ]
+    )
+    main_unit = "\n".join(
         [
             "#include <inttypes.h>",
             "#include <stddef.h>",
             "#include <stdint.h>",
             "#include <stdio.h>",
             "#include <stdlib.h>",
-            BITVECTOR_PRELUDE,
-            *blobs,
+            definition_prototype(function_source, f"dec_{name}"),
             *arrays,
-            *(callee_sources or []),
-            function_source,
-            *type_check,
             "int main(int argc, char **argv) {",
             f"    if (argc != 2) return {64};",
             "    char *end = NULL;",
@@ -2303,15 +2353,50 @@ def runner_source(
             "",
         ]
     )
+    return function_unit, main_unit
+
+
+def definition_prototype(function_source: str, name: str) -> str:
+    """The prototype of `name` as its definition in `function_source` spells it."""
+    head, separator, _ = function_source.partition("{")
+    if not separator:
+        raise ValueError(f"no definition of {name} in the rendering")
+    lines = head.rstrip().splitlines()
+    start = next(
+        (index for index in range(len(lines) - 1, -1, -1) if f"{name}(" in lines[index]),
+        None,
+    )
+    if start is None:
+        raise ValueError(f"no definition of {name} in the rendering")
+    return " ".join(line.strip() for line in lines[start:]) + ";"
 
 
 def compile_runner(
-    source: str, source_path: Path, executable: Path, *, strict: bool
+    units: tuple[str, str], source_path: Path, executable: Path, *, strict: bool
 ) -> dict[str, Any]:
+    """Compile the rendering and the harness main as two translation units.
+
+    `source_path` names the rendering's unit; the main unit sits beside it
+    with a `_main` suffix. The rendering is what the gate judges, so it takes
+    the strict flags; the main is harness code and takes the same flags only
+    because nothing in it should warn either.
+    """
+    function_unit, main_unit = units
     source_path.parent.mkdir(parents=True, exist_ok=True)
-    source_path.write_text(source)
+    source_path.write_text(function_unit)
+    main_path = source_path.with_name(f"{source_path.stem}_main{source_path.suffix}")
+    main_path.write_text(main_unit)
     flags = list(STRICT_C_FLAGS) if strict else ["-std=c11", "-w", "-O0"]
-    result = run_command(["clang", *flags, "-o", str(executable), str(source_path)])
+    objects = []
+    for unit in (source_path, main_path):
+        object_path = unit.with_suffix(".o")
+        result = run_command(["clang", *flags, "-c", "-o", str(object_path), str(unit)])
+        if result["status"] != "pass":
+            result["source"] = str(source_path)
+            result["executable"] = str(executable)
+            return result
+        objects.append(str(object_path))
+    result = run_command(["clang", "-o", str(executable), *objects])
     result["source"] = str(source_path)
     result["executable"] = str(executable)
     return result
@@ -2558,6 +2643,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         )
         if callee_notes:
             entry["callees"] = callee_notes
+        preamble = file_scope_preamble(exact_section, name)
         raw_program = runner_source(
             raw_mapped,
             raw_blobs,
@@ -2567,6 +2653,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             diagnostic=False,
             callee_sources=callee_sources,
             declared_parameters=declared_parameters,
+            preamble=preamble,
         )
         raw_compile = compile_runner(
             raw_program,
@@ -2596,6 +2683,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
                     sections, diagnostic_mapped, root=name
                 )[0],
                 declared_parameters=declared_parameters,
+                preamble=preamble,
             )
             diagnostic_compile = compile_runner(
                 diagnostic_program,

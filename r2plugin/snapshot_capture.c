@@ -5496,6 +5496,11 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 	RAnalFunctionInterfaceSnapshot *interface = &snapshot->function_interface;
 	snapshot_type_report_function = snapshot->function_name;
 	function_logical_types_clear (interface);
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("r2sleigh: type graph entered: fcn=%s complete=%d signature=%d parameters=%u return_kind=%d\n",
+			r_str_get (snapshot->function_name), interface->complete? 1: 0,
+			ctx->signature? 1: 0, (unsigned)interface->num_parameters, (int)interface->return_kind);
+	}
 	if (!interface->complete || !ctx->signature) {
 		snapshot_type_graph_report (interface->complete
 			? "no signature": "interface incomplete", NULL,
@@ -5507,6 +5512,7 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 	// to 64-bit, so a 32-bit target has no reason to lose its type graph.
 	const ut64 pointer_bits = anal->config? (ut64)anal->config->bits: 0;
 	if (pointer_bits != 32 && pointer_bits != 64) {
+		snapshot_type_graph_report ("pointer width", NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	size_t base_count = (size_t)r_list_length (snapshot->base_types);
@@ -5539,6 +5545,7 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		|| type_capacity > limits->max_type_graph_types
 		|| base_count > limits->max_type_graph_aggregates
 		|| child_count > limits->max_type_graph_members) {
+		snapshot_type_graph_report ("graph capacity", NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	RAnalSnapshotTypeGraph *graph = &snapshot->type_graph;
@@ -5621,6 +5628,11 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 	RAnalFunctionParam *parameter;
 	size_t index = 0;
 	r_list_foreach (ctx->signature->params, iter, parameter) {
+		// The ellipsis is the variadic tail, not a parameter; the interface counts only the fixed prefix.
+		if (parameter && interface->variadic && !iter->n
+			&& r_type_arg_is_vararg (parameter->type, parameter->name)) {
+			break;
+		}
 		if (!parameter || index >= interface->num_parameters) {
 			result = SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 			break;
@@ -5659,6 +5671,7 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		index++;
 	}
 	if (result == SNAPSHOT_TYPE_GRAPH_VALID && index != interface->num_parameters) {
+		snapshot_type_graph_report ("signature and interface disagree on the parameter count", NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		result = SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	if (result == SNAPSHOT_TYPE_GRAPH_VALID
@@ -5682,6 +5695,7 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		}
 	} else if (result == SNAPSHOT_TYPE_GRAPH_VALID
 		&& interface->return_kind != R_ANAL_SNAPSHOT_RETURN_VOID) {
+		snapshot_type_graph_report ("return is neither a register nor void", ctx->signature->ret_type, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		result = SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	// Root what the locals are declared as, and hand each slot its node. A
@@ -5732,6 +5746,10 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 	free (aggregate_laid_out);
 	free (aggregate_in_progress);
 	free (pending_aggregates);
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("r2sleigh: type graph left: fcn=%s result=%d types=%u\n",
+			r_str_get (snapshot->function_name), (int)result, (unsigned)graph->num_types);
+	}
 	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 		snapshot_type_graph_fini (graph);
 		function_logical_types_clear (interface);

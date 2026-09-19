@@ -1066,12 +1066,16 @@ impl TypeWritebackAnalysis {
                 let id = r2ssa::SemanticId::parameter(slot)?;
                 let carrier_width = match render.certified_entities.get(&id) {
                     Some(crate::CertifiedEntity::Parameter { carrier_width, .. }) => *carrier_width,
-                    _ if prototype => {
-                        let spec = interface?.parameters().get(slot)?;
-                        spec.register_storage()
-                            .map(|storage| storage.size)
-                            .or_else(|| spec.location().stack().map(|(_, size)| size))?
-                    }
+                    // The declared type occupies its own projection of the carrier: an int in a 64-bit register is 32 bits.
+                    _ if prototype => match interface?.parameter_logical_value(slot) {
+                        Some(logical) => u32::try_from(logical.carrier().size_bits() / 8).ok()?,
+                        None => {
+                            let spec = interface?.parameters().get(slot)?;
+                            spec.register_storage()
+                                .map(|storage| storage.size)
+                                .or_else(|| spec.location().stack().map(|(_, size)| size))?
+                        }
+                    },
                     _ => {
                         r2il::refusal_evidence!(
                             "callee-signature",

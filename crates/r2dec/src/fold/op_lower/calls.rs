@@ -230,6 +230,17 @@ impl<'a> FoldingContext<'a> {
         let cert = self
             .certified_callsite_for_op(block_addr, op_idx)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        // A call to this function needs no prototype: its definition is the
+        // one being written.
+        if cert.direct_target.is_some()
+            && cert.direct_target
+                == self
+                    .inputs
+                    .prepared_ssa
+                    .map(|prepared| prepared.function().entry)
+        {
+            return Ok(());
+        }
         let render_fact = self
             .certified_call_render_fact_for_op(block_addr, op_idx)
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;

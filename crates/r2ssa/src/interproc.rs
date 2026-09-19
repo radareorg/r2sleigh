@@ -257,7 +257,6 @@ impl FunctionSemanticSummary {
         }
     }
 
-    #[cfg(test)]
     fn seed_for_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
         let normalized = normalize_seed_name(name)?;
         let mut arg_effects = BTreeMap::new();
@@ -352,6 +351,68 @@ impl FunctionSemanticSummary {
                     kind: SummaryMemoryEffectKind::Write,
                     location: arg_location(0, None, None),
                 });
+                transfer_effects.push(SummaryTransferEffect {
+                    dst: arg_location(0, None, None),
+                    src: SummaryMemoryLocation {
+                        region: SummaryMemoryRegion::Unknown,
+                        range: None,
+                    },
+                    len: SummaryTransferLength::Arg(2),
+                });
+                SummaryReturnRelation::Arg(0)
+            }
+            // The `n`-bounded writers: at most `n` bytes land in the destination.
+            "snprintf" | "vsnprintf" => {
+                effect(0, false, true, true, false);
+                memory_effects.push(SummaryMemoryEffect {
+                    kind: SummaryMemoryEffectKind::Write,
+                    location: arg_location(0, None, None),
+                });
+                transfer_effects.push(SummaryTransferEffect {
+                    dst: arg_location(0, None, None),
+                    src: SummaryMemoryLocation {
+                        region: SummaryMemoryRegion::Unknown,
+                        range: None,
+                    },
+                    len: SummaryTransferLength::Arg(1),
+                });
+                SummaryReturnRelation::Unknown
+            }
+            // `__snprintf_chk(s, maxlen, flag, slen, format, ...)` on glibc and
+            // Apple alike: the write is bounded by `maxlen`; `slen` is the
+            // object size the check compares it against.
+            "snprintf_chk" => {
+                effect(0, false, true, true, false);
+                memory_effects.push(SummaryMemoryEffect {
+                    kind: SummaryMemoryEffectKind::Write,
+                    location: arg_location(0, None, None),
+                });
+                transfer_effects.push(SummaryTransferEffect {
+                    dst: arg_location(0, None, None),
+                    src: SummaryMemoryLocation {
+                        region: SummaryMemoryRegion::Unknown,
+                        range: None,
+                    },
+                    len: SummaryTransferLength::Arg(1),
+                });
+                SummaryReturnRelation::Unknown
+            }
+            "strncpy" => {
+                effect(0, false, true, true, false);
+                effect(1, true, false, false, false);
+                memory_effects.push(SummaryMemoryEffect {
+                    kind: SummaryMemoryEffectKind::Write,
+                    location: arg_location(0, None, None),
+                });
+                memory_effects.push(SummaryMemoryEffect {
+                    kind: SummaryMemoryEffectKind::Read,
+                    location: arg_location(1, None, None),
+                });
+                transfer_effects.push(SummaryTransferEffect {
+                    dst: arg_location(0, None, None),
+                    src: arg_location(1, None, None),
+                    len: SummaryTransferLength::Arg(2),
+                });
                 SummaryReturnRelation::Arg(0)
             }
             "strlen" => {
@@ -429,7 +490,9 @@ impl FunctionSemanticSummary {
                 | "release" | "lock" | "unlock" => 1,
                 "calloc" => 2,
                 "strcmp" | "memcmp" => 2,
-                "memcpy" | "memmove" | "copyin" | "copyout" | "memset" => 3,
+                "memcpy" | "memmove" | "copyin" | "copyout" | "memset" | "strncpy" | "snprintf"
+                | "vsnprintf" => 3,
+                "snprintf_chk" => 5,
                 _ => 0,
             }),
             direct_callees: BTreeSet::new(),
@@ -745,7 +808,29 @@ fn prepared_obligations_require_unknown_effects(prepared: &SsaArtifact) -> bool 
     !inventory.is_complete()
         || inventory.obligations().values().any(|obligation| {
             obligation.id.kind == crate::SemanticObligationKind::VolatileOrUnknownEffect
+                && !only_variadic_tail_unproven(prepared, obligation.id.instruction)
         })
+}
+
+/// A direct variadic call whose one gap is the count of its tail composes
+/// exactly: the callee summary names argument positions, and the solve maps
+/// each position from its own carrier state, declaring unknown what it cannot
+/// follow. Only the rendering needs the count, not the effect.
+fn only_variadic_tail_unproven(
+    prepared: &SsaArtifact,
+    instruction: crate::CanonicalInstructionId,
+) -> bool {
+    let crate::CanonicalInstructionSite::Op(ordinal) = instruction.site else {
+        return false;
+    };
+    prepared.certificates().callsites.values().any(|site| {
+        site.block_addr == instruction.block_addr
+            && site.op_index as u64 == ordinal
+            && site.direct_target.is_some()
+            && site.variadic
+            && site.variadic_argument_count_refusal.is_some()
+            && site.results_complete
+    })
 }
 
 fn unknown_call_argument_state(
@@ -1065,6 +1150,8 @@ pub struct PreparedCalleeSummary {
     architecture_family: crate::MachineArchitectureFamily,
     blocks: Vec<(u64, u32)>,
     local: LocalSummaryFacts,
+    /// Names of the bodiless callees this body reaches: a PLT stub's slot.
+    callee_names: BTreeMap<u64, String>,
 }
 
 impl PreparedCalleeSummary {
@@ -1088,6 +1175,13 @@ impl PreparedCalleeSummary {
             .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
         let local = collect_source_owned_summary_facts(prepared, &abi);
         require_converged_call_carriers(&local)?;
+        let callee_names = prepared
+            .display_names()
+            .functions()
+            .iter()
+            .filter(|(addr, _)| local.direct_callees.contains(*addr))
+            .map(|(addr, name)| (*addr, name.clone()))
+            .collect();
         Ok(Self {
             id,
             architecture_family: prepared.machine_context().architecture_family(),
@@ -1098,6 +1192,7 @@ impl PreparedCalleeSummary {
                 .map(|block| (block.addr, block.size))
                 .collect(),
             local,
+            callee_names,
         })
     }
 
@@ -1174,6 +1269,13 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         locals.insert(callee.id, (None, callee.local.clone()));
     }
 
+    let mut names = root.display_names().functions().clone();
+    for callee in callees {
+        for (addr, name) in &callee.callee_names {
+            names.entry(*addr).or_insert_with(|| name.clone());
+        }
+    }
+    seed_named_callees(&names, &locals, &mut current);
     let report =
         solve_interproc_summary_set_from_locals(locals, current, Some(root_id), callees.len() + 1);
     require_converged_summary_report(&report)?;
@@ -1183,6 +1285,46 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         bodies,
         report,
     })
+}
+
+/// A callee with no body but a known name is what its model says: an import
+/// the seed table describes enters the set as a fixed summary, so a call to
+/// `snprintf` is a bounded write rather than an unknown call.
+fn seed_named_callees(
+    names: &BTreeMap<u64, String>,
+    locals: &BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
+    current: &mut BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
+) {
+    let callees = locals
+        .values()
+        .flat_map(|(_, local)| local.direct_callees.iter().copied())
+        .collect::<BTreeSet<_>>();
+    for callee in callees {
+        let id = InterprocFunctionId(callee);
+        if current.contains_key(&id) {
+            continue;
+        }
+        // The names table spells an import bare; having no body is the
+        // externality the seed table asks the name to carry.
+        let seed = names.get(&callee).and_then(|name| {
+            let marked = if name.contains("imp.") || name.contains("reloc.") {
+                name.clone()
+            } else {
+                format!("sym.imp.{name}")
+            };
+            FunctionSemanticSummary::seed_for_name(id, &marked)
+        });
+        r2il::refusal_evidence!(
+            "summary-seed",
+            "callee {callee:#x} name={:?} seeded={}",
+            names.get(&callee),
+            seed.is_some()
+        );
+        let Some(seed) = seed else {
+            continue;
+        };
+        current.insert(id, seed);
+    }
 }
 
 /// Solve from whole prepared bodies. Each non-root body is reduced to its
@@ -1822,6 +1964,36 @@ fn collect_local_summary_facts_with_obligation_authority(
     let function = prepared.function();
     let source_requires_unknown_effects =
         source_owned && prepared_obligations_require_unknown_effects(prepared);
+    r2il::refusal_evidence!(
+        "summary-local",
+        "{:#x}: source_owned={source_owned} unknown_effects={source_requires_unknown_effects} complete={} volatile_or_unknown={:?} calls={} sites={:?}",
+        function.entry,
+        prepared.obligations().is_complete(),
+        prepared
+            .obligations()
+            .obligations()
+            .values()
+            .filter(|obligation| {
+                obligation.id.kind == crate::SemanticObligationKind::VolatileOrUnknownEffect
+            })
+            .map(|obligation| obligation.id.to_string())
+            .collect::<Vec<_>>(),
+        prepared.call_sites().by_id.len(),
+        prepared
+            .certificates()
+            .callsites
+            .values()
+            .map(|site| (
+                site.block_addr,
+                site.op_index,
+                site.variadic,
+                site.variadic_argument_count_refusal,
+                site.results_complete,
+                site.fixed_argument_count,
+                site.argument_values.len()
+            ))
+            .collect::<Vec<_>>()
+    );
     let observed_call_argument_state = collect_call_arg_state(prepared, abi);
     let call_argument_state = if source_requires_unknown_effects {
         unknown_call_argument_state(prepared, abi, observed_call_argument_state.converged)
@@ -1877,6 +2049,11 @@ fn collect_local_summary_facts_with_obligation_authority(
                 );
             }
             None => {
+                r2il::refusal_evidence!(
+                    "summary-local",
+                    "{:#x}: call {call_id:?} has no direct target",
+                    function.entry
+                );
                 mark_unknown_call_effects(
                     &mut out.has_unknown_calls,
                     &mut out.arg_effects,
@@ -2873,7 +3050,6 @@ fn exact_constant_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64
     .then_some(bits)
 }
 
-#[cfg(test)]
 fn normalize_seed_name(name: &str) -> Option<&'static str> {
     let normalized_owned = name.trim().to_ascii_lowercase();
     let mut normalized = normalized_owned.as_str();
@@ -2909,14 +3085,22 @@ fn normalize_seed_name(name: &str) -> Option<&'static str> {
         normalized = rest;
     }
     match normalized {
-        "strlen" | "__strlen_chk" => Some("strlen"),
+        // Names arrive with their leading underscores already stripped, so
+        // the fortified variants match by their bare spelling. Those that keep
+        // the plain layout share a model; the ones that insert the object size
+        // before the length get their own.
+        "strlen" | "strlen_chk" => Some("strlen"),
         "strcmp" => Some("strcmp"),
         "memcmp" => Some("memcmp"),
-        "memcpy" | "__memcpy_chk" => Some("memcpy"),
-        "memmove" | "__memmove_chk" => Some("memmove"),
+        "memcpy" => Some("memcpy"),
+        "memmove" => Some("memmove"),
         "copyin" => Some("copyin"),
         "copyout" => Some("copyout"),
         "memset" => Some("memset"),
+        "snprintf" => Some("snprintf"),
+        "vsnprintf" => Some("vsnprintf"),
+        "snprintf_chk" | "vsnprintf_chk" => Some("snprintf_chk"),
+        "strncpy" => Some("strncpy"),
         "malloc" | "__libc_malloc" | "__gi___libc_malloc" => Some("malloc"),
         "calloc" | "__libc_calloc" => Some("calloc"),
         "free" => Some("free"),
@@ -3980,6 +4164,29 @@ mod tests {
                 effect.location.region == (SummaryMemoryRegion::Arg { index: 3 })
             })
         );
+    }
+
+    #[test]
+    fn seed_summary_models_the_fortified_snprintf_by_its_length_argument() {
+        let seed = FunctionSemanticSummary::seed_for_name(
+            InterprocFunctionId(9),
+            "sym.imp.__snprintf_chk",
+        )
+        .expect("snprintf_chk seed");
+        assert_eq!(seed.transfer_effects.len(), 1);
+        assert_eq!(
+            seed.transfer_effects[0].len,
+            SummaryTransferLength::Arg(1),
+            "the fortified layout bounds the write by maxlen"
+        );
+        assert_eq!(
+            seed.transfer_effects[0].dst.region,
+            SummaryMemoryRegion::Arg { index: 0 }
+        );
+        let plain =
+            FunctionSemanticSummary::seed_for_name(InterprocFunctionId(10), "sym.imp.snprintf")
+                .expect("snprintf seed");
+        assert_eq!(plain.transfer_effects[0].len, SummaryTransferLength::Arg(1));
     }
 
     #[test]

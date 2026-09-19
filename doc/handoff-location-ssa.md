@@ -28596,3 +28596,116 @@ register defined twice); here it is right. The recovery follows
 "body-proven callee signature wins": the callee's live-out names both
 carriers, the call defines both, and the caller consumes them as one 16-byte
 value. It is the same defect as `shape_multiword_return`, and is not built.
+
+
+## The libc models were never wired in, and the fortified names never matched
+
+`interproc.rs` has carried a seed table -- `memcpy`, `memset`, `malloc`,
+`free`, the lock and refcount helpers -- since before this arc, and only its
+tests ever called it: the prepared-set solver built summaries for the root
+and for callees with bodies and left every import an unknown call. The solver
+now seeds each body-less direct callee whose name the table knows as a fixed
+summary (`seed_named_callees`, `summary-seed` evidence). The table matched
+names after their leading underscores were stripped and then listed
+`__memcpy_chk`-style spellings that could never match; the fortified variants
+match by their bare spelling, and `snprintf_chk`/`vsnprintf_chk` get their own
+model because the fortified layout puts the object size before the length
+(`__snprintf_chk(s, flag, slen, maxlen, fmt, ...)`, write bounded by `maxlen`).
+`snprintf`, `vsnprintf`, `strncpy` and `memset` carry the length of their
+write as a transfer effect, and the escape bound reads a transfer's length
+from the constant argument at the call, so `snprintf(buffer, sizeof buffer,
+...)` covers the buffer.
+
+Two smaller ones from the same stretch: a call to the function being rendered
+no longer emits a prototype inside its own body (`shape_recurse_direct`
+rendered three lines matching its own name), and the shapes harness counts
+only definition lines as signatures.
+
+## Variadic import through a PLT stub: three causes, all upstream data or interproc
+
+`shape_variadic` (x64 -O0) rendered its four `__snprintf_chk` calls with only
+the six register arguments and then refused outright once the fortified
+prototypes landed. Three causes, in the order they surfaced.
+
+1. radare2 keyed `snprintf_chk`, `sprintf_chk` and `strcpy_chk` without their
+   leading underscores in `types.sdb.txt`, and `types-linux.sdb.txt` carried
+   the eighteen fortified entries a second time under stripped names. The
+   plugin looks a prototype up by the exact identifier, so the import got no
+   signature. PR 26743 now keys every fortified function by its identifier and
+   drops the linux duplicates; two tests that spelled the stripped names moved
+   to the identifiers.
+
+2. `size_t` could not be rooted in the type graph. radare2 declared `size_t`,
+   `ssize_t`, `off_t`, `off64_t`, `pid_t`, `uid_t`, `gid_t` and `time_t` as
+   opaque atomics: a `pf` format letter and a size, no signedness, and the
+   sizes disagreed between files (`uid_t` was 64 bits in the generic file,
+   `pid_t` had a typo key and no size at all). The format letter is not a
+   signedness signal either: `type.long=x`, `type.unsigned int=i`. They are
+   typedefs of the fixed-width integers now, per bits file. Two radare2 gaps
+   fell out: `r_type_format` returned nothing for a typedef of a scalar, and a
+   struct member typed by such a typedef formatted as a pointer. PRs 26762
+   (format fix) and 26763 (the data, stacked on 26762). Five r2r expectations
+   changed and each was judged: `tsj NSString` now formats its `size_t` member
+   as `q` on 64-bit where it printed `x` (4 bytes) before; `pdc` on
+   `strcpy-overflow` prints `__strcpy_chk("", -1, 32)` where it printed `-1`
+   for the destlen, and the call site is `mov x2, 0x20`.
+
+3. The stub `sym.imp.__snprintf_chk` is analysed as a function whose one op
+   is a variadic tail call through the slot. Its call boundary cannot count
+   the variadic tail (the format is the stub's own parameter), which seeded a
+   `VolatileOrUnknownEffect` obligation and made the stub's whole summary
+   unknown, so the 160-byte buffer's bytes past the first were never proven
+   written and placement refused them. Two interproc changes: a callee
+   summary carries the names of its bodiless callees so the slot behind a
+   stub can be seeded (`PreparedCalleeSummary::callee_names`), and a direct
+   variadic call whose only gap is its tail count no longer marks the body's
+   effects unknown (`only_variadic_tail_unproven`): the summary composes by
+   argument position from the solver's own carrier state, and the count is a
+   rendering need, not an effect. The stub's summary is now exactly the
+   seed's: a bounded write of argument 0.
+
+`shape_variadic` renders with every variadic argument. The buffer still
+renders as four `uint8_t` objects at the bytes the function reads, which is
+the aggregate-recovery design item above.
+
+Broad r2r after the fork changes: failures only in `db/anal/s1c88`,
+`db/formats/elf/elf-relarm64`, `db/formats/elf/crelocs`, `db/formats/ptx` and
+`db/cmd/cmd_list`, none of which touch types; not yet bisected to the
+in-flight fork branches.
+
+Two more causes surfaced once the prototype carried its types.
+
+4. The plugin's type graph rooted the signature's trailing ellipsis as a
+   sixth parameter against a five-parameter interface and refused the whole
+   graph silently, so an import's prototype never became exact types and the
+   callee declaration was spelled from carriers (`uint64_t` throughout). The
+   ellipsis is skipped, as the interface already skips it, and each silent
+   exit of the graph builder now reports under `R2SLEIGH_DEBUG_INTERFACE`.
+   `r2types` then sized an `int` prototype parameter by its register (64
+   bits) and failed its own width check; a prototype parameter is sized by
+   its logical projection of the carrier.
+
+5. With `char *` now the declared type of the first argument, the escaped
+   extent took the declared pointee (one byte) over the summary's transfer
+   length. A scalar pointee is an element, not an extent: an aggregate pointee
+   still bounds the write, a scalar one is the floor under what the callee's
+   body proves.
+
+The verifier compiles the rendering as its own translation unit now, with
+`stdint.h` and the rendering's own file-scope preamble (`typedef uint64_t
+size_t;`) in scope and nothing else; the harness `main` sits in a second unit
+with the libc headers and reaches the function through its own prototype. A
+single unit contradicted the rendering twice: `size_t` is `unsigned long` in
+`stddef.h` and `uint64_t` here, and `snprintf` is a fortify macro after
+`stdio.h`.
+
+Open, traced but not fixed: `shape_recurse_mutual` at -O1/-O2 links against
+nothing because `shape_mutual_even` and `shape_mutual_odd` refuse. Each tail
+calls the other, radare2 records no return type for either, and interface
+recovery declines when an unproven tail transfer owns the result boundary
+(`recover_interface.rs:617`). Both bodies also return directly through RAX,
+so the exact answer is a fixpoint over the tail-call component: a function's
+return kind is the join of its direct return paths and its tail callees'
+kinds, and an SCC with agreeing direct paths resolves to them. Recovery runs
+per function today and has no callee body in hand, so this needs the solve to
+happen where the prepared set is.
