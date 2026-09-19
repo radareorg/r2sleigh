@@ -205,6 +205,7 @@ pub(crate) struct BindingNameResolution {
     symbols: Rc<RefCell<SymbolTable>>,
     by_binding: Box<[SymbolId]>,
     source_named_locals: usize,
+    entry_held: usize,
 }
 
 impl BindingNameResolution {
@@ -219,6 +220,32 @@ impl BindingNameResolution {
 
         let mut by_binding = Vec::with_capacity(plan.binding_count());
         let mut source_named_locals = 0usize;
+        let mut entry_held = 0usize;
+        // One pass, not one per binding: whether a binding occupies a slot the
+        // convention passes an argument in. An entry value there is a
+        // parameter this recovery missed, and counting it as unspellable would
+        // hide that.
+        let argument_slot_bindings = {
+            let slots = source_owned
+                .source()
+                .machine_context()
+                .convention_slots()
+                .map(|slots| slots.argument_slots().to_vec())
+                .unwrap_or_default();
+            let mut found = std::collections::BTreeSet::new();
+            for value in &source.graph().values {
+                let Some(ValueDisposition::Bound { binding }) = plan.disposition(value.id) else {
+                    continue;
+                };
+                if value
+                    .canonical_storage
+                    .is_some_and(|storage| slots.contains(&storage))
+                {
+                    found.insert(*binding);
+                }
+            }
+            found
+        };
         for (binding_id, binding) in plan.bindings() {
             let mut stack_object = None;
             let role = plan.binding_role(binding_id);
@@ -264,9 +291,11 @@ impl BindingNameResolution {
                 // An incoming machine value renders as an ordinary object; the
                 // role only says the declaration comes from entry rather than
                 // from a statement.
-                Some(BindingRole::Local | BindingRole::EntryValue | BindingRole::CallClobbered) => {
+                Some(BindingRole::EntryValue) => {
+                    entry_held += usize::from(!argument_slot_bindings.contains(&binding_id));
                     SymbolRole::Carrier
                 }
+                Some(BindingRole::Local | BindingRole::CallClobbered) => SymbolRole::Carrier,
                 None => {
                     return Err(BindingNameResolutionError::ConflictingCertifiedRoles(
                         binding_id,
@@ -304,12 +333,21 @@ impl BindingNameResolution {
             symbols,
             by_binding: by_binding.into_boxed_slice(),
             source_named_locals,
+            entry_held,
         })
     }
 
     /// Locals that took the name the source gave their slot.
     pub(crate) const fn source_named_locals(&self) -> usize {
         self.source_named_locals
+    }
+
+    /// Values the function entered already holding.
+    ///
+    /// C cannot spell one, so each is declared and never assigned. Saying how
+    /// many is what keeps that from reading as a value nothing wrote.
+    pub(crate) const fn entry_held_values(&self) -> usize {
+        self.entry_held
     }
 
     /// How a symbol is spelled in the rendered C.

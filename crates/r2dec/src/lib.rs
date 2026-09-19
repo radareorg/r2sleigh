@@ -352,6 +352,7 @@ fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
+    entry_held_values: usize,
 ) {
     let rendered_nothing = func.body.is_empty();
     let residuals = count_residual_markers(&func.body);
@@ -389,6 +390,12 @@ fn note_unproven_constructs(
                 "; {} statements rendered",
                 count_body_statements(&func.body)
             );
+            // C cannot spell the value a register held on entry, so each is
+            // declared and never assigned; the count says so rather than
+            // letting the reading look like a value nothing wrote.
+            if entry_held_values > 0 {
+                let _ = write!(&mut line, "; {entry_held_values} held from entry");
+            }
             line
         }
         _ => detail,
@@ -3739,6 +3746,7 @@ impl Decompiler {
             radare2_variadic_format_counts,
             radare2_prototypes,
             binding_names.source_named_locals(),
+            binding_names.entry_held_values(),
         );
         Ok(InternalBuildProduct::Native(native))
     }
@@ -5170,7 +5178,7 @@ mod tests {
             simplify_data_object_loads_in_stmt(stmt, 64, &used);
         }
         function.extern_objects = used.into_inner().into_values().collect();
-        note_unproven_constructs(&mut function, None, 0, 0, 0);
+        note_unproven_constructs(&mut function, None, 0, 0, 0, 0);
         let ready = crate::codegen::prepare_function_for_emission(function);
         let rendered =
             crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
@@ -5226,7 +5234,7 @@ mod tests {
             simplify_data_object_loads_in_stmt(stmt, 64, &used);
         }
         function.extern_objects = used.into_inner().into_values().collect();
-        note_unproven_constructs(&mut function, None, 0, 0, 0);
+        note_unproven_constructs(&mut function, None, 0, 0, 0, 0);
         let ready = crate::codegen::prepare_function_for_emission(function);
         let rendered =
             crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
@@ -6225,7 +6233,7 @@ mod tests {
         ];
         assert_eq!(count_residual_markers(&func.body), 2);
 
-        note_unproven_constructs(&mut func, None, 0, 0, 0);
+        note_unproven_constructs(&mut func, None, 0, 0, 0, 0);
         let note = match func.body.first() {
             Some(CStmt::Comment(text)) => text.clone(),
             other => panic!("expected a leading proof note, got {other:?}"),
@@ -6249,7 +6257,7 @@ mod tests {
     fn a_rendering_says_so_even_with_nothing_marked() {
         let mut func = CFunction::new("unclaimed".to_string(), CType::Unknown);
         func.body = vec![CStmt::Return(Some(CExpr::IntLit(0)))];
-        note_unproven_constructs(&mut func, None, 0, 0, 0);
+        note_unproven_constructs(&mut func, None, 0, 0, 0, 0);
         let note = match func.body.first() {
             Some(CStmt::Comment(text)) => text.clone(),
             other => panic!("expected a leading proof note, got {other:?}"),
@@ -6262,7 +6270,7 @@ mod tests {
     fn proof_line_attributes_variadic_format_counts_to_radare2() {
         let mut func = CFunction::new("formatted".to_string(), CType::Unknown);
         func.body = vec![CStmt::Return(None)];
-        note_unproven_constructs(&mut func, None, 2, 0, 0);
+        note_unproven_constructs(&mut func, None, 2, 0, 0, 0);
         let note = match func.body.first() {
             Some(CStmt::Comment(text)) => text,
             other => panic!("expected a leading proof note, got {other:?}"),
@@ -6282,7 +6290,7 @@ mod tests {
     fn a_body_that_rendered_nothing_says_so_rather_than_reading_as_empty() {
         let mut func = CFunction::new("nothing_rendered".to_string(), CType::Unknown);
         func.body = Vec::new();
-        note_unproven_constructs(&mut func, None, 0, 0, 0);
+        note_unproven_constructs(&mut func, None, 0, 0, 0, 0);
         let text = format!("{:?}", func.body);
         assert!(
             text.contains("r2dec proof: rendering produced no statements"),

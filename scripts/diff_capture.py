@@ -127,6 +127,9 @@ def refused(lines):
 # identifier, which is what keeps an array bound from being read as one.
 DECLARATION = re.compile(r"^\s*(?:const\s+)?[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$")
 PROOF_REFUSED = re.compile(r"(\d+) refused")
+# What the rendering says it could not spell: a register's value on entry is
+# declared and never assigned because C has no other way to name it.
+PROOF_ENTRY_HELD = re.compile(r"(\d+) held from entry")
 # `==`, `!=`, `<=`, `>=` and `!` are comparisons; an assignment is a lone `=`.
 ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
 
@@ -176,6 +179,14 @@ def undefined_reads(lines):
     return found
 
 
+def proof_entry_held(lines):
+    for line in lines:
+        if "r2dec proof:" in line:
+            found = PROOF_ENTRY_HELD.search(line)
+            return int(found.group(1)) if found else 0
+    return 0
+
+
 def proof_refusals(lines):
     for line in lines:
         if "r2dec proof:" in line:
@@ -202,6 +213,10 @@ def lint(args, binary, found):
             continue
         tally["rendered"] += 1
         undefined = undefined_reads(lines)
+        # A value held from entry is declared and never assigned on purpose,
+        # and the proof line says how many there are. Only the rest is a read
+        # of something the program never produced.
+        undefined = undefined[proof_entry_held(lines) :]
         if undefined:
             tally["undefined reads"] += 1
             print(
@@ -246,6 +261,7 @@ def compare(args, binary):
         # A read of a value nothing assigned, under a proof line that refused
         # nothing, is a certification defect and outranks any difference.
         undefined = undefined_reads(clean(native, True))
+        undefined = undefined[proof_entry_held(clean(native, True)) :]
         if undefined:
             tally["undefined reads"] = tally.get("undefined reads", 0) + 1
             print(

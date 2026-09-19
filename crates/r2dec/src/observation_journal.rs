@@ -1877,6 +1877,7 @@ impl SealedNativeFunction {
         radare2_variadic_format_counts: usize,
         radare2_prototypes: usize,
         radare2_local_names: usize,
+        entry_held_values: usize,
     ) {
         self.effect_audit = crate::EffectObligationAudit::from_ledger(ledger);
         if !self.effect_audit.is_admitted() {
@@ -1898,6 +1899,7 @@ impl SealedNativeFunction {
             radare2_variadic_format_counts,
             radare2_prototypes,
             radare2_local_names,
+            entry_held_values,
         );
         self.ready = prepare_function_for_emission(function);
     }
