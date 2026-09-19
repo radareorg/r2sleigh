@@ -92,11 +92,12 @@ elides the save entirely, so the question never reaches its renderer.
 **Three functions in the sample refuse natively where the plugin renders.**
 That is the number to drive to zero, and the oracle names which ones.
 
-**The aarch64 address fold happens after the capture.** `adrp` plus `add` never
-becomes one SSA constant, so the second pass's constant harvest does not see the
-address a string lives at; the fold happens in `r2dec`'s term layer, which is
-downstream of everything a capture could state. A rendered `_dup("x")` is still
-`_dup(0x100000500)` here.
+**The aarch64 address fold is closed.** `adrp` plus `add` never becomes one SSA
+constant, and the harvest was scanning for constants that could not exist. The
+fold itself was written four times -- the term layer, `constant.rs`,
+`data_ref.rs` and SCCP -- and the capture asked none of them;
+`SsaArtifact::folded_value` is now the one public answer and the second pass
+asks it. `_dup("x")` renders.
 
 **A `char` is spelled `int8_t`.** The declared type graph carries a signed
 eight-bit integer, which is what `char` is, and the renderer has no reason to

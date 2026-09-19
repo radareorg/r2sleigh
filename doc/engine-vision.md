@@ -349,10 +349,12 @@ from value sets, vtables and RTTI, and type signatures, iterated against the
 call graph. This is the largest single improvement available to decompiler
 output quality.
 
-**Loop and induction variable analysis.** Nothing anywhere in either tree does
-this. It is required for emitting real `for` loops, for array recovery where the
-stride is the induction step, and for the loop-carrier defects already
-diagnosed. It is cheap to build and its absence is already being paid for.
+**Loop and induction variable analysis.** Largely built since this was written:
+`r2ssa` carries `InductionStep`, `InductionFact` with its own re-derivation
+check, `collect_induction_facts`, the natural-loop walk with its bounds, and a
+`ForLoopCertificate`; `r2dec` emits `CStmt::For` from them and `r2rewrite`
+recovers `a[i]` from the induction step. What remains is the array recovery
+that sits on top of a value domain.
 
 **Structure and array recovery from access patterns**, probabilistically, over
 the memory model. Both Ghidra and IDA are weak here, so this is genuine
@@ -572,8 +574,9 @@ native extension means a C interface, sandboxed extension means WebAssembly, and
 scripting means r2pipe compatibility. Radare2's ecosystem is C-ABI plugins, and
 this decision determines whether any of it follows.
 
-**The vendored Sleigh dependency.** `libsla` and `libsla-sys` are patched to
-fork branches carrying open pull requests, and the corpus depends on them. This
-was a build-reproducibility concern; once `r2s` is the host binary it is a
-distribution blocker, because the shipped tool would depend on two unmerged pull
-requests on personal fork branches. Upstream them or vendor them.
+**The vendored Sleigh dependency — decided, and now a distribution question
+rather than an open one.** `Cargo.toml` patches `libsla`, `libsla-sys` and
+`sleigh-config` to the project's own forks' `main` branches, which is settled
+policy. What is not settled is that a shipped `r2s` would depend on three git
+forks; the compiler specifications the engine now reads for the return-address
+carrier are carried there too, and belong upstream in Ghidra.
