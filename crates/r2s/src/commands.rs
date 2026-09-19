@@ -268,27 +268,41 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
         .ok_or("the convention data names no default")?;
     let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
 
-    let name = session
-        .image
-        .symbols()
-        .iter()
-        .find(|symbol| symbol.vaddr == addr && symbol.defined)
-        .map_or_else(|| format!("fcn.{:x}", addr), |symbol| symbol.name.clone());
-
     let target = r2engine::native::NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
         convention,
         compiler: &compiler,
     };
-    let response = r2engine::native::decompile(&target, addr, &name, |vaddr, max| {
-        session
-            .image
+    let program = OpenImage {
+        image: &session.image,
+    };
+    let response = r2engine::native::decompile(&target, &program, addr)
+        .map_err(|refusal| refusal.to_string())?;
+    Ok(response.output)
+}
+
+/// The open binary, as the engine asks about it.
+#[cfg(feature = "sleigh")]
+struct OpenImage<'a> {
+    image: &'a r2image::Image,
+}
+
+#[cfg(feature = "sleigh")]
+impl r2engine::native::Program for OpenImage<'_> {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.image
             .read_upto(vaddr, max)
             .map(std::borrow::Cow::into_owned)
-    })
-    .map_err(|refusal| refusal.to_string())?;
-    Ok(response.output)
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.image
+            .symbols()
+            .iter()
+            .find(|symbol| symbol.vaddr == vaddr && symbol.defined)
+            .map(|symbol| symbol.name.clone())
+    }
 }
 
 #[cfg(feature = "sleigh")]

@@ -1496,48 +1496,54 @@ pub struct EmbeddedMachine {
 /// one processor agrees about that; the prototype models, which do differ, are
 /// not read here.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    let (sla, pspec, cspec, name): (&'static [u8], &'static str, &'static str, &'static str) =
-        match arch_name.to_ascii_lowercase().as_str() {
-            #[cfg(feature = "x86")]
-            "x86-64" | "x86_64" | "x64" | "amd64" => (
-                sleigh_config::processor_x86::SLA_X86_64,
-                sleigh_config::processor_x86::PSPEC_X86_64,
-                sleigh_config::processor_x86::CSPEC_X86_64_GCC,
-                "x86-64",
-            ),
-            #[cfg(feature = "x86")]
-            "x86" | "x86-32" | "i386" | "i686" => (
-                sleigh_config::processor_x86::SLA_X86,
-                sleigh_config::processor_x86::PSPEC_X86,
-                sleigh_config::processor_x86::CSPEC_X86GCC,
-                "x86",
-            ),
-            #[cfg(feature = "arm")]
-            "aarch64" | "arm64" | "arm64e" => (
-                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
-                sleigh_config::processor_aarch64::PSPEC_AARCH64,
-                sleigh_config::processor_aarch64::CSPEC_AARCH64,
-                "aarch64",
-            ),
-            #[cfg(feature = "arm")]
-            "arm" | "arm32" => (
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                sleigh_config::processor_arm::PSPEC_ARMT,
-                sleigh_config::processor_arm::CSPEC_ARM,
-                "ARM",
-            ),
-            other => {
-                return Err(LiftError::Unsupported(format!(
-                    "no embedded Sleigh specification for {other}"
-                )));
-            }
-        };
+    let (sla, pspec, cspec, name) = embedded_specification(&arch_name.to_ascii_lowercase())
+        .ok_or_else(|| {
+            LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
+        })?;
     let (arch, disasm) = embedded_arch_and_disassembler(sla, pspec, name)?;
     Ok(EmbeddedMachine {
         arch,
         disasm,
         compiler_spec: cspec,
     })
+}
+
+/// The embedded data one lower-cased architecture name selects, if any is
+/// compiled in for it.
+type EmbeddedSpecification = (&'static [u8], &'static str, &'static str, &'static str);
+
+fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
+    match arch_name {
+        #[cfg(feature = "x86")]
+        "x86-64" | "x86_64" | "x64" | "amd64" => Some((
+            sleigh_config::processor_x86::SLA_X86_64,
+            sleigh_config::processor_x86::PSPEC_X86_64,
+            sleigh_config::processor_x86::CSPEC_X86_64_GCC,
+            "x86-64",
+        )),
+        #[cfg(feature = "x86")]
+        "x86" | "x86-32" | "i386" | "i686" => Some((
+            sleigh_config::processor_x86::SLA_X86,
+            sleigh_config::processor_x86::PSPEC_X86,
+            sleigh_config::processor_x86::CSPEC_X86GCC,
+            "x86",
+        )),
+        #[cfg(feature = "arm")]
+        "aarch64" | "arm64" | "arm64e" => Some((
+            sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+            sleigh_config::processor_aarch64::PSPEC_AARCH64,
+            sleigh_config::processor_aarch64::CSPEC_AARCH64,
+            "aarch64",
+        )),
+        #[cfg(feature = "arm")]
+        "arm" | "arm32" => Some((
+            sleigh_config::processor_arm::SLA_ARM8_LE,
+            sleigh_config::processor_arm::PSPEC_ARMT,
+            sleigh_config::processor_arm::CSPEC_ARM,
+            "ARM",
+        )),
+        _ => None,
+    }
 }
 
 impl Disassembler {

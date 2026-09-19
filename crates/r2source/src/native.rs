@@ -47,10 +47,13 @@ pub struct NativeBlock {
 }
 
 /// One direct call the body makes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NativeCall {
     pub instruction: u64,
     pub target: u64,
+    /// What the program calls the target. Presentation only: it spells the
+    /// call in rendered output and is evidence about nothing.
+    pub name: Option<String>,
 }
 
 /// One function, as the engine walked it out of the image.
@@ -116,7 +119,7 @@ pub fn capture(
             instruction_address: call.instruction,
             target_address: call.target,
             transfer: AdvisoryCallTransfer::Call,
-            target_name: None,
+            target_name: call.name.clone(),
             linkage: AdvisoryCalleeLinkage::Internal,
             prototype: None,
         })

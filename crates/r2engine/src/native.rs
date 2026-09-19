@@ -6,10 +6,11 @@
 //! lift and the same request the plugin uses. Nothing downstream of the
 //! capture is new, and nothing here formats anything.
 //!
-//! What it does not do yet is read the callees. A capture with no callee
-//! bodies renders calls it cannot prove as refusals, which is honest and is
-//! the next thing to close.
+//! The callees a function calls directly are walked too, one level deep, and
+//! their bodies are what say what each call takes and returns. Deeper than one
+//! level is what an interprocedural fixpoint is for, and this is not one.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use r2abi::{CompilerSpec, Convention};
@@ -20,13 +21,26 @@ use r2source::{
     SourceMachineRoles, SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
-use r2ssa::TrustedSsaArtifact;
 use r2ssa::body::{BodyError, lift_body};
+use r2ssa::{CalleePreservedCarriers, SummaryArgumentReach, TrustedSsaArtifact};
 
 use crate::{
-    EngineDecompileResponse, EngineFunctionDecompileRequestInput, EngineFunctionInput,
+    CalleeFacts, EngineDecompileResponse, EngineFunctionDecompileRequestInput, EngineFunctionInput,
     EngineFunctionInputQuality, EngineSession,
 };
+
+/// The program being analysed, as the engine needs to see it.
+///
+/// Two questions and no cursor: what byte lives at an address, and what the
+/// program calls one. Whoever opened the binary answers them.
+pub trait Program {
+    /// As many bytes as are mapped at `vaddr`, up to `max`, or `None` where
+    /// nothing is mapped.
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>>;
+
+    /// What the program calls this address, where it names it at all.
+    fn name_at(&self, vaddr: u64) -> Option<String>;
+}
 
 /// Everything about the machine that does not change between functions.
 pub struct NativeTarget<'a> {
@@ -74,45 +88,46 @@ impl std::fmt::Display for NativeRefusal {
 
 impl std::error::Error for NativeRefusal {}
 
-/// Decompile the function at `entry`, reading the program through `read`.
-pub fn decompile<R>(
+/// Decompile the function at `entry`.
+pub fn decompile(
     target: &NativeTarget<'_>,
+    program: &dyn Program,
     entry: u64,
-    name: &str,
-    read: R,
-) -> Result<EngineDecompileResponse, NativeRefusal>
-where
-    R: Fn(u64, usize) -> Option<Vec<u8>>,
-{
-    let body = lift_body(entry, target.disasm, read).map_err(NativeRefusal::Body)?;
-    let machine = machine(target)?;
-    let function = NativeFunction {
-        address: entry,
-        name: name.to_owned(),
-        blocks: body
-            .blocks
-            .iter()
-            .map(|block| NativeBlock {
-                address: block.lifted.addr,
-                bytes: block.bytes.clone(),
-                successors: block.successors.clone(),
-            })
-            .collect(),
-        calls: call_sites(&body),
-        loader_role: None,
+) -> Result<EngineDecompileResponse, NativeRefusal> {
+    let native = Native {
+        target,
+        program,
+        machine: machine(target)?,
+        control: crate::EngineExecutionControl::default().ssa_execution_control(),
     };
-
-    let snapshot = r2source::native::capture(&machine, function).map_err(NativeRefusal::Capture)?;
-    let lifted = Disassembler::lift_owned_function(snapshot)
-        .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
-    let trusted = TrustedSsaArtifact::prepare(lifted)
-        .map_err(|error| NativeRefusal::Prepare(format!("{error:?}")))?;
-
-    let block_count = trusted.source_block_count();
+    let root = native.walk(entry)?;
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+
+    // What a call takes and returns is a fact about the callee's body, so the
+    // bodies it calls are walked first and the root is prepared against them.
+    // A callee that cannot be walked leaves its call unproven rather than
+    // failing the root.
+    let mut callees = Callees::default();
+    let mut facts = Vec::new();
+    for address in root.body.calls.iter().filter(|address| **address != entry) {
+        let Ok(walked) = native.walk(*address) else {
+            continue;
+        };
+        let Ok(artifact) = native.prepare(&walked, &Callees::default()) else {
+            continue;
+        };
+        let Some(derived) = CalleeFacts::derive(&artifact, ptr_bits) else {
+            continue;
+        };
+        callees.record(*address, &derived);
+        facts.push(derived);
+    }
+
+    let artifact = native.prepare(&root, &callees)?;
+    let block_count = artifact.source_block_count();
     let input = EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
-            function_name: name.to_owned(),
+            function_name: root.name,
             function_addr: entry,
             // The artifact owns the lift and the request reads it from there.
             blocks: Vec::new(),
@@ -124,9 +139,101 @@ where
         r2types::ParsedExternalContext::default(),
     )
     .with_input_quality(EngineFunctionInputQuality::complete(block_count))
-    .with_trusted_ssa(Arc::new(trusted));
+    .with_trusted_ssa(artifact)
+    .with_callee_facts(facts);
 
     Ok(EngineSession::new().decompile_function_from_input(input))
+}
+
+/// What the bodies a function calls say about their own boundaries.
+#[derive(Default)]
+struct Callees {
+    interfaces: BTreeMap<u64, r2source::SourceFunctionInterface>,
+    preserved: CalleePreservedCarriers,
+    /// What each callee reaches through each pointer it is handed, which is
+    /// what makes the bytes one callee covers one object in the caller.
+    reach: BTreeMap<u64, BTreeMap<usize, SummaryArgumentReach>>,
+}
+
+impl Callees {
+    fn record(&mut self, address: u64, facts: &CalleeFacts) {
+        self.interfaces.insert(address, facts.interface().clone());
+        self.preserved
+            .insert(address, facts.preserved_carriers().clone());
+        let reach = facts.argument_touch_reach();
+        if !reach.is_empty() {
+            self.reach.insert(address, reach);
+        }
+    }
+}
+
+/// One function walked out of the program.
+struct Walked {
+    name: String,
+    body: r2ssa::body::Body,
+}
+
+/// One program, one machine, and the walk over it.
+struct Native<'a> {
+    target: &'a NativeTarget<'a>,
+    program: &'a dyn Program,
+    machine: NativeMachine,
+    /// Cancellation and the work meter, shared by the root and its callees.
+    control: r2ssa::SsaExecutionControl,
+}
+
+impl Native<'_> {
+    fn walk(&self, entry: u64) -> Result<Walked, NativeRefusal> {
+        let body = lift_body(entry, self.target.disasm, |vaddr, max| {
+            self.program.read(vaddr, max)
+        })
+        .map_err(NativeRefusal::Body)?;
+        Ok(Walked {
+            name: self
+                .program
+                .name_at(entry)
+                .unwrap_or_else(|| format!("fcn.{entry:x}")),
+            body,
+        })
+    }
+
+    /// Capture what was walked and prepare it for the engine.
+    fn prepare(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        let function = NativeFunction {
+            address: walked.body.entry,
+            name: walked.name.clone(),
+            blocks: walked
+                .body
+                .blocks
+                .iter()
+                .map(|block| NativeBlock {
+                    address: block.lifted.addr,
+                    bytes: block.bytes.clone(),
+                    successors: block.successors.clone(),
+                })
+                .collect(),
+            calls: call_sites(&walked.body, self.program),
+            loader_role: None,
+        };
+
+        let snapshot =
+            r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)?;
+        let lifted = Disassembler::lift_owned_function(snapshot)
+            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
+        let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
+            lifted,
+            &self.control,
+            &callees.interfaces,
+            &callees.preserved,
+            &callees.reach,
+        )
+        .map_err(|error| NativeRefusal::Prepare(format!("{error:?}")))?;
+        Ok(Arc::new(artifact))
+    }
 }
 
 /// Where each direct call is made and what it reaches.
@@ -134,7 +241,7 @@ where
 /// The walk collects call targets without saying which instruction made each
 /// one, so the instruction is found by looking for the call operation in the
 /// block that carries it.
-fn call_sites(body: &r2ssa::body::Body) -> Vec<NativeCall> {
+fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut calls = Vec::new();
     for block in &body.blocks {
         for (index, op) in block.lifted.ops.iter().enumerate() {
@@ -151,6 +258,7 @@ fn call_sites(body: &r2ssa::body::Body) -> Vec<NativeCall> {
             calls.push(NativeCall {
                 instruction,
                 target: target.offset,
+                name: program.name_at(target.offset),
             });
         }
     }
