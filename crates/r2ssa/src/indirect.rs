@@ -216,7 +216,7 @@ pub(crate) fn resolve_constant(graph: &SsaGraph, value: ValueId, depth: usize) -
 /// is read several copies later. They are the same value, and the proof only
 /// connects them if both are named by where the value came from rather than by
 /// which temporary happened to be holding it.
-fn canonical_value(graph: &SsaGraph, value: ValueId) -> ValueId {
+pub(crate) fn canonical_value(graph: &SsaGraph, value: ValueId) -> ValueId {
     let mut current = value;
     for _ in 0..MAX_DEFINITION_DEPTH {
         let Some(inst) = graph.def_inst(current).and_then(|inst| graph.inst(inst)) else {

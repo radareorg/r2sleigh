@@ -29493,8 +29493,26 @@ object, the loop's indexed read is attributed to the first, and the write is
 elided as one nothing reads. The audit agrees with itself -- 0 refused -- because
 each half is consistent; the partition is what is wrong.
 
-That is the object-extent work, not the code pointer work: `evidenced_stack_roots`
-has to let an indexed read whose induction bound reaches element two extend the
-root to twenty-four bytes, which is the same machinery as `indexed-span-reach`
-and `accessed_object_extent` earlier in this document. The entries are proven
-and named either way.
+It was the bound, and the bound was missing because of how the machine spells a
+remainder. `indexed_offset_upper_bound` knew `IntRem`, and AArch64 has no
+remainder instruction: it divides and multiplies back, so `(a + i) % 3` arrives
+as `x - (x / 3) * 3`. `divided_remainder_divisor` recognises that shape and
+answers with the divisor, which bounds the index by two exactly as the
+remainder did.
+
+Both operands have to be followed through the copies that carry them. The
+quotient reaches the multiplication in a register of its own and the divisor is
+a register the constant was loaded into, so matching the definitions directly
+found an `IntMult` of two copies and gave up. The SSA dump is what said so --
+`ValueId(114)` a copy of the quotient, `ValueId(186)` a copy of the three --
+after the evidence line had narrowed it to `bound=None` for one index value.
+
+With the bound, the object is twenty-four bytes, the third write belongs to it,
+and `shape_function_pointer` at arm64 -O0 renders all three entries:
+
+```c
+uint64_t stack_m48[3];
+((uint64_t*)stack_m48)[0] = (uint64_t)sym__op_add;
+((uint64_t*)stack_m48)[1] = (uint64_t)sym__op_xor;
+stack_m48[2] = (uint64_t)sym__op_mul;
+```

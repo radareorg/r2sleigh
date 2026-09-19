@@ -8782,6 +8782,48 @@ fn masked_upper_bound(mask: u64, bound: u64) -> u64 {
 /// an exact finite upper bound. A merge, load, subtraction, or unsupported
 /// operation has none. The visited set is sized by the data it clears, so a
 /// cyclic graph refuses without an arbitrary depth constant.
+/// The divisor of a remainder the machine spelled as `x - (x / k) * k`.
+///
+/// Both operands of the multiplication are admitted in either order, and the
+/// dividend is compared through the copies and widenings that carry it, since
+/// the quotient is computed in a wider carrier on some machines.
+fn divided_remainder_divisor(graph: &SsaGraph, dividend: ValueId, product: ValueId) -> Option<u64> {
+    // Every operand is taken through the copies that carry it: the quotient
+    // reaches the multiplication in a register of its own, and the divisor is
+    // a register the machine loaded the constant into.
+    let canonical = |value: ValueId| crate::indirect::canonical_value(graph, value);
+    let inst = graph.inst(graph.def_inst(canonical(product))?)?;
+    let InstPayload::Op(SSAOp::IntMult { .. }) = &inst.payload else {
+        return None;
+    };
+    let constant_of = |value: ValueId| {
+        widened_constant(graph, value, 0).or_else(|| constant_bits_through_copies(graph, value))
+    };
+    let operands = [
+        (*inst.inputs.first()?, *inst.inputs.get(1)?),
+        (*inst.inputs.get(1)?, *inst.inputs.first()?),
+    ];
+    for (quotient, divisor) in operands {
+        let Some(divisor) = constant_of(divisor).filter(|divisor| *divisor > 0) else {
+            continue;
+        };
+        let Some(quotient_inst) = graph
+            .def_inst(canonical(quotient))
+            .and_then(|inst| graph.inst(inst))
+        else {
+            continue;
+        };
+        let InstPayload::Op(SSAOp::IntDiv { .. }) = &quotient_inst.payload else {
+            continue;
+        };
+        let same_dividend = canonical(*quotient_inst.inputs.first()?) == canonical(dividend);
+        if same_dividend && constant_of(*quotient_inst.inputs.get(1)?) == Some(divisor) {
+            return Some(divisor);
+        }
+    }
+    None
+}
+
 fn indexed_offset_upper_bound(
     graph: &SsaGraph,
     inductions: &BTreeMap<ValueId, u64>,
@@ -8849,6 +8891,13 @@ fn indexed_offset_upper_bound(
             // reaches here with the three zero-extended into a sixteen-byte
             // value and the constant no longer the operand itself.
             SSAOp::IntRem { .. } => widened_constant(graph, input(1)?, 0)?.checked_sub(1),
+            // A machine with no remainder instruction spells one as
+            // `x - (x / k) * k`, which is below `k` whatever `x` reaches.
+            // AArch64 divides and multiplies back, so the modulo that picks a
+            // table entry arrives in this shape rather than as a remainder.
+            SSAOp::IntSub { .. } => {
+                divided_remainder_divisor(graph, input(0)?, input(1)?)?.checked_sub(1)
+            }
             // The low piece of a bounded value is bounded by the same number,
             // or by what its own width can hold. Taking it back out of the
             // wide carrier a division left it in is the other half of the
