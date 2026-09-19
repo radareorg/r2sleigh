@@ -91,10 +91,18 @@ impl Prototypes {
     }
 
     pub fn get(&self, name: &str) -> Option<&Prototype> {
-        // A linked name carries the platform's own decoration.
-        self.by_name
-            .get(name)
-            .or_else(|| self.by_name.get(name.trim_start_matches('_')))
+        // A linked name carries the platform's own decoration, and how much of
+        // it is decoration is not knowable from the name: Mach-O spells
+        // `__strcpy_chk` as `___strcpy_chk`, and the declaration keeps two of
+        // those underscores. So one underscore is dropped at a time and the
+        // first spelling the data knows wins.
+        let mut candidate = name;
+        loop {
+            if let Some(prototype) = self.by_name.get(candidate) {
+                return Some(prototype);
+            }
+            candidate = candidate.strip_prefix('_')?;
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -141,6 +149,11 @@ mod tests {
         assert_eq!(
             prototypes.get("_strlen").map(|p| p.returns.as_str()),
             Some("size_t")
+        );
+        // The declaration keeps two underscores and the linker adds a third.
+        assert_eq!(
+            prototypes.get("___strcpy_chk").map(|p| p.parameters.len()),
+            Some(3)
         );
     }
 

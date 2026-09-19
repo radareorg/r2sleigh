@@ -122,7 +122,7 @@ pub fn decompile(
         let Some(prototype) = target.prototypes.get(&name) else {
             continue;
         };
-        if let Some(interface) = declared_interface(prototype, &native.machine) {
+        if let Some(interface) = declared_interface(prototype, &native.machine, ptr_bits) {
             callees.interfaces.insert(*address, interface);
         }
     }
@@ -197,7 +197,7 @@ fn declared_signatures(
     context
 }
 
-/// A declared prototype, placed in the convention's slots.
+/// A declared prototype, placed in the convention's slots and typed.
 ///
 /// The prototype says how many arguments there are and what they are; the
 /// convention says where they arrive. Neither alone describes the call, and
@@ -206,6 +206,7 @@ fn declared_signatures(
 fn declared_interface(
     prototype: &r2abi::Prototype,
     machine: &NativeMachine,
+    ptr_bits: u32,
 ) -> Option<r2source::SourceFunctionInterface> {
     let slots = machine.slots.argument_slots();
     if prototype.parameters.len() > slots.len() {
@@ -228,31 +229,115 @@ fn declared_interface(
         ("void" | "", _) | (_, None) => r2source::SourceFunctionReturn::Void,
         (_, Some(storage)) => r2source::SourceFunctionReturn::Register { storage },
     };
+
+    // The declared types, as the graph the interface carries. A spelling this
+    // build cannot place leaves the prototype untyped rather than half-typed.
+    let mut graph = DeclaredTypes::default();
+    let parameter_values = prototype
+        .parameters
+        .iter()
+        .map(|spelling| graph.value(spelling, ptr_bits))
+        .collect::<Vec<_>>();
+    let return_value = match returns {
+        r2source::SourceFunctionReturn::Void => None,
+        _ => graph.value(&prototype.returns, ptr_bits),
+    };
+    let typed = parameter_values.iter().all(Option::is_some)
+        && matches!(returns, r2source::SourceFunctionReturn::Void) == return_value.is_none();
+    let type_graph = typed
+        .then(|| r2source::SourceTypeGraph::new(graph.types.clone(), []).ok())
+        .flatten();
+
     let revision = format!("declared:{}", prototype.name);
-    r2source::SourceFunctionInterface::new_exact(
-        revision.into_bytes(),
-        machine.slots.calling_convention(),
-        parameters,
-        returns,
-        Vec::new(),
-    )
-    .ok()
-    .and_then(|interface| {
-        let roles = machine.roles;
-        interface
-            .with_return_address_storage(roles.return_address_storage()?)
-            .ok()?
-            .with_stack_pointer_storage(roles.stack_pointer_storage()?)
-            .ok()
-    })
-    .or_else(|| {
-        r2il::refusal_evidence!(
-            "declared-interface",
-            "{} could not be stated in this machine's carriers",
-            prototype.name
-        );
-        None
-    })
+    let interface = match &type_graph {
+        Some(_) => r2source::SourceFunctionInterface::new_exact_with_logical_types(
+            revision.into_bytes(),
+            machine.slots.calling_convention(),
+            parameters,
+            returns,
+            Vec::new(),
+            parameter_values,
+            return_value,
+            type_graph,
+        ),
+        None => r2source::SourceFunctionInterface::new_exact(
+            revision.into_bytes(),
+            machine.slots.calling_convention(),
+            parameters,
+            returns,
+            Vec::new(),
+        ),
+    };
+
+    interface
+        .ok()
+        .and_then(|interface| {
+            let roles = machine.roles;
+            interface
+                .with_return_address_storage(roles.return_address_storage()?)
+                .ok()?
+                .with_stack_pointer_storage(roles.stack_pointer_storage()?)
+                .ok()
+        })
+        // The types are radare2's declarations, which is exactly what this flag
+        // says: the prototype was read rather than recovered.
+        .map(r2source::SourceFunctionInterface::with_prototype_from_source_types)
+        .or_else(|| {
+            r2il::refusal_evidence!(
+                "declared-interface",
+                "{} could not be stated in this machine's carriers",
+                prototype.name
+            );
+            None
+        })
+}
+
+/// The types one declared prototype needs, interned as it is read.
+#[derive(Default)]
+struct DeclaredTypes {
+    types: Vec<r2source::SourceType>,
+}
+
+impl DeclaredTypes {
+    /// The logical value one C spelling stands for.
+    fn value(&mut self, spelling: &str, ptr_bits: u32) -> Option<r2source::SourceLogicalValue> {
+        let parsed = r2types::parse_c_type_like(spelling, ptr_bits)?;
+        let id = self.intern(&parsed, ptr_bits)?;
+        let bits = self.types[id as usize].size_bits();
+        Some(r2source::SourceLogicalValue::new(
+            id,
+            r2source::SourceCarrierProjection::new(r2source::SourceCarrierKind::Full, 0, bits),
+        ))
+    }
+
+    fn intern(&mut self, parsed: &r2types::CTypeLike, ptr_bits: u32) -> Option<u32> {
+        use r2source::SourceTypeKind as Kind;
+        use r2types::{CTypeLike, Signedness};
+
+        let (kind, bits) = match parsed {
+            CTypeLike::Void => (Kind::Void, 0),
+            CTypeLike::Bool => (Kind::UnsignedInteger, 8),
+            CTypeLike::Int { bits, signedness } => match signedness {
+                Signedness::Signed => (Kind::SignedInteger, *bits),
+                _ => (Kind::UnsignedInteger, *bits),
+            },
+            CTypeLike::Float(bits) => (Kind::Float, *bits),
+            CTypeLike::Pointer(target) => {
+                let target_type_id = self.intern(target, ptr_bits)?;
+                (Kind::Pointer { target_type_id }, ptr_bits)
+            }
+            // An aggregate needs a layout this declaration does not carry.
+            _ => return None,
+        };
+        let id = u32::try_from(self.types.len()).ok()?;
+        self.types.push(r2source::SourceType::new(
+            id,
+            kind,
+            u64::from(bits),
+            u64::from(bits.max(8)),
+        ));
+        Some(id)
+    }
 }
 
 /// One declared prototype as the type layer states it.
