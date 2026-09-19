@@ -550,12 +550,11 @@ than over a bridge into someone else's.
 
 ## Open questions
 
-**Naming.** `r2sleigh`, and the `r2` prefix on every crate, both assert that
-this is a guest inside radare2, and the host binary is now `r2s`. The target
-name is to be decided now so it stops drifting through documentation and tests;
-the rename itself waits for a quiet moment, because renaming twelve crates while
-another branch is mid-flight is a collision for no functional gain. Sleigh
-becomes an implementation detail of one crate rather than the product.
+**Naming — settled, and kept.** The `r2` prefix stays on the binary and on
+every crate. It reads as a guest's prefix only if compatibility is incidental,
+and it is not: `r2s` reproduces radare2's command language on purpose, and the
+prefix is what says so. There is no rename. `r2sleigh` stays the name of the
+Sleigh toolchain, and `r2s` is the host binary.
 
 **Incremental recomputation.** Query-keyed memoisation with dependency tracking
 is the right model — patch a byte, invalidate only what depended on it — and it
