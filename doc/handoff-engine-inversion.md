@@ -317,3 +317,48 @@ decoder — and the address chooses. `pd` now matches radare2 on both.
 `arm/64`, by a deliberate rule that a tuple enters the list only once it has
 been verified against the active analyzer. Admitting `arm/32` is that
 verification, not a line of code.
+
+## i386 call sites: the arguments were never looked at
+
+A call with no prototype fell back to the convention, and that fallback walked
+only the convention's *register* carriers. On i386 cdecl that list is empty, so
+every such call came back **complete with zero arguments** — not a gap but a
+false claim, with the arguments sitting beside the call as
+`*(uint32_t*)ESP_4 = ...` stores that were then elided as dead. Three things
+were wrong on one path and all three are fixed at their own cause:
+
+- The fallback now reads the outgoing argument area after the register slots,
+  stopping at the first slot with no store, and refuses the boundary outright
+  when the convention passes arguments on the stack and the entering pointer's
+  position is unknown. An empty scan there means nothing was looked at, not
+  that nothing is there.
+- `SourceStackArgumentPlacement::first_offset` carried Ghidra's callee-entry
+  coordinate while its own comment promised the caller's. The cspec states
+  `stackshift` on the same prototype element, so subtracting it makes the field
+  mean what it says; this also removes an off-by-one-slot in the x86-64
+  variadic tail probe.
+- A function that realigns its stack (`and esp, -16`) had no root for any
+  address after the mask, so nothing about its frame could be placed.
+  `StackAddressBase::Realigned` names that origin — an origin, not a position,
+  because what the mask discarded is unknown. Aliasing still answers "may
+  alias" across bases, so no disjointness is claimed.
+
+The Qt `main` in `abcde-qt32` went from 77 of 153 obligations gapped to none,
+and its ten calls now carry argument lists that match the machine push for
+push. `easiestprintf`'s `main` went from nine argument-less calls to
+`setvbuf(stdin, 0, 2, 0)`, `alarm(60)`, `sleep(3)`,
+`open("/dev/urandom", 0)`, `read(fd, &stack_m29, 1)`, `_exit(-1)`.
+
+## A convention-preserved register a callee does not preserve
+
+`__x86.get_pc_thunk.si` is `mov esi, [esp]; ret`: it returns the return address
+in ESI, which x86 cdecl's `<unaffected>` list calls preserved. The caller
+therefore reads `esi` after the call as the value it spilled beforehand, and
+the string address in the Qt `main` renders as `stack_m16 + 0xe0d`.
+
+The callee's own interface already proves the answer -- `body_proven_result`
+recovers a carrier the convention does not name, and the thunk is declared
+`uint32_t __x86_get_pc_thunk_si(void)` in that very rendering. The rule is that
+a register the callee's interface names as its result is not preserved across
+that call. It must not be widened to "the callee's body writes it": every
+save-and-restore callee writes the registers it saves.
