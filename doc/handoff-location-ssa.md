@@ -28739,3 +28739,38 @@ the library's `const char *` parameter, so a strict compile refuses the
 redeclaration. The type model drops qualifiers when it parses a spelling
 (`strip_type_qualifiers`), and `CTypeLike` has no way to carry one back; a
 declaration of any libc function that takes `const char *` fails the same way.
+
+## A const pointee is part of a declared type
+
+`CTypeLike` now has `Const(Box<CTypeLike>)`, carried only on a pointee. A
+declaration of `snprintf` that spelled `char *` where the library says
+`const char *` was a different type to clang, which knows the name and
+refused the redeclaration under `-Werror`; every rendering that calls a libc
+function taking `const char *` failed the strict compile the same way. A
+top-level qualifier is not part of a prototype's type and is still dropped.
+
+Three parsers each stripped the qualifier and each keeps it now:
+`parse_c_type_like` peels a pointer level before it normalises the rest,
+`parse_context_type_spec` and the engine's prototype parser wrap the pointee
+when the words before the star spell `const`. The exact source signature is
+built from the type graph, which has no qualifier, so it is requalified
+from the spelled prototype (`writeback::requalify`): the graph gives the
+structure, the text gives the qualifier, nothing else moves. The renderer
+spells `const char*` and every width helper sees through the wrapper.
+
+A conversion that only adds a qualifier is implicit (C11 6.3.2.3p2), so
+`strlen(s)` stays `strlen(s)` when `s` is a `char *`.
+
+`shape_variadic` renders at every level and the -O0 cells pass the
+differential. The -O1/-O2 cells still refuse to compile, for a reason the
+qualifier exposed: the rendering spells `typedef uint64_t size_t;`, and
+clang's builtin prototype for `snprintf` has the platform's `size_t`, which
+is `unsigned long` on LP64 and a different type from `unsigned long long`.
+Every rendering that redeclares a libc function taking `size_t` fails the
+same way once the name is one clang knows. Two exact answers, and which the
+header should carry is a decision about every rendering's header: spell the
+typedef as the type database does (`typedef.size_t=unsigned long` in the
+64-bit file, which also means adding `unsigned long` to the database and
+carrying the typedef's spelled target through the type graph), or treat the
+standard names as the platform's and include the header that defines them.
+Not built; the user should choose.

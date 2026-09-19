@@ -70,6 +70,18 @@ fn is_address(ty: &CType) -> bool {
     )
 }
 
+/// Whether `to` points at a qualified version of what `from` points at.
+fn adds_only_a_qualifier(from: &CType, to: &CType, pointer_bits: u32) -> bool {
+    let (CType::Pointer(pointee) | CType::Array(pointee, _), CType::Pointer(target)) = (from, to)
+    else {
+        return false;
+    };
+    let CType::Const(target) = target.as_ref() else {
+        return false;
+    };
+    same_type(pointee, target, pointer_bits)
+}
+
 /// Whether two types are one type to the compiler.
 fn same_type(from: &CType, to: &CType, pointer_bits: u32) -> bool {
     if from == to {
@@ -408,10 +420,13 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
         // a cast, C11 6.3.2.3p1, wherever a conversion is asked for.
         (None, None)
             if matches!(from, CType::Pointer(pointee) if !matches!(**pointee, CType::Function { .. }))
-                && matches!(to, CType::Pointer(pointee) if matches!(**pointee, CType::Void)) =>
+                && matches!(to, CType::Pointer(pointee) if matches!(pointee.unqualified(), CType::Void)) =>
         {
             expr
         }
+        // A pointer converts to a pointer to the qualified version of what it
+        // points at without a cast, C11 6.3.2.3p2: `char *` is a `const char *`.
+        (None, None) if adds_only_a_qualifier(from, to, pointer_bits) => expr,
         (None, None) if is_address(from) && matches!(to, CType::Pointer(_)) => {
             CExpr::cast(to.clone(), expr)
         }

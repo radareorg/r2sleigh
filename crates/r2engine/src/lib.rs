@@ -1694,12 +1694,26 @@ fn source_spelled_type(spelling: &str, ptr_bits: u32) -> Option<r2types::CTypeLi
         pointers += 1;
         rest = stripped.trim_end();
     }
+    // A qualifier on the pointee is part of the pointer's type; on the value it is not.
+    let const_pointee = pointers > 0
+        && rest.split_whitespace().any(|word| {
+            matches!(
+                word.to_ascii_lowercase().as_str(),
+                "const" | "__const" | "__const__"
+            )
+        });
     let base_words = rest
         .split_whitespace()
         .filter(|word| {
             !matches!(
                 word.to_ascii_lowercase().as_str(),
-                "const" | "volatile" | "restrict" | "__restrict" | "__restrict__"
+                "const"
+                    | "volatile"
+                    | "restrict"
+                    | "__restrict"
+                    | "__restrict__"
+                    | "__const"
+                    | "__const__"
             )
         })
         .collect::<Vec<_>>();
@@ -1726,6 +1740,9 @@ fn source_spelled_type(spelling: &str, ptr_bits: u32) -> Option<r2types::CTypeLi
         Some(parsed) => r2types::CTypeLike::named(base_spelling, parsed),
         None => return None,
     };
+    if const_pointee {
+        ty = r2types::CTypeLike::Const(Box::new(ty));
+    }
     for _ in 0..pointers {
         ty = r2types::CTypeLike::Pointer(Box::new(ty));
     }

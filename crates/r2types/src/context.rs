@@ -878,6 +878,15 @@ fn parse_context_type_spec(spec: &str, ptr_bits: u32) -> Option<CTypeLike> {
         ty = rest.trim_end();
     }
 
+    // A qualifier on what a pointer points at is part of the pointer's type;
+    // one on the value itself is not part of a prototype's.
+    let const_pointee = ptr_count > 0
+        && ty.split_whitespace().any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "const" | "__const" | "__const__"
+            )
+        });
     let qualifier_filtered = ty
         .split_whitespace()
         .filter(|token| {
@@ -917,6 +926,9 @@ fn parse_context_type_spec(spec: &str, ptr_bits: u32) -> Option<CTypeLike> {
 
     if let Some(size) = array_size {
         base = CTypeLike::Array(Box::new(base), size);
+    }
+    if const_pointee {
+        base = CTypeLike::Const(Box::new(base));
     }
     for _ in 0..ptr_count {
         base = CTypeLike::Pointer(Box::new(base));

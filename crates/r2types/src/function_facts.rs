@@ -3326,11 +3326,29 @@ impl FunctionFacts {
                 .and_then(|interface| {
                     let graph = interface.type_graph()?;
                     let logical = interface.parameter_logical_value(slot as usize)?;
-                    crate::writeback::source_type_like(
+                    let ty = crate::writeback::source_type_like(
                         graph,
                         logical.type_id(),
                         &mut BTreeSet::new(),
-                    )
+                    )?;
+                    // The graph has no qualifier; the prototype's own spelling does.
+                    let spelled = prepared
+                        .source_signature()
+                        .and_then(|signature| signature.named_parameters().get(slot as usize))
+                        .and_then(r2source::SourceSignatureParameter::type_spelling)
+                        .and_then(|spelling| {
+                            crate::parse_c_type_like(
+                                spelling,
+                                prepared
+                                    .machine_context()
+                                    .memory_model()
+                                    .default_address_bits(),
+                            )
+                        });
+                    Some(match spelled {
+                        Some(spelled) => crate::writeback::requalify(ty, &spelled),
+                        None => ty,
+                    })
                 });
             self.render.certified_entities.insert(
                 id,
@@ -3625,6 +3643,41 @@ impl FunctionFacts {
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>()
             });
+        // The graph carries no qualifier; the spelling does, and a `const`
+        // pointee is part of the declared type.
+        let ptr_bits = context.memory_model().default_address_bits();
+        let spelled_types = spelled
+            .as_ref()
+            .filter(|signature| signature.params.len() == logical.len())
+            .map(|signature| {
+                signature
+                    .params
+                    .iter()
+                    .map(|param| param.ty.clone())
+                    .collect::<Vec<_>>()
+            })
+            .or_else(|| {
+                let signature = source.source_signature()?;
+                let parameters = signature.named_parameters();
+                (parameters.len() == logical.len()).then(|| {
+                    parameters
+                        .iter()
+                        .map(|parameter| {
+                            parameter
+                                .type_spelling()
+                                .and_then(|spelling| crate::parse_c_type_like(spelling, ptr_bits))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            });
+        r2il::refusal_evidence!(
+            "exact-source-signature",
+            "{:#x}: spelled={} presentation={} spelled_types={:?}",
+            source.function().entry,
+            spelled.is_some(),
+            source.source_signature().is_some(),
+            spelled_types
+        );
         let mut params = Vec::with_capacity(logical.len());
         for (index, value) in logical.iter().enumerate() {
             // An exact signature is exact in every parameter. One the capture
@@ -3638,6 +3691,14 @@ impl FunctionFacts {
                 crate::writeback::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
             else {
                 return false;
+            };
+            let ty = match spelled_types
+                .as_ref()
+                .and_then(|types| types.get(index))
+                .and_then(Option::as_ref)
+            {
+                Some(spelled) => crate::writeback::requalify(ty, spelled),
+                None => ty,
             };
             let name = names
                 .as_ref()

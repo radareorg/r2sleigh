@@ -1169,6 +1169,14 @@ impl SsaArtifact {
         &self.display_names
     }
 
+    /// The source's own prototype text for this function, where it had one.
+    pub fn source_signature(&self) -> Option<&r2source::SourceSignaturePresentation> {
+        match &self.provenance {
+            SsaArtifactProvenance::TrustedSource(source) => source.presentation().signature(),
+            SsaArtifactProvenance::Manual | SsaArtifactProvenance::GenuineLiftOnly(_) => None,
+        }
+    }
+
     /// The name the architecture gives one of its user-defined operations.
     ///
     /// `None` when the artifact was built without an architecture, or when the

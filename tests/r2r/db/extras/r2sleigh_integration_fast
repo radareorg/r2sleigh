@@ -387,7 +387,7 @@ CMDS=<<EOF
 a:sla > /dev/null
 aaa
 s dbg.vuln_memcpy > /dev/null
-pd:s | jq -Rs 'contains("printf((char*)\"Copied: %s\\\\n\", (uint64_t)var_8h);")'
+pd:s | jq -Rs 'contains("printf((const char*)\"Copied: %s\\\\n\", (uint64_t)var_8h);")'
 EOF
 RUN
 
@@ -396,7 +396,7 @@ FILE=bins/r2sleigh_vuln_test_x86_64_macho_O2_v1
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
 /* r2sleigh: import stub at 0x1000019aa; this symbol is the import `strlen` and has no body of its own. */
-extern size_t strlen(int8_t*);
+extern size_t strlen(const int8_t*);
 
 EOF
 CMDS=<<EOF
@@ -412,7 +412,7 @@ FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
 /* r2sleigh: import stub at 0x100002af0; this symbol is the import `strlen` and has no body of its own. */
-extern size_t strlen(int8_t*);
+extern size_t strlen(const int8_t*);
 
 EOF
 CMDS=<<EOF
@@ -428,7 +428,7 @@ FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF
 /* r2sleigh: import stub at 0x100002ae4; this symbol is the import `printf` and has no body of its own. */
-extern int32_t printf(int8_t*, ...);
+extern int32_t printf(const int8_t*, ...);
 
 EOF
 CMDS=<<EOF

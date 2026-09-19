@@ -5102,6 +5102,32 @@ fn field_access_certificates_from_struct_artifacts(
 /// Public because a rendering that declares a value of an aggregate has to
 /// define that aggregate, and the definition's member types come from the same
 /// graph the declaration did.
+/// The graph's type wearing the qualifiers the declaration spelled.
+///
+/// The graph carries structure and no qualifier; the prototype text carries
+/// both. Where the two agree on shape, a `const` the text puts on a pointee
+/// goes onto the graph's pointee, and nothing else moves.
+pub fn requalify(graph: CTypeLike, spelled: &CTypeLike) -> CTypeLike {
+    match (graph, spelled) {
+        (CTypeLike::Const(inner), spelled) => {
+            CTypeLike::Const(Box::new(requalify(*inner, spelled)))
+        }
+        (inner, CTypeLike::Const(spelled)) => CTypeLike::Const(Box::new(requalify(inner, spelled))),
+        (CTypeLike::Pointer(inner), CTypeLike::Pointer(spelled)) => {
+            CTypeLike::Pointer(Box::new(requalify(*inner, spelled)))
+        }
+        (CTypeLike::Array(inner, count), CTypeLike::Array(spelled, _)) => {
+            CTypeLike::Array(Box::new(requalify(*inner, spelled)), count)
+        }
+        (CTypeLike::Typedef { name, ty }, spelled) => CTypeLike::Typedef {
+            name,
+            ty: Box::new(requalify(*ty, spelled)),
+        },
+        (graph, CTypeLike::Typedef { ty: spelled, .. }) => requalify(graph, spelled),
+        (graph, _) => graph,
+    }
+}
+
 pub fn source_type_like(
     graph: &r2ssa::SourceTypeGraph,
     type_id: u32,
