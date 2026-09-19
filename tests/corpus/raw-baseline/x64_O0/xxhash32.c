@@ -2,7 +2,7 @@ uint32_t sym__xxhash32(uint64_t RDI_0, uint64_t RSI_0, uint32_t EDX_0)
 {
     uint32_t sym__rotl32(uint32_t, uint8_t);
 
-    /* r2dec proof: no individual construct is marked; 416 source obligations: 312 rendered, 104 elided, 0 refused; 94 statements rendered */
+    /* r2dec proof: no individual construct is marked; 416 source obligations: 305 rendered, 111 elided, 0 refused; 94 statements rendered */
     {
         uint64_t stack_m40;
         int32_t stack_m28;

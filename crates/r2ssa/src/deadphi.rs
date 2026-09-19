@@ -401,19 +401,23 @@ impl DeadPhis {
             let definition_state = definition.map(|instruction| format!("{:?}", instruction.state));
             let own_obligations = definition
                 .map(|instruction| {
-                    obligations
-                        .obligations()
-                        .values()
-                        .filter(|obligation| obligation.id.instruction == instruction.id)
-                        .map(|obligation| {
-                            format!("{:?}/{:?}", obligation.id.kind, obligation.id.component)
-                        })
+                    instruction
+                        .obligations
+                        .iter()
+                        .map(|id| format!("{:?}/{:?}/{}", id.kind, id.component, id.instruction))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let definition_site = graph.def_inst(value.id).map(|inst| {
+                (
+                    inst,
+                    graph.op_site_for_inst(inst),
+                    graph.inst(inst).map(|inst| format!("{:?}", inst.payload)),
+                )
+            });
             r2il::refusal_evidence!(
                 "observed-through-dead-merge",
-                "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} own_obligations={own_obligations:?} obligations={rooted_by:?}",
+                "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} definition={definition_site:?} own_obligations={own_obligations:?} obligations={rooted_by:?}",
                 value.id,
                 uses.len(),
                 observed.contains(&value.id),

@@ -1042,7 +1042,15 @@ impl<'a> FoldingContext<'a> {
         let symbol = names.symbol_for_binding(*binding)?;
         let canonical = names.plan().canonical();
         let rewrite = canonical.value(value)?;
-        if rewrite.canonical == canonical.import().value(value)?.term {
+        // A term the rewriter left as it arrived is the machine's own
+        // expression and the op lowers it, except a frame address: the
+        // machine computes it from a base and a displacement, and the
+        // object model spells it as the object it names.
+        let object_address = matches!(
+            canonical.arena().term(rewrite.canonical).kind,
+            r2rewrite::TermKind::ObjectAddress(_)
+        );
+        if rewrite.canonical == canonical.import().value(value)?.term && !object_address {
             return None;
         }
         let mut absorbed = Vec::with_capacity(rewrite.discharges.len());

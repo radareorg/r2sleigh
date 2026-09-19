@@ -28830,3 +28830,25 @@ stores render. `observed-through-dead-merge` now prints the definition's own
 obligations, which is what identified the rule; the rule itself -- an
 obligation-owning definition whose every use is a dead merge -- is not
 changed here.
+
+## Two loops with calls: the second loop's stack pointer was never rooted
+
+The stack-pointer leak in `shape_pointer_to_pointer` at x86-64 -O1 traced
+to `collect_decompile_prep_facts`. Loop-carried stack roots are speculated
+per round; a round that verified stopped the loop, so a merge that only
+became speculable once that round's roots had propagated -- the second
+loop's stack-pointer phi, which rests on the first loop's -- stayed
+unrooted. With no root, the exit chain to `ret` had no certified control,
+interface recovery found no return mechanism, the return boundary was
+incomplete, every definition before it was tainted volatile, the flags of
+`sub rsp` counted as observed readers of the stack pointer, and the pointer
+left the geometry. The loop now runs until nothing new is speculable.
+`stack-root-speculation` prints each round; `unread-live-definition`
+prints a definition nothing reads that still owes an obligation, which is
+what named the taint.
+
+Separately, a bound frame address whose canonical term the rewriter left as
+it arrived was lowered by its op as base-plus-displacement arithmetic on
+the entry stack pointer; `canonical_bound_assignment` now spells it from the
+object it names. The earlier lead about the flag ops of `sub rsp` was a
+misread of a callee's trace and is withdrawn.

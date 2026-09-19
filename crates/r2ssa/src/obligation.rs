@@ -480,6 +480,36 @@ impl SemanticObligationInventory {
         }
 
         for access in structured.memory_accesses.values() {
+            if r2il::refusal_evidence::tracing() && graph.inst(access.id.inst).is_none() {
+                r2il::refusal_evidence!(
+                    "access-instruction",
+                    "{:?} names no instruction of this graph",
+                    access.id
+                );
+            }
+            if r2il::refusal_evidence::tracing()
+                && let Some(inst) = graph.inst(access.id.inst)
+                && !matches!(
+                    inst.payload,
+                    InstPayload::Op(
+                        crate::SSAOp::Load { .. }
+                            | crate::SSAOp::Store { .. }
+                            | crate::SSAOp::LoadLinked { .. }
+                            | crate::SSAOp::StoreConditional { .. }
+                            | crate::SSAOp::LoadGuarded { .. }
+                            | crate::SSAOp::StoreGuarded { .. }
+                            | crate::SSAOp::AtomicCAS(_)
+                    )
+                )
+            {
+                r2il::refusal_evidence!(
+                    "access-instruction",
+                    "{:?} is a memory access filed on {:?}, which is {:?}",
+                    access.id,
+                    inst.id,
+                    inst.payload
+                );
+            }
             // A slot no pointer outside its own accesses can name is a C
             // object, so reading it is not an observable effect: the load
             // produces the variable's own value and lives only while something
@@ -778,6 +808,18 @@ impl SemanticObligationInventory {
                 continue;
             };
             let kinds = required.remove(&inst.id).unwrap_or_default();
+            if !kinds.is_empty()
+                && inst
+                    .output
+                    .is_some_and(|output| graph.use_sites(output).is_empty())
+            {
+                r2il::refusal_evidence!(
+                    "unread-live-definition",
+                    "{:?} ({id}) defines {:?}, which nothing reads, and owes {kinds:?}",
+                    inst.id,
+                    inst.output
+                );
+            }
             let state = if unsupported.contains(&inst.id) {
                 SemanticInstructionState::UnsupportedUnknown
             } else if !kinds.is_empty() {

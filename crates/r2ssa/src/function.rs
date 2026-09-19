@@ -4903,11 +4903,23 @@ impl SSAFunction {
             }
             self.propagate_stack_roots(&mut facts, entry_stack_address_size, control)?;
             let failed = self.unverified_stack_root_speculations(&facts, &speculated);
-            if failed.is_empty() {
-                break;
+            r2il::refusal_evidence!(
+                "stack-root-speculation",
+                "{:#x}: speculated {:?} failed {:?}",
+                self.entry,
+                speculated
+                    .iter()
+                    .map(|(dst, root, entry)| (dst.display_name(), *root, *entry))
+                    .collect::<Vec<_>>(),
+                failed.iter().map(SSAVar::display_name).collect::<Vec<_>>()
+            );
+            // A round that holds may make a later merge speculable: the
+            // second loop's stack pointer rests on the first loop's, whose
+            // root arrived only now. Stopping here left it unrooted.
+            if !failed.is_empty() {
+                facts = proven;
+                rejected.extend(failed);
             }
-            facts = proven;
-            rejected.extend(failed);
         }
 
         control.poll()?;

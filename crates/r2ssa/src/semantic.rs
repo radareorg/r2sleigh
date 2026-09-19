@@ -7703,8 +7703,19 @@ fn collect_stack_geometry_certificate(
         for (value, site) in removed {
             r2il::refusal_evidence!(
                 "stack-geometry",
-                "{value:?} leaves the geometry: read at {site:?} by {:?}",
-                graph.inst(site.inst).map(|inst| &inst.payload)
+                "{value:?} leaves the geometry: read at {site:?} by {:?}; reader unobserved={} reader output unobserved={:?}; entry root {:?} of {} entry roots, reader output root {:?}",
+                graph.inst(site.inst).map(|inst| &inst.payload),
+                unobserved.unobserved_uses().contains(&site),
+                graph
+                    .inst(site.inst)
+                    .and_then(|inst| inst.output)
+                    .map(|output| unobserved.unobserved_values().contains(&output)),
+                stack_root(value),
+                prep.entry_stack_address_roots.len(),
+                graph
+                    .inst(site.inst)
+                    .and_then(|inst| inst.output)
+                    .map(stack_root)
             );
             values.remove(&value);
         }
