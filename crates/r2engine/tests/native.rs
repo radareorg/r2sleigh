@@ -200,3 +200,44 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
         response.output
     );
 }
+
+/// add x0, x0, 1; ret
+const AARCH64_ADD_ONE: &[u8] = &[
+    0x00, 0x04, 0x00, 0x91, // 0x1000 add x0, x0, 1
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1004 ret
+];
+
+/// The same route on the other machine it claims.
+#[test]
+fn a_function_is_decompiled_on_aarch64_too() {
+    let machine = r2sleigh_lift::embedded_machine("aarch64").expect("aarch64 machine");
+    let conventions = Conventions::for_arch("aarch64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    // The stack pointer is the specification's to name on every machine.
+    assert_eq!(compiler.stack_pointer.as_deref(), Some("sp"));
+
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: AARCH64_ADD_ONE,
+        name: "add_one",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    assert!(response.output.contains("add_one("), "{}", response.output);
+    assert!(response.output.contains("X0_0"), "{}", response.output);
+    assert!(response.output.contains("return"), "{}", response.output);
+}
