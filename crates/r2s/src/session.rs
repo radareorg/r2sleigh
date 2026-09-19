@@ -28,6 +28,11 @@ pub struct Session {
     pub addr: u64,
     #[cfg(feature = "sleigh")]
     machine: Option<r2sleigh_lift::EmbeddedMachine>,
+    /// The same instruction set with TMode set. ARM states the mode per
+    /// function in the low bit of its symbol, so both decoders are needed at
+    /// once and neither is the image's.
+    #[cfg(feature = "sleigh")]
+    thumb_machine: Option<r2sleigh_lift::EmbeddedMachine>,
 }
 
 impl Session {
@@ -67,6 +72,8 @@ impl Session {
             addr,
             #[cfg(feature = "sleigh")]
             machine: None,
+            #[cfg(feature = "sleigh")]
+            thumb_machine: None,
         })
     }
 
@@ -84,6 +91,11 @@ impl Session {
             self.imports = crate::flags::imports(&self.image, &machine.disasm);
             self.flags.name_imports(&self.imports);
             self.machine = Some(machine);
+            // Only where a function says it is Thumb, so a machine with no
+            // Thumb code pays nothing for the second specification.
+            if self.defined.values().any(|definition| definition.thumb) {
+                self.thumb_machine = r2sleigh_lift::embedded_machine("arm-thumb").ok();
+            }
         }
         Ok(())
     }
@@ -91,6 +103,27 @@ impl Session {
     #[cfg(feature = "sleigh")]
     pub fn machine(&self) -> Option<&r2sleigh_lift::EmbeddedMachine> {
         self.machine.as_ref()
+    }
+
+    /// The decoder the code at this address is written in.
+    ///
+    /// ARM states the mode per function, in the low bit of the symbol that
+    /// names it, so the image has no single answer and the address decides.
+    #[cfg(feature = "sleigh")]
+    pub fn machine_at(&self, vaddr: u64) -> Option<&r2sleigh_lift::EmbeddedMachine> {
+        match self.thumb_at(vaddr) {
+            true => self.thumb_machine.as_ref().or(self.machine.as_ref()),
+            false => self.machine.as_ref(),
+        }
+    }
+
+    /// Whether the function containing this address is Thumb.
+    #[cfg(feature = "sleigh")]
+    pub fn thumb_at(&self, vaddr: u64) -> bool {
+        self.defined
+            .range(..=vaddr)
+            .next_back()
+            .is_some_and(|(_, definition)| definition.function && definition.thumb)
     }
 }
 
@@ -101,6 +134,8 @@ pub struct Definition {
     pub name: String,
     /// Whether a function begins here, which is what bounds a body.
     pub function: bool,
+    /// Whether this function's code is Thumb rather than ARM.
+    pub thumb: bool,
 }
 
 /// Everything the binary names, indexed by where it is.
@@ -117,6 +152,7 @@ fn definitions(image: &Image) -> std::collections::BTreeMap<u64, Definition> {
         defined.entry(symbol.vaddr).or_insert_with(|| Definition {
             name: symbol.name.clone(),
             function: symbol.kind == r2image::SymbolKind::Function,
+            thumb: symbol.thumb,
         });
     }
     defined

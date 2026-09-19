@@ -111,6 +111,9 @@ pub struct Symbol {
     pub kind: SymbolKind,
     /// False for an undefined symbol, which names an import rather than a body.
     pub defined: bool,
+    /// Whether this function's code is Thumb, which ARM states in the low bit
+    /// of the symbol's value. False on every other machine.
+    pub thumb: bool,
 }
 
 /// Why an address is a place execution can begin.
@@ -150,13 +153,17 @@ pub struct Relocation {
 /// aligned. Keeping the bit made an entry point decode from one byte into
 /// itself and every instruction after it read from the wrong place.
 ///
-/// The mode the bit selected is not recorded here, because nothing downstream
-/// can act on it yet: the decoder always reads ARM.
+/// The mode the bit selected is kept beside the address, as `Symbol::thumb`.
 fn code_address(arch: &ImageArch, value: u64) -> u64 {
-    match arch.name == "ARM" && arch.bits == 32 {
+    match is_arm32(arch) {
         true => value & !1,
         false => value,
     }
+}
+
+/// Whether the low bit of a function's address selects Thumb on this machine.
+fn is_arm32(arch: &ImageArch) -> bool {
+    arch.name == "ARM" && arch.bits == 32
 }
 
 /// Which symbol each stub and pointer slot stands for, in a Mach-O.
@@ -396,6 +403,9 @@ impl Image {
                         _ => SymbolKind::Other,
                     },
                     defined: symbol.is_definition(),
+                    thumb: is_arm32(&arch)
+                        && symbol.kind() == object::SymbolKind::Text
+                        && symbol.address() & 1 == 1,
                 })
             })
             .collect();

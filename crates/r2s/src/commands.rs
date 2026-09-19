@@ -282,7 +282,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     session.ensure_machine()?;
     let machine = session
-        .machine()
+        .machine_at(addr)
         .ok_or("no Sleigh specification for this architecture")?;
 
     let bits = session.image.arch().bits;
@@ -363,7 +363,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
     let start = session.addr;
     session.ensure_machine()?;
     let machine = session
-        .machine()
+        .machine_at(start)
         .ok_or("no decoder for this architecture")?;
     let decoder = &machine.disasm;
     // Bytes that do not decode are stepped over by the width the machine

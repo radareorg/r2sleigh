@@ -1542,6 +1542,15 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
             sleigh_config::processor_arm::CSPEC_ARM,
             "ARM",
         )),
+        // The same instruction set with TMode set, which is how Ghidra itself
+        // ships a Thumb decoder: one language, two processor contexts.
+        #[cfg(feature = "arm")]
+        "arm-thumb" | "thumb" => Some((
+            sleigh_config::processor_arm::SLA_ARM8_LE,
+            sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
+            sleigh_config::processor_arm::CSPEC_ARM,
+            "ARM",
+        )),
         _ => None,
     }
 }
