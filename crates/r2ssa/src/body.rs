@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::R2ILBlock;
 use r2sleigh_lift::Disassembler;
+use r2source::AdvisorySuccessorKind;
 
 use crate::cfg::{BasicBlock, BlockTerminator};
 
@@ -26,13 +27,23 @@ const WINDOW: usize = 16;
 pub struct Body {
     /// The address the walk started from.
     pub entry: u64,
-    /// One block per basic block, in address order, ready for `CFG`.
-    pub blocks: Vec<R2ILBlock>,
+    /// One entry per basic block, in address order.
+    pub blocks: Vec<BodyBlock>,
     /// Direct call targets, in address order. The callee facts a request wants
     /// are collected from these.
     pub calls: Vec<u64>,
     /// Every place the walk stopped without knowing where control went.
     pub unresolved: Vec<Unresolved>,
+}
+
+/// One basic block: what it lifts to, the bytes it is, and where it goes.
+#[derive(Debug, Clone)]
+pub struct BodyBlock {
+    pub lifted: R2ILBlock,
+    /// The block's own bytes, which a capture hands to the trusted lift.
+    pub bytes: Vec<u8>,
+    /// Where control continues from this block.
+    pub successors: Vec<(AdvisorySuccessorKind, u64)>,
 }
 
 /// One place the walk could not continue, and why.
@@ -90,6 +101,7 @@ where
 /// One instruction the walk decoded, and where control goes after it.
 struct Instruction {
     lifted: R2ILBlock,
+    bytes: Vec<u8>,
     terminator: BlockTerminator,
 }
 
@@ -180,7 +192,12 @@ impl Walk {
         // A call is assumed to come back. Whether it does is a fact about the
         // callee, and the walk of one body cannot hold it.
         let terminator = BasicBlock::from_r2il_continuing(&lifted, true).terminator;
-        Some(Instruction { lifted, terminator })
+        let bytes = fetch[..lifted.size as usize].to_vec();
+        Some(Instruction {
+            lifted,
+            bytes,
+            terminator,
+        })
     }
 
     fn stop(&mut self, addr: u64, reason: UnresolvedReason) -> Option<Instruction> {
@@ -240,27 +257,24 @@ impl Walk {
     /// instruction is a leader, or until the instructions stop being
     /// contiguous, which is where an unresolved transfer left a hole.
     fn into_body(self) -> Body {
-        let mut blocks = Vec::new();
-        let mut parts: Vec<R2ILBlock> = Vec::new();
-        let mut start = 0u64;
-        let mut end = 0u64;
+        let mut blocks: Vec<BodyBlock> = Vec::new();
+        let mut parts: Vec<Instruction> = Vec::new();
 
-        for (addr, instruction) in &self.decoded {
-            let breaks = parts.is_empty() || *addr != end || self.leaders.contains(addr);
-            if breaks && !parts.is_empty() {
-                blocks.push(finish(start, end, &mut parts));
+        for (addr, instruction) in self.decoded {
+            let broken = parts
+                .last()
+                .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
+            if broken {
+                blocks.push(finish(&mut parts));
             }
-            if parts.is_empty() {
-                start = *addr;
-            }
-            end = instruction.end();
-            parts.push(instruction.lifted.clone());
-            if instruction.ends_block() {
-                blocks.push(finish(start, end, &mut parts));
+            let ends = instruction.ends_block();
+            parts.push(instruction);
+            if ends {
+                blocks.push(finish(&mut parts));
             }
         }
         if !parts.is_empty() {
-            blocks.push(finish(start, end, &mut parts));
+            blocks.push(finish(&mut parts));
         }
 
         Body {
@@ -273,7 +287,51 @@ impl Walk {
 }
 
 /// One block from the instructions collected for it.
-fn finish(start: u64, end: u64, parts: &mut Vec<R2ILBlock>) -> R2ILBlock {
+///
+/// The successors are the last instruction's, because that is the only
+/// instruction in a basic block that control can leave by.
+fn finish(parts: &mut Vec<Instruction>) -> BodyBlock {
+    let start = parts[0].lifted.addr;
+    let last = parts
+        .last()
+        .expect("a block holds at least one instruction");
+    let end = last.end();
+    let successors = successors_of(&last.terminator, end);
     let size = u32::try_from(end - start).unwrap_or(u32::MAX);
-    R2ILBlock::join(start, size, parts.drain(..))
+    let mut bytes = Vec::with_capacity(size as usize);
+    for part in parts.iter() {
+        bytes.extend_from_slice(&part.bytes);
+    }
+    let lifted = R2ILBlock::join(start, size, parts.drain(..).map(|part| part.lifted));
+    BodyBlock {
+        lifted,
+        bytes,
+        successors,
+    }
+}
+
+/// Where control goes after a block that ends this way.
+fn successors_of(terminator: &BlockTerminator, end: u64) -> Vec<(AdvisorySuccessorKind, u64)> {
+    match terminator {
+        BlockTerminator::Fallthrough { next } => {
+            vec![(AdvisorySuccessorKind::Fallthrough, *next)]
+        }
+        BlockTerminator::Branch { target } => vec![(AdvisorySuccessorKind::Direct, *target)],
+        BlockTerminator::ConditionalBranch {
+            true_target,
+            false_target,
+        } => vec![
+            (AdvisorySuccessorKind::Direct, *true_target),
+            (AdvisorySuccessorKind::Fallthrough, *false_target),
+        ],
+        // A call returns to the instruction after it, which is the next block
+        // whenever the call is the last instruction of this one.
+        BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
+            vec![(AdvisorySuccessorKind::Fallthrough, end)]
+        }
+        BlockTerminator::Switch { .. }
+        | BlockTerminator::IndirectBranch
+        | BlockTerminator::Return
+        | BlockTerminator::None => Vec::new(),
+    }
 }
