@@ -123,11 +123,108 @@ currently supplies through the snapshot seam.
    radare2's real moat and has to be reproduced faithfully, including seeking,
    grepping, piping and iterators, or users will not follow.
 
-The inversion itself is mechanical. `r2sleigh-cli` becomes the host binary and
-links `libr_bin` and `libr_io` as C libraries — the same FFI, direction
-reversed — then those are replaced one at a time and the FFI deleted. The
-radare2 plugin survives the whole way as a thin client of the same engine, so
-the integration work is not thrown away and existing users lose nothing.
+`r2sleigh-cli` becomes the host binary, and the radare2 plugin survives the whole
+way as a thin client of the same engine, so the integration work is not thrown
+away and existing users lose nothing.
+
+## The seam, measured
+
+The question of what the engine needs from radare2 has a measured answer, and it
+is smaller than the size of the bridge suggests.
+
+The plugin bridge is about 15,500 lines of C — `snapshot_capture.c` at 8468,
+`r_anal_sleigh.c` at 5049, `snapshot_walk.c` at 1218, `dwarf_facts.c` at 366,
+`arch_sleigh.c` at 244, `snapshot_wire.c` at 239 — plus `ffi_v2.rs` at 5268 and
+`snapshot_capture.h` at 960. Against that, it calls **156 distinct radare2
+symbols** at roughly 750 call sites.
+
+The density is the finding. `snapshot_capture.c` is 6 per cent radare2 calls;
+`snapshot_walk.c` is 1 per cent; `snapshot_wire.c` touches radare2 zero times
+and is still written in C. This is not an FFI layer. It is r2sleigh's own
+collection and marshalling logic living on the wrong side of the boundary, and
+moving it to Rust requires no new FFI at all.
+
+Note also that the `r_anal_function_snapshot_*` names are not a radare2 API.
+They are `static` functions inside `snapshot_capture.c`, and nothing of that name
+exists in radare2's headers. The real coupling is to radare2's struct layouts —
+`RAnal`, `RAnalFunction`, `RAnalVar`, `RList` — walked directly.
+
+### The 156 symbols, by what happens to them
+
+**Delete and replace natively.** Roughly thirty, plus forty-one C-library
+substitutes (`r_str_*`, `r_list_*`, `r_strbuf_*`) that simply evaporate once the
+logic is Rust. Bytes and mapping (`r_io_map_*`, `r_io_desc_*`) become a native
+`Image`. Binary information (`r_bin_get_baddr`, `r_bin_get_info`, `r_bin_cur`)
+becomes `object` and `goblin`. Debug information (`r_bin_dwarf_parse_*`) becomes
+`gimli`. The register profile (`r_reg_*`, `r_anal_set_reg_profile`) comes from
+Sleigh's processor specification, which is where roadmap item six already points.
+Decoding (`r_anal_op`, `r_arch_session_decode`) is already covered by Sleigh.
+Output (`r_cons_print*`, `r_codemeta_*`) leaves the engine entirely under the
+rule that the engine never formats.
+
+**Import as data, not code.** Twenty-two symbols, and the cheapest win here. The
+twelve `r_anal_cc_*` calls, the ten `r_type_*` calls, `r_anal_base_type_*`,
+`r_anal_type_bitsize` and `r_anal_noreturn_at` are all lookups into static sdb
+files. The data is good and hard-won; only the lookup code crosses the boundary,
+and it should not.
+
+**Build in Rust.** The genuine gap, and not an FFI question: function discovery
+and boundaries (`r_anal_get_fcn_in`, `r_anal_get_function_at`,
+`r_anal_get_block_at`, `r_anal_bb_opaddr_i`, the min/max/linear-size family),
+cross-references (`r_anal_refs_get`, `r_anal_xrefs_*`), names and flags
+(`r_flag_*`), comments (`r_meta_*`), and variables (`r_anal_var_*` — noting that
+`r2ssa` already recovers variables better than radare2's heuristics, so this
+dependency is a liability being carried rather than a capability being used).
+
+**Keep, as the adapter.** `r_core_plugin_add`, `r_core_return_code`, and the
+apply and render path.
+
+### Engine at zero, adapter small, permanently
+
+The target is not "no FFI." It is that **all** the FFI lives in one small
+adapter crate and **none** of it lives in the engine. The engine needs bytes, an
+architecture, and entry points; `object`, `gimli` and Sleigh supply all three.
+The adapter keeps a radare2 dependency forever, because radare2 has to be able
+to call in and get results back, and that seam is how the work reaches users.
+
+Keeping `libr` as a backend is not a third option, because linking it *is* FFI.
+What it would buy is radare2's long tail — 97 binary formats against roughly
+eight mainstream ones in `object`, 51 IO plugins, 13 debug backends, 186
+architecture plugins against roughly forty Sleigh specifications. That coverage
+is real and irreproducible, and it is also explicitly out of scope: depth before
+breadth means x86, ARM, and ELF/PE/Mach-O is the whole target until the phases
+are done. An optional gated `libr` backend would also be exactly the
+old-support-beside-new-support shape this project rejects. If breadth ever
+becomes the goal, the decoder interface makes it a contained decision rather
+than an architectural one.
+
+Three things survive regardless: the sdb data files, imported natively; the
+stream of general radare2 fixes going upstream as their own pull requests; and
+radare2 as the differential validation target for discovery, cross-references
+and boundaries, which is a dependency of the development process rather than of
+the binary.
+
+### Peeling order
+
+Each step removes boundary surface and leaves the tree working.
+
+1. **`snapshot_wire.c`** — 239 lines, zero radare2 calls. Free, and it proves the
+   pattern.
+2. **`snapshot_walk.c`** — 1218 lines, 13 call sites to bridge, 1205 lines of
+   logic relocated.
+3. **The sdb data import** — types and calling conventions read natively.
+   Twenty-two symbols gone, and type facts stop being marshalled across the
+   boundary, which is where the current type work keeps meeting friction.
+4. **Native image, `object`, `gimli`** — about thirty more symbols gone, and the
+   point at which `r2sleigh-cli` opens a binary with no radare2 present.
+5. **`snapshot_capture.c`** — by now mostly stranded, since most of its 539 call
+   sites have evaporated. Port what remains.
+6. **Discovery, cross-references, names** — built in Rust. The engine exists.
+
+Every new FFI entry point added before step five makes step five harder, because
+it gives logic another reason to stay in C. The seam only shrinks from here. If a
+piece of work appears to need a new radare2 API, that is the signal that the
+logic belongs in Rust instead.
 
 ### The tension this creates, stated now
 
