@@ -46,7 +46,7 @@ pub struct NativeBlock {
     pub successors: Vec<(AdvisorySuccessorKind, u64)>,
 }
 
-/// One direct call the body makes.
+/// One direct transfer to another function the body makes.
 #[derive(Debug, Clone)]
 pub struct NativeCall {
     pub instruction: u64,
@@ -54,6 +54,11 @@ pub struct NativeCall {
     /// What the program calls the target. Presentation only: it spells the
     /// call in rendered output and is evidence about nothing.
     pub name: Option<String>,
+    /// How control reaches the callee. A tail jump does not come back, and
+    /// its result is this function's own.
+    pub transfer: AdvisoryCallTransfer,
+    /// Whether the target is this binary's own code or an import's stub.
+    pub linkage: AdvisoryCalleeLinkage,
 }
 
 /// One function, as the engine walked it out of the image.
@@ -137,9 +142,9 @@ pub fn capture(
         .map(|call| AdvisoryCallSite {
             instruction_address: call.instruction,
             target_address: call.target,
-            transfer: AdvisoryCallTransfer::Call,
+            transfer: call.transfer,
             target_name: call.name.clone(),
-            linkage: AdvisoryCalleeLinkage::Internal,
+            linkage: call.linkage,
             prototype: None,
         })
         .collect::<Vec<_>>();

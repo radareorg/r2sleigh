@@ -28,12 +28,29 @@ fn x86_64() -> Disassembler {
     .expect("x86-64 disassembler")
 }
 
-/// A reader over one run of bytes mapped at `BASE`.
-fn reader(bytes: &'static [u8]) -> impl Fn(u64, usize) -> Option<Vec<u8>> {
-    move |vaddr, max| {
+/// One run of bytes mapped at `BASE`, in a program that declares no other
+/// function.
+struct Fixture {
+    bytes: &'static [u8],
+    entries: &'static [u64],
+}
+
+impl r2ssa::body::Program for Fixture {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
-        let slice = bytes.get(offset..)?;
+        let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.entries.contains(&vaddr)
+    }
+}
+
+fn reader(bytes: &'static [u8]) -> Fixture {
+    Fixture {
+        bytes,
+        entries: &[],
     }
 }
 
@@ -47,7 +64,7 @@ const DIAMOND: &[u8] = &[
 
 #[test]
 fn conditional_branch_splits_three_blocks() {
-    let body = lift_body(BASE, &x86_64(), reader(DIAMOND)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND)).expect("body");
     assert_eq!(addrs(&body), vec![0x1000, 0x1006, 0x100b]);
     let sizes: Vec<u32> = body.blocks.iter().map(|block| block.lifted.size).collect();
     assert_eq!(sizes, vec![6, 5, 1]);
@@ -60,7 +77,7 @@ fn conditional_branch_splits_three_blocks() {
 fn a_block_states_where_control_leaves_it() {
     use r2source::AdvisorySuccessorKind::{Direct, Fallthrough};
 
-    let body = lift_body(BASE, &x86_64(), reader(DIAMOND)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND)).expect("body");
     assert_eq!(
         body.blocks[0].successors,
         vec![(Direct, 0x100b), (Fallthrough, 0x1006)]
@@ -72,7 +89,7 @@ fn a_block_states_where_control_leaves_it() {
 
 #[test]
 fn the_walk_feeds_the_graph() {
-    let body = lift_body(BASE, &x86_64(), reader(DIAMOND)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND)).expect("body");
     let lifted = lifted(&body);
     let cfg = CFG::from_blocks(&lifted).expect("cfg");
     assert_eq!(cfg.entry, 0x1000);
@@ -91,7 +108,7 @@ const CALLING: &[u8] = &[
 
 #[test]
 fn a_call_is_recorded_and_the_block_runs_on() {
-    let body = lift_body(BASE, &x86_64(), reader(CALLING)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(CALLING)).expect("body");
     assert_eq!(body.calls, vec![0x1010]);
     assert_eq!(body.blocks.len(), 1);
     assert_eq!(body.blocks[0].lifted.addr, 0x1000);
@@ -103,7 +120,7 @@ const INDIRECT: &[u8] = &[0xff, 0xe0];
 
 #[test]
 fn an_indirect_branch_is_refused_not_guessed() {
-    let body = lift_body(BASE, &x86_64(), reader(INDIRECT)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT)).expect("body");
     assert_eq!(body.blocks.len(), 1);
     assert_eq!(
         body.unresolved
@@ -124,12 +141,43 @@ const LOOP: &[u8] = &[
 
 #[test]
 fn a_loop_terminates_and_keeps_one_block_per_leader() {
-    let body = lift_body(BASE, &x86_64(), reader(LOOP)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(LOOP)).expect("body");
     assert_eq!(addrs(&body), vec![0x1000, 0x1005]);
 }
 
 #[test]
 fn an_unmapped_entry_refuses() {
-    let error = lift_body(0x9000, &x86_64(), reader(DIAMOND)).expect_err("unmapped");
+    let error = lift_body(0x9000, &x86_64(), &reader(DIAMOND)).expect_err("unmapped");
     assert_eq!(error.to_string(), "nothing mapped at 0x9000");
+}
+
+/// jmp 0x1010, where another function begins.
+const TAIL: &[u8] = &[
+    0xe9, 0x0b, 0x00, 0x00, 0x00, // 0x1000 jmp 0x1010
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // padding
+    0x89, 0xf8, 0xc3, // 0x1010 mov eax, edi; ret
+];
+
+#[test]
+fn a_branch_to_another_function_ends_the_body() {
+    let program = Fixture {
+        bytes: TAIL,
+        entries: &[0x1010],
+    };
+    let body = lift_body(BASE, &x86_64(), &program).expect("body");
+    // One block, and the other function's code is not in it.
+    assert_eq!(addrs(&body), vec![0x1000]);
+    assert_eq!(body.tail_calls, vec![0x1010]);
+    assert!(body.calls.is_empty());
+}
+
+#[test]
+fn a_branch_to_a_function_the_program_does_not_declare_is_followed() {
+    let program = Fixture {
+        bytes: TAIL,
+        entries: &[],
+    };
+    let body = lift_body(BASE, &x86_64(), &program).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000, 0x1010]);
+    assert!(body.tail_calls.is_empty());
 }

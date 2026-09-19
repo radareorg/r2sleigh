@@ -9,6 +9,12 @@
 //! targets are not guessed, which is the same rule the rest of the engine
 //! keeps: a body with an unresolved transfer is an honest partial body, and
 //! resolving one needs a value domain that does not exist yet.
+//!
+//! A direct branch to another function's entry is a tail call and ends the
+//! body. Without that question the walk has no boundary at all: `frame_dummy`
+//! is two instructions ending in `jmp register_tm_clones`, and following that
+//! edge swallowed the whole of the other function, so the body carried code
+//! the function does not contain and refused on an obligation from it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +28,21 @@ use crate::cfg::{BasicBlock, BlockTerminator};
 /// Sleigh wants for a decode wherever the address is mapped.
 const WINDOW: usize = 16;
 
+/// The program the walk reads, and the one question about it a walk cannot
+/// answer for itself.
+pub trait Program {
+    /// As many bytes as are mapped at `vaddr`, up to `max`, or `None` where
+    /// nothing is mapped.
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>>;
+
+    /// Whether another function begins here.
+    ///
+    /// This is what bounds a body. The walk can see that control transfers; it
+    /// cannot see that the target belongs to someone else, and a program that
+    /// knows its own functions can.
+    fn is_entry(&self, vaddr: u64) -> bool;
+}
+
 /// A function body: its blocks, who it calls, and what it could not follow.
 #[derive(Debug, Clone)]
 pub struct Body {
@@ -32,6 +53,9 @@ pub struct Body {
     /// Direct call targets, in address order. The callee facts a request wants
     /// are collected from these.
     pub calls: Vec<u64>,
+    /// Functions this body leaves for without returning, by branching straight
+    /// to their entry. A tail call is a call whose result is this function's.
+    pub tail_calls: Vec<u64>,
     /// Every place the walk stopped without knowing where control went.
     pub unresolved: Vec<Unresolved>,
 }
@@ -90,12 +114,12 @@ impl std::error::Error for BodyError {}
 ///
 /// `read` answers with as many bytes as the program maps at an address, up to
 /// the length asked for, and `None` where nothing is mapped.
-pub fn lift_body<R>(entry: u64, disasm: &Disassembler, read: R) -> Result<Body, BodyError>
-where
-    R: Fn(u64, usize) -> Option<Vec<u8>>,
-{
-    let walk = Walk::run(entry, disasm, read)?;
-    Ok(walk.into_body())
+pub fn lift_body(
+    entry: u64,
+    disasm: &Disassembler,
+    program: &dyn Program,
+) -> Result<Body, BodyError> {
+    Walk::run(entry, disasm, program).map(Walk::into_body)
 }
 
 /// One instruction the walk decoded, and where control goes after it.
@@ -123,24 +147,25 @@ impl Instruction {
     }
 }
 
-struct Walk {
+struct Walk<'a> {
     entry: u64,
+    program: &'a dyn Program,
     decoded: BTreeMap<u64, Instruction>,
     leaders: BTreeSet<u64>,
     calls: BTreeSet<u64>,
+    tail_calls: BTreeSet<u64>,
     unresolved: Vec<Unresolved>,
 }
 
-impl Walk {
-    fn run<R>(entry: u64, disasm: &Disassembler, read: R) -> Result<Self, BodyError>
-    where
-        R: Fn(u64, usize) -> Option<Vec<u8>>,
-    {
+impl<'a> Walk<'a> {
+    fn run(entry: u64, disasm: &Disassembler, program: &'a dyn Program) -> Result<Self, BodyError> {
         let mut walk = Self {
             entry,
+            program,
             decoded: BTreeMap::new(),
             leaders: BTreeSet::from([entry]),
             calls: BTreeSet::new(),
+            tail_calls: BTreeSet::new(),
             unresolved: Vec::new(),
         };
 
@@ -149,7 +174,7 @@ impl Walk {
             if walk.decoded.contains_key(&addr) {
                 continue;
             }
-            let instruction = match walk.decode(addr, disasm, &read) {
+            let instruction = match walk.decode(addr, disasm) {
                 Some(instruction) => instruction,
                 None if addr == entry => {
                     return Err(match walk.unresolved.last().map(|stop| stop.reason) {
@@ -166,11 +191,8 @@ impl Walk {
     }
 
     /// Decode one instruction, or record why control stops here.
-    fn decode<R>(&mut self, addr: u64, disasm: &Disassembler, read: &R) -> Option<Instruction>
-    where
-        R: Fn(u64, usize) -> Option<Vec<u8>>,
-    {
-        let Some(window) = read(addr, WINDOW) else {
+    fn decode(&mut self, addr: u64, disasm: &Disassembler) -> Option<Instruction> {
+        let Some(window) = self.program.read(addr, WINDOW) else {
             return self.stop(addr, UnresolvedReason::Unmapped);
         };
         let available = window.len();
@@ -206,6 +228,35 @@ impl Walk {
         None
     }
 
+    /// Follow a transfer, or end the body where it leaves for another
+    /// function.
+    ///
+    /// Every way out of a block asks this: a conditional branch to another
+    /// entry is a tail call on one arm, and a call to a function that never
+    /// returns falls through into whatever the linker put next. Its own entry
+    /// is not a boundary, because a function that jumps to its own start is a
+    /// loop.
+    fn transfer(&mut self, target: u64, successors: &mut Vec<u64>) {
+        if target != self.entry && self.program.is_entry(target) {
+            self.tail_calls.insert(target);
+            return;
+        }
+        self.leaders.insert(target);
+        successors.push(target);
+    }
+
+    /// Continue to the address after an instruction, where the next function
+    /// does not begin there.
+    fn continues(&mut self, next: Option<u64>, successors: &mut Vec<u64>) {
+        let Some(next) = next else {
+            return;
+        };
+        if next != self.entry && self.program.is_entry(next) {
+            return;
+        }
+        successors.push(next);
+    }
+
     /// Keep an instruction, and answer where the walk goes next.
     fn record(&mut self, instruction: Instruction) -> Vec<u64> {
         let addr = instruction.lifted.addr;
@@ -213,28 +264,27 @@ impl Walk {
         let mut successors = Vec::new();
 
         match instruction.terminator {
-            BlockTerminator::Fallthrough { next: after } => successors.push(after),
-            BlockTerminator::Branch { target } => {
-                self.leaders.insert(target);
-                successors.push(target);
+            BlockTerminator::Fallthrough { next: after } => {
+                self.continues(Some(after), &mut successors)
             }
+            BlockTerminator::Branch { target } => self.transfer(target, &mut successors),
             BlockTerminator::ConditionalBranch {
                 true_target,
                 false_target,
             } => {
-                self.leaders.insert(true_target);
-                self.leaders.insert(false_target);
-                successors.push(true_target);
-                successors.push(false_target);
+                self.transfer(true_target, &mut successors);
+                self.transfer(false_target, &mut successors);
             }
             BlockTerminator::Call {
                 target,
                 fallthrough,
             } => {
                 self.calls.insert(target);
-                successors.extend(fallthrough);
+                self.continues(fallthrough, &mut successors);
             }
-            BlockTerminator::IndirectCall { fallthrough } => successors.extend(fallthrough),
+            BlockTerminator::IndirectCall { fallthrough } => {
+                self.continues(fallthrough, &mut successors)
+            }
             BlockTerminator::IndirectBranch => {
                 self.stop(addr, UnresolvedReason::IndirectBranch);
             }
@@ -281,6 +331,7 @@ impl Walk {
             entry: self.entry,
             blocks,
             calls: self.calls.into_iter().collect(),
+            tail_calls: self.tail_calls.into_iter().collect(),
             unresolved: self.unresolved,
         }
     }

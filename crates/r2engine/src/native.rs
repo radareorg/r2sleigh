@@ -34,13 +34,16 @@ use crate::{
 ///
 /// Two questions and no cursor: what byte lives at an address, and what the
 /// program calls one. Whoever opened the binary answers them.
-pub trait Program {
-    /// As many bytes as are mapped at `vaddr`, up to `max`, or `None` where
-    /// nothing is mapped.
-    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>>;
-
+pub trait Program: r2ssa::body::Program {
     /// What the program calls this address, where it names it at all.
     fn name_at(&self, vaddr: u64) -> Option<String>;
+
+    /// The import this address stands for, where the binary says it is one.
+    ///
+    /// Asked of the binary rather than guessed from a name: a program that
+    /// defines its own `strlen` carries a body there, and rendering that
+    /// against the library's declaration would be a claim it never made.
+    fn import_at(&self, vaddr: u64) -> Option<String>;
 }
 
 /// Everything about the machine that does not change between functions.
@@ -117,8 +120,17 @@ pub fn decompile(
     // prototype is placed in the convention's own slots and stands in for one,
     // and the same declaration states the C signature the call renders with.
     let mut declared = Vec::new();
-    for address in &root.body.calls {
-        let Some(name) = native.program.name_at(*address) else {
+    // A tail jump reaches another function exactly as a call does; the only
+    // difference is that its result is this function's own.
+    let targets: Vec<u64> = root
+        .body
+        .calls
+        .iter()
+        .chain(root.body.tail_calls.iter())
+        .copied()
+        .collect();
+    for address in &targets {
+        let Some(name) = native.program.import_at(*address) else {
             continue;
         };
         let Some(prototype) = target.prototypes.get(&name) else {
@@ -142,9 +154,7 @@ pub fn decompile(
     let mut facts = Vec::new();
     // A stub is not a body: walking one recovers an interface with no
     // parameters, which would displace the declaration that has them.
-    let bodies: Vec<u64> = root
-        .body
-        .calls
+    let bodies: Vec<u64> = targets
         .iter()
         .copied()
         .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
@@ -156,6 +166,16 @@ pub fn decompile(
         let Ok(artifact) = native.prepare(&walked, &Callees::default()) else {
             continue;
         };
+        // The interface is what the callee's body proves about its boundary,
+        // and a callee whose whole preparation cannot be certified still
+        // proved that much. Taking it keeps the call rendered as a call.
+        if let Some(interface) = artifact
+            .shared_artifact()
+            .machine_context()
+            .function_interface()
+        {
+            callees.interfaces.insert(*address, interface.clone());
+        }
         let Some(derived) = CalleeFacts::derive(&artifact, ptr_bits) else {
             continue;
         };
@@ -475,10 +495,8 @@ struct Native<'a> {
 
 impl Native<'_> {
     fn walk(&self, entry: u64) -> Result<Walked, NativeRefusal> {
-        let body = lift_body(entry, self.target.disasm, |vaddr, max| {
-            self.program.read(vaddr, max)
-        })
-        .map_err(NativeRefusal::Body)?;
+        let body =
+            lift_body(entry, self.target.disasm, self.program).map_err(NativeRefusal::Body)?;
         let callee_names = body
             .calls
             .iter()
@@ -494,32 +512,33 @@ impl Native<'_> {
         })
     }
 
-    /// The text a prepared body points at, which its constants name only once
-    /// the machine's address arithmetic has been folded.
+    /// The text a prepared body points at.
+    ///
+    /// A machine does not always write an address down: aarch64 forms one from
+    /// a page and an offset, so the constant a string lives at exists only
+    /// once the two are folded. Preparation folds them, and this asks it
+    /// rather than re-scanning the operations that could not know.
     fn folded_literals(
         &self,
         artifact: &TrustedSsaArtifact,
         walked: &Walked,
     ) -> Vec<(u64, String)> {
+        let prepared = artifact.shared_artifact();
         let already = self
             .literals(&walked.body)
             .into_iter()
             .map(|(address, _)| address)
             .collect::<BTreeSet<_>>();
         let mut found = BTreeMap::new();
-        for block in artifact.shared_artifact().function().blocks() {
-            for op in &block.ops {
-                for source in op.sources() {
-                    let Some(value) = source.constant_bits() else {
-                        continue;
-                    };
-                    if value == 0 || already.contains(&value) || found.contains_key(&value) {
-                        continue;
-                    }
-                    if let Some(text) = self.text_at(value) {
-                        found.insert(value, text);
-                    }
-                }
+        for value in prepared.value_ids() {
+            let Some(address) = prepared.folded_value(value) else {
+                continue;
+            };
+            if address == 0 || already.contains(&address) {
+                continue;
+            }
+            if let Some(text) = self.text_at(address) {
+                found.insert(address, text);
             }
         }
         found.into_iter().collect()
@@ -544,8 +563,7 @@ impl Native<'_> {
         let prepared = prepared.as_ref();
         let interface = prepared.machine_context().function_interface()?;
         let base_storage = prepared.machine_context().stack_pointer_carrier()?;
-        let proved =
-            r2ssa::recover_interface::recovered_stack_slots(prepared, interface.parameters());
+        let proved = r2ssa::recover_interface::recovered_stack_slots(prepared);
         if proved.is_empty() {
             return None;
         }
@@ -658,10 +676,10 @@ const LITERAL_LIMIT: usize = 4096;
 /// one, so the instruction is found by looking for the call operation in the
 /// block that carries it.
 fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall> {
-    let mut calls = Vec::new();
+    let mut sites = Vec::new();
     for block in &body.blocks {
         for (index, op) in block.lifted.ops.iter().enumerate() {
-            let r2il::R2ILOp::Call { target } = op else {
+            let Some((target, transfer)) = transfer(op, body) else {
                 continue;
             };
             let Some(instruction) = block
@@ -671,14 +689,39 @@ fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall
             else {
                 continue;
             };
-            calls.push(NativeCall {
+            sites.push(NativeCall {
                 instruction,
-                target: target.offset,
-                name: program.name_at(target.offset),
+                target,
+                name: program.name_at(target),
+                transfer,
+                linkage: match program.import_at(target) {
+                    Some(_) => r2source::AdvisoryCalleeLinkage::Imported,
+                    None => r2source::AdvisoryCalleeLinkage::Internal,
+                },
             });
         }
     }
-    calls
+    sites
+}
+
+/// How one operation reaches another function, where it reaches one at all.
+///
+/// A call comes back and a tail jump does not, and which this is a fact about
+/// the body rather than about the callee: the walk decided it when it stopped
+/// at the target's entry.
+fn transfer(
+    op: &r2il::R2ILOp,
+    body: &r2ssa::body::Body,
+) -> Option<(u64, r2source::AdvisoryCallTransfer)> {
+    match op {
+        r2il::R2ILOp::Call { target } => {
+            Some((target.offset, r2source::AdvisoryCallTransfer::Call))
+        }
+        r2il::R2ILOp::Branch { target } if body.tail_calls.contains(&target.offset) => {
+            Some((target.offset, r2source::AdvisoryCallTransfer::TailJump))
+        }
+        _ => None,
+    }
 }
 
 impl Native<'_> {

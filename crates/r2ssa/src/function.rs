@@ -1357,6 +1357,28 @@ impl SsaArtifact {
         })
     }
 
+    /// The constant one value computes to, where it computes to one.
+    ///
+    /// A machine forms an address in more than one instruction -- aarch64
+    /// spells one as a page and an offset -- so the address a value names is
+    /// not always a constant the lift wrote down. This is the one answer to
+    /// that question: four places used to fold it privately, and a consumer
+    /// outside the crate had none.
+    pub fn folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
+        crate::constant::prepared_folded_value(
+            self.graph(),
+            self.function().decompile_prep_facts(),
+            value_id,
+        )
+    }
+
+    /// Every value the body computes, in graph order.
+    pub fn value_ids(&self) -> impl Iterator<Item = crate::graph::ValueId> + '_ {
+        (0..self.graph().values.len())
+            .filter_map(|index| u32::try_from(index).ok())
+            .map(crate::graph::ValueId)
+    }
+
     pub fn value_var(&self, value_id: crate::graph::ValueId) -> Option<&SSAVar> {
         self.graph.value(value_id).map(|value| &value.var)
     }

@@ -22,15 +22,25 @@ struct Fixture {
     name: &'static str,
 }
 
-impl Program for Fixture {
+impl r2ssa::body::Program for Fixture {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE
+    }
+}
+
+impl Program for Fixture {
     fn name_at(&self, vaddr: u64) -> Option<String> {
         (vaddr == BASE).then(|| self.name.to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
     }
 }
 
@@ -128,19 +138,28 @@ fn a_call_is_rendered_from_the_callee_body() {
 /// import stub is: no body worth reading, and a declared prototype instead.
 struct Importing;
 
-impl Program for Importing {
+impl r2ssa::body::Program for Importing {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = CALLER.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x100a)
+    }
+}
+
+impl Program for Importing {
     fn name_at(&self, vaddr: u64) -> Option<String> {
-        match vaddr {
-            BASE => Some("caller".to_owned()),
-            0x100a => Some("strlen".to_owned()),
-            _ => None,
-        }
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    /// The binary says this address is an import's stub, which is what makes
+    /// the declaration apply to it.
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x100a).then(|| "strlen".to_owned())
     }
 }
 

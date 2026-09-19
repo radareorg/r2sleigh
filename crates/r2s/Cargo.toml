@@ -14,6 +14,7 @@ r2abi = { path = "../r2abi" }
 r2engine = { path = "../r2engine" }
 r2image = { path = "../r2image" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
+r2ssa = { path = "../r2ssa" }
 r2il = { path = "../r2il" }
 clap.workspace = true
 sleigh-config = { workspace = true, optional = true }

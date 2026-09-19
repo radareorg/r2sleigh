@@ -308,13 +308,27 @@ struct OpenImage<'a> {
 }
 
 #[cfg(feature = "sleigh")]
-impl r2engine::native::Program for OpenImage<'_> {
+impl r2ssa::body::Program for OpenImage<'_> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         self.image
             .read_upto(vaddr, max)
             .map(std::borrow::Cow::into_owned)
     }
 
+    fn is_entry(&self, vaddr: u64) -> bool {
+        // A stub is a function of the program's as much as a body is: control
+        // that reaches one has left the function it came from.
+        self.imports.contains_key(&vaddr)
+            || self.image.symbols().iter().any(|symbol| {
+                symbol.vaddr == vaddr
+                    && symbol.defined
+                    && symbol.kind == r2image::SymbolKind::Function
+            })
+    }
+}
+
+#[cfg(feature = "sleigh")]
+impl r2engine::native::Program for OpenImage<'_> {
     fn name_at(&self, vaddr: u64) -> Option<String> {
         // An import's stub is what a call names, and the import's own name is
         // what a reader expects to see there.
@@ -325,6 +339,10 @@ impl r2engine::native::Program for OpenImage<'_> {
                 .find(|symbol| symbol.vaddr == vaddr && symbol.defined)
                 .map(|symbol| symbol.name.clone())
         })
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.imports.get(&vaddr).cloned()
     }
 }
 
