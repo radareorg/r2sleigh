@@ -237,3 +237,66 @@ until `r2s` answers what the plugin path answers. The native route already makes
 `snapshot_wire.c`, `snapshot_walk.c` and `crates/r2source/src/snapshot_wire.rs`
 unnecessary for anything but the plugin, which is roughly 5,345 lines waiting on
 the proof step.
+
+## The native certification gate, and what moved it
+
+The gate is `scripts/diff_capture.py --bins <radare2>/test/bins/elf --limit 24
+--functions 8 --native-only`. It went from `rendered 82 / refused 16 /
+undefined reads 3` to `rendered 95 / refused 3 / undefined reads 4` across:
+
+- The capture emitting `TailSlot` for a stub's jump through its slot, so a
+  walked import stub no longer looks like a body that returns nothing.
+- Placing a stub at its own cell, derived from the distance between two
+  transfers, instead of after a landing pad that the padding test read as
+  padding.
+- Refusing to return a register whose one definition is a call clobber whose
+  boundary names no result carrier.
+- Reading the argument area of a convention that passes everything on the
+  stack, which is stated by the compiler specification's stack `pentry`. This
+  alone was eleven of the sixteen refusals: x86 cdecl has no argument
+  registers, and recovery returned `None` before it started.
+- Asking once whether the caller supplied a binding, rather than the plan and
+  the seal deriving it differently.
+- One canonicalization per inlining round, absorbed as the rendering absorbs.
+  The conflict this refusal reported was masking a miscompilation: a shift of a
+  rewritten object was duplicated into a tail call argument and read after the
+  object had been reassigned.
+- Placing a gapped read where it is read rather than where the gap marker sits.
+- Letting a body prove a result the convention does not name, which is what a
+  position-independent code thunk returns.
+
+The proof line now reports how many values a rendering holds from entry, and
+the gate reads that count. A value in one of the convention's argument slots is
+excluded from it, so a parameter the recovery missed still reads as a defect
+rather than being absorbed by the new column.
+
+## `SourceFunctionReturn` needs a third state, and this is the measurement
+
+A function whose tail transfer has an unprovable result cannot recover its
+parameters, because the guard returns no interface at all. Letting it recover
+parameters with a void result was tried and measured: rendered 95 → 89, refused
+3 → 9, undefined reads 4 → 11, one test red. `Void` is an active claim that
+displaces the caller's convention fallback, so every `.part.NN` function that
+had been getting its result that way lost it.
+
+So "this function proves no result" and "this function returns nothing" are
+different facts and the contract has one spelling for both. The same gap is why
+a return address that lives on a stack slot has nowhere to go: `r2abi` now
+keeps the location x86 declares (`CompilerSpec::return_address_slot`), but the
+machine roles carry register storages only. Both want the same missing state.
+
+## Open
+
+- Which repository "just use master" meant. The radare2 fork's integration
+  branch is now twenty linear commits on `upstream/master`, which is the
+  substance of it; moving the published `master` ref is a separate act, and
+  r2sleigh's own `master` is a public protected branch 2452 commits behind the
+  working line.
+- `observation journal: RenderedValueRequired` on `main` (abcde-qt32) and
+  `funcarg` (arg_down_prop): a value the plan bound or inlined has no cell
+  because the rewriter spelled it through another member. Three closures at the
+  accounting pass were tried and reverted; the cell has to be allocated where
+  the rendering happens, not filled in at the seal.
+- `StackObjectDeclarationWidth` on `_Z6_startv` (`_Exit (42)`): an access-less,
+  address-only stack object becomes a binding that demands a declaration width
+  it cannot have.
