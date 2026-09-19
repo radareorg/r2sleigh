@@ -28852,3 +28852,21 @@ it arrived was lowered by its op as base-plus-displacement arithmetic on
 the entry stack pointer; `canonical_bound_assignment` now spells it from the
 object it names. The earlier lead about the flag ops of `sub rsp` was a
 misread of a callee's trace and is withdrawn.
+
+
+## A parameter stored into its home slot is a copy, not the slot
+
+`shape_signed_divmod` at -O0 refused with "missing program-variable
+authorization": `binding-role-conflict` named one binding certified by both
+`Parameter(0)` and `StackSlot(ObjectId(2))`. The store-mate rule in the
+pre-partition joins a value stored into a slot with the slot's mate. Its
+guard, `identity_conflict`, only fires when two *different* identities meet,
+and the slot's mate had none: the slot's own coalescing had been declined
+("a member is live where another is written"), so `RDI_0`, already
+`Parameter(0)`, joined the slot and the slot's identity then overwrote the
+parameter's. `xxhash32` never showed it because there the slot's coalescing
+held and the conflict was visible.
+
+The rule now declines when the stored value already is another object.
+`coalescing-union` prints each union the pre-partition makes, beside the
+declines it already printed.

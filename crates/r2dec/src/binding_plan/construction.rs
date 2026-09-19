@@ -478,6 +478,11 @@ pub(super) fn binding_components_with(
                     live_by_root[find(&mut parent, first.0 as usize)] = None;
                 }
                 identity_by_root[find(&mut parent, first.0 as usize)] = joined;
+                r2il::refusal_evidence!(
+                    "coalescing-union",
+                    "entity {:?} members {values:?} identity {joined:?}",
+                    entity.id()
+                );
             }
             certificate_sets.push((
                 BindingCertificateSource::CertifiedEntity(entity.id()),
@@ -552,6 +557,20 @@ pub(super) fn binding_components_with(
                     continue;
                 }
                 let proposed = BTreeSet::from([stored, mate]);
+                // A value that is already another object -- a parameter, a
+                // different slot -- was copied into this slot, not renamed by
+                // it. The conflict check below sees that only when the mate
+                // carries an identity of its own, which a slot whose own
+                // coalescing was declined does not.
+                if let Some(other) = identity_by_root[find(&mut parent, index)]
+                    && other != *id
+                {
+                    r2il::refusal_evidence!(
+                        "store-declined",
+                        "{id:?} stored {stored:?}: the value is {other:?}, another object"
+                    );
+                    continue;
+                }
                 if let Some((left, right)) =
                     identity_conflict(&mut parent, &identity_by_root, &proposed, None)
                 {
@@ -568,6 +587,12 @@ pub(super) fn binding_components_with(
                     );
                     continue;
                 }
+                r2il::refusal_evidence!(
+                    "coalescing-union",
+                    "{id:?} stored {stored:?} joins mate {mate:?} (identities {:?} and {:?})",
+                    identity_by_root[find(&mut parent, index)],
+                    identity_by_root[find(&mut parent, mate.0 as usize)]
+                );
                 union(&mut parent, &mut rank, &mut ring, mate, stored);
                 let root = find(&mut parent, mate.0 as usize);
                 live_by_root[root] = None;
