@@ -905,7 +905,13 @@ impl BindingPlan {
                 BindingPlanSourceMismatch::Authority,
             ))?;
         crate::stage_timing::mark("plan_certified");
-        let unread = super::rules::unread_defined_values(source, &machine_projection);
+        let boundary_reads = super::readers::BoundaryReads::compute(source);
+        let plan_facts = super::rules::PlanFacts {
+            owned: source_owned,
+            projection: &machine_projection,
+            boundary: &boundary_reads,
+        };
+        let unread = super::rules::unread_defined_values(plan_facts);
         crate::stage_timing::mark("plan_unread");
         // One derivation, three readers. The partition is a pure function of the
         // source facts and the projection, and neither the seal nor the shadow
@@ -920,8 +926,7 @@ impl BindingPlan {
         // dead, and it needs an elision reason of its own: leaving it merely
         // ineligible for a binding gives it no disposition at all, which the
         // plan reports as a missing binding certificate.
-        let unrendered =
-            super::rules::unrendered_defined_values(source, &machine_projection, canonical);
+        let unrendered = super::rules::unrendered_defined_values(plan_facts, canonical);
         let inlinable = &partition.inlinable;
         let mut dispositions = graph
             .values

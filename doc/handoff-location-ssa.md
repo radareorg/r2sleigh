@@ -29881,3 +29881,24 @@ four. The census script that found it is kept at
 `tests/corpus/structure_census.py`: it tracks brace depth so that a run of
 sequential loops -- eleven elision sources one after another, say -- is not
 mistaken for nesting, which the first cut of it did.
+
+## The binding plan's rules take their inputs as one thing
+
+Four rules rebuilt the same index of graphless certificate reads -- deadness,
+renderability, the escaped-frame walk and the fold rule -- each walking every
+instruction to do it. `BoundaryReads` builds it once and they share it.
+
+Threading it as a fourth parameter was the wrong way to share it, and removing
+one duplication by growing four signatures is not an improvement. The three
+values travel together through every rule in the module, which means they are
+one thing that had not been named. `PlanFacts` names it: the function's facts,
+the machine projection that says how each cell renders, and the graphless reads.
+`Round` names the other group, which is what one round of the fold decision
+proposes: the canonicalised terms, the admitted literals, the unrendered values
+and the partition they were computed against.
+
+`inlinable_core` takes two parameters instead of seven, `unread_defined_values`
+one instead of three, `unrendered_defined_values` two instead of four. The
+function-parameter census that found this is at `tests/corpus/arg_census.py`,
+beside the nesting one; it also reports over-long identifiers, where the
+outliers are all test names and those are meant to be sentences.

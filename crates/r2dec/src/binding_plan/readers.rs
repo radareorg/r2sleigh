@@ -24,7 +24,40 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use r2ssa::{InstId, UseSite, ValueId};
-use r2types::SourceOwnedFunctionFacts;
+
+/// Every graphless read the boundary certificates state, indexed by value.
+///
+/// A return, a call argument, a switch selector and a derived-width call
+/// result are reads the text performs and the SSA graph has no operand for.
+/// Four separate rules need to know them -- deadness, renderability, the
+/// escaped-frame walk and the fold rule -- and each used to rebuild this
+/// index by walking every instruction itself. It depends on nothing but the
+/// certificates, so it is built before any of them and shared.
+#[derive(Debug, Default)]
+pub(super) struct BoundaryReads {
+    by_value: BTreeMap<ValueId, Vec<InstId>>,
+}
+
+impl BoundaryReads {
+    pub(super) fn compute(source: &r2ssa::SsaArtifact) -> Self {
+        let mut by_value = BTreeMap::<ValueId, Vec<InstId>>::new();
+        for inst in &source.graph().insts {
+            for value in super::certified_boundary_read_values(source, inst.id) {
+                by_value.entry(value).or_default().push(inst.id);
+            }
+        }
+        Self { by_value }
+    }
+
+    pub(super) fn of(&self, value: ValueId) -> &[InstId] {
+        self.by_value.get(&value).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether any certificate states a graphless read of the value.
+    pub(super) fn any(&self, value: ValueId) -> bool {
+        !self.of(value).is_empty()
+    }
+}
 
 /// The instructions that read one value.
 #[derive(Debug, Default)]
@@ -157,12 +190,13 @@ impl RenderedReaders {
     /// An instruction whose own output is in either renders nothing, so a read
     /// it performs reaches no page.
     pub(super) fn compute(
-        source_owned: &SourceOwnedFunctionFacts,
+        facts: super::rules::PlanFacts<'_>,
         unrendered: &BTreeSet<ValueId>,
         dead: &BTreeSet<ValueId>,
     ) -> Self {
-        let source = source_owned.source();
-        let graph = source.graph();
+        let source = facts.source();
+        let graph = facts.graph();
+        let boundary_reads = facts.boundary;
         let unobserved = source.unobserved_values();
         let unobserved_uses = source.unobserved_merges().unobserved_uses();
         let renders_nothing = |inst: InstId| {
@@ -175,12 +209,6 @@ impl RenderedReaders {
                         || unobserved.contains(&output)
                 })
         };
-        let mut boundary_by_value = BTreeMap::<ValueId, Vec<InstId>>::new();
-        for inst in &graph.insts {
-            for value in super::certified_boundary_read_values(source, inst.id) {
-                boundary_by_value.entry(value).or_default().push(inst.id);
-            }
-        }
         let mut by_value = BTreeMap::new();
         for value in &graph.values {
             let sites = graph
@@ -213,7 +241,7 @@ impl RenderedReaders {
                         })
                 })
                 .collect::<Vec<_>>();
-            let boundary = boundary_by_value.remove(&value.id).unwrap_or_default();
+            let boundary = boundary_reads.of(value.id).to_vec();
             let all = distinct(&sites, &boundary);
             if all == 0 {
                 continue;

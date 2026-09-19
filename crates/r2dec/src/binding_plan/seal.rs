@@ -120,9 +120,14 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
     // Both kinds of deadness, derived the same way the plan derives them: no
     // reader in the graph at all, and every reader having stopped reading it
     // when the terms were rewritten.
-    let unread = super::rules::unread_defined_values(source, machine_projection);
-    let unrendered =
-        super::rules::unrendered_defined_values(source, machine_projection, &partition.canonical);
+    let boundary_reads = super::readers::BoundaryReads::compute(source);
+    let plan_facts = super::rules::PlanFacts {
+        owned: source_owned,
+        projection: machine_projection,
+        boundary: &boundary_reads,
+    };
+    let unread = super::rules::unread_defined_values(plan_facts);
+    let unrendered = super::rules::unrendered_defined_values(plan_facts, &partition.canonical);
     let resolved = seal_binding_components_with(
         source_owned,
         machine_projection,
@@ -402,12 +407,15 @@ impl BindingPlan {
             .ok_or(BindingPlanBuildError::Seal(
                 BindingPlanSourceMismatch::Authority,
             ))?;
-        let unread = super::rules::unread_defined_values(source, &self.machine_projection);
-        let unrendered = super::rules::unrendered_defined_values(
-            source,
-            &self.machine_projection,
-            &self.partition.canonical,
-        );
+        let boundary_reads = super::readers::BoundaryReads::compute(source);
+        let plan_facts = super::rules::PlanFacts {
+            owned: source_owned,
+            projection: &self.machine_projection,
+            boundary: &boundary_reads,
+        };
+        let unread = super::rules::unread_defined_values(plan_facts);
+        let unrendered =
+            super::rules::unrendered_defined_values(plan_facts, &self.partition.canonical);
         for (index, graph_value) in graph.values.iter().enumerate() {
             if graph_value.id.0 as usize != index {
                 return Err(BindingPlanBuildError::Seal(

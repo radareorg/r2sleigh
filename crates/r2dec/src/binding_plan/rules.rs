@@ -496,7 +496,13 @@ pub(super) fn component_eligible_with(
     let direct_call_targets = certified_direct_call_target_values(source);
     let stack_frame_values = certified_stack_frame_values(source);
     let stack_geometry_values = certified_stack_geometry_values(source);
-    let unread = unread_defined_values(source, projection);
+    let certified = super::readers::BoundaryReads::compute(source);
+    let facts = PlanFacts {
+        owned: source_owned,
+        projection,
+        boundary: &certified,
+    };
+    let unread = unread_defined_values(facts);
     let structural_unused = source
         .obligations()
         .structural_unused_values(graph, source.unobserved_merges().unobserved_uses())
@@ -536,12 +542,11 @@ pub(super) fn component_eligible_with(
 /// itself has to be removable, so an instruction with an effect is never called
 /// dead because its result is.
 pub(super) fn unrendered_defined_values(
-    source: &r2ssa::SsaArtifact,
-    projection: &r2ssa::MachineProjection,
+    facts: PlanFacts<'_>,
     canonical: &r2rewrite::CanonicalRoots,
 ) -> BTreeSet<ValueId> {
+    let (source, projection, certified) = (facts.source(), facts.projection, facts.boundary);
     let graph = source.graph();
-    let certified = certified_value_readers(source);
     // A merge the structurer writes at a shared exit reads its target and its
     // sources, and it does so from the control shape rather than from any term,
     // so no canonical term can speak for those reads. A merge nothing observes
@@ -564,7 +569,7 @@ pub(super) fn unrendered_defined_values(
         .filter(|value| !merged.contains(&value.id))
         .filter(|value| removable_definition(source, projection, value.id))
         .filter(|value| canonical.value(value.id).is_some())
-        .filter(|value| !certified.contains_key(&value.id))
+        .filter(|value| !certified.any(value.id))
         .filter(|value| !graph.caller_supplied(value.id))
         .filter(|value| !graph.use_sites(value.id).is_empty())
         // Only where the reader's own term is a faithful account of what it
@@ -625,6 +630,29 @@ fn removable_definition(
     })
 }
 
+/// What every rule below reads about one function.
+///
+/// The three travel together through every rule -- the facts the plan is
+/// derived from, the machine projection that says how each cell renders, and
+/// the graphless reads the certificates state -- so they are one thing rather
+/// than three parameters each rule repeats.
+#[derive(Clone, Copy)]
+pub(super) struct PlanFacts<'a> {
+    pub(super) owned: &'a SourceOwnedFunctionFacts,
+    pub(super) projection: &'a r2ssa::MachineProjection,
+    pub(super) boundary: &'a super::readers::BoundaryReads,
+}
+
+impl<'a> PlanFacts<'a> {
+    pub(super) fn source(self) -> &'a r2ssa::SsaArtifact {
+        self.owned.source()
+    }
+
+    pub(super) fn graph(self) -> &'a r2ssa::SsaGraph {
+        self.owned.source().graph()
+    }
+}
+
 /// Values defined in this function that no graph or certified boundary reads.
 ///
 /// Entry values are deliberately outside this set: an exact interface can own
@@ -633,11 +661,8 @@ fn removable_definition(
 /// graph use table plus the complete graphless boundary-reader inventory is the
 /// closed read domain, so membership is a linear pass with `O(log n)` indexed
 /// certificate lookups.
-pub(super) fn unread_defined_values(
-    source: &r2ssa::SsaArtifact,
-    projection: &r2ssa::MachineProjection,
-) -> BTreeSet<ValueId> {
-    let certified = certified_value_readers(source);
+pub(super) fn unread_defined_values(facts: PlanFacts<'_>) -> BTreeSet<ValueId> {
+    let (source, projection, certified) = (facts.source(), facts.projection, facts.boundary);
     // A use the certificates elide spells nothing, so a value only such uses
     // read is unread and owes no object. A call's `CallUse` of a register its
     // prototype does not name was the only reason counted, which left a call
@@ -680,7 +705,7 @@ pub(super) fn unread_defined_values(
                         projection.use_disposition(*site)
                     ))
                     .collect::<Vec<_>>(),
-                certified.get(&value.id),
+                certified.of(value.id),
                 source.graph().caller_supplied(value.id)
             );
         }
@@ -718,7 +743,7 @@ pub(super) fn unread_defined_values(
                 .iter()
                 .all(|site| elided.contains(site))
         })
-        .filter(|value| !certified.contains_key(&value.id))
+        .filter(|value| !certified.any(value.id))
         // A formal the body never reads is still declared; it is not dead.
         .filter(|value| !source.graph().caller_supplied(value.id))
         .map(|value| value.id)
@@ -751,14 +776,14 @@ pub(super) fn frame_objects_with_escaped_address(
     let source = source_owned.source();
     let graph = source.graph();
     let geometry = &source.certificates().stack_geometry.insts;
-    let boundary_readers = certified_value_readers(source);
+    let boundary_readers = super::readers::BoundaryReads::compute(source);
     let mut escaped = BTreeSet::new();
     let mut reached_by_callee = BTreeSet::new();
     for value in &graph.values {
         let Some(object) = r2rewrite::exact_stack_object_address(source, value.id) else {
             continue;
         };
-        let escapes = boundary_readers.contains_key(&value.id)
+        let escapes = boundary_readers.any(value.id)
             || graph.use_sites(value.id).iter().any(|site| {
                 !geometry.contains(&site.inst)
                     && !matches!(
@@ -1028,16 +1053,6 @@ fn escaped_pointee_reach(
             (proven, floor) => proven.or(floor),
         }
     })
-}
-
-fn certified_value_readers(source: &r2ssa::SsaArtifact) -> BTreeMap<ValueId, Vec<InstId>> {
-    let mut readers = BTreeMap::<ValueId, Vec<InstId>>::new();
-    for inst in &source.graph().insts {
-        for value in super::certified_boundary_read_values(source, inst.id) {
-            readers.entry(value).or_default().push(inst.id);
-        }
-    }
-    readers
 }
 
 /// The type one object is declared with.
@@ -1383,6 +1398,14 @@ pub(super) fn rewrite_inlining_partition(
 ) -> Result<RewriteInliningPartition, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
+    // The graphless reads the certificates state, built once for every rule
+    // below that needs them.
+    let boundary_reads = super::readers::BoundaryReads::compute(source);
+    let facts = PlanFacts {
+        owned: source_owned,
+        projection,
+        boundary: &boundary_reads,
+    };
     let mut eligible = component_eligible_with(source_owned, projection)?;
     // A value every reader stopped reading when the terms were rewritten is
     // no object either. That needs the canonical terms, which do not depend
@@ -1392,7 +1415,7 @@ pub(super) fn rewrite_inlining_partition(
         let seed =
             r2rewrite::canonicalize_with(source, projection, &seed_absorbs_literal, &|_| None)
                 .map_err(BindingPlanBuildError::Canonicalisation)?;
-        unrendered_defined_values(source, projection, &seed)
+        unrendered_defined_values(facts, &seed)
     };
     for value in &unrendered {
         eligible[value.0 as usize] = false;
@@ -1490,12 +1513,13 @@ pub(super) fn rewrite_inlining_partition(
             }
         }
         let folds = inlinable_core(
-            source_owned,
-            projection,
-            &seed_canonical,
-            &admitted,
-            &unrendered,
-            &groups,
+            facts,
+            Round {
+                canonical: &seed_canonical,
+                admitted: &admitted,
+                unrendered: &unrendered,
+                pre_partition: &groups,
+            },
         );
         crate::stage_timing::mark("plan_inlinable");
         // Later rounds only shrink the fold set, except for a literal the
@@ -1809,23 +1833,34 @@ struct Folds {
     readers: BTreeMap<ValueId, r2ssa::InstId>,
 }
 
-fn inlinable_core(
-    source_owned: &SourceOwnedFunctionFacts,
-    projection: &r2ssa::MachineProjection,
-    canonical: &r2rewrite::CanonicalRoots,
-    admitted: &BTreeSet<ValueId>,
-    unrendered: &BTreeSet<ValueId>,
-    pre_partition: &[u32],
-) -> Folds {
-    let source = source_owned.source();
-    let graph = source.graph();
+/// What one round of the fold decision proposes: the terms it canonicalised,
+/// the literals it admitted, the values it found unrendered, and the partition
+/// it computed those against.
+#[derive(Clone, Copy)]
+struct Round<'a> {
+    canonical: &'a r2rewrite::CanonicalRoots,
+    admitted: &'a BTreeSet<ValueId>,
+    unrendered: &'a BTreeSet<ValueId>,
+    pre_partition: &'a [u32],
+}
+
+fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
+    let Round {
+        canonical,
+        admitted,
+        unrendered,
+        pre_partition,
+    } = round;
+    let (source_owned, projection) = (facts.owned, facts.projection);
+    let source = facts.source();
+    let graph = facts.graph();
     // A certificate that reads a value as a lane is answered from that value's
     // binding symbol, so it must keep one. An address read is not: a folded
     // address is spelled by its own expression.
     let certified_read_values = super::certified_lane_read_values(source);
     // A certificate on a value nothing reads states a read that renders nothing.
-    let dead_readers = unread_defined_values(source, projection);
-    let readers = super::readers::RenderedReaders::compute(source_owned, unrendered, &dead_readers);
+    let dead_readers = unread_defined_values(facts);
+    let readers = super::readers::RenderedReaders::compute(facts, unrendered, &dead_readers);
     // A read is a read only if what it feeds reaches the page. At -O0 and again
     // under x86-64's flag lanes a value carries several graph readers and one
     // rendered one, and counting the graph's is what keeps it named.
