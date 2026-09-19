@@ -89,6 +89,40 @@ jobs:
 
   # Correctness is intentionally separate from the fixed-machine performance
   # contract. A semantic/source-gold failure cannot be hidden by faster output.
+  capture-gate:
+    name: Native Capture Certification Gate
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust PATH
+        run: |
+          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
+            if [ -d "$p" ]; then
+              echo "$p" >> "$GITHUB_PATH"
+              export PATH="$p:$PATH"
+            fi
+          done
+          command -v cargo >/dev/null
+      # The binaries are radare2's own test corpus; radare2 itself is not run
+      # by this gate, which is the point of it: the native route answers for
+      # itself.
+      - name: Ensure radare2 checkout for its test binaries
+        run: bash .github/scripts/ensure-radare2-ci.sh
+      - name: Build the shell
+        run: cargo build --release -p r2s --features sleigh
+      - name: A rendering may not read what nothing wrote
+        run: |
+          set -eu
+          bins="${R2SLEIGH_RADARE2_CACHE_DIR:-}"
+          if [ -z "$bins" ] || [ ! -d "$bins/test/bins/elf" ]; then
+            bins="$(ls -d /tmp/radare2-* 2>/dev/null | head -1)"
+          fi
+          test -d "$bins/test/bins/elf"
+          python3 scripts/diff_capture.py \
+            --bins "$bins/test/bins/elf" \
+            --r2s target/release/r2s \
+            --limit 12 --functions 8 --native-only
+
   source-gold:
     name: Source-Gold Correctness Gate
     runs-on: self-hosted

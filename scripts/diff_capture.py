@@ -15,6 +15,7 @@ Usage:
   scripts/diff_capture.py BINARY --at 0x1000     # one function
   scripts/diff_capture.py --bins DIR --limit 5
   scripts/diff_capture.py BINARY --verbose
+  scripts/diff_capture.py --bins DIR --native-only    # certification gate
 """
 
 import argparse
@@ -162,6 +163,34 @@ def proof_refusals(lines):
     return None
 
 
+def lint(args, binary, found):
+    """Report what the native rendering claims it proved and did not.
+
+    radare2 is not run: an undefined read under a proof line that refused
+    nothing is wrong on its own terms, with nothing to compare against.
+    """
+    tally = {"rendered": 0, "refused": 0, "undefined reads": 0}
+    for address, name in found[: args.functions]:
+        native, error = native_render(args.r2s, binary, address, args.timeout)
+        if error:
+            print(f"  {name}: {error}")
+            continue
+        lines = clean(native, True)
+        if refused(lines):
+            tally["refused"] += 1
+            continue
+        tally["rendered"] += 1
+        undefined = undefined_reads(lines)
+        if undefined:
+            tally["undefined reads"] += 1
+            print(
+                "  {}: reads {} which nothing assigns, proof says {} refused".format(
+                    name, ", ".join(undefined), proof_refusals(lines)
+                )
+            )
+    return tally
+
+
 def compare(args, binary):
     found, error = functions(args.r2s, binary, args.timeout)
     if error:
@@ -171,6 +200,9 @@ def compare(args, binary):
         found = [(address, name) for address, name in found if address == args.at]
         if not found:
             found = [(args.at, f"fcn.{args.at:x}")]
+
+    if args.native_only:
+        return lint(args, binary, found)
 
     tally = {
         "same": 0,
@@ -238,6 +270,11 @@ def main():
     parser.add_argument("--functions", type=int, default=20, help="per binary")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--proof", action="store_true", help="compare proof lines too")
+    parser.add_argument(
+        "--native-only",
+        action="store_true",
+        help="render natively and report uncertified output; radare2 is not run",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -257,15 +294,23 @@ def main():
             totals[key] = totals.get(key, 0) + value
 
     print()
-    for key in (
-        "same",
-        "differ",
-        "native refused",
-        "plugin refused",
-        "both refused",
-        "undefined reads",
-    ):
+    keys = (
+        ("rendered", "refused", "undefined reads")
+        if args.native_only
+        else (
+            "same",
+            "differ",
+            "native refused",
+            "plugin refused",
+            "both refused",
+            "undefined reads",
+        )
+    )
+    for key in keys:
         print(f"{key:16} {totals.get(key, 0)}")
+    if args.native_only:
+        # An uncertified rendering is a defect on its own terms.
+        return 1 if totals.get("undefined reads", 0) else 0
     return 1 if totals.get("differ", 0) or totals.get("native refused", 0) else 0
 
 
