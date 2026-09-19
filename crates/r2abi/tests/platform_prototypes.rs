@@ -13,11 +13,17 @@ fn linux_declares_its_own() {
     let linux = r2abi::Prototypes::embedded_for(r2abi::Platform::Linux);
     let exit = linux.get("_Exit").expect("_Exit is declared on linux");
     assert_eq!(exit.parameters.len(), 1);
-    assert!(linux.get("printf").is_some(), "the portable table still applies");
+    assert!(
+        linux.get("printf").is_some(),
+        "the portable table still applies"
+    );
 }
 
 #[test]
 fn darwin_declares_its_own() {
     let darwin = r2abi::Prototypes::embedded_for(r2abi::Platform::Darwin);
-    assert!(darwin.get("printf").is_some(), "the portable table still applies");
+    assert!(
+        darwin.get("printf").is_some(),
+        "the portable table still applies"
+    );
 }
