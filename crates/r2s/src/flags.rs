@@ -155,8 +155,11 @@ fn section_stubs(
     section: &r2image::Section,
     slots: &BTreeMap<u64, &str>,
 ) -> Vec<(u64, String)> {
-    let mut ends: Vec<(u64, Option<String>)> = Vec::new();
-    let mut symbol: Option<String> = None;
+    // Where each stub reads the slot the loader fills. One stub reads one
+    // slot, so the distance between two readers is the size the linker gave
+    // the cells, and neither a landing pad nor alignment padding can be
+    // mistaken for the start of one.
+    let mut readers: Vec<(u64, String)> = Vec::new();
     let mut pc = section.vaddr;
     let end = section.vaddr + section.vsize;
     while pc < end {
@@ -165,7 +168,7 @@ fn section_stubs(
         };
         let mut fetch = window.into_owned();
         fetch.resize(DECODE_WINDOW, 0);
-        // Zero bytes are not an instruction, so nothing can be read out of them.
+        // Zero bytes are not an instruction, so nothing reads a slot in them.
         if fetch[0] == 0 {
             pc += 1;
             continue;
@@ -176,36 +179,26 @@ fn section_stubs(
         if lifted.size == 0 {
             break;
         }
-        let mut leaves = false;
         for op in &lifted.ops {
-            match op {
-                R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. }
-                    if matches!(addr.space, SpaceId::Ram | SpaceId::Const) =>
-                {
-                    if let Some(found) = slots.get(&addr.offset) {
-                        symbol = Some((*found).to_owned());
-                    }
-                }
-                R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. } => leaves = true,
-                _ => {}
+            if let R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. } = op
+                && matches!(addr.space, SpaceId::Ram | SpaceId::Const)
+                && let Some(found) = slots.get(&addr.offset)
+            {
+                readers.push((pc, (*found).to_owned()));
             }
         }
         pc += u64::from(lifted.size);
-        if leaves {
-            ends.push((pc, symbol.take()));
-        }
     }
 
-    let stride = match ends.as_slice() {
-        [first, second, ..] => second.0 - first.0,
-        [_] | [] => section.vsize.max(1),
+    let stride = match readers.as_slice() {
+        [first, second, ..] => second.0.checked_sub(first.0).unwrap_or(1),
+        [_] | [] => return readers,
     };
-    // The section is a run of equal cells from its first address, and the
-    // transfer a stub makes falls in the cell the stub occupies.
-    ends.into_iter()
-        .filter_map(|(end, symbol)| {
-            let cell = end.checked_sub(1)?.checked_sub(section.vaddr)? / stride;
-            Some((section.vaddr + cell * stride, symbol?))
+    readers
+        .into_iter()
+        .filter_map(|(reader, symbol)| {
+            let cell = reader.checked_sub(section.vaddr)? / stride.max(1);
+            Some((section.vaddr + cell * stride, symbol))
         })
         .collect()
 }

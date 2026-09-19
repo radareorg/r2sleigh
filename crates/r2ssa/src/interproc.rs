@@ -326,6 +326,10 @@ impl FunctionSemanticSummary {
 
     fn seed_for_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
         let normalized = normalize_seed_name(name)?;
+        // The normalized spelling selects the model; it does not rename the
+        // callee. `_Exit` is not `exit`, and a rendering that says so names a
+        // function the program does not call.
+        let called = import_basename(name).to_owned();
         let mut arg_effects = BTreeMap::new();
         let mut effect = |idx: usize, read: bool, write: bool, escape: bool, free: bool| {
             arg_effects.insert(
@@ -550,7 +554,7 @@ impl FunctionSemanticSummary {
         Some(Self {
             schema_version: INTERPROC_SUMMARY_SCHEMA_VERSION,
             id,
-            name: Some(normalized.to_string()),
+            name: Some(called),
             linkage: FunctionSemanticLinkage::Unknown,
             arg_count_hint: Some(match normalized {
                 "malloc" | "free" | "strlen" | "puts" | "printf" | "exit" | "retain"
@@ -3189,6 +3193,17 @@ fn global_address_for_value_id(prepared: &SsaArtifact, value_id: ValueId) -> Opt
         ObjectKind::Global { address, .. } => Some(address),
         _ => None,
     }
+}
+
+/// The name the program links against, with radare2's namespace removed.
+fn import_basename(name: &str) -> &str {
+    let mut bare = name.trim();
+    for prefix in ["sym.imp.", "sym.", "imp.", "reloc.", "dbg."] {
+        while let Some(rest) = bare.strip_prefix(prefix) {
+            bare = rest;
+        }
+    }
+    bare.split_once('@').map_or(bare, |(base, _)| base)
 }
 
 fn normalize_seed_name(name: &str) -> Option<&'static str> {
