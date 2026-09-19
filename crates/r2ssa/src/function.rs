@@ -465,6 +465,7 @@ impl SsaArtifact {
             &same_content_pairs,
             &ignored_reads,
         );
+        function.install_formal_parameter_identity(&graph, &facts.addresses);
         let unobserved_merges = crate::deadphi::DeadPhis::find(&graph, &live_out, &facts);
         let aggregate_accesses = collect_aggregate_access_projections(
             &graph,
@@ -4782,6 +4783,39 @@ impl SSAFunction {
             if parameter.graph_storage == parameter.abi_storage {
                 prep.formal_parameter_bases.insert(value.var.clone(), index);
             }
+        }
+    }
+
+    /// Record every value that is a formal parameter, and which one.
+    ///
+    /// A formal reaches its uses through more than the storage it entered in:
+    /// a copy, a widening, a lane projection and the reload of the slot the
+    /// prologue spilled it to all deliver the same value. Four call sites each
+    /// answered that question with their own partial walk, and none of them
+    /// reached the reload. The address facts already answer it exactly -- they
+    /// seed from the ABI storages and propagate through those steps, across
+    /// the frame included -- so a value is the formal when its parameter
+    /// expression names one with nothing added to it. What
+    /// `install_exact_formal_parameters` proved is authoritative and is not
+    /// overwritten here.
+    fn install_formal_parameter_identity(
+        &mut self,
+        graph: &SsaGraph,
+        addresses: &crate::AddressProvenanceFacts,
+    ) {
+        let Some(prep) = self.decompile_prep_facts.as_mut() else {
+            return;
+        };
+        for (value, expression) in &addresses.parameter_expressions {
+            if !expression.terms.is_empty() || expression.offset != 0 {
+                continue;
+            }
+            let Some(var) = graph.value(*value).map(|value| value.var.clone()) else {
+                continue;
+            };
+            prep.formal_parameters
+                .entry(var)
+                .or_insert(expression.parameter);
         }
     }
 

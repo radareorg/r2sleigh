@@ -689,20 +689,6 @@ pub struct PreparedInterprocFunctionInput<'a> {
     pub prepared: &'a Arc<SsaArtifact>,
 }
 
-fn formal_arg_index_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option<usize> {
-    let value = prepared.graph().value_id_for_var(var)?;
-    prepared
-        .facts()
-        .boundaries
-        .parameters
-        .iter()
-        .find_map(|(index, parameter)| {
-            (parameter.value == value)
-                .then(|| usize::try_from(*index).ok())
-                .flatten()
-        })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SummaryOperand {
     Arg(usize),
@@ -2260,7 +2246,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     has_volatile_or_unknown_effects = true;
                     let args = inputs
                         .iter()
-                        .map(|input| classify_var_operand(prepared, input, 0))
+                        .map(|input| classify_var_operand(prepared, input))
                         .collect::<Vec<_>>();
                     mark_unknown_call_effects(
                         &mut out.has_unknown_calls,
@@ -2384,11 +2370,6 @@ fn classify_memory_access_location_value(
     }
 
     for candidate in &candidates {
-        if let Some(var) = prepared.value_var(*candidate)
-            && let Some(idx) = formal_arg_index_for_var(prepared, var)
-        {
-            return arg_location(idx, Some(0), Some(width));
-        }
         if let Some(expression) = prepared.addresses().parameter_expression(*candidate) {
             let parameter = match expression
                 .parameter_storage
@@ -2537,8 +2518,8 @@ fn classify_memory_additive_location(
     right_id: ValueId,
     ctx: AdditiveLocationCtx,
 ) -> SummaryMemoryLocation {
-    let left_const = summary_const_value(prepared, left_id, ctx.depth);
-    let right_const = summary_const_value(prepared, right_id, ctx.depth);
+    let left_const = summary_const_value(prepared, left_id);
+    let right_const = summary_const_value(prepared, right_id);
 
     if let Some(k) = right_const {
         let mut base = classify_memory_access_location_value(
@@ -2563,10 +2544,10 @@ fn classify_memory_additive_location(
     unknown_location()
 }
 
-fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId, depth: u32) -> Option<u64> {
-    match classify_value_operand(prepared, value_id, depth) {
+fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64> {
+    match classify_value_operand(prepared, value_id) {
         SummaryOperand::Const(value) => Some(value),
-        _ => crate::constant::value_of(prepared.graph(), canonical_root_value(prepared, value_id)),
+        _ => None,
     }
 }
 
@@ -2688,7 +2669,7 @@ fn collect_call_arg_state_with_iteration_limit(
                                     SummaryOperand::Arg(*index)
                                 }
                                 Some(CallCarrierState::Value(value_id)) => {
-                                    classify_value_operand(prepared, *value_id, 0)
+                                    classify_value_operand(prepared, *value_id)
                                 }
                                 Some(CallCarrierState::Unknown) | None => SummaryOperand::Unknown,
                             })
@@ -2896,7 +2877,7 @@ fn classify_return_target(
     {
         return observation;
     }
-    match classify_var_operand(prepared, target, 0) {
+    match classify_var_operand(prepared, target) {
         SummaryOperand::Arg(idx) => SummaryValueObservation::Arg(idx),
         SummaryOperand::Const(value) => SummaryValueObservation::Const(value),
         SummaryOperand::Unknown => SummaryValueObservation::Unknown,
@@ -2958,7 +2939,7 @@ fn classify_value_observation(
     value_id: ValueId,
     calls: &BTreeMap<CallSiteId, CallObservation>,
 ) -> SummaryValueObservation {
-    match classify_value_operand(prepared, value_id, 0) {
+    match classify_value_operand(prepared, value_id) {
         SummaryOperand::Arg(idx) => SummaryValueObservation::Arg(idx),
         SummaryOperand::Const(value) => SummaryValueObservation::Const(value),
         SummaryOperand::Unknown => {
@@ -3035,78 +3016,32 @@ fn return_call_site_for_value(
     single_call_site().and_then(exact_result_matches)
 }
 
-fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar, depth: u32) -> SummaryOperand {
-    if depth > 8 {
-        return SummaryOperand::Unknown;
-    }
+/// What a summary says an operand is: a constant, an argument, or neither.
+///
+/// Both questions are already answered once during preparation. A constant is
+/// what the value folds to. An argument is what the address facts propagated:
+/// they carry a parameter through copies, widenings, same-width lane
+/// projections, spill slots and affine arithmetic, which is exactly the
+/// derivation this used to re-walk here with its own depth limit and its own
+/// op set.
+fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar) -> SummaryOperand {
     let Some(value_id) = prepared.graph().value_id_for_var(var) else {
         return SummaryOperand::Unknown;
     };
-    if let Some(bits) = crate::constant::value_of(prepared.graph(), value_id) {
-        return SummaryOperand::Const(bits);
-    }
-    if let Some(idx) = formal_arg_index_for_var(prepared, var) {
-        return SummaryOperand::Arg(idx);
-    }
-    classify_value_operand(prepared, value_id, depth)
+    classify_value_operand(prepared, value_id)
 }
 
-fn classify_value_operand(prepared: &SsaArtifact, value_id: ValueId, depth: u32) -> SummaryOperand {
-    if depth > 8 {
-        return SummaryOperand::Unknown;
-    }
+fn classify_value_operand(prepared: &SsaArtifact, value_id: ValueId) -> SummaryOperand {
     let rooted = canonical_root_value(prepared, value_id);
-    let Some(root_var) = prepared.value_var(rooted) else {
-        return SummaryOperand::Unknown;
-    };
-    if let Some(bits) = crate::constant::value_of(prepared.graph(), rooted) {
-        return SummaryOperand::Const(bits);
-    }
-    if let Some(idx) = formal_arg_index_for_var(prepared, root_var) {
-        return SummaryOperand::Arg(idx);
-    }
-
-    let Some(def_inst) = prepared.graph().def_inst(rooted) else {
-        return SummaryOperand::Unknown;
-    };
-    let Some(inst) = prepared.graph().inst(def_inst) else {
-        return SummaryOperand::Unknown;
-    };
-    let InstPayload::Op(op) = &inst.payload else {
-        return SummaryOperand::Unknown;
-    };
-    match op {
-        SSAOp::Copy { .. }
-        | SSAOp::IntZExt { .. }
-        | SSAOp::IntSExt { .. }
-        | SSAOp::Subpiece { .. } => inst
-            .inputs
-            .first()
-            .copied()
-            .map(|src| classify_value_operand(prepared, src, depth + 1))
-            .unwrap_or(SummaryOperand::Unknown),
-        SSAOp::IntAdd { .. }
-        | SSAOp::IntSub { .. }
-        | SSAOp::PtrAdd { .. }
-        | SSAOp::PtrSub { .. } => {
-            let Some(&left_id) = inst.inputs.first() else {
-                return SummaryOperand::Unknown;
-            };
-            let Some(&right_id) = inst.inputs.get(1) else {
-                return SummaryOperand::Unknown;
-            };
-            let left = classify_value_operand(prepared, left_id, depth + 1);
-            let right = classify_value_operand(prepared, right_id, depth + 1);
-            match (left, right) {
-                (SummaryOperand::Arg(idx), SummaryOperand::Const(_))
-                | (SummaryOperand::Const(_), SummaryOperand::Arg(idx)) => SummaryOperand::Arg(idx),
-                (SummaryOperand::Arg(idx), SummaryOperand::Unknown) => SummaryOperand::Arg(idx),
-                (SummaryOperand::Unknown, SummaryOperand::Arg(idx)) => SummaryOperand::Arg(idx),
-                _ => SummaryOperand::Unknown,
-            }
+    for candidate in [value_id, rooted] {
+        if let Some(bits) = crate::constant::folded_value(prepared.graph(), candidate) {
+            return SummaryOperand::Const(bits);
         }
-        _ => SummaryOperand::Unknown,
+        if let Some(expression) = prepared.addresses().parameter_expression(candidate) {
+            return SummaryOperand::Arg(expression.parameter);
+        }
     }
+    SummaryOperand::Unknown
 }
 
 fn canonical_root_value(prepared: &SsaArtifact, value_id: ValueId) -> ValueId {
@@ -4868,7 +4803,7 @@ mod tests {
         let InstPayload::Op(op) = &inst.payload else {
             panic!("expected op payload");
         };
-        assert_eq!(summary_const_value(&prepared, right_id, 0), Some(2));
+        assert_eq!(summary_const_value(&prepared, right_id), Some(2));
         assert_eq!(
             classify_memory_access_location_value(
                 &prepared,
@@ -4973,7 +4908,7 @@ mod tests {
         let InstPayload::Op(op) = &inst.payload else {
             panic!("expected op payload");
         };
-        assert_eq!(summary_const_value(&prepared, right_id, 0), Some(1));
+        assert_eq!(summary_const_value(&prepared, right_id), Some(1));
         assert_eq!(
             classify_memory_access_location_value(
                 &prepared,

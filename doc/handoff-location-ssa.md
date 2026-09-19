@@ -29749,3 +29749,60 @@ strengthen those too, because the root relation closes over phis and no walk
 over definitions does; that is available and not taken here.
 
 271 lines left the call sites; `constant.rs` is 311 including its four tests.
+
+## Which formal a value is, asked once
+
+Four places asked whether a value is a formal parameter and each answered
+differently. `formal_arg_index_for_var` compared the value against the
+boundary fact's own value, so only the entry value matched. `classify_value_operand`
+knew that was too narrow and re-walked `Copy`, `IntZExt`, `IntSExt` and
+`Subpiece` in front of it, with its own depth limit, and then re-derived affine
+arithmetic on top with a second arm for `IntAdd`, `IntSub`, `PtrAdd` and
+`PtrSub`. `classify_memory_access_location_value` tried the narrow question
+first and the address facts second, so the same value could be answered twice
+by two mechanisms. `r2types`' `prepared_formal_parameters` rebuilt the
+index-to-variable direction from the boundary facts with the same
+`fact.index != index` filter that preparation had already applied.
+
+None of the four reached the case that matters most: a parameter spilled to its
+home slot in the prologue and reloaded later. That is the ordinary shape at
+`-O0`, and it is why a reloaded argument rendered as an anonymous local rather
+than under the parameter's name.
+
+The relation they were each approximating already exists. `AddressCollector`
+seeds from `formal_parameter_bases` and propagates a parameter expression
+through copies, widenings, same-width lane projections, spill slots and affine
+arithmetic, as a per-block dataflow with a stack map. A value *is* the formal
+when its parameter expression names one with no terms and zero offset; it
+*derives from* the formal when the expression names one at all. The two
+questions were tangled together in one walk, which is why widening any of the
+four would have been wrong: the summary's `Arg(i)` operand wants derivation and
+the binding plan's parameter symbol wants identity.
+
+So identity is now a prepared fact. `install_formal_parameter_identity` runs
+after the facts are collected and inserts every value whose parameter
+expression is a bare parameter into `DecompilePrepFacts::formal_parameters`,
+leaving what `install_exact_formal_parameters` proved untouched. Derivation
+stays where it was computed: `classify_value_operand` reads
+`parameter_expression` directly and is now four lines, with no depth limit and
+no op set of its own.
+
+One narrowing is deliberate. The address collector excludes a `Subpiece` that
+narrows -- "a narrowed address is not the address" -- so the low lane of a
+pointer parameter no longer classifies as that argument, where the deleted walk
+accepted any `Subpiece`. That walk's result reaches `SummaryMemoryLocation` and
+`SummaryTransferLength`, where treating a narrowed value as the argument is
+unsound, so the tighter answer is the correct one.
+
+`formal_parameter_bases` keeps its exact meaning: the formals at their own ABI
+storage, which is what the address collector seeds from.
+
+One thing did not belong in the consolidation and was put back. `r2types`'
+`prepared_formal_parameters` maps an index to the variable the formal enters
+in, which is the *inverse* of the identity relation rather than a second copy
+of it. A forward map that holds every value which is a formal cannot name the
+one variable a signature parameter is declared from, and reading
+`formal_parameter_bases` instead would have dropped every parameter arriving in
+a lane projection -- an `int` in `edi` while the ABI storage is `rdi` -- and cut
+the recovered arity. The boundary facts state the inverse directly and remain
+its source.

@@ -529,18 +529,23 @@ pub fn recover_signature_params_from_ssa(
     params
 }
 
+/// The variable each formal enters in.
+///
+/// This is the inverse of the identity relation, not a second copy of it: the
+/// forward map answers which formal a value is, and once it holds every value
+/// that is a formal it can no longer name the one variable a signature
+/// parameter is declared from. The boundary facts state that directly.
 fn prepared_formal_parameters(prepared: &r2ssa::SsaArtifact) -> BTreeMap<usize, SSAVar> {
-    let mut parameters = BTreeMap::<usize, SSAVar>::new();
-    for (index, fact) in &prepared.facts().boundaries.parameters {
-        if fact.index != *index {
-            continue;
-        }
-        let Some(var) = prepared.value_var(fact.value) else {
-            continue;
-        };
-        parameters.insert(*index as usize, var.clone());
-    }
-    parameters
+    prepared
+        .facts()
+        .boundaries
+        .parameters
+        .iter()
+        .filter(|(index, fact)| fact.index == **index)
+        .filter_map(|(index, fact)| {
+            Some((*index as usize, prepared.value_var(fact.value)?.clone()))
+        })
+        .collect()
 }
 
 pub(crate) fn recover_signature_params_from_prepared_ssa(
