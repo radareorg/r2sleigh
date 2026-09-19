@@ -19,7 +19,7 @@ use crate::{
     AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity, FunctionIdentity,
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
     OwnedFunctionSnapshot, SnapshotValidationError, SourceConventionSlots, SourceDataObject,
-    SourceEndianness, SourceLoaderRole, SourceMachineRoles,
+    SourceEndianness, SourceFunctionInterface, SourceLoaderRole, SourceMachineRoles,
 };
 
 /// The machine every function in one capture session runs on.
@@ -67,6 +67,16 @@ pub struct NativeFunction {
     pub string_literals: Vec<(u64, String)>,
     /// Program data the body points at, named.
     pub data_symbols: Vec<SourceDataObject>,
+    /// The interface this capture states, where a first pass has proved one.
+    ///
+    /// Absent on a first capture, which is what makes the artifact builder
+    /// recover an interface off the instructions. A second capture states what
+    /// the first proved, so the stack slots it found are declared and the
+    /// spills into them stop being memory.
+    pub interface: Option<SourceFunctionInterface>,
+    /// What to call each parameter the interface declares. Presentation only,
+    /// and exactly as long as that list.
+    pub parameter_names: Vec<String>,
     pub loader_role: Option<SourceLoaderRole>,
 }
 
@@ -82,6 +92,11 @@ pub fn capture(
         .map(|block| block.bytes.len())
         .sum::<usize>();
     let identity = revision_identity(function.address, &function.blocks);
+    // An interface states facts about one revision; one from another capture of
+    // other bytes is not about this function.
+    let interface = function
+        .interface
+        .filter(|interface| interface.revision_identity() == identity.as_ref());
     // Where control leaves the function is not stated twice: it is every
     // successor that lands outside the blocks this walk kept.
     let mut external_exits: Vec<u64> = function
@@ -142,8 +157,11 @@ pub fn capture(
         },
         FunctionPresentation {
             display_name: function.name.as_str().into(),
-            // Names for parameters this capture does not claim to have.
-            parameter_names: Box::from([]),
+            parameter_names: function
+                .parameter_names
+                .iter()
+                .map(|name| name.as_str().into())
+                .collect(),
             stack_slot_names: Box::from([]),
             signature: None,
             callee_signatures: Box::from([]),
@@ -161,25 +179,36 @@ pub fn capture(
         },
         advisory_calls.into_boxed_slice(),
         identity,
-        None,
+        interface.clone(),
         machine.roles,
         machine.slots.clone(),
         CapturedSourceFields {
             // The walk bounds the function: every block it kept, it decoded.
             bounded_function_image: true,
-            function_interface: false,
-            exact_function_types: false,
-            exact_stack_slot_roles: false,
-            // These say what the *interface* carried, and this capture carries
-            // no interface. The same carriers are stated in the machine roles.
-            return_address_storage: false,
-            stack_pointer_storage: false,
-            frame_pointer_storage: false,
-            return_mechanism: false,
+            function_interface: interface.is_some(),
+            // Every remaining flag says what the interface carried, so each one
+            // is read off the interface and is false when there is none.
+            exact_function_types: field(&interface, |i| i.type_graph().is_some()),
+            exact_stack_slot_roles: field(
+                &interface,
+                SourceFunctionInterface::stack_slot_roles_complete,
+            ),
+            return_address_storage: field(&interface, |i| i.return_address_storage().is_some()),
+            stack_pointer_storage: field(&interface, |i| i.stack_pointer_storage().is_some()),
+            frame_pointer_storage: field(&interface, |i| i.frame_pointer_storage().is_some()),
+            return_mechanism: field(&interface, |i| i.return_mechanism().is_some()),
             stack_allocation_contract: machine.roles.stack_allocation_contract().is_some(),
         },
         DiagnosticIdentity(0),
     )
+}
+
+/// What an interface says about itself, or false where there is none.
+fn field(
+    interface: &Option<SourceFunctionInterface>,
+    ask: impl Fn(&SourceFunctionInterface) -> bool,
+) -> bool {
+    interface.as_ref().is_some_and(ask)
 }
 
 /// An identity for what was captured, from what was captured.
@@ -259,6 +288,8 @@ mod tests {
             calls: Vec::new(),
             string_literals: Vec::new(),
             data_symbols: Vec::new(),
+            interface: None,
+            parameter_names: Vec::new(),
             loader_role: None,
         }
     }

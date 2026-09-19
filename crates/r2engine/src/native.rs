@@ -163,7 +163,16 @@ pub fn decompile(
         facts.push(derived);
     }
 
-    let artifact = native.prepare(&root, &callees)?;
+    let first = native.prepare(&root, &callees)?;
+    // What the body points at is not always a constant the machine spells in
+    // one instruction: aarch64 forms an address from a page and an offset, so
+    // the text it reaches appears only once the values are folded. A second
+    // capture states what the first proved.
+    let folded = native.folded_literals(&first, &root);
+    let artifact = match folded.is_empty() {
+        true => first,
+        false => native.prepare_with_literals(&root, &callees, folded)?,
+    };
     let block_count = artifact.source_block_count();
     let signatures = declared_signatures(target, &root, ptr_bits);
     let input = EngineFunctionDecompileRequestInput::single_function(
@@ -430,11 +439,51 @@ impl Native<'_> {
         })
     }
 
+    /// The text a prepared body points at, which its constants name only once
+    /// the machine's address arithmetic has been folded.
+    fn folded_literals(
+        &self,
+        artifact: &TrustedSsaArtifact,
+        walked: &Walked,
+    ) -> Vec<(u64, String)> {
+        let already = self
+            .literals(&walked.body)
+            .into_iter()
+            .map(|(address, _)| address)
+            .collect::<BTreeSet<_>>();
+        let mut found = BTreeMap::new();
+        for block in artifact.shared_artifact().function().blocks() {
+            for op in &block.ops {
+                for source in op.sources() {
+                    let Some(value) = source.constant_bits() else {
+                        continue;
+                    };
+                    if value == 0 || already.contains(&value) || found.contains_key(&value) {
+                        continue;
+                    }
+                    if let Some(text) = self.text_at(value) {
+                        found.insert(value, text);
+                    }
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
     /// Capture what was walked and prepare it for the engine.
     fn prepare(
         &self,
         walked: &Walked,
         callees: &Callees,
+    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        self.prepare_with_literals(walked, callees, Vec::new())
+    }
+
+    fn prepare_with_literals(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        extra_literals: Vec<(u64, String)>,
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
         let function = NativeFunction {
             address: walked.body.entry,
@@ -450,8 +499,16 @@ impl Native<'_> {
                 })
                 .collect(),
             calls: call_sites(&walked.body, self.program),
-            string_literals: self.literals(&walked.body),
+            string_literals: {
+                let mut literals = self.literals(&walked.body);
+                literals.extend(extra_literals);
+                literals.sort_by_key(|(address, _)| *address);
+                literals.dedup_by_key(|(address, _)| *address);
+                literals
+            },
             data_symbols: self.data_symbols(&walked.body),
+            interface: None,
+            parameter_names: Vec::new(),
             loader_role: None,
         };
 
@@ -535,12 +592,13 @@ impl Native<'_> {
     /// The text at an address, where there is text there.
     fn text_at(&self, address: u64) -> Option<String> {
         let bytes = self.program.read(address, LITERAL_LIMIT)?;
-        let end = bytes.iter().position(|byte| *byte == 0)?;
-        // One character is not a string, and a run of printable bytes that
-        // never terminates is not one either.
-        if end < 2 {
-            return None;
-        }
+        // A run of printable bytes that never terminates is not text, and
+        // neither is an empty one. One character is: a program that points at
+        // `"x"` points at a string.
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .filter(|end| *end > 0)?;
         let text = std::str::from_utf8(&bytes[..end]).ok()?;
         text.chars()
             .all(|c| !c.is_control() || c == '\n' || c == '\t')
