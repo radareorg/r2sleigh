@@ -28774,3 +28774,27 @@ typedef as the type database does (`typedef.size_t=unsigned long` in the
 carrying the typedef's spelled target through the type graph), or treat the
 standard names as the platform's and include the header that defines them.
 Not built; the user should choose.
+
+## A promoted slot whose address had escaped: the wrong value in `shape_call_chain`
+
+`shape_call_chain` at arm64 -O0 returned the wrong value: `third` read back
+as the constant `0` its initialiser stored, and the `third * 7` term was
+gone. The compiler had spilled `&third` (`add x8, sp, 0x28`) into a temporary
+slot and reloaded it into `x0` before the call, and slot promotion
+(`promote_private_stack_slots`) took `third` out of memory as private, so the
+callee's write through the address was never seen.
+
+Two defects in the promotion scan, both in how it tracks which registers
+hold a frame address. A register redefined with a new address kept its old
+entry, and the first entry answered, so `x8` reported the place of the
+previous address it held when its store was examined. Fixing that exposed the
+second: the scan dropped a register's entry when an op "pushed nothing", and
+it measured pushing by the list's length, which a replace-then-push leaves
+unchanged, so every address computed into a reused unique was forgotten one
+op before the load through it. The entry now replaces its predecessor and the
+op says whether it derived one (`derived_here`). The evidence channel prints
+each derivation, each stored frame address, and each load's attribution under
+`promote-stack-slot`.
+
+All six `shape_call_chain` cells pass the differential now. The x86-64 cells
+never showed the defect because that code base keeps `&third` in a register.

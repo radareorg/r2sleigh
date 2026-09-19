@@ -14126,9 +14126,17 @@ fn promote_private_stack_slots(
                     None
                 }
             };
-            let derived_before = derived.len();
+            let mut derived_here = false;
             match op {
                 R2ILOp::Load { dst, addr, .. } => {
+                    r2il::refusal_evidence!(
+                        "promote-stack-slot",
+                        "{:#x}:{at} load {dst} through {addr}: held={} frame_base={} place={:?}",
+                        block.addr,
+                        holds(&derived, addr),
+                        is_frame_base(addr, index, at),
+                        place_of(addr)
+                    );
                     if holds(&derived, addr) || is_frame_base(addr, index, at) {
                         let Some((base, displacement)) =
                             resolved_stack_address(block, at, addr, &frame_base_register)
@@ -14175,6 +14183,11 @@ fn promote_private_stack_slots(
                 }
                 R2ILOp::Store { addr, val, .. } => {
                     if let Some(place) = place_of(val) {
+                        r2il::refusal_evidence!(
+                            "promote-stack-slot",
+                            "{:#x}:{at} stores frame address {val} at place {place:?}",
+                            block.addr
+                        );
                         let Some(place) = place else {
                             r2il::refusal_evidence!(
                                 "promote-stack-slot",
@@ -14240,7 +14253,13 @@ fn promote_private_stack_slots(
                 R2ILOp::Copy { dst, src } if place_of(src).is_some() => {
                     let place = place_of(src).flatten();
                     if !is_frame_base(dst, index, at) {
-                        derived.push((dst.clone(), unplaced(place, block, at)?));
+                        {
+                            // A redefinition replaces the place the register held, so a later reader finds this one and not the first.
+                            let place = unplaced(place, block, at)?;
+                            derived.retain(|(held, _)| held != dst);
+                            derived.push((dst.clone(), place));
+                            derived_here = true;
+                        }
                     }
                 }
                 R2ILOp::IntAdd { dst, a, b } if place_of(a).is_some() || place_of(b).is_some() => {
@@ -14253,8 +14272,21 @@ fn promote_private_stack_slots(
                         .flatten()
                         .zip(r2il_constant_before(block, at, other, 0));
                     let place = place.map(|(place, amount)| place + amount as i64);
+                    r2il::refusal_evidence!(
+                        "promote-stack-slot",
+                        "{:#x}:{at} {dst} = {base} + {other} derives place {place:?} (base {:?}, frame base {})",
+                        block.addr,
+                        place_of(base),
+                        is_frame_base(dst, index, at)
+                    );
                     if !is_frame_base(dst, index, at) {
-                        derived.push((dst.clone(), unplaced(place, block, at)?));
+                        {
+                            // A redefinition replaces the place the register held, so a later reader finds this one and not the first.
+                            let place = unplaced(place, block, at)?;
+                            derived.retain(|(held, _)| held != dst);
+                            derived.push((dst.clone(), place));
+                            derived_here = true;
+                        }
                     }
                 }
                 R2ILOp::IntSub { dst, a, b } if place_of(a).is_some() || place_of(b).is_some() => {
@@ -14263,7 +14295,13 @@ fn promote_private_stack_slots(
                         .zip(r2il_constant_before(block, at, b, 0))
                         .map(|(place, amount)| place - amount as i64);
                     if !is_frame_base(dst, index, at) {
-                        derived.push((dst.clone(), unplaced(place, block, at)?));
+                        {
+                            // A redefinition replaces the place the register held, so a later reader finds this one and not the first.
+                            let place = unplaced(place, block, at)?;
+                            derived.retain(|(held, _)| held != dst);
+                            derived.push((dst.clone(), place));
+                            derived_here = true;
+                        }
                     }
                 }
                 // A comparison of a frame address neither reaches the slot nor
@@ -14292,9 +14330,7 @@ fn promote_private_stack_slots(
             }
             // A temporary the lift reuses holds a frame address only until it
             // is next written with something else.
-            if derived.len() == derived_before
-                && let Some(dst) = op.output()
-            {
+            if !derived_here && let Some(dst) = op.output() {
                 derived.retain(|(held, _)| held != dst);
             }
         }
