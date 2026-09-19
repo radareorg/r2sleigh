@@ -4806,6 +4806,7 @@ impl SSAFunction {
         let Some(prep) = self.decompile_prep_facts.as_mut() else {
             return;
         };
+        let exact = prep.formal_parameters.len();
         for (value, expression) in &addresses.parameter_expressions {
             if !expression.terms.is_empty() || expression.offset != 0 {
                 continue;
@@ -4817,6 +4818,12 @@ impl SSAFunction {
                 .entry(var)
                 .or_insert(expression.parameter);
         }
+        r2il::refusal_evidence!(
+            "formal-identity",
+            "{} values are a formal, {exact} of them proved at entry, from {} parameter expressions",
+            prep.formal_parameters.len(),
+            addresses.parameter_expressions.len()
+        );
     }
 
     /// Refresh the cached decompiler-prep facts for the current SSA state.
