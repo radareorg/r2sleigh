@@ -1213,6 +1213,8 @@ unsafe fn capture_trusted_ssa_from_buffer(
     let mut callee_facts = Vec::new();
     let mut callee_interfaces = std::collections::BTreeMap::new();
     let mut callee_preserved_carriers = r2ssa::CalleePreservedCarriers::new();
+    let mut callee_argument_reach =
+        std::collections::BTreeMap::<u64, std::collections::BTreeMap<usize, u64>>::new();
     let callee_started = Instant::now();
     let callee_count = callees.len();
     let mut callee_hits = 0usize;
@@ -1305,6 +1307,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
                     execution,
                     &nested_interfaces,
                     &nested_preserved,
+                    &std::collections::BTreeMap::new(),
                 ) else {
                     continue;
                 };
@@ -1318,6 +1321,13 @@ unsafe fn capture_trusted_ssa_from_buffer(
         keys.insert(entry, key);
         callee_interfaces.insert(entry, facts.interface().clone());
         callee_preserved_carriers.insert(entry, facts.preserved_carriers().clone());
+        // What the callee reaches through each pointer it is handed. The root
+        // is prepared against this, so the bytes one callee covers are one
+        // object in the caller's frame rather than a row of neighbours.
+        let reach = facts.argument_touch_reach();
+        if !reach.is_empty() {
+            callee_argument_reach.insert(entry, reach);
+        }
         callee_facts.push(facts);
     }
     let callee_elapsed = callee_started.elapsed();
@@ -1343,6 +1353,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
                 execution,
                 &callee_interfaces,
                 &callee_preserved_carriers,
+                &callee_argument_reach,
             )?;
             r2engine::cache_root_artifact(root_address, bytes, &root);
             (root, false)
@@ -1424,6 +1435,7 @@ fn trusted_from_source_with_callees(
     execution: &r2engine::EngineExecutionControl,
     callee_interfaces: &std::collections::BTreeMap<u64, r2source::SourceFunctionInterface>,
     callee_preserved_carriers: &r2ssa::CalleePreservedCarriers,
+    callee_argument_reach: &std::collections::BTreeMap<u64, std::collections::BTreeMap<usize, u64>>,
 ) -> Result<Arc<r2ssa::TrustedSsaArtifact>, BoundaryError> {
     let ssa_control = execution.ssa_execution_control();
     r2ssa::SsaWorkControl::poll(&ssa_control).map_err(|error| {
@@ -1443,6 +1455,7 @@ fn trusted_from_source_with_callees(
         &ssa_control,
         callee_interfaces,
         callee_preserved_carriers,
+        callee_argument_reach,
     )
     .map_err(|error| BoundaryError::engine(format!("trusted SSA preparation failed: {error}")))?;
     r2il::refusal_evidence!(

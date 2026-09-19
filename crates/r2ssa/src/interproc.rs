@@ -1210,6 +1210,71 @@ impl PreparedCalleeSummary {
     pub const fn id(&self) -> InterprocFunctionId {
         self.id
     }
+
+    /// How far this body is proven to touch through each pointer argument it
+    /// is handed, in bytes from that argument.
+    ///
+    /// A caller that hands over a frame address learns from this that the
+    /// bytes it covers are one object: the callee reaches them all through one
+    /// pointer, so a position inside them is a member of what it was given
+    /// rather than a neighbouring local. An argument the body hands on to
+    /// something the summary cannot see, or accesses at a place it cannot
+    /// state, has no entry -- an unbounded reach is not a span.
+    pub fn argument_touch_reach(&self) -> BTreeMap<usize, u64> {
+        let mut reach = BTreeMap::<usize, u64>::new();
+        let mut unbounded = BTreeSet::<usize>::new();
+        if self.local.has_unknown_calls {
+            return BTreeMap::new();
+        }
+        for effect in &self.local.memory_effects {
+            let SummaryMemoryRegion::Arg { index } = effect.location.region else {
+                continue;
+            };
+            match effect.kind {
+                SummaryMemoryEffectKind::Read | SummaryMemoryEffectKind::Write => {}
+                SummaryMemoryEffectKind::Escape | SummaryMemoryEffectKind::Free => {
+                    unbounded.insert(index);
+                    continue;
+                }
+            }
+            let Some(range) = effect.location.range else {
+                unbounded.insert(index);
+                continue;
+            };
+            let Some(end) = range
+                .offset_hi
+                .checked_add(1)
+                .and_then(|end| u64::try_from(end).ok())
+            else {
+                unbounded.insert(index);
+                continue;
+            };
+            reach
+                .entry(index)
+                .and_modify(|known| *known = (*known).max(end))
+                .or_insert(end);
+        }
+        for transfer in &self.local.transfer_effects {
+            for location in [transfer.dst, transfer.src] {
+                let SummaryMemoryRegion::Arg { index } = location.region else {
+                    continue;
+                };
+                match transfer.len {
+                    SummaryTransferLength::Const(length) => {
+                        reach
+                            .entry(index)
+                            .and_modify(|known| *known = (*known).max(length))
+                            .or_insert(length);
+                    }
+                    SummaryTransferLength::Arg(_) | SummaryTransferLength::Unknown => {
+                        unbounded.insert(index);
+                    }
+                }
+            }
+        }
+        reach.retain(|index, _| !unbounded.contains(index));
+        reach
+    }
 }
 
 /// Solve the summary set for one root against callee contributions already

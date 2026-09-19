@@ -29058,3 +29058,47 @@ model keeps radare2's own answer rather than being quietly widened.
 model has no way to say `unsigned long`: its integers are widths, which is the
 right model for everything except the handful of names whose definition is the
 implementation's to give.
+
+## A wide access proves its bytes are one object
+
+`shape_struct_pointer` builds a `struct mixed` in a local, hands its address to
+a callee twice and reads three members back. The compiler writes the first three
+members with one eight-byte store and reads them back at their own widths, and
+the object model made four objects of that: the store's eight bytes at the
+struct's base, and a separate object at each member offset the reads named. The
+members were read and never written, so the C declared three variables nothing
+assigns, and every configuration failed to compile.
+
+The span machinery already had the right idea for indexed accesses: a position
+strictly inside what an index reaches is a place in that buffer rather than the
+start of another object. The same holds for an access at an exact place. A store
+of eight bytes at one root proves those eight bytes are one object, because
+nothing writes across two locals that are both live -- the store would clobber
+the second. Exact accesses now contribute their own spans beside the indexed
+ones, and the absorption that was already there does the rest.
+
+## What a callee reaches through an argument is one object in the caller
+
+The object model is built while the root's SSA is prepared, and the
+interprocedural solve happens afterwards, so nothing a callee proved about the
+memory it is handed could reach the model that decides what the caller's frame
+contains. Two defects sat behind that ordering: `shape_pointer_to_pointer`
+split its four-element pointer table into four locals, three written and never
+read, and `shape_struct_pointer` kept reading a member of a struct from a local
+the callee had overwritten through the pointer it was given.
+
+The ordering is not forced. The plugin lifts and prepares every callee before
+it prepares the root -- that is where the callee interfaces and preserved
+carriers already come from -- so the fact can travel with them. Each callee's
+summary now answers how far it touches through each pointer argument, and the
+root is prepared against that map. `callee_write_spans` turns it into a span at
+every direct call whose argument is a frame address, and the absorption that
+was already there makes those bytes one object.
+
+The reach is proven or absent, never guessed. A callee with an unknown call, an
+argument it hands on or frees, an access at a place it cannot state, or a
+transfer whose length is another argument contributes no entry for that
+argument, because an unbounded reach is not a span. The root artifact's cache
+key is the whole capture buffer, which is every body taken with it, so a
+cached root was prepared against the same callee bodies that would produce the
+same map.

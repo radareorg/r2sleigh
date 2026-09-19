@@ -575,6 +575,12 @@ pub struct SourceMachineContext {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
+    /// How far each callee is proven to touch through each pointer argument,
+    /// by the callee's own entry address. What a callee reaches through one
+    /// address is one object in this frame, and the object model is built
+    /// before the interprocedural solve exists, so the fact arrives with the
+    /// bodies the capture took rather than from that solve.
+    callee_argument_reach: BTreeMap<u64, BTreeMap<usize, u64>>,
     call_site_interfaces: BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface>,
     /// Literal bytes captured by the same immutable source transaction as the
     /// callsite interfaces. Unlike display strings, these participate in
@@ -1348,6 +1354,7 @@ impl SourceMachineContext {
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
+            callee_argument_reach: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             memory_spaces_by_op,
@@ -1612,6 +1619,19 @@ impl SourceMachineContext {
         callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     ) {
         self.callee_names = callee_names;
+    }
+
+    pub(crate) fn set_callee_argument_reach(
+        &mut self,
+        callee_argument_reach: BTreeMap<u64, BTreeMap<usize, u64>>,
+    ) {
+        self.callee_argument_reach = callee_argument_reach;
+    }
+
+    /// How far the callee at this address is proven to touch through each of
+    /// its pointer arguments.
+    pub fn callee_argument_reach(&self, address: u64) -> Option<&BTreeMap<usize, u64>> {
+        self.callee_argument_reach.get(&address)
     }
 
     /// The name the source gave the site's callee, where it gave one.

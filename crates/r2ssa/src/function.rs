@@ -1942,6 +1942,7 @@ impl TrustedSsaArtifact {
             control,
             &BTreeMap::new(),
             &CalleePreservedCarriers::new(),
+            &BTreeMap::new(),
         )
     }
 
@@ -1954,6 +1955,7 @@ impl TrustedSsaArtifact {
         control: &C,
         callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
         callee_preserved_carriers: &CalleePreservedCarriers,
+        callee_argument_reach: &BTreeMap<u64, BTreeMap<usize, u64>>,
     ) -> Result<Self, SsaPrepareError> {
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
@@ -2123,6 +2125,7 @@ impl TrustedSsaArtifact {
             );
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
+        machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         r2il::refusal_evidence!(
             "snapshot-literals",
             "the decoded image delivers {} string literals",

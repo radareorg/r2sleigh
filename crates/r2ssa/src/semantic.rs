@@ -7932,11 +7932,6 @@ fn callee_write_spans(
             let id = crate::interproc::InterprocFunctionId(
                 resolve_graph_literal_value(graph, Some(facts), target).unwrap_or(0),
             );
-            let Some(seed) =
-                crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name)
-            else {
-                continue;
-            };
             let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
                 continue;
             };
@@ -7954,6 +7949,38 @@ fn callee_write_spans(
                     }
                     _ => None,
                 }
+            };
+            // A callee taken with this capture says how far it reaches through
+            // each pointer it is handed. The bytes it covers are one object,
+            // whatever this body reads of them afterwards, and the fact is
+            // available here because the callee's body was read before this
+            // one was prepared.
+            if let Some(target) = resolve_graph_literal_value(graph, Some(facts), target)
+                && let Some(reach) = machine_context.callee_argument_reach(target)
+            {
+                for (index, bytes) in reach {
+                    let Some(root) =
+                        argument(*index).and_then(|var| resolve_stack_root(Some(facts), var))
+                    else {
+                        continue;
+                    };
+                    let Some(end) = i64::try_from(*bytes)
+                        .ok()
+                        .and_then(|bytes| root.offset.checked_add(bytes))
+                    else {
+                        continue;
+                    };
+                    r2il::refusal_evidence!(
+                        "callee-write-span",
+                        "{name} at {instruction:#x} reaches argument {index} at {root:?} up to {end}"
+                    );
+                    spans.push((root, end));
+                }
+            }
+            let Some(seed) =
+                crate::interproc::FunctionSemanticSummary::seed_for_callee_name(id, name)
+            else {
+                continue;
             };
             for transfer in &seed.transfer_effects {
                 let crate::interproc::SummaryMemoryRegion::Arg { index } = transfer.dst.region
@@ -8130,6 +8157,20 @@ fn evidenced_stack_roots(
                 } if *space == SpaceId::Ram => (addr, val.size),
                 _ => continue,
             };
+            // An access of its own width at an exact place proves those bytes
+            // are one object: nothing writes eight bytes across two locals
+            // that are both live, so a position inside what it covers is a
+            // member of what it wrote rather than a neighbour. A struct
+            // written by one wide store and read back a member at a time was
+            // four objects, three of them read and never written.
+            if let Some(root) = resolve_stack_root(Some(facts), addr)
+                && let Some(end) = root.offset.checked_add(i64::from(width))
+            {
+                spans
+                    .entry(root)
+                    .and_modify(|known| *known = (*known).max(end))
+                    .or_insert(end);
+            }
             let Some(root) = facts.indexed_stack_address_root_of(addr) else {
                 continue;
             };
