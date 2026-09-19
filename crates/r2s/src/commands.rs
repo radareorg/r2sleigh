@@ -304,6 +304,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let program = OpenImage {
         image: &session.image,
         imports: &session.imports,
+        defined: &session.defined,
     };
     let response = r2engine::native::decompile(&target, &program, addr)
         .map_err(|refusal| refusal.to_string())?;
@@ -315,6 +316,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 struct OpenImage<'a> {
     image: &'a r2image::Image,
     imports: &'a std::collections::BTreeMap<u64, String>,
+    defined: &'a std::collections::BTreeMap<u64, crate::session::Definition>,
 }
 
 #[cfg(feature = "sleigh")]
@@ -329,11 +331,10 @@ impl r2ssa::body::Program for OpenImage<'_> {
         // A stub is a function of the program's as much as a body is: control
         // that reaches one has left the function it came from.
         self.imports.contains_key(&vaddr)
-            || self.image.symbols().iter().any(|symbol| {
-                symbol.vaddr == vaddr
-                    && symbol.defined
-                    && symbol.kind == r2image::SymbolKind::Function
-            })
+            || self
+                .defined
+                .get(&vaddr)
+                .is_some_and(|definition| definition.function)
     }
 }
 
@@ -342,13 +343,10 @@ impl r2engine::native::Program for OpenImage<'_> {
     fn name_at(&self, vaddr: u64) -> Option<String> {
         // An import's stub is what a call names, and the import's own name is
         // what a reader expects to see there.
-        self.imports.get(&vaddr).cloned().or_else(|| {
-            self.image
-                .symbols()
-                .iter()
-                .find(|symbol| symbol.vaddr == vaddr && symbol.defined)
-                .map(|symbol| symbol.name.clone())
-        })
+        self.imports
+            .get(&vaddr)
+            .or_else(|| self.defined.get(&vaddr).map(|defined| &defined.name))
+            .cloned()
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {

@@ -16,6 +16,13 @@ pub struct Session {
     /// Which stub stands for which import, by the import's own name.
     #[cfg(feature = "sleigh")]
     pub imports: std::collections::BTreeMap<u64, String>,
+    /// What this binary defines at each address, indexed once.
+    ///
+    /// The engine asks this per call target and per branch target of every
+    /// body it walks, and answering it by scanning the symbol table made the
+    /// walk cost one pass over every symbol per edge.
+    #[cfg(feature = "sleigh")]
+    pub defined: std::collections::BTreeMap<u64, Definition>,
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
@@ -53,6 +60,8 @@ impl Session {
             flags: Flags::of(&image),
             #[cfg(feature = "sleigh")]
             imports: std::collections::BTreeMap::new(),
+            #[cfg(feature = "sleigh")]
+            defined: definitions(&image),
             image,
             path: path.to_owned(),
             addr,
@@ -88,4 +97,32 @@ impl Session {
     pub fn decoder(&self) -> Option<&r2sleigh_lift::Disassembler> {
         self.machine.as_ref().map(|machine| &machine.disasm)
     }
+}
+
+/// What the binary defines at one address.
+#[cfg(feature = "sleigh")]
+#[derive(Debug, Clone)]
+pub struct Definition {
+    pub name: String,
+    /// Whether a function begins here, which is what bounds a body.
+    pub function: bool,
+}
+
+/// Everything the binary names, indexed by where it is.
+///
+/// The first symbol at an address wins, so the index answers the same way
+/// twice over.
+#[cfg(feature = "sleigh")]
+fn definitions(image: &Image) -> std::collections::BTreeMap<u64, Definition> {
+    let mut defined = std::collections::BTreeMap::new();
+    for symbol in image.symbols() {
+        if !symbol.defined || symbol.name.is_empty() {
+            continue;
+        }
+        defined.entry(symbol.vaddr).or_insert_with(|| Definition {
+            name: symbol.name.clone(),
+            function: symbol.kind == r2image::SymbolKind::Function,
+        });
+    }
+    defined
 }
