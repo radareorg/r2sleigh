@@ -985,6 +985,12 @@ impl<'a> FoldingContext<'a> {
             .prepared_ssa()?
             .machine_context()
             .code_pointer_entry(address)?;
+        r2il::refusal_evidence!("code-pointer-entry", "{address:#x} names {target:#x}");
+        self.code_function_expr(target)
+    }
+
+    /// The function this code address is, spelled and declared.
+    pub(super) fn code_function_expr(&self, target: u64) -> Option<CExpr> {
         let machine_bits = self.pointer_bits();
         let signature = self
             .inputs
@@ -994,10 +1000,7 @@ impl<'a> FoldingContext<'a> {
             .get(&target)
             .and_then(|fact| fact.signature.as_ref());
         let Some(signature) = signature else {
-            r2il::refusal_evidence!(
-                "code-pointer-entry",
-                "{address:#x} names {target:#x} with no recovered signature"
-            );
+            r2il::refusal_evidence!("code-function", "{target:#x} has no recovered signature");
             return None;
         };
         let name = crate::ast::c_identifier(
@@ -1007,10 +1010,7 @@ impl<'a> FoldingContext<'a> {
                 .functions()
                 .get(&target)?,
         );
-        r2il::refusal_evidence!(
-            "code-pointer-entry",
-            "{address:#x} names {target:#x} as {name}"
-        );
+        r2il::refusal_evidence!("code-function", "{target:#x} is {name}");
         self.callee_declarations
             .borrow_mut()
             .entry(name.clone())
@@ -1081,9 +1081,15 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
         let owner = self.certified_stack_var_expr_for_object(certificate.object)?;
-        let member_expr = |member: &r2ssa::MemberRunStoreMember| CExpr::Member {
-            base: Box::new(owner.clone()),
-            member: member.name.clone(),
+        let member_expr = |member: &r2ssa::MemberRunStoreMember| match &member.place {
+            r2ssa::MemberRunPlace::Field(name) => CExpr::Member {
+                base: Box::new(owner.clone()),
+                member: name.clone(),
+            },
+            r2ssa::MemberRunPlace::Element(index) => CExpr::Subscript {
+                base: Box::new(owner.clone()),
+                index: Box::new(CExpr::IntLit(i64::try_from(*index).unwrap_or(0))),
+            },
         };
         let mut members = certificate.members.iter();
         let head = members.next()?;

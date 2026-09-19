@@ -1189,35 +1189,6 @@ impl SsaArtifact {
         self.machine_context.set_code_pointer_entries(recorded);
     }
 
-    /// Record the code pointer tables this function's own source captured.
-    fn record_code_pointer_tables(&mut self) {
-        let SsaArtifactProvenance::TrustedSource(source) = &self.provenance else {
-            return;
-        };
-        let entries = source
-            .image()
-            .code_pointer_tables()
-            .iter()
-            .flat_map(|table| {
-                let entry_size = u64::from(table.entry_size());
-                table
-                    .targets()
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(index, target)| {
-                        let offset = u64::try_from(index).ok()?.checked_mul(entry_size)?;
-                        let address = table.address().checked_add(offset)?;
-                        Some((
-                            address,
-                            *target,
-                            table.target_name(index).map(str::to_owned),
-                        ))
-                    })
-            })
-            .collect::<Vec<_>>();
-        self.record_code_pointer_entries(entries);
-    }
-
     /// The source's own prototype text for this function, where it had one.
     pub fn source_signature(&self) -> Option<&r2source::SourceSignaturePresentation> {
         match &self.provenance {
@@ -2175,6 +2146,27 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        // What each entry of a captured code pointer table names, recorded
+        // before the facts are collected: a load of such a slot is proven
+        // from this, and the collection is what proves it.
+        let mut code_pointer_entries = BTreeMap::new();
+        for table in source.image().code_pointer_tables() {
+            let entry_size = u64::from(table.entry_size());
+            for (index, target) in table.targets().iter().enumerate() {
+                let Some(address) = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_mul(entry_size))
+                    .and_then(|offset| table.address().checked_add(offset))
+                else {
+                    continue;
+                };
+                code_pointer_entries.insert(address, *target);
+                if let Some(name) = table.target_name(index) {
+                    display_names.insert_function(*target, name);
+                }
+            }
+        }
+        machine_context.set_code_pointer_entries(code_pointer_entries);
         r2il::refusal_evidence!(
             "snapshot-literals",
             "the decoded image delivers {} string literals",
@@ -2211,7 +2203,6 @@ impl TrustedSsaArtifact {
             control,
         )?;
         artifact.display_names = display_names;
-        artifact.record_code_pointer_tables();
         artifact.user_operations = Arc::from(arch.user_ops.clone());
         if !artifact
             .facts

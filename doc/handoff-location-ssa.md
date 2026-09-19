@@ -29403,3 +29403,50 @@ the first two entries are moved as one 16-byte vector, which renders as
 for a load of pointer width, and a load covering two entries is not one. The
 honest rendering splits such a load into the entries it covers, which is the
 same shape as the byte-buffer work.
+
+## A wide move of a table is the entries it covers
+
+The remaining read of the image was the one the rule could not see: at -O0 on
+arm64 the first two entries move as one sixteen-byte vector, and a load of two
+pointers is not a load of one. Three things stood between that move and the
+functions it carries.
+
+`source_aggregate_layout` accepted a struct or a union and nothing else, so a
+wide store into a declared array never decomposed at all -- `binary_operation
+table[3]` took the whole vector as one opaque assignment. An array is a run of
+declared parts exactly as a struct is; only the spelling differs. It is now
+`member_run_layout`, returning either an aggregate's members or an element
+stride and count, and `MemberRunStoreMember` carries a `MemberRunPlace` that
+says whether the rendering names the part or numbers it.
+
+`value_byte_sources` followed copies, zero extensions, pieces and inserts, and
+stopped at a load. A load of a run of code pointer entries is not opaque: the
+relocations state what each slot becomes, so its bytes are those targets. The
+address is resolved through the arithmetic that computes it, because an `adrp`
+pair is an add of two constants rather than a constant.
+
+The two together make the store decompose into one assignment per element whose
+source is a proven constant, and a constant that is a function's entry renders
+as that function: `code_function_expr` is now the one place that names a code
+address, used by the slot rule and by a member run's constant alike.
+
+The defect that hid all of this for one build cycle was ordering, and the
+debugger is what found it. `record_code_pointer_tables` ran on the artifact
+after `SsaArtifact::new_with_context_control_and_provenance`, and the structured
+facts are collected inside that constructor, so `code_pointer_entry` answered
+nothing while the facts that needed it were being proven. A breakpoint in
+`code_pointer_run_bytes` showed it entered from `value_byte_sources` with
+`width=16` and returning nothing, which no amount of reading the rendering would
+have said. The entries are now set on the machine context before the artifact is
+built.
+
+`dbg_table_dispatch` renders
+
+```c
+binary_operation table[3];
+table[0] = (uint64_t)dbg_table_op_add;
+table[1] = (uint64_t)dbg_table_op_xor;
+table[2] = (uint64_t)dbg_table_op_mul;
+```
+
+with all three declared, and no address of this image left in the body.

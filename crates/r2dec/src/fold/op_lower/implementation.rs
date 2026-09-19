@@ -852,7 +852,21 @@ impl<'a> FoldingContext<'a> {
         source: r2ssa::MemberRunSource,
     ) -> Option<CExpr> {
         let value = match source {
-            r2ssa::MemberRunSource::Constant(bits) => return Some(CExpr::UIntLit(bits)),
+            // A constant that is a function's entry is that function: the
+            // number is this image's, and the name is what compiles back.
+            r2ssa::MemberRunSource::Constant(bits) => {
+                return Some(
+                    self.code_function_expr(bits)
+                        .map_or_else(|| CExpr::UIntLit(bits), |named| {
+                            crate::fold::op_lower::convert::convert(
+                                named,
+                                &CValue::Typed(CType::ptr(CType::Void)),
+                                &CType::uint(self.pointer_bits()),
+                                self.pointer_bits(),
+                            )
+                        }),
+                );
+            }
             r2ssa::MemberRunSource::Lane(value) => value,
         };
         let expr = match self.planned_value_expr(value) {

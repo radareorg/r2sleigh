@@ -161,7 +161,7 @@ pub use semantic::{
     ControlDomainId, ControlGuard, ForLoopCertificate, GlobalObjectKey, IfRegionCertificate,
     InductionFact, InductionStep, LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact,
     LoopCarrierMemberRole, LoopCarrierUpdateFact, LoopCertificate, LoopId,
-    MachineReturnControlCertificate, MemberRunSource, MemberRunStoreCertificate,
+    MachineReturnControlCertificate, MemberRunPlace, MemberRunSource, MemberRunStoreCertificate,
     MemberRunStoreMember, MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey,
     MemoryPhiFact, MemorySSAFacts, MemoryUseFact, MemoryVersion, ObjectFact, ObjectId, ObjectKind,
     ObjectModel, ObjectSpaceId, ParameterObjectKey, PredicateFact, PredicateFacts, PredicateId,

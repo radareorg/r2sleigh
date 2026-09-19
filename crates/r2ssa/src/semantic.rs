@@ -1371,11 +1371,21 @@ pub struct MemberRunStoreCertificate {
 pub struct MemberRunStoreMember {
     /// The structured access this member's own assignment is, and is observed at.
     pub access: StructuredAccessId,
-    pub name: String,
+    /// How the rendering addresses this part of the object.
+    pub place: MemberRunPlace,
     /// Byte offset in the object, which is where the member's name resolves.
     pub offset: u64,
     pub width: u32,
     pub source: MemberRunSource,
+}
+
+/// How a decomposed wide store's part is addressed in its object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberRunPlace {
+    /// A named member of a struct or union.
+    Field(String),
+    /// An element of an array, by index.
+    Element(u64),
 }
 
 /// What one member of a decomposed wide store receives.
@@ -1398,7 +1408,44 @@ enum ByteSource {
 
 /// The bytes of `value`, least significant first, as constants and slices of
 /// the values that only byte-moving operations composed it from.
-fn value_byte_sources(graph: &SsaGraph, value: ValueId) -> Option<Vec<ByteSource>> {
+/// The bytes a load of a run of code pointer entries carries.
+///
+/// A relocation fills the slots, so the file states nothing about them and
+/// what they become is the targets the capture recorded. Only a load that
+/// starts at an entry and covers whole entries is one of these.
+fn code_pointer_run_bytes(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    inst: &crate::graph::GraphInst,
+    space: SpaceId,
+    size: u32,
+) -> Option<Vec<ByteSource>> {
+    let machine_context = machine_context?;
+    if space != SpaceId::Ram {
+        return None;
+    }
+    let entry_bytes = machine_context.memory_model().default_address_bits() / 8;
+    if entry_bytes == 0 || !size.is_multiple_of(entry_bytes) {
+        return None;
+    }
+    let address = crate::indirect::resolve_constant(graph, *inst.inputs.first()?, 0)?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    for entry in 0..size / entry_bytes {
+        let at = address.checked_add(u64::from(entry) * u64::from(entry_bytes))?;
+        let target = machine_context.code_pointer_entry(at)?;
+        bytes.extend(
+            (0..entry_bytes)
+                .map(|byte| ByteSource::Constant(target.checked_shr(byte * 8).unwrap_or(0) as u8)),
+        );
+    }
+    Some(bytes)
+}
+
+fn value_byte_sources(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    value: ValueId,
+) -> Option<Vec<ByteSource>> {
     let mut current = value;
     loop {
         let graph_value = graph.value(current)?;
@@ -1431,20 +1478,28 @@ fn value_byte_sources(graph: &SsaGraph, value: ValueId) -> Option<Vec<ByteSource
         };
         match &inst.payload {
             InstPayload::Op(SSAOp::Copy { .. }) => current = *inst.inputs.first()?,
+            InstPayload::Op(SSAOp::Load { space, .. }) => {
+                return code_pointer_run_bytes(graph, machine_context, inst, *space, size)
+                    .or_else(leaf);
+            }
             InstPayload::Op(SSAOp::IntZExt { .. }) => {
-                let mut bytes = value_byte_sources(graph, *inst.inputs.first()?)?;
+                let mut bytes = value_byte_sources(graph, machine_context, *inst.inputs.first()?)?;
                 bytes.resize(size as usize, ByteSource::Constant(0));
                 return Some(bytes);
             }
             InstPayload::Op(SSAOp::Piece { .. }) => {
-                let mut bytes = value_byte_sources(graph, *inst.inputs.get(1)?)?;
-                bytes.extend(value_byte_sources(graph, *inst.inputs.first()?)?);
+                let mut bytes = value_byte_sources(graph, machine_context, *inst.inputs.get(1)?)?;
+                bytes.extend(value_byte_sources(
+                    graph,
+                    machine_context,
+                    *inst.inputs.first()?,
+                )?);
                 (bytes.len() == size as usize).then_some(())?;
                 return Some(bytes);
             }
             InstPayload::Op(SSAOp::Insert { .. }) => {
-                let mut bytes = value_byte_sources(graph, *inst.inputs.first()?)?;
-                let lane = value_byte_sources(graph, *inst.inputs.get(1)?)?;
+                let mut bytes = value_byte_sources(graph, machine_context, *inst.inputs.first()?)?;
+                let lane = value_byte_sources(graph, machine_context, *inst.inputs.get(1)?)?;
                 let position = constant_bits_through_copies(graph, *inst.inputs.get(2)?)?;
                 if position % 8 != 0 {
                     return None;
@@ -10185,20 +10240,38 @@ fn collect_two_way_selection_certificates(
 }
 
 /// The aggregate a source type identifies, when it is one.
-fn source_aggregate_layout(
-    graph: &crate::SourceTypeGraph,
-    type_id: u32,
-) -> Option<&crate::SourceAggregateLayout> {
+/// How the parts of an object a wide store covers are addressed.
+///
+/// A struct or union names them; an array numbers them. Both are runs of
+/// declared parts, and only the spelling differs, so one store decomposes the
+/// same way into either.
+enum MemberRunLayout<'a> {
+    Aggregate(&'a crate::SourceAggregateLayout),
+    Elements { stride_bits: u64, count: u64 },
+}
+
+fn member_run_layout(graph: &crate::SourceTypeGraph, type_id: u32) -> Option<MemberRunLayout<'_>> {
     let ty = graph.types().get(usize::try_from(type_id).ok()?)?;
-    let aggregate_id = match ty.kind() {
+    match ty.kind() {
         crate::SourceTypeKind::Struct { aggregate_id }
-        | crate::SourceTypeKind::Union { aggregate_id } => aggregate_id,
-        _ => return None,
-    };
-    graph
-        .aggregates()
-        .get(usize::try_from(aggregate_id).ok()?)
-        .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
+        | crate::SourceTypeKind::Union { aggregate_id } => graph
+            .aggregates()
+            .get(usize::try_from(aggregate_id).ok()?)
+            .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
+            .map(MemberRunLayout::Aggregate),
+        crate::SourceTypeKind::Array {
+            element_type_id,
+            count,
+        } => {
+            let element = graph.types().get(usize::try_from(element_type_id).ok()?)?;
+            let stride_bits = element.size_bits();
+            // A stride that is not whole bytes names no element boundary the
+            // store's bytes could land on.
+            (stride_bits > 0 && stride_bits % 8 == 0)
+                .then_some(MemberRunLayout::Elements { stride_bits, count })
+        }
+        _ => None,
+    }
 }
 
 /// The bits a value carries when it is constant, followed through copies.
@@ -10233,7 +10306,7 @@ fn constant_bits_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64>
 /// The members an access of `width_bits` at `offset_bits` covers exactly,
 /// each with the bytes of the stored value that land on it.
 fn member_run_slices(
-    aggregate: &crate::SourceAggregateLayout,
+    layout: &MemberRunLayout<'_>,
     inst: InstId,
     offset_bits: u64,
     width_bits: u64,
@@ -10247,19 +10320,33 @@ fn member_run_slices(
     let mut members = Vec::new();
     let mut cursor = offset_bits;
     while cursor < end_bits {
-        let mut at_cursor = aggregate
-            .members()
-            .iter()
-            .filter(|member| member.offset_bits() == cursor && member.size_bits() > 0);
-        let member = at_cursor.next()?;
-        // Members sharing an offset name the same bytes twice, and nothing
-        // here can say which of them the machine meant.
-        at_cursor.next().is_none().then_some(())?;
-        let next = cursor.checked_add(member.size_bits())?;
-        if next > end_bits || member.size_bits() % 8 != 0 || member.size_bits() > 64 {
+        let (place, size_bits) = match layout {
+            MemberRunLayout::Aggregate(aggregate) => {
+                let mut at_cursor = aggregate
+                    .members()
+                    .iter()
+                    .filter(|member| member.offset_bits() == cursor && member.size_bits() > 0);
+                let member = at_cursor.next()?;
+                // Members sharing an offset name the same bytes twice, and
+                // nothing here can say which of them the machine meant.
+                at_cursor.next().is_none().then_some(())?;
+                (
+                    MemberRunPlace::Field(member.name().to_string()),
+                    member.size_bits(),
+                )
+            }
+            MemberRunLayout::Elements { stride_bits, count } => {
+                cursor.is_multiple_of(*stride_bits).then_some(())?;
+                let index = cursor / stride_bits;
+                (index < *count).then_some(())?;
+                (MemberRunPlace::Element(index), *stride_bits)
+            }
+        };
+        let next = cursor.checked_add(size_bits)?;
+        if next > end_bits || size_bits % 8 != 0 || size_bits > 64 {
             return None;
         }
-        let width = usize::try_from(member.size_bits() / 8).ok()?;
+        let width = usize::try_from(size_bits / 8).ok()?;
         let memory_offset = usize::try_from(cursor.checked_sub(offset_bits)? / 8).ok()?;
         // The value's bytes that land on the member, least significant first:
         // the lowest addresses hold the lowest bytes on a little-endian
@@ -10276,7 +10363,7 @@ fn member_run_slices(
                 inst,
                 ordinal: u32::try_from(members.len()).ok()?,
             },
-            name: member.name().to_string(),
+            place,
             offset: cursor / 8,
             width: u32::try_from(width).ok()?,
             source,
@@ -12972,14 +13059,14 @@ fn member_run_store(
         | ObjectKind::FrameObject { base, offset, .. } => (base, offset),
         _ => return None,
     };
-    let aggregate = declared_slots
+    let layout = declared_slots
         .by_key
         .get(&(base, slot_offset))
         .and_then(SourceStackSlotSpec::logical_type)
-        .and_then(|type_id| source_aggregate_layout(type_graph, type_id))?;
-    let bytes = value_byte_sources(graph, value)?;
+        .and_then(|type_id| member_run_layout(type_graph, type_id))?;
+    let bytes = value_byte_sources(graph, machine_context, value)?;
     let members = member_run_slices(
-        aggregate,
+        &layout,
         inst,
         offset_bits,
         u64::from(width).saturating_mul(8),
@@ -19661,7 +19748,7 @@ mod tests {
             .iter()
             .find(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::Store { .. })))
             .expect("the store");
-        let bytes = value_byte_sources(graph, store.inputs[1]).expect("byte sources");
+        let bytes = value_byte_sources(graph, None, store.inputs[1]).expect("byte sources");
         assert_eq!(bytes.len(), 16);
         let first = graph
             .insts
