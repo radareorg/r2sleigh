@@ -348,7 +348,6 @@ fn declared_interface(
 fn restate(
     interface: &r2source::SourceFunctionInterface,
     slots: Vec<r2source::SourceStackSlotSpec>,
-    target: &NativeTarget<'_>,
 ) -> Option<r2source::SourceFunctionInterface> {
     let mut restated = r2source::SourceFunctionInterface::new_exact_with_logical_types(
         interface.revision_identity().to_vec(),
@@ -362,13 +361,9 @@ fn restate(
     )
     .ok()?
     .with_role_register_names(interface.role_register_names())
-    // What a call leaves standing is the specification's statement, not
-    // something the recovered interface could know. Without it every function
-    // that calls loses every fact about its own frame, and its dead spills
-    // render as variables assigned from values nothing wrote.
     .with_preserved_call_carriers(
-        preserves(target, interface.stack_pointer_storage()),
-        preserves(target, interface.frame_pointer_storage()),
+        interface.stack_pointer_preserved_across_calls(),
+        interface.frame_pointer_preserved_across_calls(),
     );
     if let Some(storage) = interface.return_address_storage() {
         restated = restated.with_return_address_storage(storage).ok()?;
@@ -393,22 +388,6 @@ fn restate(
         restated = restated.with_prototype_from_source_types();
     }
     Some(restated)
-}
-
-/// Whether a call leaves one carrier as it found it.
-///
-/// A carrier the interface does not name is not disturbed by a call either,
-/// because there is nothing there to disturb.
-fn preserves(target: &NativeTarget<'_>, storage: Option<r2source::CanonicalStorageId>) -> bool {
-    let Some(storage) = storage else {
-        return true;
-    };
-    target
-        .arch
-        .registers
-        .iter()
-        .filter(|register| register.offset == storage.offset && register.size == storage.size)
-        .any(|register| target.compiler.preserves(&register.name))
 }
 
 /// The types one declared prototype needs, interned as it is read.
@@ -620,7 +599,7 @@ impl Native<'_> {
             })
             .collect::<Vec<_>>();
 
-        restate(interface, slots, self.target)
+        restate(interface, slots)
     }
 
     fn prepare_with_literals(
@@ -839,6 +818,20 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
             roles.with_stack_allocation_contract(
                 SourceStackAllocationContract::with_implicit_active_sp_bytes(growth, redzone),
             )
+        })
+        // What a call leaves standing is the specification's statement, and it
+        // is asked in the first pass, before an interface exists to hold it.
+        // Without it every function that calls loses the facts about its own
+        // frame: no entry-relative roots, so no certificate that a slot is its
+        // own, so the prologue's save renders as a variable assigned from a
+        // value nothing wrote.
+        .map(|roles| {
+            roles.with_call_preserved_carriers(r2source::SourceCallPreservedCarriers::new(
+                target.compiler.preserves(stack_pointer_name),
+                // No frame pointer is declared, so a call has none of that kind
+                // to disturb. This is the rule the interface fallback states.
+                true,
+            ))
         })
         .map_err(|_| NativeRefusal::Machine("the carriers are not register storages"))?
         // The names, not only the storages: the trusted lift restates every
