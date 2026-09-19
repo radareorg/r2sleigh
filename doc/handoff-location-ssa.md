@@ -29158,3 +29158,43 @@ The named arity falls out of the same shape: the registers spilled are the
 unnamed ones, so the first of them is the first `...` position and everything
 before it is declared. Here `rdi` is never spilled, which says `vfold` has one
 named parameter and is variadic, exactly as the source declares it.
+
+The two-register return is also the whole of two other failures, which makes it
+the largest single cause left in the shapes corpus. `shape_struct_value` and
+`shape_struct_pointer` at -O0 both store the second result register straight
+into the struct they were building:
+
+```
+callq _mixed_from
+movq %rax, -0x20(%rbp)
+movq %rdx, -0x18(%rbp)      ; the high half, which no certificate names
+```
+
+Placement refuses those functions with `read_before_assignment`, which is the
+right answer to an interface that says the call produced one value. Six cells
+fail this way at -O0 and four more at -O1 and above.
+
+At -O0 the callee's own body proves the pair exactly, with no caller evidence
+and no guessing. `wide_make` ends:
+
+```
+movq -0x10(%rbp), %rax      ; the 16-byte local's low half
+movq -0x8(%rbp),  %rdx      ; its high half, eight bytes above
+popq %rbp
+retq
+```
+
+Both convention result registers are loaded from consecutive halves of one
+frame object immediately before the return, and nothing else reads those two
+loads. A function that merely leaves scratch in the second register has no such
+shape, so the rule claims a pair only where the machine built one. That is the
+recovery half of the plan above; the contract, the caller's boundary and the
+`__uint128_t` spelling are unchanged by it.
+
+At -O1 and above the halves are computed in registers and never touch memory,
+so the shape is absent and the remaining four cells need the caller's evidence:
+the caller reads the second result register after the call, and the callee
+writes it on every return path. Those two facts live on opposite sides of the
+capture, and joining them means preparing the root once, asking which call
+results it reads in a second register, and re-deriving those callees. The -O0
+rule needs none of that and is worth taking first.
