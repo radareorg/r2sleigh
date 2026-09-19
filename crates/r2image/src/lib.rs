@@ -215,12 +215,24 @@ where
     };
     let offset = dysymtab.indirectsymoff.get(endian) as usize;
     let count = dysymtab.nindirectsyms.get(endian) as usize;
-    let Some(bytes) = data.get(offset..offset + count.saturating_mul(4)) else {
+    let Some(end) = count
+        .checked_mul(4)
+        .and_then(|size| offset.checked_add(size))
+    else {
+        return Vec::new();
+    };
+    let Some(bytes) = data.get(offset..end) else {
         return Vec::new();
     };
     let indirect: Vec<u32> = bytes
         .chunks_exact(4)
-        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .map(|word| {
+            let word = [word[0], word[1], word[2], word[3]];
+            match endian {
+                object::Endianness::Big => u32::from_be_bytes(word),
+                object::Endianness::Little => u32::from_le_bytes(word),
+            }
+        })
         .collect();
 
     let symbols = file.macho_symbol_table();

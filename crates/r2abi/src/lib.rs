@@ -322,7 +322,10 @@ fn list(value: &str) -> Vec<String> {
 }
 
 /// The file family an architecture name belongs to.
-fn family(arch: &str) -> Option<&'static str> {
+///
+/// One table: the same question was answered again in the engine, and the two
+/// had already drifted apart by two spellings.
+pub fn family(arch: &str) -> Option<&'static str> {
     let arch = arch.to_ascii_lowercase();
     let arch = arch.as_str();
     match arch {

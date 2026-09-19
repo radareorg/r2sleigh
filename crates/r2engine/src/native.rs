@@ -878,15 +878,9 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
 /// The machine tuple the trusted lift selects a Sleigh profile by.
 fn profile(arch: &ArchSpec) -> Result<(&'static str, u32, SourceEndianness), NativeRefusal> {
     let bits = crate::engine_effective_ptr_bits(arch);
-    let family = match arch.name.to_ascii_lowercase().as_str() {
-        "x86" | "x86-32" | "x86-64" | "x86_64" | "x64" | "amd64" | "i386" | "i686" => "x86",
-        "arm" | "arm32" | "arm64" | "arm64e" | "aarch64" => "arm",
-        _ => {
-            return Err(NativeRefusal::Machine(
-                "no trusted profile for this machine",
-            ));
-        }
-    };
+    let family = r2abi::family(&arch.name).ok_or(NativeRefusal::Machine(
+        "no trusted profile for this machine",
+    ))?;
     let endianness = match arch.memory_endianness {
         r2il::Endianness::Little => SourceEndianness::Little,
         r2il::Endianness::Big => SourceEndianness::Big,
