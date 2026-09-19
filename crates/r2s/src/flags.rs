@@ -157,6 +157,15 @@ pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
                 break;
             }
 
+            // Alignment padding between stubs is an instruction like
+            // `nop dword [rax]` as often as it is zero bytes. It writes
+            // nothing the program can read, and the stub begins after it.
+            if is_padding(&lifted) {
+                pc += u64::from(lifted.size);
+                stub = pc;
+                continue;
+            }
+
             let mut leaves = false;
             for op in &lifted.ops {
                 match op {
@@ -181,6 +190,24 @@ pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
         }
     }
     named
+}
+
+/// Whether an instruction only occupies space.
+///
+/// Padding leaves nothing behind: it writes no memory, transfers nowhere, and
+/// whatever it computes stays in the temporaries the lift invented for it.
+fn is_padding(lifted: &r2il::R2ILBlock) -> bool {
+    // An instruction that lifts to nothing at all did nothing at all.
+    lifted.ops.iter().all(|op| match op {
+        R2ILOp::Store { .. }
+        | R2ILOp::Branch { .. }
+        | R2ILOp::CBranch { .. }
+        | R2ILOp::BranchInd { .. }
+        | R2ILOp::Call { .. }
+        | R2ILOp::CallInd { .. }
+        | R2ILOp::Return { .. } => false,
+        _ => op.output().is_none_or(|out| out.space == SpaceId::Unique),
+    })
 }
 
 /// The sections a format puts import stubs in.
