@@ -29671,18 +29671,28 @@ function. Two `accessed-object-extent` lines are all the indexed accesses it
 has, both into `ObjectId(4)`, both `bound=None`, both one byte wide -- `buf[i]`
 from the first loop and `p[a % 8]` from the tail.
 
-Those indices are masks. At -O2 `a % 8u` is `and eax, 7`, and
-`indexed_offset_upper_bound`'s `IntAnd` arm answers `None` in strict mode when
-the operand being masked is itself unbounded: `(!strict).then_some(mask)`. So
-the byte accesses prove nothing about how far they reach, no span reaches
-across the neighbouring roots, and the sixteen-byte read-modify-write of the
-second loop lands in a root of its own.
+The first reading of this was wrong, and it is worth recording as wrong because
+the wrong answer was the plausible one. Those indices look like masks -- at -O2
+`a % 8u` is `and eax, 7` -- and `indexed_offset_upper_bound` does refuse a
+mask's own magnitude in strict mode. But the caller that produced these two
+lines, `accessed_object_extent`, passes `strict = false`, so the mask rule is
+not what declined. Reading the index instead of the arm settles it:
 
-That conservatism is deliberate and the comment beside it says why: a span
-built on a mask's own magnitude "swallowed every neighbouring local", which is
-the `i & 0xf8` shape claiming two hundred and forty-eight bytes. It is worth
-noticing that the two cases differ. `x & 7 <= 7` is a theorem about the index
-whatever `x` is, and it is the *object* claim -- that eight bytes there are one
-object -- that the past regression was about. Separating the bound on the index
-from the claim about the object is the decision this refusal rests on, and it
-is one the project has already made once.
+```
+ValueId(371) = Copy(ValueId(65))
+ValueId(65)  = Phi { predecessors: [BlockId(0), BlockId(1)] }
+```
+
+The index is the first loop's counter. `indexed_offset_upper_bound` has no phi
+arm and falls to `_ => None`; a counter is bounded only by being in the
+`inductions` map that `induction_upper_bounds` fills, and this function emits
+no `induction-bound` evidence at all. So no loop counter here is bounded, the
+byte accesses prove nothing about how far they reach, no span reaches across
+the neighbouring roots, and the sixteen-byte read-modify-write of the second
+loop lands in a root of its own.
+
+The question is therefore why `induction_upper_bounds` proves nothing for
+`for (i = 0; i < 64; i++)` once -O2 has vectorised it -- a rotated guard, a
+step of sixteen, a counter that counts down, or a comparison it does not
+recognise. That is one analysis falling short of one loop shape, not a
+partition policy and not a layering fault.
