@@ -1,0 +1,8 @@
+[package]
+name = "r2abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Calling conventions, read from radare2's data files without radare2"
+
+[dependencies]
