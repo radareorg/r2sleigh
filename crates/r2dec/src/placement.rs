@@ -43,7 +43,20 @@ enum FinalObservationScope {
         /// the same statement here, so a read can be recognised as naming a
         /// value its own statement defines.
         statement: u64,
+        /// Whether the statement carrying this observation spells it.
+        spelled: bool,
     },
+    Ambiguous,
+}
+
+/// What the rendered text says about where a group of observations happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupPosition {
+    /// The statement spells the group, and the walk just ordered it.
+    Spelled,
+    /// A gap marker names none of the cells it claims, so its place is not theirs.
+    Unspelled,
+    /// The construct carrying the group states no evaluation order.
     Ambiguous,
 }
 
@@ -63,6 +76,8 @@ pub(crate) struct FinalBindingRead {
     pub(crate) region: RegionId,
     pub(crate) block: u64,
     pub(crate) order: FinalOccurrenceOrder,
+    /// Whether the rendered text spells this read where it is ordered.
+    pub(crate) spelled: bool,
 }
 
 /// One binding write that survived all AST rewriting.
@@ -428,6 +443,7 @@ pub(crate) fn collect_final_placement_occurrences(
             region,
             order,
             statement,
+            spelled,
         }) = scoped[index]
         else {
             continue;
@@ -461,6 +477,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         region,
                         block,
                         order,
+                        spelled,
                     });
                 }
             }
@@ -487,6 +504,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         region,
                         block,
                         order,
+                        spelled,
                     });
                 }
             }
@@ -522,6 +540,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         region,
                         block,
                         order,
+                        spelled,
                     });
                 }
             }
@@ -632,6 +651,7 @@ pub(crate) fn collect_final_placement_occurrences(
                         region,
                         block,
                         order,
+                        spelled,
                     });
                 }
             }
@@ -650,6 +670,7 @@ pub(crate) fn collect_final_placement_occurrences(
                     region,
                     block,
                     order,
+                    spelled,
                 });
             }
             PlacementObservationTarget::Other => {}
@@ -1239,7 +1260,7 @@ fn visit_nested_statement_lists(statement: &CStmt, after: &mut BTreeSet<RenderOb
 fn record_observation_group(
     ids: &[RenderObservationId],
     region: Option<RegionId>,
-    ambiguous: bool,
+    position: GroupPosition,
     statement: u64,
     order: &mut u64,
     scoped: &mut [Option<FinalObservationScope>],
@@ -1251,7 +1272,7 @@ fn record_observation_group(
     // refusal reports only the observation, so the caller's line is the one
     // fact that says whether the answer is a call, an assignment, an operand
     // of a binary, or a control statement's own marker.
-    if ambiguous && r2il::refusal_evidence::tracing() {
+    if position == GroupPosition::Ambiguous && r2il::refusal_evidence::tracing() {
         eprintln!(
             "ambiguous group {ids:?} recorded at {}",
             std::panic::Location::caller()
@@ -1261,14 +1282,14 @@ fn record_observation_group(
     *order = order.saturating_add(1);
     let Some(region) = region else { return };
     for id in ids {
-        scoped[id.index() as usize] = Some(if ambiguous {
-            FinalObservationScope::Ambiguous
-        } else {
-            FinalObservationScope::Exact {
+        scoped[id.index() as usize] = Some(match position {
+            GroupPosition::Ambiguous => FinalObservationScope::Ambiguous,
+            GroupPosition::Spelled | GroupPosition::Unspelled => FinalObservationScope::Exact {
                 region,
                 order: current,
                 statement,
-            }
+                spelled: position == GroupPosition::Spelled,
+            },
         });
     }
 }
@@ -1425,6 +1446,7 @@ fn record_completion_observations(
     ids: &[RenderObservationId],
     current: Option<RegionId>,
     targets: &[Option<PlacementObservationTarget>],
+    position: GroupPosition,
     order: &mut u64,
     scoped: &mut [Option<FinalObservationScope>],
 ) {
@@ -1437,8 +1459,8 @@ fn record_completion_observations(
     // value this very statement defines can be told from a read of the value
     // it replaces.
     let statement = *order;
-    record_observation_group(&reads, current, false, statement, order, scoped);
-    record_observation_group(&writes, current, false, statement, order, scoped);
+    record_observation_group(&reads, current, position, statement, order, scoped);
+    record_observation_group(&writes, current, position, statement, order, scoped);
 }
 
 #[track_caller]
@@ -1449,12 +1471,16 @@ fn record_control_observations(
     order: &mut u64,
     scoped: &mut [Option<FinalObservationScope>],
 ) {
-    let ambiguous = ids
+    let position = match ids
         .iter()
         .copied()
-        .any(|id| observation_is_placement_relevant(targets, id));
+        .any(|id| observation_is_placement_relevant(targets, id))
+    {
+        true => GroupPosition::Ambiguous,
+        false => GroupPosition::Spelled,
+    };
     let statement = *order;
-    record_observation_group(ids, current, ambiguous, statement, order, scoped);
+    record_observation_group(ids, current, position, statement, order, scoped);
 }
 
 #[track_caller]
@@ -1469,7 +1495,14 @@ fn record_ambiguous_expr_group<'a>(
         visit_expr_observations(expr, &mut |id| ids.push(id));
     }
     let statement = *order;
-    record_observation_group(&ids, current, true, statement, order, scoped);
+    record_observation_group(
+        &ids,
+        current,
+        GroupPosition::Ambiguous,
+        statement,
+        order,
+        scoped,
+    );
 }
 
 fn collect_expr_observation_scopes(
@@ -1515,8 +1548,22 @@ fn collect_expr_observation_scopes(
                 // The destination's address is read before the store that uses
                 // it, and both belong to the one assignment.
                 let statement = *order;
-                record_observation_group(&reads, current, false, statement, order, scoped);
-                record_observation_group(&writes, current, false, statement, order, scoped);
+                record_observation_group(
+                    &reads,
+                    current,
+                    GroupPosition::Spelled,
+                    statement,
+                    order,
+                    scoped,
+                );
+                record_observation_group(
+                    &writes,
+                    current,
+                    GroupPosition::Spelled,
+                    statement,
+                    order,
+                    scoped,
+                );
             } else if expression_has_placement_write(left, targets)
                 || expression_has_placement_write(right, targets)
             {
@@ -1643,7 +1690,14 @@ fn collect_expr_observation_scopes(
         | CExpr::SizeofType(_) => {}
     }
 
-    record_completion_observations(&leading, current, targets, order, scoped);
+    record_completion_observations(
+        &leading,
+        current,
+        targets,
+        GroupPosition::Spelled,
+        order,
+        scoped,
+    );
 }
 
 fn collect_stmt_observation_scopes(
@@ -1674,13 +1728,27 @@ fn collect_stmt_observation_scopes(
         }
         CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
             collect_expr_observation_scopes(expr, current, targets, order, scoped);
-            record_completion_observations(&leading, current, targets, order, scoped);
+            record_completion_observations(
+                &leading,
+                current,
+                targets,
+                GroupPosition::Spelled,
+                order,
+                scoped,
+            );
         }
         CStmt::Decl { init, .. } => {
             if let Some(init) = init {
                 collect_expr_observation_scopes(init, current, targets, order, scoped);
             }
-            record_completion_observations(&leading, current, targets, order, scoped);
+            record_completion_observations(
+                &leading,
+                current,
+                targets,
+                GroupPosition::Spelled,
+                order,
+                scoped,
+            );
         }
         CStmt::If {
             cond,
@@ -1765,15 +1833,32 @@ fn collect_stmt_observation_scopes(
             }
         }
         CStmt::Observed { .. } => unreachable!("leading observations were consumed"),
+        // A marker names none of its cells, so they take its region but not its place.
+        CStmt::Gap(_) => {
+            record_completion_observations(
+                &leading,
+                current,
+                targets,
+                GroupPosition::Unspelled,
+                order,
+                scoped,
+            );
+        }
         CStmt::Empty
         | CStmt::Return(None)
         | CStmt::Break
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_)
-        | CStmt::Gap(_) => {
-            record_completion_observations(&leading, current, targets, order, scoped);
+        | CStmt::Comment(_) => {
+            record_completion_observations(
+                &leading,
+                current,
+                targets,
+                GroupPosition::Spelled,
+                order,
+                scoped,
+            );
         }
     }
 }
@@ -4039,6 +4124,7 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
             kind: OccurrenceKind::Read(read.source),
             self_defined,
             statement: read.statement,
+            spelled: read.spelled,
         });
     }
     for write in writes {
@@ -4052,6 +4138,7 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
             },
             self_defined: false,
             statement: write.statement,
+            spelled: true,
         });
     }
     for binding_occurrences in &mut occurrences {
@@ -4204,6 +4291,7 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
             && *inline_eligible
             && binding_occurrences.iter().all(|occurrence| {
                 matches!(occurrence.kind, OccurrenceKind::Write { .. })
+                    || !occurrence.spelled
                     || (write.order <= occurrence.order
                         && cfg.dominates(write.block, occurrence.block))
             })
@@ -4256,8 +4344,9 @@ fn occurrence_regions_have_proven_order(
         let self_contained = |region_occurrences: &Vec<&Occurrence>| {
             region_occurrences
                 .iter()
+                .filter(|occurrence| occurrence.spelled)
                 .min_by_key(|occurrence| occurrence.order)
-                .is_some_and(|first| matches!(first.kind, OccurrenceKind::Write { .. }))
+                .is_none_or(|first| matches!(first.kind, OccurrenceKind::Write { .. }))
         };
         if block_regions.values().all(self_contained) {
             return true;
@@ -4358,6 +4447,12 @@ struct Occurrence {
     /// writes at the next, so ordering on `order` alone can never put a read
     /// after a write of the same statement, however it is ranked.
     statement: u64,
+    /// Whether the text spells this occurrence where it is ordered.
+    ///
+    /// A gap's claimed read keeps its definition from being dropped as a dead
+    /// store, but the marker names nothing and stands at its anchor rather than
+    /// where the covered operation ran, so its order proves nothing.
+    spelled: bool,
 }
 
 impl Occurrence {
@@ -4494,6 +4589,8 @@ fn first_read_before_assignment(
         for occurrence in block_occurrences {
             match occurrence.kind {
                 OccurrenceKind::Read(PlacementRead::IndexedStackAccess(_)) => {}
+                // Nothing in the text reads it here, so nothing can read it early.
+                OccurrenceKind::Read(_) if !occurrence.spelled => {}
                 OccurrenceKind::Read(read) if !assigned => {
                     r2il::refusal_evidence!(
                         "read-before-assignment",
@@ -4974,6 +5071,7 @@ mod tests {
             region: merge_region,
             block: 0x1030,
             order: FinalOccurrenceOrder(3),
+            spelled: true,
         }];
 
         let decisions = derive_with_cfg(
@@ -5025,6 +5123,7 @@ mod tests {
             region: merge_region,
             block: 0x1030,
             order: FinalOccurrenceOrder(2),
+            spelled: true,
         }];
 
         let decisions = derive_with_cfg(
@@ -5115,6 +5214,7 @@ mod tests {
                 region: merge_regions[0],
                 block: 0x1030,
                 order: FinalOccurrenceOrder(2),
+                spelled: true,
             },
             FinalBindingRead {
                 value: None,
@@ -5127,6 +5227,7 @@ mod tests {
                 region: merge_regions[1],
                 block: 0x1030,
                 order: FinalOccurrenceOrder(4),
+                spelled: true,
             },
         ];
 
@@ -5171,6 +5272,7 @@ mod tests {
                 region: read_region,
                 block: 0x1010,
                 order: FinalOccurrenceOrder(2),
+                spelled: true,
             }],
             &[FinalBindingWrite {
                 statement: 0,
@@ -5217,6 +5319,7 @@ mod tests {
             region: block_region,
             block: 0x1000,
             order: FinalOccurrenceOrder(0),
+            spelled: true,
         }];
 
         let decisions = derive_with_cfg(
@@ -5267,6 +5370,7 @@ mod tests {
             region: block_region,
             block: 0x1000,
             order: FinalOccurrenceOrder(0),
+            spelled: true,
         }];
 
         let decisions = derive_with_cfg(
