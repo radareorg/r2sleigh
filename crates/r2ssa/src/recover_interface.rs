@@ -224,13 +224,10 @@ fn recovered_stack_parameters(
     if slot_bytes == 0 {
         return Vec::new();
     }
-    let written = facts
-        .structured
-        .memory_accesses
-        .values()
-        .filter(|access| access.is_write)
-        .map(|access| access.object)
-        .collect::<BTreeSet<_>>();
+    // A slot the body writes can still be a parameter: at -O0 a function with
+    // no argument registers advances its own argument in place. The argument
+    // area above the entry stack pointer is the caller's, so a read of it is a
+    // read of what the caller left there whatever the body later stores.
     // The return address is the caller's too, and the return reads it.
     let control = facts
         .certificates
@@ -243,7 +240,6 @@ fn recovered_stack_parameters(
         if access.is_write
             || !access.provenance_complete
             || access.space != SpaceId::Ram
-            || written.contains(&access.object)
             || control.contains(&access.id.inst)
         {
             continue;
@@ -626,7 +622,10 @@ fn recover_interface_inner(
     machine_context: Option<&crate::SourceMachineContext>,
     loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    if slots.argument_slots().is_empty() {
+    // A convention with no argument registers still places its arguments: x86
+    // cdecl puts every one on the stack. Only a convention that states neither
+    // offers nothing to intersect the body's reads against.
+    if slots.argument_slots().is_empty() && slots.stack_arguments().is_none() {
         return None;
     }
     // Recovery is intentionally a bounded two-phase path used only when the
@@ -819,7 +818,16 @@ fn recover_interface_inner(
     // The convention fills every register slot before the argument area, so
     // a stack slot is a parameter only once each register slot is proven.
     let stack_parameters = if parameters.len() == slots.argument_slots().len() {
-        let slot_bytes = slots.argument_slots().first().map_or(0, |slot| slot.size);
+        // A convention with no argument registers takes its step from the
+        // stack entry the specification declares instead.
+        let slot_bytes = slots.argument_slots().first().map_or_else(
+            || {
+                slots
+                    .stack_arguments()
+                    .map_or(0, |placement| placement.stride_bytes())
+            },
+            |slot| slot.size,
+        );
         match return_mechanism {
             Some(RecoveredReturnMechanism::Link) => {
                 recovered_stack_parameters(&facts, &observations, 0, slot_bytes)

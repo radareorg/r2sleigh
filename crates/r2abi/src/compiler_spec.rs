@@ -28,6 +28,12 @@ pub struct CompilerSpec {
     /// The registers a call leaves as it found them, as the default prototype
     /// declares them.
     pub unaffected: Vec<String>,
+    /// Where the default prototype puts an argument on the stack: the first
+    /// one's offset from the stack pointer entering the call, and the step
+    /// from each to the next. Both are stated by the specification, so a
+    /// convention with no register arguments still says where its arguments
+    /// are.
+    pub stack_arguments: Option<(i64, u32)>,
 }
 
 impl CompilerSpec {
@@ -43,6 +49,7 @@ impl CompilerSpec {
             },
             return_address: return_address(text),
             unaffected: unaffected(text),
+            stack_arguments: stack_arguments(text),
         }
     }
 
@@ -64,6 +71,33 @@ fn return_address(text: &str) -> Option<String> {
     let body = &text[start..end];
     let register = element(body, "register")?;
     attribute(register, "name").map(str::to_owned)
+}
+
+/// Where the default prototype's first stack argument sits, and the step to
+/// the next.
+///
+/// A stack `pentry` states its own address and alignment, so a convention that
+/// passes everything on the stack -- x86 cdecl -- describes its arguments as
+/// exactly as a register convention does.
+fn stack_arguments(text: &str) -> Option<(i64, u32)> {
+    let prototype = element_body(text, "default_proto")?;
+    let input = element_body(prototype, "input")?;
+    let mut rest = input;
+    while let Some(index) = rest.find("<pentry") {
+        let close = rest[index..].find('>').map(|close| close + index)?;
+        let entry = &rest[index..close];
+        let body = &rest[close..];
+        let end = body.find("</pentry>").unwrap_or(body.len());
+        if let Some(addr) = element(&body[..end], "addr")
+            && attribute(addr, "space") == Some("stack")
+        {
+            let offset = attribute(addr, "offset")?.parse().ok()?;
+            let align = attribute(entry, "align")?.parse().ok()?;
+            return Some((offset, align));
+        }
+        rest = &body[end.min(body.len())..];
+    }
+    None
 }
 
 /// The registers the default prototype says a call does not disturb.
@@ -89,6 +123,13 @@ fn unaffected(text: &str) -> Vec<String> {
     names
 }
 
+/// What one `<name>...</name>` pair encloses.
+fn element_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let open = text.split_once(&format!("<{name}"))?.1;
+    let inner = open.split_once('>')?.1;
+    Some(inner.split_once(&format!("</{name}>"))?.0)
+}
+
 /// The text of the first `<name ...>` tag, up to its closing angle bracket.
 fn element<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let open = text.split_once(&format!("<{name}"))?.1;
@@ -108,6 +149,39 @@ fn attribute<'a>(element: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stack_only_convention_states_where_its_arguments_are() {
+        let spec = CompilerSpec::parse(
+            r#"<default_proto>
+    <prototype name="__cdecl" extrapop="4" stackshift="4">
+      <input>
+        <pentry minsize="1" maxsize="500" align="4">
+          <addr offset="4" space="stack"/>
+        </pentry>
+      </input>
+    </prototype>
+  </default_proto>"#,
+        );
+        assert_eq!(spec.stack_arguments, Some((4, 4)));
+    }
+
+    #[test]
+    fn a_register_convention_reaches_its_stack_entry_past_the_registers() {
+        let spec = CompilerSpec::parse(
+            r#"<default_proto>
+    <prototype name="__stdcall">
+      <input>
+        <pentry minsize="1" maxsize="8"><register name="RDI"/></pentry>
+        <pentry minsize="1" maxsize="500" align="8">
+          <addr offset="8" space="stack"/>
+        </pentry>
+      </input>
+    </prototype>
+  </default_proto>"#,
+        );
+        assert_eq!(spec.stack_arguments, Some((8, 8)));
+    }
 
     #[test]
     fn the_stack_pointer_is_read_with_its_default_growth() {

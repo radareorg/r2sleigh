@@ -859,12 +859,16 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         Some(slot) => Some(storage(target.arch, slot.name())?),
         None => None,
     };
-    // Where a seventh argument goes is stated by neither file directly: it is
-    // arithmetic over the shadow space and the return-address slot. Until that
-    // is derived, a function with more arguments than registers refuses rather
-    // than being given a placement nothing proved.
+    // Where an argument past the registers goes is the compiler specification's
+    // own statement: its stack parameter entry carries the first offset and the
+    // step between entries.
+    let stack_arguments = target
+        .compiler
+        .stack_arguments
+        .and_then(|(offset, align)| r2source::SourceStackArgumentPlacement::new(offset, align));
     let slots = SourceConventionSlots::new(&target.convention.name, argument_slots, result_slot)
-        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
+        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
+        .with_stack_arguments(stack_arguments);
 
     Ok(NativeMachine {
         arch_id: family.to_owned(),
