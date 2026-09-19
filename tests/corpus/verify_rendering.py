@@ -1568,14 +1568,23 @@ def file_scope_preamble(section: str, name: str) -> list[str]:
     if body is None:
         return []
     start = section.find(body.rstrip())
-    return [
-        line
-        for line in section[:start].splitlines()
-        if line
-        and not line[0].isspace()
-        and (line.rstrip().endswith(";") or line.startswith("#define "))
-        and not line.startswith("R2SLEIGH_")
-    ]
+    # Top-level chunks, one declaration each, so a struct spanning several
+    # lines travels whole. The bit-vector structs are the prelude's own and
+    # would be redefined.
+    chunks: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for line in section[:start].splitlines():
+        if not line.strip() or line.startswith("R2SLEIGH_"):
+            continue
+        current.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth == 0 and (line.rstrip().endswith((";", "}")) or line.startswith("#")):
+            chunks.append("\n".join(current))
+            current = []
+    if current:
+        chunks.append("\n".join(current))
+    return [chunk for chunk in chunks if not chunk.startswith("struct r2sleigh_bits_")]
 
 
 def normalize_linkage_name(source: str, name: str) -> tuple[str, dict[str, Any]]:
