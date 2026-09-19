@@ -37,6 +37,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "is" => symbols(session),
         "px" => hexdump(session, argument),
         "pd" => disassemble(session, argument),
+        "pdd" => decompile(session, argument),
         other => Err(format!("unknown command '{}'", other)),
     }
 }
@@ -245,6 +246,51 @@ fn disassemble(_session: &mut Session, _argument: &str) -> Result<String, String
     Err("built without the sleigh feature, so pd cannot decode".to_owned())
 }
 
+#[cfg(not(feature = "sleigh"))]
+fn decompile(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("built without the sleigh feature, so pdd cannot decompile".to_owned())
+}
+
+/// `pdd`: decompile the function at the cursor, with no radare2 anywhere.
+#[cfg(feature = "sleigh")]
+fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
+    let addr = parse_number(session, argument)?;
+    session.ensure_machine()?;
+    let machine = session
+        .machine()
+        .ok_or("no Sleigh specification for this architecture")?;
+
+    let bits = session.image.arch().bits;
+    let conventions = r2abi::Conventions::for_arch(machine.arch.name.as_str(), bits)
+        .ok_or_else(|| format!("no calling conventions for {} {}", machine.arch.name, bits))?;
+    let convention = conventions
+        .default_convention()
+        .ok_or("the convention data names no default")?;
+    let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
+
+    let name = session
+        .image
+        .symbols()
+        .iter()
+        .find(|symbol| symbol.vaddr == addr && symbol.defined)
+        .map_or_else(|| format!("fcn.{:x}", addr), |symbol| symbol.name.clone());
+
+    let target = r2engine::native::NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        convention,
+        compiler: &compiler,
+    };
+    let response = r2engine::native::decompile(&target, addr, &name, |vaddr, max| {
+        session
+            .image
+            .read_upto(vaddr, max)
+            .map(std::borrow::Cow::into_owned)
+    })
+    .map_err(|refusal| refusal.to_string())?;
+    Ok(response.output)
+}
+
 #[cfg(feature = "sleigh")]
 fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> {
     /// Sleigh fetches a whole window whatever the instruction needs.
@@ -252,7 +298,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
-    session.ensure_decoder()?;
+    session.ensure_machine()?;
     let decoder = session
         .decoder()
         .ok_or("no decoder for this architecture")?;

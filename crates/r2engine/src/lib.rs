@@ -6,6 +6,8 @@
 //! needed for a request. Analysis artifacts are built directly for each
 //! source snapshot request.
 
+pub mod native;
+
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

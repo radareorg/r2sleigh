@@ -1,4 +1,4 @@
-//! The shell's state: an open image, a decoder, and the seek cursor.
+//! The shell's state: an open image, its machine, and the seek cursor.
 //!
 //! The cursor lives here and nowhere else. Every engine call takes its address
 //! as an argument, so the query surface below this stays stateless and the
@@ -12,7 +12,7 @@ pub struct Session {
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
     #[cfg(feature = "sleigh")]
-    decoder: Option<r2sleigh_lift::Disassembler>,
+    machine: Option<r2sleigh_lift::EmbeddedMachine>,
 }
 
 impl Session {
@@ -45,54 +45,33 @@ impl Session {
             path: path.to_owned(),
             addr,
             #[cfg(feature = "sleigh")]
-            decoder: None,
+            machine: None,
         })
     }
 
-    /// Build this image's decoder if it is not built yet.
+    /// Load this image's machine if it is not loaded yet.
     ///
-    /// Separate from reading it so a caller can hold the decoder and the image
+    /// Separate from reading it so a caller can hold the machine and the image
     /// at once; one method returning a reference out of `&mut self` would make
     /// those two borrows conflict.
     #[cfg(feature = "sleigh")]
-    pub fn ensure_decoder(&mut self) -> Result<(), String> {
-        if self.decoder.is_none() {
-            self.decoder = Some(build_decoder(self.image.arch())?);
+    pub fn ensure_machine(&mut self) -> Result<(), String> {
+        if self.machine.is_none() {
+            self.machine = Some(
+                r2sleigh_lift::embedded_machine(self.image.arch().name)
+                    .map_err(|error| error.to_string())?,
+            );
         }
         Ok(())
     }
 
     #[cfg(feature = "sleigh")]
-    pub fn decoder(&self) -> Option<&r2sleigh_lift::Disassembler> {
-        self.decoder.as_ref()
+    pub fn machine(&self) -> Option<&r2sleigh_lift::EmbeddedMachine> {
+        self.machine.as_ref()
     }
-}
 
-#[cfg(feature = "sleigh")]
-fn build_decoder(arch: &r2image::ImageArch) -> Result<r2sleigh_lift::Disassembler, String> {
-    use r2sleigh_lift::Disassembler;
-    let (sla, pspec, name): (&[u8], &str, &str) = match arch.name {
-        "x86-64" => (
-            sleigh_config::processor_x86::SLA_X86_64,
-            sleigh_config::processor_x86::PSPEC_X86_64,
-            "x86-64",
-        ),
-        "x86" => (
-            sleigh_config::processor_x86::SLA_X86,
-            sleigh_config::processor_x86::PSPEC_X86,
-            "x86",
-        ),
-        "AArch64" => (
-            sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
-            sleigh_config::processor_aarch64::PSPEC_AARCH64,
-            "aarch64",
-        ),
-        "ARM" => (
-            sleigh_config::processor_arm::SLA_ARM8_LE,
-            sleigh_config::processor_arm::PSPEC_ARMT,
-            "ARM",
-        ),
-        other => return Err(format!("no Sleigh specification for {}", other)),
-    };
-    Disassembler::from_sla(sla, pspec, name).map_err(|e| e.to_string())
+    #[cfg(feature = "sleigh")]
+    pub fn decoder(&self) -> Option<&r2sleigh_lift::Disassembler> {
+        self.machine.as_ref().map(|machine| &machine.disasm)
+    }
 }

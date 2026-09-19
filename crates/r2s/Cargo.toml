@@ -10,6 +10,8 @@ name = "r2s"
 path = "src/main.rs"
 
 [dependencies]
+r2abi = { path = "../r2abi" }
+r2engine = { path = "../r2engine" }
 r2image = { path = "../r2image" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
 r2il = { path = "../r2il" }

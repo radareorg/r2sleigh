@@ -6,7 +6,10 @@ license.workspace = true
 description = "Request planner and artifact orchestration for r2sleigh"
 
 [dependencies]
+r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
+r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
+r2source = { path = "../r2source" }
 r2ssa = { path = "../r2ssa" }
 r2types = { path = "../r2types" }
 r2dec = { path = "../r2dec" }
@@ -15,6 +18,9 @@ serde_json.workspace = true
 
 [features]
 default = []
+
+[dev-dependencies]
+r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false, features = ["x86"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
