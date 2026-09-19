@@ -29102,3 +29102,36 @@ argument, because an unbounded reach is not a span. The root artifact's cache
 key is the whole capture buffer, which is every body taken with it, so a
 cached root was prepared against the same callee bodies that would produce the
 same map.
+
+## A variadic callee with no format string gets a fixed prototype
+
+`shape_variadic_local` calls `vfold(count, ...)` four times with one, two,
+three and five variadic arguments. `vfold` is a local function, the binaries
+carry no debug information, and nothing in radare2's analysis says it is
+variadic, so the recovered interface is a fixed prototype of six arguments --
+the count plus every argument register the convention could carry. Each call
+then renders with six, and the four the site never set are reads of the
+caller's own entry registers:
+
+```c
+uint64_t RAX_2 = sym__vfold(1, RDI_0, RDX_0, RCX_0, R8_0, R9_0);
+```
+
+The x86-64 cells fail to compile on those reads. On arm64 the same fact
+surfaces as a signature mismatch instead: the rendering declares an arity the
+corpus runner cannot call.
+
+Two ways to the right answer, and they are independent.
+
+The first is recovery: a body that spills every argument register into a
+register save area and then walks it is variadic, whatever the prototype says.
+That is a shape the lifter can see -- `vfold` stores the six registers at entry
+and reads them back through a cursor -- and it would give the callee
+`uint64_t vfold(uint32_t, ...)` without any type information.
+
+The second is the call site: radare2's own analysis says how many arguments a
+site sets, and a rendering should never pass a register the site did not write.
+Where the two disagree, the site's answer is the one with evidence behind it;
+the callee's fixed prototype is a default, not a proof. The existing
+`only_variadic_tail_unproven` path already accepts that a variadic call's tail
+is the site's business rather than the callee's.
