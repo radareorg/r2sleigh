@@ -638,22 +638,25 @@ pub(super) fn unread_defined_values(
     projection: &r2ssa::MachineProjection,
 ) -> BTreeSet<ValueId> {
     let certified = certified_value_readers(source);
-    // A call's `CallUse` of a register its prototype does not name is a use
-    // the certificates elide and the text never spells, so a value only that
-    // reads is unread and owes no object.
-    let graph = source.graph();
+    // A use the certificates elide spells nothing, so a value only such uses
+    // read is unread and owes no object. A call's `CallUse` of a register its
+    // prototype does not name was the only reason counted, which left a call
+    // result read by an unobserved merge looking read: `indirect_store`'s
+    // result fed the next loop's dead phi and was bound to a variable nothing
+    // assigns from or reads. A merge the certificates prove unobserved spells
+    // nothing either, and counts the same way.
     let elided = certificate_elided_cells(source, projection)
         .map(|cells| cells.uses)
         .unwrap_or_default()
-        .into_keys()
-        .filter(|site| {
-            graph.inst(site.inst).is_some_and(|inst| {
-                matches!(
-                    inst.payload,
-                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. })
-                )
-            })
+        .into_iter()
+        .filter(|(_, reason)| {
+            matches!(
+                reason,
+                r2ssa::ledger::ElisionReason::CallBoundaryCarrier
+                    | r2ssa::ledger::ElisionReason::UnobservedMerge
+            )
         })
+        .map(|(site, _)| site)
         .collect::<BTreeSet<_>>();
     if let Some(want) = crate::debug::traced_inline_name() {
         for value in &source.graph().values {

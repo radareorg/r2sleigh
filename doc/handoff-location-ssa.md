@@ -28950,3 +28950,38 @@ A displacement the object model records has to be spelled where the access is
 rendered, or the rendering says every unrolled write of a loop lands on one
 byte. `planned_slot_indexed_bytes_expr` now adds it back, which is what makes
 `buf[i - 3]` and `buf[i]` different bytes again.
+
+## A direct return answers the boundary a tail transfer leaves open
+
+`shape_mutual_even` and `shape_mutual_odd` refused at -O1 and above, which took
+`shape_recurse_mutual` with them: the rendering called two functions that had no
+definition to link against. Each helper ends one arm with a value of its own and
+tails to its partner on the other, and neither partner has a recovered prototype
+yet, so `tail_result_storage` reported `Unproven` and interface recovery
+declined the whole function.
+
+The refusal is right for an import thunk, whose body writes nothing and
+therefore says nothing about what its target returns. It is wrong here. The
+convention gives the tail callee the same result register this function would
+use, so an arm that returns a value of its own says both that the function has
+a result and where it is. Recovery now takes that arm's answer when every path
+the live-out walk could not resolve is a tail transfer and at least one path
+resolved; a body with no such arm still refuses.
+
+This is the per-function half of the fixpoint the earlier note described. The
+join over a tail-call component is still the general answer, and it is still
+unbuilt; what landed covers the case where the component's members each have a
+direct return of their own, which is what mutual recursion in C usually looks
+like.
+
+## A call result read only by an unobserved merge is not bound
+
+`unread_defined_values` counted a use as elided only when the reading
+instruction was a `CallUse`. Every other elided cell -- including a use the
+certificates record as `UnobservedMerge` -- looked like a read, so a value only
+those read kept its binding. `indirect_store`'s result fed the phi of the loop
+that follows it, that phi is a dead merge, and the caller declared
+`uint64_t RAX_22 = sym__indirect_store(...)` with nothing to read it. The
+elision reason is the fact, not the instruction kind, so the set now counts the
+merge reason too. `UnobservedValue` stays out: a dead load chain is elided under
+it and its address binding is decided elsewhere.

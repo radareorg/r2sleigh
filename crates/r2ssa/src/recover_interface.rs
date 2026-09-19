@@ -613,6 +613,23 @@ fn recover_interface_inner(
         // Claiming void from it gave every caller of an import thunk a
         // callee that returns nothing, and the caller then read the return
         // register as a value no statement had assigned.
+        // A body that returns a value on a path of its own answers the
+        // boundary the tail transfer leaves open. `shape_mutual_even` ends
+        // one arm with `return accumulator ^ ...` and tails to its partner on
+        // the other; the convention gives both the same result register, so
+        // the arm that writes it says what the function returns. An import
+        // thunk has no such arm and still refuses.
+        TailResult::Unproven
+            if direct_return_result(func, &graph, &facts, slots.result_slot()).is_some() =>
+        {
+            let slot = slots.result_slot();
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "a tail transfer owns one path and a direct return owns another; \
+                 the direct return's {slot:?} is the result"
+            );
+            Some(slot)
+        }
         TailResult::Unproven => {
             r2il::refusal_evidence!(
                 "interface-recovery",
@@ -775,6 +792,50 @@ enum TailResult {
 }
 
 /// The result carrier licensed by every source-proven tail boundary.
+/// The result a return path of this body's own proves, when the function also
+/// leaves through a tail transfer nothing describes.
+///
+/// A block that ends in a tail branch is a returning block with no write of
+/// the result register on its own path, so the ordinary live-out walk reports
+/// it unresolved. What the other paths write is still a fact about this
+/// function: the convention gives the tail callee the same result register, so
+/// a path that fills it says the function has a result and where it is.
+fn direct_return_result(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    candidate: Option<CanonicalStorageId>,
+) -> Option<CanonicalStorageId> {
+    let candidate = candidate?;
+    let tail_blocks = facts
+        .call_sites
+        .by_id
+        .values()
+        .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
+        .filter_map(|call| graph.op_site_for_inst(call.at).map(|(block, _)| block))
+        .collect::<BTreeSet<_>>();
+    if tail_blocks.is_empty() {
+        return None;
+    }
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
+    if live_out.is_empty() {
+        return None;
+    }
+    // Every path the walk could not answer has to be one a tail transfer owns,
+    // and at least one path has to have answered.
+    if live_out
+        .unresolved_blocks()
+        .any(|block| !tail_blocks.contains(&block))
+    {
+        return None;
+    }
+    let resolved = live_out
+        .by_return()
+        .filter(|(block, _)| !tail_blocks.contains(block))
+        .count();
+    (resolved > 0).then_some(candidate)
+}
+
 fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailResult {
     let mut results = facts
         .call_sites
@@ -1633,6 +1694,71 @@ mod tests {
         );
         let recovered = recover_interface_with_context(&function, &candidates(), &known, None)
             .expect("a proven tail boundary owns the result");
+        assert_eq!(
+            recovered.result().map(|result| result.slot()),
+            Some(register(0, 8))
+        );
+    }
+
+    #[test]
+    fn a_direct_return_owns_the_result_a_tail_transfer_leaves_open() {
+        // One arm returns a value of its own, the other tails to a target
+        // nothing describes -- the shape of a mutually recursive pair whose
+        // partner has no prototype yet. The arm that returns says where the
+        // result is.
+        let arch = arch();
+        let slot = 0x4000u64;
+        let slot_storage = CanonicalStorageId {
+            space: CanonicalStorageSpace::Ram,
+            offset: slot,
+            size: 8,
+        };
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::IntEqual {
+            dst: Varnode::register(24, 1),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(0, 8),
+        });
+        entry.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x1008, 8),
+            cond: Varnode::register(24, 1),
+        });
+
+        let mut tail = R2ILBlock::new(0x1004, 4);
+        let loaded = Varnode::unique(0x100, 8);
+        tail.push(R2ILOp::Load {
+            dst: loaded.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: Varnode::constant(slot, 8),
+        });
+        tail.push(R2ILOp::BranchInd { target: loaded });
+        tail.stamp_instruction(1, 0x1005);
+
+        let mut direct = R2ILBlock::new(0x1008, 4);
+        direct.push(R2ILOp::IntXor {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::constant(0xa5a5_a5a5, 8),
+        });
+        direct.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+
+        let blocks = [entry, tail, direct];
+        let identity = SourceCallSiteIdentity::new(0x1005, slot_storage);
+        let function = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
+            .expect("mutual recursion ssa");
+        let context = crate::SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+            &blocks,
+            Some(&arch),
+            None,
+            SourceMachineRoles::default(),
+            Some(candidates()),
+            Vec::new(),
+            vec![identity],
+        );
+        let recovered = recover_interface_with_context(&function, &candidates(), &context, None)
+            .expect("a direct return answers the boundary the tail leaves open");
         assert_eq!(
             recovered.result().map(|result| result.slot()),
             Some(register(0, 8))
