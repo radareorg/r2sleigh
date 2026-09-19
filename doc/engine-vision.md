@@ -32,6 +32,14 @@ The measure of success is not command count or crate count. It is whether an
 agent can answer a real reverse-engineering question in one or two calls, with
 the engine's confidence attached to every field, and whether it can ask why.
 
+The near milestone, which orders every decision below, is one sentence:
+
+> `r2s -c 'pdd @ 0x401000' binary` emits C with no radare2 present.
+
+Everything that is not on the path to that sentence is optional relative to it.
+Discovery, names and value sets are all optional by that test; body lift and the
+type and convention data are not.
+
 ## Non-goals
 
 These are decisions, not omissions.
@@ -123,9 +131,19 @@ currently supplies through the snapshot seam.
    radare2's real moat and has to be reproduced faithfully, including seeking,
    grepping, piping and iterators, or users will not follow.
 
-`r2sleigh-cli` becomes the host binary, and the radare2 plugin survives the whole
-way as a thin client of the same engine, so the integration work is not thrown
-away and existing users lose nothing.
+`r2s` becomes the host binary — `r2sleigh` stays the name of the Sleigh
+toolchain — and the radare2 plugin survives the whole way as a thin client of
+the same engine, so the integration work is not thrown away and existing users
+lose nothing.
+
+Item one splits in two, and only half of it is hard. **Body lift at a known
+address** is recursive descent over direct branches, terminating at returns and
+refusing at indirect transfers; it needs no value domain, and refusing a switch
+rather than guessing it is the discipline this project already has. **Discovery**
+— finding every function, and completing a body whose switch has to be resolved
+— does need the value domain, and is sequenced behind it. Until then a
+non-stripped binary's symbol table supplies the function list, which is what
+makes the milestone reachable early.
 
 ## The seam, measured
 
@@ -206,20 +224,27 @@ the binary.
 
 ### Peeling order
 
-Each step removes boundary surface and leaves the tree working.
+The bridge is not ported. It is made dead and then deleted, in that order,
+because the plugin needs it until `r2s` can answer what the plugin path answers.
 
-1. **`snapshot_wire.c`** — 239 lines, zero radare2 calls. Free, and it proves the
-   pattern.
-2. **`snapshot_walk.c`** — 1218 lines, 13 call sites to bridge, 1205 lines of
-   logic relocated.
-3. **The sdb data import** — types and calling conventions read natively.
-   Twenty-two symbols gone, and type facts stop being marshalled across the
-   boundary, which is where the current type work keeps meeting friction.
-4. **Native image, `object`, `gimli`** — about thirty more symbols gone, and the
-   point at which `r2sleigh-cli` opens a binary with no radare2 present.
-5. **`snapshot_capture.c`** — by now mostly stranded, since most of its 539 call
-   sites have evaporated. Port what remains.
-6. **Discovery, cross-references, names** — built in Rust. The engine exists.
+1. **Native body lift at a given address.** Bytes from `Image`, decode and lift
+   through Sleigh, blocks and edges by recursive descent, refusing at indirect
+   transfers.
+2. **The sdb data import.** Types and calling conventions read natively. This is
+   not a side quest: `EngineAnalyzeRequest` carries `callee_facts`, and an empty
+   one degrades into a wall of refusals rather than failing, so a useful `pdd`
+   depends on it.
+3. **Native `EngineAnalyzeRequest` construction**, and `pdd` end to end in `r2s`.
+4. **Prove it** against the plugin path over the corpus: the same function, the
+   same rendering, from both sides.
+5. **Delete what that made dead** — `snapshot_wire.c` at 239 lines,
+   `snapshot_walk.c` at 1218 and `snapshot_wire.rs` at 3888, which is 5,345 lines
+   removed rather than relocated.
+6. **The name database**, which is also what closes eighteen of the twenty-four
+   `pd` disagreements against radare2 and so makes the differential oracle usable
+   for grading everything after it. `snapshot_capture.c` strands as this lands.
+7. **Discovery, cross-references, boundaries** — built in Rust, with confidence
+   attached. The engine exists.
 
 Every new FFI entry point added before step five makes step five harder, because
 it gives logic another reason to stay in C. The seam only shrinks from here. If a
@@ -239,6 +264,15 @@ tier keeps the right to refuse on top of those answers. `r2engine`'s request
 model and `r2source`'s fact ownership were both built assuming refusal is always
 available, and splitting that assumption is the real work of the inversion.
 Reshuffling crates is the easy part.
+
+The trigger is concrete rather than a judgement call. Everything `r2image`
+answers is parsed out of the container format and is genuinely proven, so the
+tension is not live yet. It goes live the instant discovery lands, because *this
+address is a function* is the first inferred fact in the tier. Until then the
+cheap half is taken and the expensive half is not: **every engine-tier fact
+carries a confidence field from the first one written**, even while every value
+of it is `Proven`. Adding the field now costs almost nothing; adding it later
+means touching every producer and every consumer.
 
 ## The IL, in tiers
 
@@ -475,46 +509,53 @@ Violating any of these costs more than the work it saves.
 
 ## Sequencing
 
-Dependency order, and each step ships something.
+Dependency order, and each step ships something. The inversion comes first and
+the agent surface is done at the end, when the tracks merge; an earlier draft of
+this document had that the other way round.
 
-1. **Stateless typed query API in `r2engine`**, with no transport. This is the
-   real work of the agent interface; the protocol is a wrapper.
-2. **Confidence on every field**, wired into `r2source`'s contracts so it cannot
-   be lost downstream.
-3. **Explain.** Surfacing the existing ledger. The cheapest high-differentiation
-   change available.
-4. **An agent protocol over the API**, about a dozen tools plus function
-   resources.
-5. **Budget-aware rendering**, with elision reported and fetchable.
-6. **Native image and binary parsing.** First step of the inversion, and the
-   point at which `r2sleigh-cli` opens a binary with no radare2 present.
-7. **Function discovery.** The point at which it is an engine.
-8. **Split the fact lattice** into engine-tier best-effort and decompiler-tier
-   certifying.
-9. **Value-set analysis and the memory model.** One project. Unblocks the
-   interprocedural graph, structure and array recovery, rewriting, and
-   deobfuscation.
-10. **Loop and induction variables.** Cheap, and already overdue.
-11. **Interprocedural control-flow graph to fixpoint.**
-12. **Binary diffing.** Independent of the above and high value.
-13. **Solver escalation**, with verification and value-set analysis as its
+1. **Native body lift at a given address.** Recursive descent over direct
+   branches, refusing at indirect transfers. Nothing below this is callable
+   without it.
+2. **The sdb type and convention import.** A dependency of a useful `pdd`
+   through `callee_facts`, not an independent win.
+3. **Native request construction**, and `pdd` end to end in `r2s`. The milestone.
+4. **The name database.** Closes eighteen of the twenty-four `pd` disagreements
+   and unblocks the differential oracle for everything after it.
+5. **Delete the bridge that is now dead.** Build, prove, then delete.
+6. **Discovery**, with confidence attached, and the fact lattice split at that
+   moment, because that is where the first inferred fact appears.
+7. **Value-set analysis and the memory model.** One project. Unblocks the
+   interprocedural graph, complete bodies through resolved switches, structure
+   and array recovery, rewriting, and deobfuscation.
+8. **Loop and induction variables.** Cheap, and already overdue.
+9. **Interprocedural control-flow graph to fixpoint.**
+10. **Binary diffing.** Independent of the above and high value.
+11. **Solver escalation**, with verification and value-set analysis as its
     consumers, so it does not repeat the deleted crate's fate.
-14. **Equivalence checking**, which makes every later claim mechanical rather
+12. **Equivalence checking**, which makes every later claim mechanical rather
     than hand-checked.
-15. **Command language and r2pipe compatibility.**
-16. **Trace recording and query.**
+13. **The rest of the command language and r2pipe compatibility.** Begun: `r2s`
+    already spells its commands as radare2 spells them so the two can be diffed.
+14. **The agent surface**, at the merge: the stateless typed query API in
+    `r2engine`, confidence carried through `r2source`'s contracts, explain over
+    the existing ledger, a protocol of about a dozen tools plus function
+    resources, and budget-aware rendering with elision reported and fetchable.
+    The query API is the real work; the protocol is a wrapper.
+15. **Trace recording and query.**
 
-Steps one through three are small and make this the best agent-facing binary
-analysis tool in existence, because nothing else ships confidence and nothing
-else can explain itself.
+Step fourteen is small and makes this the best agent-facing binary analysis tool
+in existence, because nothing else ships confidence and nothing else can explain
+itself. It is last because it is worth more over an engine that owns its facts
+than over a bridge into someone else's.
 
 ## Open questions
 
 **Naming.** `r2sleigh`, and the `r2` prefix on every crate, both assert that
-this is a guest inside radare2. If the plan is for it to become the host, the
-rename should happen before the names harden into documentation, tests and a
-plugin interface. Sleigh would then be an implementation detail of one crate
-rather than the product.
+this is a guest inside radare2, and the host binary is now `r2s`. The target
+name is to be decided now so it stops drifting through documentation and tests;
+the rename itself waits for a quiet moment, because renaming twelve crates while
+another branch is mid-flight is a collision for no functional gain. Sleigh
+becomes an implementation detail of one crate rather than the product.
 
 **Incremental recomputation.** Query-keyed memoisation with dependency tracking
 is the right model — patch a byte, invalidate only what depended on it — and it
@@ -528,5 +569,7 @@ scripting means r2pipe compatibility. Radare2's ecosystem is C-ABI plugins, and
 this decision determines whether any of it follows.
 
 **The vendored Sleigh dependency.** `libsla` and `libsla-sys` are patched to
-fork branches carrying open pull requests, and the corpus depends on them. Wait,
-ask upstream, or vendor.
+fork branches carrying open pull requests, and the corpus depends on them. This
+was a build-reproducibility concern; once `r2s` is the host binary it is a
+distribution blocker, because the shipped tool would depend on two unmerged pull
+requests on personal fork branches. Upstream them or vendor them.
