@@ -123,9 +123,29 @@ def refused(lines):
     return any("r2sleigh refused" in line for line in lines)
 
 
-DECLARATION = re.compile(r"^\s*(?:const\s+)?[A-Za-z_][\w*\s]*?\b(\w+)\s*;\s*$")
-ASSIGNED = re.compile(r"\b{}\s*(?:=[^=]|\+\+|--)")
+# A declaration names its variable last: `const int8_t* name;`. The name is an
+# identifier, which is what keeps an array bound from being read as one.
+DECLARATION = re.compile(r"^\s*(?:const\s+)?[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$")
 PROOF_REFUSED = re.compile(r"(\d+) refused")
+# `==`, `!=`, `<=`, `>=` and `!` are comparisons; an assignment is a lone `=`.
+ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
+
+
+def assigns(line, name):
+    """Whether this line writes `name`, however it spells the destination.
+
+    A write reaches its variable through casts, indices and address-of:
+    `((uint32_t*)&slot)[3] = 0` assigns `slot` as surely as `slot = 0` does.
+    So the test is whether the name stands left of the assignment, not whether
+    it is the whole of it. Taking its address counts too: whoever holds the
+    pointer may write through it.
+    """
+    if re.search(r"&\s*{}\b".format(re.escape(name)), line):
+        return True
+    found = ASSIGNMENT.search(line)
+    if not found:
+        return False
+    return re.search(r"\b{}\b".format(re.escape(name)), line[: found.start()]) is not None
 
 
 def undefined_reads(lines):
@@ -137,7 +157,6 @@ def undefined_reads(lines):
     an undefined read under `0 refused` says the accounting is wrong, not just
     the output.
     """
-    body = "\n".join(lines)
     found = []
     for line in lines:
         declared = DECLARATION.match(line)
@@ -146,10 +165,12 @@ def undefined_reads(lines):
         name = declared.group(1)
         if name in ("return", "else", "struct", "union"):
             continue
-        if re.search(ASSIGNED.pattern.format(re.escape(name)), body):
+        if any(assigns(other, name) for other in lines):
             continue
-        # Declared, never written. Read anywhere else is a read of nothing.
-        uses = len(re.findall(r"\b{}\b".format(re.escape(name)), body))
+        # Declared, never written. A read anywhere else is a read of nothing.
+        uses = sum(
+            len(re.findall(r"\b{}\b".format(re.escape(name)), other)) for other in lines
+        )
         if uses > 1:
             found.append(name)
     return found
