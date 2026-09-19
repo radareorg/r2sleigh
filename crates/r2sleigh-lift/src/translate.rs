@@ -1,15 +1,11 @@
-//! Shared P-code translation abstraction.
+//! Operand helpers for the canonical libsla P-code translator.
 //!
-//! This module provides a trait-based abstraction for translating P-code operations
-//! to r2il, reducing code duplication between the `disasm` and `pcode` modules.
+//! Opcode dispatch lives in `disasm`; these helpers validate the common operand
+//! shapes used by its translation arms.
 
 use r2il::{R2ILOp, SpaceId, Varnode};
 
-/// A source of P-code operands that can be translated to r2il.
-///
-/// This trait abstracts over different P-code representations:
-/// - `libsla::PcodeInstruction` (from runtime disassembly)
-/// - `RawPcodeOp` (from raw P-code bytes)
+/// A validated view of operands from a libsla P-code instruction.
 pub trait PcodeSource {
     /// Get the output varnode, if any.
     fn output(&self) -> Option<Varnode>;
@@ -24,7 +20,7 @@ pub trait PcodeSource {
     fn input_count(&self) -> usize;
 
     /// Get the space ID from a space index (for LOAD/STORE operations).
-    fn space_from_index(&self, idx: u64) -> SpaceId;
+    fn space_from_index(&self, idx: u64) -> Option<SpaceId>;
 }
 
 /// Errors that can occur during translation.
@@ -89,93 +85,6 @@ where
     Ok(f(dst, a, b))
 }
 
-/// Common P-code opcodes for translation.
-///
-/// These numeric values match Ghidra's P-code opcode definitions.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommonOp {
-    Copy = 1,
-    Load = 2,
-    Store = 3,
-    Branch = 4,
-    CBranch = 5,
-    BranchInd = 6,
-    Call = 7,
-    CallInd = 8,
-    CallOther = 9,
-    Return = 10,
-
-    IntEqual = 11,
-    IntNotEqual = 12,
-    IntSLess = 13,
-    IntSLessEqual = 14,
-    IntLess = 15,
-    IntLessEqual = 16,
-    IntZExt = 17,
-    IntSExt = 18,
-    IntAdd = 19,
-    IntSub = 20,
-    IntCarry = 21,
-    IntSCarry = 22,
-    IntSBorrow = 23,
-    Int2Comp = 24,  // Two's complement (unary minus)
-    IntNegate = 25, // Bitwise NOT (confusing Ghidra naming)
-    IntXor = 26,
-    IntAnd = 27,
-    IntOr = 28,
-    IntLeft = 29,
-    IntRight = 30,
-    IntSRight = 31,
-    IntMult = 32,
-    IntDiv = 33,
-    IntSDiv = 34,
-    IntRem = 35,
-    IntSRem = 36,
-
-    BoolNot = 37,
-    BoolXor = 38,
-    BoolAnd = 39,
-    BoolOr = 40,
-
-    FloatEqual = 41,
-    FloatNotEqual = 42,
-    FloatLess = 43,
-    FloatLessEqual = 44,
-    FloatNaN = 46,
-    FloatAdd = 47,
-    FloatDiv = 48,
-    FloatMult = 49,
-    FloatSub = 50,
-    FloatNeg = 51,
-    FloatAbs = 52,
-    FloatSqrt = 53,
-    Int2Float = 54,
-    Float2Int = 55,
-    FloatFloat = 56,
-    Trunc = 57,
-    FloatCeil = 58,
-    FloatFloor = 59,
-    FloatRound = 60,
-
-    Multiequal = 61,
-    Indirect = 62,
-    Piece = 63,
-    Subpiece = 64,
-
-    Cast = 65,
-    PtrAdd = 66,
-    PtrSub = 67,
-    SegmentOp = 68,
-    CpuId = 69,
-    New = 70,
-
-    Insert = 71,
-    Extract = 72,
-    PopCount = 73,
-    Lzcount = 74,
-}
-
 /// Translate a LOAD operation.
 pub fn translate_load<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     let dst = require_output(source, "LOAD")?;
@@ -183,7 +92,9 @@ pub fn translate_load<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
         .input_raw_offset(0)
         .ok_or(TranslateError::MissingInput("LOAD", 0))?;
     let addr = require_input(source, 1, "LOAD")?;
-    let space = source.space_from_index(space_idx);
+    let space = source
+        .space_from_index(space_idx)
+        .ok_or(TranslateError::InvalidSpace(space_idx))?;
     Ok(R2ILOp::Load { dst, space, addr })
 }
 
@@ -194,7 +105,9 @@ pub fn translate_store<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
         .ok_or(TranslateError::MissingInput("STORE", 0))?;
     let addr = require_input(source, 1, "STORE")?;
     let val = require_input(source, 2, "STORE")?;
-    let space = source.space_from_index(space_idx);
+    let space = source
+        .space_from_index(space_idx)
+        .ok_or(TranslateError::InvalidSpace(space_idx))?;
     Ok(R2ILOp::Store { space, addr, val })
 }
 
@@ -249,6 +162,84 @@ pub fn translate_ptrsub<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     })
 }
 
+/// Rewrite every direct-address memory operand into an explicit access.
+///
+/// Sleigh spells a memory operand with a constant address as a varnode in the
+/// ram space, and SSA construction would rename that like a register: a read
+/// became an undefined variable, and a write a local nothing else could see.
+/// A read becomes a load into a fresh temporary, a written output becomes a
+/// temporary the operation writes and a store carries out; a copy needs no
+/// temporary at all. A code address a transfer names is not a memory operand.
+pub fn canonicalize_memory_operands(
+    ops: Vec<R2ILOp>,
+    address_size: u32,
+    next_temp: &mut u64,
+) -> Vec<R2ILOp> {
+    let mut out = Vec::with_capacity(ops.len());
+    let mut temp = |size: u32| {
+        let node = Varnode::unique(*next_temp, size);
+        *next_temp += u64::from(size).max(1);
+        node
+    };
+    for mut op in ops {
+        match &op {
+            R2ILOp::Copy { dst, src } if src.space == SpaceId::Ram && dst.space != SpaceId::Ram => {
+                out.push(R2ILOp::Load {
+                    dst: dst.clone(),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(src.offset, address_size),
+                });
+                continue;
+            }
+            R2ILOp::Copy { dst, src } if dst.space == SpaceId::Ram && src.space != SpaceId::Ram => {
+                out.push(R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(dst.offset, address_size),
+                    val: src.clone(),
+                });
+                continue;
+            }
+            _ => {}
+        }
+        let code_target = match &op {
+            R2ILOp::Branch { target }
+            | R2ILOp::CBranch { target, .. }
+            | R2ILOp::Call { target } => Some(target.clone()),
+            _ => None,
+        };
+        for input in op.inputs_mut() {
+            if input.space != SpaceId::Ram || code_target.as_ref() == Some(&*input) {
+                continue;
+            }
+            let loaded = temp(input.size);
+            out.push(R2ILOp::Load {
+                dst: loaded.clone(),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(input.offset, address_size),
+            });
+            *input = loaded;
+        }
+        let written = op
+            .output_mut()
+            .filter(|output| output.space == SpaceId::Ram)
+            .map(|output| {
+                let address = output.offset;
+                let value = temp(output.size);
+                *output = value.clone();
+                (address, value)
+            });
+        out.push(op);
+        if let Some((address, val)) = written {
+            out.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: Varnode::constant(address, address_size),
+                val,
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,13 +267,13 @@ mod tests {
             self.inputs.len()
         }
 
-        fn space_from_index(&self, idx: u64) -> SpaceId {
-            match idx {
+        fn space_from_index(&self, idx: u64) -> Option<SpaceId> {
+            Some(match idx {
                 0 => SpaceId::Ram,
                 1 => SpaceId::Register,
                 2 => SpaceId::Unique,
                 n => SpaceId::Custom(n as u32),
-            }
+            })
         }
     }
 
@@ -356,5 +347,76 @@ mod tests {
             }
             _ => panic!("Expected PtrAdd"),
         }
+    }
+
+    #[test]
+    fn memory_operands_become_loads_and_stores() {
+        let mut next = 0x100;
+        let ops = vec![
+            R2ILOp::IntZExt {
+                dst: Varnode::register(0, 8),
+                src: Varnode::ram(0x18da8, 1),
+            },
+            R2ILOp::IntAdd {
+                dst: Varnode::ram(0x2000, 4),
+                a: Varnode::ram(0x2000, 4),
+                b: Varnode::constant(1, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(8, 8),
+                src: Varnode::ram(0x3000, 8),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::ram(0x3008, 8),
+                src: Varnode::register(8, 8),
+            },
+            R2ILOp::Branch {
+                target: Varnode::ram(0x4000, 8),
+            },
+        ];
+        let out = canonicalize_memory_operands(ops, 8, &mut next);
+        assert_eq!(
+            out,
+            vec![
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x100, 1),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x18da8, 8),
+                },
+                R2ILOp::IntZExt {
+                    dst: Varnode::register(0, 8),
+                    src: Varnode::unique(0x100, 1),
+                },
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x101, 4),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x2000, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::unique(0x105, 4),
+                    a: Varnode::unique(0x101, 4),
+                    b: Varnode::constant(1, 4),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x2000, 8),
+                    val: Varnode::unique(0x105, 4),
+                },
+                R2ILOp::Load {
+                    dst: Varnode::register(8, 8),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x3000, 8),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x3008, 8),
+                    val: Varnode::register(8, 8),
+                },
+                R2ILOp::Branch {
+                    target: Varnode::ram(0x4000, 8),
+                },
+            ]
+        );
+        assert_eq!(next, 0x109);
     }
 }

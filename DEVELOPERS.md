@@ -225,7 +225,7 @@ For robustness, the decompiler has three tiers:
 3. **Linear emission**: per-block statement output as last resort
 
 When fallback triggers, the output includes
-`/* r2dec fallback: <reason> */`.
+`/* r2sleigh refused <function>: <reason> */`.
 
 ### Architecture Assumptions
 

@@ -1,0 +1,435 @@
+# Engine Vision
+
+> What r2sleigh is becoming, and why. This document sits above `ROADMAP.md`:
+> the roadmap is the ordered execution list for the current decompiler work,
+> this is the shape the whole subsystem is aiming at.
+
+## Thesis
+
+r2sleigh is not a decompiler plugin. It is a binary analysis engine that
+happens to ship a decompiler, and it is built agent-first.
+
+Two statements follow from that, and everything in this document is a
+consequence of one of them.
+
+The first is that the engine owns its facts. Today radare2 finds the functions,
+collects a typed snapshot, and hands it down for r2sleigh to render. The
+dependency runs the wrong way for an engine: whoever discovers the work owns the
+program, and whoever owns the program decides what is analysed next and what
+gets invalidated when a byte changes. The engine has to be the owner.
+
+The second is that the primary consumer is an agent, not a human at a terminal.
+Agents fail on binary analysis tools for reasons that are structural rather than
+cosmetic: a hidden seek cursor means the tool answers about a location the agent
+did not intend, a scripted address-then-reseek-then-print sequence burns a turn
+per hop and refills context each time, rendered text has to be parsed before it
+can be reasoned about, an empty result is indistinguishable from a malformed
+query, unbounded output exhausts the context window on bytes nobody needed, and
+a heuristic guess arrives looking exactly like a proven fact. Each of those has
+a different fix, and none of them is a better renderer.
+
+The measure of success is not command count or crate count. It is whether an
+agent can answer a real reverse-engineering question in one or two calls, with
+the engine's confidence attached to every field, and whether it can ask why.
+
+## Non-goals
+
+These are decisions, not omissions.
+
+**No rewrite of radare2.** `libr` is roughly 1.1 million lines: 347k in `arch`,
+210k in `bin`, 179k in `core`, 117k in `anal`. A full rewrite produces a worse
+tool for years and ships nothing in the meantime. The plan is to invert the
+dependency and then delete C library by library, with something shippable at
+every step.
+
+**No native terminal user interface.** r2sleigh already runs inside radare2, so
+radare2's visual mode renders its output and the project gets a human terminal
+interface without owning one. The human surface is `r2sleigh-cli` plus the
+radare2 plugin. A typed listing model that separates results from rendering is
+still worth building — the agent interface and the plugin both consume it — but
+owning a renderer, a layout engine, a keymap and an input loop is not.
+
+**No new architectures.** x86 and ARM depth comes first, and stays first, until
+the phases below are complete and adding a CPU is cheap and safe. Work that
+makes adding an architecture easier still counts as depth work.
+
+**No parallel pipelines.** One implementation per job. When a newer approach is
+better the older one is deleted rather than kept behind a flag. This is the
+constraint that makes the rest of the document tractable, and it is the one most
+easily lost under delivery pressure.
+
+**No per-architecture semantics.** Semantics come from Sleigh, always. ESIL's
+failure is that 186 architecture plugins each hand-wrote a stringly-typed
+approximation of their own instruction set, most incomplete and many wrong. That
+mistake is not to be repeated in any form, for any reason.
+
+## Component topology
+
+Three processes, and the boundaries are chosen for a reason rather than for
+symmetry.
+
+**The engine** holds the IL, the analysis layers, the fact database and the
+decompiler, in one process and many crates. The decompiler queries analysis
+constantly; a serialization boundary between them would be ruinous, and the
+project has already spent effort removing JSON-shaped internal seams. Crates
+give modularity at no runtime cost. Re-introducing an RPC hop inside this
+boundary undoes completed work.
+
+**The debugger** is a separate process, and has to be. It needs different
+privileges, it owns `ptrace` or its platform equivalent, the debuggee can crash
+it, and remote targets are a first-class case. The protocol is an existing one —
+gdb-remote for remote targets, DAP for editor clients — rather than an invented
+one.
+
+**Frontends** are clients of a typed engine API. The radare2 plugin is one, the
+CLI is one, the agent interface is one. None of them is privileged, and the
+engine never formats output for any of them. This is the discipline `libr/core`
+lost: 5793 references to the console layer in 179k lines, against 93 in the
+whole of `libr/anal` and zero in `libr/arch`. The libraries stayed clean; the
+core fused command dispatch, analysis driving and rendering into one blob, and
+that is why radare2 cannot thread its analysis and cannot be tested at the
+interface.
+
+## Inverting the dependency
+
+The engine already exists in outline. `r2il` is the substrate,
+`r2sleigh-lift` decodes and lifts, `r2ssa` carries the control-flow graph,
+dominator tree, def-use, liveness, taint, slicing and interprocedural facts,
+`r2types` carries constraint-based type inference, `r2dec` structures and
+renders, and `r2engine` orchestrates requests. `r2sleigh-cli` is already a
+standalone binary. What is missing is not analysis; it is the things radare2
+currently supplies through the snapshot seam.
+
+1. **Function discovery.** The largest gap, and smaller than it appears.
+   `r2ssa` already constructs control-flow graphs and dominator trees — what it
+   never does is decide which addresses are functions. That is entry seeding,
+   prelude scanning with verification, and a worklist, not the bulk of
+   `fcn.c`.
+
+2. **Image and IO.** Byte mapping, layers, maps, banks, and patched views.
+
+3. **Binary parsing.** Sections, symbols, relocations, imports, entry points.
+   This is the highest-value replacement in the whole plan: `object`, `goblin`,
+   `gimli` and `pdb` cover the mainstream formats in a fraction of the lines,
+   and format parsers are where memory-safety defects actually live.
+
+4. **Cross-references, flags, strings, and the global name database.** These
+   should be queries over the IL rather than separate scanners.
+
+5. **Debug information.** Currently reached through radare2; `gimli` is better
+   than the C path for DWARF, and `pdb` for Windows.
+
+6. **Command language, shell, and the r2pipe protocol.** The command language is
+   radare2's real moat and has to be reproduced faithfully, including seeking,
+   grepping, piping and iterators, or users will not follow.
+
+The inversion itself is mechanical. `r2sleigh-cli` becomes the host binary and
+links `libr_bin` and `libr_io` as C libraries — the same FFI, direction
+reversed — then those are replaced one at a time and the FFI deleted. The
+radare2 plugin survives the whole way as a thin client of the same engine, so
+the integration work is not thrown away and existing users lose nothing.
+
+### The tension this creates, stated now
+
+r2sleigh's contract today is *given a function, render it, and refuse when the
+facts are not proven*. Certifying refusal is correct for a decompiler. It is
+wrong for an analysis engine: a function listing cannot refuse, and neither can
+a cross-reference query.
+
+So the fact lattice needs two consumption policies rather than two pipelines.
+The engine tier answers best-effort with confidence attached; the decompiler
+tier keeps the right to refuse on top of those answers. `r2engine`'s request
+model and `r2source`'s fact ownership were both built assuming refusal is always
+available, and splitting that assumption is the real work of the inversion.
+Reshuffling crates is the easy part.
+
+## The IL, in tiers
+
+One substrate is not enough, and the reason is diagnostic rather than
+aesthetic. When output is wrong today there is no inspectable middle, so the
+defect cannot be localised to a lowering. Three tiers, each one crate with one
+job, each independently printable:
+
+**Low** is `r2il` as lifted from Sleigh: machine-faithful, flags explicit, no
+variables. **Medium** is SSA with stack variables, resolved calls and dead flag
+elimination — `r2ssa` promoted to a tier with a printable form of its own.
+**High** is structured and typed, C-shaped, from `r2dec`.
+
+Each tier gets a rendering, so every defect belongs to exactly one lowering and
+can be shown to be there.
+
+Sleigh is the only source of semantics. Capstone, if it is used at all, is used
+only for architectures Sleigh has no specification for, behind the same decoder
+interface, and it never produces IL. Sleigh's decode cost is the known
+objection; the answers are ahead-of-time compilation of the specification into
+match tables at build time — `r2sleigh-export` is the right home — and caching
+decoded instructions keyed by bytes and context.
+
+## Analysis capability
+
+The honest accounting is that radare2 has more than its reputation suggests and
+r2sleigh has more still, and that the most valuable gaps are ones neither has.
+
+Radare2 has and does adequately: FLIRT, zignatures, Itanium and MSVC RTTI,
+vtables, DWARF, PDB, the Go pclntab, IO layers, and search. None of that should
+be rebuilt. Radare2 has but does weakly: jump tables as 1868 lines of
+per-architecture heuristics, variable recovery as stack-pointer heuristics, type
+inference in 799 lines, and binary diffing in 366 lines. The ESIL dataflow graph
+is 2219 lines down a dead end.
+
+r2sleigh already has constant propagation, taint, slicing, interprocedural
+facts, indirect-call handling, aggregate access, interface recovery,
+fingerprinting, and constraint-based type inference with a lattice and a solver.
+
+Neither has strided intervals, a points-to or alias model, loop and induction
+variable analysis, exception-handler recovery, or deobfuscation.
+
+### Tier one: the keystone
+
+**Value-set analysis.** Abstract interpretation over the medium tier with
+strided intervals and widening. This is the single biggest hole in the stack.
+`indirect.rs` is heuristic because it has no value domain to consult, and
+radare2's jump table code exists at all because radare2 has no value domain. One
+pass over the IL replaces both, and it is architecture-independent, so it
+deepens x86 and ARM rather than widening.
+
+**A memory model.** Abstract locations in the CodeSurfer sense: memory
+partitioned into a region and an offset, where the region is a global, a named
+stack frame, or an allocation site. `aggregate_access.rs` is doing structure
+recovery without one, which is exactly why it is small and why it will not grow
+past guessing until this exists.
+
+These two are one fixpoint, not two projects.
+
+**Solver escalation, and the lesson from the deleted crate.** The symbolic crate
+was 67k lines with z3 in seventeen files and one reach from the render path, and
+it was deleted for exactly that reason. The lesson is not that SMT is
+unnecessary; it is that a solver subsystem with no consumers does not pay for
+itself, and that building the subsystem before its consumers is the mistake.
+Value-set analysis and hypothesis verification are the consumers. Build them
+first, and let the solver come back as an escalation behind the facts API —
+domains answer first, escalate when blocked and the budget allows, one call
+site, one direction of flow.
+
+### Tier two: what the keystone unlocks
+
+**Interprocedural control-flow graph to fixpoint**, with indirect calls resolved
+from value sets, vtables and RTTI, and type signatures, iterated against the
+call graph. This is the largest single improvement available to decompiler
+output quality.
+
+**Loop and induction variable analysis.** Nothing anywhere in either tree does
+this. It is required for emitting real `for` loops, for array recovery where the
+stride is the induction step, and for the loop-carrier defects already
+diagnosed. It is cheap to build and its absence is already being paid for.
+
+**Structure and array recovery from access patterns**, probabilistically, over
+the memory model. Both Ghidra and IDA are weak here, so this is genuine
+differentiation rather than catching up.
+
+**Exception-handler recovery.** `.eh_frame` and `.gcc_except_table` into real
+`try`/`catch`, and the MSVC and SEH equivalents on Windows. Radare2 parses
+`.eh_frame` for unwinding and never recovers handlers. Well-specified, no
+research risk.
+
+### Tier three: absent from both, high value
+
+**Binary diffing at current state of the art**, in two layers: structural
+matching over the call graph and control-flow graphs, propagating outward from
+confident anchors, and feature-vector matching over the decompiled IL for the
+fuzzy case. `fingerprint.rs` is already the seed of the second layer. This is
+the highest user-visible value per line of code on the list.
+
+**Corpus-scale similarity and library identification.** FLIRT is exact-pattern
+and brittle across compiler versions and optimisation levels; fuzzy matching
+against a corpus built from source beats it badly on optimised code.
+
+**Static rewriting and reassembleable output.** Nothing in the radare2 world has
+this. It converts the tool from one that reads binaries to one that transforms
+them, and it depends on symbolisation being correct, which depends on tier one.
+
+**Deobfuscation passes.** Opaque predicate detection, control-flow flattening
+reversal, and mixed boolean-arithmetic simplification. The dispatcher analysis
+already in the tree is the natural starting point for the second, and
+`r2rewrite` is the correct home for the third.
+
+### Tier four: language runtimes
+
+Go beyond the pclntab — runtime type metadata, interface tables, channel and
+goroutine structure. Rust, which has no demangler in `libr` at all, and whose
+release binaries carry panic locations that hand over file, line and function
+identity for free if anyone harvests them. C++ finished rather than started: the
+RTTI data is already parsed and then not consumed, so class hierarchies never
+reach `this` typing, method signatures or the rendered output.
+
+### Tier five: research-grade, judged separately
+
+Probabilistic and superset disassembly for stripped and obfuscated code, and
+learned function-boundary detection. Both are real and published, both are
+expensive, and neither should start until stripped-binary quality is
+demonstrably the bottleneck.
+
+### Tier six: the thing nobody ships
+
+**Equivalence checking of the decompiler's own output.** Re-lift the emitted C
+and compare its IL against the original function's under a solver, and report
+divergence instead of emitting something wrong in silence. This follows directly
+from the certifying discipline the project already has, no shipping decompiler
+does it, and it is the only mechanical answer to "is the decompiler right" —
+a question currently answered by hand, one function at a time.
+
+## The agent interface
+
+This is the differentiator, and most of the machinery already exists:
+`observation_journal.rs`, `contracts.rs`, `obligation.rs`, `evidence.rs`,
+`ledger.rs` and `proven.rs` together are a substantial evidence system. What is
+missing is a surface that exposes it.
+
+### Principles
+
+**Stateless, addressed queries.** Every call carries its own target. There is no
+cursor, ever. A query is idempotent, cacheable, order-independent and safe to
+retry.
+
+**Compound questions in one call.** The round-trip tax disappears only if the
+agent can express the whole question. *Which functions reach `memcpy` with a
+size derived from an argument and not bounded by a comparison* has to be one
+query, and the interprocedural, taint and slicing layers already compute the
+facts it needs. The facts exist; the query surface does not.
+
+**Confidence on every field, never optional.** Every returned fact is proven,
+inferred, guessed or unknown. An agent branches on that and a human ignores it,
+which is why the certifying discipline that constrains the decompiler is an
+asset here rather than a cost. The wire format must make confidence impossible
+to drop.
+
+**Token budget as a parameter.** Every call takes a budget; the engine elides to
+fit and reports what it elided and how to fetch it. Context is the scarce
+resource, not processor time.
+
+**Progressive disclosure.** The default answer is a summary plus stable handles,
+and the agent drills only where it needs to. Nothing dumps by default.
+
+**Decompiled C as the default rendering.** Models read C far better than
+assembly and it is several times cheaper in tokens. Assembly and IL are
+drill-downs, not the starting point.
+
+**Errors teach.** A malformed query returns the schema, the nearest valid form,
+and what was wrong with the input. Silence is the failure mode that makes agents
+confabulate.
+
+### Two primitives nobody else has
+
+**Explain.** Given any fact, return its evidence chain from the obligation
+ledger. An agent that can interrogate its tool's reasoning hallucinates far
+less, and the data structure is already built.
+
+**Verify.** Given a hypothesis — this function is a CRC, this loop cannot
+overflow, these two functions are equivalent — return proved, disproved with a
+counterexample, or unknown, from emulation and the solver. This inverts the
+relationship: the agent proposes and the engine disproves. It is what makes the
+tool trustworthy inside a loop rather than a confident liar.
+
+### Shape of the surface
+
+Agents degrade past roughly thirty tools, so the surface is small: an overview,
+a function listing, an inspection of one function at a chosen depth, a
+decompilation with a tier selector, cross-references with a depth bound, a
+general query with an introspectable schema, explain, verify, strings and data
+with references resolved, annotation that records agent provenance and is
+undoable, search, and diff. Roughly a dozen.
+
+Function decompilations are exposed as addressable resources, not just tool
+results, so an agent can reference one without refetching it and the host can
+cache it outside the conversation.
+
+Writing radare2 command strings is an escape hatch at most and never the
+interface, because command strings reintroduce every failure mode named at the
+top of this document.
+
+## The debugger
+
+The complaint that motivates this design is really about step-and-query: reach a
+breakpoint, read a value, lose the state, start again. The fix is
+record-and-query.
+
+Record a trace once, then answer every question declaratively against the
+recording — what was this register at the third execution of this address, what
+wrote to this stack slot before the fault, which branch selected this path.
+Reverse execution becomes another query. Nothing is re-run and no state is lost,
+which is exactly what the multi-turn agent loop needs.
+
+The query layer over recordings comes before live stepping. Replay at IL level
+also answers questions a native debugger cannot.
+
+## Invariants
+
+Violating any of these costs more than the work it saves.
+
+1. One fact, one owner. One implementation per job.
+2. The engine never formats output. Rendering is a separate crate.
+3. No implicit cursor anywhere in the query surface.
+4. Confidence travels with every fact and cannot be stripped.
+5. Semantics come from Sleigh. No hand-written per-architecture semantics, ever.
+6. No serialization boundary inside the engine process.
+7. Analysis is demand-driven and invalidated incrementally, not batched.
+8. Every tier of the IL is printable.
+9. A defect is fixed where it originates.
+
+## Sequencing
+
+Dependency order, and each step ships something.
+
+1. **Stateless typed query API in `r2engine`**, with no transport. This is the
+   real work of the agent interface; the protocol is a wrapper.
+2. **Confidence on every field**, wired into `r2source`'s contracts so it cannot
+   be lost downstream.
+3. **Explain.** Surfacing the existing ledger. The cheapest high-differentiation
+   change available.
+4. **An agent protocol over the API**, about a dozen tools plus function
+   resources.
+5. **Budget-aware rendering**, with elision reported and fetchable.
+6. **Native image and binary parsing.** First step of the inversion, and the
+   point at which `r2sleigh-cli` opens a binary with no radare2 present.
+7. **Function discovery.** The point at which it is an engine.
+8. **Split the fact lattice** into engine-tier best-effort and decompiler-tier
+   certifying.
+9. **Value-set analysis and the memory model.** One project. Unblocks the
+   interprocedural graph, structure and array recovery, rewriting, and
+   deobfuscation.
+10. **Loop and induction variables.** Cheap, and already overdue.
+11. **Interprocedural control-flow graph to fixpoint.**
+12. **Binary diffing.** Independent of the above and high value.
+13. **Solver escalation**, with verification and value-set analysis as its
+    consumers, so it does not repeat the deleted crate's fate.
+14. **Equivalence checking**, which makes every later claim mechanical rather
+    than hand-checked.
+15. **Command language and r2pipe compatibility.**
+16. **Trace recording and query.**
+
+Steps one through three are small and make this the best agent-facing binary
+analysis tool in existence, because nothing else ships confidence and nothing
+else can explain itself.
+
+## Open questions
+
+**Naming.** `r2sleigh`, and the `r2` prefix on every crate, both assert that
+this is a guest inside radare2. If the plan is for it to become the host, the
+rename should happen before the names harden into documentation, tests and a
+plugin interface. Sleigh would then be an implementation detail of one crate
+rather than the product.
+
+**Incremental recomputation.** Query-keyed memoisation with dependency tracking
+is the right model — patch a byte, invalidate only what depended on it — and it
+is the difference between opening a large binary instantly and waiting for a
+batch analysis. Whether to adopt an existing framework or hand-roll it is
+undecided; the model is not.
+
+**The plugin interface for the standalone engine.** Rust has no stable ABI, so
+native extension means a C interface, sandboxed extension means WebAssembly, and
+scripting means r2pipe compatibility. Radare2's ecosystem is C-ABI plugins, and
+this decision determines whether any of it follows.
+
+**The vendored Sleigh dependency.** `libsla` and `libsla-sys` are patched to
+fork branches carrying open pull requests, and the corpus depends on them. Wait,
+ask upstream, or vendor.

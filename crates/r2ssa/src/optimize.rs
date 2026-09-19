@@ -4,20 +4,21 @@
 //! intended to simplify analysis and decompilation output.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::{BlockTerminator, PhiNode, SSAFunction, SSAOp, SSAVar, SourceSite};
+use crate::control::{SsaExecutionStopReason, SsaWorkControl, UncheckedSsaWorkControl};
+use crate::{
+    BlockTerminator, CanonicalStorageId, CanonicalStorageSpace, PhiNode, SSAFunction, SSAOp,
+    SSAVar, SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite,
+    SourceTypeKind,
+};
 
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
     pub max_iterations: usize,
     pub enable_sccp: bool,
-    pub enable_const_prop: bool,
     pub enable_inst_combine: bool,
-    pub enable_copy_prop: bool,
-    pub enable_cse: bool,
-    pub enable_dce: bool,
     pub preserve_memory_reads: bool,
 }
 
@@ -30,7 +31,6 @@ pub struct OptimizationConfig {
 pub struct DecompilePrepConfig {
     pub max_iterations: usize,
     pub enable_inst_combine: bool,
-    pub enable_cse: bool,
 }
 
 impl Default for OptimizationConfig {
@@ -38,11 +38,7 @@ impl Default for OptimizationConfig {
         Self {
             max_iterations: 4,
             enable_sccp: true,
-            enable_const_prop: true,
             enable_inst_combine: true,
-            enable_copy_prop: true,
-            enable_cse: true,
-            enable_dce: true,
             preserve_memory_reads: false,
         }
     }
@@ -52,8 +48,7 @@ impl Default for DecompilePrepConfig {
     fn default() -> Self {
         Self {
             max_iterations: 1,
-            enable_inst_combine: false,
-            enable_cse: false,
+            enable_inst_combine: true,
         }
     }
 }
@@ -63,11 +58,7 @@ impl From<&DecompilePrepConfig> for OptimizationConfig {
         Self {
             max_iterations: value.max_iterations.max(1),
             enable_sccp: false,
-            enable_const_prop: false,
             enable_inst_combine: value.enable_inst_combine,
-            enable_copy_prop: false,
-            enable_cse: value.enable_cse,
-            enable_dce: false,
             preserve_memory_reads: true,
         }
     }
@@ -82,46 +73,66 @@ pub struct OptimizationStats {
     pub sccp_blocks_removed: usize,
     pub constants_propagated: usize,
     pub ops_simplified: usize,
-    pub copies_propagated: usize,
-    pub phis_simplified: usize,
-    pub cse_replacements: usize,
-    pub dce_removed_ops: usize,
-    pub dce_removed_phis: usize,
+    pub chains_fused: usize,
 }
 
 /// Run the SSA optimization pipeline on a function.
 pub fn optimize_function(func: &mut SSAFunction, config: &OptimizationConfig) -> OptimizationStats {
+    optimize_function_with_control(func, config, &UncheckedSsaWorkControl)
+        .expect("unchecked SSA optimization cannot stop")
+}
+
+pub(crate) fn optimize_function_with_control<C: SsaWorkControl + ?Sized>(
+    func: &mut SSAFunction,
+    config: &OptimizationConfig,
+    control: &C,
+) -> Result<OptimizationStats, SsaExecutionStopReason> {
+    optimize_function_with_interface_and_control(func, config, None, control)
+}
+
+pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?Sized>(
+    func: &mut SSAFunction,
+    config: &OptimizationConfig,
+    function_interface: Option<&SourceFunctionInterface>,
+    control: &C,
+) -> Result<OptimizationStats, SsaExecutionStopReason> {
+    control.poll()?;
     let mut stats = OptimizationStats::default();
     let max_iters = config.max_iterations.max(1);
 
-    if config.enable_sccp {
-        let (consts, executable_edges) = sccp(func);
-        apply_sccp_results(func, &consts, &executable_edges, &mut stats);
-    }
-
+    // Constants and folds feed each other: a fold through a definition can
+    // turn a lane read into a constant copy, which is a constant the next
+    // propagation round carries to its readers. Both run until neither moves.
     for _ in 0..max_iters {
+        control.poll()?;
         let mut changed = false;
 
-        if config.enable_const_prop && !config.enable_sccp {
-            let consts = compute_constants(func, max_iters);
-            if replace_sources_with_constants(func, &consts, &mut stats) {
+        if config.enable_sccp {
+            let (consts, executable_edges) = sccp_with_control(func, control)?;
+            control.poll()?;
+            if apply_sccp_results(
+                func,
+                &consts,
+                &executable_edges,
+                function_interface,
+                &mut stats,
+            ) {
                 changed = true;
             }
         }
 
+        // Before the shape passes and whatever they are configured to do: a
+        // machine comparison is a comparison in the graph, not a flag algebra
+        // for a later stage to undo.
+        if fold_condition_codes_in_function(func, &mut stats) {
+            changed = true;
+        }
+
+        if fuse_compare_chains_in_function(func, &mut stats) {
+            changed = true;
+        }
+
         if config.enable_inst_combine && inst_combine(func, &mut stats) {
-            changed = true;
-        }
-
-        if config.enable_cse && common_subexpr_elim(func, &mut stats) {
-            changed = true;
-        }
-
-        if config.enable_copy_prop && copy_propagation(func, &mut stats) {
-            changed = true;
-        }
-
-        if config.enable_dce && dead_code_elim(func, config, &mut stats) {
             changed = true;
         }
 
@@ -131,7 +142,8 @@ pub fn optimize_function(func: &mut SSAFunction, config: &OptimizationConfig) ->
         }
     }
 
-    stats
+    control.poll()?;
+    Ok(stats)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,7 +151,10 @@ struct VarKey {
     name: String,
     version: u32,
     size: u32,
+    rename_disambiguator: u32,
 }
+
+type SccpResult = (HashMap<VarKey, u64>, HashSet<(u64, u64)>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LatticeValue {
@@ -173,20 +188,28 @@ enum UseLocation {
 impl VarKey {
     fn from_var(var: &SSAVar) -> Self {
         Self {
-            name: var.name.clone(),
+            name: var.name().to_string(),
             version: var.version,
             size: var.size,
+            rename_disambiguator: var.rename_disambiguator(),
         }
     }
 }
 
 impl Ord for VarKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.name.as_str(), self.version, self.size).cmp(&(
-            other.name.as_str(),
-            other.version,
-            other.size,
-        ))
+        (
+            self.name.as_str(),
+            self.version,
+            self.size,
+            self.rename_disambiguator,
+        )
+            .cmp(&(
+                other.name.as_str(),
+                other.version,
+                other.size,
+                other.rename_disambiguator,
+            ))
     }
 }
 
@@ -229,7 +252,7 @@ fn get_lattice_value(var: &SSAVar, lattice: &HashMap<VarKey, LatticeValue>) -> L
 }
 
 fn init_if_input(var: &SSAVar, lattice: &mut HashMap<VarKey, LatticeValue>) {
-    if var.version == 0 && !var.is_const() {
+    if var.version == 0 && var.constant_bits().is_none() {
         lattice
             .entry(VarKey::from_var(var))
             .or_insert(LatticeValue::Bottom);
@@ -266,26 +289,30 @@ fn evaluate_op_sccp(op: &SSAOp, lattice: &HashMap<VarKey, LatticeValue>) -> Latt
     }
 
     let mut has_top = false;
+    let mut has_bottom = false;
     let mut temp_consts = HashMap::new();
     for src in op.sources() {
         match get_lattice_value(src, lattice) {
-            LatticeValue::Bottom => return LatticeValue::Bottom,
-            LatticeValue::Top => {
-                has_top = true;
-            }
+            LatticeValue::Bottom => has_bottom = true,
+            LatticeValue::Top => has_top = true,
             LatticeValue::Const(c) => {
                 temp_consts.insert(VarKey::from_var(src), c);
             }
         }
     }
 
-    if has_top {
-        return LatticeValue::Top;
+    // An absorbing constant decides the result without the other operand,
+    // so it is tried before an unknown operand is allowed to make the
+    // result unknown; the evaluator answers only from the constants it has.
+    if let Some(c) = eval_const_op(op, &temp_consts) {
+        return LatticeValue::Const(c);
     }
-
-    match eval_const_op(op, &temp_consts) {
-        Some(c) => LatticeValue::Const(c),
-        None => LatticeValue::Bottom,
+    if has_bottom {
+        LatticeValue::Bottom
+    } else if has_top {
+        LatticeValue::Top
+    } else {
+        LatticeValue::Bottom
     }
 }
 
@@ -351,7 +378,16 @@ fn evaluate_terminator_sccp(
     }
 }
 
+#[cfg(test)]
 fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
+    sccp_with_control(func, &UncheckedSsaWorkControl).expect("unchecked SCCP cannot stop")
+}
+
+fn sccp_with_control<C: SsaWorkControl + ?Sized>(
+    func: &SSAFunction,
+    control: &C,
+) -> Result<SccpResult, SsaExecutionStopReason> {
+    control.poll()?;
     let mut lattice = HashMap::new();
     let mut executable = HashSet::new();
     let mut block_visited = HashSet::new();
@@ -360,6 +396,7 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
     let use_map = build_use_map(func);
 
     for block in func.blocks() {
+        control.poll()?;
         block.for_each_def(|def| init_if_input(def.var, &mut lattice));
         block.for_each_source(|src| init_if_input(src.var, &mut lattice));
     }
@@ -367,7 +404,9 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
     cfg_worklist.push_back((u64::MAX, func.entry));
 
     while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
+        control.poll()?;
         while let Some((from, to)) = cfg_worklist.pop_front() {
+            control.poll()?;
             if !executable.insert((from, to)) {
                 continue;
             }
@@ -377,6 +416,7 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
             };
 
             for phi in &block.phis {
+                control.poll()?;
                 let new_val = evaluate_phi_sccp(phi, &executable, &lattice, to);
                 if update_lattice(&mut lattice, &phi.dst, new_val) {
                     ssa_worklist.push_back(VarKey::from_var(&phi.dst));
@@ -385,6 +425,7 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
 
             if block_visited.insert(to) {
                 for op in &block.ops {
+                    control.poll()?;
                     if let Some(dst) = op.dst() {
                         let new_val = evaluate_op_sccp(op, &lattice);
                         if update_lattice(&mut lattice, dst, new_val) {
@@ -397,10 +438,12 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
         }
 
         while let Some(var_key) = ssa_worklist.pop_front() {
+            control.poll()?;
             let Some(use_locs) = use_map.get(&var_key) else {
                 continue;
             };
             for use_loc in use_locs {
+                control.poll()?;
                 match use_loc {
                     UseLocation::Phi {
                         block_addr,
@@ -459,24 +502,12 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
             LatticeValue::Top | LatticeValue::Bottom => None,
         })
         .collect();
-    (consts, executable)
+    control.poll()?;
+    Ok((consts, executable))
 }
 
 fn const_value(var: &SSAVar) -> Option<u64> {
-    if !var.is_const() {
-        return None;
-    }
-    let val_str = var.name.strip_prefix("const:")?;
-    if let Some(hex) = val_str
-        .strip_prefix("0x")
-        .or_else(|| val_str.strip_prefix("0X"))
-    {
-        return u64::from_str_radix(hex, 16).ok();
-    }
-    if let Ok(val) = u64::from_str_radix(val_str, 16) {
-        return Some(val);
-    }
-    val_str.parse::<u64>().ok()
+    var.constant_bits()
 }
 
 fn mask_for_bits(bits: u32) -> u64 {
@@ -505,50 +536,6 @@ fn const_for_var(var: &SSAVar, consts: &HashMap<VarKey, u64>) -> Option<u64> {
         return Some(val);
     }
     consts.get(&VarKey::from_var(var)).copied()
-}
-
-fn compute_constants(func: &SSAFunction, max_iters: usize) -> HashMap<VarKey, u64> {
-    let mut consts = HashMap::new();
-
-    for _ in 0..max_iters {
-        let mut changed = false;
-
-        for phi in func.all_phis() {
-            let dst_key = VarKey::from_var(&phi.dst);
-            if consts.contains_key(&dst_key) {
-                continue;
-            }
-            let mut iter = phi.sources.iter();
-            let Some((_, first)) = iter.next() else {
-                continue;
-            };
-            let Some(first_val) = const_for_var(first, &consts) else {
-                continue;
-            };
-            if iter.all(|(_, src)| const_for_var(src, &consts) == Some(first_val)) {
-                consts.insert(dst_key, first_val);
-                changed = true;
-            }
-        }
-
-        for op in func.all_ops() {
-            let Some(dst) = op.dst() else { continue };
-            let dst_key = VarKey::from_var(dst);
-            if consts.contains_key(&dst_key) {
-                continue;
-            }
-            if let Some(val) = eval_const_op(op, &consts) {
-                consts.insert(dst_key, val);
-                changed = true;
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
-
-    consts
 }
 
 fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
@@ -581,10 +568,11 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
             let (a, b) = binary(a, b)?;
             a.wrapping_sub(b)
         }
-        IntMult { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a.wrapping_mul(b)
-        }
+        IntMult { a, b, .. } => match (unary(a), unary(b)) {
+            (Some(0), _) | (_, Some(0)) => 0,
+            (Some(a), Some(b)) => a.wrapping_mul(b),
+            _ => return None,
+        },
         IntDiv { a, b, .. } => {
             let (a, b) = binary(a, b)?;
             if b == 0 {
@@ -615,14 +603,19 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
             let signed = sign_extend(a, bits) % sign_extend(b, bits);
             signed as u64
         }
-        IntAnd { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a & b
-        }
-        IntOr { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a | b
-        }
+        // Absorbing elements are constants whatever the other operand holds:
+        // `and x, 0` is 0, `or x, -1` is all ones, `mul x, 0` is 0. Without
+        // them a write like `or rax, -1` reads the entry carrier for nothing.
+        IntAnd { a, b, .. } => match (unary(a), unary(b)) {
+            (Some(0), _) | (_, Some(0)) => 0,
+            (Some(a), Some(b)) => a & b,
+            _ => return None,
+        },
+        IntOr { a, b, .. } => match (unary(a), unary(b)) {
+            (Some(v), _) | (_, Some(v)) if v & mask == mask => mask,
+            (Some(a), Some(b)) => a | b,
+            _ => return None,
+        },
         IntXor { a, b, .. } => {
             let (a, b) = binary(a, b)?;
             a ^ b
@@ -737,13 +730,69 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
     Some(val & mask)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalStorageProjection {
+    carrier: CanonicalStorageId,
+    logical: CanonicalStorageId,
+}
+
+fn coherent_return_projection(
+    function_interface: Option<&SourceFunctionInterface>,
+) -> Option<TerminalStorageProjection> {
+    let interface = function_interface?;
+    let SourceFunctionReturn::Register { storage } = interface.return_kind() else {
+        return None;
+    };
+    let logical = interface.return_logical_value()?;
+    let graph = interface.type_graph()?;
+    let source_type = graph
+        .types()
+        .get(usize::try_from(logical.type_id()).ok()?)?;
+    let carrier = logical.carrier();
+    let storage_bits = u64::from(storage.size).checked_mul(8)?;
+    if storage.space != CanonicalStorageSpace::Register
+        || storage.size == 0
+        || carrier.offset_bits() != 0
+        || carrier.size_bits() == 0
+        || carrier.size_bits() != source_type.size_bits()
+        || carrier.size_bits() % 8 != 0
+        || carrier.size_bits() > storage_bits
+    {
+        return None;
+    }
+    let logical = match carrier.kind() {
+        SourceCarrierKind::Full if carrier.size_bits() == storage_bits => storage,
+        SourceCarrierKind::LowBits
+            if carrier.size_bits() < storage_bits
+                && matches!(
+                    source_type.kind(),
+                    SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+                ) =>
+        {
+            CanonicalStorageId {
+                space: storage.space,
+                offset: storage.offset,
+                size: u32::try_from(carrier.size_bits() / 8).ok()?,
+            }
+        }
+        _ => return None,
+    };
+    Some(TerminalStorageProjection {
+        carrier: storage,
+        logical,
+    })
+}
+
 fn replace_sources_with_constants(
     func: &mut SSAFunction,
     consts: &HashMap<VarKey, u64>,
+    function_interface: Option<&SourceFunctionInterface>,
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let block_addrs = func.block_addrs().to_vec();
+    let return_storage =
+        coherent_return_projection(function_interface).map(|projection| projection.carrier);
 
     for addr in block_addrs {
         let is_return_block = func
@@ -755,8 +804,8 @@ fn replace_sources_with_constants(
         };
 
         for phi in &mut block.phis {
-            let preserve_phi_sources =
-                is_return_block && return_value_family(&phi.dst.name).is_some();
+            let preserve_phi_sources = is_return_block
+                && return_storage.is_some_and(|storage| phi.canonical_storage == Some(storage));
             for (_, src) in &mut phi.sources {
                 if preserve_phi_sources {
                     continue;
@@ -800,12 +849,13 @@ fn apply_sccp_results(
     func: &mut SSAFunction,
     consts: &HashMap<VarKey, u64>,
     executable_edges: &HashSet<(u64, u64)>,
+    function_interface: Option<&SourceFunctionInterface>,
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let mut cfg_changed = false;
 
-    if replace_sources_with_constants(func, consts, stats) {
+    if replace_sources_with_constants(func, consts, function_interface, stats) {
         changed = true;
     }
     stats.sccp_constants_found = consts.len();
@@ -863,8 +913,11 @@ fn apply_sccp_results(
         {
             if rw.take_true {
                 if let SSAOp::CBranch { target, .. } = op {
+                    // The branch that remains was never a call site the source
+                    // named, so it keeps no instruction identity.
                     *op = SSAOp::Branch {
                         target: target.clone(),
+                        instruction: None,
                     };
                 }
             } else {
@@ -947,15 +1000,29 @@ fn count_source_replacements(before: &SSAOp, after: &SSAOp) -> usize {
 fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let mut changed = false;
     let block_addrs = func.block_addrs().to_vec();
+    let mut defs = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
+        .collect::<HashMap<_, _>>();
 
-    for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else {
+    for addr in &block_addrs {
+        let Some(block) = func.get_block_mut(*addr) else {
             continue;
         };
         for op in &mut block.ops {
-            if let Some(new_op) = simplify_op(op)
-                && &new_op != op
-            {
+            loop {
+                let Some(new_op) = fold_through_definition(op, &defs).or_else(|| simplify_op(op))
+                else {
+                    break;
+                };
+                if &new_op == op {
+                    break;
+                }
+                if let Some(dst) = new_op.dst() {
+                    defs.insert(VarKey::from_var(dst), new_op.clone());
+                }
                 *op = new_op;
                 stats.ops_simplified += 1;
                 changed = true;
@@ -963,7 +1030,770 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         }
     }
 
+    // A lane temporary that a fold made a copy of another value is that
+    // value: it is the construction's own scaffolding, not a move the
+    // program made, so its readers take the value and the copy goes dead.
+    let mut lane_copies = HashMap::new();
+    for (key, op) in &defs {
+        if let SSAOp::Copy { dst, src } = op
+            && crate::rename::is_lane_temp(dst)
+        {
+            lane_copies.insert(key.clone(), src.clone());
+        }
+    }
+    if !lane_copies.is_empty() {
+        let resolve = |var: &SSAVar| {
+            let mut current = var.clone();
+            let mut hops = 0;
+            while let Some(next) = lane_copies.get(&VarKey::from_var(&current)) {
+                current = next.clone();
+                hops += 1;
+                if hops > lane_copies.len() {
+                    break;
+                }
+            }
+            current
+        };
+        // A merge keeps its copy: its edge assignment is a statement of the
+        // copied object, not an expression read.
+        for addr in &block_addrs {
+            let Some(block) = func.get_block_mut(*addr) else {
+                continue;
+            };
+            for op in &mut block.ops {
+                let new_op = map_sources_in_op(op, &resolve);
+                if &new_op != op {
+                    *op = new_op;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     changed
+}
+
+/// Read a `Subpiece` through the operation defining its source.
+///
+/// A lane read is a `Subpiece` of its root, and the root's definition says
+/// what the lane holds: the constant copied there, the value an `Insert` put
+/// at that position, the narrower value an extension widened, or a slice of
+/// a wider slice (doc/adr-register-identity.md §5). Copies of non-constants
+/// are left alone: a copy is a statement the prepared SSA keeps.
+/// Replace every condition assembled from condition codes with the comparison
+/// the source wrote. Always runs: the graph is what every later stage reads.
+/// One equality test a block ends in: `selector == value` sends control to
+/// `equal`, anything else to `other`.
+struct EqualityTest {
+    selector: SSAVar,
+    value: u64,
+    equal: u64,
+    other: u64,
+}
+
+/// A comparison chain, fused into the multiway branch it lowers.
+///
+/// A `switch` too small for a jump table compiles to one equality test per
+/// case, each falling to the next, and the case bodies fall into each other
+/// exactly as the source's `case` labels did. Structured as tests, that shape
+/// needs a `goto`: the default edge leaves from the innermost test and jumps
+/// over every body. The tests are one branch on one value, so the graph says
+/// so, and the structurer prints the `switch` it already prints for a table.
+///
+/// Only a chain whose bodies fall into each other is fused. Tests whose bodies
+/// each rejoin the same successor structure as `else if`, and that is what the
+/// source most likely wrote.
+fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
+    let defs = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
+        .collect::<HashMap<_, _>>();
+    let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
+    // The value a copy chain carries: a promoted slot's reload is a copy of
+    // the store, and the store a copy of the register.
+    let root = |var: &SSAVar| {
+        let mut var = var.clone();
+        for _ in 0..16 {
+            match define(&var) {
+                Some(SSAOp::Copy { src, .. }) => var = src.clone(),
+                _ => break,
+            }
+        }
+        var
+    };
+    // `x == c`, or the zero flag of `x - c` where the difference also lands in
+    // a register and so was left as the flag fold found it.
+    let against_constant = |a: &SSAVar, b: &SSAVar| {
+        let (selector, value) = match (const_value(a), const_value(b)) {
+            (None, Some(value)) => (a, value),
+            (Some(value), None) => (b, value),
+            _ => return None,
+        };
+        if value == 0
+            && let Some(SSAOp::IntSub { a: x, b: c, .. }) = define(&root(selector))
+            && let Some(c) = const_value(&root(c))
+        {
+            return Some((root(x), c));
+        }
+        Some((root(selector), value))
+    };
+    let equality = |var: &SSAVar| {
+        let mut op = define(var)?;
+        let mut negated = false;
+        for _ in 0..16 {
+            match op {
+                SSAOp::Copy { src, .. } => op = define(src)?,
+                SSAOp::BoolNot { src, .. } => {
+                    negated = !negated;
+                    op = define(src)?;
+                }
+                SSAOp::IntEqual { a, b, .. } => {
+                    let (selector, value) = against_constant(a, b)?;
+                    return Some((selector, value, negated));
+                }
+                SSAOp::IntNotEqual { a, b, .. } => {
+                    let (selector, value) = against_constant(a, b)?;
+                    return Some((selector, value, !negated));
+                }
+                _ => return None,
+            }
+        }
+        None
+    };
+    let test_of = |addr: u64| {
+        let block = func.get_block(addr)?;
+        let SSAOp::CBranch { cond, .. } = block.ops.last()? else {
+            return None;
+        };
+        let BlockTerminator::ConditionalBranch {
+            true_target,
+            false_target,
+        } = func.cfg().get_block(addr)?.terminator
+        else {
+            return None;
+        };
+        if true_target == false_target {
+            return None;
+        }
+        let (selector, value, negated) = equality(cond)?;
+        let (equal, other) = if negated {
+            (false_target, true_target)
+        } else {
+            (true_target, false_target)
+        };
+        Some(EqualityTest {
+            selector,
+            value,
+            equal,
+            other,
+        })
+    };
+    // A block that computes nothing the fused branch does not: values only,
+    // no memory and no call, and it is entered from the chain alone.
+    let pure_link = |addr: u64| {
+        let block = func.get_block(addr)?;
+        if !block.phis.is_empty() || func.predecessors(addr).len() != 1 {
+            return None;
+        }
+        let (last, body) = block.ops.split_last()?;
+        let pure = body.iter().all(|op| {
+            op.dst().is_some()
+                && !matches!(
+                    op,
+                    SSAOp::Load { .. }
+                        | SSAOp::LoadLinked { .. }
+                        | SSAOp::LoadGuarded { .. }
+                        | SSAOp::AtomicCAS { .. }
+                        | SSAOp::CallOther { .. }
+                        | SSAOp::CallDefine { .. }
+                        | SSAOp::CallRestore { .. }
+                        | SSAOp::StoreConditional { .. }
+                )
+        }) || body.iter().all(|op| matches!(op, SSAOp::Nop));
+        pure.then_some(last)
+    };
+
+    struct Fusion {
+        block: u64,
+        selector: SSAVar,
+        cases: Vec<(u64, u64)>,
+        default: u64,
+        links: Vec<u64>,
+    }
+    let mut fusions: Vec<Fusion> = Vec::new();
+    let mut claimed = HashSet::new();
+    for addr in func.block_addrs().to_vec() {
+        if claimed.contains(&addr) {
+            continue;
+        }
+        let Some(head) = test_of(addr) else {
+            continue;
+        };
+        let mut cases = vec![(head.value, head.equal)];
+        let mut links = Vec::new();
+        let mut cur = head.other;
+        loop {
+            if cur == addr || links.contains(&cur) || claimed.contains(&cur) {
+                r2il::refusal_evidence!("fuse-compare-chain", "{addr:#x}: {cur:#x} closes a cycle");
+                break;
+            }
+            let Some(last) = pure_link(cur) else {
+                r2il::refusal_evidence!(
+                    "fuse-compare-chain",
+                    "{addr:#x}: {cur:#x} is not a pure single-entry link"
+                );
+                break;
+            };
+            match last {
+                SSAOp::Branch { .. } => {
+                    let Some(BlockTerminator::Branch { target }) = func
+                        .cfg()
+                        .get_block(cur)
+                        .map(|block| block.terminator.clone())
+                    else {
+                        break;
+                    };
+                    links.push(cur);
+                    cur = target;
+                }
+                SSAOp::CBranch { .. } => {
+                    let Some(test) = test_of(cur) else {
+                        r2il::refusal_evidence!(
+                            "fuse-compare-chain",
+                            "{addr:#x}: {cur:#x} tests no equality against a constant"
+                        );
+                        break;
+                    };
+                    if test.selector != head.selector
+                        || cases.iter().any(|(value, _)| *value == test.value)
+                    {
+                        r2il::refusal_evidence!(
+                            "fuse-compare-chain",
+                            "{addr:#x}: {cur:#x} tests {} == {}, not {}",
+                            test.selector.display_name(),
+                            test.value,
+                            head.selector.display_name()
+                        );
+                        break;
+                    }
+                    cases.push((test.value, test.equal));
+                    links.push(cur);
+                    cur = test.other;
+                }
+                _ => break,
+            }
+        }
+        if cases.len() < 2 {
+            continue;
+        }
+        let default = cur;
+        let chain = std::iter::once(addr)
+            .chain(links.iter().copied())
+            .collect::<HashSet<_>>();
+        let falls_through = cases.iter().any(|(_, target)| {
+            !chain.contains(target)
+                && func
+                    .predecessors(*target)
+                    .iter()
+                    .any(|pred| !chain.contains(pred))
+        });
+        if !falls_through {
+            r2il::refusal_evidence!(
+                "fuse-compare-chain",
+                "{addr:#x}: {} tests whose bodies rejoin, left as else-if",
+                cases.len()
+            );
+            continue;
+        }
+        if cases.iter().any(|(_, target)| chain.contains(target)) || chain.contains(&default) {
+            continue;
+        }
+        // A phi at a target reads what the chain passed it: one value from
+        // every chain edge, or the fused edge cannot say which it carries.
+        let targets = cases
+            .iter()
+            .map(|(_, target)| *target)
+            .chain(std::iter::once(default))
+            .collect::<BTreeSet<_>>();
+        let phis_agree = targets.iter().all(|target| {
+            func.get_block(*target).is_none_or(|block| {
+                block.phis.iter().all(|phi| {
+                    let mut carried = phi
+                        .sources
+                        .iter()
+                        .filter(|(pred, _)| chain.contains(pred))
+                        .map(|(_, var)| var);
+                    let first = carried.next();
+                    carried.all(|var| Some(var) == first)
+                })
+            })
+        });
+        if !phis_agree {
+            r2il::refusal_evidence!(
+                "fuse-compare-chain",
+                "{addr:#x}: a target merges different values from the chain"
+            );
+            continue;
+        }
+        claimed.extend(chain.iter().copied());
+        fusions.push(Fusion {
+            block: addr,
+            selector: head.selector,
+            cases,
+            default,
+            links,
+        });
+    }
+    if fusions.is_empty() {
+        return false;
+    }
+    for fusion in fusions {
+        r2il::refusal_evidence!(
+            "fuse-compare-chain",
+            "{:#x}: {} cases on {} through {} links, default {:#x}",
+            fusion.block,
+            fusion.cases.len(),
+            fusion.selector.display_name(),
+            fusion.links.len(),
+            fusion.default
+        );
+        // The links' values stay defined: they are pure, the head dominates
+        // every reader, and the merges at the targets still name them.
+        let hoisted = fusion
+            .links
+            .iter()
+            .filter_map(|link| func.get_block(*link))
+            .flat_map(|block| {
+                block.ops[..block.ops.len().saturating_sub(1)]
+                    .iter()
+                    .filter(|op| !matches!(op, SSAOp::Nop))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if let Some(block) = func.get_block_mut(fusion.block) {
+            let terminator = block.ops.len() - 1;
+            block.ops[terminator] = SSAOp::Switch {
+                selector: fusion.selector.clone(),
+            };
+            block.ops.splice(terminator..terminator, hoisted);
+        }
+        let targets = fusion
+            .cases
+            .iter()
+            .map(|(_, target)| *target)
+            .chain(std::iter::once(fusion.default))
+            .collect::<BTreeSet<_>>();
+        for target in &targets {
+            if let Some(block) = func.get_block_mut(*target) {
+                for phi in &mut block.phis {
+                    let carried = phi
+                        .sources
+                        .iter()
+                        .find(|(pred, _)| *pred == fusion.block || fusion.links.contains(pred))
+                        .map(|(_, var)| var.clone());
+                    phi.sources
+                        .retain(|(pred, _)| *pred != fusion.block && !fusion.links.contains(pred));
+                    if let Some(var) = carried {
+                        phi.sources.push((fusion.block, var));
+                    }
+                    // A merge lists its sources in predecessor order.
+                    phi.sources.sort_by_key(|(pred, _)| *pred);
+                }
+            }
+        }
+        for link in &fusion.links {
+            func.cfg_mut().remove_block(*link);
+        }
+        func.cfg_mut().set_terminator(
+            fusion.block,
+            BlockTerminator::Switch {
+                cases: fusion.cases.clone(),
+                default: Some(fusion.default),
+            },
+        );
+        stats.chains_fused += 1;
+    }
+    func.refresh_after_cfg_mutation();
+    true
+}
+
+fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
+    let defs = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
+        .collect::<HashMap<_, _>>();
+    // Values a statement other than a flag test reads. A difference read only
+    // by the flags of its own instruction does go unread once they fold; one a
+    // register receives does not.
+    let kept = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter(|op| {
+            !matches!(
+                op,
+                SSAOp::IntEqual { .. }
+                    | SSAOp::IntNotEqual { .. }
+                    | SSAOp::IntSLess { .. }
+                    | SSAOp::IntSLessEqual { .. }
+                    | SSAOp::IntLess { .. }
+                    | SSAOp::IntLessEqual { .. }
+                    | SSAOp::IntSBorrow { .. }
+                    | SSAOp::IntCarry { .. }
+            )
+        })
+        .flat_map(|op| op.sources())
+        .map(VarKey::from_var)
+        .collect::<HashSet<_>>();
+    // Flags a disjunction reads: those are halves of one combined condition.
+    // The machine copies a flag out of its scratch register before testing it,
+    // so the disjunction names the copy and the fold has to look through it.
+    let mut combined = func
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter(|op| matches!(op, SSAOp::IntOr { .. } | SSAOp::BoolOr { .. }))
+        .flat_map(|op| op.sources())
+        .map(VarKey::from_var)
+        .collect::<HashSet<_>>();
+    loop {
+        let grown = func
+            .blocks()
+            .iter()
+            .flat_map(|block| block.ops.iter())
+            .filter_map(|op| match op {
+                SSAOp::Copy { dst, src } if combined.contains(&VarKey::from_var(dst)) => {
+                    Some(VarKey::from_var(src))
+                }
+                _ => None,
+            })
+            .filter(|key| !combined.contains(key))
+            .collect::<Vec<_>>();
+        if grown.is_empty() {
+            break;
+        }
+        combined.extend(grown);
+    }
+    let mut changed = false;
+    for addr in func.block_addrs().to_vec() {
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
+        for op in &mut block.ops {
+            let Some(folded) = fold_condition_codes(op, &defs, &kept, &combined) else {
+                continue;
+            };
+            if &folded == op {
+                continue;
+            }
+            *op = folded;
+            stats.ops_simplified += 1;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A branch condition assembled from condition codes, as the comparison it is.
+///
+/// A machine has no `a <= b`; it subtracts and then tests the flags the
+/// subtraction set, so `cmp a, b; jle` lifts to a sign flag, an overflow flag,
+/// a zero flag and two boolean operations over them. The source wrote one
+/// comparison, and every stage after this one -- the binding plan's reader
+/// counts, the observation journal, the placement audit -- reads the graph, so
+/// the comparison has to be *in* the graph rather than reconstructed later by
+/// the renderer's term rewriter. Folding it there instead leaves the flags with
+/// graph readers the rewritten term no longer has, which is a disagreement no
+/// amount of bookkeeping downstream can settle.
+///
+/// The flag definitions are left where they are. They become unread, and the
+/// passes that remove unread values already know what to do with them.
+fn fold_condition_codes(
+    op: &SSAOp,
+    defs: &HashMap<VarKey, SSAOp>,
+    kept: &HashSet<VarKey>,
+    combined: &HashSet<VarKey>,
+) -> Option<SSAOp> {
+    let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
+    let is_zero = |var: &SSAVar| const_value(var) == Some(0);
+    // `d = a - b`, whether the flag reads the difference by name or the
+    // subtraction was folded into it.
+    let subtraction = |var: &SSAVar| match define(var)? {
+        SSAOp::IntSub { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
+    };
+    // A flag read through the copies the machine makes of it: arm64 tests
+    // `ZR`, which is a copy of the `tmpZR` the subtraction wrote.
+    let define_through_copies = |var: &SSAVar| {
+        let mut op = define(var)?;
+        let mut hops = 0;
+        while let SSAOp::Copy { src, .. } = op {
+            hops += 1;
+            if hops > 8 {
+                return None;
+            }
+            op = define(src)?;
+        }
+        Some(op)
+    };
+    // The sign flag: `(a - b) <s 0`.
+    let sign_flag = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+        _ => None,
+    };
+    // The overflow flag: `sborrow(a, b)`.
+    let overflow_flag = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntSBorrow { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
+    };
+    // The zero flag: `(a - b) == 0`, or already the equality this pass made
+    // of it, since the two halves of a disjunction fold in one walk.
+    let zero_flag = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntEqual { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+        SSAOp::IntEqual { a, b, .. } => Some((a.clone(), b.clone())),
+        _ => None,
+    };
+    // The unsigned ordering: the carry of `a - b` is `b <= a`, and the machine
+    // tests its negation for `a < b`.
+    let unsigned_order = |var: &SSAVar| match define_through_copies(var)? {
+        SSAOp::IntLess { a, b, .. } => Some((a.clone(), b.clone())),
+        SSAOp::BoolNot { src, .. } => match define_through_copies(src)? {
+            SSAOp::IntLessEqual { a: y, b: x, .. } => Some((x.clone(), y.clone())),
+            _ => None,
+        },
+        _ => None,
+    };
+    // `SF != OF` is `a <s b`, and `SF == OF` is `b <=s a`. Either order.
+    let signed_order = |x: &SSAVar, y: &SSAVar| {
+        sign_flag(x)
+            .zip(overflow_flag(y))
+            .or_else(|| sign_flag(y).zip(overflow_flag(x)))
+            .filter(|(sign, overflow)| sign == overflow)
+            .map(|(sign, _)| sign)
+    };
+    match op {
+        // `jl` / `jge`: the sign and overflow flags alone.
+        SSAOp::IntNotEqual { dst, a, b } => {
+            if let Some((left, right)) = signed_order(a, b) {
+                return Some(SSAOp::IntSLess {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                });
+            }
+            if kept.contains(&VarKey::from_var(a)) && !combined.contains(&VarKey::from_var(dst)) {
+                return None;
+            }
+            let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
+            Some(SSAOp::IntNotEqual {
+                dst: dst.clone(),
+                a: left,
+                b: right,
+            })
+        }
+        SSAOp::IntEqual { dst, a, b } => {
+            if let Some((left, right)) = signed_order(a, b) {
+                return Some(SSAOp::IntSLessEqual {
+                    dst: dst.clone(),
+                    a: right,
+                    b: left,
+                });
+            }
+            // The zero flag of a subtraction is an equality between its
+            // operands. True of two's complement at any width, and it is what
+            // lets the difference itself go unread.
+            // Only where the difference really does go unread. When a
+            // register receives it, restating the test over the operands moves
+            // the read to before the write, and the comparison can no longer be
+            // spelled after it -- which is what leaves the flag in a local.
+            // Unless the flag is half of a combined condition: `jle` and
+            // `jbe` are an ordering beside this test, and that fold needs the
+            // test in its operand form to recognise the pair.
+            if kept.contains(&VarKey::from_var(a)) && !combined.contains(&VarKey::from_var(dst)) {
+                return None;
+            }
+            let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
+            Some(SSAOp::IntEqual {
+                dst: dst.clone(),
+                a: left,
+                b: right,
+            })
+        }
+        // `jle` / `jg`: the ordering with the zero flag beside it. The lifter
+        // spells the disjunction of two flags as either an integer or a
+        // boolean or, depending on the instruction it came from.
+        SSAOp::IntOr { dst, a, b } | SSAOp::BoolOr { dst, a, b } => {
+            // The ordering half is either still the flag pair or already the
+            // comparison this pass made of it, because the two are folded in
+            // one walk and the operand may have been reached first.
+            let ordered = |ordering: &SSAVar, zero: &SSAVar| {
+                let (left, right, signed) = match define(ordering)? {
+                    SSAOp::IntNotEqual { a: x, b: y, .. } => {
+                        let (l, r) = signed_order(x, y)?;
+                        (l, r, true)
+                    }
+                    SSAOp::IntSLess { a: x, b: y, .. } => (x.clone(), y.clone(), true),
+                    _ => {
+                        let (l, r) = unsigned_order(ordering)?;
+                        (l, r, false)
+                    }
+                };
+                let (zero_left, zero_right) = zero_flag(zero)?;
+                let same = (zero_left == left && zero_right == right)
+                    || (zero_left == right && zero_right == left);
+                same.then_some((left, right, signed))
+            };
+            let (left, right, signed) = ordered(a, b).or_else(|| ordered(b, a))?;
+            Some(if signed {
+                SSAOp::IntSLessEqual {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            } else {
+                SSAOp::IntLessEqual {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            })
+        }
+        // `jg` / `ja`: the non-strict ordering with the zero flag denied beside
+        // it, which is the strict ordering.
+        SSAOp::BoolAnd { dst, a, b } | SSAOp::IntAnd { dst, a, b } => {
+            let denied_zero = |var: &SSAVar| match define_through_copies(var)? {
+                SSAOp::BoolNot { src, .. } => zero_flag(src),
+                _ => None,
+            };
+            // The ordering half: the signed pair, or the comparison this pass
+            // already made of either pair.
+            let ordered = |var: &SSAVar| match define_through_copies(var)? {
+                SSAOp::IntEqual { a: x, b: y, .. } => {
+                    let (l, r) = signed_order(x, y)?;
+                    Some((r, l, true))
+                }
+                SSAOp::IntSLessEqual { a: x, b: y, .. } => Some((x.clone(), y.clone(), true)),
+                SSAOp::IntLessEqual { a: x, b: y, .. } => Some((x.clone(), y.clone(), false)),
+                _ => None,
+            };
+            let strict = |ordering: &SSAVar, zero: &SSAVar| {
+                let (left, right, signed) = ordered(ordering)?;
+                let (zero_left, zero_right) = denied_zero(zero)?;
+                let same = (zero_left == left && zero_right == right)
+                    || (zero_left == right && zero_right == left);
+                same.then_some((left, right, signed))
+            };
+            let (left, right, signed) = strict(a, b).or_else(|| strict(b, a))?;
+            Some(if signed {
+                SSAOp::IntSLess {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            } else {
+                SSAOp::IntLess {
+                    dst: dst.clone(),
+                    a: left,
+                    b: right,
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The constant a value is, computed through its definitions: the decompile
+/// pipeline runs no constant propagation, so `x9 = 4; (x9 == 0)` is decided
+/// here where the operation that reads the result is simplified.
+fn constant_through_definitions(
+    var: &SSAVar,
+    defs: &HashMap<VarKey, SSAOp>,
+    depth: u32,
+) -> Option<u64> {
+    if let Some(value) = const_value(var) {
+        return Some(value);
+    }
+    if depth > 8 {
+        return None;
+    }
+    let op = defs.get(&VarKey::from_var(var))?;
+    let mut consts = HashMap::new();
+    for source in op.sources() {
+        consts.insert(
+            VarKey::from_var(source),
+            constant_through_definitions(source, defs, depth + 1)?,
+        );
+    }
+    eval_const_op(op, &consts)
+}
+
+fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+    // A selection on a condition its definitions decide is the arm decided.
+    if let SSAOp::Select(select) = op {
+        let chosen = match constant_through_definitions(&select.cond, defs, 0)? {
+            0 => &select.if_false,
+            _ => &select.if_true,
+        };
+        return Some(SSAOp::Copy {
+            dst: select.dst.clone(),
+            src: chosen.clone(),
+        });
+    }
+    let SSAOp::Subpiece { dst, src, offset } = op else {
+        return None;
+    };
+    let producer = defs.get(&VarKey::from_var(src))?;
+    let lane_start = u64::from(*offset) * 8;
+    let lane_bits = u64::from(dst.size) * 8;
+    let lane_end = lane_start + lane_bits;
+    let subpiece = |src: &SSAVar, offset: u64| {
+        let offset = u32::try_from(offset).ok()?;
+        Some(if u64::from(src.size) * 8 == lane_bits && offset == 0 {
+            SSAOp::Copy {
+                dst: dst.clone(),
+                src: src.clone(),
+            }
+        } else {
+            SSAOp::Subpiece {
+                dst: dst.clone(),
+                src: src.clone(),
+                offset,
+            }
+        })
+    };
+    match producer {
+        SSAOp::Copy { src: value, .. } if value.constant_bits().is_some() => {
+            subpiece(value, u64::from(*offset))
+        }
+        SSAOp::Insert(insert) => {
+            let (root, value) = (&insert.src, &insert.value);
+            let position = insert.position.constant_bits()?;
+            let inserted_end = position.checked_add(u64::from(value.size) * 8)?;
+            if position <= lane_start && lane_end <= inserted_end {
+                subpiece(value, (lane_start - position) / 8)
+            } else if lane_end <= position || inserted_end <= lane_start {
+                subpiece(root, u64::from(*offset))
+            } else {
+                None
+            }
+        }
+        SSAOp::IntZExt { src: narrow, .. } | SSAOp::IntSExt { src: narrow, .. }
+            if lane_end <= u64::from(narrow.size) * 8 =>
+        {
+            subpiece(narrow, u64::from(*offset))
+        }
+        SSAOp::Subpiece {
+            src: wider,
+            offset: inner,
+            ..
+        } => subpiece(wider, u64::from(*offset) + u64::from(*inner)),
+        _ => None,
+    }
 }
 
 fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
@@ -987,6 +1817,12 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
 
     let simplified = match op {
         Copy { .. } => return None,
+        // A selection on a decided condition is the arm it decided.
+        Select(select) => match const_of(&select.cond) {
+            Some(0) => make_copy(&select.if_false),
+            Some(_) => make_copy(&select.if_true),
+            None => return None,
+        },
         IntAdd { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) => make_copy(b),
             (_, Some(0)) => make_copy(a),
@@ -1048,6 +1884,9 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
         IntOr { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) => make_copy(b),
             (_, Some(0)) => make_copy(a),
+            // All ones absorbs: `or rax, -1` is the constant whatever `rax` held.
+            (Some(av), _) if av == mask => make_const(mask),
+            (_, Some(bv)) if bv == mask => make_const(mask),
             (Some(av), Some(bv)) => make_const(av | bv),
             _ => return None,
         },
@@ -1194,492 +2033,6 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
     Some(simplified)
 }
 
-fn copy_propagation(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
-    let (replacements, changed) = build_copy_replacements(func, stats);
-    let applied = if replacements.is_empty() {
-        false
-    } else {
-        apply_replacements(func, &replacements, stats)
-    };
-    changed || applied
-}
-
-fn build_copy_replacements(
-    func: &mut SSAFunction,
-    stats: &mut OptimizationStats,
-) -> (HashMap<VarKey, SSAVar>, bool) {
-    let mut replacements = HashMap::new();
-    let mut changed = false;
-    let block_addrs = func.block_addrs().to_vec();
-
-    for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else {
-            continue;
-        };
-
-        block.phis.retain(|phi| {
-            let mut iter = phi.sources.iter();
-            let Some((_, first)) = iter.next() else {
-                return true;
-            };
-            if iter.all(|(_, src)| src == first) {
-                let dst_key = VarKey::from_var(&phi.dst);
-                if phi.dst != *first {
-                    replacements.insert(dst_key, first.clone());
-                }
-                stats.phis_simplified += 1;
-                changed = true;
-                false
-            } else {
-                true
-            }
-        });
-
-        for op in &block.ops {
-            if let SSAOp::Copy { dst, src } = op
-                && dst.size == src.size
-                && dst != src
-            {
-                replacements.insert(VarKey::from_var(dst), src.clone());
-            }
-        }
-    }
-
-    (resolve_replacements(replacements), changed)
-}
-
-fn resolve_replacements(mut replacements: HashMap<VarKey, SSAVar>) -> HashMap<VarKey, SSAVar> {
-    let keys: Vec<VarKey> = replacements.keys().cloned().collect();
-    for key in keys {
-        let mut visited = HashSet::new();
-        let mut current_key = key.clone();
-        let mut current_var = replacements.get(&current_key).cloned();
-        while let Some(next) = current_var {
-            let next_key = VarKey::from_var(&next);
-            if !visited.insert(next_key.clone()) {
-                break;
-            }
-            if let Some(follow) = replacements.get(&next_key).cloned() {
-                current_var = Some(follow);
-                current_key = next_key;
-            } else {
-                replacements.insert(key.clone(), next);
-                break;
-            }
-        }
-    }
-    replacements
-}
-
-fn apply_replacements(
-    func: &mut SSAFunction,
-    replacements: &HashMap<VarKey, SSAVar>,
-    stats: &mut OptimizationStats,
-) -> bool {
-    let mut changed = false;
-    let block_addrs = func.block_addrs().to_vec();
-
-    let mapper = |var: &SSAVar| -> SSAVar {
-        let mut visited = HashSet::new();
-        let mut current = var.clone();
-        let mut key = VarKey::from_var(&current);
-        while let Some(next) = replacements.get(&key).cloned() {
-            if !visited.insert(key) {
-                return var.clone();
-            }
-            current = next;
-            key = VarKey::from_var(&current);
-        }
-        current
-    };
-
-    for addr in block_addrs {
-        let is_return_block = func
-            .cfg()
-            .get_block(addr)
-            .is_some_and(|cfg_block| cfg_block.is_return());
-        let Some(block) = func.get_block_mut(addr) else {
-            continue;
-        };
-
-        for phi in &mut block.phis {
-            let preserve_phi_sources =
-                is_return_block && return_value_family(&phi.dst.name).is_some();
-            for (_, src) in &mut phi.sources {
-                let new_src = if preserve_phi_sources {
-                    src.clone()
-                } else {
-                    mapper(src)
-                };
-                if new_src != *src {
-                    *src = new_src;
-                    stats.copies_propagated += 1;
-                    changed = true;
-                }
-            }
-        }
-
-        for op in &mut block.ops {
-            let new_op = map_sources_in_op(op, &mapper);
-            if &new_op != op {
-                let delta = count_source_replacements(op, &new_op);
-                if delta > 0 {
-                    stats.copies_propagated += delta;
-                }
-                *op = new_op;
-                changed = true;
-            }
-        }
-    }
-
-    changed
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ExprKind {
-    Unary(&'static str),
-    Binary(&'static str),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExprKey {
-    kind: ExprKind,
-    dst_size: u32,
-    args: Vec<VarKey>,
-}
-
-fn expr_key(op: &SSAOp) -> Option<ExprKey> {
-    use SSAOp::*;
-    let dst = op.dst()?;
-    let key = match op {
-        IntNegate { src, .. } => ExprKey {
-            kind: ExprKind::Unary("IntNegate"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        IntNot { src, .. } => ExprKey {
-            kind: ExprKind::Unary("IntNot"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        BoolNot { src, .. } => ExprKey {
-            kind: ExprKind::Unary("BoolNot"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        IntZExt { src, .. } => ExprKey {
-            kind: ExprKind::Unary("IntZExt"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        IntSExt { src, .. } => ExprKey {
-            kind: ExprKind::Unary("IntSExt"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        Trunc { src, .. } => ExprKey {
-            kind: ExprKind::Unary("Trunc"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        FloatNeg { src, .. } => ExprKey {
-            kind: ExprKind::Unary("FloatNeg"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        FloatAbs { src, .. } => ExprKey {
-            kind: ExprKind::Unary("FloatAbs"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        FloatSqrt { src, .. } => ExprKey {
-            kind: ExprKind::Unary("FloatSqrt"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        Int2Float { src, .. } => ExprKey {
-            kind: ExprKind::Unary("Int2Float"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        Float2Int { src, .. } => ExprKey {
-            kind: ExprKind::Unary("Float2Int"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        FloatFloat { src, .. } => ExprKey {
-            kind: ExprKind::Unary("FloatFloat"),
-            dst_size: dst.size,
-            args: vec![VarKey::from_var(src)],
-        },
-        IntAdd { a, b, .. }
-        | IntMult { a, b, .. }
-        | IntAnd { a, b, .. }
-        | IntOr { a, b, .. }
-        | IntXor { a, b, .. }
-        | IntEqual { a, b, .. }
-        | IntNotEqual { a, b, .. }
-        | BoolAnd { a, b, .. }
-        | BoolOr { a, b, .. }
-        | BoolXor { a, b, .. }
-        | FloatAdd { a, b, .. }
-        | FloatMult { a, b, .. }
-        | FloatEqual { a, b, .. }
-        | FloatNotEqual { a, b, .. } => {
-            let mut args = vec![VarKey::from_var(a), VarKey::from_var(b)];
-            args.sort();
-            let kind = match op {
-                IntAdd { .. } => ExprKind::Binary("IntAdd"),
-                IntMult { .. } => ExprKind::Binary("IntMult"),
-                IntAnd { .. } => ExprKind::Binary("IntAnd"),
-                IntOr { .. } => ExprKind::Binary("IntOr"),
-                IntXor { .. } => ExprKind::Binary("IntXor"),
-                IntEqual { .. } => ExprKind::Binary("IntEqual"),
-                IntNotEqual { .. } => ExprKind::Binary("IntNotEqual"),
-                BoolAnd { .. } => ExprKind::Binary("BoolAnd"),
-                BoolOr { .. } => ExprKind::Binary("BoolOr"),
-                BoolXor { .. } => ExprKind::Binary("BoolXor"),
-                FloatAdd { .. } => ExprKind::Binary("FloatAdd"),
-                FloatMult { .. } => ExprKind::Binary("FloatMult"),
-                FloatEqual { .. } => ExprKind::Binary("FloatEqual"),
-                FloatNotEqual { .. } => ExprKind::Binary("FloatNotEqual"),
-                _ => return None,
-            };
-            ExprKey {
-                kind,
-                dst_size: dst.size,
-                args,
-            }
-        }
-        IntSub { a, b, .. }
-        | IntDiv { a, b, .. }
-        | IntSDiv { a, b, .. }
-        | IntRem { a, b, .. }
-        | IntSRem { a, b, .. }
-        | IntLeft { a, b, .. }
-        | IntRight { a, b, .. }
-        | IntSRight { a, b, .. }
-        | IntLess { a, b, .. }
-        | IntLessEqual { a, b, .. }
-        | IntSLess { a, b, .. }
-        | IntSLessEqual { a, b, .. }
-        | FloatSub { a, b, .. }
-        | FloatDiv { a, b, .. }
-        | FloatLess { a, b, .. }
-        | FloatLessEqual { a, b, .. } => {
-            let args = vec![VarKey::from_var(a), VarKey::from_var(b)];
-            let kind = match op {
-                IntSub { .. } => ExprKind::Binary("IntSub"),
-                IntDiv { .. } => ExprKind::Binary("IntDiv"),
-                IntSDiv { .. } => ExprKind::Binary("IntSDiv"),
-                IntRem { .. } => ExprKind::Binary("IntRem"),
-                IntSRem { .. } => ExprKind::Binary("IntSRem"),
-                IntLeft { .. } => ExprKind::Binary("IntLeft"),
-                IntRight { .. } => ExprKind::Binary("IntRight"),
-                IntSRight { .. } => ExprKind::Binary("IntSRight"),
-                IntLess { .. } => ExprKind::Binary("IntLess"),
-                IntLessEqual { .. } => ExprKind::Binary("IntLessEqual"),
-                IntSLess { .. } => ExprKind::Binary("IntSLess"),
-                IntSLessEqual { .. } => ExprKind::Binary("IntSLessEqual"),
-                FloatSub { .. } => ExprKind::Binary("FloatSub"),
-                FloatDiv { .. } => ExprKind::Binary("FloatDiv"),
-                FloatLess { .. } => ExprKind::Binary("FloatLess"),
-                FloatLessEqual { .. } => ExprKind::Binary("FloatLessEqual"),
-                _ => return None,
-            };
-            ExprKey {
-                kind,
-                dst_size: dst.size,
-                args,
-            }
-        }
-        _ => return None,
-    };
-
-    Some(key)
-}
-
-fn common_subexpr_elim(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
-    let mut changed = false;
-    let block_addrs = func.block_addrs().to_vec();
-
-    for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else {
-            continue;
-        };
-        let mut available: HashMap<ExprKey, SSAVar> = HashMap::new();
-
-        for op in &mut block.ops {
-            let Some(dst) = op.dst().cloned() else {
-                continue;
-            };
-            let Some(key) = expr_key(op) else { continue };
-
-            if let Some(existing) = available.get(&key).cloned() {
-                if existing.size == dst.size {
-                    *op = SSAOp::Copy { dst, src: existing };
-                    stats.cse_replacements += 1;
-                    changed = true;
-                }
-            } else {
-                available.insert(key, dst);
-            }
-        }
-    }
-
-    changed
-}
-
-fn op_has_side_effects(op: &SSAOp, preserve_memory_reads: bool) -> bool {
-    if op.is_control_flow() || op.is_memory_write() {
-        return true;
-    }
-    if matches!(
-        op,
-        SSAOp::Fence { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
-    ) {
-        return true;
-    }
-    if preserve_memory_reads && op.is_memory_read() {
-        return true;
-    }
-    matches!(
-        op,
-        SSAOp::CallOther { .. }
-            | SSAOp::Breakpoint
-            | SSAOp::Unimplemented
-            | SSAOp::CpuId { .. }
-            | SSAOp::New { .. }
-    )
-}
-
-fn dead_code_elim(
-    func: &mut SSAFunction,
-    config: &OptimizationConfig,
-    stats: &mut OptimizationStats,
-) -> bool {
-    let mut changed = false;
-
-    loop {
-        let use_set = collect_uses(func);
-        let mut local_change = false;
-        let block_addrs = func.block_addrs().to_vec();
-
-        for addr in block_addrs {
-            let Some(block) = func.get_block_mut(addr) else {
-                continue;
-            };
-
-            let before_ops = block.ops.len();
-            block.ops.retain(|op| {
-                if let Some(dst) = op.dst() {
-                    let key = VarKey::from_var(dst);
-                    if !use_set.contains(&key)
-                        && !op_has_side_effects(op, config.preserve_memory_reads)
-                    {
-                        stats.dce_removed_ops += 1;
-                        return false;
-                    }
-                }
-                true
-            });
-
-            let before_phis = block.phis.len();
-            block.phis.retain(|phi| {
-                let key = VarKey::from_var(&phi.dst);
-                if !use_set.contains(&key) {
-                    stats.dce_removed_phis += 1;
-                    return false;
-                }
-                true
-            });
-
-            if block.ops.len() != before_ops || block.phis.len() != before_phis {
-                local_change = true;
-            }
-        }
-
-        if !local_change {
-            break;
-        }
-        changed = true;
-    }
-
-    changed
-}
-
-fn return_value_family(name: &str) -> Option<&'static str> {
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "rax" | "eax" | "ax" | "al" | "ah" => Some("x86-gpr-ret"),
-        "xmm0" | "ymm0" | "zmm0" => Some("x86-simd-ret"),
-        "st0" | "st(0)" => Some("x86-fpu-ret"),
-        "r0" => Some("arm-gpr-ret"),
-        "x0" | "w0" => Some("aarch64-gpr-ret"),
-        "v0" | "q0" | "d0" | "s0" => Some("aarch64-simd-ret"),
-        "a0" => Some("riscv-gpr-ret"),
-        "fa0" => Some("riscv-fp-ret"),
-        _ => None,
-    }
-}
-
-fn collect_preserved_return_defs(func: &SSAFunction) -> HashSet<VarKey> {
-    let mut preserved = HashSet::new();
-
-    for block in func.blocks() {
-        let Some(cfg_block) = func.cfg().get_block(block.addr) else {
-            continue;
-        };
-        if !cfg_block.is_return() {
-            continue;
-        }
-
-        let mut seen_families = HashSet::new();
-        for op in block.ops.iter().rev() {
-            let Some(dst) = op.dst() else {
-                continue;
-            };
-            let Some(family) = return_value_family(&dst.name) else {
-                continue;
-            };
-            if seen_families.insert(family) {
-                preserved.insert(VarKey::from_var(dst));
-            }
-        }
-
-        for phi in block.phis.iter().rev() {
-            let Some(family) = return_value_family(&phi.dst.name) else {
-                continue;
-            };
-            if seen_families.insert(family) {
-                preserved.insert(VarKey::from_var(&phi.dst));
-            }
-        }
-    }
-
-    preserved
-}
-
-fn collect_uses(func: &SSAFunction) -> HashSet<VarKey> {
-    let mut uses = HashSet::new();
-
-    for phi in func.all_phis() {
-        for (_, src) in &phi.sources {
-            uses.insert(VarKey::from_var(src));
-        }
-    }
-
-    for op in func.all_ops() {
-        for src in op.sources() {
-            uses.insert(VarKey::from_var(src));
-        }
-    }
-
-    uses.extend(collect_preserved_return_defs(func));
-
-    uses
-}
-
 pub(crate) fn map_sources_in_op<F>(op: &SSAOp, map: &F) -> SSAOp
 where
     F: Fn(&SSAVar) -> SSAVar,
@@ -1697,14 +2050,23 @@ where
         },
         Load { dst, space, addr } => Load {
             dst: dst.clone(),
-            space: space.clone(),
+            space: *space,
             addr: map(addr),
         },
         Store { space, addr, val } => Store {
-            space: space.clone(),
+            space: *space,
             addr: map(addr),
             val: map(val),
         },
+        BlockTransfer(transfer) => BlockTransfer(Box::new(crate::op::BlockTransferOp {
+            space: transfer.space,
+            kind: transfer.kind,
+            destination: map(&transfer.destination),
+            source: map(&transfer.source),
+            count: map(&transfer.count),
+            direction: map(&transfer.direction),
+            element_size: transfer.element_size,
+        })),
         Fence { ordering } => Fence {
             ordering: *ordering,
         },
@@ -1715,7 +2077,7 @@ where
             ordering,
         } => LoadLinked {
             dst: dst.clone(),
-            space: space.clone(),
+            space: *space,
             addr: map(addr),
             ordering: *ordering,
         },
@@ -1727,26 +2089,19 @@ where
             ordering,
         } => StoreConditional {
             result: result.clone(),
-            space: space.clone(),
+            space: *space,
             addr: map(addr),
             val: map(val),
             ordering: *ordering,
         },
-        AtomicCAS {
-            dst,
-            space,
-            addr,
-            expected,
-            replacement,
-            ordering,
-        } => AtomicCAS {
-            dst: dst.clone(),
-            space: space.clone(),
-            addr: map(addr),
-            expected: map(expected),
-            replacement: map(replacement),
-            ordering: *ordering,
-        },
+        AtomicCAS(swap) => AtomicCAS(Box::new(crate::op::AtomicCasOp {
+            dst: swap.dst.clone(),
+            space: swap.space,
+            addr: map(&swap.addr),
+            expected: map(&swap.expected),
+            replacement: map(&swap.replacement),
+            ordering: swap.ordering,
+        })),
         LoadGuarded {
             dst,
             space,
@@ -1755,7 +2110,7 @@ where
             ordering,
         } => LoadGuarded {
             dst: dst.clone(),
-            space: space.clone(),
+            space: *space,
             addr: map(addr),
             guard: map(guard),
             ordering: *ordering,
@@ -1767,7 +2122,7 @@ where
             guard,
             ordering,
         } => StoreGuarded {
-            space: space.clone(),
+            space: *space,
             addr: map(addr),
             val: map(val),
             guard: map(guard),
@@ -1936,23 +2291,47 @@ where
             dst: dst.clone(),
             src: map(src),
         },
-        Branch { target } => Branch {
+        Branch {
+            target,
+            instruction,
+        } => Branch {
             target: map(target),
+            instruction: *instruction,
         },
         CBranch { target, cond } => CBranch {
             target: map(target),
             cond: map(cond),
         },
-        BranchInd { target } => BranchInd {
+        BranchInd {
+            target,
+            instruction,
+        } => BranchInd {
             target: map(target),
+            instruction: *instruction,
         },
-        Call { target } => Call {
-            target: map(target),
+        Switch { selector } => Switch {
+            selector: map(selector),
         },
-        CallInd { target } => CallInd {
+        Call {
+            target,
+            instruction,
+        } => Call {
             target: map(target),
+            instruction: *instruction,
+        },
+        CallInd {
+            target,
+            instruction,
+        } => CallInd {
+            target: map(target),
+            instruction: *instruction,
         },
         CallDefine { dst } => CallDefine { dst: dst.clone() },
+        CallUse { src } => CallUse { src: map(src) },
+        CallRestore { dst, src } => CallRestore {
+            dst: dst.clone(),
+            src: map(src),
+        },
         Return { target } => Return {
             target: map(target),
         },
@@ -2094,17 +2473,18 @@ where
             src: map(src),
             position: map(position),
         },
-        Insert {
-            dst,
-            src,
-            value,
-            position,
-        } => Insert {
-            dst: dst.clone(),
-            src: map(src),
-            value: map(value),
-            position: map(position),
-        },
+        Insert(insert) => Insert(Box::new(crate::op::InsertOp {
+            dst: insert.dst.clone(),
+            src: map(&insert.src),
+            value: map(&insert.value),
+            position: map(&insert.position),
+        })),
+        Select(select) => Select(Box::new(crate::op::SelectOp {
+            dst: select.dst.clone(),
+            cond: map(&select.cond),
+            if_true: map(&select.if_true),
+            if_false: map(&select.if_false),
+        })),
         Nop => Nop,
         Unimplemented => Unimplemented,
         Breakpoint => Breakpoint,
@@ -2181,6 +2561,64 @@ mod sccp_tests {
         assert_eq!(
             LatticeValue::Bottom.meet(LatticeValue::Const(9)),
             LatticeValue::Bottom
+        );
+    }
+
+    #[test]
+    fn sccp_constant_identity_ignores_display_names() {
+        let spoofed = SSAVar::new("const:2a", 0, 8);
+        assert_eq!(const_value(&spoofed), None);
+        let mut lattice = HashMap::new();
+        init_if_input(&spoofed, &mut lattice);
+        assert_eq!(
+            lattice.get(&VarKey::from_var(&spoofed)),
+            Some(&LatticeValue::Bottom)
+        );
+
+        let renamed = SSAVar::constant(0x2a, 8).renamed("renamed-value");
+        assert_eq!(const_value(&renamed), Some(0x2a));
+    }
+
+    #[test]
+    fn sccp_absorbing_constant_folds_without_the_other_operand() {
+        // `or rax, -1` on an entry value: the result is all ones whatever
+        // `rax` held, so the entry carrier is not a reader of the return.
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntOr {
+                    dst: make_reg(0, 8),
+                    a: make_reg(0, 8),
+                    b: make_const(u64::MAX, 8),
+                },
+                R2ILOp::IntAnd {
+                    dst: make_reg(1, 4),
+                    a: make_reg(1, 4),
+                    b: make_const(0, 4),
+                },
+                R2ILOp::IntMult {
+                    dst: make_reg(2, 4),
+                    a: make_const(0, 4),
+                    b: make_reg(2, 4),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }]);
+
+        let (consts, _) = sccp(&func);
+        assert!(
+            consts.values().any(|v| *v == u64::MAX),
+            "SCCP should fold `x | -1` to all ones: {consts:?}"
+        );
+        assert_eq!(
+            consts.values().filter(|v| **v == 0).count(),
+            2,
+            "SCCP should fold `x & 0` and `0 * x` to zero: {consts:?}"
         );
     }
 
@@ -2413,7 +2851,7 @@ mod sccp_tests {
 
         let (consts, executable) = sccp(&func);
         let mut stats = OptimizationStats::default();
-        let changed = apply_sccp_results(&mut func, &consts, &executable, &mut stats);
+        let changed = apply_sccp_results(&mut func, &consts, &executable, None, &mut stats);
         assert!(changed);
         assert!(
             func.get_block(0x1004).is_none(),
@@ -2424,127 +2862,449 @@ mod sccp_tests {
         assert!(stats.sccp_blocks_removed > 0);
     }
 
+    /// The definition-aware folds a lane read goes through
+    /// (doc/adr-register-identity.md §5).
     #[test]
-    fn dce_preserves_branch_merged_return_register_phi() {
-        let mut func = raw_func(vec![
+    fn subpiece_folds_through_the_definition_of_its_source() {
+        let root = SSAVar::new("RAX", 1, 8);
+        let older = SSAVar::new("RAX", 0, 8);
+        let lane = SSAVar::new("tmp:lane:1000:1:0", 1, 4);
+        let byte = SSAVar::new("tmp:lane:1000:2:0", 1, 1);
+        let read = |offset: u32, size: u32| SSAOp::Subpiece {
+            dst: SSAVar::new("tmp:lane:1000:3:0", 1, size),
+            src: root.clone(),
+            offset,
+        };
+        let defined_by = |op: SSAOp| {
+            let mut defs = HashMap::new();
+            defs.insert(VarKey::from_var(&root), op);
+            defs
+        };
+
+        // A constant copied into the root: the lane is that constant's bytes.
+        let constant = defined_by(SSAOp::Copy {
+            dst: root.clone(),
+            src: SSAVar::constant(0x1122_3344_5566_7788, 8),
+        });
+        assert_eq!(
+            fold_through_definition(&read(4, 4), &constant),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: SSAVar::constant(0x1122_3344_5566_7788, 8),
+                offset: 4,
+            })
+        );
+
+        // A lane inserted at bit 32: a read inside it is the inserted value,
+        // a read outside it is the same read of the older root.
+        let inserted = defined_by(SSAOp::Insert(Box::new(crate::op::InsertOp {
+            dst: root.clone(),
+            src: older.clone(),
+            value: lane.clone(),
+            position: SSAVar::constant(32, 4),
+        })));
+        assert_eq!(
+            fold_through_definition(&read(4, 4), &inserted),
+            Some(SSAOp::Copy {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: lane.clone(),
+            })
+        );
+        assert_eq!(
+            fold_through_definition(&read(5, 1), &inserted),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                src: lane.clone(),
+                offset: 1,
+            })
+        );
+        assert_eq!(
+            fold_through_definition(&read(0, 4), &inserted),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: older.clone(),
+                offset: 0,
+            })
+        );
+        assert_eq!(fold_through_definition(&read(2, 4), &inserted), None);
+
+        // A widened value: a read within the narrow width is the narrow value.
+        let widened = defined_by(SSAOp::IntZExt {
+            dst: root.clone(),
+            src: lane.clone(),
+        });
+        assert_eq!(
+            fold_through_definition(&read(0, 4), &widened),
+            Some(SSAOp::Copy {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: lane.clone(),
+            })
+        );
+        assert_eq!(
+            fold_through_definition(&read(0, 1), &widened),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                src: lane.clone(),
+                offset: 0,
+            })
+        );
+        assert_eq!(fold_through_definition(&read(0, 8), &widened), None);
+
+        // A slice of a slice is one slice.
+        let sliced = defined_by(SSAOp::Subpiece {
+            dst: root.clone(),
+            src: SSAVar::new("XMM0", 1, 16),
+            offset: 8,
+        });
+        assert_eq!(
+            fold_through_definition(&read(2, 1), &sliced),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                src: SSAVar::new("XMM0", 1, 16),
+                offset: 10,
+            })
+        );
+
+        // A copy of a non-constant is a statement the prepared SSA keeps.
+        let copied = defined_by(SSAOp::Copy {
+            dst: root.clone(),
+            src: older.clone(),
+        });
+        assert_eq!(fold_through_definition(&read(0, 4), &copied), None);
+        let _ = byte;
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+
+    fn c(val: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Const,
+            offset: val,
+            size,
+            meta: None,
+        }
+    }
+
+    fn r(offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Register,
+            offset,
+            size,
+            meta: None,
+        }
+    }
+
+    fn block(addr: u64, ops: Vec<R2ILOp>) -> R2ILBlock {
+        R2ILBlock {
+            addr,
+            size: 4,
+            ops,
+            switch_info: None,
+            op_metadata: Default::default(),
+        }
+    }
+
+    fn test(value: u64, target: u64, negated: bool) -> Vec<R2ILOp> {
+        let mut ops = vec![R2ILOp::IntEqual {
+            dst: r(9, 1),
+            a: r(8, 8),
+            b: c(value, 8),
+        }];
+        let cond = if negated {
+            ops.push(R2ILOp::BoolNot {
+                dst: r(10, 1),
+                src: r(9, 1),
+            });
+            r(10, 1)
+        } else {
+            r(9, 1)
+        };
+        ops.push(R2ILOp::CBranch {
+            target: c(target, 8),
+            cond,
+        });
+        ops
+    }
+
+    fn body(addend: u64, next: u64) -> Vec<R2ILOp> {
+        vec![
+            R2ILOp::IntAdd {
+                dst: r(16, 8),
+                a: r(16, 8),
+                b: c(addend, 8),
+            },
+            R2ILOp::Branch { target: c(next, 8) },
+        ]
+    }
+
+    fn chain(case3_next: u64, case2_next: u64) -> SSAFunction {
+        let mut head = vec![R2ILOp::IntAnd {
+            dst: r(8, 8),
+            a: r(0, 8),
+            b: c(3, 8),
+        }];
+        head.extend(test(1, 0x1030, false));
+        let blocks = vec![
+            block(0x1000, head),
+            block(0x1004, test(2, 0x1020, false)),
+            block(0x1008, test(3, 0x1040, true)),
+            block(0x100c, body(3, case3_next)),
+            block(0x1020, body(2, case2_next)),
+            block(0x1030, body(1, 0x1040)),
+            block(0x1040, vec![R2ILOp::Return { target: r(0, 8) }]),
+        ];
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        optimize_function(&mut func, &OptimizationConfig::default());
+        func
+    }
+
+    #[test]
+    fn a_chain_whose_cases_fall_through_fuses_into_one_switch() {
+        let func = chain(0x1020, 0x1030);
+        let terminator = func
+            .cfg()
+            .get_block(0x1000)
+            .expect("head")
+            .terminator
+            .clone();
+        assert_eq!(
+            terminator,
+            BlockTerminator::Switch {
+                cases: vec![(1, 0x1030), (2, 0x1020), (3, 0x100c)],
+                default: Some(0x1040),
+            }
+        );
+        assert!(matches!(
+            func.get_block(0x1000).expect("head").ops.last(),
+            Some(SSAOp::Switch { .. })
+        ));
+        assert!(func.get_block(0x1004).is_none());
+        assert!(func.get_block(0x1008).is_none());
+        let mut successors = func.successors(0x1000);
+        successors.sort_unstable();
+        successors.dedup();
+        assert_eq!(successors, vec![0x100c, 0x1020, 0x1030, 0x1040]);
+        let merge = func.get_block(0x1020).expect("case 2");
+        assert!(
+            merge.phis.iter().all(|phi| phi
+                .sources
+                .iter()
+                .all(|(pred, _)| *pred == 0x1000 || *pred == 0x100c)),
+            "phi sources: {:?}",
+            merge.phis
+        );
+    }
+
+    #[test]
+    fn a_chain_whose_cases_rejoin_stays_an_else_if_ladder() {
+        let func = chain(0x1040, 0x1040);
+        assert!(matches!(
+            func.cfg().get_block(0x1000).expect("head").terminator,
+            BlockTerminator::ConditionalBranch { .. }
+        ));
+        assert!(func.get_block(0x1004).is_some());
+    }
+}
+
+#[cfg(test)]
+mod signed_flag_tests {
+    use super::*;
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+
+    fn c(val: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Const,
+            offset: val,
+            size,
+            meta: None,
+        }
+    }
+
+    fn r(offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Register,
+            offset,
+            size,
+            meta: None,
+        }
+    }
+
+    // `cmp x, #1` as arm64 lifts it, with the flags copied out of their
+    // temporaries before the branch reads them.
+    fn compare(strict: bool) -> SSAFunction {
+        let x = r(0, 8);
+        let mut ops = vec![
+            R2ILOp::IntAnd {
+                dst: x.clone(),
+                a: r(8, 8),
+                b: c(3, 8),
+            },
+            R2ILOp::IntSBorrow {
+                dst: r(0x40, 1),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::IntSub {
+                dst: r(0x50, 8),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::IntSLess {
+                dst: r(0x41, 1),
+                a: r(0x50, 8),
+                b: c(0, 8),
+            },
+            R2ILOp::IntEqual {
+                dst: r(0x42, 1),
+                a: x.clone(),
+                b: c(1, 8),
+            },
+            R2ILOp::Copy {
+                dst: r(0x60, 1),
+                src: r(0x41, 1),
+            },
+            R2ILOp::Copy {
+                dst: r(0x61, 1),
+                src: r(0x40, 1),
+            },
+            R2ILOp::Copy {
+                dst: r(0x62, 1),
+                src: r(0x42, 1),
+            },
+            R2ILOp::IntEqual {
+                dst: r(0x70, 1),
+                a: r(0x60, 1),
+                b: r(0x61, 1),
+            },
+        ];
+        let cond = if strict {
+            ops.push(R2ILOp::BoolNot {
+                dst: r(0x71, 1),
+                src: r(0x62, 1),
+            });
+            ops.push(R2ILOp::BoolAnd {
+                dst: r(0x72, 1),
+                a: r(0x71, 1),
+                b: r(0x70, 1),
+            });
+            r(0x72, 1)
+        } else {
+            r(0x70, 1)
+        };
+        ops.push(R2ILOp::CBranch {
+            target: c(0x1010, 8),
+            cond,
+        });
+        let blocks = vec![
             R2ILBlock {
                 addr: 0x1000,
                 size: 4,
-                ops: vec![R2ILOp::CBranch {
-                    target: make_const(0x1008, 8),
-                    cond: make_reg(32, 1),
-                }],
+                ops,
                 switch_info: None,
                 op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
                 size: 4,
-                ops: vec![R2ILOp::Branch {
-                    target: make_const(0x100c, 8),
-                }],
+                ops: vec![R2ILOp::Return { target: r(0x80, 8) }],
                 switch_info: None,
                 op_metadata: Default::default(),
             },
             R2ILBlock {
-                addr: 0x1008,
+                addr: 0x1010,
                 size: 4,
-                ops: vec![R2ILOp::Branch {
-                    target: make_const(0x100c, 8),
-                }],
+                ops: vec![R2ILOp::Return { target: r(0x80, 8) }],
                 switch_info: None,
                 op_metadata: Default::default(),
             },
-            R2ILBlock {
-                addr: 0x100c,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: make_ram(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ]);
+        ];
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        optimize_function(&mut func, &OptimizationConfig::default());
+        func
+    }
 
-        func.get_block_mut(0x1000).expect("entry block").ops = vec![SSAOp::CBranch {
-            target: SSAVar::new("ram:1008", 0, 8),
-            cond: SSAVar::new("tmp:cond", 0, 1),
-        }];
-        func.get_block_mut(0x1004).expect("left block").ops = vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("rax", 1, 8),
-                src: SSAVar::constant(1, 8),
-            },
-            SSAOp::Branch {
-                target: SSAVar::new("ram:100c", 0, 8),
-            },
-        ];
-        func.get_block_mut(0x1008).expect("right block").ops = vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("rax", 2, 8),
-                src: SSAVar::constant(0, 8),
-            },
-            SSAOp::Branch {
-                target: SSAVar::new("ram:100c", 0, 8),
-            },
-        ];
-        func.get_block_mut(0x100c).expect("merge block").phis = vec![PhiNode {
-            dst: SSAVar::new("rax", 3, 8),
-            sources: vec![
-                (0x1004, SSAVar::new("rax", 1, 8)),
-                (0x1008, SSAVar::new("rax", 2, 8)),
+    fn condition_op(func: &SSAFunction) -> SSAOp {
+        let block = func.get_block(0x1000).expect("head");
+        let SSAOp::CBranch { cond, .. } = block.ops.last().expect("branch") else {
+            panic!("no branch");
+        };
+        block
+            .ops
+            .iter()
+            .find(|op| op.dst() == Some(cond))
+            .cloned()
+            .expect("condition definition")
+    }
+
+    #[test]
+    fn a_select_on_a_decided_condition_is_the_arm_it_decided() {
+        // arm64's udiv guard: `x9 = 4; q = x8 / x9; x8 = (x9 == 0) ? 0 : q`.
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: r(0x10, 8),
+                    src: c(4, 8),
+                },
+                R2ILOp::IntEqual {
+                    dst: r(0x20, 1),
+                    a: r(0x10, 8),
+                    b: c(0, 8),
+                },
+                R2ILOp::IntDiv {
+                    dst: r(0x30, 8),
+                    a: r(0, 8),
+                    b: r(0x10, 8),
+                },
+                R2ILOp::Select {
+                    dst: r(0x40, 8),
+                    cond: r(0x20, 1),
+                    if_true: c(0, 8),
+                    if_false: r(0x30, 8),
+                },
+                R2ILOp::Return { target: r(0x80, 8) },
             ],
+            switch_info: None,
+            op_metadata: Default::default(),
         }];
-
-        let stats = optimize_function(&mut func, &OptimizationConfig::default());
-        let merge = func.get_block(0x100c).expect("merge block");
-        assert_eq!(merge.phis.len(), 1, "return-value phi must survive DCE");
-        assert!(
-            func.get_block(0x1004).expect("left block").ops.iter().any(
-                |op| matches!(op, SSAOp::Copy { dst, .. } if dst == &SSAVar::new("rax", 1, 8))
-            ),
-            "left return-value write must remain live through the exit phi"
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build");
+        // As the decompile pipeline runs it: no constant propagation.
+        optimize_function(
+            &mut func,
+            &OptimizationConfig {
+                enable_sccp: false,
+                ..OptimizationConfig::default()
+            },
         );
+        let block = func.get_block(0x1000).expect("block");
         assert!(
-            func.get_block(0x1008).expect("right block").ops.iter().any(
-                |op| matches!(op, SSAOp::Copy { dst, .. } if dst == &SSAVar::new("rax", 2, 8))
-            ),
-            "right return-value write must remain live through the exit phi"
-        );
-        assert!(
-            stats.dce_removed_phis == 0,
-            "DCE must not classify the exit return phi as dead"
+            block.ops.iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
+            "ops: {:?}",
+            block.ops
         );
     }
 
     #[test]
-    fn dce_preserves_direct_return_register_write_in_return_block() {
-        let mut func = raw_func(vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }]);
+    fn sign_equals_overflow_through_copies_is_the_non_strict_ordering() {
+        assert!(matches!(
+            condition_op(&compare(false)),
+            SSAOp::IntSLessEqual { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
+        ));
+    }
 
-        func.get_block_mut(0x1000).expect("entry block").ops = vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("eax", 1, 4),
-                src: SSAVar::constant(1, 4),
-            },
-            SSAOp::Return {
-                target: SSAVar::new("ram:0", 0, 8),
-            },
-        ];
-
-        optimize_function(&mut func, &OptimizationConfig::default());
-        assert!(
-            func.get_block(0x1000).expect("entry block").ops.iter().any(
-                |op| matches!(op, SSAOp::Copy { dst, .. } if dst == &SSAVar::new("eax", 1, 4))
-            ),
-            "the last return-register write in a return block must survive DCE"
-        );
+    #[test]
+    fn not_zero_and_sign_equals_overflow_is_the_strict_ordering() {
+        assert!(matches!(
+            condition_op(&compare(true)),
+            SSAOp::IntSLess { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
+        ));
     }
 }

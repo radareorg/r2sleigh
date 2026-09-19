@@ -11,6 +11,15 @@ use crate::metadata::OpMetadata;
 use crate::space::SpaceId;
 use crate::varnode::Varnode;
 
+/// Whether a block operation reads its elements from memory or repeats a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BlockTransferKind {
+    /// Each element is read from `source` and written at `destination`.
+    Move,
+    /// Every element is the value `source` holds.
+    Fill,
+}
+
 /// An r2il operation representing a single semantic action.
 ///
 /// Operations are organized into categories:
@@ -40,6 +49,25 @@ pub enum R2ILOp {
         space: SpaceId,
         addr: Varnode,
         val: Varnode,
+    },
+
+    /// One repeated string operation, as the block it is.
+    ///
+    /// x86 spells `rep movs` and `rep stos` as a loop inside one instruction,
+    /// because p-code has no block-operation vocabulary; the loop is how the
+    /// specification writes something the machine performs as a block. The
+    /// operation reads `count` elements of `element_size` bytes from `source`
+    /// and writes them at `destination`, ascending when `direction` is zero.
+    /// The register updates the instruction also performs are ordinary
+    /// operations emitted beside it, so this one writes only memory.
+    BlockTransfer {
+        space: SpaceId,
+        kind: BlockTransferKind,
+        destination: Varnode,
+        source: Varnode,
+        count: Varnode,
+        direction: Varnode,
+        element_size: u32,
     },
 
     /// Memory fence/barrier with ordering semantics.
@@ -492,6 +520,15 @@ pub enum R2ILOp {
         value: Varnode,
         position: Varnode,
     },
+
+    /// Conditional value merge produced when instruction-local P-code control
+    /// flow is normalized into the linear r2il value graph.
+    Select {
+        dst: Varnode,
+        cond: Varnode,
+        if_true: Varnode,
+        if_false: Varnode,
+    },
 }
 
 impl R2ILOp {
@@ -505,6 +542,10 @@ impl R2ILOp {
                 | R2ILOp::Call { .. }
                 | R2ILOp::CallInd { .. }
                 | R2ILOp::Return { .. }
+                // A trap decides where control goes as surely as a branch
+                // does: to the exception handler, and not back. A block ends
+                // at one, and it names no successor of its own.
+                | R2ILOp::Breakpoint
         )
     }
 
@@ -524,10 +565,27 @@ impl R2ILOp {
         matches!(
             self,
             R2ILOp::Store { .. }
+                | R2ILOp::BlockTransfer { .. }
                 | R2ILOp::StoreConditional { .. }
                 | R2ILOp::StoreGuarded { .. }
                 | R2ILOp::AtomicCAS { .. }
         )
+    }
+
+    /// Returns true when this value operation may be evaluated speculatively.
+    ///
+    /// This is intentionally narrower than "has an output": reads, writes,
+    /// allocation, CPU state queries, calls, and control flow may be observable
+    /// even when their result is later discarded.
+    pub fn is_speculatable_value(&self) -> bool {
+        self.output().is_some()
+            && !self.is_control_flow()
+            && !self.is_memory_read()
+            && !self.is_memory_write()
+            && !matches!(
+                self,
+                R2ILOp::CallOther { .. } | R2ILOp::CpuId { .. } | R2ILOp::New { .. }
+            )
     }
 
     /// Returns the output varnode if this operation has one.
@@ -600,7 +658,8 @@ impl R2ILOp {
             | R2ILOp::New { dst, .. }
             | R2ILOp::Cast { dst, .. }
             | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. } => Some(dst),
+            | R2ILOp::Insert { dst, .. }
+            | R2ILOp::Select { dst, .. } => Some(dst),
             R2ILOp::StoreConditional { result, .. } => result.as_ref(),
             R2ILOp::CallOther { output, .. } => output.as_ref(),
             _ => None,
@@ -677,7 +736,8 @@ impl R2ILOp {
             | R2ILOp::New { dst, .. }
             | R2ILOp::Cast { dst, .. }
             | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. } => Some(dst),
+            | R2ILOp::Insert { dst, .. }
+            | R2ILOp::Select { dst, .. } => Some(dst),
             R2ILOp::StoreConditional { result, .. } => result.as_mut(),
             R2ILOp::CallOther { output, .. } => output.as_mut(),
             _ => None,
@@ -694,6 +754,13 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
+            R2ILOp::BlockTransfer {
+                destination,
+                source,
+                count,
+                direction,
+                ..
+            } => vec![destination, source, count, direction],
             R2ILOp::Fence { .. } => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
@@ -800,6 +867,12 @@ impl R2ILOp {
                 position,
                 ..
             } => vec![src, value, position],
+            R2ILOp::Select {
+                cond,
+                if_true,
+                if_false,
+                ..
+            } => vec![cond, if_true, if_false],
         }
     }
 
@@ -812,6 +885,13 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
+            R2ILOp::BlockTransfer {
+                destination,
+                source,
+                count,
+                direction,
+                ..
+            } => vec![destination, source, count, direction],
             R2ILOp::Fence { .. } => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
@@ -918,6 +998,12 @@ impl R2ILOp {
                 position,
                 ..
             } => vec![src, value, position],
+            R2ILOp::Select {
+                cond,
+                if_true,
+                if_false,
+                ..
+            } => vec![cond, if_true, if_false],
         }
     }
 }
@@ -927,6 +1013,28 @@ impl std::fmt::Display for R2ILOp {
         match self {
             // Data movement
             R2ILOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
+            R2ILOp::BlockTransfer {
+                space,
+                kind,
+                destination,
+                source,
+                count,
+                direction,
+                element_size,
+            } => write!(
+                f,
+                "BLOCK{} [{}]{} <- {} x {} ({} bytes each, direction {})",
+                match kind {
+                    BlockTransferKind::Move => "MOVE",
+                    BlockTransferKind::Fill => "FILL",
+                },
+                space,
+                destination,
+                source,
+                count,
+                element_size,
+                direction
+            ),
             R2ILOp::Load { dst, space, addr } => {
                 write!(f, "{} = LOAD [{}]{}", dst, space, addr)
             }
@@ -1157,6 +1265,12 @@ impl std::fmt::Display for R2ILOp {
             } => {
                 write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position)
             }
+            R2ILOp::Select {
+                dst,
+                cond,
+                if_true,
+                if_false,
+            } => write!(f, "{} = SELECT({}, {}, {})", dst, cond, if_true, if_false),
         }
     }
 }
@@ -1226,6 +1340,15 @@ impl R2ILBlock {
         if let Some(meta) = meta {
             self.op_metadata.insert(idx, meta);
         }
+    }
+
+    /// Record the native instruction the operation at `op_index` was lifted
+    /// from, keeping whatever other metadata it already carries.
+    pub fn stamp_instruction(&mut self, op_index: usize, instruction_addr: u64) {
+        self.op_metadata
+            .entry(op_index)
+            .or_default()
+            .instruction_addr = Some(instruction_addr);
     }
 
     /// Set metadata for an operation index.

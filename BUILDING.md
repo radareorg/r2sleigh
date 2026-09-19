@@ -59,11 +59,14 @@ cd r2plugin
 # Build release with x86 (default)
 make
 
+# Build a fast debug version for local iteration
+make RUST_TARGET=debug
+
 # Build with all architectures
 make RUST_FEATURES=all-archs
 
-# Build debug version
-make RUST_TARGET=debug
+# Build maximum-optimized distributable artifacts
+make RUST_TARGET=dist
 ```
 
 ### Make Targets
@@ -81,8 +84,8 @@ make RUST_TARGET=debug
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUST_TARGET` | `release` | `release` or `debug` |
-| `RUST_FEATURES` | `x86` | Sleigh feature flags |
+| `RUST_TARGET` | `release` | `debug`, `release`, or `dist` |
+| `RUST_FEATURES` | `all-archs` | Sleigh feature flags: `x86`, `arm` (ARM32 + AArch64), `mips`, `riscv`, or `all-archs`. Narrow it only when build time matters more than covering the host. |
 
 Installation
 ------------
@@ -153,10 +156,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 R2IL Format Compatibility
 -------------------------
 
-- Current writer format is `FORMAT_VERSION = 4`.
-- Default loader support is for v4 `.r2il` artifacts (postcard encoding).
-- Legacy v1/v2/v3 loading requires `r2il/legacy-bincode`.
-- Re-saving any loaded artifact writes v4.
+- The sole format identity is `R2PSTC07`; there is no separate format-version authority.
+- The loader accepts exactly `R2PSTC07 || payload_length_u64_le || postcard(ArchSpec)` and rejects truncation or trailing bytes.
+- Older versions and encodings are rejected instead of being migrated through a second semantic path.
 
 Troubleshooting
 ---------------
@@ -193,13 +195,13 @@ The plugin reads `anal.arch` and `anal.bits` from radare2. If auto-detection
 fails, set them explicitly:
 
 ```bash
-r2 -qc 'e anal.arch=x86; e anal.bits=64; aaa; s main; a:sla.dec' /bin/ls
+r2 -qc 'e anal.arch=x86; e anal.bits=64; aaa; s main; pd:s' /bin/ls
 ```
 
 Or override with the plugin command:
 
 ```bash
-r2 -qc 'a:sla.arch x86-64; aaa; s main; a:sla.dec' /bin/ls
+r2 -qc 'a:sla.arch x86-64; aaa; s main; pd:s' /bin/ls
 ```
 
 ### Build fails with linker errors
@@ -215,18 +217,31 @@ sudo apt install radare2-dev libstdc++-dev
 sudo dnf install radare2-devel libstdc++-devel
 ```
 
-Release Builds
---------------
+Release And Dist Builds
+-----------------------
 
-The workspace `Cargo.toml` enables LTO, single codegen unit, and symbol
-stripping for release builds:
+The workspace `release` profile is tuned for normal local and CI iteration:
+optimized code, parallel codegen, abort-on-panic, and stripped artifacts.
+Use `dist` only when a maximum-optimized distributable artifact is worth the
+extra link time.
 
 ```toml
 [profile.release]
-lto = true
-codegen-units = 1
+lto = false
+codegen-units = 16
 panic = "abort"
 strip = true
+
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
 ```
 
-This produces smaller, faster binaries at the cost of longer compile times.
+Examples:
+
+```bash
+cargo build --release -p r2sleigh-plugin --features x86
+cargo build --profile dist -p r2sleigh-plugin --features all-archs
+make -C r2plugin RUST_TARGET=dist RUST_FEATURES=all-archs
+```
