@@ -1230,6 +1230,7 @@ impl TypeInference {
         arena: &mut TypeArena,
     ) -> (TypeId, Option<String>) {
         match ty {
+            CTypeLike::Const(inner) => self.type_like_to_typeid(inner, arena),
             CTypeLike::Void => (arena.unknown_alias("void"), None),
             CTypeLike::Bool => (arena.bool_ty(), None),
             CTypeLike::Int { bits, signedness } => (arena.int(*bits, *signedness), None),

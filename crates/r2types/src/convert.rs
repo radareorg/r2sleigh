@@ -48,6 +48,13 @@ pub enum CTypeLike {
         /// every cast and every declaration a rendering emits.
         params: Box<[CTypeLike]>,
     },
+    /// A `const`-qualified pointee: what `const char *` points at.
+    ///
+    /// Only a pointee carries the qualifier. A top-level qualifier is not part
+    /// of a prototype's type, but a pointee's is: a declaration of `printf`
+    /// that spells `char *` where the library says `const char *` is a
+    /// different type to the compiler, and it refuses the redeclaration.
+    Const(Box<CTypeLike>),
     Unknown,
 }
 
@@ -159,6 +166,15 @@ impl CTypeLike {
             CTypeLike::Typedef { ty, .. } if !matches!(ty.as_ref(), CTypeLike::Unknown) => {
                 ty.unaliased()
             }
+            CTypeLike::Const(ty) => ty.unaliased(),
+            other => other,
+        }
+    }
+
+    /// This type without its qualifier, which is what it is a type of.
+    pub fn unqualified(&self) -> &CTypeLike {
+        match self {
+            CTypeLike::Const(ty) => ty.unqualified(),
             other => other,
         }
     }
@@ -218,7 +234,7 @@ impl CTypeLike {
             }
             CTypeLike::Pointer(_) => Some(ptr_bits),
             // A name stands for its target, so it is as wide as the target is.
-            CTypeLike::Typedef { ty, .. } => ty.bits(ptr_bits),
+            CTypeLike::Typedef { ty, .. } | CTypeLike::Const(ty) => ty.bits(ptr_bits),
             _ => None,
         }
     }
@@ -359,6 +375,7 @@ pub fn render_c_type_like(ty: &CTypeLike) -> String {
         CTypeLike::Union(name) => format!("union {name}"),
         CTypeLike::Enum(name) => format!("enum {name}"),
         CTypeLike::Typedef { name, .. } => name.clone(),
+        CTypeLike::Const(inner) => format!("const {}", render_c_type_like(inner)),
         CTypeLike::Function { ret, params } => {
             // A function proven to take nothing is spelled `(void)`. An empty
             // list says the arguments are unspecified, which is a weaker claim
@@ -478,8 +495,31 @@ pub fn c_object_declaration(ty: &CTypeLike, name: &str) -> String {
 /// `long` and `size_t` is a property of the target, and guessing it is how two
 /// of the previous parsers came to disagree.
 pub fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
+    // A pointer level is peeled before the qualifiers go, because the
+    // qualifier of what it points at is part of the pointer's type. What
+    // follows the star qualifies the pointer itself and is dropped with the
+    // rest.
+    let spelling = spelling.trim();
+    if let Some(inner) = spelling.strip_suffix('*') {
+        let pointee = parse_c_type_like(inner, ptr_bits)?;
+        let pointee = if !matches!(pointee, CTypeLike::Pointer(_) | CTypeLike::Const(_))
+            && spells_const(inner)
+        {
+            CTypeLike::Const(Box::new(pointee))
+        } else {
+            pointee
+        };
+        return Some(CTypeLike::Pointer(Box::new(pointee)));
+    }
     let normalized = crate::external::normalize_type_spelling(spelling);
     parse_normalized(normalized.trim(), ptr_bits)
+}
+
+/// Whether a spelling carries `const` as a word of its own.
+fn spells_const(spelling: &str) -> bool {
+    spelling
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| matches!(token, "const" | "__const" | "__const__"))
 }
 
 fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
@@ -687,11 +727,12 @@ mod tests {
 
     #[test]
     fn qualified_pointer_spellings_reach_the_same_type() {
-        let signed_char_ptr = CTypeLike::Pointer(Box::new(CTypeLike::Int {
-            bits: 8,
-            signedness: Signedness::Signed,
-        }));
-        let void_ptr = CTypeLike::Pointer(Box::new(CTypeLike::Void));
+        let signed_char_ptr =
+            CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(CTypeLike::Int {
+                bits: 8,
+                signedness: Signedness::Signed,
+            }))));
+        let void_ptr = CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(CTypeLike::Void))));
 
         for spelling in ["char const *", "char const*", "const char *"] {
             assert_eq!(
@@ -818,10 +859,10 @@ mod tests {
             ),
             (
                 "const char *",
-                CTypeLike::Pointer(Box::new(CTypeLike::Int {
+                CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(CTypeLike::Int {
                     bits: 8,
                     signedness: Signedness::Signed,
-                })),
+                })))),
             ),
             (
                 "struct Demo *",

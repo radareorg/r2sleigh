@@ -115,6 +115,7 @@ impl<'a> SourceEvidenceTypeOracle<'a> {
 
 fn intern_render_type(arena: &mut TypeArena, ty: &CTypeLike) -> TypeId {
     match ty {
+        CTypeLike::Const(inner) => intern_render_type(arena, inner),
         CTypeLike::Void => arena.unknown_alias("void"),
         CTypeLike::Bool => arena.bool_ty(),
         CTypeLike::Int { bits, signedness } => arena.int(*bits, *signedness),
@@ -785,6 +786,7 @@ impl<'a> EvidenceBuilder<'a> {
 
     fn intern_structural(&mut self, ty: &CTypeLike) -> Option<TypeId> {
         match ty {
+            CTypeLike::Const(inner) => self.intern_structural(inner),
             // `void` as a value type says nothing; as a pointee it is the top of
             // the pointee lattice, which is what `Top` already means.
             CTypeLike::Void

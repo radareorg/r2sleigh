@@ -645,6 +645,9 @@ pub(crate) fn resolve_builtin_typedefs(ty: CTypeLike, ptr_bits: u32) -> CTypeLik
         CTypeLike::Array(inner, len) => {
             CTypeLike::Array(Box::new(resolve_builtin_typedefs(*inner, ptr_bits)), len)
         }
+        CTypeLike::Const(inner) => {
+            CTypeLike::Const(Box::new(resolve_builtin_typedefs(*inner, ptr_bits)))
+        }
         other => other,
     }
 }
@@ -671,6 +674,7 @@ fn settle_unknown_signedness(ty: CTypeLike) -> CTypeLike {
 
 pub fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
     match materialize_signature_type_like(ty.clone(), ptr_bits) {
+        CTypeLike::Const(inner) => format!("const {}", render_signature_type(&inner, ptr_bits)),
         CTypeLike::Void => "void".to_string(),
         CTypeLike::Bool => "bool".to_string(),
         CTypeLike::Int {

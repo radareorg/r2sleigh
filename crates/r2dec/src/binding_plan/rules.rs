@@ -1609,7 +1609,9 @@ fn declared_pointer_for_value(ty: &r2types::CTypeLike) -> Option<bool> {
         | r2types::CTypeLike::Float(_)
         | r2types::CTypeLike::BitVector(_)
         | r2types::CTypeLike::Enum(_) => Some(false),
-        r2types::CTypeLike::Typedef { ty, .. } => declared_pointer_for_value(ty),
+        r2types::CTypeLike::Typedef { ty, .. } | r2types::CTypeLike::Const(ty) => {
+            declared_pointer_for_value(ty)
+        }
         r2types::CTypeLike::Void
         | r2types::CTypeLike::Struct(_)
         | r2types::CTypeLike::Union(_)

@@ -3108,6 +3108,7 @@ fn estimate_parsed_c_type_size_bytes(ty: &r2types::CTypeLike, ptr_bits: u32) -> 
         r2types::CTypeLike::Struct(_)
         | r2types::CTypeLike::Union(_)
         | r2types::CTypeLike::Typedef { .. }
+        | r2types::CTypeLike::Const(_)
         | r2types::CTypeLike::Unknown => None,
     }
 }

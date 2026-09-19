@@ -4209,6 +4209,7 @@ fn c_object_storage_bits(ty: &CType, pointer_bits: u32) -> Option<u32> {
         CType::Array(element, Some(len)) => {
             c_object_storage_bits(element, pointer_bits)?.checked_mul(u32::try_from(*len).ok()?)
         }
+        CType::Const(inner) => c_object_storage_bits(inner, pointer_bits),
         CType::Void
         | CType::Array(_, None)
         | CType::Struct(_)
