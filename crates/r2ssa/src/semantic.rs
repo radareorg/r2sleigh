@@ -330,6 +330,8 @@ pub struct ObjectModel {
     pub indexed_displacements: BTreeMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
+    /// Stack objects whose address leaves this body as a value.
+    pub escaping_addresses: BTreeSet<ObjectId>,
 }
 
 impl ObjectModel {
@@ -382,6 +384,11 @@ impl ObjectModel {
 
     pub fn escaped_unknown_object(&self, space: SpaceId) -> Option<ObjectId> {
         self.escaped_unknown.get(&ObjectSpaceId(space)).copied()
+    }
+
+    /// Whether this object's address leaves the body as a value.
+    pub fn address_escapes(&self, object: ObjectId) -> bool {
+        self.escaping_addresses.contains(&object)
     }
 
     /// The parameter a chain of pointee objects starts from, if it starts
@@ -2406,6 +2413,8 @@ struct ObjectModelBuilder<'a> {
     evidenced_roots: BTreeSet<StackAddressRoot>,
     /// How far each evidenced root's indexed accesses reach.
     evidenced_spans: BTreeMap<StackAddressRoot, i64>,
+    /// Roots whose address leaves the body as a value.
+    escaping_roots: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     callee_write_spans: BTreeMap<StackAddressRoot, i64>,
     /// Where each counted loop's counter starts, for an index's lower bound.
@@ -2469,6 +2478,7 @@ impl<'a> ObjectModelBuilder<'a> {
             indexed_displacements: BTreeMap::new(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
+            escaping_roots: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
             induction_starts: BTreeMap::new(),
             resolving: BTreeSet::new(),
@@ -2513,7 +2523,7 @@ impl<'a> ObjectModelBuilder<'a> {
                     .and_modify(|known| *known = (*known).max(end))
                     .or_insert(end);
             }
-            let (roots, spans) = evidenced_stack_roots(
+            let evidenced = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
                 function,
@@ -2525,8 +2535,9 @@ impl<'a> ObjectModelBuilder<'a> {
                 },
                 &self.callee_write_spans,
             );
-            self.evidenced_roots = roots;
-            self.evidenced_spans = spans;
+            self.evidenced_roots = evidenced.roots;
+            self.evidenced_spans = evidenced.spans;
+            self.escaping_roots = evidenced.escaping;
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
             stack_roots.sort_unstable();
@@ -2595,8 +2606,15 @@ impl<'a> ObjectModelBuilder<'a> {
                 Some((*object, reach))
             })
             .collect();
+        let escaping_addresses = self
+            .stack_objects
+            .iter()
+            .filter(|(key, _)| self.escaping_roots.contains(&key.root))
+            .map(|(_, object)| *object)
+            .collect();
         ObjectModel {
             callee_write_reach,
+            escaping_addresses,
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,
@@ -8131,6 +8149,13 @@ fn callee_write_spans(
     spans
 }
 
+/// The frame positions an object starts at, how far each reaches, and the ones whose address leaves the body.
+struct EvidencedStackRoots {
+    roots: BTreeSet<StackAddressRoot>,
+    spans: BTreeMap<StackAddressRoot, i64>,
+    escaping: BTreeSet<StackAddressRoot>,
+}
+
 fn evidenced_stack_roots(
     facts: &DecompilePrepFacts,
     declared_slots: &DeclaredStackSlots,
@@ -8139,7 +8164,7 @@ fn evidenced_stack_roots(
     stack_pointer_carrier: Option<CanonicalStorageId>,
     induction: &InductionBounds<'_>,
     callee_write_spans: &BTreeMap<StackAddressRoot, i64>,
-) -> (BTreeSet<StackAddressRoot>, BTreeMap<StackAddressRoot, i64>) {
+) -> EvidencedStackRoots {
     let induction_bounds = induction.upper;
     let induction_starts = induction.lower;
     let mut roots = BTreeSet::new();
@@ -8348,6 +8373,7 @@ fn evidenced_stack_roots(
         }
         !inside
     });
+    let mut escaping = BTreeSet::new();
     for (var, root) in &facts.stack_address_roots {
         let Some(value) = graph.value_id_for_var(var) else {
             continue;
@@ -8367,9 +8393,14 @@ fn evidenced_stack_roots(
         });
         if escapes {
             roots.insert(*root);
+            escaping.insert(*root);
         }
     }
-    (roots, spans)
+    EvidencedStackRoots {
+        roots,
+        spans,
+        escaping,
+    }
 }
 
 fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) -> Option<u32> {
@@ -9732,12 +9763,15 @@ fn collect_prepared_function_certificates(
                     None
                 } else {
                     accessed_object_storage(graph, &induction_bounds, objects, structured, *object)
-                        // No access sizes it and nothing declares it: a buffer
-                        // whose address escapes to a callee. The frame lays it
-                        // out between its neighbours, and that gap is its extent,
-                        // as bytes -- nothing here ever read it at a width.
+                        // No access sizes it and nothing declares it, but its address left the body: a buffer a callee fills.
+                        // The frame lays it out between its neighbours, and that gap is its extent, as bytes.
+                        // An address that never leaves and is never accessed is a stack position, not an object, and the gap says nothing about it.
                         .or_else(|| {
-                            frame_gap_extent(objects, base, offset).map(|extent| (extent, true))
+                            objects
+                                .address_escapes(*object)
+                                .then(|| frame_gap_extent(objects, base, offset))
+                                .flatten()
+                                .map(|extent| (extent, true))
                         })
                 };
                 r2il::refusal_evidence!(
@@ -15999,6 +16033,108 @@ mod tests {
                 .and_then(|slot| slot.callee_allocation.as_ref())
                 .is_none(),
             "opposite source stack growth must not certify the object"
+        );
+    }
+
+    #[test]
+    fn a_stack_position_nothing_accesses_or_passes_on_has_no_extent() {
+        // Two `sub sp` steps. The lower position is declared and stored to; the
+        // upper one is a place the stack pointer passed through and nothing
+        // ever reads, writes or hands on. The gap the frame leaves above such a
+        // place is not a width it has, and a declaration needs a width.
+        let artifact = |escapes: bool| {
+            let sp = Varnode::register(0, 8);
+            let ra = Varnode::register(16, 8);
+            let held = Varnode::unique(0x100, 8);
+            let mut block = R2ILBlock::new(0x4200, 4);
+            block.push(R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: Varnode::constant(8, 8),
+            });
+            block.push(R2ILOp::Copy {
+                dst: held.clone(),
+                src: sp.clone(),
+            });
+            block.push(R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: Varnode::constant(8, 8),
+            });
+            block.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: if escapes {
+                    held
+                } else {
+                    Varnode::constant(1, 8)
+                },
+            });
+            block.push(R2ILOp::Return { target: ra });
+
+            let mut arch = ArchSpec::new("stack-position-test");
+            arch.addr_size = 8;
+            arch.add_register(RegisterDef::new("sp", 0, 8));
+            arch.add_register(RegisterDef::new("ra", 16, 8));
+            arch.add_space(r2il::AddressSpace::ram(8));
+            let storage = |offset| CanonicalStorageId {
+                space: CanonicalStorageSpace::Register,
+                offset,
+                size: 8,
+            };
+            let interface = SourceFunctionInterface::new_exact(
+                b"stack-position-revision-1".to_vec(),
+                "test-abi",
+                [],
+                SourceFunctionReturn::Void,
+                [SourceStackSlotSpec::new_local(
+                    StackAddressBase::StackPointer,
+                    storage(0),
+                    -16,
+                    8,
+                )],
+            )
+            .and_then(|interface| interface.with_return_address_storage(storage(16)))
+            .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
+            .expect("stack-position interface");
+            SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+                .expect("stack-position artifact")
+        };
+        let passed_through = |artifact: &SsaArtifact| {
+            let object = artifact
+                .objects()
+                .objects
+                .values()
+                .find(|fact| {
+                    matches!(
+                        fact.kind,
+                        ObjectKind::StackSlot {
+                            base: StackAddressBase::StackPointer,
+                            offset: -8,
+                            ..
+                        }
+                    )
+                })
+                .map(|fact| fact.id)
+                .expect("the position the stack pointer passed through");
+            (
+                artifact
+                    .certificates()
+                    .stack_slots
+                    .get(&object)
+                    .and_then(|slot| slot.size),
+                artifact.declarable_stack_object(object),
+            )
+        };
+        assert_eq!(
+            passed_through(&artifact(false)),
+            (None, false),
+            "a position with no access and no escaping address is not an object to declare"
+        );
+        assert_eq!(
+            passed_through(&artifact(true)),
+            (Some(8), true),
+            "the same position is a buffer once its address is handed on, and the frame's gap is its extent"
         );
     }
 
