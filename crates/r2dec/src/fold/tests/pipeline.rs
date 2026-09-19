@@ -538,7 +538,9 @@ mod tests {
         };
         let base_storage = match base {
             r2ssa::StackAddressBase::FramePointer => storage(0x20),
-            r2ssa::StackAddressBase::StackPointer => storage(0x28),
+            r2ssa::StackAddressBase::StackPointer | r2ssa::StackAddressBase::Realigned => {
+                storage(0x28)
+            }
         };
         let parameters = [0x10, 0x18, 0x38, 0x40, 0x48, 0x50]
             .into_iter()

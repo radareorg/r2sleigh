@@ -4621,8 +4621,13 @@ struct ConventionCallBoundary {
 /// Where the convention itself is unknown there is no ground to stand on, and
 /// the boundary stays incomplete: the function refuses, which is the honest
 /// answer and the one this leaves in place for that case alone.
-/// The entry-relative position of the stack pointer as a call instruction
-/// finds it, before the instruction's own p-code spends anything.
+/// Where the stack pointer stands as a call instruction finds it, before the
+/// instruction's own p-code spends anything.
+///
+/// The position is named in the frame the pointer belongs to: the entry frame,
+/// or the realigned one when a mask cut a new origin. Both sides of every
+/// question asked about an outgoing slot are read in that same frame, so which
+/// one it is travels with the offset.
 ///
 /// Construction records exactly that carrier as the source of the
 /// `CallRestore` it emits after the call, so no instruction boundary has to
@@ -4634,7 +4639,7 @@ fn call_entering_stack_pointer_offset(
     block: &crate::function::SSABlock,
     call_op_index: usize,
     calls_move_stack_pointer: bool,
-) -> Option<(i64, bool)> {
+) -> Option<(StackAddressRoot, bool)> {
     let recorded = block
         .ops
         .get(call_op_index.checked_add(1)?..)?
@@ -4667,7 +4672,15 @@ fn call_entering_stack_pointer_offset(
                 call_op_index,
                 calls_move_stack_pointer,
             ) {
-                Some(ReachingAbiState::PreservedEntry) => return Some((0, false)),
+                Some(ReachingAbiState::PreservedEntry) => {
+                    return Some((
+                        StackAddressRoot {
+                            base: StackAddressBase::StackPointer,
+                            offset: 0,
+                        },
+                        false,
+                    ));
+                }
                 Some(ReachingAbiState::Value(value)) => graph.value(value)?.var.clone(),
                 None => {
                     r2il::refusal_evidence!(
@@ -4768,7 +4781,11 @@ fn call_entering_stack_pointer_offset(
         );
         return None;
     };
-    (root.base == StackAddressBase::StackPointer).then_some((root.offset, recorded_restore))
+    matches!(
+        root.base,
+        StackAddressBase::StackPointer | StackAddressBase::Realigned
+    )
+    .then_some((root, recorded_restore))
 }
 
 /// The value a call reads from one slot of its outgoing argument area.
@@ -4827,7 +4844,7 @@ fn reaching_stack_argument_before_call(
     ) else {
         r2il::refusal_evidence!(
             "call-argument-stack-store",
-            "callsite ({block_addr:#x}, {call_op_index}) has no entry-relative stack pointer entering the call"
+            "callsite ({block_addr:#x}, {call_op_index}) has no frame position for the stack pointer entering the call"
         );
         return None;
     };
@@ -4836,14 +4853,16 @@ fn reaching_stack_argument_before_call(
     } else {
         callee_offset
     };
-    let entry_offset = entering.checked_add(offset)?;
+    let entry_offset = entering.offset.checked_add(offset)?;
     let slot_name = crate::naming::frame_slot_name(entry_offset);
     // Promotion named the slot's variable after its entry coordinate; the
-    // graph has such a value exactly when the slot left memory.
-    let promoted = graph
-        .values
-        .iter()
-        .any(|value| value.var.name() == slot_name);
+    // graph has such a value exactly when the slot left memory. The name
+    // carries no frame, so only the entry frame may be asked for one.
+    let promoted = entering.base == StackAddressBase::StackPointer
+        && graph
+            .values
+            .iter()
+            .any(|value| value.var.name() == slot_name);
     let mut visited = BTreeSet::new();
     reaching_stack_slot_value(
         function,
@@ -4851,6 +4870,7 @@ fn reaching_stack_argument_before_call(
         block_addr,
         call_op_index,
         StackSlotQuery {
+            base: entering.base,
             entry_offset,
             slot_name: &slot_name,
             size_bytes,
@@ -4864,6 +4884,8 @@ fn reaching_stack_argument_before_call(
 /// The outgoing slot an argument walk looks for.
 #[derive(Clone, Copy)]
 struct StackSlotQuery<'a> {
+    /// The frame the offset is in: the entry one, or a realigned origin.
+    base: StackAddressBase,
     entry_offset: i64,
     slot_name: &'a str,
     size_bytes: u32,
@@ -4923,13 +4945,13 @@ fn reaching_stack_slot_value(
                 else {
                     r2il::refusal_evidence!(
                         "call-argument-stack-store",
-                        "({block_addr:#x}) store through {addr} has no entry-relative root (wanted {})",
+                        "({block_addr:#x}) store through {addr} has no root (wanted {:?} {})",
+                        query.base,
                         query.entry_offset
                     );
                     continue;
                 };
-                if root.base != StackAddressBase::StackPointer || root.offset != query.entry_offset
-                {
+                if root.base != query.base || root.offset != query.entry_offset {
                     continue;
                 }
                 if val.size != query.size_bytes {
@@ -5034,6 +5056,64 @@ fn convention_call_boundary(
             },
             value: SourceCallArgumentValue::Value(value),
         });
+    }
+    // The convention fills every register slot before the argument area, and a
+    // convention with none starts there: x86 cdecl passes everything on the
+    // stack. A slot this function stored into before the call is one the call
+    // reads, which is the same evidence the register scan takes, and the first
+    // slot with no store ends the count exactly as an untouched register does.
+    if arguments.len() == convention.argument_slots().len()
+        && let Some(placement) = convention.stack_arguments()
+    {
+        // Where the area is depends on where the stack pointer stands. Without
+        // that, an empty scan says nothing was looked at rather than that
+        // nothing is there, and a call that passes arguments would be spelled
+        // as one that passes none.
+        if call_entering_stack_pointer_offset(
+            function,
+            graph,
+            function.get_block(block_addr)?,
+            op_index,
+            machine_context.call_moves_stack_pointer(),
+        )
+        .is_none()
+        {
+            r2il::refusal_evidence!(
+                "convention-argument-area",
+                "callsite ({block_addr:#x}, {op_index}) cannot see the argument area its convention passes on"
+            );
+            return None;
+        }
+        // The callee names the same slot from the pointer it is entered with,
+        // below the caller's by what the transfer spends on the return address.
+        let spent = machine_context.return_mechanism().map_or(0, |mechanism| {
+            i64::from(mechanism.stack_pointer_delta_bytes())
+        });
+        for position in 0.. {
+            let Some(offset) = placement.offset_of(position) else {
+                break;
+            };
+            let Some((value, entry_offset)) = reaching_stack_argument_before_call(
+                CallPosition {
+                    function,
+                    graph,
+                    block_addr,
+                    op_index,
+                    calls_move_stack_pointer: machine_context.call_moves_stack_pointer(),
+                },
+                StackArgument {
+                    offset,
+                    callee_offset: offset.saturating_add(spent),
+                    size_bytes: placement.stride_bytes(),
+                },
+            ) else {
+                break;
+            };
+            arguments.push(SourceCallArgumentFact {
+                slot: CallBoundarySlot::Stack(entry_offset),
+                value: SourceCallArgumentValue::Value(value),
+            });
+        }
     }
 
     let results = convention
@@ -14199,9 +14279,9 @@ fn collect_stack_call_argument_values(
     };
 
     // Outgoing slots sit at and above the stack pointer as the call
-    // instruction finds it. Objects are keyed by their entry-relative
-    // position, so the boundary is that pointer's entry-relative position:
-    // anything below it is this function's own frame, not an argument.
+    // instruction finds it. Objects are keyed by their position in a frame, so
+    // the boundary is that pointer's position in the same frame: anything
+    // below it is this function's own, not an argument.
     let Some((entering, _)) = call_entering_stack_pointer_offset(
         function,
         graph,
@@ -14240,10 +14320,12 @@ fn collect_stack_call_argument_values(
             if access.value != Some(value) {
                 continue;
             }
-            let Some(offset) = stack_pointer_object_offset(objects, access.object) else {
+            // The slot and the pointer entering the call are read in the same
+            // frame: an object in another one is not this call's argument area.
+            let Some((base, offset)) = stack_object_root(objects, access.object) else {
                 continue;
             };
-            if offset < entering {
+            if base != entering.base || offset < entering.offset {
                 continue;
             }
             by_offset
@@ -14257,25 +14339,6 @@ fn collect_stack_call_argument_values(
     }
 
     by_offset.into_values().collect()
-}
-
-fn stack_pointer_object_offset(objects: &ObjectModel, object: ObjectId) -> Option<i64> {
-    let fact = objects.object(object)?;
-    match fact.kind {
-        ObjectKind::StackSlot {
-            space: SpaceId::Ram,
-            base: StackAddressBase::StackPointer,
-            offset,
-            ..
-        }
-        | ObjectKind::FrameObject {
-            space: SpaceId::Ram,
-            base: StackAddressBase::StackPointer,
-            offset,
-            ..
-        } => Some(offset),
-        _ => None,
-    }
 }
 
 fn stack_object_offset(objects: &ObjectModel, object: ObjectId) -> Option<i64> {

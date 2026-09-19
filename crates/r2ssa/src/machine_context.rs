@@ -673,6 +673,7 @@ impl MachineContextIdentityWriter {
         self.u8(match base {
             StackAddressBase::StackPointer => 1,
             StackAddressBase::FramePointer => 2,
+            StackAddressBase::Realigned => 3,
         });
     }
 

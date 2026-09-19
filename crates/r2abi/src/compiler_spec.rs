@@ -84,9 +84,15 @@ fn return_address(text: &str) -> Option<String> {
 ///
 /// A stack `pentry` states its own address and alignment, so a convention that
 /// passes everything on the stack -- x86 cdecl -- describes its arguments as
-/// exactly as a register convention does.
+/// exactly as a register convention does. The address is in the callee's own
+/// coordinates, where the transfer has already spent `stackshift` bytes on the
+/// return address, so that much is taken off to name the slot from the stack
+/// pointer entering the call.
 fn stack_arguments(text: &str) -> Option<(i64, u32)> {
     let prototype = element_body(text, "default_proto")?;
+    let shift = attribute(element(prototype, "prototype")?, "stackshift")?
+        .parse::<i64>()
+        .ok()?;
     let input = element_body(prototype, "input")?;
     let mut rest = input;
     while let Some(index) = rest.find("<pentry") {
@@ -97,9 +103,9 @@ fn stack_arguments(text: &str) -> Option<(i64, u32)> {
         if let Some(addr) = element(&body[..end], "addr")
             && attribute(addr, "space") == Some("stack")
         {
-            let offset = attribute(addr, "offset")?.parse().ok()?;
+            let offset = attribute(addr, "offset")?.parse::<i64>().ok()?;
             let align = attribute(entry, "align")?.parse().ok()?;
-            return Some((offset, align));
+            return Some((offset.checked_sub(shift)?, align));
         }
         rest = &body[end.min(body.len())..];
     }
@@ -199,14 +205,14 @@ mod tests {
     </prototype>
   </default_proto>"#,
         );
-        assert_eq!(spec.stack_arguments, Some((4, 4)));
+        assert_eq!(spec.stack_arguments, Some((0, 4)));
     }
 
     #[test]
     fn a_register_convention_reaches_its_stack_entry_past_the_registers() {
         let spec = CompilerSpec::parse(
             r#"<default_proto>
-    <prototype name="__stdcall">
+    <prototype name="__stdcall" extrapop="8" stackshift="8">
       <input>
         <pentry minsize="1" maxsize="8"><register name="RDI"/></pentry>
         <pentry minsize="1" maxsize="500" align="8">
@@ -216,7 +222,24 @@ mod tests {
     </prototype>
   </default_proto>"#,
         );
-        assert_eq!(spec.stack_arguments, Some((8, 8)));
+        assert_eq!(spec.stack_arguments, Some((0, 8)));
+    }
+
+    #[test]
+    fn a_shadow_area_keeps_its_distance_from_the_calling_stack_pointer() {
+        let spec = CompilerSpec::parse(
+            r#"<default_proto>
+    <prototype name="__fastcall" extrapop="8" stackshift="8">
+      <input>
+        <pentry minsize="1" maxsize="8"><register name="RCX"/></pentry>
+        <pentry minsize="1" maxsize="500" align="8">
+          <addr offset="40" space="stack"/>
+        </pentry>
+      </input>
+    </prototype>
+  </default_proto>"#,
+        );
+        assert_eq!(spec.stack_arguments, Some((32, 8)));
     }
 
     #[test]

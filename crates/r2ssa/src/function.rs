@@ -4962,6 +4962,9 @@ impl SSAFunction {
             }
         }
         self.propagate_stack_roots(&mut facts, entry_stack_address_size, control)?;
+        if self.root_realigned_stack_pointer(&mut facts, entry_stack_address_size) {
+            self.propagate_stack_roots(&mut facts, entry_stack_address_size, control)?;
+        }
         // A stack pointer carried around a loop cannot be rooted by a meet: the
         // phi wants every source rooted, and the back edge derives from the phi,
         // so neither ever starts. Assume the back edge agrees with the sources
@@ -5000,6 +5003,63 @@ impl SSAFunction {
 
         control.poll()?;
         Ok(facts)
+    }
+
+    /// Root the stack pointer a mask realigned, as an origin of its own.
+    ///
+    /// `and esp, -16` keeps the pointer and throws away up to fifteen bytes of
+    /// where it came from, so no coordinate in the entry frame names it. What
+    /// it does name is a frame of its own: every push and every local below it
+    /// sits at a distance from the masked pointer the arithmetic states, and
+    /// every call in the body finds its outgoing argument area there. Exactly
+    /// one realignment is rooted, because two would be two origins nothing
+    /// here can tell apart.
+    fn root_realigned_stack_pointer(
+        &self,
+        facts: &mut DecompilePrepFacts,
+        entry_stack_address_size: Option<u32>,
+    ) -> bool {
+        let mut realigned = None;
+        for block in self.blocks() {
+            for op in &block.ops {
+                let SSAOp::IntAnd { dst, a, b } = op else {
+                    continue;
+                };
+                if entry_stack_address_size != Some(dst.size) {
+                    continue;
+                }
+                let a_root = canonical_root_in(&facts.canonical_value_roots, a);
+                let b_root = canonical_root_in(&facts.canonical_value_roots, b);
+                if !aligns_stack_pointer(a, a_root, b, b_root, &facts.stack_address_roots)
+                    && !aligns_stack_pointer(b, b_root, a, a_root, &facts.stack_address_roots)
+                {
+                    continue;
+                }
+                if realigned.replace(dst.clone()).is_some() {
+                    r2il::refusal_evidence!(
+                        "stack-root-realign",
+                        "{:#x}: more than one mask realigns the stack pointer",
+                        self.entry
+                    );
+                    return false;
+                }
+            }
+        }
+        let Some(dst) = realigned else {
+            return false;
+        };
+        let root = StackAddressRoot {
+            base: StackAddressBase::Realigned,
+            offset: 0,
+        };
+        r2il::refusal_evidence!(
+            "stack-root-realign",
+            "{:#x}: {dst} is the realigned frame's origin",
+            self.entry
+        );
+        insert_stack_root(&mut facts.stack_address_roots, dst.clone(), root);
+        insert_stack_root(&mut facts.entry_stack_address_roots, dst, root);
+        true
     }
 
     /// Root the phis whose rooted sources agree, assuming the rest will.
@@ -6269,6 +6329,29 @@ fn indexed_stack_address_root_from_sub(
 ) -> Option<StackAddressRoot> {
     let base = stack_root_of(a, a_root, indexed_roots)?;
     signed_stack_delta_of(b, b_root).is_some().then_some(base)
+}
+
+/// Whether `mask` aligns a value that is a position in the entry stack frame.
+///
+/// The mask clears low bits, which is a negative power of two read as a signed
+/// displacement. A mask of anything else, or of a pointer already realigned,
+/// is not one this can name.
+fn aligns_stack_pointer(
+    value: &SSAVar,
+    value_root: &SSAVar,
+    mask: &SSAVar,
+    mask_root: &SSAVar,
+    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
+) -> bool {
+    let Some(base) = stack_root_of(value, value_root, stack_roots) else {
+        return false;
+    };
+    let Some(alignment) = signed_stack_delta_of(mask, mask_root).and_then(i64::checked_neg) else {
+        return false;
+    };
+    base.base == StackAddressBase::StackPointer
+        && alignment >= 2
+        && alignment.unsigned_abs().is_power_of_two()
 }
 
 fn stack_address_root_from_sub(
@@ -12827,6 +12910,87 @@ mod tests {
     }
 
     #[test]
+    fn a_mask_that_aligns_the_stack_pointer_opens_a_frame_of_its_own() {
+        let mut arch = ArchSpec::new("custom-realign");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("custom_sp", 0x10, 8));
+        arch.add_register(RegisterDef::new("custom_ra", 0x20, 8));
+        let sp_storage = CanonicalStorageId {
+            space: crate::CanonicalStorageSpace::Register,
+            offset: 0x10,
+            size: 8,
+        };
+        let ra_storage = CanonicalStorageId {
+            space: crate::CanonicalStorageSpace::Register,
+            offset: 0x20,
+            size: 8,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"custom-realign-roots".to_vec(),
+            "custom-unknown",
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .expect("exact custom interface")
+        .with_return_address_storage(ra_storage)
+        .expect("custom return-address carrier")
+        .with_stack_pointer_storage(sp_storage)
+        .expect("custom stack-pointer carrier")
+        .with_preserved_call_carriers(true, false);
+        let blocks = vec![R2ILBlock {
+            addr: 0x3400,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntAnd {
+                    dst: make_reg(0x10, 8),
+                    a: make_reg(0x10, 8),
+                    b: make_const(0xffff_ffff_ffff_fff0, 8),
+                },
+                R2ILOp::IntSub {
+                    dst: make_reg(0x10, 8),
+                    a: make_reg(0x10, 8),
+                    b: make_const(8, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: make_unique(0x40, 8),
+                    a: make_reg(0x10, 8),
+                    b: make_const(0x10, 8),
+                },
+                R2ILOp::Return {
+                    target: make_reg(0x20, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }];
+        let artifact = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
+            .expect("realigned artifact must build");
+        let facts = artifact
+            .function()
+            .decompile_prep_facts()
+            .expect("custom prep facts");
+        let realigned = facts
+            .stack_address_roots
+            .values()
+            .filter(|root| root.base == StackAddressBase::Realigned)
+            .map(|root| root.offset)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            realigned,
+            BTreeSet::from([0, -8, 8]),
+            "the masked pointer, the push below it and the address above it share one origin"
+        );
+        assert!(
+            facts
+                .entry_stack_address_roots
+                .values()
+                .all(|root| root.base != StackAddressBase::StackPointer || root.offset == 0),
+            "nothing past the mask keeps an entry-relative position"
+        );
+    }
+
+    #[test]
     fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
         let mut arch = ArchSpec::new("custom-stack-call");
         arch.addr_size = 8;
@@ -13730,6 +13894,118 @@ mod tests {
             },
         ]);
         assert_eq!(sites, BTreeSet::from([(0x4000, 2)]));
+    }
+
+    #[test]
+    fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
+        // sp -= 8; [sp] = rdi        -- the caller materialises an argument
+        // sp -= 8; [sp] = ret; call  -- the call instruction spends its slot
+        // Nothing declares the callee. The convention says every argument is
+        // on the stack, and the store above the call's pointer is the one it
+        // passes; the slot above that has none, which ends the count.
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("rax", 0, 8));
+        arch.add_register(RegisterDef::new("rdi", 8, 8));
+        arch.add_register(RegisterDef::new("rip", 16, 8));
+        arch.add_register(RegisterDef::new("rsp", 32, 8));
+        let storage = |offset, size| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let sp = make_reg(32, 8);
+        let ops = vec![
+            R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: make_const(8, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: make_reg(8, 8),
+            },
+            R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: make_const(8, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: make_const(0x100d, 8),
+            },
+            R2ILOp::Call {
+                target: make_ram(0x2000, 8),
+            },
+            R2ILOp::Return {
+                target: make_reg(16, 8),
+            },
+        ];
+        let mut op_metadata = std::collections::BTreeMap::new();
+        for (index, instruction_addr) in [0x1000u64, 0x1000, 0x1008, 0x1008, 0x1008, 0x100d]
+            .into_iter()
+            .enumerate()
+        {
+            op_metadata.insert(
+                index,
+                r2il::OpMetadata {
+                    instruction_addr: Some(instruction_addr),
+                    ..Default::default()
+                },
+            );
+        }
+        let block = R2ILBlock {
+            addr: 0x1000,
+            size: 16,
+            ops,
+            switch_info: None,
+            op_metadata,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"convention-stack-argument".to_vec(),
+            "test-stack-abi",
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_return_address_storage(storage(16, 8)))
+        .and_then(|interface| interface.with_stack_pointer_storage(storage(32, 8)))
+        .expect("caller interface");
+        let convention = SourceConventionSlots::new("test-stack-abi", [], Some(storage(0, 8)))
+            .expect("stack-only convention")
+            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8));
+        let artifact = SsaArtifact::for_decompile_with(
+            &[block],
+            DecompileInputs {
+                arch: Some(&arch),
+                function_interface: Some(interface),
+                machine_roles: SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
+                    .expect("machine roles")
+                    .with_call_preserved_carriers(SourceCallPreservedCarriers::new(true, true)),
+                convention_slots: Some(convention),
+                ..Default::default()
+            },
+        )
+        .expect("artifact");
+        let facts = artifact.facts();
+        let call = facts
+            .call_sites
+            .by_id
+            .values()
+            .find(|call| call.direct_target == Some(0x2000))
+            .expect("call site");
+        let boundary = facts.boundaries.calls.get(&call.id).expect("boundary");
+        assert!(boundary.complete, "{boundary:?}");
+        let [argument] = boundary.arguments.as_slice() else {
+            panic!("one stack argument: {boundary:?}");
+        };
+        assert_eq!(
+            argument.slot,
+            crate::semantic::CallBoundarySlot::Stack(-8),
+            "{boundary:?}"
+        );
     }
 
     #[test]

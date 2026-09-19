@@ -876,6 +876,7 @@ impl<'a> EvidenceBuilder<'a> {
                     base: match base {
                         r2ssa::StackAddressBase::FramePointer => ExternalStackBase::FramePointer,
                         r2ssa::StackAddressBase::StackPointer => ExternalStackBase::StackPointer,
+                        r2ssa::StackAddressBase::Realigned => ExternalStackBase::Realigned,
                     },
                     offset,
                 },

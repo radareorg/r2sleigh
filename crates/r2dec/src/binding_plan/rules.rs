@@ -1317,6 +1317,7 @@ pub(super) fn declaration_type_for_stack_object(
         base: match base {
             r2ssa::StackAddressBase::FramePointer => r2types::ExternalStackBase::FramePointer,
             r2ssa::StackAddressBase::StackPointer => r2types::ExternalStackBase::StackPointer,
+            r2ssa::StackAddressBase::Realigned => r2types::ExternalStackBase::Realigned,
         },
         offset,
     };

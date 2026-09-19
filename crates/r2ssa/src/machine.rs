@@ -451,6 +451,7 @@ pub enum MachineAddressProvenance {
 pub enum MachineStackBase {
     FramePointer,
     StackPointer,
+    Realigned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -4406,6 +4407,7 @@ pub fn machine_address_provenance(
                 base: match base {
                     StackAddressBase::FramePointer => MachineStackBase::FramePointer,
                     StackAddressBase::StackPointer => MachineStackBase::StackPointer,
+                    StackAddressBase::Realigned => MachineStackBase::Realigned,
                 },
                 offset: *offset,
             },

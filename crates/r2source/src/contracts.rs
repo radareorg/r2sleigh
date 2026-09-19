@@ -77,10 +77,16 @@ impl CanonicalStorageId {
 }
 
 /// Canonical base used to form a proven stack address.
+///
+/// `Realigned` is the stack pointer after a mask has aligned it. Its distance
+/// from the entry pointer is what the mask threw away, so it is an origin of
+/// its own rather than a position in the entry frame. No source declares one:
+/// it is recovered from the body and never written back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum StackAddressBase {
     FramePointer,
     StackPointer,
+    Realigned,
 }
 
 pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 11;

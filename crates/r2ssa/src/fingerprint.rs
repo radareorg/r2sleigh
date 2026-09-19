@@ -111,6 +111,7 @@ fn stack_base_tag(base: StackAddressBase) -> u16 {
     match base {
         StackAddressBase::StackPointer => 1,
         StackAddressBase::FramePointer => 2,
+        StackAddressBase::Realigned => 3,
     }
 }
 

@@ -627,6 +627,7 @@ pub fn write_presentation(
         writer.u8(match slot_name.base() {
             StackAddressBase::FramePointer => BASE_FRAME_POINTER,
             StackAddressBase::StackPointer => BASE_STACK_POINTER,
+            StackAddressBase::Realigned => BASE_REALIGNED,
         });
         writer.i64(slot_name.offset());
         writer.string(slot_name.name())?;
@@ -704,6 +705,7 @@ pub fn read_presentation(
         let base = match reader.u8()? {
             BASE_FRAME_POINTER => StackAddressBase::FramePointer,
             BASE_STACK_POINTER => StackAddressBase::StackPointer,
+            BASE_REALIGNED => StackAddressBase::Realigned,
             tag => {
                 return Err(SnapshotWireError::UnknownDiscriminant {
                     record: "stack slot name base",
@@ -1814,6 +1816,7 @@ pub fn read_return_mechanism(
 
 const BASE_FRAME_POINTER: u8 = 0;
 const BASE_STACK_POINTER: u8 = 1;
+const BASE_REALIGNED: u8 = 2;
 const ROLE_UNCLASSIFIED: u8 = 0;
 const ROLE_LOCAL: u8 = 1;
 const ROLE_PARAMETER_HOME: u8 = 2;
@@ -1823,6 +1826,7 @@ pub fn write_stack_slot(writer: &mut SnapshotWireWriter, slot: &SourceStackSlotS
     writer.u8(match slot.base() {
         StackAddressBase::FramePointer => BASE_FRAME_POINTER,
         StackAddressBase::StackPointer => BASE_STACK_POINTER,
+        StackAddressBase::Realigned => BASE_REALIGNED,
     });
     write_storage(writer, slot.base_storage());
     writer.i64(slot.offset());
@@ -1854,6 +1858,7 @@ pub fn read_stack_slot(
     let base = match reader.u8()? {
         BASE_FRAME_POINTER => StackAddressBase::FramePointer,
         BASE_STACK_POINTER => StackAddressBase::StackPointer,
+        BASE_REALIGNED => StackAddressBase::Realigned,
         tag => {
             return Err(SnapshotWireError::UnknownDiscriminant {
                 record: "stack slot base",

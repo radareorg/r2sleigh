@@ -2860,6 +2860,7 @@ fn apply_type_hint_assumptions_to_context(
                                 match key.base {
                                     ExternalStackBase::FramePointer => "bp",
                                     ExternalStackBase::StackPointer => "sp",
+                                    ExternalStackBase::Realigned => "aligned sp",
                                 },
                                 key.offset,
                                 render_signature_type(existing, ptr_bits)
