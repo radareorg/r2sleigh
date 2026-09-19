@@ -29198,3 +29198,31 @@ writes it on every return path. Those two facts live on opposite sides of the
 capture, and joining them means preparing the root once, asking which call
 results it reads in a second register, and re-deriving those callees. The -O0
 rule needs none of that and is worth taking first.
+
+## The -O2 byte buffer refuses on a coalescing interference
+
+`shape_byte_indexed_buffer` refuses at -O2 on both architectures with
+`read_before_assignment`, and the evidence names the shape exactly. Three
+bindings each carry three occurrences, all in one rendered block, in this
+order:
+
+```
+binding=BindingId(19) block=0x1000011c9
+  order 126  Read   (UseSite inst 452)
+  order 139  Read   (UseSite inst 456)
+  order 153  Write  (inst 462)
+```
+
+The object is read twice and assigned afterwards. Nothing is wrong with the
+placement: it is reporting that the partition put two values into one object
+whose live ranges cross, so the statement that would have given the object its
+value comes after the statements that read the previous one. The unrolled
+second loop reads a word, computes, and writes the same register back, which is
+the lost-copy shape.
+
+This is not a new mechanism to design. It is the case the partition-first plan
+in `doc/` already names: the pre-partition decides coalescing with two proxies,
+co-read by one instruction and intra-block outlives-redefinition, and neither
+sees a pair whose ranges cross across the unrolled body. A real liveness
+interference predicate over the merged component is what settles it, and this
+function is the corpus evidence that the proxies are not enough.
