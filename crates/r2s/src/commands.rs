@@ -27,6 +27,16 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         return Ok(kept.join("\n"));
     }
 
+    // `@` runs a command somewhere else and leaves the cursor where it was.
+    if let Some((command, address)) = line.split_once('@') {
+        let address = parse_number(session, address)?;
+        let was = session.addr;
+        session.addr = address;
+        let answer = run(session, command);
+        session.addr = was;
+        return answer;
+    }
+
     let (verb, argument) = split_verb(line);
     match verb {
         "q" | "quit" | "exit" => Err("quit".to_owned()),
