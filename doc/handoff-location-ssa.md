@@ -29135,3 +29135,26 @@ Where the two disagree, the site's answer is the one with evidence behind it;
 the callee's fixed prototype is a default, not a proof. The existing
 `only_variadic_tail_unproven` path already accepts that a variadic call's tail
 is the site's business rather than the callee's.
+
+The prologue makes the first route exact rather than heuristic. `vfold` at -O1
+opens with
+
+```
+movq %rsi, -0xc8(%rbp)      ; the five integer argument registers, in order,
+movq %rdx, -0xc0(%rbp)      ; at consecutive slots
+movq %rcx, -0xb8(%rbp)
+movq %r8,  -0xb0(%rbp)
+movq %r9,  -0xa8(%rbp)
+testb %al, %al              ; the vector count the convention passes in al
+je   .skip                  ; only a variadic function reads it
+movaps %xmm0, -0xa0(%rbp)   ; the eight vector registers, guarded
+...
+```
+
+Two facts settle it. The convention's argument registers are spilled in order
+to consecutive slots, and the guard tests the register that carries the number
+of vector arguments -- a value no non-variadic function has any reason to read.
+The named arity falls out of the same shape: the registers spilled are the
+unnamed ones, so the first of them is the first `...` position and everything
+before it is declared. Here `rdi` is never spilled, which says `vfold` has one
+named parameter and is variadic, exactly as the source declares it.
