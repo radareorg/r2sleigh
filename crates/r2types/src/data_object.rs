@@ -168,6 +168,7 @@ fn data_object_type_is_placeable(
     behind_pointer: bool,
 ) -> bool {
     match ty {
+        CTypeLike::Const(inner) => data_object_type_is_placeable(inner, type_db, behind_pointer),
         CTypeLike::Void => behind_pointer,
         CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) | CTypeLike::BitVector(_) => {
             true

@@ -6150,6 +6150,7 @@ fn pointer_element_stride(ty: &CTypeLike, type_db: &ExternalTypeDb, ptr_bits: u3
 
 fn scalar_element_stride(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
     match ty {
+        CTypeLike::Const(inner) => scalar_element_stride(inner, ptr_bits),
         CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => {
             estimate_type_like_size_bytes(ty, ptr_bits).filter(|size| *size > 0)
         }
@@ -6864,6 +6865,7 @@ fn aggregate_pointee_type_names_from_type(ty: &CTypeLike) -> Vec<String> {
 
 fn collect_aggregate_type_names(ty: &CTypeLike, out: &mut Vec<String>) {
     match ty {
+        CTypeLike::Const(inner) => collect_aggregate_type_names(inner, out),
         CTypeLike::Struct(name) | CTypeLike::Union(name) | CTypeLike::Enum(name) => {
             push_unique_type_name(out, name);
         }
@@ -7650,6 +7652,7 @@ fn name_is_low_signal_binding(name: &str) -> bool {
 
 fn visible_binding_type_specificity(ty: &CTypeLike) -> u8 {
     match ty {
+        CTypeLike::Const(inner) => visible_binding_type_specificity(inner),
         CTypeLike::Unknown => 0,
         CTypeLike::Void => 1,
         CTypeLike::Function { .. } | CTypeLike::BitVector(_) => 2,
@@ -9406,6 +9409,7 @@ fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
 
 fn estimate_type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
     match ty {
+        CTypeLike::Const(inner) => estimate_type_like_size_bytes(inner, ptr_bits),
         CTypeLike::Void
         | CTypeLike::Unknown
         | CTypeLike::BitVector(_)

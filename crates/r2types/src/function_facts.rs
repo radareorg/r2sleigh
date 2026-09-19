@@ -878,6 +878,7 @@ pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64>
             type_like_size_bytes(inner, ptr_bits).map(|size| size.saturating_mul(*count as u64))
         }
         CTypeLike::Array(inner, None) => type_like_size_bytes(inner, ptr_bits),
+        CTypeLike::Const(inner) => type_like_size_bytes(inner, ptr_bits),
         CTypeLike::Struct(_)
         | CTypeLike::Union(_)
         | CTypeLike::Enum(_)
@@ -956,6 +957,7 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         // A name is as wide as what it stands for. The target is asked first
         // because it is evidence -- the capture resolved it -- and the name
         // text is only a fallback for a spelling C itself defines.
+        CTypeLike::Const(inner) => declaration_type_width_bits(inner, ptr_bits),
         CTypeLike::Typedef { name, ty } => {
             declaration_type_width_bits(ty, ptr_bits).or_else(|| {
                 crate::parse_external_type_like_spec(name, ptr_bits)
