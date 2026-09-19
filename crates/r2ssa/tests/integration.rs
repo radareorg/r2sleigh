@@ -68,11 +68,11 @@ mod tests {
         for op in &ssa_block.ops {
             if let SSAOp::Copy { dst, src } = op {
                 // RAX should be written (version > 0)
-                if dst.name.to_lowercase().contains("rax") {
+                if dst.name().to_lowercase().contains("rax") {
                     assert!(dst.version > 0, "RAX should be written");
                 }
                 // RBX should be read (version 0 initially)
-                if src.name.to_lowercase().contains("rbx") {
+                if src.name().to_lowercase().contains("rbx") {
                     assert_eq!(src.version, 0, "RBX should be read at version 0");
                 }
             }
@@ -147,14 +147,14 @@ mod tests {
             .ops
             .iter()
             .flat_map(|op| op.sources())
-            .filter(|var| is_rax_family(&var.name))
+            .filter(|var| is_rax_family(var.name()))
             .map(|var| var.version)
             .collect();
         let rax_dest_versions: Vec<u32> = ssa_block
             .ops
             .iter()
             .filter_map(|op| op.dst())
-            .filter(|var| is_rax_family(&var.name))
+            .filter(|var| is_rax_family(var.name()))
             .map(|var| var.version)
             .collect();
 
@@ -206,20 +206,39 @@ mod tests {
 
         assert!(
             entry.ops.iter().any(
-                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("rax"))
+                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected decompile-prep SSA to materialize a post-call return-register definition, got ops={:?}",
             entry.ops
         );
+        // `test eax, eax` reads the low lane of the return register, so the
+        // compare's operand is the projection rather than the register itself.
+        let lane = entry
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Subpiece { dst, src, .. }
+                    if src.name().eq_ignore_ascii_case("rax") && src.version > 0 =>
+                {
+                    Some(dst.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a lane projection of a fresh return register, got ops={:?}",
+                    entry.ops
+                )
+            });
         assert!(
             entry
                 .ops
                 .iter()
                 .any(|op| matches!(op, SSAOp::IntAnd { a, b, .. }
-                    if ((a.name.eq_ignore_ascii_case("rax") && b.name.eq_ignore_ascii_case("rax"))
-                        || (a.name.eq_ignore_ascii_case("eax") && b.name.eq_ignore_ascii_case("eax")))
-                        && a.version > 0
-                        && b.version > 0)),
+                if a.name() == lane.name()
+                    && b.name() == lane.name()
+                    && a.version == lane.version
+                    && b.version == lane.version)),
             "expected post-call compare/test to use a fresh return-register version, got ops={:?}",
             entry.ops
         );
@@ -258,14 +277,14 @@ mod tests {
 
         assert!(
             entry.ops.iter().any(
-                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("rax"))
+                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected first call boundary to materialize a fresh RAX definition even without a prior explicit RAX write, got ops={:?}",
             entry.ops
         );
         assert!(
             copy_arm.ops.iter().any(
-                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("rax"))
+                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected second call boundary to materialize a fresh RAX definition for memcpy, got ops={:?}",
             copy_arm.ops
@@ -370,7 +389,7 @@ mod tests {
         impl TaintPolicy for MaskingPolicy {
             fn is_source(&self, var: &SSAVar, _block_addr: u64) -> Option<Vec<TaintLabel>> {
                 if var.version == 0 && var.is_register() {
-                    Some(vec![TaintLabel::new(format!("input:{}", var.name))])
+                    Some(vec![TaintLabel::new(format!("input:{}", var.name()))])
                 } else {
                     None
                 }
