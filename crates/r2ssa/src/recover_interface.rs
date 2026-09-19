@@ -552,9 +552,13 @@ fn body_proven_result(
                 .then_some((candidate, live_out))
         });
     let first = candidates.next()?;
-    candidates.next().is_none().then_some(first).filter(|(candidate, live_out)| {
-        recovered_result(graph, facts, live_out, *candidate).is_some()
-    })
+    candidates
+        .next()
+        .is_none()
+        .then_some(first)
+        .filter(|(candidate, live_out)| {
+            recovered_result(graph, facts, live_out, *candidate).is_some()
+        })
 }
 
 fn recovered_result(
