@@ -35,6 +35,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "ie" => entries(session),
         "iS" => sections(session),
         "is" => symbols(session),
+        "ir" => relocations(session),
         "px" => hexdump(session, argument),
         "pd" => disassemble(session, argument),
         "pdd" => decompile(session, argument),
@@ -244,6 +245,20 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
 #[cfg(not(feature = "sleigh"))]
 fn disassemble(_session: &mut Session, _argument: &str) -> Result<String, String> {
     Err("built without the sleigh feature, so pd cannot decode".to_owned())
+}
+
+/// `ir`: the slots the loader fills, and what it fills them with.
+fn relocations(session: &Session) -> Result<String, String> {
+    let mut out = String::from("vaddr      name\n");
+    out.push_str(&"-".repeat(40));
+    out.push('\n');
+    for relocation in session.image.relocations() {
+        out.push_str(&format!(
+            "{:#010x} {}\n",
+            relocation.vaddr, relocation.symbol
+        ));
+    }
+    Ok(out.trim_end().to_owned())
 }
 
 #[cfg(not(feature = "sleigh"))]

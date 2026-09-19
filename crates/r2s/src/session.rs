@@ -64,10 +64,11 @@ impl Session {
     #[cfg(feature = "sleigh")]
     pub fn ensure_machine(&mut self) -> Result<(), String> {
         if self.machine.is_none() {
-            self.machine = Some(
-                r2sleigh_lift::embedded_machine(self.image.arch().name)
-                    .map_err(|error| error.to_string())?,
-            );
+            let machine = r2sleigh_lift::embedded_machine(self.image.arch().name)
+                .map_err(|error| error.to_string())?;
+            // The import stubs can only be read once there is a decoder.
+            self.flags.name_imports(&self.image, &machine.disasm);
+            self.machine = Some(machine);
         }
         Ok(())
     }

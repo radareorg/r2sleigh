@@ -131,6 +131,17 @@ pub struct EntryPoint {
     pub kind: EntryKind,
 }
 
+/// One slot the loader fills with the address of a symbol.
+///
+/// The slot is where the pointer goes, not where the code is: a call to an
+/// import reaches a stub that reads this slot, so naming the stub means
+/// following the stub's own read back to here.
+#[derive(Debug, Clone)]
+pub struct Relocation {
+    pub vaddr: u64,
+    pub symbol: String,
+}
+
 /// A parsed binary, with its bytes retained for address reads.
 #[derive(Debug, Clone)]
 pub struct Image {
@@ -142,6 +153,7 @@ pub struct Image {
     sections: Vec<Section>,
     symbols: Vec<Symbol>,
     entry_points: Vec<EntryPoint>,
+    relocations: Vec<Relocation>,
 }
 
 impl Image {
@@ -223,6 +235,30 @@ impl Image {
                 })
             })
             .collect();
+
+        // What the loader will write into each slot it fills. `object` reports
+        // the dynamic relocations for a linked image and the static ones for an
+        // object file, and both name their symbol the same way.
+        let mut relocations: Vec<Relocation> = file
+            .dynamic_relocations()
+            .into_iter()
+            .flatten()
+            .filter_map(|(vaddr, relocation)| {
+                let object::RelocationTarget::Symbol(index) = relocation.target() else {
+                    return None;
+                };
+                let table = file.dynamic_symbol_table()?;
+                let symbol =
+                    object::read::ObjectSymbolTable::symbol_by_index(&table, index).ok()?;
+                let name = symbol.name().ok()?;
+                (!name.is_empty()).then(|| Relocation {
+                    vaddr,
+                    symbol: name.to_owned(),
+                })
+            })
+            .collect();
+        relocations.sort_by(|left, right| left.vaddr.cmp(&right.vaddr));
+        relocations.dedup_by_key(|relocation| relocation.vaddr);
 
         let sections: Vec<Section> = file
             .sections()
@@ -311,6 +347,7 @@ impl Image {
             sections,
             symbols,
             entry_points,
+            relocations,
         })
     }
 
@@ -336,6 +373,11 @@ impl Image {
 
     pub fn symbols(&self) -> &[Symbol] {
         &self.symbols
+    }
+
+    /// The slots the loader fills, in address order.
+    pub fn relocations(&self) -> &[Relocation] {
+        &self.relocations
     }
 
     pub fn entry_points(&self) -> &[EntryPoint] {

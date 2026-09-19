@@ -8,7 +8,12 @@
 
 use std::collections::BTreeMap;
 
+use r2il::{R2ILOp, SpaceId};
 use r2image::{EntryKind, Image, SymbolKind};
+use r2sleigh_lift::Disassembler;
+
+/// Sleigh fetches a whole window whatever the instruction needs.
+const DECODE_WINDOW: usize = 16;
 
 /// Every address this binary has a name for.
 #[derive(Debug, Default)]
@@ -45,6 +50,79 @@ impl Flags {
             by_address.insert(entry.vaddr, "entry0".to_owned());
         }
         Self { by_address }
+    }
+
+    /// Name each import by the stub that calls it.
+    ///
+    /// A call to an import reaches a stub in one of the `.plt` sections, and
+    /// the stub reads the slot the loader fills. Following that read back to
+    /// the relocation names the stub, which is the address the call names.
+    /// Reading the stubs rather than assuming an entry size is what keeps this
+    /// exact across formats and architectures.
+    pub fn name_imports(&mut self, image: &Image, decoder: &Disassembler) {
+        let slots: BTreeMap<u64, &str> = image
+            .relocations()
+            .iter()
+            .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
+            .collect();
+        if slots.is_empty() {
+            return;
+        }
+
+        for section in image
+            .sections()
+            .iter()
+            .filter(|section| section.name.starts_with(".plt"))
+        {
+            let mut stub = section.vaddr;
+            let mut pc = section.vaddr;
+            let end = section.vaddr + section.vsize;
+            while pc < end {
+                let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
+                    break;
+                };
+                let mut fetch = window.into_owned();
+                fetch.resize(DECODE_WINDOW, 0);
+                // Padding between stubs is zero bytes, and zero bytes are not
+                // an instruction. Skipping them is what puts the name on the
+                // stub a call reaches rather than on the padding before it.
+                if fetch[0] == 0 {
+                    pc += 1;
+                    stub = pc;
+                    continue;
+                }
+                let Ok(lifted) = decoder.lift(&fetch, pc) else {
+                    break;
+                };
+                if lifted.size == 0 {
+                    break;
+                }
+
+                let mut leaves = false;
+                for op in &lifted.ops {
+                    match op {
+                        R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. }
+                            if addr.space == SpaceId::Ram || addr.space == SpaceId::Const =>
+                        {
+                            if let Some(symbol) = slots.get(&addr.offset) {
+                                self.by_address
+                                    .entry(stub)
+                                    .or_insert_with(|| format!("sym.imp.{symbol}"));
+                            }
+                        }
+                        // An unconditional transfer ends the stub, so whatever
+                        // follows begins the next one.
+                        R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. } => leaves = true,
+                        _ => {}
+                    }
+                }
+
+                pc += u64::from(lifted.size);
+                if leaves {
+                    stub = pc;
+                }
+            }
+        }
     }
 
     pub fn at(&self, vaddr: u64) -> Option<&str> {
