@@ -1384,8 +1384,11 @@ pub struct MemberRunStoreMember {
 pub enum MemberRunPlace {
     /// A named member of a struct or union.
     Field(String),
-    /// An element of an array, by index.
+    /// An element of an array, by index. The declaration gives the width.
     Element(u64),
+    /// One unit of an object that declares no parts. The width is the
+    /// store's own, so the rendering has to spell it.
+    Unit { index: u64, bits: u64 },
 }
 
 /// What one member of a decomposed wide store receives.
@@ -1439,6 +1442,25 @@ fn code_pointer_run_bytes(
         );
     }
     Some(bytes)
+}
+
+/// The width one entry of a code pointer run this value carries has, when
+/// every one of its bytes comes from such a run.
+fn code_pointer_run_stride(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    value: ValueId,
+) -> Option<u64> {
+    let machine_context = machine_context?;
+    let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
+    let InstPayload::Op(SSAOp::Load { space, .. }) = &inst.payload else {
+        return None;
+    };
+    let size = graph.value(value)?.var.size;
+    code_pointer_run_bytes(graph, Some(machine_context), inst, *space, size)?;
+    Some(u64::from(
+        machine_context.memory_model().default_address_bits(),
+    ))
 }
 
 fn value_byte_sources(
@@ -10247,7 +10269,16 @@ fn collect_two_way_selection_certificates(
 /// same way into either.
 enum MemberRunLayout<'a> {
     Aggregate(&'a crate::SourceAggregateLayout),
-    Elements { stride_bits: u64, count: u64 },
+    Elements {
+        stride_bits: u64,
+        count: u64,
+    },
+    /// The object declares no parts, and the value the store carries divides
+    /// it: a run of code pointer entries is one address per entry, and the
+    /// entry is what states the width.
+    Units {
+        stride_bits: u64,
+    },
 }
 
 fn member_run_layout(graph: &crate::SourceTypeGraph, type_id: u32) -> Option<MemberRunLayout<'_>> {
@@ -10340,6 +10371,16 @@ fn member_run_slices(
                 let index = cursor / stride_bits;
                 (index < *count).then_some(())?;
                 (MemberRunPlace::Element(index), *stride_bits)
+            }
+            MemberRunLayout::Units { stride_bits } => {
+                cursor.is_multiple_of(*stride_bits).then_some(())?;
+                (
+                    MemberRunPlace::Unit {
+                        index: cursor / stride_bits,
+                        bits: *stride_bits,
+                    },
+                    *stride_bits,
+                )
             }
         };
         let next = cursor.checked_add(size_bits)?;
@@ -13059,12 +13100,18 @@ fn member_run_store(
         | ObjectKind::FrameObject { base, offset, .. } => (base, offset),
         _ => return None,
     };
+    let bytes = value_byte_sources(graph, machine_context, value)?;
+    // What the object declares divides it; where it declares nothing, the
+    // run of entries the store carries does.
     let layout = declared_slots
         .by_key
         .get(&(base, slot_offset))
         .and_then(SourceStackSlotSpec::logical_type)
-        .and_then(|type_id| member_run_layout(type_graph, type_id))?;
-    let bytes = value_byte_sources(graph, machine_context, value)?;
+        .and_then(|type_id| member_run_layout(type_graph, type_id))
+        .or_else(|| {
+            code_pointer_run_stride(graph, machine_context, value)
+                .map(|stride_bits| MemberRunLayout::Units { stride_bits })
+        })?;
     let members = member_run_slices(
         &layout,
         inst,

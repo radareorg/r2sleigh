@@ -29450,3 +29450,51 @@ table[2] = (uint64_t)dbg_table_op_mul;
 ```
 
 with all three declared, and no address of this image left in the body.
+
+## Where an object declares nothing, the store's own value divides it
+
+The arm64 -O0 cell still read the image after all of the above, and the reason
+was the destination rather than the source: its slot is an undeclared
+`uint8_t stack_m48[16]`, so `member_run_layout` found no parts to decompose
+into and the sixteen bytes stayed one opaque move. Requiring the destination to
+declare its parts is the wrong test, because what proves the two entries there
+is the value, not the slot: a run of code pointer entries is one address per
+entry and the entry states its own width.
+
+`MemberRunLayout` gained a `Units` case that `code_pointer_run_stride` supplies
+when the declaration supplies nothing, and `MemberRunPlace::Unit` carries the
+width so the rendering can spell it -- `((uint64_t *)stack_m48)[0]` rather than
+an index into bytes. The declared cases are unchanged and still preferred: a
+declaration says more than the store does.
+
+`shape_function_pointer` at arm64 -O0 now renders
+
+```c
+((uint64_t*)stack_m48)[0] = (uint64_t)sym__op_add;
+((uint64_t*)stack_m48)[1] = (uint64_t)sym__op_xor;
+```
+
+with all three operations declared, and no address of this image in the body.
+
+## The next thread: the table's object is sized short of its last element
+
+With the entries named, `shape_function_pointer` at arm64 -O0 still fails its
+differential, and the rendering says why: the slot is `uint8_t stack_m48[16]`
+and only two of the three writes appear.
+
+```c
+((uint64_t*)stack_m48)[0] = (uint64_t)sym__op_add;
+((uint64_t*)stack_m48)[1] = (uint64_t)sym__op_xor;
+```
+
+`sym__op_mul` is declared and never assigned. The array is twenty-four bytes;
+the object model gave it sixteen, so the third write belongs to a different
+object, the loop's indexed read is attributed to the first, and the write is
+elided as one nothing reads. The audit agrees with itself -- 0 refused -- because
+each half is consistent; the partition is what is wrong.
+
+That is the object-extent work, not the code pointer work: `evidenced_stack_roots`
+has to let an indexed read whose induction bound reaches element two extend the
+root to twenty-four bytes, which is the same machinery as `indexed-span-reach`
+and `accessed_object_extent` earlier in this document. The entries are proven
+and named either way.

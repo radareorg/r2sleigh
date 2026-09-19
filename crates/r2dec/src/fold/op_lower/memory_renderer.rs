@@ -1090,6 +1090,15 @@ impl<'a> FoldingContext<'a> {
                 base: Box::new(owner.clone()),
                 index: Box::new(CExpr::IntLit(i64::try_from(*index).unwrap_or(0))),
             },
+            // The object declares no parts, so the width the store divides it
+            // by is spelled here rather than read off a declaration.
+            r2ssa::MemberRunPlace::Unit { index, bits } => CExpr::Subscript {
+                base: Box::new(CExpr::cast(
+                    CType::ptr(CType::uint(u32::try_from(*bits).unwrap_or(8))),
+                    owner.clone(),
+                )),
+                index: Box::new(CExpr::IntLit(i64::try_from(*index).unwrap_or(0))),
+            },
         };
         let mut members = certificate.members.iter();
         let head = members.next()?;
