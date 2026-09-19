@@ -362,7 +362,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
             "            {:#010x}      {:<14} {}\n",
             pc,
             hex,
-            r2_mnemonic(&mnemonic)
+            session.flags.spell(&r2_mnemonic(&mnemonic))
         ));
         pc += size as u64;
     }

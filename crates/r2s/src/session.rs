@@ -4,10 +4,15 @@
 //! as an argument, so the query surface below this stays stateless and the
 //! shell is a client of it rather than a layer inside it.
 
+#[cfg(feature = "sleigh")]
+use crate::flags::Flags;
 use r2image::Image;
 
 pub struct Session {
     pub image: Image,
+    /// What this binary calls each address it names.
+    #[cfg(feature = "sleigh")]
+    pub flags: Flags,
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
@@ -41,6 +46,8 @@ impl Session {
             })
             .unwrap_or(0);
         Ok(Self {
+            #[cfg(feature = "sleigh")]
+            flags: Flags::of(&image),
             image,
             path: path.to_owned(),
             addr,
