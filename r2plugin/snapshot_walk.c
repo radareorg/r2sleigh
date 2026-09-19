@@ -261,6 +261,8 @@ static bool walk_image(R2SleighWireWriter *writer, const RAnalFunctionSnapshot *
 		r2sleigh_wire_u32 (writer, (uint32_t)table->num_targets);
 		for (size_t t = 0; t < table->num_targets; t++) {
 			r2sleigh_wire_u64 (writer, table->targets[t]);
+			r2sleigh_wire_optional_string (writer,
+				table->target_names? table->target_names[t]: NULL);
 		}
 	}
 	r2sleigh_wire_u64 (writer, (uint64_t)image->total_source_bytes);

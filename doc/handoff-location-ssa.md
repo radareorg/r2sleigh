@@ -29293,3 +29293,66 @@ that is an entry of a captured code pointer table is the function that entry
 names, so it renders as that function's name rather than as a read of the
 image. The table's own storage then needs no blob, the local array holds
 three names, and the indirect call goes where the program sends it.
+
+## The code pointer table was never captured, and the entry now names its function
+
+The spelling rule above turned out to rest on a fact that was not there. The
+collector read the entry's bytes out of the image and required the value to
+start a function:
+
+```c
+const ut64 target = entry_size == 8 ? r_read_le64 (word) : (ut64)r_read_le32 (word);
+if (!snapshot_addr_starts_function (anal, target)) {
+        break;
+}
+```
+
+On a Mach-O the eight bytes at `0x100002030` are `0x00100000000012c0`, which is
+a chained-fixup encoding rather than an address: the loader replaces it, and no
+function starts there. Every entry failed the test, `num_targets` stayed below
+two, and the table was dropped. The evidence that the analysis knew better was
+one command away -- `ir` prints `0x100002030 0x1000012c0 SET_64` and radare2
+even records a DATA cross reference from the slot to `sym._op_add` -- so the
+defect was reading the file where a relocation is the statement.
+
+`snapshot_code_pointer_at` now asks `anal->binb.get_reloc_at` first and falls
+back to the bytes, which is the same order `fcn_context_plt_stub_reloc` already
+used for a stub's slot. The target is `reloc->symbol ? reloc->symbol->vaddr :
+reloc->addend`, which is how radare2's own `ir` spells it.
+
+Three further pieces carry the fact to the rendering.
+
+The capture records the name radare2 has for each target beside the target, so
+`RAnalSnapshotCodePointerTable` gained `target_names` and the wire carries one
+optional string per entry. A name is presentation, but nothing else in the
+snapshot would have carried it: display names are built from the function's
+advisory calls, and a function reached only through a table is never called
+directly.
+
+`SsaArtifact::record_code_pointer_entries` states what each entry names and how
+it is spelled, filling the machine context's `code_pointer_entries` and the
+artifact's display names together. `record_code_pointer_tables` is the one
+production caller and derives its argument from the artifact's own source, so a
+manually built artifact -- a test's -- states the same fact through the same
+method.
+
+The renderer's rule sits beside the existing `reloc.` branch in
+`render_certified_memory_address_access`, and runs before it: a function beats
+a data object where both could name a slot. The replacement carries the address
+expression's observations, which is what the neighbouring branch gets from
+`name_of_constant_address`; without that the address value's cell was never
+observed and the function refused with `RenderedValueRequired` at seal. The
+name is declared through the existing callee declaration table with an
+unspecified parameter list, which is what the rendering already does for a
+callee whose signature was not recovered.
+
+`shape_function_pointer` at x64 -O0 now renders
+
+```c
+uint64_t RAX_3 = (uint64_t)sym__op_add;
+*(uint64_t*)stack_m40 = RAX_3;
+```
+
+with `uint64_t sym__op_add();` among its declarations, so the verifier pulls in
+the three operations' own renderings and the call through the table reaches
+them rather than a blob.

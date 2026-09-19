@@ -429,15 +429,29 @@ pub struct SourceCodePointerTable {
     address: u64,
     entry_size: u32,
     targets: Box<[u64]>,
+    /// What radare2 calls the function each entry names, in the same order.
+    /// Presentation only: the address is what the table claims.
+    target_names: Box<[Option<Box<str>>]>,
 }
 
 impl SourceCodePointerTable {
-    pub fn new(address: u64, entry_size: u32, targets: impl Into<Box<[u64]>>) -> Self {
+    pub fn new(
+        address: u64,
+        entry_size: u32,
+        targets: impl Into<Box<[u64]>>,
+        target_names: impl Into<Box<[Option<Box<str>>]>>,
+    ) -> Self {
         Self {
             address,
             entry_size,
             targets: targets.into(),
+            target_names: target_names.into(),
         }
+    }
+
+    /// The name of the function entry `index` names, where radare2 had one.
+    pub fn target_name(&self, index: usize) -> Option<&str> {
+        self.target_names.get(index)?.as_deref()
     }
 
     pub const fn address(&self) -> u64 {

@@ -135,6 +135,14 @@ static bool snapshot_switch_cases_target(const RAnalSwitchOp *switch_op, ut64 ad
 static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSnapshotBlock *block, size_t *total_successors, const RAnalFunctionSnapshotLimits *limits, const char **reason);
 static int function_image_target_classify(const RAnalFunctionImageSnapshot *image, ut64 target);
 static bool snapshot_addr_starts_function(RAnal *anal, ut64 addr);
+static void snapshot_code_pointer_targets_free(ut64 *targets, char **names, size_t count) {
+	size_t index;
+	for (index = 0; names && index < count; index++) {
+		free (names[index]);
+	}
+	free (names);
+	free (targets);
+}
 static bool function_image_code_pointer_table_collect(RAnal *anal, RAnalFunctionImageSnapshot *image, ut64 addr, ut32 entry_size);
 static bool function_image_code_pointer_tables_collect(RAnal *anal, RAnalFunctionImageSnapshot *image);
 static bool function_image_string_literals_collect(RAnal *anal, RAnalFunctionImageSnapshot *image, const RAnalFunctionSnapshotLimits *limits);
@@ -1231,7 +1239,13 @@ static void function_image_snapshot_fini(RAnalFunctionImageSnapshot *image) {
 		free (image->data_symbols);
 		size_t table;
 		for (table = 0; table < image->num_code_pointer_tables; table++) {
-			free (image->code_pointer_tables[table].targets);
+			RAnalSnapshotCodePointerTable *entry = &image->code_pointer_tables[table];
+			size_t target;
+			for (target = 0; target < entry->num_targets; target++) {
+				free (entry->target_names? entry->target_names[target]: NULL);
+			}
+			free (entry->target_names);
+			free (entry->targets);
 		}
 		free (image->code_pointer_tables);
 	}
@@ -1640,6 +1654,23 @@ static bool function_image_target_is_interior_hole(RAnal *anal, const RAnalFunct
 static bool snapshot_addr_starts_function(RAnal *anal, ut64 addr) {
 	return addr && addr != UT64_MAX && r_anal_get_function_at (anal, addr) != NULL;
 }
+/* The code address a pointer slot holds at run time. */
+static ut64 snapshot_code_pointer_at(RAnal *anal, ut64 at, ut32 entry_size) {
+	/* A relocated slot does not hold its target in the file: Mach-O chained
+	 * fixups leave an encoded ordinal there, so the bytes name no function
+	 * and the relocation is the only statement of what the slot becomes. */
+	if (anal->binb.bin && anal->binb.get_reloc_at) {
+		const RBinReloc *reloc = anal->binb.get_reloc_at (anal->binb.bin, at);
+		if (reloc) {
+			return reloc->symbol? reloc->symbol->vaddr: (ut64)reloc->addend;
+		}
+	}
+	ut8 word[8] = {0};
+	if (!anal->iob.read_at || !anal->iob.read_at (anal->iob.io, at, word, entry_size)) {
+		return UT64_MAX;
+	}
+	return entry_size == 8? r_read_le64 (word): (ut64)r_read_le32 (word);
+}
 static bool function_image_code_pointer_table_collect(RAnal *anal,
 		RAnalFunctionImageSnapshot *image, ut64 addr, ut32 entry_size) {
 	size_t existing;
@@ -1652,36 +1683,42 @@ static bool function_image_code_pointer_table_collect(RAnal *anal,
 		return true;
 	}
 	ut64 *targets = NULL;
+	char **target_names = NULL;
 	size_t num_targets = 0;
 	while (num_targets < SNAPSHOT_MAX_CODE_POINTER_TABLE_ENTRIES) {
-		ut8 word[8] = {0};
 		const ut64 at = addr + (ut64)num_targets * entry_size;
-		if (!anal->iob.read_at || !anal->iob.read_at (anal->iob.io, at, word, entry_size)) {
-			break;
-		}
-		const ut64 target = entry_size == 8
-			? r_read_le64 (word)
-			: (ut64)r_read_le32 (word);
+		const ut64 target = snapshot_code_pointer_at (anal, at, entry_size);
 		if (!snapshot_addr_starts_function (anal, target)) {
 			break;
 		}
 		ut64 *grown = realloc (targets, (num_targets + 1) * sizeof (*grown));
 		if (!grown) {
-			free (targets);
+			snapshot_code_pointer_targets_free (targets, target_names, num_targets);
 			return false;
 		}
 		targets = grown;
+		char **grown_names = realloc (target_names, (num_targets + 1) * sizeof (*grown_names));
+		if (!grown_names) {
+			snapshot_code_pointer_targets_free (targets, target_names, num_targets);
+			return false;
+		}
+		target_names = grown_names;
+		// The name the entry stands for: the rendering spells the function
+		// rather than the slot, and a slot a relocation fills holds no
+		// address a recompiled program could use.
+		const RAnalFunction *named = r_anal_get_function_at (anal, target);
+		target_names[num_targets] = (named && named->name)? strdup (named->name): NULL;
 		targets[num_targets++] = target;
 	}
 	if (num_targets < 2) {
 		// One pointer is a variable holding a function, not a table to index.
-		free (targets);
+		snapshot_code_pointer_targets_free (targets, target_names, num_targets);
 		return true;
 	}
 	RAnalSnapshotCodePointerTable *grown = realloc (image->code_pointer_tables,
 		(image->num_code_pointer_tables + 1) * sizeof (*grown));
 	if (!grown) {
-		free (targets);
+		snapshot_code_pointer_targets_free (targets, target_names, num_targets);
 		return false;
 	}
 	image->code_pointer_tables = grown;
@@ -1690,6 +1727,7 @@ static bool function_image_code_pointer_table_collect(RAnal *anal,
 	table->addr = addr;
 	table->entry_size = entry_size;
 	table->targets = targets;
+	table->target_names = target_names;
 	table->num_targets = num_targets;
 	return true;
 }

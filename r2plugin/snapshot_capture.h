@@ -459,6 +459,8 @@ typedef struct r_anal_snapshot_code_pointer_table_t {
 	ut64 addr;
 	ut32 entry_size;
 	ut64 *targets;
+	/* The name of the function each entry names, in the same order. */
+	char **target_names;
 	size_t num_targets;
 } RAnalSnapshotCodePointerTable;
 

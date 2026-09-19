@@ -918,6 +918,25 @@ impl<'a> FoldingContext<'a> {
                 CExpr::cast(CType::ptr(elem_ty), byte_address),
             ))));
         }
+        // A captured code pointer table says the slot names a function, so a
+        // pointer-width load of it is that function's address. The bytes in
+        // the file are not it: a relocation fills the slot, so reading the
+        // image there reaches an encoding rather than a code address.
+        if let Some(value) = crate::literal_value(&addr_expr)
+            && r2types::declaration_type_width_bits(&elem_ty, self.pointer_bits())
+                == Some(self.pointer_bits())
+            && let Some(named) = self.code_pointer_entry_expr(value)
+        {
+            // The address is not spelled any more, so what observed it travels
+            // to the name that replaced it.
+            let named = crate::ast::carry_all_expr_observations(&addr_expr, named);
+            return Some(PendingMemoryAccessExpr::Planned(super::convert::convert(
+                named,
+                &CValue::Typed(CType::ptr(CType::Void)),
+                &elem_ty,
+                self.pointer_bits(),
+            )));
+        }
         // A `reloc.` flag says the slot holds the address of the named symbol,
         // so a pointer-width load from it is that address, not the object.
         if let Some(value) = crate::literal_value(&addr_expr)
@@ -954,6 +973,67 @@ impl<'a> FoldingContext<'a> {
         Some(PendingMemoryAccessExpr::Planned(CExpr::Deref(Box::new(
             casted,
         ))))
+    }
+
+    /// The function a captured code pointer slot names, spelled and declared.
+    ///
+    /// Spelling the name obliges the rendering to declare it, and C takes no
+    /// declaration without a parameter list, so a target whose signature the
+    /// capture did not recover is left as the read of its slot.
+    fn code_pointer_entry_expr(&self, address: u64) -> Option<CExpr> {
+        let target = self
+            .prepared_ssa()?
+            .machine_context()
+            .code_pointer_entry(address)?;
+        let machine_bits = self.pointer_bits();
+        let signature = self
+            .inputs
+            .function_facts
+            .type_facts()
+            .callee_facts
+            .get(&target)
+            .and_then(|fact| fact.signature.as_ref());
+        let Some(signature) = signature else {
+            r2il::refusal_evidence!(
+                "code-pointer-entry",
+                "{address:#x} names {target:#x} with no recovered signature"
+            );
+            return None;
+        };
+        let name = crate::ast::c_identifier(
+            self.inputs
+                .function_facts
+                .display_names()
+                .functions()
+                .get(&target)?,
+        );
+        r2il::refusal_evidence!(
+            "code-pointer-entry",
+            "{address:#x} names {target:#x} as {name}"
+        );
+        self.callee_declarations
+            .borrow_mut()
+            .entry(name.clone())
+            .or_insert_with(|| crate::fold::context::RecordedCalleeDeclaration {
+                declaration: crate::ast::CExternDecl {
+                    name: name.clone(),
+                    ret_type: r2types::spellable_c_type_like(&signature.return_type, machine_bits),
+                    params: Some(
+                        signature
+                            .params
+                            .iter()
+                            .map(|param| r2types::spellable_c_type_like(param, machine_bits))
+                            .collect(),
+                    ),
+                    variadic: signature.variadic,
+                    noreturn: false,
+                },
+                from_source_signature: true,
+            });
+        Some(CExpr::External {
+            name,
+            kind: crate::symbol::ExternalKind::Function,
+        })
     }
 
     /// The only extractor for a certified memory route's pending syntax.

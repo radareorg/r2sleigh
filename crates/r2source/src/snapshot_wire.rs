@@ -1157,8 +1157,9 @@ fn write_image_for_format(
         let targets =
             u32::try_from(table.targets().len()).map_err(|_| SnapshotWireError::ValueTooWide)?;
         writer.u32(targets);
-        for target in table.targets() {
+        for (index, target) in table.targets().iter().enumerate() {
             writer.u64(*target);
+            writer.optional_string(table.target_name(index))?;
         }
     }
     let total =
@@ -1202,10 +1203,17 @@ pub fn read_image(
         let entry_size = reader.u32()?;
         let target_count = reader.u32()? as usize;
         let mut targets = Vec::with_capacity(target_count.min(1024));
+        let mut target_names = Vec::with_capacity(target_count.min(1024));
         for _ in 0..target_count {
             targets.push(reader.u64()?);
+            target_names.push(reader.optional_string()?.map(Box::<str>::from));
         }
-        code_pointer_tables.push(SourceCodePointerTable::new(address, entry_size, targets));
+        code_pointer_tables.push(SourceCodePointerTable::new(
+            address,
+            entry_size,
+            targets,
+            target_names,
+        ));
     }
     let total_source_bytes =
         usize::try_from(reader.u64()?).map_err(|_| SnapshotWireError::ValueTooWide)?;
@@ -2485,6 +2493,11 @@ mod tests {
                 0xc000,
                 8,
                 vec![0x6c8, 0x6e8, 0x708],
+                vec![
+                    Some(Box::from("sym.op_add")),
+                    None,
+                    Some(Box::from("sym.op_mul")),
+                ],
             )]),
             total_source_bytes: 0,
         };

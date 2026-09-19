@@ -1169,6 +1169,55 @@ impl SsaArtifact {
         &self.display_names
     }
 
+    /// State what each entry of a code pointer table names, and how radare2
+    /// spells it.
+    ///
+    /// A slot a relocation fills holds no address the file states, so the
+    /// function an entry names is the only statement of what a load of that
+    /// slot is, and the name is what a rendering can spell in its place.
+    pub fn record_code_pointer_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = (u64, u64, Option<String>)>,
+    ) {
+        let mut recorded = BTreeMap::new();
+        for (address, target, name) in entries {
+            recorded.insert(address, target);
+            if let Some(name) = name {
+                self.display_names.insert_function(target, name);
+            }
+        }
+        self.machine_context.set_code_pointer_entries(recorded);
+    }
+
+    /// Record the code pointer tables this function's own source captured.
+    fn record_code_pointer_tables(&mut self) {
+        let SsaArtifactProvenance::TrustedSource(source) = &self.provenance else {
+            return;
+        };
+        let entries = source
+            .image()
+            .code_pointer_tables()
+            .iter()
+            .flat_map(|table| {
+                let entry_size = u64::from(table.entry_size());
+                table
+                    .targets()
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, target)| {
+                        let offset = u64::try_from(index).ok()?.checked_mul(entry_size)?;
+                        let address = table.address().checked_add(offset)?;
+                        Some((
+                            address,
+                            *target,
+                            table.target_name(index).map(str::to_owned),
+                        ))
+                    })
+            })
+            .collect::<Vec<_>>();
+        self.record_code_pointer_entries(entries);
+    }
+
     /// The source's own prototype text for this function, where it had one.
     pub fn source_signature(&self) -> Option<&r2source::SourceSignaturePresentation> {
         match &self.provenance {
@@ -2162,6 +2211,7 @@ impl TrustedSsaArtifact {
             control,
         )?;
         artifact.display_names = display_names;
+        artifact.record_code_pointer_tables();
         artifact.user_operations = Arc::from(arch.user_ops.clone());
         if !artifact
             .facts
@@ -13411,6 +13461,40 @@ mod tests {
         let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
             .expect("artifact");
         artifact.function().promoted_slot_sites().clone()
+    }
+
+    #[test]
+    fn a_code_pointer_entry_names_the_function_its_slot_holds() {
+        // Each entry of a captured table is one slot, an entry apart, and the
+        // name travels with the target so a rendering can spell it.
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Return {
+            target: Varnode::register(0x30, 8),
+        });
+        let mut artifact =
+            SsaArtifact::for_decompile(&[block], None).expect("a returning block prepares");
+        artifact.record_code_pointer_entries([
+            (0x2000, 0x1200, Some("sym.op_add".to_string())),
+            (0x2008, 0x1220, None),
+        ]);
+        assert_eq!(
+            artifact.machine_context().code_pointer_entry(0x2000),
+            Some(0x1200)
+        );
+        assert_eq!(
+            artifact.machine_context().code_pointer_entry(0x2008),
+            Some(0x1220)
+        );
+        assert_eq!(artifact.machine_context().code_pointer_entry(0x2010), None);
+        assert_eq!(
+            artifact
+                .display_names()
+                .functions()
+                .get(&0x1200)
+                .map(String::as_str),
+            Some("sym.op_add")
+        );
+        assert!(!artifact.display_names().functions().contains_key(&0x1220));
     }
 
     #[test]

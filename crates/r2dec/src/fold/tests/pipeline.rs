@@ -243,6 +243,20 @@ mod tests {
         arch: &ArchSpec,
         call_argument_count: usize,
     ) -> SourceOwnedPreparedFixture {
+        source_owned_fixture(artifact_from_r2il_blocks_with_call_arguments(
+            blocks,
+            arch,
+            call_argument_count,
+        ))
+    }
+
+    /// The same prepared artifact before it is sealed into source-owned facts,
+    /// so a test can state what the source captured about it.
+    fn artifact_from_r2il_blocks_with_call_arguments(
+        blocks: &[R2ILBlock],
+        arch: &ArchSpec,
+        call_argument_count: usize,
+    ) -> r2ssa::SsaArtifact {
         let blocks = &with_transfers_stamped(blocks);
         let storage = |offset| r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
@@ -326,15 +340,13 @@ mod tests {
                 })
             })
             .collect();
-        source_owned_fixture(
-            r2ssa::SsaArtifact::for_decompile_with_interfaces(
-                blocks,
-                Some(arch),
-                Some(interface),
-                call_site_interfaces,
-            )
-            .expect("prepared SSA should build"),
+        r2ssa::SsaArtifact::for_decompile_with_interfaces(
+            blocks,
+            Some(arch),
+            Some(interface),
+            call_site_interfaces,
         )
+        .expect("prepared SSA should build")
     }
 
     /// A function whose only operation is a tail call through a relocated
@@ -1937,6 +1949,64 @@ mod tests {
             !audit.output().contains("stack_p"),
             "the slot is the parameter, not a local: {}",
             audit.output()
+        );
+    }
+
+    #[test]
+    fn a_code_pointer_slot_renders_as_the_function_it_names() {
+        // A slot a relocation fills holds no address the file states, so a
+        // load of it is the function the captured table names. Reading the
+        // image there would reach the encoding the loader replaces, which is
+        // why the name rather than the address is what compiles back.
+        let arch = make_test_arch_x86_64();
+        let slot = 0x2000;
+        let mut block = R2ILBlock::new(0x1000, 8);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x100, 8),
+            src: Varnode::constant(slot, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x100, 8),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(0x30, 8),
+        });
+        let mut prepared =
+            artifact_from_r2il_blocks_with_call_arguments(std::slice::from_ref(&block), &arch, 0);
+        prepared.record_code_pointer_entries([(slot, 0x1200, Some("sym.op_add".to_string()))]);
+        let mut fact = r2types::CalleeFact::named(
+            0x1200,
+            Some("sym.op_add".to_string()),
+            r2types::CalleeLinkage::Internal,
+        );
+        fact.signature = Some(r2types::FunctionType {
+            return_type: r2types::CTypeLike::uint(64),
+            params: vec![r2types::CTypeLike::uint(64), r2types::CTypeLike::uint(64)],
+            variadic: false,
+        });
+        let context = r2types::ParsedExternalContext {
+            callee_facts: std::collections::BTreeMap::from([(0x1200, fact)]),
+            ..Default::default()
+        };
+        let fixture = SourceOwnedPreparedFixture::new_with_context(prepared, context);
+        let input = crate::DecompilerInput::new(fixture.facts.clone());
+        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
+            .decompile_input_with_binding_audit(&input);
+        assert_eq!(audit.render_refusal(), None, "{}", audit.output());
+        let output = audit.output();
+        assert!(
+            output.contains("sym_op_add"),
+            "the slot is the function it names: {output}"
+        );
+        assert!(
+            output.contains("sym_op_add(uint64_t, uint64_t)"),
+            "the name it spells is the one it declares: {output}"
+        );
+        assert!(
+            !output.contains("0x2000"),
+            "the slot's address is not what a rendering can read: {output}"
         );
     }
 

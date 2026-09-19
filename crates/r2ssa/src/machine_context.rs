@@ -581,6 +581,11 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, u64>>,
+    /// The function each captured code pointer table entry names, by the
+    /// address of the entry. A slot a relocation fills holds no address the
+    /// file states, so what it becomes is a fact about the program rather
+    /// than bytes a reader could fetch.
+    code_pointer_entries: BTreeMap<u64, u64>,
     call_site_interfaces: BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface>,
     /// Literal bytes captured by the same immutable source transaction as the
     /// callsite interfaces. Unlike display strings, these participate in
@@ -1355,6 +1360,7 @@ impl SourceMachineContext {
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             memory_spaces_by_op,
@@ -1626,6 +1632,15 @@ impl SourceMachineContext {
         callee_argument_reach: BTreeMap<u64, BTreeMap<usize, u64>>,
     ) {
         self.callee_argument_reach = callee_argument_reach;
+    }
+
+    pub(crate) fn set_code_pointer_entries(&mut self, entries: BTreeMap<u64, u64>) {
+        self.code_pointer_entries = entries;
+    }
+
+    /// The function the code pointer slot at this address names.
+    pub fn code_pointer_entry(&self, address: u64) -> Option<u64> {
+        self.code_pointer_entries.get(&address).copied()
     }
 
     /// How far the callee at this address is proven to touch through each of
