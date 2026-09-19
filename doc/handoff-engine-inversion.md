@@ -89,11 +89,12 @@ Without it every function that calls lost the facts about its own frame. `main`
 in an ELF hello world went from forty-six rendered lines to thirty-four, against
 the plugin's thirty-five, with no uncertified read left.
 
-aarch64 still carries it, and the reason is exact: the certificate compares the
-saved value's carrier against the declared return address, and no `.cspec` in
-Ghidra names a return-address register for ARM or AArch64. The declaration is
-written and waiting in the `sleigh-config` fork; until it lands the carrier
-falls back to the program counter and the comparison fails.
+aarch64 carried it until the declaration landed. No `.cspec` in Ghidra names a
+return-address register for ARM or AArch64, so the certificate compared the
+saved value's carrier against the program counter and failed. Declaring `x30`
+and `lr` in the `sleigh-config` fork closed it: `_dup` renders with no
+uncertified read and its caller lost three lines of dead frame. The
+declarations belong upstream in Ghidra.
 
 A second class, unrelated: the cold partitions of C++ library functions
 (`..._create_hard_link...part.37` and its neighbours) read `RAX_1` and `RAX_2`
