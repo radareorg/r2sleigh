@@ -10,15 +10,16 @@
 //! their bodies are what say what each call takes and returns. Deeper than one
 //! level is what an interprocedural fixpoint is for, and this is not one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use r2abi::{CompilerSpec, Convention};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2source::{
-    CanonicalStorageId, CanonicalStorageSpace, SourceConventionSlots, SourceEndianness,
-    SourceMachineRoles, SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth,
+    CanonicalStorageId, CanonicalStorageSpace, SourceConventionSlots, SourceDataObject,
+    SourceEndianness, SourceMachineRoles, SourceRoleRegisterNames, SourceStackAllocationContract,
+    SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
 use r2ssa::body::{BodyError, lift_body};
@@ -217,6 +218,8 @@ impl Native<'_> {
                 })
                 .collect(),
             calls: call_sites(&walked.body, self.program),
+            string_literals: self.literals(&walked.body),
+            data_symbols: self.data_symbols(&walked.body),
             loader_role: None,
         };
 
@@ -235,6 +238,13 @@ impl Native<'_> {
         Ok(Arc::new(artifact))
     }
 }
+
+/// The longest text a capture will read out of one address.
+///
+/// Long enough for any format string or message a program renders, and short
+/// enough that a constant landing in a run of printable bytes cannot pull the
+/// whole section in behind it.
+const LITERAL_LIMIT: usize = 4096;
 
 /// Where each direct call is made and what it reaches.
 ///
@@ -263,6 +273,67 @@ fn call_sites(body: &r2ssa::body::Body, program: &dyn Program) -> Vec<NativeCall
         }
     }
     calls
+}
+
+impl Native<'_> {
+    /// The text this body points at.
+    ///
+    /// A constant the code computes with is not a pointer, and nothing here
+    /// claims it is: the address has to hold a run of printable bytes ending
+    /// in a terminator for it to be read as text at all.
+    fn literals(&self, body: &r2ssa::body::Body) -> Vec<(u64, String)> {
+        referenced(body)
+            .into_iter()
+            .filter_map(|address| Some((address, self.text_at(address)?)))
+            .collect()
+    }
+
+    /// The named program data this body points at.
+    fn data_symbols(&self, body: &r2ssa::body::Body) -> Vec<SourceDataObject> {
+        referenced(body)
+            .into_iter()
+            .filter(|address| !body.calls.contains(address))
+            .filter_map(|address| {
+                let name = self.program.name_at(address)?;
+                Some(SourceDataObject::new(address, name, None::<String>))
+            })
+            .collect()
+    }
+
+    /// The text at an address, where there is text there.
+    fn text_at(&self, address: u64) -> Option<String> {
+        let bytes = self.program.read(address, LITERAL_LIMIT)?;
+        let end = bytes.iter().position(|byte| *byte == 0)?;
+        // One character is not a string, and a run of printable bytes that
+        // never terminates is not one either.
+        if end < 2 {
+            return None;
+        }
+        let text = std::str::from_utf8(&bytes[..end]).ok()?;
+        text.chars()
+            .all(|c| !c.is_control() || c == '\n' || c == '\t')
+            .then(|| text.to_owned())
+    }
+}
+
+/// Every address this body names as a constant.
+fn referenced(body: &r2ssa::body::Body) -> BTreeSet<u64> {
+    let mut addresses = BTreeSet::new();
+    for block in &body.blocks {
+        for op in &block.lifted.ops {
+            for varnode in op.inputs() {
+                // Whether a constant is an address is decided by what is
+                // there, not by how large it is: a binary linked low puts its
+                // strings at four-digit addresses.
+                if matches!(varnode.space, r2il::SpaceId::Ram | r2il::SpaceId::Const)
+                    && varnode.offset != 0
+                {
+                    addresses.insert(varnode.offset);
+                }
+            }
+        }
+    }
+    addresses
 }
 
 /// State the machine from the convention data and the compiler specification.

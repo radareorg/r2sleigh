@@ -18,8 +18,8 @@ use crate::{
     AdvisoryCallSite, AdvisoryCallTransfer, AdvisoryCalleeLinkage, AdvisorySuccessor,
     AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity, FunctionIdentity,
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
-    OwnedFunctionSnapshot, SnapshotValidationError, SourceConventionSlots, SourceEndianness,
-    SourceLoaderRole, SourceMachineRoles,
+    OwnedFunctionSnapshot, SnapshotValidationError, SourceConventionSlots, SourceDataObject,
+    SourceEndianness, SourceLoaderRole, SourceMachineRoles,
 };
 
 /// The machine every function in one capture session runs on.
@@ -63,6 +63,10 @@ pub struct NativeFunction {
     pub name: String,
     pub blocks: Vec<NativeBlock>,
     pub calls: Vec<NativeCall>,
+    /// Text the body points at, with the address it lives at.
+    pub string_literals: Vec<(u64, String)>,
+    /// Program data the body points at, named.
+    pub data_symbols: Vec<SourceDataObject>,
     pub loader_role: Option<SourceLoaderRole>,
 }
 
@@ -148,10 +152,10 @@ pub fn capture(
             entry_address: function.address,
             blocks: blocks.into_boxed_slice(),
             external_exits: external_exits.into_boxed_slice(),
-            // Literals, data objects and pointer tables are the name database,
-            // which this capture does not read yet.
-            string_literals: Box::from([]),
-            data_symbols: Box::from([]),
+            string_literals: function.string_literals.into_boxed_slice(),
+            data_symbols: function.data_symbols.into_boxed_slice(),
+            // A table of code pointers is found by proving what indexes it,
+            // which needs the value domain this walk does not have.
             code_pointer_tables: Box::from([]),
             total_source_bytes,
         },
@@ -253,6 +257,8 @@ mod tests {
                 },
             ],
             calls: Vec::new(),
+            string_literals: Vec::new(),
+            data_symbols: Vec::new(),
             loader_role: None,
         }
     }

@@ -52,76 +52,12 @@ impl Flags {
         Self { by_address }
     }
 
-    /// Name each import by the stub that calls it.
-    ///
-    /// A call to an import reaches a stub in one of the `.plt` sections, and
-    /// the stub reads the slot the loader fills. Following that read back to
-    /// the relocation names the stub, which is the address the call names.
-    /// Reading the stubs rather than assuming an entry size is what keeps this
-    /// exact across formats and architectures.
-    pub fn name_imports(&mut self, image: &Image, decoder: &Disassembler) {
-        let slots: BTreeMap<u64, &str> = image
-            .relocations()
-            .iter()
-            .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
-            .collect();
-        if slots.is_empty() {
-            return;
-        }
-
-        for section in image
-            .sections()
-            .iter()
-            .filter(|section| section.name.starts_with(".plt"))
-        {
-            let mut stub = section.vaddr;
-            let mut pc = section.vaddr;
-            let end = section.vaddr + section.vsize;
-            while pc < end {
-                let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
-                    break;
-                };
-                let mut fetch = window.into_owned();
-                fetch.resize(DECODE_WINDOW, 0);
-                // Padding between stubs is zero bytes, and zero bytes are not
-                // an instruction. Skipping them is what puts the name on the
-                // stub a call reaches rather than on the padding before it.
-                if fetch[0] == 0 {
-                    pc += 1;
-                    stub = pc;
-                    continue;
-                }
-                let Ok(lifted) = decoder.lift(&fetch, pc) else {
-                    break;
-                };
-                if lifted.size == 0 {
-                    break;
-                }
-
-                let mut leaves = false;
-                for op in &lifted.ops {
-                    match op {
-                        R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. }
-                            if addr.space == SpaceId::Ram || addr.space == SpaceId::Const =>
-                        {
-                            if let Some(symbol) = slots.get(&addr.offset) {
-                                self.by_address
-                                    .entry(stub)
-                                    .or_insert_with(|| format!("sym.imp.{symbol}"));
-                            }
-                        }
-                        // An unconditional transfer ends the stub, so whatever
-                        // follows begins the next one.
-                        R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. } => leaves = true,
-                        _ => {}
-                    }
-                }
-
-                pc += u64::from(lifted.size);
-                if leaves {
-                    stub = pc;
-                }
-            }
+    /// Give each import stub the name radare2 gives it.
+    pub fn name_imports(&mut self, imports: &BTreeMap<u64, String>) {
+        for (stub, symbol) in imports {
+            self.by_address
+                .entry(*stub)
+                .or_insert_with(|| format!("sym.imp.{symbol}"));
         }
     }
 
@@ -160,6 +96,83 @@ impl Flags {
         out.push_str(rest);
         out
     }
+}
+
+/// Which stub stands for which import, by its own name.
+///
+/// A call to an import reaches a stub, and the stub reads the slot the loader
+/// fills. Following that read back to the relocation names the stub, which is
+/// the address the call names. Reading the stubs rather than assuming an entry
+/// size is what keeps this exact across formats and architectures.
+pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
+    let slots: BTreeMap<u64, &str> = image
+        .relocations()
+        .iter()
+        .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
+        .collect();
+    let mut named = BTreeMap::new();
+    if slots.is_empty() {
+        return named;
+    }
+
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| stubs(&section.name))
+    {
+        let mut stub = section.vaddr;
+        let mut pc = section.vaddr;
+        let end = section.vaddr + section.vsize;
+        while pc < end {
+            let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
+                break;
+            };
+            let mut fetch = window.into_owned();
+            fetch.resize(DECODE_WINDOW, 0);
+            // Padding between stubs is zero bytes, and zero bytes are not an
+            // instruction. Skipping them is what puts the name on the stub a
+            // call reaches rather than on the padding before it.
+            if fetch[0] == 0 {
+                pc += 1;
+                stub = pc;
+                continue;
+            }
+            let Ok(lifted) = decoder.lift(&fetch, pc) else {
+                break;
+            };
+            if lifted.size == 0 {
+                break;
+            }
+
+            let mut leaves = false;
+            for op in &lifted.ops {
+                match op {
+                    R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. }
+                        if matches!(addr.space, SpaceId::Ram | SpaceId::Const) =>
+                    {
+                        if let Some(symbol) = slots.get(&addr.offset) {
+                            named.entry(stub).or_insert_with(|| (*symbol).to_owned());
+                        }
+                    }
+                    // An unconditional transfer ends the stub, so whatever
+                    // follows begins the next one.
+                    R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. } => leaves = true,
+                    _ => {}
+                }
+            }
+
+            pc += u64::from(lifted.size);
+            if leaves {
+                stub = pc;
+            }
+        }
+    }
+    named
+}
+
+/// The sections a format puts import stubs in.
+fn stubs(name: &str) -> bool {
+    name.starts_with(".plt") || name == "__stubs" || name == "__symbol_stub"
 }
 
 /// Whether a symbol names a place in the program.
@@ -202,6 +215,13 @@ mod tests {
     fn an_address_with_no_name_stays_a_number() {
         assert_eq!(flags().spell("call 0x100000341"), "call 0x100000341");
         assert_eq!(flags().spell("sub rsp, 0x10"), "sub rsp, 0x10");
+    }
+
+    #[test]
+    fn an_import_stub_is_named_by_what_it_reaches() {
+        let mut flags = Flags::default();
+        flags.name_imports(&BTreeMap::from([(0x1030, "printf".to_owned())]));
+        assert_eq!(flags.at(0x1030), Some("sym.imp.printf"));
     }
 
     #[test]

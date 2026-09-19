@@ -13,6 +13,9 @@ pub struct Session {
     /// What this binary calls each address it names.
     #[cfg(feature = "sleigh")]
     pub flags: Flags,
+    /// Which stub stands for which import, by the import's own name.
+    #[cfg(feature = "sleigh")]
+    pub imports: std::collections::BTreeMap<u64, String>,
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
@@ -48,6 +51,8 @@ impl Session {
         Ok(Self {
             #[cfg(feature = "sleigh")]
             flags: Flags::of(&image),
+            #[cfg(feature = "sleigh")]
+            imports: std::collections::BTreeMap::new(),
             image,
             path: path.to_owned(),
             addr,
@@ -67,7 +72,8 @@ impl Session {
             let machine = r2sleigh_lift::embedded_machine(self.image.arch().name)
                 .map_err(|error| error.to_string())?;
             // The import stubs can only be read once there is a decoder.
-            self.flags.name_imports(&self.image, &machine.disasm);
+            self.imports = crate::flags::imports(&self.image, &machine.disasm);
+            self.flags.name_imports(&self.imports);
             self.machine = Some(machine);
         }
         Ok(())

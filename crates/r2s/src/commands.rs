@@ -291,6 +291,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     };
     let program = OpenImage {
         image: &session.image,
+        imports: &session.imports,
     };
     let response = r2engine::native::decompile(&target, &program, addr)
         .map_err(|refusal| refusal.to_string())?;
@@ -301,6 +302,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 #[cfg(feature = "sleigh")]
 struct OpenImage<'a> {
     image: &'a r2image::Image,
+    imports: &'a std::collections::BTreeMap<u64, String>,
 }
 
 #[cfg(feature = "sleigh")]
@@ -312,11 +314,15 @@ impl r2engine::native::Program for OpenImage<'_> {
     }
 
     fn name_at(&self, vaddr: u64) -> Option<String> {
-        self.image
-            .symbols()
-            .iter()
-            .find(|symbol| symbol.vaddr == vaddr && symbol.defined)
-            .map(|symbol| symbol.name.clone())
+        // An import's stub is what a call names, and the import's own name is
+        // what a reader expects to see there.
+        self.imports.get(&vaddr).cloned().or_else(|| {
+            self.image
+                .symbols()
+                .iter()
+                .find(|symbol| symbol.vaddr == vaddr && symbol.defined)
+                .map(|symbol| symbol.name.clone())
+        })
     }
 }
 
