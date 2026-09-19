@@ -91,17 +91,25 @@ enum Commands {
     /// Disassemble instruction bytes to r2il
     #[cfg(feature = "sleigh-config")]
     Disasm {
-        /// Architecture (e.g., x86-64, ARM)
+        /// Architecture (e.g., x86-64, ARM); taken from the file when omitted
         #[arg(short, long)]
-        arch: String,
+        arch: Option<String>,
 
         /// Hex-encoded instruction bytes
-        #[arg(short, long)]
-        bytes: String,
+        #[arg(short, long, conflicts_with = "file")]
+        bytes: Option<String>,
 
-        /// Base address for disassembly
-        #[arg(long, default_value = "0x1000")]
-        addr: String,
+        /// Binary to read the bytes from, instead of passing them as hex
+        #[arg(long, conflicts_with = "bytes")]
+        file: Option<PathBuf>,
+
+        /// Address to disassemble at; the file's entry point when omitted
+        #[arg(long)]
+        addr: Option<String>,
+
+        /// How many instructions to disassemble
+        #[arg(short = 'n', long, default_value_t = 1)]
+        count: usize,
 
         /// Output format: text, json, esil, or r2cmd
         #[arg(short, long, default_value = "text")]
@@ -297,9 +305,18 @@ fn main() {
         Commands::Disasm {
             arch,
             bytes,
+            file,
             addr,
+            count,
             format,
-        } => cmd_disasm(&arch, &bytes, &addr, &format),
+        } => cmd_disasm(
+            arch.as_deref(),
+            bytes.as_deref(),
+            file.as_deref(),
+            addr.as_deref(),
+            count,
+            &format,
+        ),
 
         #[cfg(feature = "sleigh-config")]
         Commands::Run {
@@ -632,49 +649,142 @@ fn render_esil_lines(
     Ok(lines)
 }
 
+/// Where instruction bytes come from: hex on the command line, or a binary.
 #[cfg(feature = "sleigh-config")]
-fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Result<(), String> {
-    let addr = parse_addr(addr_str)?;
-    let bytes = parse_hex_bytes(bytes_hex)?;
+enum ByteSource {
+    Hex { base: u64, bytes: Vec<u8> },
+    Image(r2image::Image),
+}
 
-    // Get the disassembler for the requested architecture
-    let (disasm, arch_spec) = get_disassembler_with_spec(arch)?;
-
-    // Lift the instruction
-    let block = disasm
-        .lift(&bytes, addr)
-        .map_err(|e| format!("Lift failed: {}", e))?;
-
-    // Also get the native disassembly for display
-    let (mnemonic, size) = disasm
-        .disasm_native(&bytes, addr)
-        .map_err(|e| format!("Native disasm failed: {}", e))?;
-
-    match format {
-        "json" => {
-            let json = build_disasm_json(&disasm, &arch_spec, &block, &mnemonic, size)?;
-            let output = serde_json::to_string_pretty(&json)
-                .map_err(|e| format!("Failed to render JSON: {}", e))?;
-            println!("{}", output);
+#[cfg(feature = "sleigh-config")]
+impl ByteSource {
+    /// A decode window at an address, short at the end of what is mapped.
+    fn window(&self, vaddr: u64, max: usize) -> Option<std::borrow::Cow<'_, [u8]>> {
+        match self {
+            ByteSource::Hex { base, bytes } => {
+                let offset = usize::try_from(vaddr.checked_sub(*base)?).ok()?;
+                let slice = bytes.get(offset..)?;
+                if slice.is_empty() {
+                    return None;
+                }
+                Some(std::borrow::Cow::Borrowed(&slice[..slice.len().min(max)]))
+            }
+            ByteSource::Image(image) => image.read_upto(vaddr, max),
         }
-        "esil" => {
-            let lines = render_esil_lines(&disasm, &arch_spec, &bytes, addr)?;
-            for line in lines {
-                println!("{}", line);
+    }
+}
+
+/// Longest instruction any supported architecture encodes, so one window always
+/// holds a whole instruction wherever the address is mapped.
+#[cfg(feature = "sleigh-config")]
+const DECODE_WINDOW: usize = 16;
+
+#[cfg(feature = "sleigh-config")]
+fn cmd_disasm(
+    arch: Option<&str>,
+    bytes_hex: Option<&str>,
+    file: Option<&Path>,
+    addr_str: Option<&str>,
+    count: usize,
+    format: &str,
+) -> Result<(), String> {
+    let (source, arch_name, start) = match file {
+        Some(path) => {
+            let image = r2image::Image::open(path).map_err(|e| e.to_string())?;
+            let arch_name = arch
+                .map(str::to_owned)
+                .unwrap_or_else(|| image.arch().name.to_owned());
+            let start = match addr_str {
+                Some(addr) => parse_addr(addr)?,
+                None => image
+                    .entry_points()
+                    .iter()
+                    .find(|entry| entry.kind == r2image::EntryKind::Main)
+                    .or_else(|| image.entry_points().first())
+                    .map(|entry| entry.vaddr)
+                    .ok_or_else(|| format!("{} declares no entry point", path.display()))?,
+            };
+            (ByteSource::Image(image), arch_name, start)
+        }
+        None => {
+            let arch_name = arch
+                .ok_or("--arch is required when bytes are passed rather than a file")?
+                .to_owned();
+            let hex = bytes_hex.ok_or("pass either --bytes or --file")?;
+            let start = parse_addr(addr_str.unwrap_or("0x1000"))?;
+            let bytes = parse_hex_bytes(hex)?;
+            (ByteSource::Hex { base: start, bytes }, arch_name, start)
+        }
+    };
+
+    let (disasm, arch_spec) = get_disassembler_with_spec(&arch_name)?;
+
+    let mut pc = start;
+    for index in 0..count.max(1) {
+        let Some(window) = source.window(pc, DECODE_WINDOW) else {
+            if index == 0 {
+                return Err(format!("nothing mapped at {:#x}", pc));
+            }
+            break;
+        };
+
+        // Sleigh fetches a whole window whatever the instruction needs, so a
+        // short one is padded and the decoded size checked against what is real.
+        let available = window.len();
+        let mut fetch = window.into_owned();
+        fetch.resize(DECODE_WINDOW, 0);
+
+        let block = disasm
+            .lift(&fetch, pc)
+            .map_err(|e| format!("Lift failed at {:#x}: {}", pc, e))?;
+        let (mnemonic, size) = disasm
+            .disasm_native(&fetch, pc)
+            .map_err(|e| format!("Native disasm failed at {:#x}: {}", pc, e))?;
+        if size > available {
+            return Err(format!(
+                "instruction at {:#x} needs {} bytes but only {} are there",
+                pc, size, available
+            ));
+        }
+
+        match format {
+            "json" => {
+                let json = build_disasm_json(&disasm, &arch_spec, &block, &mnemonic, size)?;
+                let output = serde_json::to_string_pretty(&json)
+                    .map_err(|e| format!("Failed to render JSON: {}", e))?;
+                println!("{}", output);
+            }
+            "esil" => {
+                for line in render_esil_lines(&disasm, &arch_spec, &fetch, pc)? {
+                    println!("{}", line);
+                }
+            }
+            "r2cmd" => {
+                let input =
+                    make_instruction_input(&disasm, &arch_spec, &block, pc, &mnemonic, size);
+                let output = export_single_instruction(
+                    &input,
+                    InstructionAction::Lift,
+                    ExportFormat::R2Cmd,
+                )?;
+                println!("{}", output);
+            }
+            _ => {
+                let input =
+                    make_instruction_input(&disasm, &arch_spec, &block, pc, &mnemonic, size);
+                let output =
+                    export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Text)?;
+                println!("{}", output);
             }
         }
-        "r2cmd" => {
-            let input = make_instruction_input(&disasm, &arch_spec, &block, addr, &mnemonic, size);
-            let output =
-                export_single_instruction(&input, InstructionAction::Lift, ExportFormat::R2Cmd)?;
-            println!("{}", output);
+
+        if size == 0 {
+            return Err(format!(
+                "decoder reported a zero-length instruction at {:#x}",
+                pc
+            ));
         }
-        _ => {
-            let input = make_instruction_input(&disasm, &arch_spec, &block, addr, &mnemonic, size);
-            let output =
-                export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Text)?;
-            println!("{}", output);
-        }
+        pc += size as u64;
     }
 
     Ok(())

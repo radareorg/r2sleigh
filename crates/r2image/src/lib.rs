@@ -355,6 +355,17 @@ impl Image {
         Some(Cow::Owned(bytes))
     }
 
+    /// As much of `max` bytes at `vaddr` as the containing segment holds.
+    ///
+    /// A decoder wants a window rather than an exact length, since it does not
+    /// know an instruction's size until it has read it, and a window at the end
+    /// of a segment is short rather than absent.
+    pub fn read_upto(&self, vaddr: u64, max: usize) -> Option<Cow<'_, [u8]>> {
+        let segment = self.segment_at(vaddr)?;
+        let available = (segment.vsize - (vaddr - segment.vaddr)).min(max as u64) as usize;
+        self.read(vaddr, available)
+    }
+
     /// Whether the address is inside a segment marked executable.
     pub fn is_executable(&self, vaddr: u64) -> bool {
         self.segment_at(vaddr)
