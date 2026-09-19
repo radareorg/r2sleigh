@@ -29902,3 +29902,41 @@ one instead of three, `unrendered_defined_values` two instead of four. The
 function-parameter census that found this is at `tests/corpus/arg_census.py`,
 beside the nesting one; it also reports over-long identifiers, where the
 outliers are all test names and those are meant to be sentences.
+
+## The memory-access helpers name what they were repeating
+
+Five functions that record a raw memory effect carried twelve and thirteen
+parameters each, and every one of them wore `#[allow(clippy::too_many_arguments)]`.
+Clippy had flagged all of them; the response each time had been to silence it.
+There are twenty such suppressions in the tree and nine of them were in
+`semantic.rs`.
+
+The parameters were not twelve separate things. Three groups repeated verbatim
+across all five signatures and at every call site:
+
+* where the access sits -- `inst`, `block_addr`, `op_index`, which the caller
+  already knows once per operation and passed again at each of eight calls;
+* what the access does -- `address`, `space`, `value`, `is_write`, `width`;
+* where the record goes -- the fact map and the ordinal that orders the effects
+  one instruction produces, which travel together because the ordinal is only
+  meaningful against that map.
+
+`AccessSite`, `RawAccess` and `EffectSink` name them. `insert_raw_memory_subeffect`
+takes five parameters instead of twelve, `insert_structured_memory_access` six
+instead of thirteen, `raw_memory_subeffect_provenance` four instead of six, and
+`member_run_store` seven instead of twelve -- the stored value rides in the
+access it belongs to rather than beside it. The site is built once per
+operation and reused at all eight call sites, which is also what makes those
+calls readable: the fields are named there now rather than being five positional
+values in a row.
+
+Four of the nine suppressions in `semantic.rs` are gone, and none was replaced
+by a wider allow. The remaining five are the certificate collectors, where the
+repeated group is `(boundaries, function, graph, machine_context, objects,
+memory, predicates, call_sites, structured)` -- thirty-nine functions in this
+file take three or more of it, and five take all of their parameters from it.
+Naming that group as two contexts, the body and what has been derived from it,
+is the next piece and the largest one available.
+
+`tests/corpus/arg_census.py` reports the parameter counts, and
+`grep -c 'too_many_arguments'` is the honest progress measure beside it.

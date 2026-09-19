@@ -12813,6 +12813,11 @@ fn collect_structured_memory_access_facts(
             let Some(inst) = graph.inst_id_for_op_site(block.addr, op_index) else {
                 continue;
             };
+            let site = AccessSite {
+                inst,
+                block_addr: block.addr,
+                op_index,
+            };
             let mut ordinal = 0u32;
             match op {
                 SSAOp::Load { dst, addr, space }
@@ -12824,18 +12829,20 @@ fn collect_structured_memory_access_facts(
                 } => {
                     if let Some(address) = graph.value_id_for_var(addr) {
                         insert_raw_memory_subeffect(
-                            &mut access_facts,
+                            EffectSink {
+                                facts: &mut access_facts,
+                                ordinal: &mut ordinal,
+                            },
                             memory,
                             objects,
-                            inst,
-                            &mut ordinal,
-                            block.addr,
-                            op_index,
-                            address,
-                            *space,
-                            graph.value_id_for_var(dst),
-                            false,
-                            dst.size,
+                            site,
+                            RawAccess {
+                                address,
+                                space: *space,
+                                value: graph.value_id_for_var(dst),
+                                is_write: false,
+                                width: dst.size,
+                            },
                         );
                     }
                 }
@@ -12856,13 +12863,14 @@ fn collect_structured_memory_access_facts(
                                     memory,
                                     machine_context,
                                     declared_slots,
-                                    inst,
-                                    block.addr,
-                                    op_index,
-                                    address,
-                                    value?,
-                                    *space,
-                                    val.size,
+                                    site,
+                                    RawAccess {
+                                        address,
+                                        space: *space,
+                                        value,
+                                        is_write: true,
+                                        width: val.size,
+                                    },
                                 )
                             })
                             .flatten();
@@ -12870,35 +12878,41 @@ fn collect_structured_memory_access_facts(
                             Some(run) => {
                                 for member in &run.members {
                                     insert_raw_member_subeffect(
-                                        &mut access_facts,
+                                        EffectSink {
+                                            facts: &mut access_facts,
+                                            ordinal: &mut ordinal,
+                                        },
                                         memory,
                                         objects,
-                                        inst,
-                                        &mut ordinal,
-                                        block.addr,
-                                        op_index,
-                                        address,
-                                        *space,
+                                        site,
+                                        RawAccess {
+                                            address,
+                                            space: *space,
+                                            value,
+                                            is_write: true,
+                                            width: val.size,
+                                        },
                                         run.object,
                                         member,
-                                        val.size,
                                     );
                                 }
                                 member_run_stores.insert(inst, run);
                             }
                             None => insert_raw_memory_subeffect(
-                                &mut access_facts,
+                                EffectSink {
+                                    facts: &mut access_facts,
+                                    ordinal: &mut ordinal,
+                                },
                                 memory,
                                 objects,
-                                inst,
-                                &mut ordinal,
-                                block.addr,
-                                op_index,
-                                address,
-                                *space,
-                                value,
-                                true,
-                                val.size,
+                                site,
+                                RawAccess {
+                                    address,
+                                    space: *space,
+                                    value,
+                                    is_write: true,
+                                    width: val.size,
+                                },
                             ),
                         }
                     }
@@ -12908,32 +12922,36 @@ fn collect_structured_memory_access_facts(
                 } => {
                     if let Some(address) = graph.value_id_for_var(addr) {
                         insert_raw_memory_subeffect(
-                            &mut access_facts,
+                            EffectSink {
+                                facts: &mut access_facts,
+                                ordinal: &mut ordinal,
+                            },
                             memory,
                             objects,
-                            inst,
-                            &mut ordinal,
-                            block.addr,
-                            op_index,
-                            address,
-                            *space,
-                            None,
-                            false,
-                            val.size,
+                            site,
+                            RawAccess {
+                                address,
+                                space: *space,
+                                value: None,
+                                is_write: false,
+                                width: val.size,
+                            },
                         );
                         insert_raw_memory_subeffect(
-                            &mut access_facts,
+                            EffectSink {
+                                facts: &mut access_facts,
+                                ordinal: &mut ordinal,
+                            },
                             memory,
                             objects,
-                            inst,
-                            &mut ordinal,
-                            block.addr,
-                            op_index,
-                            address,
-                            *space,
-                            graph.value_id_for_var(val),
-                            true,
-                            val.size,
+                            site,
+                            RawAccess {
+                                address,
+                                space: *space,
+                                value: graph.value_id_for_var(val),
+                                is_write: true,
+                                width: val.size,
+                            },
                         );
                     }
                 }
@@ -12942,32 +12960,36 @@ fn collect_structured_memory_access_facts(
                         (&swap.dst, &swap.addr, &swap.replacement, swap.space);
                     if let Some(address) = graph.value_id_for_var(addr) {
                         insert_raw_memory_subeffect(
-                            &mut access_facts,
+                            EffectSink {
+                                facts: &mut access_facts,
+                                ordinal: &mut ordinal,
+                            },
                             memory,
                             objects,
-                            inst,
-                            &mut ordinal,
-                            block.addr,
-                            op_index,
-                            address,
-                            space,
-                            graph.value_id_for_var(dst),
-                            false,
-                            replacement.size,
+                            site,
+                            RawAccess {
+                                address,
+                                space,
+                                value: graph.value_id_for_var(dst),
+                                is_write: false,
+                                width: replacement.size,
+                            },
                         );
                         insert_raw_memory_subeffect(
-                            &mut access_facts,
+                            EffectSink {
+                                facts: &mut access_facts,
+                                ordinal: &mut ordinal,
+                            },
                             memory,
                             objects,
-                            inst,
-                            &mut ordinal,
-                            block.addr,
-                            op_index,
-                            address,
-                            space,
-                            graph.value_id_for_var(replacement),
-                            true,
-                            replacement.size,
+                            site,
+                            RawAccess {
+                                address,
+                                space,
+                                value: graph.value_id_for_var(replacement),
+                                is_write: true,
+                                width: replacement.size,
+                            },
                         );
                     }
                 }
@@ -12982,28 +13004,29 @@ fn collect_structured_memory_access_facts(
 ///
 /// C has no scalar as wide as the store, and the layout says which members its
 /// bytes are, so each member takes its own slice of the proven constant.
-#[allow(clippy::too_many_arguments)]
 fn member_run_store(
     graph: &SsaGraph,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
-    inst: InstId,
-    block_addr: u64,
-    op_index: usize,
-    address: ValueId,
-    value: ValueId,
-    space: SpaceId,
-    width: u32,
+    site: AccessSite,
+    store: RawAccess,
 ) -> Option<MemberRunStoreCertificate> {
+    let value = store.value?;
+    let AccessSite {
+        inst,
+        block_addr,
+        op_index,
+    } = site;
+    let (address, space, width) = (store.address, store.space, store.width);
     if space != SpaceId::Ram || width == 0 {
         return None;
     }
     let type_graph = machine_context
         .and_then(SourceMachineContext::function_interface)
         .and_then(|interface| interface.type_graph())?;
-    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, space, true, width);
+    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, store);
     if !provenance.complete {
         return None;
     }
@@ -13071,14 +13094,46 @@ struct RawMemoryProvenance {
     complete: bool,
 }
 
+/// Where an access sits in the program.
+///
+/// The instruction, the block it is in and its index there travel together
+/// through every rule that records a memory effect, so they are one thing.
+#[derive(Clone, Copy)]
+struct AccessSite {
+    inst: InstId,
+    block_addr: u64,
+    op_index: usize,
+}
+
+/// Where a recorded effect goes, and the counter that orders the effects one
+/// instruction produces.
+struct EffectSink<'a> {
+    facts: &'a mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    ordinal: &'a mut u32,
+}
+
+/// One raw memory access: what it touches, and what it does there.
+#[derive(Clone, Copy)]
+struct RawAccess {
+    address: ValueId,
+    space: SpaceId,
+    value: Option<ValueId>,
+    is_write: bool,
+    width: u32,
+}
+
 fn raw_memory_subeffect_provenance(
     memory: &MemorySSAFacts,
     objects: &ObjectModel,
     inst: InstId,
-    space: SpaceId,
-    is_write: bool,
-    width: u32,
+    access: RawAccess,
 ) -> RawMemoryProvenance {
+    let RawAccess {
+        space,
+        is_write,
+        width,
+        ..
+    } = access;
     let annotations = if is_write {
         memory
             .defs_by_inst
@@ -13129,99 +13184,82 @@ fn raw_memory_subeffect_provenance(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn insert_raw_memory_subeffect(
-    access_facts: &mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    sink: EffectSink<'_>,
     memory: &MemorySSAFacts,
     objects: &ObjectModel,
-    inst: InstId,
-    ordinal: &mut u32,
-    block_addr: u64,
-    op_index: usize,
-    address: ValueId,
-    space: SpaceId,
-    value: Option<ValueId>,
-    is_write: bool,
-    width: u32,
+    site: AccessSite,
+    access: RawAccess,
 ) {
-    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, space, is_write, width);
+    let provenance = raw_memory_subeffect_provenance(memory, objects, site.inst, access);
     insert_structured_memory_access(
-        access_facts,
-        inst,
-        ordinal,
-        block_addr,
-        op_index,
-        space,
+        sink,
+        site,
+        access,
         provenance.object,
-        address,
-        value,
-        is_write,
-        width,
         provenance.complete,
         provenance.object_offset,
     );
 }
 
 /// One member's own write, carrying the whole store's proven provenance.
-#[allow(clippy::too_many_arguments)]
 fn insert_raw_member_subeffect(
-    access_facts: &mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    sink: EffectSink<'_>,
     memory: &MemorySSAFacts,
     objects: &ObjectModel,
-    inst: InstId,
-    ordinal: &mut u32,
-    block_addr: u64,
-    op_index: usize,
-    address: ValueId,
-    space: SpaceId,
+    site: AccessSite,
+    store: RawAccess,
     object: ObjectId,
     member: &MemberRunStoreMember,
-    store_width: u32,
 ) {
-    let provenance =
-        raw_memory_subeffect_provenance(memory, objects, inst, space, true, store_width);
+    let (address, space) = (store.address, store.space);
+    let provenance = raw_memory_subeffect_provenance(memory, objects, site.inst, store);
     insert_structured_memory_access(
-        access_facts,
-        inst,
-        ordinal,
-        block_addr,
-        op_index,
-        space,
-        object,
-        address,
-        match member.source {
-            MemberRunSource::Constant(_) => None,
-            MemberRunSource::Lane(value) => Some(value),
+        sink,
+        site,
+        RawAccess {
+            address,
+            space,
+            value: match member.source {
+                MemberRunSource::Constant(_) => None,
+                MemberRunSource::Lane(value) => Some(value),
+            },
+            is_write: true,
+            width: member.width,
         },
-        true,
-        member.width,
+        object,
         provenance.complete,
         i64::try_from(member.offset).ok(),
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn insert_structured_memory_access(
-    access_facts: &mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-    inst: InstId,
-    ordinal: &mut u32,
-    block_addr: u64,
-    op_index: usize,
-    space: SpaceId,
+    sink: EffectSink<'_>,
+    site: AccessSite,
+    access: RawAccess,
     object: ObjectId,
-    address: ValueId,
-    value: Option<ValueId>,
-    is_write: bool,
-    width: u32,
     provenance_complete: bool,
     object_offset: Option<i64>,
 ) {
+    let AccessSite {
+        inst,
+        block_addr,
+        op_index,
+    } = site;
+    let RawAccess {
+        address,
+        space,
+        value,
+        is_write,
+        width,
+    } = access;
+    let EffectSink { facts, ordinal } = sink;
     let id = StructuredAccessId {
         inst,
         ordinal: *ordinal,
     };
     *ordinal = (*ordinal).saturating_add(1);
-    access_facts.insert(
+    facts.insert(
         id,
         StructuredMemoryAccessFact {
             id,
@@ -15937,18 +15975,24 @@ mod tests {
         let mut accesses = BTreeMap::new();
         let mut ordinal = 0;
         super::insert_raw_memory_subeffect(
-            &mut accesses,
+            super::EffectSink {
+                facts: &mut accesses,
+                ordinal: &mut ordinal,
+            },
             &memory,
             &objects,
-            inst,
-            &mut ordinal,
-            0x1000,
-            0,
-            ValueId(0),
-            space,
-            Some(ValueId(1)),
-            is_write,
-            width,
+            super::AccessSite {
+                inst,
+                block_addr: 0x1000,
+                op_index: 0,
+            },
+            super::RawAccess {
+                address: ValueId(0),
+                space,
+                value: Some(ValueId(1)),
+                is_write,
+                width,
+            },
         );
         accesses
             .remove(&StructuredAccessId { inst, ordinal: 0 })
