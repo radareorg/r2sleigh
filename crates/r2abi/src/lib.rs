@@ -11,8 +11,10 @@
 //! a convention is spelled `cc.<name>.<what>`.
 
 pub mod compiler_spec;
+pub mod prototypes;
 
 pub use compiler_spec::CompilerSpec;
+pub use prototypes::{Prototype, Prototypes};
 
 use std::collections::BTreeMap;
 

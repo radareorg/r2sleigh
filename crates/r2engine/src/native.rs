@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2abi::{CompilerSpec, Convention};
+use r2abi::{CompilerSpec, Convention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2source::{
@@ -51,6 +51,10 @@ pub struct NativeTarget<'a> {
     /// data declares as the default until something says otherwise.
     pub convention: &'a Convention,
     pub compiler: &'a CompilerSpec,
+    /// What the library functions this program calls take and return. An
+    /// import has no body to read an interface off, so without this a call to
+    /// one renders with no arguments at all.
+    pub prototypes: &'a Prototypes,
 }
 
 /// Why a native decompile could not be attempted.
@@ -109,8 +113,30 @@ pub fn decompile(
     // A callee that cannot be walked leaves its call unproven rather than
     // failing the root.
     let mut callees = Callees::default();
+    // An import has no body here to read an interface off, so its declared
+    // prototype is placed in the convention's own slots and stands in for one.
+    for address in &root.body.calls {
+        let Some(name) = native.program.name_at(*address) else {
+            continue;
+        };
+        let Some(prototype) = target.prototypes.get(&name) else {
+            continue;
+        };
+        if let Some(interface) = declared_interface(prototype, &native.machine) {
+            callees.interfaces.insert(*address, interface);
+        }
+    }
     let mut facts = Vec::new();
-    for address in root.body.calls.iter().filter(|address| **address != entry) {
+    // A stub is not a body: walking one recovers an interface with no
+    // parameters, which would displace the declaration that has them.
+    let bodies: Vec<u64> = root
+        .body
+        .calls
+        .iter()
+        .copied()
+        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .collect();
+    for address in &bodies {
         let Ok(walked) = native.walk(*address) else {
             continue;
         };
@@ -126,6 +152,7 @@ pub fn decompile(
 
     let artifact = native.prepare(&root, &callees)?;
     let block_count = artifact.source_block_count();
+    let signatures = declared_signatures(target, &root, ptr_bits);
     let input = EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
             function_name: root.name,
@@ -137,13 +164,96 @@ pub fn decompile(
             source_snapshot: None,
         },
         Some(ptr_bits),
-        r2types::ParsedExternalContext::default(),
+        signatures,
     )
     .with_input_quality(EngineFunctionInputQuality::complete(block_count))
     .with_trusted_ssa(artifact)
     .with_callee_facts(facts);
 
     Ok(EngineSession::new().decompile_function_from_input(input))
+}
+
+/// The declared interfaces of the library functions this body calls.
+///
+/// Keyed by name, because that is what an import is: the body is elsewhere and
+/// only the name reaches the program.
+fn declared_signatures(
+    target: &NativeTarget<'_>,
+    root: &Walked,
+    ptr_bits: u32,
+) -> r2types::ParsedExternalContext {
+    let mut context = r2types::ParsedExternalContext::default();
+    for name in &root.callee_names {
+        let Some(prototype) = target.prototypes.get(name) else {
+            continue;
+        };
+        let Some(signature) = function_type(prototype, ptr_bits) else {
+            continue;
+        };
+        context
+            .known_function_signatures
+            .insert(name.clone(), signature);
+    }
+    context
+}
+
+/// A declared prototype, placed in the convention's slots.
+///
+/// The prototype says how many arguments there are and what they are; the
+/// convention says where they arrive. Neither alone describes the call, and
+/// nothing here proves anything about the callee's body, which is why this is
+/// only reached for a function whose body the program does not carry.
+fn declared_interface(
+    prototype: &r2abi::Prototype,
+    machine: &NativeMachine,
+) -> Option<r2source::SourceFunctionInterface> {
+    let slots = machine.slots.argument_slots();
+    if prototype.parameters.len() > slots.len() {
+        return None;
+    }
+    let parameters = prototype
+        .parameters
+        .iter()
+        .enumerate()
+        .map(|(index, _)| r2source::SourceAbiParameterSpec::new(index as u32, slots[index]))
+        .collect::<Vec<_>>();
+    let returns = match (prototype.returns.as_str(), machine.slots.result_slot()) {
+        ("void" | "", _) | (_, None) => r2source::SourceFunctionReturn::Void,
+        (_, Some(storage)) => r2source::SourceFunctionReturn::Register { storage },
+    };
+    let revision = format!("declared:{}", prototype.name);
+    r2source::SourceFunctionInterface::new_exact(
+        revision.into_bytes(),
+        machine.slots.calling_convention(),
+        parameters,
+        returns,
+        Vec::new(),
+    )
+    .ok()
+    .and_then(|interface| {
+        let roles = machine.roles;
+        interface
+            .with_return_address_storage(roles.return_address_storage()?)
+            .ok()?
+            .with_stack_pointer_storage(roles.stack_pointer_storage()?)
+            .ok()
+    })
+}
+
+/// One declared prototype as the type layer states it.
+///
+/// A spelling this build cannot parse leaves the whole prototype out rather
+/// than contributing a parameter list with a hole in it.
+fn function_type(prototype: &r2abi::Prototype, ptr_bits: u32) -> Option<r2types::FunctionType> {
+    let mut params = Vec::with_capacity(prototype.parameters.len());
+    for spelling in &prototype.parameters {
+        params.push(r2types::parse_c_type_like(spelling, ptr_bits)?);
+    }
+    Some(r2types::FunctionType {
+        return_type: r2types::parse_c_type_like(&prototype.returns, ptr_bits)?,
+        params,
+        variadic: prototype.variadic,
+    })
 }
 
 /// What the bodies a function calls say about their own boundaries.
@@ -172,6 +282,8 @@ impl Callees {
 struct Walked {
     name: String,
     body: r2ssa::body::Body,
+    /// What each function this one calls is called.
+    callee_names: Vec<String>,
 }
 
 /// One program, one machine, and the walk over it.
@@ -189,12 +301,18 @@ impl Native<'_> {
             self.program.read(vaddr, max)
         })
         .map_err(NativeRefusal::Body)?;
+        let callee_names = body
+            .calls
+            .iter()
+            .filter_map(|address| self.program.name_at(*address))
+            .collect();
         Ok(Walked {
             name: self
                 .program
                 .name_at(entry)
                 .unwrap_or_else(|| format!("fcn.{entry:x}")),
             body,
+            callee_names,
         })
     }
 

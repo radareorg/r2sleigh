@@ -42,11 +42,13 @@ fn a_function_is_decompiled_from_bytes_alone() {
     let compiler = CompilerSpec::parse(machine.compiler_spec);
     assert_eq!(compiler.stack_pointer.as_deref(), Some("RSP"));
 
+    let prototypes = r2abi::Prototypes::embedded();
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
         convention,
         compiler: &compiler,
+        prototypes: &prototypes,
     };
     let program = Fixture {
         bytes: ADD_TWO,
@@ -74,11 +76,13 @@ fn an_address_the_program_does_not_map_refuses() {
     let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
     let convention = conventions.default_convention().expect("default");
     let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
         convention,
         compiler: &compiler,
+        prototypes: &prototypes,
     };
     let program = Fixture {
         bytes: ADD_TWO,
@@ -94,11 +98,13 @@ fn a_call_is_rendered_from_the_callee_body() {
     let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
     let convention = conventions.default_convention().expect("default");
     let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
         convention,
         compiler: &compiler,
+        prototypes: &prototypes,
     };
     let program = Fixture {
         bytes: CALLER,
@@ -116,4 +122,53 @@ fn a_call_is_rendered_from_the_callee_body() {
         response.output
     );
     assert!(response.output.contains("sub_100a("), "{}", response.output);
+}
+
+/// A program where the called address is a library function by name, as an
+/// import stub is: no body worth reading, and a declared prototype instead.
+struct Importing;
+
+impl Program for Importing {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = CALLER.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        match vaddr {
+            BASE => Some("caller".to_owned()),
+            0x100a => Some("strlen".to_owned()),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn a_declared_prototype_gives_an_import_its_arguments() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
+    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let response = decompile(&target, &Importing, BASE).expect("decompile");
+
+    // strlen takes one argument, and the convention says it arrives in rdi.
+    assert!(
+        response.output.contains("strlen(uint64_t)"),
+        "{}",
+        response.output
+    );
+    assert!(
+        response.output.contains("strlen(RDI_0)") || response.output.contains("strlen("),
+        "{}",
+        response.output
+    );
 }

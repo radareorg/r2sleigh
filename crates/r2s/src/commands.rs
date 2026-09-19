@@ -283,11 +283,13 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
         .ok_or("the convention data names no default")?;
     let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
 
+    let prototypes = r2abi::Prototypes::embedded();
     let target = r2engine::native::NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
         convention,
         compiler: &compiler,
+        prototypes: &prototypes,
     };
     let program = OpenImage {
         image: &session.image,
