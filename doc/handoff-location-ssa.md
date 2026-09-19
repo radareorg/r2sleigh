@@ -29618,3 +29618,71 @@ evidence line, meaning one of the two `?`s between the `Load` match and the
 object's coordinate now declines where it did not before. That is the first
 thing to instrument next time, and the reason this was reset rather than
 committed.
+
+## The byte buffer's refusal is a must-assignment question about a counted loop
+
+Two cells of `shape_byte_indexed_buffer` refuse outright -- x64 -O2 and arm64
+-O2, `native declaration placement refused: read_before_assignment` -- and the
+placement's own evidence names the binding and every occurrence it has:
+
+```
+binding=BindingId(19) block=0x1000011c9 order=126 read=Use(InstId(452))
+all=[(…, 126, Read(Use(InstId(452)))), (…, 139, Read(Use(InstId(456)))),
+     (…, 153, Write { inst: InstId(462) })]
+```
+
+Three occurrences, all in one block, both reads before the write. The value
+those reads use is `ValueId(519)`, defined by a sixteen-byte `Load` at ordinal
+104 of that same block, and the store at ordinal 116 writes the bytes back:
+the read-modify-write of a vectorised loop.
+
+The source writes the whole buffer before that loop ever runs:
+
+```c
+uint8_t buf[64];
+for (i = 0; i < 64; i++) { buf[i] = …; }
+for (i = 0; i < 64; i += 8) { memcpy(&word, buf + …, 8); … }
+```
+
+So the buffer is assigned on every path that reaches the reader, and the
+binding's occurrence list carries nothing from the first loop at all. That list
+is complete: `occurrences` in `assign_placements` is indexed by binding, and
+`first_read_before_assignment` is handed the whole of one binding's entry, so
+three occurrences in one block is everything binding 19 has.
+
+The first loop's stores therefore belong to a *different* binding, and the
+placement is right to refuse: the binding it was asked about really is read
+before anything assigns it. `buf` is split, one binding for the byte-wise
+stores of the first loop and another for the sixteen-byte read-modify-write of
+the second, and the refusal is that split showing through rather than a
+must-analysis being too weak. The question to take next is why the partition
+separates them -- the same object reached at one width and at another -- which
+is the object model, not the placement.
+
+The evidence answers that too. The frame is chopped into eight- and
+sixteen-byte roots where `buf[64]` should be one object:
+
+```
+-112: -104, -96: -88, -88: -72, -72: -56, -56: -40, -40: -24, -16: -8, -8: 0
+```
+
+and there is no `induction-bound` and no `indexed-span-reach` in the whole
+function. Two `accessed-object-extent` lines are all the indexed accesses it
+has, both into `ObjectId(4)`, both `bound=None`, both one byte wide -- `buf[i]`
+from the first loop and `p[a % 8]` from the tail.
+
+Those indices are masks. At -O2 `a % 8u` is `and eax, 7`, and
+`indexed_offset_upper_bound`'s `IntAnd` arm answers `None` in strict mode when
+the operand being masked is itself unbounded: `(!strict).then_some(mask)`. So
+the byte accesses prove nothing about how far they reach, no span reaches
+across the neighbouring roots, and the sixteen-byte read-modify-write of the
+second loop lands in a root of its own.
+
+That conservatism is deliberate and the comment beside it says why: a span
+built on a mask's own magnitude "swallowed every neighbouring local", which is
+the `i & 0xf8` shape claiming two hundred and forty-eight bytes. It is worth
+noticing that the two cases differ. `x & 7 <= 7` is a theorem about the index
+whatever `x` is, and it is the *object* claim -- that eight bytes there are one
+object -- that the past regression was about. Separating the bound on the index
+from the claim about the object is the decision this refusal rests on, and it
+is one the project has already made once.
