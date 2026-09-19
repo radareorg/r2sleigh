@@ -142,6 +142,23 @@ pub struct Relocation {
     pub symbol: String,
 }
 
+/// The address a code pointer names, with the mode bit taken off.
+///
+/// On 32-bit ARM the low bit of a function's address selects Thumb rather than
+/// forming part of the address: the ELF ABI says so, and no instruction begins
+/// at an odd address on a machine whose instructions are two- or four-byte
+/// aligned. Keeping the bit made an entry point decode from one byte into
+/// itself and every instruction after it read from the wrong place.
+///
+/// The mode the bit selected is not recorded here, because nothing downstream
+/// can act on it yet: the decoder always reads ARM.
+fn code_address(arch: &ImageArch, value: u64) -> u64 {
+    match arch.name == "ARM" && arch.bits == 32 {
+        true => value & !1,
+        false => value,
+    }
+}
+
 /// Which symbol each stub and pointer slot stands for, in a Mach-O.
 ///
 /// A section of stubs or of symbol pointers says where its entries begin in the
@@ -367,7 +384,10 @@ impl Image {
                 }
                 Some(Symbol {
                     name: name.to_owned(),
-                    vaddr: symbol.address(),
+                    vaddr: match symbol.kind() {
+                        object::SymbolKind::Text => code_address(&arch, symbol.address()),
+                        _ => symbol.address(),
+                    },
                     size: symbol.size(),
                     kind: match symbol.kind() {
                         object::SymbolKind::Text => SymbolKind::Function,
@@ -441,7 +461,7 @@ impl Image {
         };
 
         let mut entry_points = Vec::new();
-        let entry = file.entry();
+        let entry = code_address(&arch, file.entry());
         if entry != 0 {
             // Mach-O states the entry as a file offset, so translate when unmapped.
             let vaddr = if executable(entry) {
@@ -476,7 +496,7 @@ impl Image {
                 continue;
             };
             for slot in bytes.chunks_exact(pointer_bytes) {
-                let vaddr = read_pointer(slot, arch.endian);
+                let vaddr = code_address(&arch, read_pointer(slot, arch.endian));
                 if vaddr != 0 {
                     entry_points.push(EntryPoint { vaddr, kind });
                 }

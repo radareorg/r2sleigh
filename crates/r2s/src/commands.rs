@@ -362,9 +362,15 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
     session.ensure_machine()?;
-    let decoder = session
-        .decoder()
+    let machine = session
+        .machine()
         .ok_or("no decoder for this architecture")?;
+    let decoder = &machine.disasm;
+    // Bytes that do not decode are stepped over by the width the machine
+    // addresses instructions at. Stepping one byte put the next instruction at
+    // an odd address on ARM, where no instruction can begin, and every line
+    // after it decoded from the wrong place.
+    let step = u64::from(machine.arch.alignment.max(1));
 
     let mut out = String::new();
     let mut pc = start;
@@ -387,7 +393,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
                     pc,
                     format!("{:02x}", fetch[0])
                 ));
-                pc += 1;
+                pc += step;
                 continue;
             }
         };
@@ -397,7 +403,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
                 pc,
                 format!("{:02x}", fetch[0])
             ));
-            pc += 1;
+            pc += step;
             continue;
         }
 

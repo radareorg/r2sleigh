@@ -92,11 +92,6 @@ impl Session {
     pub fn machine(&self) -> Option<&r2sleigh_lift::EmbeddedMachine> {
         self.machine.as_ref()
     }
-
-    #[cfg(feature = "sleigh")]
-    pub fn decoder(&self) -> Option<&r2sleigh_lift::Disassembler> {
-        self.machine.as_ref().map(|machine| &machine.disasm)
-    }
 }
 
 /// What the binary defines at one address.
