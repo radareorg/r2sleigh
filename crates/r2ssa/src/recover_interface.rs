@@ -1765,3 +1765,171 @@ mod tests {
         );
     }
 }
+
+/// One stack slot the body proves a role for, in entry-stack-pointer
+/// coordinates.
+///
+/// A capture that states these is stating what preparation already proved, so
+/// the spill into a parameter's home stops being a memory access and becomes
+/// the parameter again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveredStackSlot {
+    pub offset: i64,
+    pub size_bytes: u32,
+    /// The parameter this slot homes, where the body proves it is one.
+    pub parameter: Option<u32>,
+}
+
+/// The stack slots one prepared body proves, with the parameter each homes.
+///
+/// A home is a slot written exactly once, with the value a parameter arrived
+/// in, and read back afterwards: written and never read is an outgoing
+/// argument rather than a home. Everything else with an agreed width is a
+/// local. Slots whose entry-stack coordinate the preparation did not prove are
+/// left out rather than placed by guess.
+pub fn recovered_stack_slots(
+    prepared: &crate::SsaArtifact,
+    parameters: &[SourceAbiParameterSpec],
+) -> Vec<RecoveredStackSlot> {
+    let entry_values = parameter_entry_values(prepared, parameters);
+    let mut widths: BTreeMap<crate::ObjectId, BTreeSet<u32>> = BTreeMap::new();
+    let mut stores: BTreeMap<crate::ObjectId, Vec<&crate::MemoryAccessCertificate>> =
+        BTreeMap::new();
+    let mut loaded: BTreeSet<crate::ObjectId> = BTreeSet::new();
+
+    for access in prepared.certificates().memory_accesses.values() {
+        if access.space != SpaceId::Ram {
+            continue;
+        }
+        if stack_coordinate(prepared, access.object).is_none() {
+            continue;
+        }
+        widths
+            .entry(access.object)
+            .or_default()
+            .insert(access.width);
+        match access.is_write {
+            true => stores.entry(access.object).or_default().push(access),
+            false => {
+                loaded.insert(access.object);
+            }
+        }
+    }
+
+    let mut slots = Vec::new();
+    for (object, sizes) in widths {
+        // One width per slot: two widths are two things sharing an address,
+        // and nothing here can say which one the source meant.
+        let widths = sizes.iter().copied().collect::<Vec<u32>>();
+        let [size] = widths[..] else {
+            continue;
+        };
+        let Some(offset) = stack_coordinate(prepared, object) else {
+            continue;
+        };
+        if size == 0 {
+            continue;
+        }
+        let parameter = stores
+            .get(&object)
+            .and_then(|writes| match writes.as_slice() {
+                [store] => Some(*store),
+                _ => None,
+            })
+            .filter(|_| loaded.contains(&object))
+            .and_then(|store| store.value)
+            .and_then(|value| prepared.value_var(value))
+            .and_then(|stored| {
+                entry_values
+                    .iter()
+                    .find(|(_, var)| *var == stored)
+                    .map(|(index, _)| *index)
+            });
+        slots.push(RecoveredStackSlot {
+            offset,
+            size_bytes: size,
+            parameter,
+        });
+    }
+    slots.sort_by_key(|slot| slot.offset);
+    r2il::refusal_evidence!(
+        "recovered-stack-slots",
+        "{} accesses over {} rooted objects, {} entry roots, {} parameters with an entry value, \
+         {} slots ({} homes)",
+        prepared.certificates().memory_accesses.len(),
+        stores.len(),
+        prepared.objects().entry_stack_roots.len(),
+        entry_values.len(),
+        slots.len(),
+        slots.iter().filter(|slot| slot.parameter.is_some()).count()
+    );
+    slots
+}
+
+/// Where one stack object sits, in entry-stack-pointer coordinates.
+///
+/// Preparation proves that coordinate for some objects outright; for the rest
+/// the object states its own, and only a stack-pointer-based one is in the
+/// coordinates a source may declare.
+fn stack_coordinate(prepared: &crate::SsaArtifact, object: crate::ObjectId) -> Option<i64> {
+    if let Some(root) = prepared.objects().entry_stack_roots.get(&object)
+        && root.base == StackAddressBase::StackPointer
+    {
+        return Some(root.offset);
+    }
+    match prepared.objects().object(object)?.kind {
+        crate::ObjectKind::StackSlot {
+            base: StackAddressBase::StackPointer,
+            offset,
+            ..
+        }
+        | crate::ObjectKind::FrameObject {
+            base: StackAddressBase::StackPointer,
+            offset,
+            ..
+        } => Some(offset),
+        _ => None,
+    }
+}
+
+/// The value each parameter arrived in, as the body names it.
+fn parameter_entry_values<'a>(
+    prepared: &'a crate::SsaArtifact,
+    parameters: &[SourceAbiParameterSpec],
+) -> Vec<(u32, &'a SSAVar)> {
+    let mut found = Vec::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let Some(storage) = parameter.register_storage() else {
+            continue;
+        };
+        let Some(var) = entry_var_for_storage(prepared, storage) else {
+            continue;
+        };
+        let Ok(index) = u32::try_from(index) else {
+            continue;
+        };
+        found.push((index, var));
+    }
+    found
+}
+
+/// The version-zero variable a register storage names, which is the value the
+/// caller left there.
+fn entry_var_for_storage(
+    prepared: &crate::SsaArtifact,
+    storage: CanonicalStorageId,
+) -> Option<&SSAVar> {
+    let name = prepared
+        .machine_context()
+        .register_storages_by_name()
+        .iter()
+        .find(|(_, candidate)| **candidate == storage)
+        .map(|(name, _)| name.clone())?;
+    prepared.function().blocks().iter().find_map(|block| {
+        block.ops.iter().find_map(|op| {
+            op.sources()
+                .into_iter()
+                .find(|var| var.version == 0 && var.name().eq_ignore_ascii_case(&name))
+        })
+    })
+}

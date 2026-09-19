@@ -164,14 +164,18 @@ pub fn decompile(
     }
 
     let first = native.prepare(&root, &callees)?;
-    // What the body points at is not always a constant the machine spells in
-    // one instruction: aarch64 forms an address from a page and an offset, so
-    // the text it reaches appears only once the values are folded. A second
-    // capture states what the first proved.
+    // A second capture states what the first proved. Preparation recovers the
+    // interface off the instructions and proves which frame slots home which
+    // parameter; declaring those turns the spill into the parameter again,
+    // which is the whole difference between reading a frame and reading a
+    // program. Text the body points at is harvested the same way, because
+    // aarch64 forms an address from a page and an offset and the constant the
+    // literal lives at appears only once those are folded.
+    let restated = native.restated(&first);
     let folded = native.folded_literals(&first, &root);
-    let artifact = match folded.is_empty() {
+    let artifact = match restated.is_none() && folded.is_empty() {
         true => first,
-        false => native.prepare_with_literals(&root, &callees, folded)?,
+        false => native.prepare_restated(&root, &callees, folded, restated)?,
     };
     let block_count = artifact.source_block_count();
     let signatures = declared_signatures(target, &root, ptr_bits);
@@ -313,6 +317,57 @@ fn declared_interface(
             );
             None
         })
+}
+
+/// One interface again, with stack slots it did not have.
+///
+/// There is no builder that adds them, so the interface is rebuilt from what
+/// it says about itself. The order matters: a return mechanism validates
+/// against the carriers, and a carrier refuses to move once a mechanism is
+/// bound, so the carriers go on first.
+fn restate(
+    interface: &r2source::SourceFunctionInterface,
+    slots: Vec<r2source::SourceStackSlotSpec>,
+) -> Option<r2source::SourceFunctionInterface> {
+    let mut restated = r2source::SourceFunctionInterface::new_exact_with_logical_types(
+        interface.revision_identity().to_vec(),
+        interface.calling_convention(),
+        interface.parameters().to_vec(),
+        interface.return_kind(),
+        slots,
+        interface.parameter_logical_values().to_vec(),
+        interface.return_logical_value(),
+        interface.type_graph().cloned(),
+    )
+    .ok()?
+    .with_role_register_names(interface.role_register_names())
+    .with_preserved_call_carriers(
+        interface.stack_pointer_preserved_across_calls(),
+        interface.frame_pointer_preserved_across_calls(),
+    );
+    if let Some(storage) = interface.return_address_storage() {
+        restated = restated.with_return_address_storage(storage).ok()?;
+    }
+    if let Some(storage) = interface.stack_pointer_storage() {
+        restated = restated.with_stack_pointer_storage(storage).ok()?;
+    }
+    if let Some(storage) = interface.frame_pointer_storage() {
+        restated = restated.with_frame_pointer_storage(storage).ok()?;
+    }
+    if let Some(mechanism) = interface.return_mechanism() {
+        restated = restated
+            .with_exact_stacked_return(
+                mechanism.stack_offset(),
+                mechanism.slot_size_bytes(),
+                mechanism.stack_pointer_delta_bytes(),
+                mechanism.address_size_bytes(),
+            )
+            .ok()?;
+    }
+    if interface.prototype_from_source_types() {
+        restated = restated.with_prototype_from_source_types();
+    }
+    Some(restated)
 }
 
 /// The types one declared prototype needs, interned as it is read.
@@ -479,11 +534,71 @@ impl Native<'_> {
         self.prepare_with_literals(walked, callees, Vec::new())
     }
 
+    /// The interface the first pass recovered, restated with the frame slots
+    /// it proved.
+    ///
+    /// `None` where the body proves no slot, which is every function that
+    /// keeps its arguments in registers.
+    fn restated(&self, artifact: &TrustedSsaArtifact) -> Option<r2source::SourceFunctionInterface> {
+        let prepared = artifact.shared_artifact();
+        let prepared = prepared.as_ref();
+        let interface = prepared.machine_context().function_interface()?;
+        let base_storage = prepared.machine_context().stack_pointer_carrier()?;
+        let proved =
+            r2ssa::recover_interface::recovered_stack_slots(prepared, interface.parameters());
+        if proved.is_empty() {
+            return None;
+        }
+
+        let slots = proved
+            .iter()
+            .filter_map(|slot| {
+                let parameter = match slot.parameter {
+                    None => {
+                        return Some(r2source::SourceStackSlotSpec::new_local(
+                            r2source::StackAddressBase::StackPointer,
+                            base_storage,
+                            slot.offset,
+                            slot.size_bytes,
+                        ));
+                    }
+                    Some(index) => index,
+                };
+                // A home names the register its parameter arrived in, and the
+                // constructor refuses any other.
+                let home = interface
+                    .parameters()
+                    .get(parameter as usize)?
+                    .register_storage()?;
+                Some(r2source::SourceStackSlotSpec::new_parameter_home(
+                    r2source::StackAddressBase::StackPointer,
+                    base_storage,
+                    slot.offset,
+                    slot.size_bytes,
+                    parameter,
+                    home,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        restate(interface, slots)
+    }
+
     fn prepare_with_literals(
         &self,
         walked: &Walked,
         callees: &Callees,
         extra_literals: Vec<(u64, String)>,
+    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        self.prepare_restated(walked, callees, extra_literals, None)
+    }
+
+    fn prepare_restated(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        extra_literals: Vec<(u64, String)>,
+        interface: Option<r2source::SourceFunctionInterface>,
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
         let function = NativeFunction {
             address: walked.body.entry,
@@ -507,8 +622,10 @@ impl Native<'_> {
                 literals
             },
             data_symbols: self.data_symbols(&walked.body),
-            interface: None,
-            parameter_names: Vec::new(),
+            parameter_names: (0..interface.as_ref().map_or(0, |i| i.parameters().len()))
+                .map(|index| format!("arg{index}"))
+                .collect(),
+            interface,
             loader_role: None,
         };
 
