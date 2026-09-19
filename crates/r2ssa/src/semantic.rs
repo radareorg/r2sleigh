@@ -4505,14 +4505,18 @@ fn variadic_callsite_arguments(
                 .offset_of(stack_index)
                 .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
             let (value, entry_offset) = reaching_stack_argument_before_call(
-                recovery.function,
-                recovery.graph,
-                recovery.block_addr,
-                recovery.op_index,
-                offset,
-                offset,
-                placement.stride_bytes(),
-                recovery.machine_context.call_moves_stack_pointer(),
+                CallPosition {
+                    function: recovery.function,
+                    graph: recovery.graph,
+                    block_addr: recovery.block_addr,
+                    op_index: recovery.op_index,
+                    calls_move_stack_pointer: recovery.machine_context.call_moves_stack_pointer(),
+                },
+                StackArgument {
+                    offset,
+                    callee_offset: offset,
+                    size_bytes: placement.stride_bytes(),
+                },
             )
             .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
             arguments.push(SourceCallArgumentFact {
@@ -4754,17 +4758,41 @@ fn call_entering_stack_pointer_offset(
 /// the run of operations since the previous call, which is where a compiler
 /// materialises the arguments it cannot pass in registers. Returns the value
 /// and the slot's entry-relative coordinate.
-#[allow(clippy::too_many_arguments)]
-fn reaching_stack_argument_before_call(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+/// Where a call sits, for the searches that look backwards from it.
+#[derive(Clone, Copy)]
+struct CallPosition<'a> {
+    function: &'a SSAFunction,
+    graph: &'a SsaGraph,
     block_addr: u64,
-    call_op_index: usize,
+    op_index: usize,
+    calls_move_stack_pointer: bool,
+}
+
+/// One stack argument: where the caller writes it, where the callee reads it,
+/// and how wide it is.
+#[derive(Clone, Copy)]
+struct StackArgument {
     offset: i64,
     callee_offset: i64,
     size_bytes: u32,
-    calls_move_stack_pointer: bool,
+}
+
+fn reaching_stack_argument_before_call(
+    at: CallPosition<'_>,
+    argument: StackArgument,
 ) -> Option<(ValueId, i64)> {
+    let CallPosition {
+        function,
+        graph,
+        block_addr,
+        op_index: call_op_index,
+        calls_move_stack_pointer,
+    } = at;
+    let StackArgument {
+        offset,
+        callee_offset,
+        size_bytes,
+    } = argument;
     let block = function.get_block(block_addr)?;
     let Some((entering, transfer_moved_carrier)) = call_entering_stack_pointer_offset(
         function,
@@ -5153,14 +5181,19 @@ fn collect_source_boundary_facts(
                             callee_offset,
                         } => {
                             let found = reaching_stack_argument_before_call(
-                                function,
-                                graph,
-                                block_addr,
-                                op_index,
-                                offset,
-                                callee_offset,
-                                size_bytes,
-                                machine_context.call_moves_stack_pointer(),
+                                CallPosition {
+                                    function,
+                                    graph,
+                                    block_addr,
+                                    op_index,
+                                    calls_move_stack_pointer: machine_context
+                                        .call_moves_stack_pointer(),
+                                },
+                                StackArgument {
+                                    offset,
+                                    callee_offset,
+                                    size_bytes,
+                                },
                             );
                             if found.is_none() {
                                 r2il::refusal_evidence!(
@@ -6046,19 +6079,22 @@ fn reaching_stack_pointer_before(
     calls_move_stack_pointer: bool,
 ) -> Option<ReachingAbiState> {
     let visited = BTreeMap::new();
-    match reaching_abi_value_before(
+    let search = ReachingAbi {
         function,
         graph,
-        block_addr,
-        boundary_op_index,
         storage,
-        &visited,
-        ReachingAbiPolicy {
+        policy: ReachingAbiPolicy {
             allow_distinct_phi_inputs: false,
             calls_are_barriers: true,
             stack_pointer: Some(storage),
             transfer_carrier: calls_move_stack_pointer.then_some(storage),
         },
+    };
+    match reaching_abi_value_before(
+        search,
+        block_addr,
+        boundary_op_index,
+        &visited,
         &mut BTreeMap::new(),
     )? {
         ReachingAbiPath::Reaches(state) => Some(state),
@@ -6076,14 +6112,11 @@ fn reaching_abi_value_in_block_with_policy(
     allow_distinct_phi_inputs: bool,
 ) -> Option<ReachingAbiState> {
     let visited = BTreeMap::new();
-    match reaching_abi_value_before(
+    let search = ReachingAbi {
         function,
         graph,
-        block_addr,
-        boundary_op_index,
         storage,
-        &visited,
-        ReachingAbiPolicy {
+        policy: ReachingAbiPolicy {
             allow_distinct_phi_inputs,
             calls_are_barriers: true,
             stack_pointer: machine_context.stack_pointer_carrier(),
@@ -6092,6 +6125,12 @@ fn reaching_abi_value_in_block_with_policy(
                 .then(|| machine_context.stack_pointer_carrier())
                 .flatten(),
         },
+    };
+    match reaching_abi_value_before(
+        search,
+        block_addr,
+        boundary_op_index,
+        &visited,
         &mut BTreeMap::new(),
     )? {
         ReachingAbiPath::Reaches(state) => Some(state),
@@ -6112,43 +6151,51 @@ fn trace_call_definitions() -> bool {
 /// boundary, or an ancestor on the current path, which a back edge asks
 /// about -- and those keep the path's own scan. Without this the walk
 /// enumerated every path through a diamond-shaped body and never finished.
-#[allow(clippy::too_many_arguments)]
-fn reaching_abi_value_at_end(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    block_addr: u64,
+/// The backward search for the value an ABI storage holds at a point.
+///
+/// The function, its graph, the storage being traced and the policy that says
+/// what may be crossed are fixed for the whole walk; only the point moves. The
+/// two walkers below are mutually recursive, so stating the fixed part once is
+/// also what keeps their signatures readable.
+#[derive(Clone, Copy)]
+struct ReachingAbi<'a> {
+    function: &'a SSAFunction,
+    graph: &'a SsaGraph,
     storage: CanonicalStorageId,
-    visited: &BTreeMap<u64, usize>,
     policy: ReachingAbiPolicy,
+}
+
+fn reaching_abi_value_at_end(
+    search: ReachingAbi<'_>,
+    block_addr: u64,
+    visited: &BTreeMap<u64, usize>,
     memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
-    let boundary = function.get_block(block_addr)?.ops.len();
+    let boundary = search.function.get_block(block_addr)?.ops.len();
     if visited.contains_key(&block_addr) {
-        return reaching_abi_value_before(
-            function, graph, block_addr, boundary, storage, visited, policy, memo,
-        );
+        return reaching_abi_value_before(search, block_addr, boundary, visited, memo);
     }
     if let Some(known) = memo.get(&block_addr) {
         return *known;
     }
-    let result = reaching_abi_value_before(
-        function, graph, block_addr, boundary, storage, visited, policy, memo,
-    );
+    let result = reaching_abi_value_before(search, block_addr, boundary, visited, memo);
     memo.insert(block_addr, result);
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reaching_abi_value_before(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+    search: ReachingAbi<'_>,
     block_addr: u64,
     boundary_op_index: usize,
-    storage: CanonicalStorageId,
     visited: &BTreeMap<u64, usize>,
-    policy: ReachingAbiPolicy,
     memo: &mut BTreeMap<u64, Option<ReachingAbiPath>>,
 ) -> Option<ReachingAbiPath> {
+    let ReachingAbi {
+        function,
+        graph,
+        storage,
+        policy,
+    } = search;
     let block = function.get_block(block_addr)?;
     // A block already on this path was scanned up to the boundary it was
     // entered at; a back edge asks about the rest of it. What that rest
@@ -6352,15 +6399,7 @@ fn reaching_abi_value_before(
         return None;
     }
     for predecessor in &predecessors {
-        match reaching_abi_value_at_end(
-            function,
-            graph,
-            *predecessor,
-            storage,
-            &path_visited,
-            policy,
-            memo,
-        )? {
+        match reaching_abi_value_at_end(search, *predecessor, &path_visited, memo)? {
             ReachingAbiPath::Reaches(state) => values.push(state),
             ReachingAbiPath::Cycle => {}
         }

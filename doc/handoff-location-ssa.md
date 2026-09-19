@@ -29978,3 +29978,30 @@ Suppressions of the argument-count lint across the tree are down from
 twenty-five to eighteen, and none of the seven was moved rather than removed.
 The three left in this file are the ABI reaching-value search, where the
 repeated group is a search rather than a fact set.
+
+## The backward searches name what is fixed and what moves
+
+Three searches that walk backwards from a point carried seven and eight
+parameters each. In every one of them most of the parameters were fixed for the
+whole walk and only one or two moved, which is what made the signatures long and
+the recursion unreadable.
+
+`reaching_abi_value_at_end` and `reaching_abi_value_before` are mutually
+recursive and pass each other the same six values at every step. Four of them --
+the function, its graph, the storage being traced and the policy saying what may
+be crossed -- never change during a search, so they are `ReachingAbi`. What
+moves is the block and the boundary inside it; what accumulates is the visited
+set and the memo. The two take four and five parameters instead of seven and
+eight, and their recursive calls now fit on one line each.
+
+`reaching_stack_argument_before_call` took eight and now takes two.
+`CallPosition` is where the call sits and whether the convention moves the stack
+pointer across it; `StackArgument` is the slot -- where the caller writes it,
+where the callee reads it, how wide it is. Both callers already had the first
+group to hand: one of them was destructuring a recovery context into four
+positional arguments only to have them reassembled inside.
+
+Suppressions of the argument-count lint are down from twenty-five to fifteen.
+The one left in `semantic.rs` is `loop_carrier_facts`, where the repeated group
+is a natural loop -- its identity, header, latches and body -- which
+`loop_induction_values` beside it also takes apart the same way.
