@@ -1591,6 +1591,11 @@ pub struct CFunction {
 pub struct CTypedefDef {
     pub name: String,
     pub target: CType,
+    /// The text to declare the name with, where the type model has no spelling
+    /// for it. A name the C implementation owns is defined by the
+    /// implementation's own words -- `size_t` is `unsigned long` on a machine
+    /// whose long is its address width -- and those are not fixed-width names.
+    pub spelling: Option<String>,
 }
 
 /// One aggregate this rendering defines, so a value of it can be declared.

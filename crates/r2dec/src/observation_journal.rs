@@ -1608,14 +1608,25 @@ impl SealedNativeFunction {
             if target.to_string() == name {
                 continue;
             }
+            // A name the C implementation defines has a spelling of its own,
+            // and it is not a fixed-width one. `size_t` is `unsigned long`
+            // wherever a long is the address width and `unsigned long long`
+            // where it is not, and the two are distinct types however equal
+            // their widths: `typedef uint64_t size_t;` made every declaration
+            // of a library function taking one incompatible with the compiler's
+            // own, and `snprintf` was rejected for it.
             targets.insert(name, target);
         }
         // A name has to stand before any name declared through it, so the
         // order is the dependency order and not the order they were met.
         let mut wanted = Vec::new();
         let mut placed = std::collections::BTreeSet::new();
+        let address_bits = prepared
+            .machine_context()
+            .memory_model()
+            .default_address_bits();
         for name in targets.keys() {
-            place_typedef(name, &targets, &mut placed, &mut wanted);
+            place_typedef(name, &targets, &mut placed, &mut wanted, address_bits);
         }
         if r2il::refusal_evidence::tracing() {
             for entry in &wanted {
@@ -6215,11 +6226,41 @@ fn collect_named_types(ty: &crate::ast::CType, out: &mut Vec<(String, crate::ast
 ///
 /// The graph is acyclic: a name's target comes from the type it was minted
 /// over, which was built before it.
+/// The words a C implementation defines a standard name with.
+///
+/// `size_t` is `unsigned long` wherever a long is as wide as an address and
+/// `unsigned long long` where it is not, and `ptrdiff_t` is the signed one
+/// beside it. Both are distinct types from the fixed-width names however equal
+/// their widths, so a declaration of a library function that spells one as
+/// `uint64_t` is incompatible with the compiler's own and is rejected. The
+/// width the capture carried still has to agree: a 32-bit `size_t` on a 64-bit
+/// address model is radare2 describing a different program, and it keeps its
+/// own spelling.
+fn standard_type_spelling(
+    name: &str,
+    target: &crate::ast::CType,
+    address_bits: u32,
+) -> Option<&'static str> {
+    let long_is_an_address = address_bits == 64;
+    let width = r2types::declaration_type_width_bits(target, address_bits)?;
+    if width != address_bits {
+        return None;
+    }
+    Some(match (name, long_is_an_address) {
+        ("size_t" | "uintptr_t", true) => "unsigned long",
+        ("size_t" | "uintptr_t", false) => "unsigned int",
+        ("ssize_t" | "ptrdiff_t" | "intptr_t", true) => "long",
+        ("ssize_t" | "ptrdiff_t" | "intptr_t", false) => "int",
+        _ => return None,
+    })
+}
+
 fn place_typedef(
     name: &str,
     targets: &std::collections::BTreeMap<String, crate::ast::CType>,
     placed: &mut std::collections::BTreeSet<String>,
     out: &mut Vec<crate::ast::CTypedefDef>,
+    address_bits: u32,
 ) {
     let Some(target) = targets.get(name) else {
         return;
@@ -6230,11 +6271,12 @@ fn place_typedef(
     let mut dependencies = Vec::new();
     collect_named_types(target, &mut dependencies);
     for (dependency, _) in dependencies {
-        place_typedef(&dependency, targets, placed, out);
+        place_typedef(&dependency, targets, placed, out, address_bits);
     }
     out.push(crate::ast::CTypedefDef {
         name: name.to_string(),
         target: target.clone(),
+        spelling: standard_type_spelling(name, target, address_bits).map(str::to_string),
     });
 }
 

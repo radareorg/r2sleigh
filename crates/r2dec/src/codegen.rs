@@ -216,10 +216,17 @@ impl<'c> CodeGenerator<'c> {
     fn emit_typedef_declarations(&mut self, func: &CFunction) {
         for typedef in &func.typedefs {
             self.output.push_str("typedef ");
-            self.output.push_str(&r2types::c_object_declaration(
-                &typedef.target,
-                &typedef.name,
-            ));
+            match &typedef.spelling {
+                Some(spelling) => {
+                    self.output.push_str(spelling);
+                    self.output.push(' ');
+                    self.output.push_str(&typedef.name);
+                }
+                None => self.output.push_str(&r2types::c_object_declaration(
+                    &typedef.target,
+                    &typedef.name,
+                )),
+            }
             self.output.push_str(";\n");
         }
         if !func.typedefs.is_empty() {
@@ -1204,10 +1211,12 @@ mod tests {
                 crate::ast::CTypedefDef {
                     name: "UInt16".to_string(),
                     target: CType::u16(),
+                    spelling: None,
                 },
                 crate::ast::CTypedefDef {
                     name: "BZFILE".to_string(),
                     target: CType::Void,
+                    spelling: None,
                 },
             ],
             aggregates: Vec::new(),

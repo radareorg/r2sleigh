@@ -29033,3 +29033,28 @@ What it needs, in order:
 
 Nothing smaller is worth doing first: making -O1 refuse as -O0 does would trade
 four wrong renderings for four refusals and no coverage.
+
+## A standard type name is defined with the implementation's own words
+
+`shape_variadic` compiled to `error: incompatible redeclaration of library
+function 'snprintf'` in all four optimised configurations. The rendering
+declared the libc it calls, as it must, and spelled the second parameter
+`size_t` -- then defined that name itself as `typedef uint64_t size_t;`,
+because radare2's type database records the typedef's target as a fixed-width
+name. On this target `uint64_t` is `unsigned long long` while the
+implementation's `size_t` is `unsigned long`. The two have the same width and
+are distinct types, so every declaration of a library function taking one
+disagreed with the compiler's own idea of that function.
+
+The fix is in what the rendering says, not in what it knows. A name the C
+implementation owns is defined with the implementation's words: `size_t` and
+`uintptr_t` are `unsigned long` wherever a long is as wide as an address and
+`unsigned int` where it is not, and `ssize_t`, `ptrdiff_t` and `intptr_t` are
+the signed ones beside them. The width the capture carried still has to agree
+before the spelling is used, so a 32-bit `size_t` against a 64-bit address
+model keeps radare2's own answer rather than being quietly widened.
+
+`CTypedefDef` carries that spelling beside the target type, because the type
+model has no way to say `unsigned long`: its integers are widths, which is the
+right model for everything except the handful of names whose definition is the
+implementation's to give.
