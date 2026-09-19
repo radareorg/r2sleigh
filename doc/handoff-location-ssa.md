@@ -29590,3 +29590,31 @@ computes and discards: `parameter_homes`, the set of displacements that hold an
 incoming value. Retaining it as a map from displacement to parameter index, and
 answering `formal_argument_of_value` from a load of such a slot, is the step
 this stopped at.
+
+A second attempt built that -- `incoming_spill_root` returning the register it
+spilled, a `parameter_home_slots` map on `DecompilePrepFacts`, and the matcher
+consulting it where the interface declares nothing -- and it too came back to
+the tree unbuilt. Three things were learned and are worth not rediscovering.
+
+The interface route is closed for these bodies. The evidence read
+`ValueId(20) reads StackPointer-20 against Some([])`: the load *is* recognised
+as a stack read at the home's coordinate, and `stack_slots()` is empty, so
+`SourceStackSlotRole::ParameterHome` never applies. radare2 declares no slots
+for a helper this small, which is exactly the shape that needs the fact.
+
+Never stand an empty `DecompilePrepFacts` where preparation expects to build
+one. Creating a default set when the field was `None`, in order to write the
+home map into it, cost the body every address root it had proven, and the
+symptom was that `object_for_var` stopped resolving the very load that had
+resolved a probe earlier. The assignment must find the facts already there.
+
+And the affine term's value is a *load*, not a projection: `ValueId(20)`
+projects to itself with a definition, against parameters `[(0, ValueId(10)),
+(1, ValueId(1))]`. Following copies, widenings and low-half projections is
+therefore not enough on its own -- the reload has to be recognised as such,
+which is what the home map is for. Where the second attempt stopped is
+unexplained: with the home map wired the home read no longer reached its own
+evidence line, meaning one of the two `?`s between the `Load` match and the
+object's coordinate now declines where it did not before. That is the first
+thing to instrument next time, and the reason this was reset rather than
+committed.
