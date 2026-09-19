@@ -92,7 +92,7 @@ pub use execution::{
 };
 pub use fingerprint::{SSA_SEMANTIC_FINGERPRINT_SCHEMA_VERSION, stable_ssa_semantic_fingerprint};
 pub use function::{
-    CFGRiskSummary, CalleePreservedCarriers, DecompilePrepFacts, DefRef, DefSite,
+    CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
     FunctionPrepareMode, GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo,
     RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
     SSAFunction, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,

@@ -353,6 +353,31 @@ pub struct RegisterIdentityCensus {
     pub split_entry_families: usize,
 }
 
+/// What a decompilation preparation is given besides the blocks.
+///
+/// Rust has no default arguments, and the gap had been filled by a chain of
+/// `for_decompile_with_...` constructors, each adding one of these values and
+/// announcing it in its own name. One structure with a default says the same
+/// thing once, and lets the call site name the fields it actually sets.
+#[derive(Default)]
+pub struct DecompileInputs<'a> {
+    pub arch: Option<&'a ArchSpec>,
+    pub function_interface: Option<SourceFunctionInterface>,
+    pub machine_roles: SourceMachineRoles,
+    /// Where the calling convention places arguments. A variadic call needs
+    /// them: its prototype names only the fixed arguments, so where argument
+    /// `n + 1` would go is a question only the convention answers.
+    pub convention_slots: Option<SourceConventionSlots>,
+    pub call_site_interfaces: Vec<SourceCallSiteInterface>,
+    /// Call sites the source proved are tail calls, by identity. A tail call
+    /// through a relocated slot is a `BranchInd` that only a context knowing
+    /// the identity certifies as a call.
+    pub tail_call_identities: Vec<SourceCallSiteIdentity>,
+    /// Which registers each direct callee's body proves it leaves untouched,
+    /// so construction defines nothing a call did not touch.
+    pub callee_preserved_carriers: CalleePreservedCarriers,
+}
+
 impl SsaArtifact {
     #[cfg(test)]
     fn new(function: SSAFunction, mode: FunctionPrepareMode) -> Self {
@@ -644,95 +669,37 @@ impl SsaArtifact {
         machine_roles: SourceMachineRoles,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
-        Self::for_decompile_with_interfaces_roles_and_convention(
+        Self::for_decompile_with(
             blocks,
-            arch,
-            function_interface,
-            machine_roles,
-            None,
-            call_site_interfaces,
+            DecompileInputs {
+                arch,
+                function_interface,
+                machine_roles,
+                call_site_interfaces,
+                ..Default::default()
+            },
         )
     }
 
-    /// The same, describing where the calling convention places arguments.
-    ///
-    /// The slots are a fact about the convention rather than about this
-    /// function, and a variadic call needs them: its prototype names only the
-    /// fixed arguments, so where argument `n + 1` would go is a question only
-    /// the convention answers.
-    pub fn for_decompile_with_interfaces_roles_and_convention(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-        function_interface: Option<SourceFunctionInterface>,
-        machine_roles: SourceMachineRoles,
-        convention_slots: Option<SourceConventionSlots>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-    ) -> Option<Self> {
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces(
+    /// Build decompiler-prepared SSA from the blocks and whatever the source
+    /// knows about them.
+    pub fn for_decompile_with(blocks: &[R2ILBlock], inputs: DecompileInputs<'_>) -> Option<Self> {
+        let DecompileInputs {
+            arch,
+            function_interface,
+            machine_roles,
+            convention_slots,
+            call_site_interfaces,
+            tail_call_identities,
+            callee_preserved_carriers,
+        } = inputs;
+        let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
             arch,
             function_interface,
             machine_roles,
             convention_slots,
             call_site_interfaces,
-        );
-        Some(Self::new_with_context(
-            SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-                blocks,
-                arch,
-                InterfaceQuestions::new(&machine_context),
-                machine_context.machine_roles().call_preserved_carriers(),
-                machine_context.stack_pointer_carrier(),
-                &CalleePreservedCarriers::new(),
-                None,
-                &UncheckedSsaWorkControl,
-            )
-            .ok()?,
-            FunctionPrepareMode::Decompile,
-            machine_context,
-        ))
-    }
-
-    /// Build decompiler-prepared SSA whose machine context also carries the
-    /// tail calls the source proved, by call-site identity.
-    ///
-    /// This is the shape production builds from a capture: a tail call
-    /// through a relocated slot is a `BranchInd` the source names as a call
-    /// site, and only a context that knows the identity certifies it as one.
-    pub fn for_decompile_with_interfaces_and_tail_calls(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-        tail_call_identities: Vec<SourceCallSiteIdentity>,
-    ) -> Option<Self> {
-        Self::for_decompile_with_callee_preserved_carriers(
-            blocks,
-            arch,
-            function_interface,
-            call_site_interfaces,
-            tail_call_identities,
-            &CalleePreservedCarriers::new(),
-        )
-    }
-
-    /// The same, told which registers each direct callee's body proves it
-    /// leaves untouched, so construction defines nothing a call did not touch.
-    pub fn for_decompile_with_callee_preserved_carriers(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-        tail_call_identities: Vec<SourceCallSiteIdentity>,
-        callee_preserved_carriers: &CalleePreservedCarriers,
-    ) -> Option<Self> {
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
-            blocks,
-            arch,
-            function_interface,
-            SourceMachineRoles::default(),
-            None,
-            call_site_interfaces,
             tail_call_identities,
         );
         Some(Self::new_with_context(
@@ -742,7 +709,7 @@ impl SsaArtifact {
                 InterfaceQuestions::new(&machine_context),
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
-                callee_preserved_carriers,
+                &callee_preserved_carriers,
                 None,
                 &UncheckedSsaWorkControl,
             )
@@ -752,27 +719,9 @@ impl SsaArtifact {
         ))
     }
 
-    /// Build controlled decompiler SSA with explicit source interfaces.
+    /// Build controlled decompiler SSA with explicit source interfaces and
+    /// independently source-owned machine roles.
     pub fn for_decompile_with_interfaces_and_control<C: SsaWorkControl + ?Sized>(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-        control: &C,
-    ) -> Result<Self, SsaPrepareError> {
-        Self::for_decompile_with_interfaces_machine_roles_and_control(
-            blocks,
-            arch,
-            function_interface,
-            SourceMachineRoles::default(),
-            call_site_interfaces,
-            control,
-        )
-    }
-
-    /// Controlled counterpart of
-    /// [`Self::for_decompile_with_interfaces_and_machine_roles`].
-    pub fn for_decompile_with_interfaces_machine_roles_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
         function_interface: Option<SourceFunctionInterface>,
@@ -10043,13 +9992,13 @@ mod tests {
         };
         let convention =
             SourceConventionSlots::new("amd64", [], Some(full_result)).expect("result convention");
-        let prepared = SsaArtifact::for_decompile_with_interfaces_roles_and_convention(
+        let prepared = SsaArtifact::for_decompile_with(
             &blocks,
-            Some(&arch),
-            None,
-            SourceMachineRoles::default(),
-            Some(convention),
-            Vec::new(),
+            DecompileInputs {
+                arch: Some(&arch),
+                convention_slots: Some(convention),
+                ..Default::default()
+            },
         )
         .expect("prepared SSA with convention boundary");
         let call = prepared
@@ -13246,21 +13195,21 @@ mod tests {
         ]);
         let rdi = call_preservation_storage(8, 8);
         let preserved = CalleePreservedCarriers::from([(0x2000u64, BTreeSet::from([rdi]))]);
-        let with = SsaArtifact::for_decompile_with_callee_preserved_carriers(
+        let with = SsaArtifact::for_decompile_with(
             std::slice::from_ref(&block),
-            Some(&arch),
-            None,
-            Vec::new(),
-            Vec::new(),
-            &preserved,
+            DecompileInputs {
+                arch: Some(&arch),
+                callee_preserved_carriers: preserved.clone(),
+                ..Default::default()
+            },
         )
         .expect("artifact with a preserving callee");
-        let without = SsaArtifact::for_decompile_with_interfaces_and_tail_calls(
+        let without = SsaArtifact::for_decompile_with(
             std::slice::from_ref(&block),
-            Some(&arch),
-            None,
-            Vec::new(),
-            Vec::new(),
+            DecompileInputs {
+                arch: Some(&arch),
+                ..Default::default()
+            },
         )
         .expect("artifact without callee facts");
         let call_defines = |artifact: &SsaArtifact, name: &str| {

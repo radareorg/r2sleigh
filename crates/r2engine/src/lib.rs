@@ -4067,7 +4067,7 @@ fn build_engine_analysis_from_parts_with_control<C: r2ssa::SsaWorkControl + ?Siz
     control: &C,
 ) -> Result<EngineAnalysis, r2ssa::SsaPrepareError> {
     let ssa_func = Arc::new(
-        r2ssa::SsaArtifact::for_decompile_with_interfaces_machine_roles_and_control(
+        r2ssa::SsaArtifact::for_decompile_with_interfaces_and_control(
             blocks,
             arch,
             source_snapshot.function_interface().cloned(),

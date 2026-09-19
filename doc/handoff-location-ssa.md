@@ -30060,3 +30060,33 @@ variants was written instead, each adding one value and announcing it in its
 name.
 
 Suppressions of the argument-count lint are at twelve, from twenty-five.
+
+## One constructor with defaults instead of a chain of variants
+
+`SsaArtifact` had eleven `for_decompile*` constructors. Four of them --
+`for_decompile_with_interfaces_roles_and_convention`,
+`for_decompile_with_interfaces_and_tail_calls`,
+`for_decompile_with_callee_preserved_carriers` and
+`for_decompile_with_interfaces_machine_roles_and_control` -- existed only
+because Rust has no default arguments: each added one value to the one below
+it, passed defaults for the rest, and announced the addition in its own name.
+A fifth, `for_decompile_with_interfaces_and_control`, had no callers at all.
+
+`DecompileInputs` carries the seven things a preparation is given besides the
+blocks, and derives `Default`, so `for_decompile_with(blocks, inputs)` replaces
+all four and a call site names only the fields it sets. The dead variant is
+deleted and its name reused by the controlled path, which drops from
+fifty-five characters to forty.
+
+Two were deliberately left. `for_decompile(blocks, arch)` has a hundred and
+three callers and two parameters, and `for_decompile_with_interface` has
+sixty-seven and three; they now delegate to `for_decompile_with`, and turning
+their call sites into struct literals would be churn that makes the common case
+longer to read rather than shorter. Judging each family rather than driving the
+count to zero is the point: `r2source/contracts.rs`'s constructors take their
+own struct's fields, which is not a hidden group either.
+
+Eleven variants are nine. The wider pattern is unchanged and still worth
+sweeping: a hundred and eighty-two functions are named `..._with_...` and
+thirty base names have two or more variants, `new` with eleven and `from_blocks`
+with five.

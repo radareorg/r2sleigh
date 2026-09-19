@@ -436,12 +436,15 @@ mod tests {
             .callee_facts
             .insert(slot, minimal_import_callee_fact(slot, callee));
         SourceOwnedPreparedFixture::new_with_context(
-            r2ssa::SsaArtifact::for_decompile_with_interfaces_and_tail_calls(
+            r2ssa::SsaArtifact::for_decompile_with(
                 blocks,
-                Some(arch),
-                Some(interface),
-                interfaces,
-                identities,
+                r2ssa::DecompileInputs {
+                    arch: Some(arch),
+                    function_interface: Some(interface),
+                    call_site_interfaces: interfaces,
+                    tail_call_identities: identities,
+                    ..Default::default()
+                },
             )
             .expect("prepared SSA should build")
             .with_name(name),
@@ -1921,12 +1924,13 @@ mod tests {
         .and_then(|interface| interface.with_stack_pointer_storage(storage(0x28)))
         .expect("exact source interface with a stack parameter");
         let prepared = SourceOwnedPreparedFixture::new(
-            r2ssa::SsaArtifact::for_decompile_with_interfaces_and_tail_calls(
+            r2ssa::SsaArtifact::for_decompile_with(
                 std::slice::from_ref(&block),
-                Some(&arch),
-                Some(interface),
-                Vec::new(),
-                Vec::new(),
+                r2ssa::DecompileInputs {
+                    arch: Some(&arch),
+                    function_interface: Some(interface),
+                    ..Default::default()
+                },
             )
             .expect("prepared SSA should build")
             .with_name("seventh"),
