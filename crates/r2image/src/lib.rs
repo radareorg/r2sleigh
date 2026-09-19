@@ -84,6 +84,17 @@ impl Segment {
     }
 }
 
+/// One named range the format declares, finer-grained than a segment.
+#[derive(Debug, Clone)]
+pub struct Section {
+    pub name: String,
+    pub vaddr: u64,
+    pub vsize: u64,
+    pub file_offset: u64,
+    pub file_size: u64,
+    pub is_code: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Function,
@@ -128,6 +139,7 @@ pub struct Image {
     arch: ImageArch,
     base_address: u64,
     segments: Vec<Segment>,
+    sections: Vec<Section>,
     symbols: Vec<Symbol>,
     entry_points: Vec<EntryPoint>,
 }
@@ -212,13 +224,27 @@ impl Image {
             })
             .collect();
 
+        let sections: Vec<Section> = file
+            .sections()
+            .map(|section| {
+                let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                Section {
+                    name: section.name().unwrap_or_default().to_owned(),
+                    vaddr: section.address(),
+                    vsize: section.size(),
+                    file_offset,
+                    file_size,
+                    is_code: section.kind() == object::SectionKind::Text,
+                }
+            })
+            .collect();
+
         // Code lives in code sections, not merely in executable segments: Mach-O
         // puts __cstring and __const inside __TEXT, and the header itself starts it.
-        let code_ranges: Vec<(u64, u64)> = file
-            .sections()
-            .filter(|section| section.kind() == object::SectionKind::Text)
-            .map(|section| (section.address(), section.size()))
-            .filter(|(_, size)| *size > 0)
+        let code_ranges: Vec<(u64, u64)> = sections
+            .iter()
+            .filter(|section| section.is_code && section.vsize > 0)
+            .map(|section| (section.vaddr, section.vsize))
             .collect();
         let executable = |vaddr: u64| {
             if code_ranges.is_empty() {
@@ -282,6 +308,7 @@ impl Image {
             arch,
             base_address,
             segments,
+            sections,
             symbols,
             entry_points,
         })
@@ -301,6 +328,10 @@ impl Image {
 
     pub fn segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
     }
 
     pub fn symbols(&self) -> &[Symbol] {
@@ -524,6 +555,7 @@ mod tests {
             },
             base_address: 0,
             segments,
+            sections: Vec::new(),
             symbols: Vec::new(),
             entry_points: Vec::new(),
         }
