@@ -35,9 +35,7 @@ use crate::machine_context::{
 use crate::naming::{ARCH_DERIVED_CACHE_MAX_ENTRIES, ArchCacheTag, cached_register_name_map};
 use crate::op::SSAOp;
 use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names_storage_and_control};
-use crate::rename::{
-    CallBoundaryConfig, CallBoundaryDef, rename_function_with_names_and_call_boundaries_and_control,
-};
+use crate::rename::{CallBoundaryConfig, CallBoundaryDef, rename_function};
 use crate::semantic::{
     CallResultCertificate, CallSiteFacts, CallSiteId, CallsiteCertificate, MemoryAccessCertificate,
     MemoryDefFact, MemorySSAFacts, MemoryUseFact, ObjectId, ObjectModel, PredicateFacts,
@@ -3783,15 +3781,17 @@ impl SSAFunction {
         }
 
         // Rename variables
-        let renamed = rename_function_with_names_and_call_boundaries_and_control(
-            &cfg,
-            &domtree,
-            &phi_placement,
+        let renamed = rename_function(
+            crate::rename::RenameInputs {
+                cfg: &cfg,
+                domtree: &domtree,
+                phi_placement: &phi_placement,
+                reg_names: reg_names_ref,
+                call_boundaries,
+                promoted,
+            },
             &defs,
-            reg_names_ref,
             families.clone(),
-            call_boundaries,
-            promoted,
             control,
         )?;
 

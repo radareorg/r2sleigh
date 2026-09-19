@@ -367,18 +367,34 @@ impl RenamedFunction {
 }
 
 /// Perform SSA renaming while polling its block and operation worklists.
-#[allow(clippy::too_many_arguments)]
-pub fn rename_function_with_names_and_call_boundaries_and_control<C: SsaWorkControl + ?Sized>(
-    cfg: &CFG,
-    domtree: &DomTree,
-    phi_placement: &PhiPlacement,
+/// What the renamer reads about the function it is renaming.
+///
+/// The six travel together from the entry point down into the block walk, and
+/// the entry point's name used to list three of them -- it was
+/// `rename_function_with_names_and_call_boundaries_and_control`, which is what
+/// a name becomes when its parameters have none.
+#[derive(Clone, Copy)]
+pub struct RenameInputs<'a> {
+    pub cfg: &'a CFG,
+    pub domtree: &'a DomTree,
+    pub phi_placement: &'a PhiPlacement,
+    pub reg_names: Option<&'a RegisterNameMap>,
+    pub call_boundaries: Option<&'a CallBoundaryConfig>,
+    pub promoted: &'a PromotedStackSlots,
+}
+
+pub fn rename_function<C: SsaWorkControl + ?Sized>(
+    inputs: RenameInputs<'_>,
     definitions: &DefinitionSitesByIdentity,
-    reg_names: Option<&RegisterNameMap>,
     families: Option<Arc<RegisterFamilyInfo>>,
-    call_boundaries: Option<&CallBoundaryConfig>,
-    promoted: &PromotedStackSlots,
     control: &C,
 ) -> Result<RenamedFunction, SsaExecutionStopReason> {
+    let RenameInputs {
+        cfg,
+        phi_placement,
+        call_boundaries,
+        ..
+    } = inputs;
     control.poll()?;
     let mut ctx = RenameContext::with_families(families);
     let mut result = RenamedFunction::new();
@@ -437,15 +453,10 @@ pub fn rename_function_with_names_and_call_boundaries_and_control<C: SsaWorkCont
     // Rename starting from entry block using dominator tree traversal.
     rename_block(
         cfg.entry,
-        cfg,
-        domtree,
-        phi_placement,
+        inputs,
         &mut ctx,
         &mut result,
-        reg_names,
-        call_boundaries,
         stack_pointer_identity.as_ref(),
-        promoted,
         control,
     )?;
 
@@ -471,20 +482,22 @@ fn sole_identity_on_storage(
 }
 
 /// Rename a block and its dominated descendants.
-#[allow(clippy::too_many_arguments)]
 fn rename_block<C: SsaWorkControl + ?Sized>(
     block_addr: u64,
-    cfg: &CFG,
-    domtree: &DomTree,
-    phi_placement: &PhiPlacement,
+    inputs: RenameInputs<'_>,
     ctx: &mut RenameContext,
     result: &mut RenamedFunction,
-    reg_names: Option<&RegisterNameMap>,
-    call_boundaries: Option<&CallBoundaryConfig>,
     stack_pointer_identity: Option<&RenameIdentity>,
-    promoted: &PromotedStackSlots,
     control: &C,
 ) -> Result<(), SsaExecutionStopReason> {
+    let RenameInputs {
+        cfg,
+        domtree,
+        phi_placement,
+        reg_names,
+        call_boundaries,
+        promoted,
+    } = inputs;
     // An exit frame keeps each block's definitions live until all dominated
     // children have been renamed, matching the recursive traversal's scope.
     let mut stack: Vec<(u64, Option<Vec<RenameIdentity>>)> = vec![(block_addr, None)];

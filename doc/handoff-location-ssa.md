@@ -30033,3 +30033,30 @@ one boolean. `rename.rs` has two that do share a real group --
 naming it would also shorten
 `rename_function_with_names_and_call_boundaries_and_control`, whose name is
 long precisely because those parameters have none.
+
+## A long name is an argument list that was never given one
+
+`rename_function_with_names_and_call_boundaries_and_control` is fifty-eight
+characters, and every clause after the verb names a parameter: the register
+names, the call boundaries, the work control. It had nine parameters and one
+caller, so the name had accreted entirely to distinguish it from variants that
+no longer exist.
+
+Six of the nine are one thing -- the control-flow graph, its dominator tree,
+the phi placement, the register names, the call boundaries and the promoted
+slots -- and `rename_block` beside it took the same six plus five of its own.
+`RenameInputs` names them. The entry point takes four parameters and is called
+`rename_function`; the block walk takes six instead of eleven.
+
+That is the general shape and it is worth stating on its own, because it
+connects the two halves of the quality rule. A function acquires a
+`..._with_X_and_Y_and_Z` name exactly when X, Y and Z are parameters that have
+no name of their own, so naming the group shortens the signature and the
+identifier together. There are a hundred and eighty-two functions in the tree
+named `..._with_...` and thirty base names with two or more variants;
+`SsaArtifact::for_decompile` has nine, `new` has eleven, `from_blocks` has five.
+Each family is the same thing: Rust has no default arguments, so a chain of
+variants was written instead, each adding one value and announcing it in its
+name.
+
+Suppressions of the argument-count lint are at twelve, from twenty-five.
