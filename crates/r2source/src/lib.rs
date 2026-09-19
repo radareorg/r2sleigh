@@ -9,6 +9,7 @@
 //! identity of one capture event.
 
 pub mod display_names;
+pub mod native;
 pub use display_names::DisplayNames;
 
 use std::collections::BTreeSet;
