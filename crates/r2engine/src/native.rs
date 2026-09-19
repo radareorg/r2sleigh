@@ -348,6 +348,7 @@ fn declared_interface(
 fn restate(
     interface: &r2source::SourceFunctionInterface,
     slots: Vec<r2source::SourceStackSlotSpec>,
+    target: &NativeTarget<'_>,
 ) -> Option<r2source::SourceFunctionInterface> {
     let mut restated = r2source::SourceFunctionInterface::new_exact_with_logical_types(
         interface.revision_identity().to_vec(),
@@ -361,9 +362,13 @@ fn restate(
     )
     .ok()?
     .with_role_register_names(interface.role_register_names())
+    // What a call leaves standing is the specification's statement, not
+    // something the recovered interface could know. Without it every function
+    // that calls loses every fact about its own frame, and its dead spills
+    // render as variables assigned from values nothing wrote.
     .with_preserved_call_carriers(
-        interface.stack_pointer_preserved_across_calls(),
-        interface.frame_pointer_preserved_across_calls(),
+        preserves(target, interface.stack_pointer_storage()),
+        preserves(target, interface.frame_pointer_storage()),
     );
     if let Some(storage) = interface.return_address_storage() {
         restated = restated.with_return_address_storage(storage).ok()?;
@@ -388,6 +393,22 @@ fn restate(
         restated = restated.with_prototype_from_source_types();
     }
     Some(restated)
+}
+
+/// Whether a call leaves one carrier as it found it.
+///
+/// A carrier the interface does not name is not disturbed by a call either,
+/// because there is nothing there to disturb.
+fn preserves(target: &NativeTarget<'_>, storage: Option<r2source::CanonicalStorageId>) -> bool {
+    let Some(storage) = storage else {
+        return true;
+    };
+    target
+        .arch
+        .registers
+        .iter()
+        .filter(|register| register.offset == storage.offset && register.size == storage.size)
+        .any(|register| target.compiler.preserves(&register.name))
 }
 
 /// The types one declared prototype needs, interned as it is read.
@@ -599,7 +620,7 @@ impl Native<'_> {
             })
             .collect::<Vec<_>>();
 
-        restate(interface, slots)
+        restate(interface, slots, self.target)
     }
 
     fn prepare_with_literals(
@@ -789,8 +810,15 @@ fn referenced(body: &r2ssa::body::Body) -> BTreeSet<u64> {
 /// State the machine from the convention data and the compiler specification.
 fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
     let (family, bits, endianness) = profile(target.arch)?;
-    let program_counter_name = target.disasm.program_counter();
-    let program_counter = storage(target.arch, program_counter_name)?;
+    // A machine that leaves the return address in a register says so; one that
+    // pushes it names a stack location, and then the carrier the return reads
+    // is the program counter.
+    let return_address_name = target
+        .compiler
+        .return_address
+        .as_deref()
+        .unwrap_or_else(|| target.disasm.program_counter());
+    let return_address = storage(target.arch, return_address_name)?;
     let stack_pointer_name = target
         .compiler
         .stack_pointer
@@ -806,7 +834,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         r2abi::StackAllocation::Higher => SourceStackGrowth::HigherAddresses,
     };
     let redzone = u32::try_from(target.convention.redzone_bytes).unwrap_or(0);
-    let roles = SourceMachineRoles::new(Some(program_counter), Some(stack_pointer))
+    let roles = SourceMachineRoles::new(Some(return_address), Some(stack_pointer))
         .and_then(|roles| {
             roles.with_stack_allocation_contract(
                 SourceStackAllocationContract::with_implicit_active_sp_bytes(growth, redzone),
@@ -817,7 +845,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         // carrier in its own architecture's numbering, and it looks the
         // carriers up by name to do it.
         .with_role_register_names(SourceRoleRegisterNames::new(
-            Some(program_counter_name),
+            Some(return_address_name),
             Some(stack_pointer_name),
             None,
         ));

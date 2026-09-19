@@ -21,24 +21,72 @@ pub struct CompilerSpec {
     /// Which way the stack grows. Ghidra's default is towards lower
     /// addresses, and only a few specifications say otherwise.
     pub stack_growth: StackAllocation,
+    /// The register a call leaves the return address in, where the machine
+    /// uses one. A machine that pushes it names a stack location instead, and
+    /// this is then `None`.
+    pub return_address: Option<String>,
+    /// The registers a call leaves as it found them, as the default prototype
+    /// declares them.
+    pub unaffected: Vec<String>,
 }
 
 impl CompilerSpec {
     pub fn parse(text: &str) -> Self {
-        let Some(element) = element(text, "stackpointer") else {
-            return Self {
-                stack_pointer: None,
-                stack_growth: StackAllocation::Lower,
-            };
-        };
+        let pointer = element(text, "stackpointer");
         Self {
-            stack_pointer: attribute(element, "register").map(str::to_owned),
-            stack_growth: match attribute(element, "growth") {
+            stack_pointer: pointer
+                .and_then(|element| attribute(element, "register"))
+                .map(str::to_owned),
+            stack_growth: match pointer.and_then(|element| attribute(element, "growth")) {
                 Some("positive") => StackAllocation::Higher,
                 _ => StackAllocation::Lower,
             },
+            return_address: return_address(text),
+            unaffected: unaffected(text),
         }
     }
+
+    /// Whether a call leaves this register as it found it.
+    pub fn preserves(&self, register: &str) -> bool {
+        self.unaffected
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(register))
+    }
+}
+
+/// The register a call leaves the return address in.
+///
+/// A machine that pushes it declares a stack location, which names no
+/// register and is why this is an option rather than a name.
+fn return_address(text: &str) -> Option<String> {
+    let start = text.find("<returnaddress>")? + "<returnaddress>".len();
+    let end = text[start..].find("</returnaddress>")? + start;
+    let body = &text[start..end];
+    let register = element(body, "register")?;
+    attribute(register, "name").map(str::to_owned)
+}
+
+/// The registers the default prototype says a call does not disturb.
+fn unaffected(text: &str) -> Vec<String> {
+    let Some(start) = text.find("<unaffected>") else {
+        return Vec::new();
+    };
+    let start = start + "<unaffected>".len();
+    let Some(end) = text[start..].find("</unaffected>").map(|end| end + start) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut rest = &text[start..end];
+    while let Some(index) = rest.find("<register") {
+        let Some(close) = rest[index..].find('>').map(|close| close + index) else {
+            break;
+        };
+        if let Some(name) = attribute(&rest[index..close], "name") {
+            names.push(name.to_owned());
+        }
+        rest = &rest[close..];
+    }
+    names
 }
 
 /// The text of the first `<name ...>` tag, up to its closing angle bracket.
@@ -88,6 +136,43 @@ mod tests {
             CompilerSpec::parse(r#"	<stackpointer register="sp" space="ram"  growth="negative"/>"#);
         assert_eq!(spec.stack_pointer.as_deref(), Some("sp"));
         assert_eq!(spec.stack_growth, StackAllocation::Lower);
+    }
+
+    #[test]
+    fn a_machine_with_a_link_register_names_it() {
+        let spec = CompilerSpec::parse(
+            r#"<compiler_spec>
+  <stackpointer register="sp" space="ram"/>
+  <returnaddress>
+    <register name="x30"/>
+  </returnaddress>
+</compiler_spec>"#,
+        );
+        assert_eq!(spec.return_address.as_deref(), Some("x30"));
+    }
+
+    #[test]
+    fn a_machine_that_pushes_the_return_address_names_no_register() {
+        let spec = CompilerSpec::parse(
+            r#"<returnaddress>
+    <varnode space="stack" offset="0" size="8"/>
+  </returnaddress>"#,
+        );
+        assert_eq!(spec.return_address, None);
+    }
+
+    #[test]
+    fn the_registers_a_call_leaves_alone_are_read() {
+        let spec = CompilerSpec::parse(
+            r#"<unaffected>
+    <register name="x29"/>
+    <register name="x30"/>
+    <register name="sp"/>
+  </unaffected>"#,
+        );
+        assert_eq!(spec.unaffected, ["x29", "x30", "sp"]);
+        assert!(spec.preserves("SP"));
+        assert!(!spec.preserves("x0"));
     }
 
     #[test]
