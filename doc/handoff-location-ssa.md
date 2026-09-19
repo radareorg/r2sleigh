@@ -30188,3 +30188,49 @@ channel gained `scaling-argument`, which names the value a scaled reach is
 indexed by and which formal it is, because that single line is what separated
 "the expression is wrong" from "the expression is right and the formal lookup
 missed".
+
+## What `shape_multiword_return` needs, traced but not built
+
+Four cells fail with `variable 'X1_1' is uninitialized when used here`, or
+`RDX_1` on x86-64. The shape returns `struct wide { uint64_t low, high; }` by
+value, which both conventions return in a register pair -- `x0:x1` and
+`rax:rdx` -- and the engine has no way to say so.
+
+`SourceFunctionReturn` is `Void | Register { storage }`: exactly one storage.
+`body_proven_return` in `r2engine` does not consult the body at all; it returns
+`abi_model().return_registers().first()` whenever live-out resolved, so even
+where the convention names two return registers it reports one. The second is
+then neither Result nor Preserved, so it is Clobbered, and the caller reads a
+register nothing defined.
+
+The decision this falls under is already made and recorded in
+`post-call-state-and-single-owner-rendering`: the body-proven-wins rule applies
+unchanged to a callee's return register, which makes the Result half of the
+post-call decision a reading of an existing rule rather than a new one. So the
+fact wanted is "which of the convention's return registers does this body define
+on every return path", and `FunctionLiveOut::by_return` already gives what each
+returning block hands back, which is exactly the intersection to take.
+
+Two ways to carry it, and they differ in cost by an order of magnitude.
+
+Widening `SourceFunctionReturn` to name a set is the direct reading, and it
+touches a hundred and eighty-nine call sites across eight Rust files plus the C
+capture, because the type crosses the snapshot wire. Carrying it as a callee
+fact instead changes no serialized contract: `CalleeFacts` already transports
+`preserved_carriers`, which is the complement of this question -- the registers
+the body proves it does *not* define -- computed by `preserved_call_carriers`
+and consumed in `rename.rs`. The same channel can carry the registers the body
+proves it *does* define on every return path, and the call boundary can treat
+all of them as Result.
+
+The second is the one to take, on the evidence that the fact is about a body
+rather than about a declaration: radare2 never captured the second register, so
+putting it in the interface would be recording a body-proven fact in a
+source-owned contract, which the project's rules keep apart.
+
+Note also that the other decision in that memory -- a genuinely clobbered
+post-call register read by the program renders as a visible indeterminate local
+-- is still unimplemented, and implementing it would not win these cells. It
+would turn the compile failure into a compiling function that returns the wrong
+answer, so the differential would still fail. These four cells need the Result
+fix, not the Clobbered one.
