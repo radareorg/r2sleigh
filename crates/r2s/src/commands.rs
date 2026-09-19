@@ -293,7 +293,13 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
         .ok_or("the convention data names no default")?;
     let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
 
-    let prototypes = r2abi::Prototypes::embedded();
+    // The format says which platform's own declarations apply: `_Exit` is
+    // declared by the platform, not by the table every target shares.
+    let prototypes = r2abi::Prototypes::embedded_for(match session.image.format() {
+        r2image::Format::Elf => r2abi::Platform::Linux,
+        r2image::Format::MachO => r2abi::Platform::Darwin,
+        _ => r2abi::Platform::Unknown,
+    });
     let target = r2engine::native::NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,

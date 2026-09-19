@@ -14,7 +14,7 @@ pub mod compiler_spec;
 pub mod prototypes;
 
 pub use compiler_spec::CompilerSpec;
-pub use prototypes::{Prototype, Prototypes};
+pub use prototypes::{Platform, Prototype, Prototypes};
 
 use std::collections::BTreeMap;
 

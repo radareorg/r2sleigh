@@ -26,11 +26,39 @@ pub struct Prototypes {
 }
 
 const EMBEDDED: &str = include_str!("../data/types.sdb.txt");
+const EMBEDDED_LINUX: &str = include_str!("../data/types-linux.sdb.txt");
+const EMBEDDED_DARWIN: &str = include_str!("../data/types-darwin.sdb.txt");
+
+/// Which platform's own declarations apply on top of the portable ones.
+///
+/// `_Exit` and `__errno_location` are declared per platform, not in the table
+/// every target shares, so a call to one has no prototype until the platform
+/// says which set to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    Darwin,
+    Unknown,
+}
 
 impl Prototypes {
-    /// The prototypes radare2 ships.
+    /// The prototypes radare2 ships for every target.
     pub fn embedded() -> Self {
-        Self::parse(EMBEDDED)
+        Self::embedded_for(Platform::Unknown)
+    }
+
+    /// Those, with the ones this platform declares itself layered over them.
+    pub fn embedded_for(platform: Platform) -> Self {
+        let mut prototypes = Self::parse(EMBEDDED);
+        let platform = match platform {
+            Platform::Linux => Some(EMBEDDED_LINUX),
+            Platform::Darwin => Some(EMBEDDED_DARWIN),
+            Platform::Unknown => None,
+        };
+        if let Some(text) = platform {
+            prototypes.by_name.extend(Self::parse(text).by_name);
+        }
+        prototypes
     }
 
     pub fn parse(text: &str) -> Self {

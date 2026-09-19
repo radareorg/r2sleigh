@@ -1,0 +1,304 @@
+assert_fail=func
+func.assert_fail.args=4
+func.assert_fail.arg.0=const char *,assertion
+func.assert_fail.arg.1=const char *,file
+func.assert_fail.arg.2=unsigned int,line
+func.assert_fail.arg.3=const char *,function
+func.assert_fail.noreturn=true
+func.assert_fail.ret=void
+
+xalloc_die=func
+func.xalloc_die.args=0
+func.xalloc_die.noreturn=true
+func.xalloc_die.ret=void
+
+_exit=func
+func._exit.args=1
+func._exit.arg.0=int,status
+func._exit.noreturn=true
+func._exit.ret=void
+
+_Exit=func
+func._Exit.args=1
+func._Exit.arg.0=int,status
+func._Exit.noreturn=true
+func._Exit.ret=void
+
+libc_init=func
+func.libc_init.args=3
+func.libc_init.arg.0=int,argc
+func.libc_init.arg.1=char **,argv
+func.libc_init.arg.2=char **,envp
+func.libc_init.noreturn=true
+func.libc_init.ret=void
+
+libc_init_array=func
+func.libc_init_array.args=0
+func.libc_init_array.ret=void
+
+libc_start_main=func
+func.libc_start_main.args=7
+func.libc_start_main.arg.0=func,main
+func.libc_start_main.arg.1=int,argc
+func.libc_start_main.arg.2=char **,ubp_av
+func.libc_start_main.arg.3=func,init
+func.libc_start_main.arg.4=func,fini
+func.libc_start_main.arg.5=func,rtld_fini
+func.libc_start_main.arg.6=void *,stack_end
+func.libc_start_main.noreturn=true
+func.libc_start_main.ret=int
+
+uClibc_main=func
+func.uClibc_main.args=7
+func.uClibc_main.arg.0=func,main
+func.uClibc_main.arg.1=int,argc
+func.uClibc_main.arg.2=char **,argv
+func.uClibc_main.arg.3=func,app_init
+func.uClibc_main.arg.4=func,app_fini
+func.uClibc_main.arg.5=func,rtld_fini
+func.uClibc_main.arg.6=void *,stack_end
+func.uClibc_main.noreturn=true
+func.uClibc_main.ret=int
+
+abort=func
+func.abort.args=0
+func.abort.noreturn=true
+func.abort.ret=void
+
+atexit=func
+func.atexit.args=1
+func.atexit.arg.0=func,function
+func.atexit.ret=int
+
+exit=func
+func.exit.args=1
+func.exit.arg.0=int,status
+func.exit.noreturn=true
+func.exit.ret=void
+
+access=func
+func.access.args=2
+func.access.arg.0=const char *,path
+func.access.arg.1=int,mode
+func.access.ret=int
+
+prctl=func
+func.prctl.args=5
+func.prctl.arg.0=int,option
+func.prctl.arg.1=unsigned long,v2
+func.prctl.arg.2=unsigned long,v3
+func.prctl.arg.3=unsigned long,v4
+func.prctl.arg.4=unsigned long,v5
+func.prctl.ret=int
+
+sigaction=func
+func.sigaction.args=3
+func.sigaction.arg.0=int,signum
+func.sigaction.arg.1=const struct sigaction *,act
+func.sigaction.arg.2=struct sigaction *,oldact
+func.sigaction.ret=int
+
+select=func
+func.select.args=5
+func.select.arg.0=int,nfds
+func.select.arg.1=fd_set *,readfds
+func.select.arg.2=fd_set *,writefds
+func.select.arg.3=fd_set *,exceptfds
+func.select.arg.4=struct timeval *,timeout
+func.select.ret=int
+
+nanosleep=func
+func.nanosleep.args=2
+func.nanosleep.arg.0=const struct timespec *,req
+func.nanosleep.arg.1=struct timespec *,rem
+func.nanosleep.ret=int
+
+getsockname=func
+func.getsockname.args=3
+func.getsockname.arg.0=int,sockfd
+func.getsockname.arg.1=struct sockaddr *,addr
+func.getsockname.arg.2=socklen_t *,addrlen
+func.getsockname.ret=int
+
+getsockopt=func
+func.getsockopt.args=5
+func.getsockopt.arg.0=int,sockfd
+func.getsockopt.arg.1=int,level
+func.getsockopt.arg.2=int,optname
+func.getsockopt.arg.3=void *,optval
+func.getsockopt.arg.4=socklen_t *,optlen
+func.getsockopt.ret=int
+
+setsockopt=func
+func.setsockopt.args=5
+func.setsockopt.arg.0=int,sockfd
+func.setsockopt.arg.1=int,level
+func.setsockopt.arg.2=int,optname
+func.setsockopt.arg.3=void *,optval
+func.setsockopt.arg.4=socklen_t,optlen
+func.setsockopt.ret=int
+
+waitpid=func
+func.waitpid.args=3
+func.waitpid.arg.0=pid_t,pid
+func.waitpid.arg.1=int *,wstatus
+func.waitpid.arg.2=int,options
+func.waitpid.ret=pid_t
+
+wait=func
+func.wait.args=1
+func.wait.arg.0=int *,wstatus
+func.wait.ret=pid_t
+
+waitid=func
+func.waitid.args=4
+func.waitid.arg.0=idtype_t,idtype
+func.waitid.arg.1=id_t,id
+func.waitid.arg.2=siginfo_t *,infop
+func.waitid.arg.3=int,options
+func.waitid.ret=int
+
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.noreturn=true
+func.__stack_chk_fail.ret=void
+
+cxa_throw=func
+func.cxa_throw.args=3
+func.cxa_throw.arg.0=void *,thrown_exception
+func.cxa_throw.arg.1=struct std::type_info *,tinfo
+func.cxa_throw.arg.2=void *,dest
+func.cxa_throw.noreturn=true
+func.cxa_throw.ret=void
+
+off64_t=typedef
+typedef.off64_t=int64_t
+
+errno_location=func
+func.errno_location.args=0
+func.errno_location.ret=int *
+
+ctype_b_loc=func
+func.ctype_b_loc.args=0
+func.ctype_b_loc.ret=const unsigned short **
+
+ctype_toupper_loc=func
+func.ctype_toupper_loc.args=0
+func.ctype_toupper_loc.ret=const int **
+
+ctype_tolower_loc=func
+func.ctype_tolower_loc.args=0
+func.ctype_tolower_loc.ret=const int **
+
+cxa_finalize=func
+func.cxa_finalize.args=1
+func.cxa_finalize.arg.0=void *,dso_handle
+func.cxa_finalize.ret=void
+
+lseek64=func
+func.lseek64.args=3
+func.lseek64.arg.0=int,fd
+func.lseek64.arg.1=off64_t,offset
+func.lseek64.arg.2=int,whence
+func.lseek64.ret=off64_t
+
+open64=func
+func.open64.args=2
+func.open64.arg.0=const char *,path
+func.open64.arg.1=int,oflag
+func.open64.ret=int
+
+fopen64=func
+func.fopen64.args=2
+func.fopen64.arg.0=const char *,filename
+func.fopen64.arg.1=const char *,mode
+func.fopen64.ret=file*
+
+stat64=func
+func.stat64.args=2
+func.stat64.arg.0=const char *,path
+func.stat64.arg.1=void *,buf
+func.stat64.ret=int
+
+lstat64=func
+func.lstat64.args=2
+func.lstat64.arg.0=const char *,path
+func.lstat64.arg.1=void *,buf
+func.lstat64.ret=int
+
+fstat64=func
+func.fstat64.args=2
+func.fstat64.arg.0=int,fildes
+func.fstat64.arg.1=void *,buf
+func.fstat64.ret=int
+
+fseeko64=func
+func.fseeko64.args=3
+func.fseeko64.arg.0=FILE *,stream
+func.fseeko64.arg.1=off64_t,offset
+func.fseeko64.arg.2=int,whence
+func.fseeko64.ret=int
+
+ftello64=func
+func.ftello64.args=1
+func.ftello64.arg.0=FILE *,stream
+func.ftello64.ret=off64_t
+
+pread64=func
+func.pread64.args=4
+func.pread64.arg.0=int,fd
+func.pread64.arg.1=void *,buf
+func.pread64.arg.2=size_t,nbytes
+func.pread64.arg.3=off64_t,offset
+func.pread64.ret=ssize_t
+
+pwrite64=func
+func.pwrite64.args=4
+func.pwrite64.arg.0=int,fd
+func.pwrite64.arg.1=const void *,buf
+func.pwrite64.arg.2=size_t,nbytes
+func.pwrite64.arg.3=off64_t,offset
+func.pwrite64.ret=ssize_t
+
+ftruncate64=func
+func.ftruncate64.args=2
+func.ftruncate64.arg.0=int,fd
+func.ftruncate64.arg.1=off64_t,length
+func.ftruncate64.ret=int
+
+truncate64=func
+func.truncate64.args=2
+func.truncate64.arg.0=const char *,path
+func.truncate64.arg.1=off64_t,length
+func.truncate64.ret=int
+
+mmap64=func
+func.mmap64.args=6
+func.mmap64.arg.0=void *,addr
+func.mmap64.arg.1=size_t,length
+func.mmap64.arg.2=int,prot
+func.mmap64.arg.3=int,flags
+func.mmap64.arg.4=int,fd
+func.mmap64.arg.5=off64_t,offset
+func.mmap64.ret=void *
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
