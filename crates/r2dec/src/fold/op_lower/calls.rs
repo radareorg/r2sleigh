@@ -753,10 +753,59 @@ mod callee_return_tests {
             Some(CType::Void)
         );
     }
+
+    #[test]
+    fn a_call_site_that_reads_no_result_does_not_claim_the_callee_returns_void() {
+        let word = CType::Int {
+            bits: 64,
+            signedness: r2types::Signedness::Unsigned,
+        };
+        let declaration = |ret_type: CType| crate::ast::CExternDecl {
+            name: "callee".to_string(),
+            ret_type,
+            params: Some(vec![word.clone()]),
+            variadic: false,
+            noreturn: false,
+        };
+        let reads_a_result = declaration(word.clone());
+        let reads_none = declaration(CType::Void);
+        assert_eq!(
+            machine_declaration_admitting_both(&reads_a_result, &reads_none),
+            Some(reads_a_result.clone())
+        );
+        assert_eq!(
+            machine_declaration_admitting_both(&reads_none, &reads_a_result),
+            Some(reads_a_result.clone())
+        );
+        let narrower = declaration(CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Unsigned,
+        });
+        assert_eq!(
+            machine_declaration_admitting_both(&reads_a_result, &narrower),
+            None
+        );
+    }
+}
+
+/// The return type two machine-derived declarations of one callee agree on.
+///
+/// A call site whose result nothing reads has no result value to measure, and
+/// the declaration it derives says `void`. That is the absence of evidence
+/// rather than a proof the callee returns nothing, so a site that does read a
+/// result is the only one speaking about the return type, and it wins. Two
+/// sites that both measure a result and disagree still have no declaration
+/// between them.
+fn machine_return_type_admitting_both(first: &CType, second: &CType) -> Option<CType> {
+    match (first, second) {
+        (CType::Void, other) | (other, CType::Void) => Some(other.clone()),
+        _ if first == second => Some(first.clone()),
+        _ => None,
+    }
 }
 
 /// One declaration that admits both call sites, or none when they disagree on
-/// more than how many arguments they pass.
+/// more than how many arguments they pass and whether a result was read.
 ///
 /// A variadic tail is what C offers for a callee whose sites pass different
 /// counts, and it claims less than either fixed arity did. The fixed prefix is
@@ -766,10 +815,20 @@ fn machine_declaration_admitting_both(
     first: &crate::ast::CExternDecl,
     second: &crate::ast::CExternDecl,
 ) -> Option<crate::ast::CExternDecl> {
-    if first.ret_type != second.ret_type || first.noreturn != second.noreturn {
+    if first.noreturn != second.noreturn {
         return None;
     }
+    let ret_type = machine_return_type_admitting_both(&first.ret_type, &second.ret_type)?;
     let (first_params, second_params) = (first.params.as_ref()?, second.params.as_ref()?);
+    if first_params == second_params && first.variadic == second.variadic {
+        return Some(crate::ast::CExternDecl {
+            name: first.name.clone(),
+            ret_type,
+            params: Some(first_params.clone()),
+            variadic: first.variadic,
+            noreturn: first.noreturn,
+        });
+    }
     let shared = first_params
         .iter()
         .zip(second_params)
@@ -780,7 +839,7 @@ fn machine_declaration_admitting_both(
     }
     Some(crate::ast::CExternDecl {
         name: first.name.clone(),
-        ret_type: first.ret_type.clone(),
+        ret_type,
         params: Some(first_params[..shared].to_vec()),
         variadic: true,
         noreturn: first.noreturn,

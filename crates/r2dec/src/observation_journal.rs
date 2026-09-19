@@ -4570,14 +4570,14 @@ impl LegacyObservationJournal {
         let rendered_symbols = Self::expr_symbols(&expr);
         let mut targets = Vec::with_capacity(input.uses.len());
         for use_site in input.uses {
-            // An access spelled by the object it lands in names no stack
-            // base: the address operand is absorbed, exactly as the operands
-            // of a vanished address computation are.
-            let observation = if matches!(
-                self.plan.use_disposition(use_site),
-                Some(MachineUseDisposition::MemoryAddress(_))
-            ) && self.stack_base_absorbed_by(input.value, &rendered_symbols)
-            {
+            // A spelling that names the object rather than the stack pointer
+            // absorbs the base, whether the object is being accessed or its
+            // address computed. What decides it is whether this rendering
+            // spells the base, never what kind of operand it is: the rewriter
+            // turns `esp + 4` into the object's address exactly as it turns
+            // `[esp + 4]` into the object, and the base is read nowhere in
+            // either.
+            let observation = if self.stack_base_absorbed_by(input.value, &rendered_symbols) {
                 LegacyUseObservation::Elided(r2ssa::ledger::ElisionReason::DeadStackBase)
             } else {
                 self.rendered_use_observation(use_site)?
@@ -4605,19 +4605,26 @@ impl LegacyObservationJournal {
         let Some(ValueDisposition::Bound { binding }) = self.plan.disposition(value) else {
             return false;
         };
-        let spelled = self
+        if self
             .names
             .symbol_for_binding(*binding)
-            .is_some_and(|symbol| rendered_symbols.contains(&symbol));
-        let entry_root = self.source.entry_stack_address_root_for_value(value);
-        if spelled || entry_root.is_none() {
+            .is_some_and(|symbol| rendered_symbols.contains(&symbol))
+        {
             r2il::refusal_evidence!(
                 "stack-base-absorbed",
-                "{value:?} bound to {binding:?} is not absorbed: spelled={spelled} entry_root={entry_root:?} stack_root={:?}",
+                "{value:?} bound to {binding:?} is not absorbed: this rendering spells it"
+            );
+            return false;
+        }
+        let entry_root = self.source.entry_stack_address_root_for_value(value);
+        if entry_root.is_none() {
+            r2il::refusal_evidence!(
+                "stack-base-absorbed",
+                "{value:?} bound to {binding:?} is not absorbed: no entry root; stack_root={:?}",
                 self.source.stack_address_root_for_value(value)
             );
         }
-        !spelled && entry_root.is_some()
+        entry_root.is_some()
     }
 
     /// Mark one rendered definition and its source write using the exact

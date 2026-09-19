@@ -434,9 +434,18 @@ impl<'a> FoldingContext<'a> {
         }
 
         // A call takes its arguments and a return its value through the
-        // convention, so neither reader is an SSA use the walk below sees.
+        // convention, so neither reader is an SSA use the walk below sees, and
+        // neither value is an SSA input of the instruction that reads it. Both
+        // directions of the walk need the pairing, so it is recorded both ways
+        // round as it is built.
         let mut implicit_readers: std::collections::BTreeMap<ValueId, BTreeSet<InstId>> =
             std::collections::BTreeMap::new();
+        let mut implicit_operands: std::collections::BTreeMap<InstId, BTreeSet<ValueId>> =
+            std::collections::BTreeMap::new();
+        let mut implicit_read = |value: ValueId, reader: InstId| {
+            implicit_readers.entry(value).or_default().insert(reader);
+            implicit_operands.entry(reader).or_default().insert(value);
+        };
         for certificate in prepared.certificates().callsites.values() {
             for value in certificate.argument_values.iter().copied().chain(
                 certificate
@@ -444,18 +453,12 @@ impl<'a> FoldingContext<'a> {
                     .iter()
                     .map(|argument| argument.value),
             ) {
-                implicit_readers
-                    .entry(value)
-                    .or_default()
-                    .insert(certificate.at);
+                implicit_read(value, certificate.at);
             }
         }
         for boundary in prepared.facts().boundaries.returns.values() {
             for value in boundary.values.iter().map(|fact| fact.value) {
-                implicit_readers
-                    .entry(value)
-                    .or_default()
-                    .insert(boundary.at);
+                implicit_read(value, boundary.at);
             }
         }
 
@@ -491,6 +494,23 @@ impl<'a> FoldingContext<'a> {
             );
             return None;
         }
+        // Whether a value is read nowhere the gap does not stand for. A read
+        // inside the closure is one, and so is a read a certificate already
+        // proved renders nothing: neither is a place the value could still be
+        // spelled. The backward walk and the cells the gap owes ask this same
+        // question, so they ask it here once.
+        let read_only_inside_gap = |input: ValueId, owned: &BTreeSet<InstId>| {
+            graph.use_sites(input).iter().all(|site| {
+                owned.contains(&site.inst)
+                    || elided_uses.contains_key(site)
+                    || elided_readers.contains(&site.inst)
+                    || reader_renders_nothing(names, graph, site.inst)
+            }) && implicit_readers
+                .get(&input)
+                .into_iter()
+                .flatten()
+                .all(|reader| owned.contains(reader))
+        };
         let mut owned: BTreeSet<InstId> = BTreeSet::new();
         owned.insert(seed);
         // A native instruction is gapped whole: its p-code ops are one operation, and an
@@ -533,8 +553,11 @@ impl<'a> FoldingContext<'a> {
                 }
             }
             // Backward: an inline producer read only from inside the gap has
-            // nowhere else to be rendered.
-            for input in instruction.inputs.iter().copied() {
+            // nowhere else to be rendered. An argument reaches its call
+            // through the convention, so it is an operand of the call without
+            // being one of its SSA inputs.
+            let implicit = implicit_operands.get(&inst).into_iter().flatten().copied();
+            for input in instruction.inputs.iter().copied().chain(implicit) {
                 let Some(definition) = graph.def_inst(input) else {
                     continue;
                 };
@@ -544,10 +567,7 @@ impl<'a> FoldingContext<'a> {
                         names.disposition_for_value(input),
                         Some(crate::binding_plan::ValueDisposition::Inline { .. })
                     )
-                    || !graph
-                        .use_sites(input)
-                        .iter()
-                        .all(|site| owned.contains(&site.inst))
+                    || !read_only_inside_gap(input, &owned)
                 {
                     continue;
                 }
@@ -588,12 +608,7 @@ impl<'a> FoldingContext<'a> {
                 // renders nothing, the gap is the only place left that can
                 // account for it.
                 if graph.def_inst(input).is_none()
-                    && graph.use_sites(input).iter().all(|site| {
-                        owned.contains(&site.inst)
-                            || elided_uses.contains_key(site)
-                            || elided_readers.contains(&site.inst)
-                            || reader_renders_nothing(names, graph, site.inst)
-                    })
+                    && read_only_inside_gap(input, &owned)
                     && claimed_values.insert(input)
                 {
                     cells.push(crate::observation_journal::GapCell::Value(input));
