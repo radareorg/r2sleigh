@@ -4669,6 +4669,7 @@ mod tests {
                 source_snapshot: Some(exact_rdi_test_source_snapshot("sym.assumed/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -5473,6 +5474,7 @@ mod tests {
             source_snapshot: Some(exact_empty_test_source_snapshot("sym.zero/analyze/rev1")),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
             reg_type_hints: HashMap::new(),
@@ -6596,6 +6598,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("dbg.main/type/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -6631,6 +6634,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("dbg.main/report/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -6732,6 +6736,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("dbg.init_node/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -6778,6 +6783,7 @@ mod tests {
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
         });
 
         assert!(
@@ -6839,6 +6845,7 @@ mod tests {
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
         });
 
         assert!(
@@ -6898,6 +6905,7 @@ mod tests {
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
         });
 
         assert!(
@@ -6949,6 +6957,7 @@ mod tests {
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
         });
 
         assert!(
@@ -7000,6 +7009,7 @@ mod tests {
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
         });
 
         let quality = response
@@ -7036,6 +7046,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("sym.direct_partial/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -7083,6 +7094,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("dbg.raw_name/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -7126,6 +7138,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("sym.caller/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -7167,6 +7180,7 @@ mod tests {
                 source_snapshot: Some(test_source_snapshot("sym.string_const/rev1")),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
                 ptr_bits: 64,
                 semantic_metadata_enabled: false,
                 reg_type_hints: HashMap::new(),
@@ -7202,6 +7216,7 @@ mod tests {
                 execution: EngineExecutionControl::default(),
                 trusted_ssa: None,
                 callee_facts: Vec::new(),
+                declared_signatures: Vec::new(),
             },
         );
 
