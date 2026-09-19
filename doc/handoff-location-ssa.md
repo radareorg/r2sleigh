@@ -30146,3 +30146,15 @@ measurement was.
 The element type is still `uint8_t[32]` read through a cast rather than
 `uint64_t[4]`. The stride is known, so the element width is available to say so,
 and that is the next refinement rather than a defect.
+
+The fix has an r2r case of its own. `tests/gold/pointer_array_reach.c` is the
+shape reduced to what matters -- a frame array of pointers whose only indexed
+reads happen inside two callees, one bounded by a loop and one by a literal --
+and `dec_pointer_array_sized_by_callee_stride` pins that the array is declared
+as an array, indexed at each element, and handed to both callees whole. Built
+with DWARF it recovers fully typed, as `uint64_t* rows[4]`, where the shapes
+corpus binary has no names and gets `uint8_t[32]`.
+
+Two of the four `shape_pointer_to_pointer` cells now pass, both at `-O0`. The
+`-O1` and `-O2` cells still fail with the same class of message against a
+different slot, `stack_m80`, which is the next thread here.

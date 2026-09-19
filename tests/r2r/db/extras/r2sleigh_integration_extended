@@ -936,3 +936,18 @@ s `afl~bitwise_check$[0]` >/dev/null
 pd:s | jq -Rs '(contains("x & 240")) and (contains("r2sleigh refused")|not) and (test("\\*\\(")|not) and (test("([A-Za-z_][A-Za-z0-9_]*) = \\1;")|not)'
 EOF_CMDS
 RUN
+
+NAME=dec_pointer_array_sized_by_callee_stride
+FILE=bins/r2sleigh_pointer_array_reach_O0
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+a:sla > /dev/null
+aaa
+s `afl~pointer_array_reach$[0]` >/dev/null
+s `afl~pointer_array_reach$[0]` >/dev/null
+pd:s | jq -Rs 'contains("rows[4]") and contains("[1] = ") and contains("[2] = ") and contains("[3] = ") and contains("table_load(rows,") and contains("table_store(rows,")'
+EOF_CMDS
+RUN

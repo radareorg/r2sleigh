@@ -30,10 +30,12 @@ LOCAL_R2_LD_LIBRARY_PATH := $(shell find "$(LOCAL_R2_ABS)/libr" -mindepth 1 -max
 E2E_DIR := ../e2e
 MANUAL_SRC := ../gold/manual_limits.c
 TABLE_SRC := ../gold/code_pointer_table.c
+REACH_SRC := ../gold/pointer_array_reach.c
 MANUAL_BINS := \
 	bins/r2sleigh_manual_limits_O0 \
 	bins/r2sleigh_manual_limits_O2 \
-	bins/r2sleigh_code_pointer_table_O0
+	bins/r2sleigh_code_pointer_table_O0 \
+	bins/r2sleigh_pointer_array_reach_O0
 E2E_BINS := \
 	$(E2E_DIR)/vuln_test \
 	$(E2E_DIR)/stress_test \
@@ -98,6 +100,12 @@ bins/r2sleigh_manual_limits_O2: $(MANUAL_SRC)
 # Position independent on purpose: the table's entries are then filled by a
 # relocation rather than stated in the file, which is the case that broke.
 bins/r2sleigh_code_pointer_table_O0: $(TABLE_SRC)
+	@mkdir -p bins
+	gcc -O0 -g -fno-inline -fno-omit-frame-pointer -fno-stack-protector -o $@ $<
+
+# The array's only indexed reads are inside the callees, so its extent comes
+# from their stride multiplied by this body's loop bound.
+bins/r2sleigh_pointer_array_reach_O0: $(REACH_SRC)
 	@mkdir -p bins
 	gcc -O0 -g -fno-inline -fno-omit-frame-pointer -fno-stack-protector -o $@ $<
 
