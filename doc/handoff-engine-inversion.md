@@ -80,7 +80,27 @@ as the `cc` data because the word size is refined by the first register argloc.
 **Callees are walked one level deep.** Deeper is what an interprocedural
 fixpoint is for. A callee that fails to walk leaves its call unproven.
 
-**A saved callee register renders as a read of nothing, under `0 refused`.**
+**A saved callee register renders as a read of nothing, under `0 refused` --
+closed on x86-64, open on aarch64.** What a call leaves standing is stated on
+the machine roles now, read from the compiler specification's `<unaffected>`
+list, and it has to be the roles rather than the interface because the roles
+are read in the first capture pass, before an interface exists to hold it.
+Without it every function that calls lost the facts about its own frame. `main`
+in an ELF hello world went from forty-six rendered lines to thirty-four, against
+the plugin's thirty-five, with no uncertified read left.
+
+aarch64 still carries it, and the reason is exact: the certificate compares the
+saved value's carrier against the declared return address, and no `.cspec` in
+Ghidra names a return-address register for ARM or AArch64. The declaration is
+written and waiting in the `sleigh-config` fork; until it lands the carrier
+falls back to the program counter and the comparison fails.
+
+A second class, unrelated: the cold partitions of C++ library functions
+(`..._create_hard_link...part.37` and its neighbours) read `RAX_1` and `RAX_2`
+under `0 refused`. Those are post-call values rather than prologue saves, so it
+is a different defect wearing the same shirt.
+
+The original wording, kept because it names the shape:
 The prologue's `stp x29, x30, [sp, N]` on aarch64, and `push rbp` on x86-64,
 render as `stack_m8 = X30_0` and `stack_m8 = RBP_0`. The entry value is
 declared as a local, never assigned, and then read -- while the proof line says
