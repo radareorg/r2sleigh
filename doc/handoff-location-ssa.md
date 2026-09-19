@@ -29356,3 +29356,50 @@ uint64_t RAX_3 = (uint64_t)sym__op_add;
 with `uint64_t sym__op_add();` among its declarations, so the verifier pulls in
 the three operations' own renderings and the call through the table reaches
 them rather than a blob.
+
+## The target's body is what says the entry's prototype
+
+Naming the function made the rendering declare it, and an unprototyped
+declaration is not C the corpus accepts: `-Werror,-Wstrict-prototypes` rejected
+`uint64_t sym__op_add();`, which turned two cells that compiled into two that
+did not. The declaration has to agree with the definition the verifier appends,
+and that definition is the decompiler's own rendering of the target, so the
+only prototype that can agree is the one the target's body proves --
+the same authority a call site gets through `SourceOwnedCalleeSignature`.
+
+Three pieces close that.
+
+The capture collects a code pointer table's targets as callees, under a
+transfer kind of their own. `R_ANAL_CALL_TRANSFER_TABLE_ENTRY` says the record
+stands for a body to capture and not for a site, so
+`call_site_interfaces_snapshot_collect` skips it: nothing transfers to the
+target from here and claiming a call site at a data address would be a
+falsehood on the wire.
+
+The ingress walks the closure from the root's advisory calls, which a table
+target is not reached by, so the bodies arrived in the buffer and no facts were
+derived from them -- `callee_facts size 1` with four callees decoded. Its
+`targets_of` now unions the advisory call targets with the image's code pointer
+table targets, and the count follows to four.
+
+`apply_source_owned_callee_signatures` attaches each target's body-proven
+signature to `callee_facts` keyed by its address. A call site has to show that
+its certified callee interface equals the callee's own before the signature is
+used; a table entry needs no such agreement, because the entry names the
+function outright rather than describing a contract to call it through.
+
+The renderer then declares `uint64_t sym__op_add(uint64_t, uint64_t);` and
+spells `(uint64_t)sym__op_add`, and where no signature was recovered the rule
+declines and the slot is read as before.
+
+An r2r case covers the whole chain: `tests/gold/code_pointer_table.c` builds a
+position-independent binary whose local table is filled by three relocations,
+and the case asserts the rendering declares and names the function rather than
+reading the slot.
+
+What this does not yet reach is a load wider than one pointer. At -O0 on arm64
+the first two entries are moved as one 16-byte vector, which renders as
+`*(__uint128_t*)0x100004000` and is still a read of the image: the rule asks
+for a load of pointer width, and a load covering two entries is not one. The
+honest rendering splits such a load into the entries it covers, which is the
+same shape as the byte-buffer work.

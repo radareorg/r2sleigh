@@ -2357,6 +2357,21 @@ impl FunctionFacts {
                 );
             }
         }
+        // A code pointer table names its target outright, so no call site has
+        // to agree about an interface before the target's own body says what
+        // its prototype is.
+        for (_, target) in source.machine_context().code_pointer_entries() {
+            let Some(signature) = signatures.get(&target) else {
+                continue;
+            };
+            let name = self.display_names.functions().get(&target).cloned();
+            let fact = self
+                .types
+                .callee_facts
+                .entry(target)
+                .or_insert_with(|| CalleeFact::named(target, name, CalleeLinkage::Internal));
+            fact.signature = Some(signature.signature.clone());
+        }
     }
 
     pub fn with_call_results(mut self, call_results: FunctionCallResultFacts) -> Self {

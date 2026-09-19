@@ -1211,6 +1211,22 @@ static RList *fcn_context_collect_callees(RAnal *anal, const RAnalFunctionImageS
 		r_list_free (callees);
 		return NULL;
 	}
+	// A function this one only reaches through a table is still a function it
+	// reaches, and its body is what says what the entry's prototype is.
+	size_t table;
+	for (table = 0; table < image->num_code_pointer_tables; table++) {
+		const RAnalSnapshotCodePointerTable *entries = &image->code_pointer_tables[table];
+		size_t entry;
+		for (entry = 0; entry < entries->num_targets; entry++) {
+			const ut64 at = entries->addr + (ut64)entry * entries->entry_size;
+			if (!fcn_context_append_callee (anal, callees, at, entries->targets[entry],
+					R_ANAL_CALL_TRANSFER_TABLE_ENTRY)) {
+				RVecAnalRef_free (refs);
+				r_list_free (callees);
+				return NULL;
+			}
+		}
+	}
 	RVecAnalRef_free (refs);
 	return callees;
 }
@@ -5986,7 +6002,18 @@ static bool call_site_interface_snapshot_collect_one(
 static bool call_site_interfaces_snapshot_collect(
 	RAnal *anal, const RAnalFcnContext *ctx, RAnalFunctionSnapshot *snapshot,
 	const RAnalFunctionSnapshotLimits *limits) {
-	size_t count = (size_t)r_list_length (ctx->callees);
+	// A table entry names a body, not a site, so it has no call-site
+	// interface and is not counted as one.
+	size_t count = 0;
+	{
+		RListIter *count_iter;
+		RAnalFcnCallee *count_callee;
+		r_list_foreach (ctx->callees, count_iter, count_callee) {
+			if (count_callee && count_callee->transfer != R_ANAL_CALL_TRANSFER_TABLE_ENTRY) {
+				count++;
+			}
+		}
+	}
 	if (!count) {
 		return true;
 	}
@@ -5997,6 +6024,9 @@ static bool call_site_interfaces_snapshot_collect(
 	RListIter *preflight_iter;
 	RAnalFcnCallee *preflight_callee;
 	r_list_foreach (ctx->callees, preflight_iter, preflight_callee) {
+		if (preflight_callee && preflight_callee->transfer == R_ANAL_CALL_TRANSFER_TABLE_ENTRY) {
+			continue;
+		}
 		const int listed = preflight_callee && preflight_callee->signature
 			&& preflight_callee->signature->params
 			? r_list_length (preflight_callee->signature->params): 0;
@@ -6020,6 +6050,9 @@ static bool call_site_interfaces_snapshot_collect(
 	RAnalFcnCallee *callee;
 	size_t index = 0;
 	r_list_foreach (ctx->callees, iter, callee) {
+		if (callee && callee->transfer == R_ANAL_CALL_TRANSFER_TABLE_ENTRY) {
+			continue;
+		}
 		if (!callee || index >= count
 			|| !call_site_interface_snapshot_collect_one (
 				anal, callee, snapshot->base_types, &snapshot->call_site_interfaces[index], limits)) {

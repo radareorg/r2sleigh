@@ -29,9 +29,11 @@ LOCAL_R2_ANAL_SO := $(LOCAL_R2_ABS)/libr/anal/libr_anal.$(SHARED_EXT)
 LOCAL_R2_LD_LIBRARY_PATH := $(shell find "$(LOCAL_R2_ABS)/libr" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | paste -sd: -)
 E2E_DIR := ../e2e
 MANUAL_SRC := ../gold/manual_limits.c
+TABLE_SRC := ../gold/code_pointer_table.c
 MANUAL_BINS := \
 	bins/r2sleigh_manual_limits_O0 \
-	bins/r2sleigh_manual_limits_O2
+	bins/r2sleigh_manual_limits_O2 \
+	bins/r2sleigh_code_pointer_table_O0
 E2E_BINS := \
 	$(E2E_DIR)/vuln_test \
 	$(E2E_DIR)/stress_test \
@@ -92,6 +94,12 @@ bins/r2sleigh_manual_limits_O0: $(MANUAL_SRC)
 bins/r2sleigh_manual_limits_O2: $(MANUAL_SRC)
 	@mkdir -p bins
 	gcc -O2 -g -fno-inline -fno-omit-frame-pointer -fno-stack-protector -no-pie -o $@ $<
+
+# Position independent on purpose: the table's entries are then filled by a
+# relocation rather than stated in the file, which is the case that broke.
+bins/r2sleigh_code_pointer_table_O0: $(TABLE_SRC)
+	@mkdir -p bins
+	gcc -O0 -g -fno-inline -fno-omit-frame-pointer -fno-stack-protector -o $@ $<
 
 ifeq ($(UNAME_S),Darwin)
 $(E2E_DIR)/vuln_test_x86: $(E2E_DIR)/vuln_test.c

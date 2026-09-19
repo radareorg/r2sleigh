@@ -1643,6 +1643,13 @@ impl SourceMachineContext {
         self.code_pointer_entries.get(&address).copied()
     }
 
+    /// Every captured code pointer slot and the function it names.
+    pub fn code_pointer_entries(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.code_pointer_entries
+            .iter()
+            .map(|(address, target)| (*address, *target))
+    }
+
     /// How far the callee at this address is proven to touch through each of
     /// its pointer arguments.
     pub fn callee_argument_reach(&self, address: u64) -> Option<&BTreeMap<usize, u64>> {

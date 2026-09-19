@@ -95,6 +95,9 @@ typedef enum {
 	R_ANAL_CALL_TRANSFER_CALL = 0,
 	R_ANAL_CALL_TRANSFER_TAIL_JUMP = 1,
 	R_ANAL_CALL_TRANSFER_TAIL_SLOT = 2,
+	/* The function an entry of a code pointer table names. Nothing transfers
+	 * to it from here, so it stands for a body to capture and never a site. */
+	R_ANAL_CALL_TRANSFER_TABLE_ENTRY = 3,
 } RAnalCallTransfer;
 
 typedef enum {

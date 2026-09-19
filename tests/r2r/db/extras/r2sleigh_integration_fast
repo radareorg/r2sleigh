@@ -345,6 +345,20 @@ pd:s | jq -Rs 'contains(" = x * 3.0;") and contains("- 7.0;")'
 EOF
 RUN
 
+NAME=pd:s names the function a code pointer table entry holds
+FILE=bins/r2sleigh_code_pointer_table_O0
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF
+true
+EOF
+CMDS=<<EOF
+a:sla > /dev/null
+aaa
+s dbg.table_dispatch > /dev/null
+pd:s | jq -Rs 'contains("uint64_t dbg_table_op_mul(uint64_t, uint64_t);") and contains("(uint64_t)dbg_table_op_mul") and (contains("*(uint64_t*)0x100004010") | not)'
+EOF
+RUN
+
 NAME=pd:s renders an x86-64 floating polynomial from its constant pool
 FILE=bins/stress_test_opt_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

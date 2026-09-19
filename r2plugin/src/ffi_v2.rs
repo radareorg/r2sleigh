@@ -1229,6 +1229,15 @@ unsafe fn capture_trusted_ssa_from_buffer(
             .advisory_calls()
             .iter()
             .map(|call| call.target_address())
+            // A function reached only through a code pointer table is called
+            // by nothing here, and its body still says what its prototype is.
+            .chain(
+                snapshot
+                    .image()
+                    .code_pointer_tables()
+                    .iter()
+                    .flat_map(|table| table.targets().iter().copied()),
+            )
             .filter(|target| *target != own && bodies.contains_key(target))
             .collect::<std::collections::BTreeSet<u64>>()
     };
