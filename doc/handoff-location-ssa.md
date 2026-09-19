@@ -28985,3 +28985,51 @@ that follows it, that phi is a dead merge, and the caller declared
 elision reason is the fact, not the instruction kind, so the set now counts the
 merge reason too. `UnobservedValue` stays out: a dead load chain is elided under
 it and its address binding is decided elsewhere.
+
+## A two-register return is the whole of `shape_multiword_return`
+
+All six cells of `shape_multiword_return` fail for one reason, and it is the
+only defect in that function. `wide_make` returns `struct wide { uint64_t low,
+high; }`, which the SysV and AAPCS conventions both return in two registers:
+`rax:rdx` and `x0:x1`. The corpus binaries carry no debug information and
+radare2 recovers no return type for `wide_make`, so the interface says one
+register and the caller's reads of the second half have nothing behind them.
+
+At -O1 and above the rendering declares the second half and never assigns it:
+
+```c
+uint64_t RDX_1;
+uint64_t RAX_1 = sym__wide_make(RDI_0, RSI_0);
+uint64_t RAX_2 = sym__wide_make(RDX_1, RAX_1);
+return (RAX_1 ^ RDX_2) + (RAX_2 ^ RDX_1);
+```
+
+At -O0 the same fact reaches placement instead, which refuses the function with
+`read_before_assignment`. The refusal is the right answer to the wrong
+interface.
+
+The evidence for the pair is available and conclusive. The callee writes both
+result-class registers on every return path, and the caller reads the second
+after the call. On both conventions there is no other legal reason for a callee
+to leave a value in the second result register that a caller reads, so the join
+of those two facts is the convention's own two-register aggregate return rather
+than a guess. `body_proven_return` already asks the first question for a single
+register; what is missing is the pair.
+
+What it needs, in order:
+
+* `SourceCallResult` and `SourceFunctionReturn` (`crates/r2source/src/contracts.rs:2439`)
+  carry only `Void` or one `Register`. A pair needs its own case; `boundary.results`
+  is already a list, but it lists the caller-side values of one result, including
+  lanes, not two results.
+* Recovery has to prove the pair: both result-class registers written on every
+  return path in the callee, and the second read by a caller after the call.
+* The caller's call boundary has to certify both halves, so the second
+  `CallDefine` is a result rather than a clobbered register.
+* The rendering needs a spelling. `__uint128_t` is exact for both conventions --
+  low in the first register, high in the second -- and the prelude already
+  defines the helpers for wide carriers, so the caller reads `(uint64_t)value`
+  and `(uint64_t)(value >> 64)` with no invented aggregate type.
+
+Nothing smaller is worth doing first: making -O1 refuse as -O0 does would trade
+four wrong renderings for four refusals and no coverage.
