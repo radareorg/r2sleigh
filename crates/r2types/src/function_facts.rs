@@ -1765,6 +1765,38 @@ impl SourceOwnedCalleeSignature {
         })
     }
 
+    /// A signature the program's own declarations state, for a callee whose
+    /// body the program does not carry.
+    ///
+    /// An import is exactly that: the name reaches the program and the body
+    /// does not, so there is no SSA to derive anything from and the
+    /// declaration is the only statement of what the call takes. The interface
+    /// is the one the call site will carry, and the same match is checked, so
+    /// a declaration that contradicts the machine is refused here rather than
+    /// travelling as authority.
+    pub fn declared(
+        address: u64,
+        interface: r2ssa::SourceFunctionInterface,
+        signature: crate::FunctionType,
+        address_bits: u32,
+    ) -> Option<Self> {
+        if !function_type_matches_source_interface(&signature, &interface, address_bits) {
+            r2il::refusal_evidence!(
+                "callee-signature",
+                "{address:#x}: the declared signature {signature:?} does not match the interface \
+                 ({} parameters, {:?})",
+                interface.parameters().len(),
+                interface.return_kind()
+            );
+            return None;
+        }
+        Some(Self {
+            address,
+            interface,
+            signature,
+        })
+    }
+
     pub(crate) fn address(&self) -> u64 {
         self.address
     }

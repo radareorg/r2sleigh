@@ -1514,6 +1514,8 @@ pub struct EngineAnalyzeRequest {
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
     /// Bodies of the functions the root calls, captured in the same transaction.
     callee_facts: Vec<CalleeFacts>,
+    /// Signatures the program declares for callees it carries no body for.
+    declared_signatures: Vec<r2types::SourceOwnedCalleeSignature>,
     /// Each callee's own typed source context, retained until `r2types` derives
     /// the source-owned signature that callers may consume.
     pub ptr_bits: u32,
@@ -2261,6 +2263,7 @@ impl EngineAnalyzeRequest {
             source_snapshot: parts.source_snapshot,
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
             ptr_bits: parts.ptr_bits,
             semantic_metadata_enabled: parts.semantic_metadata_enabled,
             reg_type_hints: parts.reg_type_hints,
@@ -2303,6 +2306,16 @@ impl EngineAnalyzeRequest {
     ///
     /// Without them the solver has no callee to look at and must assume every
     /// direct call does anything to anything it was handed.
+    /// Attach the signatures the program declares for callees it carries no
+    /// body for, which is what an import is.
+    pub fn with_declared_signatures(
+        mut self,
+        signatures: impl IntoIterator<Item = r2types::SourceOwnedCalleeSignature>,
+    ) -> Self {
+        self.declared_signatures = signatures.into_iter().collect();
+        self
+    }
+
     pub fn with_callee_facts(mut self, callees: impl IntoIterator<Item = CalleeFacts>) -> Self {
         self.callee_facts.clear();
         let mut seen = std::collections::BTreeSet::new();
@@ -2438,6 +2451,7 @@ pub struct EngineFunctionDecompileRequestInput {
     execution: EngineExecutionControl,
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
     callee_facts: Vec<CalleeFacts>,
+    declared_signatures: Vec<r2types::SourceOwnedCalleeSignature>,
 }
 
 impl EngineFunctionDecompileRequestInput {
@@ -2463,6 +2477,7 @@ impl EngineFunctionDecompileRequestInput {
             execution: EngineExecutionControl::default(),
             trusted_ssa: None,
             callee_facts: Vec::new(),
+            declared_signatures: Vec::new(),
         }
     }
 
@@ -2484,6 +2499,16 @@ impl EngineFunctionDecompileRequestInput {
     /// Attach the bodies of the functions the root calls, captured with it.
     pub fn with_callee_facts(mut self, callees: impl IntoIterator<Item = CalleeFacts>) -> Self {
         self.callee_facts = callees.into_iter().collect();
+        self
+    }
+
+    /// Attach the signatures the program declares for callees it carries no
+    /// body for, which is what an import is.
+    pub fn with_declared_signatures(
+        mut self,
+        signatures: impl IntoIterator<Item = r2types::SourceOwnedCalleeSignature>,
+    ) -> Self {
+        self.declared_signatures = signatures.into_iter().collect();
         self
     }
 
@@ -2511,6 +2536,7 @@ impl EngineFunctionDecompileRequest {
     pub(crate) fn full_semantics_for_function(input: EngineFunctionDecompileRequestInput) -> Self {
         let trusted_ssa = input.trusted_ssa;
         let callee_facts = input.callee_facts;
+        let declared_signatures = input.declared_signatures;
         Self {
             input_quality: Some(input.input_quality),
             analysis: EngineAnalyzeRequest::full_semantics_for_function(
@@ -2524,7 +2550,8 @@ impl EngineFunctionDecompileRequest {
             )
             .with_execution_control(input.execution)
             .with_optional_trusted_ssa(trusted_ssa)
-            .with_callee_facts(callee_facts),
+            .with_callee_facts(callee_facts)
+            .with_declared_signatures(declared_signatures),
         }
     }
 }
@@ -4123,6 +4150,9 @@ fn build_source_owned_callee_signatures(
         .callee_facts
         .iter()
         .filter_map(|callee| callee.signature.clone())
+        // A callee whose body the program does not carry has no facts to
+        // derive, and its declaration is the only statement of what it takes.
+        .chain(request.declared_signatures.iter().cloned())
         .collect()
 }
 

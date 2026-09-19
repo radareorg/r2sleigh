@@ -160,14 +160,23 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     };
     let response = decompile(&target, &Importing, BASE).expect("decompile");
 
-    // strlen takes one argument, and the convention says it arrives in rdi.
+    // strlen takes one argument, the convention says it arrives in rdi, and
+    // the declaration says what it is.
     assert!(
-        response.output.contains("strlen(uint64_t)"),
+        response.output.contains("strlen(const int8_t*)"),
         "{}",
         response.output
     );
     assert!(
-        response.output.contains("strlen(RDI_0)") || response.output.contains("strlen("),
+        response.output.contains("strlen((const int8_t*)RDI_0)"),
+        "{}",
+        response.output
+    );
+    // The same marker the plugin's route prints when radare2 supplies one.
+    assert!(
+        response
+            .output
+            .contains("1 callee prototype supplied by radare2"),
         "{}",
         response.output
     );

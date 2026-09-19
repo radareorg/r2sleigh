@@ -114,7 +114,9 @@ pub fn decompile(
     // failing the root.
     let mut callees = Callees::default();
     // An import has no body here to read an interface off, so its declared
-    // prototype is placed in the convention's own slots and stands in for one.
+    // prototype is placed in the convention's own slots and stands in for one,
+    // and the same declaration states the C signature the call renders with.
+    let mut declared = Vec::new();
     for address in &root.body.calls {
         let Some(name) = native.program.name_at(*address) else {
             continue;
@@ -122,9 +124,20 @@ pub fn decompile(
         let Some(prototype) = target.prototypes.get(&name) else {
             continue;
         };
-        if let Some(interface) = declared_interface(prototype, &native.machine, ptr_bits) {
-            callees.interfaces.insert(*address, interface);
+        let Some(interface) = declared_interface(prototype, &native.machine, ptr_bits) else {
+            continue;
+        };
+        if let Some(signature) = function_type(prototype, ptr_bits)
+            && let Some(declaration) = r2types::SourceOwnedCalleeSignature::declared(
+                *address,
+                interface.clone(),
+                signature,
+                ptr_bits,
+            )
+        {
+            declared.push(declaration);
         }
+        callees.interfaces.insert(*address, interface);
     }
     let mut facts = Vec::new();
     // A stub is not a body: walking one recovers an interface with no
@@ -168,7 +181,8 @@ pub fn decompile(
     )
     .with_input_quality(EngineFunctionInputQuality::complete(block_count))
     .with_trusted_ssa(artifact)
-    .with_callee_facts(facts);
+    .with_callee_facts(facts)
+    .with_declared_signatures(declared);
 
     Ok(EngineSession::new().decompile_function_from_input(input))
 }
