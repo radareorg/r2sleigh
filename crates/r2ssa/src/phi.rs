@@ -336,22 +336,39 @@ pub fn add_call_boundary_def_sites(
                 .collect::<BTreeSet<_>>()
         })
         .collect::<Vec<_>>();
+    // The same question for the carrier each callee's own interface names as
+    // its result, asked before a def site is added so the answer cannot depend
+    // on the order the calls are walked.
+    let results = call_boundaries
+        .result_by_target
+        .iter()
+        .map(|(target, reg)| {
+            let identities = call_boundary_identities(defs, reg, reg_names, families)
+                .into_iter()
+                .filter(|identity| defs.contains_key(identity))
+                .collect::<BTreeSet<_>>();
+            (*target, identities)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     for addr in cfg.block_addrs() {
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
         for op in &block.ops {
-            // Only a direct call names a callee whose body may have been read;
-            // anything else defines the whole list.
-            let preserved = match op {
-                r2il::R2ILOp::Call { target } if target.is_ram() => {
-                    call_boundaries.preserved_by_target.get(&target.offset)
-                }
-                r2il::R2ILOp::CallInd { .. } => None,
-                _ => continue,
-            };
-            for identity in resolved.iter().flatten() {
-                if preserved.is_some_and(|preserved| preserved.contains(&identity.storage)) {
+            if !matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. }) {
+                continue;
+            }
+            let callee = call_boundaries.callee_boundary(op);
+            let result = callee
+                .target
+                .and_then(|target| results.get(&target))
+                .into_iter()
+                .flatten();
+            for identity in resolved.iter().flatten().chain(result) {
+                if callee
+                    .preserved
+                    .is_some_and(|preserved| preserved.contains(&identity.storage))
+                {
                     continue;
                 }
                 defs.entry(identity.clone()).or_default().insert(block.addr);

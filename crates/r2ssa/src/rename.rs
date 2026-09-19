@@ -96,10 +96,43 @@ pub struct CallBoundaryConfig {
     /// the value the caller held going in is the value it holds coming out,
     /// which is exactly what a compiler that has seen the callee relies on.
     pub preserved_by_target: BTreeMap<u64, BTreeSet<CanonicalStorageId>>,
+    /// The carrier a direct callee's own interface names as its result, by
+    /// callee entry address. A convention's unaffected list describes a callee
+    /// nothing is known about, and this callee's boundary has said it hands
+    /// that register back changed, which outranks the list.
+    pub result_by_target: BTreeMap<u64, CallBoundaryDef>,
     /// The carriers a call reads without naming them in an operand.
     pub argument_regs: Vec<CallBoundaryDef>,
     /// The carriers a return reads without naming them in an operand.
     pub return_regs: Vec<CallBoundaryDef>,
+}
+
+impl CallBoundaryConfig {
+    /// What this call's own callee says about the convention, asked once for
+    /// both consumers: only a direct call names a callee whose boundary may
+    /// have been read.
+    pub fn callee_boundary(&self, op: &r2il::R2ILOp) -> CalleeBoundary<'_> {
+        let target = match op {
+            r2il::R2ILOp::Call { target } if target.is_ram() => target.offset,
+            _ => return CalleeBoundary::default(),
+        };
+        CalleeBoundary {
+            target: Some(target),
+            preserved: self.preserved_by_target.get(&target),
+            result: self.result_by_target.get(&target),
+        }
+    }
+}
+
+/// What one callee's own boundary says about the convention's registers.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CalleeBoundary<'a> {
+    /// The callee's entry address, where this call names one.
+    pub target: Option<u64>,
+    /// Carriers its body proves it leaves exactly as it found them.
+    pub preserved: Option<&'a BTreeSet<CanonicalStorageId>>,
+    /// The carrier its interface names as its result.
+    pub result: Option<&'a CallBoundaryDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,21 +667,13 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
                     && let Some(boundary) = call_boundaries
                 {
-                    // Only a direct call names a callee whose body may have
-                    // been read; anything else defines the whole list.
-                    let preserved = match op {
-                        r2il::R2ILOp::Call { target } if target.is_ram() => {
-                            boundary.preserved_by_target.get(&target.offset)
-                        }
-                        _ => None,
-                    };
                     let boundary_defs = append_call_boundary_defs(
                         &mut result.blocks,
                         block_addr,
                         ctx,
                         &mut defined_vars,
                         boundary,
-                        preserved,
+                        boundary.callee_boundary(op),
                         reg_names,
                     );
                     for (dst, storage) in boundary_defs {
@@ -863,7 +888,7 @@ fn append_call_boundary_defs(
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<RenameIdentity>,
     call_boundaries: &CallBoundaryConfig,
-    preserved_by_callee: Option<&BTreeSet<CanonicalStorageId>>,
+    callee: CalleeBoundary<'_>,
     reg_names: Option<&RegisterNameMap>,
 ) -> Vec<(SSAVar, CanonicalStorageId)> {
     let Some(block_ops) = blocks.get_mut(&block_addr) else {
@@ -874,7 +899,7 @@ fn append_call_boundary_defs(
     // Every width the convention names a register at is one family, and the
     // callee clobbers its root once.
     let mut clobbered: BTreeSet<RenameIdentity> = BTreeSet::new();
-    for reg in &call_boundaries.defined_regs {
+    for reg in call_boundaries.defined_regs.iter().chain(callee.result) {
         let mut actual_identities: BTreeSet<RenameIdentity> = match ctx
             .families
             .as_deref()
@@ -909,7 +934,10 @@ fn append_call_boundary_defs(
     }
     for identity in clobbered {
         let storage = identity.storage;
-        if preserved_by_callee.is_some_and(|preserved| preserved.contains(&storage)) {
+        if callee
+            .preserved
+            .is_some_and(|preserved| preserved.contains(&storage))
+        {
             continue;
         }
         ctx.init_identity(identity.clone());

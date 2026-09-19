@@ -376,6 +376,9 @@ pub struct DecompileInputs<'a> {
     /// Which registers each direct callee's body proves it leaves untouched,
     /// so construction defines nothing a call did not touch.
     pub callee_preserved_carriers: CalleePreservedCarriers,
+    /// What each direct callee's own boundary returns, by entry address. A
+    /// result the convention calls unaffected is still defined by the call.
+    pub callee_interfaces: BTreeMap<u64, SourceFunctionInterface>,
 }
 
 impl SsaArtifact {
@@ -692,6 +695,7 @@ impl SsaArtifact {
             call_site_interfaces,
             tail_call_identities,
             callee_preserved_carriers,
+            callee_interfaces,
         } = inputs;
         let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
@@ -709,7 +713,11 @@ impl SsaArtifact {
                 InterfaceQuestions::new(&machine_context),
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
-                &callee_preserved_carriers,
+                &CalleeBoundaries::from_interfaces(
+                    arch,
+                    &callee_preserved_carriers,
+                    &callee_interfaces,
+                ),
                 None,
                 &UncheckedSsaWorkControl,
             )
@@ -743,7 +751,7 @@ impl SsaArtifact {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             control,
         )?;
@@ -797,7 +805,7 @@ impl SsaArtifact {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             control,
         )?;
@@ -1970,6 +1978,13 @@ impl TrustedSsaArtifact {
         // for a fact the pipeline is built to carry.
         let correlated_call_sites =
             correlate_call_site_interfaces(&source, &blocks, callee_interfaces);
+        // What each callee said about its own boundary, read once for every
+        // pass that asks what a call to it does to the registers.
+        let callees = CalleeBoundaries::from_interfaces(
+            Some(&arch),
+            callee_preserved_carriers,
+            callee_interfaces,
+        );
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -2058,7 +2073,7 @@ impl TrustedSsaArtifact {
                             .machine_roles()
                             .call_preserved_carriers(),
                         provisional_machine_context.stack_pointer_carrier(),
-                        callee_preserved_carriers,
+                        &callees,
                         Some(&declared_successors),
                         control,
                     )
@@ -2152,7 +2167,7 @@ impl TrustedSsaArtifact {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            callee_preserved_carriers,
+            &callees,
             Some(&declared_successors),
             control,
         )?;
@@ -2760,6 +2775,55 @@ pub struct DefRef<'a> {
 /// happened.
 pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 
+/// What the callees this function calls said about their own boundaries.
+///
+/// One callee, one answer: the carriers its body proves it hands back
+/// untouched, and the carrier its interface names as its result. Both sides of
+/// a call read this same statement, so neither can believe something the other
+/// denies.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CalleeBoundaries {
+    preserved: CalleePreservedCarriers,
+    results: BTreeMap<u64, CallBoundaryDef>,
+}
+
+impl CalleeBoundaries {
+    /// Read both facts off the interfaces the callees' own bodies proved.
+    pub(crate) fn from_interfaces(
+        arch: Option<&ArchSpec>,
+        preserved: &CalleePreservedCarriers,
+        interfaces: &BTreeMap<u64, SourceFunctionInterface>,
+    ) -> Self {
+        let names = arch.map(cached_register_name_map);
+        let mut preserved = preserved.clone();
+        let mut results = BTreeMap::new();
+        for (address, interface) in interfaces {
+            let crate::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
+                continue;
+            };
+            // The same boundary cannot both hand a register back untouched and
+            // name it as what it returns.
+            if let Some(carriers) = preserved.get_mut(address) {
+                carriers.retain(|carrier| carrier.location() != storage.location());
+            }
+            let Some(name) = names
+                .as_ref()
+                .and_then(|names| names.get(&(storage.offset, storage.size)))
+            else {
+                continue;
+            };
+            results.insert(
+                *address,
+                CallBoundaryDef {
+                    name: name.clone(),
+                    size: storage.size,
+                },
+            );
+        }
+        Self { preserved, results }
+    }
+}
+
 /// What a call boundary does to this architecture's registers.
 ///
 /// `stack_pointer_restored_by_callee` carries the storage only when the source
@@ -2769,7 +2833,7 @@ pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 fn decompile_call_boundary_config(
     arch: Option<&ArchSpec>,
     stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
-    preserved_by_target: CalleePreservedCarriers,
+    callees: CalleeBoundaries,
 ) -> Option<CallBoundaryConfig> {
     let arch = arch?;
     let defined_regs = call_clobbered_register_defs(arch);
@@ -2779,7 +2843,8 @@ fn decompile_call_boundary_config(
     Some(CallBoundaryConfig {
         defined_regs,
         stack_pointer_restored_by_callee,
-        preserved_by_target,
+        preserved_by_target: callees.preserved,
+        result_by_target: callees.results,
         argument_regs: call_argument_register_defs(arch),
         return_regs: return_read_register_defs(arch),
     })
@@ -3369,7 +3434,7 @@ impl SSAFunction {
             InterfaceQuestions::none(),
             None,
             None,
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             control,
         )
@@ -3382,7 +3447,7 @@ impl SSAFunction {
         questions: InterfaceQuestions<'_>,
         call_preserved_carriers: Option<SourceCallPreservedCarriers>,
         stack_pointer_carrier: Option<CanonicalStorageId>,
-        callee_preserved_carriers: &CalleePreservedCarriers,
+        callees: &CalleeBoundaries,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
@@ -3462,7 +3527,7 @@ impl SSAFunction {
             blocks,
             arch,
             stack_pointer_restored_by_callee,
-            callee_preserved_carriers,
+            callees,
             declared_successors,
             &abi_carriers,
             &promoted,
@@ -3606,7 +3671,7 @@ impl SSAFunction {
             blocks,
             arch,
             None,
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             &[],
             &Default::default(),
@@ -3620,17 +3685,14 @@ impl SSAFunction {
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
-        callee_preserved_carriers: &CalleePreservedCarriers,
+        callees: &CalleeBoundaries,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         abi_carriers: &[CanonicalStorageId],
         promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let policy = decompile_call_boundary_config(
-            arch,
-            stack_pointer_restored_by_callee,
-            callee_preserved_carriers.clone(),
-        );
+        let policy =
+            decompile_call_boundary_config(arch, stack_pointer_restored_by_callee, callees.clone());
         Self::from_blocks_raw_with_policy_and_control(
             blocks,
             arch,
@@ -9209,7 +9271,7 @@ mod tests {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             &UncheckedSsaWorkControl,
         )
@@ -9342,7 +9404,7 @@ mod tests {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             &UncheckedSsaWorkControl,
         )
@@ -9548,7 +9610,7 @@ mod tests {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             &UncheckedSsaWorkControl,
         )
@@ -9680,7 +9742,7 @@ mod tests {
             InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             &UncheckedSsaWorkControl,
         )
@@ -13437,6 +13499,88 @@ mod tests {
     }
 
     #[test]
+    fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
+        let mut arch = call_preservation_arch();
+        // Outside the convention's clobber list, which is what makes the
+        // callee's own interface the only thing that can say it is written.
+        arch.add_register(RegisterDef::new("rbx", 32, 8));
+        // call 0x2000; *rsi = rbx; return -- rbx holds what the call returned.
+        let block = call_preservation_block(vec![
+            R2ILOp::Call {
+                target: make_ram(0x2000, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: make_reg(16, 8),
+                val: make_reg(32, 8),
+            },
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+        ]);
+        let returns_rbx = SourceFunctionInterface::new(
+            b"rev".to_vec(),
+            "cdecl",
+            [],
+            crate::SourceFunctionReturn::Register {
+                storage: call_preservation_storage(32, 8),
+            },
+            [],
+        )
+        .expect("an interface returning rbx");
+        let with = SsaArtifact::for_decompile_with(
+            std::slice::from_ref(&block),
+            DecompileInputs {
+                arch: Some(&arch),
+                callee_interfaces: BTreeMap::from([(0x2000u64, returns_rbx)]),
+                ..Default::default()
+            },
+        )
+        .expect("artifact with a callee that returns rbx");
+        let without = SsaArtifact::for_decompile_with(
+            std::slice::from_ref(&block),
+            DecompileInputs {
+                arch: Some(&arch),
+                ..Default::default()
+            },
+        )
+        .expect("artifact without callee facts");
+        let call_defines = |artifact: &SsaArtifact| {
+            artifact
+                .function()
+                .get_block(0x1000)
+                .expect("entry block")
+                .ops
+                .iter()
+                .filter(|op| {
+                    matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rbx"))
+                })
+                .count()
+        };
+        assert_eq!(call_defines(&without), 0);
+        assert_eq!(call_defines(&with), 1);
+        let stored = |artifact: &SsaArtifact| {
+            artifact
+                .function()
+                .get_block(0x1000)
+                .expect("entry block")
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    SSAOp::Store { val, .. } => Some(val.clone()),
+                    _ => None,
+                })
+                .expect("the store survives")
+        };
+        assert_eq!(stored(&without).version, 0, "the entry value of rbx");
+        assert_ne!(
+            stored(&with).version,
+            0,
+            "the store must read what the call returned, not the entry value"
+        );
+    }
+
+    #[test]
     fn a_leaf_body_preserves_every_clobbered_register_it_never_writes() {
         let arch = call_preservation_arch();
         let block = call_preservation_block(vec![
@@ -13546,7 +13690,7 @@ mod tests {
             InterfaceQuestions::none(),
             None,
             None,
-            &CalleePreservedCarriers::new(),
+            &CalleeBoundaries::default(),
             None,
             &UncheckedSsaWorkControl,
         )
