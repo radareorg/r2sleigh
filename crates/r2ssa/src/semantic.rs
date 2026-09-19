@@ -11897,19 +11897,24 @@ fn collect_structured_loop_facts(
         let body = body_set.iter().copied().collect::<Vec<_>>();
         let exits = loop_exits(function, &body_set);
         let condition = loop_condition(predicates, header, &body_set, &exits);
-        let carriers = loop_carrier_facts(
-            function,
-            graph,
+        let loop_ = NaturalLoop {
             id,
             header,
-            &latches,
-            &body_set,
+            latches: &latches,
+            body: &body_set,
+        };
+        let carriers = loop_carrier_facts(
+            Body {
+                function,
+                graph,
+                machine_context,
+            },
+            loop_,
             live_out,
             storage_spans,
-            machine_context,
         );
         let (induction_phi, induction_init, induction_update) =
-            loop_induction_values(graph, predicates, condition, header, &latches, &body_set);
+            loop_induction_values(graph, predicates, condition, loop_);
         let bound = loop_bound_value(
             graph,
             predicates,
@@ -11974,21 +11979,37 @@ fn collect_unstructured_cycle_blocks(
         .collect()
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "loop-carrier certification explicitly receives every proof input and stores no duplicate analysis context"
-)]
-fn loop_carrier_facts(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    loop_id: LoopId,
+/// One natural loop: which it is, where it begins, the edges back to it and
+/// the blocks it contains.
+///
+/// The four are computed together and every rule that reasons about a loop
+/// takes all four, so they are one thing rather than four parameters each rule
+/// takes apart again.
+#[derive(Clone, Copy)]
+struct NaturalLoop<'a> {
+    id: LoopId,
     header: u64,
-    latches: &BTreeSet<u64>,
-    loop_body: &BTreeSet<u64>,
+    latches: &'a BTreeSet<u64>,
+    body: &'a BTreeSet<u64>,
+}
+
+fn loop_carrier_facts(
+    body: Body<'_>,
+    loop_: NaturalLoop<'_>,
     live_out: &crate::liveout::FunctionLiveOut,
     storage_spans: &StorageSpans,
-    machine_context: Option<&SourceMachineContext>,
 ) -> Vec<LoopCarrierFact> {
+    let Body {
+        function,
+        graph,
+        machine_context,
+    } = body;
+    let NaturalLoop {
+        id: loop_id,
+        header,
+        latches,
+        body: loop_body,
+    } = loop_;
     let Some(header_block) = function.get_block(header) else {
         return Vec::new();
     };
@@ -12761,10 +12782,14 @@ fn loop_induction_values(
     graph: &SsaGraph,
     predicates: &PredicateFacts,
     condition: Option<PredicateId>,
-    header: u64,
-    latches: &BTreeSet<u64>,
-    body: &BTreeSet<u64>,
+    loop_: NaturalLoop<'_>,
 ) -> (Option<ValueId>, Option<ValueId>, Option<ValueId>) {
+    let NaturalLoop {
+        header,
+        latches,
+        body,
+        ..
+    } = loop_;
     let Some(header_id) = graph.block_id_for_addr(header) else {
         return (None, None, None);
     };

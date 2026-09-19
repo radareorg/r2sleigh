@@ -30005,3 +30005,31 @@ Suppressions of the argument-count lint are down from twenty-five to fifteen.
 The one left in `semantic.rs` is `loop_carrier_facts`, where the repeated group
 is a natural loop -- its identity, header, latches and body -- which
 `loop_induction_values` beside it also takes apart the same way.
+
+## A natural loop is one thing
+
+`loop_carrier_facts` took nine parameters behind an `#[expect]` whose reason was
+that loop-carrier certification "explicitly receives every proof input and
+stores no duplicate analysis context". Four of those nine were one thing: the
+loop's identity, its header, the latches and the body, computed together by the
+caller and taken apart again by the callee. `loop_induction_values` beside it
+took the same four apart the same way.
+
+`NaturalLoop` names them. `loop_carrier_facts` takes four parameters instead of
+nine and `loop_induction_values` four instead of six, and the caller builds the
+loop once and passes it to both.
+
+`semantic.rs` now carries no suppression of the argument-count lint at all,
+down from nine, and none of them was replaced by a wider allow or moved
+elsewhere. Across the tree the count is fourteen, from twenty-five.
+
+What is left is a different shape and should be judged rather than counted
+down. `r2source/contracts.rs` has four, and they are constructors taking their
+own struct's fields, which is not a hidden group; the smell there is the
+three-variant chain around them, where `new_with_logical_types`,
+`new_exact_with_logical_types` and `new_with_logical_types_internal` differ by
+one boolean. `rename.rs` has two that do share a real group --
+`(cfg, domtree, phi_placement, reg_names, call_boundaries, promoted)` -- and
+naming it would also shorten
+`rename_function_with_names_and_call_boundaries_and_control`, whose name is
+long precisely because those parameters have none.
