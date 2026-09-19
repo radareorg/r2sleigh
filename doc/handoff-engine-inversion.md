@@ -32,6 +32,42 @@ strcpy(tmp_11f80_3, tmp_11f80_1);
 Against radare2 over its ELF corpus, `pd` agreement went from six of thirty to
 thirteen of the twenty-four `r2s` opens.
 
+## What grades the capture
+
+`scripts/diff_capture.py` renders one function from radare2's capture through
+the plugin (`pd:s`) and from the engine's own through `r2s pdd`, and diffs the
+C. Both sides run the same decompiler, so a difference is a difference in what
+the capture carried. Nothing graded this before, and every quality judgement
+about the inversion was therefore an opinion.
+
+It paid immediately. It proved that the unconnected call chain in a rendered
+`main` -- every call's result dropped, every argument from an unrelated
+temporary -- is *pre-existing decompiler quality* and not inversion damage: the
+plugin's capture renders the same shuffling on the same function. It also found
+that the first import stub of any ELF was named at the `nop` padding before it,
+so every call to it stayed anonymous.
+
+Over eight ELF binaries, six functions each: two identical, seven differing,
+three refused natively where the plugin rendered, seven refused by both. The
+three native-only refusals are the measure to drive to zero.
+
+## The capture is made twice
+
+Preparation proves things a capture would have to state, which is a circle: the
+interface is recovered from the instructions, and the slots that interface
+should declare are only known once it exists. So the capture is made twice. The
+first pass carries no interface and preparation recovers one; the second states
+that interface again with the frame slots the first proved, and preparation
+folds the spills into the parameters they home.
+
+This is what took `_dup` from refusing outright to reading like its source: a
+`strlen`, a `malloc` of its result plus one, a copy into it, and the pointer
+returned.
+
+The second pass costs one more preparation per function. It is skipped entirely
+when the first pass proves no slot and finds no new text, which is every
+function that keeps its arguments in registers.
+
 ## What the route does not do yet
 
 **Stack arguments have no placement.** `SourceConventionSlots` is built with
@@ -44,11 +80,18 @@ as the `cc` data because the word size is refined by the first register argloc.
 **Callees are walked one level deep.** Deeper is what an interprocedural
 fixpoint is for. A callee that fails to walk leaves its call unproven.
 
-**Declared types do not reach the rendering, only arity.** `strlen(uint64_t)`
-rather than `size_t strlen(const char *)`. The prototypes are handed to the
-request as `known_function_signatures` and the arity arrives through a
-synthesised call-site interface; the type layer does not appear to consume the
-former. Tracing that is the next refinement.
+**Three functions in the sample refuse natively where the plugin renders.**
+That is the number to drive to zero, and the oracle names which ones.
+
+**The aarch64 address fold happens after the capture.** `adrp` plus `add` never
+becomes one SSA constant, so the second pass's constant harvest does not see the
+address a string lives at; the fold happens in `r2dec`'s term layer, which is
+downstream of everything a capture could state. A rendered `_dup("x")` is still
+`_dup(0x100000500)` here.
+
+**A `char` is spelled `int8_t`.** The declared type graph carries a signed
+eight-bit integer, which is what `char` is, and the renderer has no reason to
+prefer one spelling.
 
 **Code pointer tables are captured empty**, because finding one means proving
 what indexes it, which needs the value domain.
