@@ -122,6 +122,46 @@ def refused(lines):
     return any("r2sleigh refused" in line for line in lines)
 
 
+DECLARATION = re.compile(r"^\s*(?:const\s+)?[A-Za-z_][\w*\s]*?\b(\w+)\s*;\s*$")
+ASSIGNED = re.compile(r"\b{}\s*(?:=[^=]|\+\+|--)")
+PROOF_REFUSED = re.compile(r"(\d+) refused")
+
+
+def undefined_reads(lines):
+    """Names a rendering declares, never assigns, and then reads.
+
+    A read of a value nothing wrote is not a quality complaint: it is a claim
+    about the program that the program does not make. Reported beside what the
+    proof line says was refused, because the pair is the interesting part --
+    an undefined read under `0 refused` says the accounting is wrong, not just
+    the output.
+    """
+    body = "\n".join(lines)
+    found = []
+    for line in lines:
+        declared = DECLARATION.match(line)
+        if not declared:
+            continue
+        name = declared.group(1)
+        if name in ("return", "else", "struct", "union"):
+            continue
+        if re.search(ASSIGNED.pattern.format(re.escape(name)), body):
+            continue
+        # Declared, never written. Read anywhere else is a read of nothing.
+        uses = len(re.findall(r"\b{}\b".format(re.escape(name)), body))
+        if uses > 1:
+            found.append(name)
+    return found
+
+
+def proof_refusals(lines):
+    for line in lines:
+        if "r2dec proof:" in line:
+            found = PROOF_REFUSED.search(line)
+            return int(found.group(1)) if found else None
+    return None
+
+
 def compare(args, binary):
     found, error = functions(args.r2s, binary, args.timeout)
     if error:
@@ -132,7 +172,14 @@ def compare(args, binary):
         if not found:
             found = [(args.at, f"fcn.{args.at:x}")]
 
-    tally = {"same": 0, "differ": 0, "native refused": 0, "plugin refused": 0, "both refused": 0}
+    tally = {
+        "same": 0,
+        "differ": 0,
+        "native refused": 0,
+        "plugin refused": 0,
+        "both refused": 0,
+        "undefined reads": 0,
+    }
     for address, name in found[: args.functions]:
         plugin, plugin_error = plugin_render(args.r2, binary, address, args.timeout)
         native, native_error = native_render(args.r2s, binary, address, args.timeout)
@@ -142,6 +189,19 @@ def compare(args, binary):
 
         left = rendered(clean(plugin, args.proof), name)
         right = rendered(clean(native, args.proof), name)
+
+        # A read of a value nothing assigned, under a proof line that refused
+        # nothing, is a certification defect and outranks any difference.
+        undefined = undefined_reads(clean(native, True))
+        if undefined:
+            tally["undefined reads"] = tally.get("undefined reads", 0) + 1
+            print(
+                "  {}: reads {} which nothing assigns, proof says {} refused".format(
+                    name,
+                    ", ".join(undefined),
+                    proof_refusals(clean(native, True)),
+                )
+            )
         if refused(left) and refused(right):
             tally["both refused"] += 1
             continue
@@ -197,9 +257,17 @@ def main():
             totals[key] = totals.get(key, 0) + value
 
     print()
-    for key in ("same", "differ", "native refused", "plugin refused", "both refused"):
+    for key in (
+        "same",
+        "differ",
+        "native refused",
+        "plugin refused",
+        "both refused",
+        "undefined reads",
+    ):
         print(f"{key:16} {totals.get(key, 0)}")
     return 1 if totals.get("differ", 0) or totals.get("native refused", 0) else 0
+
 
 
 if __name__ == "__main__":
