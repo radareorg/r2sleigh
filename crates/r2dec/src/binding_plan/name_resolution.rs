@@ -272,6 +272,10 @@ impl BindingNameResolution {
                 Some(BindingRole::Parameter { slot }) => SymbolRole::Parameter(slot),
                 Some(BindingRole::StackObject { object }) => {
                     stack_object = Some(object);
+                    // Storage above the entry stack pointer is the caller's:
+                    // the slot a call pushed the return address into is held
+                    // from entry exactly as a preserved register is.
+                    entry_held += usize::from(binding.caller_supplied);
                     let entity = r2ssa::SemanticId::StackSlot(object);
                     match source_owned
                         .report()

@@ -517,6 +517,46 @@ fn clobbered_by_a_void_call(
         )
 }
 
+/// The one carrier a body leaves defined at every exit, where the convention's
+/// own result register is not one of them.
+///
+/// The convention says where a result would be; a body can still prove one
+/// elsewhere, and the rule that a body-proven signature wins applies to the
+/// result exactly as it does to arity. Two candidates prove nothing, because
+/// nothing then says which one a caller reads.
+fn body_proven_result(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    machine_context: Option<&crate::SourceMachineContext>,
+    slots: &SourceConventionSlots,
+) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
+    let machine_context = machine_context?;
+    let excluded = [
+        machine_context.stack_pointer_carrier(),
+        machine_context.return_address_carrier(),
+        slots.result_slot(),
+    ];
+    let mut candidates = graph
+        .values
+        .iter()
+        .filter(|value| graph.def_inst(value.id).is_some())
+        .filter_map(|value| value.canonical_storage)
+        .filter(|storage| storage.space == crate::CanonicalStorageSpace::Register)
+        .filter(|storage| !excluded.iter().any(|carrier| *carrier == Some(*storage)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|candidate| {
+            let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
+            (!live_out.is_empty() && live_out.unresolved_blocks().next().is_none())
+                .then_some((candidate, live_out))
+        });
+    let first = candidates.next()?;
+    candidates.next().is_none().then_some(first).filter(|(candidate, live_out)| {
+        recovered_result(graph, facts, live_out, *candidate).is_some()
+    })
+}
+
 fn recovered_result(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
@@ -741,6 +781,17 @@ fn recover_interface_inner(
             crate::liveout::FunctionLiveOut::compute(func, &graph, &[candidate]);
         if !candidate_live_out.is_empty() && candidate_live_out.unresolved_blocks().next().is_none()
         {
+            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
+            live_out = candidate_live_out;
+        }
+    }
+    // A body may prove a result the convention does not name: a position-
+    // independent code thunk returns the address a call pushed, in whichever
+    // register its name says. Only one carrier may qualify, or the body has
+    // proven nothing about which of them a caller reads.
+    if exact_tail_result.is_none() && loader_role.is_none() && result.is_none() {
+        let mut proven = body_proven_result(func, &graph, &facts, machine_context, slots);
+        if let Some((candidate, candidate_live_out)) = proven.take() {
             result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
             live_out = candidate_live_out;
         }
