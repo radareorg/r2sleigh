@@ -178,6 +178,18 @@ radare2 maps a relocatable object at `0x8000000` where `r2s` maps it at zero;
 and one Thumb function decodes differently, which is a real gap rather than a
 spelling.
 
+## Two plugin lift fixtures drift, and it is not the inversion
+
+`plain_o2_check_secret_has_exact_offline_lift` and
+`plain_o2_sum_array_has_exact_vectorized_offline_lift` in
+`r2plugin/src/plain_o2_lift_fixtures.rs` fail on an SSA hash: `check_secret`
+expects `548f779c1f93e29d` and gets `9a9df9f6a934275a`. Measured rather than
+argued: a worktree at `5c9bd947`, the commit this track started from, produces
+byte-identical expected and actual hashes, so the drift predates every change
+here and belongs to whichever change last moved SSA construction. The
+expectations are not re-blessed, because a hash that differs is not a hash that
+is right.
+
 ## Peeling: what is now dead
 
 Nothing has been deleted yet, by design — the plugin still needs the bridge
