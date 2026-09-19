@@ -300,3 +300,20 @@ machine roles carry register storages only. Both want the same missing state.
 - `StackObjectDeclarationWidth` on `_Z6_startv` (`_Exit (42)`): an access-less,
   address-only stack object becomes a binding that demands a declaration width
   it cannot have.
+
+## ARM 32-bit: Thumb decodes, and `pdd` still does not run
+
+ARM states the instruction set per function, in the low bit of the symbol that
+names it. `r2image` masked that bit off the address and discarded it, so every
+Thumb body disassembled as ARM: `push {r7, lr}` read as
+`addlt fp, r2, r0, lsl 0xb`, a different instruction of a different length, and
+everything after it landed off-cut. The bit is now kept as `Symbol::thumb`, the
+session holds the Thumb decoder beside the ARM one — the same SLA with Ghidra's
+`ARMtTHUMB` processor specification, which is how Ghidra itself ships a Thumb
+decoder — and the address chooses. `pd` now matches radare2 on both.
+
+`pdd` on any ARM 32-bit function still refuses before reaching this:
+`TrustedSleighProfile::from_tuple` admits only `x86/32`, `x86/64` and
+`arm/64`, by a deliberate rule that a tuple enters the list only once it has
+been verified against the active analyzer. Admitting `arm/32` is that
+verification, not a line of code.
