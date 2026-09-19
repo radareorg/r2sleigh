@@ -1495,10 +1495,11 @@ pub(super) fn rewrite_inlining_partition(
         let declared_pointers = |value: ValueId| {
             declared_pointer_of_object(source_owned, &groups, &group_members, value)
         };
-        let seed_canonical = r2rewrite::canonicalize_with(
+        // Absorbed exactly as the rendering absorbs, so a value is proven constant only through producers this round folds.
+        let round_canonical = r2rewrite::canonicalize_with(
             source,
             projection,
-            &seed_absorbs_literal,
+            &|query: &r2rewrite::ExpansionQuery<'_>| term_absorbs_producer(&inlined, query),
             &declared_pointers,
         )
         .map_err(BindingPlanBuildError::Canonicalisation)?;
@@ -1513,7 +1514,7 @@ pub(super) fn rewrite_inlining_partition(
             .collect::<BTreeSet<_>>();
         alone.extend(inlined.iter().copied());
         let admitted =
-            duplicable_bound_constants(projection, source_owned, &seed_canonical, &alone);
+            duplicable_bound_constants(projection, source_owned, &round_canonical, &alone);
         if let Some(want) = crate::debug::traced_inline_name() {
             for value in &graph.values {
                 if want != "all" && !value.var.display_name().eq_ignore_ascii_case(want) {
@@ -1541,7 +1542,7 @@ pub(super) fn rewrite_inlining_partition(
         let folds = inlinable_core(
             facts,
             Round {
-                canonical: &seed_canonical,
+                canonical: &round_canonical,
                 admitted: &admitted,
                 unrendered: &unrendered,
                 pre_partition: &groups,
@@ -1572,16 +1573,9 @@ pub(super) fn rewrite_inlining_partition(
                 "{:#x}: partition and inlining agreed after {round} rounds",
                 source.function().entry
             );
-            drop(seed_canonical);
-            let canonical = r2rewrite::canonicalize_with(
-                source,
-                projection,
-                &|query: &r2rewrite::ExpansionQuery<'_>| term_absorbs_producer(&inlined, query),
-                &declared_pointers,
-            )
-            .map_err(BindingPlanBuildError::Canonicalisation)?;
+            // The round's own terms, which the settled fold set no longer changes.
             return Ok(RewriteInliningPartition {
-                canonical,
+                canonical: round_canonical,
                 inlinable: inlined,
                 component_eligible: round_eligible,
                 components,

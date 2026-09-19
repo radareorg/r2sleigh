@@ -520,6 +520,75 @@ fn copy_of_bound_load_survives_temporary_storage_reuse_inline() {
 }
 
 #[test]
+fn a_constant_proven_only_through_a_bound_producer_keeps_its_own_binding() {
+    let mut entry = R2ILBlock::new(0x1000, 4);
+    entry.push(R2ILOp::Copy {
+        dst: Varnode::register(0, 8),
+        src: Varnode::constant(0, 8),
+    });
+    entry.push(R2ILOp::IntSRight {
+        dst: Varnode::register(0x38, 8),
+        a: Varnode::register(0, 8),
+        b: Varnode::constant(1, 8),
+    });
+    entry.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: Varnode::constant(0x2000, 8),
+        val: Varnode::register(0x38, 8),
+    });
+    entry.push(R2ILOp::CBranch {
+        cond: Varnode::constant(1, 1),
+        target: Varnode::constant(0x100c, 8),
+    });
+    // The object the shift read is rewritten here, so spelling the shift at
+    // the reader below would read what the rewrite put there.
+    let mut body = R2ILBlock::new(0x1004, 4);
+    body.push(R2ILOp::Copy {
+        dst: Varnode::register(0, 8),
+        src: Varnode::constant(7, 8),
+    });
+    body.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: Varnode::constant(0x2008, 8),
+        val: Varnode::register(0, 8),
+    });
+    body.push(R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: Varnode::constant(0x2010, 8),
+        val: Varnode::register(0x38, 8),
+    });
+    body.push(R2ILOp::Branch {
+        target: Varnode::constant(0x100c, 8),
+    });
+    let mut join = R2ILBlock::new(0x100c, 4);
+    join.push(R2ILOp::Return {
+        target: Varnode::register(0x30, 8),
+    });
+    let source_owned = source_owned_blocks(&[entry, body, join]);
+    let source = source_owned.source();
+    let shifted = source
+        .graph()
+        .inst_id_for_op_site(0x1000, 1)
+        .and_then(|inst| source.graph().inst(inst))
+        .and_then(|inst| inst.output)
+        .expect("shift output");
+
+    let plan = BindingPlan::build_shadow(&source_owned).expect("bound-producer constant plan");
+    // The shift is constant only because the value it reads is, and the merge
+    // keeps that value bound, so the shift is not a literal the plan may spell
+    // afresh at each reader.
+    assert!(
+        matches!(
+            plan.disposition(shifted),
+            Some(ValueDisposition::Bound { .. })
+        ),
+        "shift of a bound constant must keep a binding, got {:?}",
+        plan.disposition(shifted)
+    );
+    assert!(plan.validate_seal(&source_owned).is_ok());
+}
+
+#[test]
 fn unread_defined_value_is_elided_before_it_can_become_a_binding() {
     let source_owned = source_owned([
         R2ILOp::IntCarry {
