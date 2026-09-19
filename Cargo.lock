@@ -728,6 +728,7 @@ dependencies = [
  "r2il",
  "r2image",
  "r2sleigh-lift",
+ "r2ssa",
  "sleigh-config",
 ]
 
@@ -1002,7 +1003,7 @@ dependencies = [
 [[package]]
 name = "sleigh-config"
 version = "1.0.1"
-source = "git+https://github.com/0verflowme/sleigh-config.git?branch=main#fc0ace6c68b030bb9290faede4db11fe50757fee"
+source = "git+https://github.com/0verflowme/sleigh-config.git?branch=main#71551911c023ab34194c7156becf9ada76f78a22"
 dependencies = [
  "heck",
  "sleigh-compiler",
