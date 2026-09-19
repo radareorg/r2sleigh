@@ -4676,28 +4676,38 @@ impl SSAFunction {
         // observation reached -- which is why the recovery declared the lane
         // narrow in the first place. Either way nothing the program computes
         // depends on them, and zero is as good a value as the register held.
+        // Every variable the body reads, and the highest disambiguator each
+        // name carries. Both were asked once per root, and each asking walked
+        // the whole function, so a body with many entry registers paid for it
+        // as many times over.
+        let mut read_anywhere = BTreeSet::<SSAVar>::new();
+        for block in self.blocks.iter() {
+            for phi in &block.phis {
+                read_anywhere.extend(phi.sources.iter().map(|(_, src)| src.clone()));
+            }
+            for op in &block.ops {
+                read_anywhere.extend(op.sources().into_iter().cloned());
+            }
+        }
+        let mut highest_disambiguator = BTreeMap::<String, u32>::new();
+        for var in self.canonical_storage_by_var.keys() {
+            let entry = highest_disambiguator
+                .entry(var.name().to_string())
+                .or_insert(0);
+            *entry = (*entry).max(var.rename_disambiguator());
+        }
+        let mut substitutions = BTreeMap::<SSAVar, SSAVar>::new();
         for (root_var, (root, lanes)) in lanes_by_root {
             // Only for a root a C integer can hold; a vector register's
             // lanes are not parameters and have no declaration to rest on.
             if root.size > 8 {
                 continue;
             }
-            let read_elsewhere = self.blocks.iter().any(|block| {
-                block
-                    .phis
-                    .iter()
-                    .any(|phi| phi.sources.iter().any(|(_, src)| *src == root_var))
-                    || block.ops.iter().any(|op| op.sources().contains(&&root_var))
-            });
-            if !read_elsewhere {
+            if !read_anywhere.contains(&root_var) {
                 continue;
             }
-            let disambiguator = self
-                .canonical_storage_by_var
-                .keys()
-                .filter(|var| var.name() == root_var.name())
-                .map(SSAVar::rename_disambiguator)
-                .max()
+            let disambiguator = highest_disambiguator
+                .get(root_var.name())
                 .map_or(1, |max| max + 1);
             let composed =
                 SSAVar::new(root_var.name(), 0, root.size).with_rename_disambiguator(disambiguator);
@@ -4728,13 +4738,20 @@ impl SSAFunction {
                     }
                 }
             }
+            highest_disambiguator.insert(composed.name().to_string(), disambiguator);
             self.canonical_storage_by_var.insert(composed.clone(), root);
+            substitutions.insert(root_var, composed);
+        }
+        // One walk for every root. Each root substitutes one variable, and
+        // rewriting the body once per root read every operation R times to do
+        // R independent substitutions; no root's replacement is another
+        // root's key, because each composed variable is minted here.
+        if !substitutions.is_empty() {
             let replace = |var: &SSAVar| {
-                if *var == root_var {
-                    composed.clone()
-                } else {
-                    var.clone()
-                }
+                substitutions
+                    .get(var)
+                    .cloned()
+                    .unwrap_or_else(|| var.clone())
             };
             for block in self.blocks.iter_mut() {
                 for phi in &mut block.phis {

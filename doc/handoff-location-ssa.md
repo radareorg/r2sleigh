@@ -29848,3 +29848,36 @@ Those are the next two to name.
 Three call sites still rebuild the certificate reader index themselves --
 `certified_value_readers` at `rules.rs`'s escape, dead-value and
 boundary-reader helpers. They should read the index rather than recompute it.
+
+## Minting entry lanes stopped re-reading the body once per root
+
+`mint_entry_lane_projections` was the only function in the tree with four
+levels of loop nesting, and the nesting was the symptom rather than the defect.
+For each entry register it mints a lane projection for, it asked three
+questions, and each of the three walked something whole:
+
+* whether the root variable is read anywhere, by scanning every block's phis
+  and operations;
+* what the highest rename disambiguator on that name is, by filtering every key
+  of `canonical_storage_by_var`;
+* and then it rewrote every phi source and every operation in the function to
+  substitute that one variable.
+
+So a body with R entry registers read its own operations 3R times to perform R
+independent one-variable substitutions. Each is now a single pass. The set of
+variables the body reads and the highest disambiguator per name are built once
+before the loop, and the substitutions are accumulated and applied in one walk
+after it.
+
+The single walk is equivalent because no root's replacement is another root's
+key: each composed variable is minted inside the loop and cannot be an entry
+variable. The disambiguator map is updated as each composed variable is made,
+which is what the old code got from having already inserted it into
+`canonical_storage_by_var`. The minted operations are still spliced in after
+the rewrite, so they continue to read the original entry variables.
+
+Nesting depth goes from four to three, and the tree now has no function with
+four. The census script that found it is kept at
+`tests/corpus/structure_census.py`: it tracks brace depth so that a run of
+sequential loops -- eleven elision sources one after another, say -- is not
+mistaken for nesting, which the first cut of it did.
