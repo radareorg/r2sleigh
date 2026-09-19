@@ -8340,6 +8340,44 @@ fn accessed_object_extent(
     (extent > 0).then_some(extent)
 }
 
+/// A constant a machine widened to reach an operand's width.
+///
+/// A zero extension, a cast or a copy of a constant is that constant; the
+/// widening is how the operation is spelled and says nothing about the value.
+fn widened_constant(graph: &SsaGraph, value: ValueId, depth: u32) -> Option<u64> {
+    if let Some(constant) = graph.value(value)?.var.constant_bits() {
+        return Some(constant);
+    }
+    if depth >= 8 {
+        return None;
+    }
+    let inst = graph.inst(graph.def_inst(value)?)?;
+    let InstPayload::Op(op) = &inst.payload else {
+        return None;
+    };
+    match op {
+        SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
+            widened_constant(graph, *inst.inputs.first()?, depth + 1)
+        }
+        // The half the machine assembles a wide value from: `hi << 64 | lo`
+        // is the constant when the shifted half is zero.
+        SSAOp::IntOr { .. } => {
+            let left = widened_constant(graph, *inst.inputs.first()?, depth + 1)?;
+            let right = widened_constant(graph, *inst.inputs.get(1)?, depth + 1)?;
+            Some(left | right)
+        }
+        SSAOp::IntLeft { .. } => {
+            let value = widened_constant(graph, *inst.inputs.first()?, depth + 1)?;
+            let shift =
+                u32::try_from(widened_constant(graph, *inst.inputs.get(1)?, depth + 1)?).ok()?;
+            (value == 0)
+                .then_some(0)
+                .or_else(|| value.checked_shl(shift))
+        }
+        _ => None,
+    }
+}
+
 /// A constant varnode's value, read at its own width as a signed number.
 ///
 /// `[x3, #-3]` lifts to an addition of `0xfffffffffffffffd`, and taking that
@@ -8729,7 +8767,24 @@ fn indexed_offset_upper_bound(
                 },
                 (None, None) => Some(bound_of(0)?.min(bound_of(1)?)),
             },
-            SSAOp::IntRem { .. } => constant(1)?.checked_sub(1),
+            // A remainder is below its divisor however the machine widened
+            // that divisor. x86-64 divides a 128-bit dividend, so `(a + i) % 3`
+            // reaches here with the three zero-extended into a sixteen-byte
+            // value and the constant no longer the operand itself.
+            SSAOp::IntRem { .. } => widened_constant(graph, input(1)?, 0)?.checked_sub(1),
+            // The low piece of a bounded value is bounded by the same number,
+            // or by what its own width can hold. Taking it back out of the
+            // wide carrier a division left it in is the other half of the
+            // remainder above.
+            SSAOp::Subpiece { dst, offset, .. } if *offset == 0 => {
+                let bits = dst.size.saturating_mul(8).min(64);
+                let mask = if bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << bits) - 1
+                };
+                Some(bound_of(0)?.min(mask))
+            }
             SSAOp::IntLeft { .. } => {
                 let shift = u32::try_from(constant(1)?).ok()?;
                 bound_of(0)?.checked_shl(shift)
@@ -18282,6 +18337,85 @@ mod tests {
             Vec::new(),
         )
         .expect("counted loop pair artifact")
+    }
+
+    #[test]
+    fn a_remainder_is_bounded_through_the_width_its_divisor_was_widened_to() {
+        // `sp[(x % 3) * 8]`, with the three zero-extended the way a machine
+        // that divides a wide dividend spells it. The table is three elements.
+        let sp = Varnode::register(32, 8);
+        let divisor = Varnode::unique(0x7500, 16);
+        let remainder = Varnode::unique(0x7508, 16);
+        let narrowed = Varnode::unique(0x7510, 8);
+        let scaled = Varnode::unique(0x7518, 8);
+        let address = Varnode::unique(0x7520, 8);
+        let mut block = R2ILBlock::new(0x7500, 4);
+        block.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(64, 8),
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: divisor.clone(),
+            src: Varnode::constant(3, 8),
+        });
+        block.push(R2ILOp::IntZExt {
+            dst: remainder.clone(),
+            src: Varnode::register(8, 8),
+        });
+        block.push(R2ILOp::IntRem {
+            dst: remainder.clone(),
+            a: remainder.clone(),
+            b: divisor,
+        });
+        block.push(R2ILOp::Subpiece {
+            dst: narrowed.clone(),
+            src: remainder,
+            offset: 0,
+        });
+        block.push(R2ILOp::IntMult {
+            dst: scaled.clone(),
+            a: narrowed,
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: sp,
+            b: scaled,
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x7528, 8),
+            space: SpaceId::Ram,
+            addr: address,
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        let roles =
+            SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+                .and_then(|roles| {
+                    roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
+                        SourceStackGrowth::LowerAddresses,
+                    ))
+                })
+                .expect("widened divisor machine roles");
+        let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+            &[block],
+            Some(&return_boundary_arch()),
+            Some(preserved_stack_interface()),
+            roles,
+            Vec::new(),
+        )
+        .expect("widened divisor artifact");
+        assert!(
+            matches!(
+                indexed_stack_layout(&artifact),
+                super::StackArrayLayoutDisposition::Proven(layout)
+                    if layout.element_width == 8 && layout.extent == 24
+            ),
+            "{:?}",
+            indexed_stack_layout(&artifact)
+        );
     }
 
     #[test]

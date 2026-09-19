@@ -29233,3 +29233,31 @@ non-test match sites across the crates, each of which has to decide what a pair
 means for it rather than take a default arm. That is a session of its own, and
 half of it is worse than none: the corpus compiles the callee and its caller in
 one unit, so both sides have to agree about the return before anything renders.
+
+## A remainder keeps its bound through the width the machine divides at
+
+`shape_function_pointer` builds a three-entry table of function pointers in a
+local and calls `table[(a + index) % 3]`. The table rendered as one object of
+eight bytes with the other two entries as separate locals, so the indexed read
+ran off the end of the first and the two stores that filled the rest were dead.
+Every configuration computed the wrong answer.
+
+The index is bounded: a remainder by three is at most two, so the table is
+twenty-four bytes and the two neighbours are places inside it. The bound was
+lost in how x86-64 spells the division. The dividend is assembled into a
+sixteen-byte carrier, the divisor is the constant three zero-extended to the
+same width, and the remainder is narrowed back with a `Subpiece`. Neither the
+widened divisor nor the narrowing had a case in `indexed_offset_upper_bound`,
+so the layout refused with `MissingConstantOffset` and no span was built.
+
+Both are exact rather than approximate. A constant a machine widened is that
+constant, whatever the widening, and the low piece of a value bounded by `b` is
+bounded by `b` or by what its own width holds, whichever is smaller. The
+remainder rule already said the answer is below the divisor; it now finds the
+divisor.
+
+The table renders correctly now: three elements, all three stores kept, and
+the read spelled `stack_m40[index]`. The cell still fails its differential,
+because the indirect call through the chosen pointer passes four arguments
+where the source passes two -- the same call-site arity question the variadic
+local raises, and the next thing to fix in this function.
