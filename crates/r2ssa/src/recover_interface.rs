@@ -457,13 +457,81 @@ fn read_covers_slot(read: CanonicalStorageId, slot: CanonicalStorageId) -> bool 
 /// while a function that only defines the low half has a narrow logical result.
 /// Requiring every contributing value to belong to the convention's exact
 /// location keeps an unrelated register from becoming return-width evidence.
+/// Whether a call left this register undefined rather than returning it.
+///
+/// A `CallDefine` stands for whatever a call may have written. When the
+/// boundary proves the callee returns nothing, the register holds no value
+/// the program produced, so reaching the exit through one is not a result.
+fn clobbered_by_a_void_call(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    value: crate::ValueId,
+) -> bool {
+    let Some(inst) = graph.def_inst(value) else {
+        return false;
+    };
+    let Some(instruction) = graph.inst(inst) else {
+        return false;
+    };
+    if !matches!(
+        instruction.payload,
+        crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. })
+    ) {
+        return false;
+    }
+    // A call and the definitions it stands for are separate instructions, so
+    // the site is the nearest call above them in the same block.
+    let Some(block) = graph.block(instruction.block) else {
+        return false;
+    };
+    let Some(id) = block
+        .insts
+        .iter()
+        .take_while(|candidate| **candidate != inst)
+        .filter(|candidate| {
+            graph.inst(**candidate).is_some_and(|candidate| {
+                matches!(
+                    candidate.payload,
+                    crate::graph::InstPayload::Op(
+                        crate::op::SSAOp::Call { .. } | crate::op::SSAOp::CallInd { .. }
+                    )
+                )
+            })
+        })
+        .last()
+        .and_then(|call| facts.call_sites.by_inst.get(call))
+    else {
+        return false;
+    };
+    let Some(boundary) = facts.boundaries.calls.get(id) else {
+        return false;
+    };
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "live-out {value:?} is defined by call {id:?}: complete={} result={:?}",
+        boundary.results_complete,
+        boundary.result_kind
+    );
+    // A boundary that names no result carrier proves none: the callee either
+    // returns nothing or is not known to, and neither produced a value here.
+    boundary.results_complete
+        && !matches!(
+            boundary.result_kind,
+            Some(crate::SourceCallResult::Register { .. })
+        )
+}
+
 fn recovered_result(
     graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
 ) -> Option<RecoveredResult> {
     let mut observed = None;
     for value in live_out.iter() {
+        if clobbered_by_a_void_call(graph, facts, value) {
+            continue;
+        }
         let storage = graph.value(value)?.canonical_storage?;
         if storage.location() != slot.location() || storage.size == 0 || storage.size > slot.size {
             return None;
@@ -674,7 +742,7 @@ fn recover_interface_inner(
             crate::liveout::FunctionLiveOut::compute(func, &graph, &[candidate]);
         if !candidate_live_out.is_empty() && candidate_live_out.unresolved_blocks().next().is_none()
         {
-            result = recovered_result(&graph, &candidate_live_out, candidate);
+            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
             live_out = candidate_live_out;
         }
     }
