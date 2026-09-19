@@ -362,7 +362,9 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
             "            {:#010x}      {:<14} {}\n",
             pc,
             hex,
-            session.flags.spell(&r2_mnemonic(&mnemonic))
+            session
+                .flags
+                .spell(&r2_mnemonic(&mnemonic, session.image.arch().name))
         ));
         pc += size as u64;
     }
@@ -372,7 +374,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
 /// Radare2 spells an instruction lowercase, with a space after each comma and
 /// no `#` before an immediate, where Sleigh keeps the assembler's own prefix.
 #[cfg(feature = "sleigh")]
-fn r2_mnemonic(text: &str) -> String {
+fn r2_mnemonic(text: &str, arch: &str) -> String {
     let lowered = text.to_lowercase();
     let mut out = String::with_capacity(lowered.len());
     let mut chars = lowered.chars().peekable();
@@ -385,7 +387,76 @@ fn r2_mnemonic(text: &str) -> String {
             out.push(' ');
         }
     }
+    // Sleigh writes the x86 memory-operand size as `dword ptr [..]` and a
+    // negative displacement as `+ -0x4`; radare2 writes `dword [..]` and
+    // `- 0x4`. Same operand, and the two spellings are only spellings.
+    let out = out.replace(" ptr [", " [").replace("+ -", "- ");
+    let out = bare_effective_address(&out);
+    if arch == "ARM" {
+        arm_role_registers(&out)
+    } else {
+        out
+    }
+}
+
+/// radare2 spells the three ARM registers that have a job by that job.
+///
+/// The procedure call standard gives r11, r12, r13 and r14 the roles of frame
+/// pointer, intra-procedure scratch, stack pointer and link register, and
+/// every ARM disassembler but Sleigh's prints the role.
+#[cfg(feature = "sleigh")]
+fn arm_role_registers(text: &str) -> String {
+    const ROLES: [(&str, &str); 5] = [
+        ("r11", "fp"),
+        ("r12", "ip"),
+        ("r13", "sp"),
+        ("r14", "lr"),
+        ("r15", "pc"),
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('r') {
+        out.push_str(&rest[..start]);
+        let taken = ROLES.iter().find(|(spelling, _)| {
+            rest[start..].starts_with(spelling)
+                && !rest[start + spelling.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())
+        });
+        match taken {
+            Some((spelling, role)) => {
+                out.push_str(role);
+                rest = &rest[start + spelling.len()..];
+            }
+            None => {
+                out.push('r');
+                rest = &rest[start + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
     out
+}
+
+/// `lea` loads an address rather than what is there, and radare2 writes that
+/// address without the brackets that would say it was read.
+///
+/// Only where the brackets hold one thing: `lea r8, [0x8f0]` is that address,
+/// while `lea rax, [rbp - 0x4]` is a computation and keeps its shape.
+#[cfg(feature = "sleigh")]
+fn bare_effective_address(text: &str) -> String {
+    let Some(rest) = text.strip_prefix("lea ") else {
+        return text.to_owned();
+    };
+    let Some(open) = rest.find('[') else {
+        return text.to_owned();
+    };
+    let Some(close) = rest.rfind(']') else {
+        return text.to_owned();
+    };
+    let inside = &rest[open + 1..close];
+    if close + 1 != rest.len() || inside.contains(' ') || inside.is_empty() {
+        return text.to_owned();
+    }
+    format!("lea {}{}", &rest[..open], inside)
 }
 
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
