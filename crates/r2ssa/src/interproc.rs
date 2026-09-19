@@ -1273,6 +1273,17 @@ impl PreparedCalleeSummary {
             }
         }
         reach.retain(|index, _| !unbounded.contains(index));
+        r2il::refusal_evidence!(
+            "argument-reach",
+            "{:#x}: reach={reach:?} unbounded={unbounded:?} unknown_calls={} effects={:?}",
+            self.id.0,
+            self.local.has_unknown_calls,
+            self.local
+                .memory_effects
+                .iter()
+                .map(|effect| (effect.kind, effect.location))
+                .collect::<Vec<_>>()
+        );
         reach
     }
 }
@@ -2387,6 +2398,12 @@ fn classify_memory_access_location_value(
                 None if abi.is_source_owned() => return unknown_location(),
                 None => expression.parameter,
             };
+            r2il::refusal_evidence!(
+                "summary-location",
+                "parameter {parameter} expression for {candidate:?}: offset={} terms={:?}",
+                expression.offset,
+                expression.terms
+            );
             return arg_location(
                 parameter,
                 expression.terms.is_empty().then_some(expression.offset),

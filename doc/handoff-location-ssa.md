@@ -29545,7 +29545,48 @@ It is unbounded in the callee and bounded at every call site: the loop proves
 
 So the reach a call site hands the object model should be the callee's range
 resolved against the bounds the caller proves for the arguments it passes --
-`k * (bound + 1)` where the callee touches `base + k * arg`. That is the
+`constant + k * bound` where the callee touches `base + k * arg`. That is the
 argument-scaled summary range this document already lists as open for the
 pointer table, and it is what sizes `rows` at thirty-two bytes and makes the
 three writes readable.
+
+The whole chain was built and then reverted, because it stops one layer short
+and the tree does not keep machinery nothing exercises. What it reached, and
+where it stopped, is worth starting from.
+
+`SummaryMemoryRange` can carry a `scale` -- an argument and a coefficient --
+produced where a parameter address expression has exactly one affine term, and
+`callee_write_spans` resolves it at the call site with
+`indexed_offset_upper_bound` on the value that site passes. Two evidence lines
+stay: `argument-reach` says what a callee's per-argument reach came to and what
+made it unbounded, and `summary-location` says what a parameter address
+expression looked like. They are what turned this from guesswork into a
+sequence of facts, and the first of them showed that `callee_argument_reach`
+had never once been non-empty:
+
+```
+0x100001120: reach={} unbounded={0} effects=[
+  (Read, Arg { index: 0 }, range: None),
+  (Read, Unknown, range: None)]
+```
+
+The dereference is already `Unknown`, which is right. The scaled read of
+`rows[index]` is the one with no range, and `summary-location` shows the
+expression is there with the coefficient:
+
+```
+parameter 0 expression for ValueId(24): offset=0 terms=[{ value: ValueId(20), coefficient: 8 }]
+```
+
+What fails is matching `ValueId(20)` to the formal. At -O0 the index parameter
+is spilled to its home slot on entry and reloaded at the use, and a home slot
+is deliberately not promoted -- `spills_an_incoming_value` keeps it as the
+parameter's home. So the term names a memory load, and following copies,
+widenings and low-half projections never reaches the formal, because the value
+never travels through them.
+
+The fact that would close it is the one `promote_private_stack_slots` already
+computes and discards: `parameter_homes`, the set of displacements that hold an
+incoming value. Retaining it as a map from displacement to parameter index, and
+answering `formal_argument_of_value` from a load of such a slot, is the step
+this stopped at.
