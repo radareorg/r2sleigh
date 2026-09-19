@@ -1644,8 +1644,10 @@ impl BindingPlan {
             })
             .unwrap_or_default();
         crate::stage_timing::mark("plan_objects");
-        let escaped_frame_objects =
-            super::rules::frame_objects_with_escaped_address(source_owned, &machine_projection);
+        let super::rules::EscapedFrameObjects {
+            escaped: escaped_frame_objects,
+            reached_by_callee: callee_reached_frame_objects,
+        } = super::rules::frame_objects_with_escaped_address(source_owned, &machine_projection);
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,
@@ -1656,6 +1658,7 @@ impl BindingPlan {
             stack_objects,
             call_clobbers,
             escaped_frame_objects,
+            callee_reached_frame_objects,
             access_syntax,
             typed: std::cell::OnceCell::new(),
         };

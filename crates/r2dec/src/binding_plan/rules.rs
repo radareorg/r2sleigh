@@ -741,15 +741,24 @@ fn distinct_reader_count(use_sites: &[r2ssa::UseSite], boundary_readers: &[InstI
 /// object is defined by a statement this function does not contain. Reading it
 /// afterwards is ordinary C and needs no assignment here. A read that is the
 /// address of a memory access, or the frame geometry itself, is not an escape.
+/// Frame objects a callee may touch: those whose address leaves this body
+/// (`escaped`), and among them those a call is proven to reach through an
+/// argument, with everything the reach covers (`reached_by_callee`).
+pub(super) struct EscapedFrameObjects {
+    pub escaped: BTreeSet<r2ssa::ObjectId>,
+    pub reached_by_callee: BTreeSet<r2ssa::ObjectId>,
+}
+
 pub(super) fn frame_objects_with_escaped_address(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
-) -> BTreeSet<r2ssa::ObjectId> {
+) -> EscapedFrameObjects {
     let source = source_owned.source();
     let graph = source.graph();
     let geometry = &source.certificates().stack_geometry.insts;
     let boundary_readers = certified_value_readers(source);
     let mut escaped = BTreeSet::new();
+    let mut reached_by_callee = BTreeSet::new();
     for value in &graph.values {
         let Some(object) = r2rewrite::exact_stack_object_address(source, value.id) else {
             continue;
@@ -766,13 +775,15 @@ pub(super) fn frame_objects_with_escaped_address(
             continue;
         }
         escaped.insert(object);
-        // A callee handed `&value` may write any byte of `value`: every
-        // object inside the parameter's pointee is written through that
-        // pointer too. A parameter whose pointee has no known size escapes
-        // nothing beyond the object the address names.
-        let Some(size) = escaped_pointee_size_bytes(source_owned, value.id) else {
+        // A callee handed `&value` may reach every object from `value` to
+        // the end of what it is proven to touch: the declared aggregate, the
+        // bytes its body is proven to read or write, and, where it touches
+        // memory the summary cannot bound, everything above the address in
+        // this frame.
+        let Some(reach) = escaped_pointee_reach(source_owned, value.id) else {
             continue;
         };
+        reached_by_callee.insert(object);
         let objects = source.objects();
         let Some(root) = objects
             .stack_objects
@@ -782,33 +793,70 @@ pub(super) fn frame_objects_with_escaped_address(
         else {
             continue;
         };
-        let Some(end) = i64::try_from(size)
-            .ok()
-            .and_then(|size| root.offset.checked_add(size))
-        else {
-            continue;
-        };
-        for (key, other) in &objects.stack_objects {
-            if key.root.base == root.base && key.root.offset > root.offset && key.root.offset < end
-            {
-                r2il::refusal_evidence!(
-                    "escape-reaches",
-                    "{object:?} at {root:?} escapes {size} bytes and covers {other:?} at {:?}",
-                    key.root
-                );
-                escaped.insert(*other);
+        let end = match reach {
+            EscapeReach::Bytes(size) => {
+                let Some(end) = i64::try_from(size)
+                    .ok()
+                    .and_then(|size| root.offset.checked_add(size))
+                else {
+                    continue;
+                };
+                Some(end)
             }
+            EscapeReach::Frame => None,
+        };
+        // Upward through the frame in address order. An unbounded reach
+        // stops at the first object that is not this function's own local:
+        // a saved register the epilogue restores. The callee was handed a
+        // local and what it may touch is the allocation, not the frame's
+        // bookkeeping above it.
+        let mut above = objects
+            .stack_objects
+            .iter()
+            .filter(|(key, _)| key.root.base == root.base && key.root.offset > root.offset)
+            .collect::<Vec<_>>();
+        above.sort_by_key(|(key, _)| key.root.offset);
+        let round_trips = &source.certificates().stack_frame_round_trips;
+        for (key, other) in above {
+            if let Some(end) = end
+                && key.root.offset >= end
+            {
+                break;
+            }
+            if end.is_none() && round_trips.contains_key(other) {
+                break;
+            }
+            r2il::refusal_evidence!(
+                "escape-reaches",
+                "{object:?} at {root:?} escapes {reach:?} and covers {other:?} at {:?}",
+                key.root
+            );
+            escaped.insert(*other);
+            reached_by_callee.insert(*other);
         }
     }
-    escaped
+    EscapedFrameObjects {
+        escaped,
+        reached_by_callee,
+    }
 }
 
-/// How many bytes the callee an address is passed to may write through it:
-/// the size of the parameter's pointee, from the declared signature.
-fn escaped_pointee_size_bytes(
+/// How far a callee may reach through a frame address it is handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeReach {
+    /// This many bytes from the address.
+    Bytes(u64),
+    /// Anything above the address in this frame: the callee touches memory
+    /// the summary cannot bound.
+    Frame,
+}
+
+/// How far the callee an address is passed to may reach through it: the
+/// size of the declared aggregate, else what its body is proven to touch.
+fn escaped_pointee_reach(
     source_owned: &SourceOwnedFunctionFacts,
     value: ValueId,
-) -> Option<u64> {
+) -> Option<EscapeReach> {
     let source = source_owned.source();
     let ptr_bits = source
         .machine_context()
@@ -869,15 +917,18 @@ fn escaped_pointee_size_bytes(
                 .aggregates()
                 .iter()
                 .find(|aggregate| aggregate.name() == name)
-                .map(|aggregate| aggregate.size_bits().div_ceil(8));
+                .map(|aggregate| EscapeReach::Bytes(aggregate.size_bits().div_ceil(8)));
         }
         // A scalar pointee is an element, not an extent: `char *s` is as often
         // an array as one byte. It is the floor under what the callee's own
         // body proves it writes.
-        let scalar_floor = declared.as_ref().and_then(|scalar| {
-            r2types::declaration_type_width_bits(scalar, ptr_bits)
-                .map(|bits| u64::from(bits).div_ceil(8))
-        });
+        let scalar_floor = declared
+            .as_ref()
+            .and_then(|scalar| {
+                r2types::declaration_type_width_bits(scalar, ptr_bits)
+                    .map(|bits| u64::from(bits).div_ceil(8))
+            })
+            .map(EscapeReach::Bytes);
         // The callee's own body: the bytes it is proven to write through this
         // argument, and nothing if it hands the pointer on to something the
         // summary does not see.
@@ -895,7 +946,8 @@ fn escaped_pointee_size_bytes(
                 facts.direct_target,
                 source_owned.report().interproc_summary_set().is_some()
             );
-            return scalar_floor;
+            // A callee nothing describes may reach anything the address leads to.
+            return Some(EscapeReach::Frame);
         };
         r2il::refusal_evidence!(
             "escape-callee",
@@ -906,7 +958,7 @@ fn escaped_pointee_size_bytes(
             summary.memory_effects
         );
         if summary.has_unknown_calls || summary.touches_unknown_memory {
-            return scalar_floor;
+            return Some(EscapeReach::Frame);
         }
         // A bounded transfer into the argument writes at most its length,
         // where the length is a constant at this call.
@@ -953,25 +1005,31 @@ fn escaped_pointee_size_bytes(
             if index != argument.index {
                 continue;
             }
+            // A read is a reach as much as a write: the object it lands on
+            // is observed, and a store into it is not dead. An address the
+            // callee keeps or frees may be followed anywhere.
             match effect.kind {
-                r2ssa::SummaryMemoryEffectKind::Write => {}
-                r2ssa::SummaryMemoryEffectKind::Read => continue,
+                r2ssa::SummaryMemoryEffectKind::Write | r2ssa::SummaryMemoryEffectKind::Read => {}
                 r2ssa::SummaryMemoryEffectKind::Escape | r2ssa::SummaryMemoryEffectKind::Free => {
-                    return None;
+                    return Some(EscapeReach::Frame);
                 }
             }
-            // A write the transfer already bounds carries no range of its own.
+            // An access the transfer already bounds carries no range of its own.
             let Some(range) = effect.location.range else {
                 if has_transfer {
                     continue;
                 }
-                return None;
+                return Some(EscapeReach::Frame);
             };
             end = Some(end.map_or(range.offset_hi, |end| end.max(range.offset_hi)));
         }
-        let proven = end.and_then(|end| u64::try_from(end.checked_add(1)?).ok());
+        let proven = end
+            .and_then(|end| u64::try_from(end.checked_add(1)?).ok())
+            .map(EscapeReach::Bytes);
         match (proven, scalar_floor) {
-            (Some(proven), Some(floor)) => Some(proven.max(floor)),
+            (Some(EscapeReach::Bytes(proven)), Some(EscapeReach::Bytes(floor))) => {
+                Some(EscapeReach::Bytes(proven.max(floor)))
+            }
             (proven, floor) => proven.or(floor),
         }
     })

@@ -28798,3 +28798,35 @@ each derivation, each stored frame address, and each load's attribution under
 
 All six `shape_call_chain` cells pass the differential now. The x86-64 cells
 never showed the defect because that code base keeps `&third` in a register.
+
+## A callee's reach through a frame address is not one byte
+
+`shape_pointer_to_pointer` silently dropped the stores that filled `rows[1..3]`
+and `two`: `&rows` went to `indirect_load`, whose summary reads argument 0
+at an offset it cannot bound, and the escape rule answered nothing for an
+unbounded read, so the stores into the neighbouring objects were dead to
+placement and vanished. Compiled, the rendering read three uninitialised
+pointers.
+
+Two changes in the binding plan. `escaped_pointee_reach` now says how far the
+callee may reach: a declared aggregate's size, else the bytes the summary
+proves it reads or writes -- a read is a reach as much as a write -- and,
+where the summary cannot bound the access or the callee is unknown, the
+whole frame above the address up to the first saved-register round trip.
+And a store into an object a call is proven to reach (`callee_reached_frame_objects`,
+kept apart from the broader escaped set: the frame pointer's own slot
+"escapes" too, and keying on that rendered every push) is an effectful
+write in `collect_final_placement_occurrences`, so placement never files it
+as a dead store, whatever this body reads of it.
+
+What this exposed. In that function the stack pointer leaks into the
+program: the flag results of `sub rsp, 0x50` feed a loop-header merge that
+is dead, `deadphi` keeps them because their defining instruction owns a
+`LiveValueProducer` obligation, the stack pointer therefore leaves the
+geometry, the pops at the exit are no longer round trips, and three frame
+addresses render as `RSP_0 + -0x58`. The reach bound then finds no round
+trip to stop at and marks the push slots escaped, so the saved-register
+stores render. `observed-through-dead-merge` now prints the definition's own
+obligations, which is what identified the rule; the rule itself -- an
+obligation-owning definition whose every use is a dead merge -- is not
+changed here.

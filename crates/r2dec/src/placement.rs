@@ -589,6 +589,14 @@ pub(crate) fn collect_final_placement_occurrences(
                     }
                 };
                 if is_write {
+                    // A callee reads the object through an address this
+                    // function handed it, so the store is observed outside
+                    // this body whatever this body reads of it.
+                    let read_by_callee = matches!(
+                        names.plan().binding_role(binding),
+                        Some(crate::binding_plan::BindingRole::StackObject { object })
+                            if names.plan().callee_reached_frame_objects().contains(&object)
+                    );
                     writes.push(FinalBindingWrite {
                         binding,
                         inst: access.inst,
@@ -599,11 +607,12 @@ pub(crate) fn collect_final_placement_occurrences(
                         order,
                         observation,
                         inline_eligible: false,
-                        effectful: removing_statement_would_lose_an_effect(
-                            source,
-                            access.inst,
-                            &answered_effect_sites,
-                        ),
+                        effectful: read_by_callee
+                            || removing_statement_would_lose_an_effect(
+                                source,
+                                access.inst,
+                                &answered_effect_sites,
+                            ),
                     });
                 } else {
                     let indexed = source

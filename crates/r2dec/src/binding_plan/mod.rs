@@ -1337,6 +1337,8 @@ pub(crate) struct BindingPlan {
     /// on the stack is bound to a temporary rather than inlined, and the escape
     /// is the same fact either way.
     escaped_frame_objects: BTreeSet<r2ssa::ObjectId>,
+    /// Frame objects a call is proven to reach through an argument.
+    callee_reached_frame_objects: BTreeSet<r2ssa::ObjectId>,
     /// How each memory access is spelled, decided from the facts; absent when refused.
     access_syntax: BTreeMap<r2ssa::StructuredAccessId, access_syntax::AccessSyntax>,
     /// The C type at every boundary of the projection, under these
@@ -1487,6 +1489,11 @@ impl BindingPlan {
     /// contain empty cells when the certified slot domain is sparse.
     pub(crate) fn parameter_disposition(&self, slot: u32) -> Option<ParameterDisposition> {
         self.parameters.get(slot as usize).copied().flatten()
+    }
+
+    /// The frame objects a call is proven to reach through an address this function handed it.
+    pub(crate) fn callee_reached_frame_objects(&self) -> &BTreeSet<r2ssa::ObjectId> {
+        &self.callee_reached_frame_objects
     }
 
     pub(crate) fn binding_role(&self, binding: BindingId) -> Option<BindingRole> {

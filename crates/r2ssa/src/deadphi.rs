@@ -395,13 +395,25 @@ impl DeadPhis {
                     format!("{:?}/{:?}", obligation.id.kind, obligation.id.instruction)
                 })
                 .collect::<Vec<_>>();
-            let definition_state = graph
+            let definition = graph
                 .def_inst(value.id)
-                .and_then(|inst| obligations.instruction_for_inst(inst))
-                .map(|instruction| format!("{:?}", instruction.state));
+                .and_then(|inst| obligations.instruction_for_inst(inst));
+            let definition_state = definition.map(|instruction| format!("{:?}", instruction.state));
+            let own_obligations = definition
+                .map(|instruction| {
+                    obligations
+                        .obligations()
+                        .values()
+                        .filter(|obligation| obligation.id.instruction == instruction.id)
+                        .map(|obligation| {
+                            format!("{:?}/{:?}", obligation.id.kind, obligation.id.component)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             r2il::refusal_evidence!(
                 "observed-through-dead-merge",
-                "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} obligations={rooted_by:?}",
+                "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} own_obligations={own_obligations:?} obligations={rooted_by:?}",
                 value.id,
                 uses.len(),
                 observed.contains(&value.id),
