@@ -10,7 +10,65 @@
 //! a `<name>=cc` line declaring that `<name>` is a convention. Every fact about
 //! a convention is spelled `cc.<name>.<what>`.
 
+pub mod compiler_spec;
+
+pub use compiler_spec::CompilerSpec;
+
 use std::collections::BTreeMap;
+
+/// One location, and the register names that spell it.
+///
+/// arm64's data writes a floating-point slot as `{d0,s0,v0,q0}`: one place,
+/// named by whichever width the instruction uses. A caller that wants a single
+/// spelling takes `name`; one matching a register the code actually touched
+/// tests `spells`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Slot {
+    names: Vec<String>,
+}
+
+impl Slot {
+    /// Parse one value: a bare register, or a `{a,b,c}` alias group.
+    fn parse(value: &str) -> Self {
+        let inner = value
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .unwrap_or(value);
+        Self { names: list(inner) }
+    }
+
+    /// The first spelling, which is the widest the data names.
+    pub fn name(&self) -> &str {
+        self.names.first().map_or("", String::as_str)
+    }
+
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// Whether this location is what `register` names, in any width.
+    pub fn spells(&self, register: &str) -> bool {
+        self.names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(register))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+/// Where arguments go once the register slots run out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ArgumentTail {
+    /// The convention states none, so it has no tail.
+    #[default]
+    None,
+    /// Pushed in declaration order.
+    Stack,
+    /// Pushed in reverse, so the last argument is nearest the return address.
+    StackReversed,
+}
 
 /// The conventions one architecture and width declare.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,21 +85,25 @@ pub struct Conventions {
 pub struct Convention {
     pub name: String,
     /// Integer argument registers, in order. An argument past the end of this
-    /// list is on the stack when `stack_arguments` is set.
-    pub args: Vec<String>,
+    /// list goes where `tail` says.
+    pub args: Vec<Slot>,
     /// Floating-point argument registers, in order, where the convention
     /// passes them separately.
-    pub float_args: Vec<String>,
-    /// `argn=stack`: arguments past the registers are passed on the stack.
-    pub stack_arguments: bool,
-    /// Result registers, `ret0` first.
-    pub returns: Vec<String>,
+    pub float_args: Vec<Slot>,
+    /// Where arguments past the register slots are passed.
+    pub tail: ArgumentTail,
+    /// Result registers as the data spells them, `ret0` first. How many of
+    /// them the convention actually uses is `result_count`.
+    pub returns: Vec<Slot>,
+    /// `retn`: how many result registers this convention uses. Absent means
+    /// one, which is every convention but D's.
+    pub declared_result_count: Option<u32>,
     /// Floating-point result register.
-    pub float_return: Option<String>,
+    pub float_return: Option<Slot>,
     /// Where the object pointer arrives, for conventions that name one.
-    pub self_register: Option<String>,
+    pub self_register: Option<Slot>,
     /// Where an error is returned, for conventions that name one.
-    pub error_register: Option<String>,
+    pub error_register: Option<Slot>,
     /// Registers the callee may destroy.
     pub clobbered: Vec<String>,
     /// Registers the callee must restore.
@@ -55,8 +117,6 @@ pub struct Convention {
     pub shadow_bytes: u64,
     /// Bytes below the stack pointer a leaf function may use without moving it.
     pub redzone_bytes: u64,
-    /// Bytes the callee pops beyond the return address.
-    pub callee_popped_bytes: u64,
     /// Arguments are placed in reverse order.
     pub reversed_arguments: bool,
     /// How a result too large for a register comes back, verbatim from the
@@ -165,26 +225,39 @@ impl Conventions {
 impl Convention {
     /// Where the argument at `index` arrives, or `None` when it is on the
     /// stack or the convention does not reach that far.
-    pub fn argument(&self, index: usize) -> Option<&str> {
-        self.args.get(index).map(String::as_str)
+    pub fn argument(&self, index: usize) -> Option<&Slot> {
+        self.args.get(index)
     }
 
     /// Where the floating-point argument at `index` arrives.
-    pub fn float_argument(&self, index: usize) -> Option<&str> {
-        self.float_args.get(index).map(String::as_str)
+    pub fn float_argument(&self, index: usize) -> Option<&Slot> {
+        self.float_args.get(index)
+    }
+
+    /// The result slots this convention uses, which is one unless the data
+    /// declares more.
+    pub fn results(&self) -> &[Slot] {
+        let count = self.declared_result_count.unwrap_or(1) as usize;
+        &self.returns[..count.min(self.returns.len())]
     }
 
     /// The result register, where there is one.
-    pub fn return_register(&self) -> Option<&str> {
-        self.returns.first().map(String::as_str)
+    pub fn return_register(&self) -> Option<&Slot> {
+        self.results().first()
     }
 
     fn take(&mut self, what: &str, value: &str) {
         match what {
-            "argn" => self.stack_arguments = value == "stack",
-            "fpret0" => self.float_return = Some(value.to_owned()),
-            "self" => self.self_register = Some(value.to_owned()),
-            "error" => self.error_register = Some(value.to_owned()),
+            "argn" => {
+                self.tail = match value {
+                    "stack" => ArgumentTail::Stack,
+                    "stack_rev" => ArgumentTail::StackReversed,
+                    _ => ArgumentTail::None,
+                }
+            }
+            "fpret0" => self.float_return = Some(Slot::parse(value)),
+            "self" => self.self_register = Some(Slot::parse(value)),
+            "error" => self.error_register = Some(Slot::parse(value)),
             "clobber" => self.clobbered = list(value),
             "preserve" => self.preserved = list(value),
             "pop" => {
@@ -203,7 +276,7 @@ impl Convention {
             }
             "shadow" => self.shadow_bytes = value.parse().unwrap_or(0),
             "redzone" => self.redzone_bytes = value.parse().unwrap_or(0),
-            "retn" => self.callee_popped_bytes = value.parse().unwrap_or(0),
+            "retn" => self.declared_result_count = value.parse().ok(),
             "revarg" => self.reversed_arguments = value != "0",
             "retmech" => self.return_mechanism = Some(value.to_owned()),
             _ => self.take_indexed(what, value),
@@ -215,16 +288,16 @@ impl Convention {
         let Some((prefix, index)) = split_index(what) else {
             return;
         };
-        let slot = match prefix {
+        let slot: &mut Vec<Slot> = match prefix {
             "arg" => &mut self.args,
             "fparg" => &mut self.float_args,
             "ret" => &mut self.returns,
             _ => return,
         };
         if slot.len() <= index {
-            slot.resize(index + 1, String::new());
+            slot.resize(index + 1, Slot::default());
         }
-        slot[index] = value.to_owned();
+        slot[index] = Slot::parse(value);
     }
 }
 
@@ -267,10 +340,11 @@ mod tests {
         let conventions = Conventions::for_arch("x86-64", 64).expect("x86-64 conventions");
         assert_eq!(conventions.default_name(), Some("amd64"));
         let amd64 = conventions.default_convention().expect("amd64");
-        assert_eq!(amd64.args, ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]);
+        let args: Vec<&str> = amd64.args.iter().map(Slot::name).collect();
+        assert_eq!(args, ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]);
         assert_eq!(amd64.float_args.len(), 8);
-        assert_eq!(amd64.return_register(), Some("rax"));
-        assert!(amd64.stack_arguments);
+        assert_eq!(amd64.return_register().map(Slot::name), Some("rax"));
+        assert_eq!(amd64.tail, ArgumentTail::Stack);
         assert_eq!(amd64.pop, Some(Pop::Caller));
         assert_eq!(amd64.stack_allocation, Some(StackAllocation::Lower));
         assert_eq!(amd64.redzone_bytes, 128);
@@ -282,7 +356,8 @@ mod tests {
     fn the_windows_convention_carries_its_shadow_space() {
         let conventions = Conventions::for_arch("amd64", 64).expect("x86-64 conventions");
         let ms = conventions.get("ms").expect("ms");
-        assert_eq!(ms.args, ["rcx", "rdx", "r8", "r9"]);
+        let args: Vec<&str> = ms.args.iter().map(Slot::name).collect();
+        assert_eq!(args, ["rcx", "rdx", "r8", "r9"]);
         assert_eq!(ms.shadow_bytes, 32);
         // win64 passes one sequence with per-type homes, so there is no
         // separate float argument sequence to read.
@@ -293,19 +368,45 @@ mod tests {
     fn aarch64_arguments_are_the_first_eight_registers() {
         let conventions = Conventions::for_arch("aarch64", 64).expect("arm-64 conventions");
         let default = conventions.default_convention().expect("default");
-        assert_eq!(
-            default.args,
-            ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-        );
-        assert_eq!(default.return_register(), Some("x0"));
+        let args: Vec<&str> = default.args.iter().map(Slot::name).collect();
+        assert_eq!(args, ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]);
+        assert_eq!(default.return_register().map(Slot::name), Some("x0"));
+    }
+
+    #[test]
+    fn a_float_slot_keeps_every_width_that_spells_it() {
+        let conventions = Conventions::for_arch("aarch64", 64).expect("arm-64 conventions");
+        let default = conventions.default_convention().expect("default");
+        let first = default.float_argument(0).expect("fparg0");
+        assert!(first.spells("d0"), "{:?}", first.names());
+        assert!(first.spells("S0"), "{:?}", first.names());
+        assert!(!first.spells("d1"));
+    }
+
+    #[test]
+    fn only_a_convention_that_declares_two_results_has_two() {
+        let x86 = Conventions::for_arch("x86-64", 64).expect("x86-64 conventions");
+        let dlang = x86.get("dlang").expect("dlang");
+        assert_eq!(dlang.declared_result_count, Some(2));
+        assert_eq!(dlang.results().len(), 2);
+        // amd64 parses no `retn`, so one result register is all it claims.
+        assert_eq!(x86.get("amd64").expect("amd64").results().len(), 1);
+    }
+
+    #[test]
+    fn a_reversed_stack_tail_is_still_a_stack_tail() {
+        let x86 = Conventions::for_arch("x86", 32).expect("x86-32 conventions");
+        let pascal = x86.get("pascal").expect("pascal");
+        assert_eq!(pascal.tail, ArgumentTail::StackReversed);
+        assert_eq!(x86.get("cdecl").expect("cdecl").tail, ArgumentTail::Stack);
     }
 
     #[test]
     fn a_convention_naming_a_self_register_keeps_it() {
         let conventions = Conventions::for_arch("aarch64", 64).expect("arm-64 conventions");
         let swift = conventions.get("swift").expect("swift");
-        assert_eq!(swift.self_register.as_deref(), Some("x20"));
-        assert_eq!(swift.error_register.as_deref(), Some("x21"));
+        assert_eq!(swift.self_register.as_ref().map(Slot::name), Some("x20"));
+        assert_eq!(swift.error_register.as_ref().map(Slot::name), Some("x21"));
     }
 
     #[test]
@@ -318,7 +419,8 @@ mod tests {
     fn comments_and_declarations_are_not_facts() {
         let conventions = Conventions::parse("# a comment\nfoo=cc\ncc.foo.arg0=r0\n");
         let foo = conventions.get("foo").expect("foo");
-        assert_eq!(foo.args, ["r0"]);
+        assert_eq!(foo.args.len(), 1);
+        assert_eq!(foo.args[0].name(), "r0");
         assert_eq!(conventions.names().count(), 1);
     }
 }
