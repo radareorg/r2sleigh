@@ -2153,16 +2153,22 @@ impl PreparedFunctionFacts {
         // this rather than count raw use sites.
         let unobserved =
             crate::deadphi::DeadPhis::find_from(graph, &live_out, &obligations, &boundaries);
-        let certificates = collect_prepared_function_certificates(
-            &boundaries,
+        let body = Body {
             function,
             graph,
             machine_context,
-            &objects,
-            &memory,
-            &predicates,
-            &call_sites,
-            &structured,
+        };
+        let derived = Derived {
+            boundaries: &boundaries,
+            objects: &objects,
+            memory: &memory,
+            predicates: &predicates,
+            call_sites: &call_sites,
+            structured: &structured,
+        };
+        let certificates = collect_prepared_function_certificates(
+            body,
+            derived,
             &unobserved,
             &live_out,
             &private_stack_objects,
@@ -7057,13 +7063,9 @@ fn instruction_strictly_precedes(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_stack_frame_round_trip_certificates(
-    boundaries: &SourceBoundaryFacts,
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    machine_context: Option<&SourceMachineContext>,
-    structured: &StructuredDataflowFacts,
+    body: Body<'_>,
+    derived: Derived<'_>,
     callee_allocations: &BTreeMap<ObjectId, CalleeStackAllocationCertificate>,
     unobserved: &crate::deadphi::DeadPhis,
     live_out: &crate::liveout::FunctionLiveOut,
@@ -7071,6 +7073,12 @@ fn collect_stack_frame_round_trip_certificates(
     BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
     BTreeMap<InstId, ObjectId>,
 ) {
+    let Body {
+        function,
+        graph,
+        machine_context,
+    } = body;
+    let (boundaries, structured) = (derived.boundaries, derived.structured);
     let mut certificates = BTreeMap::new();
     let mut by_inst = BTreeMap::new();
     for (object, allocation) in callee_allocations {
@@ -9404,26 +9412,54 @@ fn collect_memory_round_trips(
     certificates
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "this single canonical certificate pass explicitly joins each upstream fact owner without a parallel wrapper"
-)]
+/// The function itself: its blocks, its graph, and the machine it was lifted
+/// for.
+///
+/// The three are read by nearly every collector in this file and are never
+/// apart, so they are one thing rather than three parameters each collector
+/// repeats. `StructuredCollectionInputs` already groups the derived facts this
+/// way for one stage; these do it for the rest.
+#[derive(Clone, Copy)]
+struct Body<'a> {
+    function: &'a SSAFunction,
+    graph: &'a SsaGraph,
+    machine_context: Option<&'a SourceMachineContext>,
+}
+
+/// What has been derived from the body by the time the certificates are proved
+/// over it.
+#[derive(Clone, Copy)]
+struct Derived<'a> {
+    boundaries: &'a SourceBoundaryFacts,
+    objects: &'a ObjectModel,
+    memory: &'a MemorySSAFacts,
+    predicates: &'a PredicateFacts,
+    call_sites: &'a CallSiteFacts,
+    structured: &'a StructuredDataflowFacts,
+}
+
 fn collect_prepared_function_certificates(
-    boundaries: &SourceBoundaryFacts,
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    machine_context: Option<&SourceMachineContext>,
-    objects: &ObjectModel,
-    memory: &MemorySSAFacts,
-    predicates: &PredicateFacts,
-    call_sites: &CallSiteFacts,
-    structured: &StructuredDataflowFacts,
+    body: Body<'_>,
+    derived: Derived<'_>,
     unobserved: &crate::deadphi::DeadPhis,
     live_out: &crate::liveout::FunctionLiveOut,
     private_objects: &BTreeSet<ObjectId>,
     declared_slots: &DeclaredStackSlots,
     memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
 ) -> PreparedFunctionCertificates {
+    let Body {
+        function,
+        graph,
+        machine_context,
+    } = body;
+    let Derived {
+        boundaries,
+        objects,
+        memory,
+        predicates,
+        call_sites,
+        structured,
+    } = derived;
     let DeclaredStackSlots {
         by_key: exact_stack_slots,
     } = declared_slots.clone();
@@ -9561,11 +9597,8 @@ fn collect_prepared_function_certificates(
     );
     let (stack_frame_round_trips, stack_frame_round_trip_by_inst) =
         collect_stack_frame_round_trip_certificates(
-            boundaries,
-            function,
-            graph,
-            machine_context,
-            structured,
+            body,
+            derived,
             &callee_stack_allocations,
             unobserved,
             live_out,
@@ -9915,9 +9948,7 @@ fn collect_prepared_function_certificates(
         .collect::<BTreeSet<_>>();
 
     let (call_results, call_results_by_inst, call_results_by_callsite) =
-        collect_call_result_certificates(
-            boundaries, function, graph, objects, call_sites, structured,
-        );
+        collect_call_result_certificates(body, derived);
     let stack_reloads =
         collect_stack_reload_source_certificates(function, graph, objects, memory, structured);
     let mut stack_slots: BTreeMap<ObjectId, StackSlotCertificate> = stack_slots;
@@ -11328,13 +11359,11 @@ type CallResultCertificateIndexes = (
 );
 
 fn collect_call_result_certificates(
-    boundaries: &SourceBoundaryFacts,
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    objects: &ObjectModel,
-    call_sites: &CallSiteFacts,
-    structured: &StructuredDataflowFacts,
+    body: Body<'_>,
+    derived: Derived<'_>,
 ) -> CallResultCertificateIndexes {
+    let (function, graph) = (body.function, body.graph);
+    let call_sites = derived.call_sites;
     let mut call_results = BTreeMap::new();
     let mut call_results_by_inst = BTreeMap::new();
     let mut call_results_by_callsite = BTreeMap::<CallSiteId, Vec<ValueId>>::new();
@@ -11362,18 +11391,16 @@ fn collect_call_result_certificates(
         };
         let input = merge_call_result_flow_predecessors(function, &out_states, block_addr);
         let output = process_call_result_flow_block(
-            boundaries,
-            function,
+            body,
+            derived,
             block,
-            graph,
-            objects,
-            call_sites,
-            structured,
             &callsites_by_op,
             input,
-            &mut call_results,
-            &mut call_results_by_inst,
-            &mut call_results_by_callsite,
+            CallResultSink {
+                call_results: &mut call_results,
+                call_results_by_inst: &mut call_results_by_inst,
+                call_results_by_callsite: &mut call_results_by_callsite,
+            },
         );
         if out_states.get(&block_addr) == Some(&output) {
             continue;
@@ -11422,21 +11449,33 @@ fn merge_call_result_flow_predecessors(
     merged
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The three indexes a call-result certificate is recorded in at once.
+struct CallResultSink<'a> {
+    call_results: &'a mut BTreeMap<ValueId, CallResultCertificate>,
+    call_results_by_inst: &'a mut BTreeMap<InstId, ValueId>,
+    call_results_by_callsite: &'a mut BTreeMap<CallSiteId, Vec<ValueId>>,
+}
+
 fn process_call_result_flow_block(
-    boundaries: &SourceBoundaryFacts,
-    function: &SSAFunction,
+    body: Body<'_>,
+    derived: Derived<'_>,
     block: &crate::FunctionSSABlock,
-    graph: &SsaGraph,
-    objects: &ObjectModel,
-    call_sites: &CallSiteFacts,
-    structured: &StructuredDataflowFacts,
     callsites_by_op: &BTreeMap<(u64, usize), CallSiteId>,
     mut state: CallResultFlowState,
-    call_results: &mut BTreeMap<ValueId, CallResultCertificate>,
-    call_results_by_inst: &mut BTreeMap<InstId, ValueId>,
-    call_results_by_callsite: &mut BTreeMap<CallSiteId, Vec<ValueId>>,
+    sink: CallResultSink<'_>,
 ) -> CallResultFlowState {
+    let (function, graph) = (body.function, body.graph);
+    let (boundaries, objects, call_sites, structured) = (
+        derived.boundaries,
+        derived.objects,
+        derived.call_sites,
+        derived.structured,
+    );
+    let CallResultSink {
+        call_results,
+        call_results_by_inst,
+        call_results_by_callsite,
+    } = sink;
     let mut active_call = None;
     for (op_index, op) in block.ops.iter().enumerate() {
         match op {
@@ -15112,15 +15151,19 @@ mod tests {
         );
         let facts = artifact.facts();
         let certificates = super::collect_prepared_function_certificates(
-            &facts.boundaries,
-            artifact.function(),
-            artifact.graph(),
-            Some(artifact.machine_context()),
-            &objects,
-            &facts.memory,
-            &facts.predicates,
-            &facts.call_sites,
-            &structured,
+            super::Body {
+                function: artifact.function(),
+                graph: artifact.graph(),
+                machine_context: Some(artifact.machine_context()),
+            },
+            super::Derived {
+                boundaries: &facts.boundaries,
+                objects: &objects,
+                memory: &facts.memory,
+                predicates: &facts.predicates,
+                call_sites: &facts.call_sites,
+                structured: &structured,
+            },
             artifact.unobserved_merges(),
             artifact.live_out(),
             &BTreeSet::new(),
@@ -15161,15 +15204,19 @@ mod tests {
             &access,
         ));
         let certificates = super::collect_prepared_function_certificates(
-            &facts.boundaries,
-            artifact.function(),
-            artifact.graph(),
-            Some(artifact.machine_context()),
-            &mismatched_objects,
-            &facts.memory,
-            &facts.predicates,
-            &facts.call_sites,
-            &structured,
+            super::Body {
+                function: artifact.function(),
+                graph: artifact.graph(),
+                machine_context: Some(artifact.machine_context()),
+            },
+            super::Derived {
+                boundaries: &facts.boundaries,
+                objects: &mismatched_objects,
+                memory: &facts.memory,
+                predicates: &facts.predicates,
+                call_sites: &facts.call_sites,
+                structured: &structured,
+            },
             artifact.unobserved_merges(),
             artifact.live_out(),
             &BTreeSet::new(),
@@ -15761,15 +15808,19 @@ mod tests {
         }
         let allocated_facts = allocated.facts();
         let incomplete = super::collect_prepared_function_certificates(
-            &allocated_facts.boundaries,
-            allocated.function(),
-            allocated.graph(),
-            Some(allocated.machine_context()),
-            allocated.objects(),
-            &allocated_facts.memory,
-            &allocated_facts.predicates,
-            &allocated_facts.call_sites,
-            &incomplete_structured,
+            super::Body {
+                function: allocated.function(),
+                graph: allocated.graph(),
+                machine_context: Some(allocated.machine_context()),
+            },
+            super::Derived {
+                boundaries: &allocated_facts.boundaries,
+                objects: allocated.objects(),
+                memory: &allocated_facts.memory,
+                predicates: &allocated_facts.predicates,
+                call_sites: &allocated_facts.call_sites,
+                structured: &incomplete_structured,
+            },
             allocated.unobserved_merges(),
             allocated.live_out(),
             &BTreeSet::new(),
@@ -15798,15 +15849,19 @@ mod tests {
             },
         );
         let overlapping = super::collect_prepared_function_certificates(
-            &allocated_facts.boundaries,
-            allocated.function(),
-            allocated.graph(),
-            Some(allocated.machine_context()),
-            &overlapping_objects,
-            &allocated_facts.memory,
-            &allocated_facts.predicates,
-            &allocated_facts.call_sites,
-            &allocated_facts.structured,
+            super::Body {
+                function: allocated.function(),
+                graph: allocated.graph(),
+                machine_context: Some(allocated.machine_context()),
+            },
+            super::Derived {
+                boundaries: &allocated_facts.boundaries,
+                objects: &overlapping_objects,
+                memory: &allocated_facts.memory,
+                predicates: &allocated_facts.predicates,
+                call_sites: &allocated_facts.call_sites,
+                structured: &allocated_facts.structured,
+            },
             allocated.unobserved_merges(),
             allocated.live_out(),
             &BTreeSet::new(),

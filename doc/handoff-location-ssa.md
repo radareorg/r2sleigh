@@ -29940,3 +29940,41 @@ is the next piece and the largest one available.
 
 `tests/corpus/arg_census.py` reports the parameter counts, and
 `grep -c 'too_many_arguments'` is the honest progress measure beside it.
+
+## The certificate collectors take the body and what was derived from it
+
+`collect_prepared_function_certificates` took fourteen parameters and carried an
+`#[expect(clippy::too_many_arguments)]` whose recorded reason was that "this
+single canonical certificate pass explicitly joins each upstream fact owner
+without a parallel wrapper". That reason is overridden here, for three
+reasons that were not available when it was written.
+
+The first is that the wrapper it declines already exists in the same file:
+`StructuredCollectionInputs` groups exactly these facts for the structured
+stage, so the pattern is the file's own rather than something imported. The
+second is the scale: thirty-nine functions in `semantic.rs` take three or more
+of `(boundaries, function, graph, machine_context, objects, memory, predicates,
+call_sites, structured)`, and five take every one of their parameters from it,
+so it is not one pass's idiosyncrasy but the shape of the whole module. The
+third is that joining the owners explicitly does not in fact make the join
+visible -- a caller writing fourteen positional arguments cannot be read at all,
+and the wrapper puts the field names back at the call site.
+
+`Body` is the function, its graph and the machine it was lifted for -- three
+things that are never apart. `Derived` is what has been proved from the body by
+the time certificates are collected. The split matters because the collectors
+that *produce* those facts run before `Derived` can exist, so one context would
+have needed optional fields.
+
+`collect_prepared_function_certificates` takes seven parameters instead of
+fourteen, `collect_stack_frame_round_trip_certificates` five instead of eight,
+`process_call_result_flow_block` four instead of twelve, and
+`collect_call_result_certificates` two instead of six. A third group appeared
+while doing it: the three indexes a call-result certificate is written to at
+once are now `CallResultSink`, because the ordinal-and-map pairing is the same
+shape as `EffectSink` above.
+
+Suppressions of the argument-count lint across the tree are down from
+twenty-five to eighteen, and none of the seven was moved rather than removed.
+The three left in this file are the ABI reaching-value search, where the
+repeated group is a search rather than a fact set.
