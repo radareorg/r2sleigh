@@ -325,6 +325,9 @@ pub struct ObjectModel {
     /// Indexed addresses whose base is displaced from the object's base, so
     /// the index alone does not say where in the object the element is.
     pub displaced_indexed_addresses: BTreeSet<ValueId>,
+    /// How far each of those starts from the object's base: `table[i].high`
+    /// is the table's base plus four, indexed.
+    pub indexed_displacements: BTreeMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
 }
@@ -349,6 +352,11 @@ impl ObjectModel {
     /// The value that supplies a computed offset into an object.
     pub fn index_for_address(&self, value: ValueId) -> Option<ValueId> {
         self.indexed_addresses.get(&value).copied()
+    }
+
+    /// How far an indexed address starts from its object's base.
+    pub fn indexed_displacement(&self, value: ValueId) -> i64 {
+        self.indexed_displacements.get(&value).copied().unwrap_or(0)
     }
 
     pub fn object_for_value(&self, value: ValueId, space: SpaceId) -> Option<ObjectId> {
@@ -2309,6 +2317,7 @@ struct ObjectModelBuilder<'a> {
     /// aggregate or an address displaced from an object's base.
     interior_offsets: BTreeMap<ValueId, i64>,
     displaced_indexed_addresses: BTreeSet<ValueId>,
+    indexed_displacements: BTreeMap<ValueId, i64>,
     /// Frame positions something proves an object starts at: a declared slot,
     /// a direct access, or an address that leaves as a value.
     evidenced_roots: BTreeSet<StackAddressRoot>,
@@ -2374,6 +2383,7 @@ impl<'a> ObjectModelBuilder<'a> {
             indexed_addresses: BTreeMap::new(),
             interior_offsets: BTreeMap::new(),
             displaced_indexed_addresses: BTreeSet::new(),
+            indexed_displacements: BTreeMap::new(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
             callee_write_spans: BTreeMap::new(),
@@ -2392,6 +2402,11 @@ impl<'a> ObjectModelBuilder<'a> {
             escaped_unknown,
             next_object_id: 1,
         }
+    }
+
+    /// The displacement already recorded for an indexed address.
+    fn indexed_displacement_of(&self, value: ValueId) -> i64 {
+        self.indexed_displacements.get(&value).copied().unwrap_or(0)
     }
 
     fn build(
@@ -2498,6 +2513,7 @@ impl<'a> ObjectModelBuilder<'a> {
             indexed_addresses: self.indexed_addresses,
             interior_offsets: self.interior_offsets,
             displaced_indexed_addresses: self.displaced_indexed_addresses,
+            indexed_displacements: self.indexed_displacements,
             stack_objects: self.stack_objects,
             entry_stack_roots: self.entry_stack_roots,
             address_bits_by_space: self.address_bits_by_space,
@@ -2745,9 +2761,31 @@ impl<'a> ObjectModelBuilder<'a> {
             ) {
                 return None;
             }
-            let inherited = index.is_none();
-            let index = index.or_else(|| self.indexed_addresses.get(&base).copied())?;
+            // A constant added to an address that is already indexed does not
+            // index it again: `(table + i * 8) + 4` is the same element four
+            // bytes in. The index stays the base's and the constant joins the
+            // displacement, which is how a machine that folds a member offset
+            // into its addressing mode spells the second half of a pair.
+            let folded_constant = index
+                .and_then(|index| signed_constant_of(&graph.value(index)?.var))
+                .filter(|_| self.indexed_addresses.contains_key(&base));
+            let inherited = index.is_none() || folded_constant.is_some();
+            let index = folded_constant
+                .and(self.indexed_addresses.get(&base).copied())
+                .or(index)
+                .or_else(|| self.indexed_addresses.get(&base).copied())?;
             self.indexed_addresses.insert(value_id, index);
+            // Where the address starts, when it is not the object's own base:
+            // the index measures from there, so the reach does too.
+            let displacement = self
+                .interior_offsets
+                .get(&base)
+                .copied()
+                .unwrap_or_else(|| self.indexed_displacement_of(base))
+                .saturating_add(folded_constant.unwrap_or(0));
+            if displacement != 0 {
+                self.indexed_displacements.insert(value_id, displacement);
+            }
             // An index inherited through arithmetic no longer measures from the
             // object's base, so it cannot say which element this is.
             if inherited
@@ -8092,7 +8130,6 @@ fn evidenced_stack_roots(
                 } if *space == SpaceId::Ram => (addr, val.size),
                 _ => continue,
             };
-            let _ = at;
             let Some(root) = facts.indexed_stack_address_root_of(addr) else {
                 continue;
             };
@@ -8116,6 +8153,13 @@ fn evidenced_stack_roots(
                 continue;
             };
             let end = root.offset.saturating_add(reach);
+            // What each indexed access contributes to its root's span is what
+            // says whether a neighbour was swallowed by a bound or by a reach.
+            r2il::refusal_evidence!(
+                "indexed-span-reach",
+                "{:#x}:{at} {root:?} index={index:?} bound={bound} width={width} end={end}",
+                block.addr
+            );
             let first = indexed_offset_lower_bound(graph, induction_starts, index, 0)
                 .and_then(|lower| i64::try_from(lower).ok())
                 .unwrap_or(0);
@@ -8215,8 +8259,11 @@ fn accessed_object_extent(
             continue;
         }
         // An indexed access files its offset as zero because the machine
-        // computes it; how far it reaches is what the index can reach. One
-        // whose index has no proven bound leaves the extent unproven, and the
+        // computes it; how far it reaches is what the index can reach, from
+        // where the address starts. An address displaced from the object's
+        // base -- `table[i].high` -- reaches that much further, and its
+        // displacement is the constant part the annotation kept. One whose
+        // index has no proven bound leaves the extent unproven, and the
         // frame's own layout answers instead.
         let offset = if objects.address_is_indexed(access.address) {
             let index = objects.index_for_address(access.address)?;
@@ -8227,14 +8274,44 @@ fn accessed_object_extent(
                 index,
                 &mut memo,
                 &mut BTreeSet::new(),
-            )?;
-            u32::try_from(bound).ok()?
+            );
+            // One unbounded index leaves the whole object unsized, so which
+            // access it was is the fact that says why a buffer lost its size.
+            r2il::refusal_evidence!(
+                "accessed-object-extent",
+                "{object:?} access {:?} index {index:?} bound={bound:?} displacement={} width={}",
+                access.address,
+                objects.indexed_displacement(access.address),
+                access.width
+            );
+            let bound = bound?;
+            // A base below the object -- `buffer[i - 1]` addressed from one
+            // byte under it -- reaches less far, not further, so nothing is
+            // added for it.
+            let displacement =
+                u32::try_from(objects.indexed_displacement(access.address).max(0)).ok()?;
+            u32::try_from(bound).ok()?.checked_add(displacement)?
         } else {
             u32::try_from(access.object_offset?).ok()?
         };
         extent = extent.max(offset.checked_add(access.width)?);
     }
     (extent > 0).then_some(extent)
+}
+
+/// A constant varnode's value, read at its own width as a signed number.
+///
+/// `[x3, #-3]` lifts to an addition of `0xfffffffffffffffd`, and taking that
+/// unsigned makes a three-byte step backwards into an index the size of the
+/// address space.
+fn signed_constant_of(var: &SSAVar) -> Option<i64> {
+    let value = var.constant_bits()?;
+    let bits = var.size.saturating_mul(8).min(64);
+    if bits == 0 || bits >= 64 {
+        return Some(value as i64);
+    }
+    let shift = 64 - bits;
+    Some(((value << shift) as i64) >> shift)
 }
 
 /// The operand of an indexed address that supplies the index.
@@ -8397,31 +8474,57 @@ fn induction_upper_bounds(
         let update = through_copies(induction.update);
         let lhs = through_copies(comparison.lhs);
         let rhs = through_copies(comparison.rhs);
-        let (limit, on_update) = if lhs == phi {
-            (comparison.rhs, false)
+        let (limit, counter_on_left, on_update) = if lhs == phi {
+            (comparison.rhs, true, false)
         } else if rhs == phi {
-            (comparison.lhs, false)
+            (comparison.lhs, false, false)
         } else if lhs == update {
-            (comparison.rhs, true)
+            (comparison.rhs, true, true)
         } else if rhs == update {
-            (comparison.lhs, true)
+            (comparison.lhs, false, true)
         } else {
             continue;
         };
+        // The comparison is the branch's, and the branch may leave the loop
+        // when it holds: `i >= 8` is spelled `8 <= i` and read at the exit
+        // edge. What bounds the counter is the condition under which the loop
+        // continues, so the side the counter sits on and the edge the truth
+        // takes both decide which way the test reads.
+        let stays_when_true = loop_fact.body.contains(&predicate.true_target);
+        let stays_when_false = loop_fact.body.contains(&predicate.false_target);
+        if stays_when_true == stays_when_false {
+            continue;
+        }
+        let negated = !stays_when_true;
         let Some(limit) = constant(limit) else {
             continue;
         };
         // A signed test bounds the unsigned value only where both sides stay
         // non-negative, which a constant start at or below the limit gives.
         let start = constant(induction.init);
-        // The last value of the compared quantity the test admits. An
+        // The last value of the compared quantity the loop admits. An
         // inequality admits everything before the limit, and only stops a
         // counter that lands on it at all.
-        let admitted = match comparison.kind {
-            CompareKind::Less | CompareKind::SignedLess => limit.checked_sub(1),
-            CompareKind::LessEqual | CompareKind::SignedLessEqual => Some(limit),
-            CompareKind::NotEqual => limit.checked_sub(step),
-            CompareKind::Equal => None,
+        let strictly_below = match (comparison.kind, counter_on_left, negated) {
+            // `i < limit`, either written that way or as the negation of
+            // `limit <= i` at an exit edge.
+            (CompareKind::Less | CompareKind::SignedLess, true, false)
+            | (CompareKind::LessEqual | CompareKind::SignedLessEqual, false, true) => Some(true),
+            // `i <= limit`, likewise.
+            (CompareKind::LessEqual | CompareKind::SignedLessEqual, true, false)
+            | (CompareKind::Less | CompareKind::SignedLess, false, true) => Some(false),
+            _ => None,
+        };
+        let admitted = match (strictly_below, comparison.kind, negated) {
+            (Some(true), _, _) => limit.checked_sub(1),
+            (Some(false), _, _) => Some(limit),
+            // A counter the loop runs while it differs from the limit stops
+            // on the step that lands there; equality is the same test negated.
+            (None, CompareKind::NotEqual, false) | (None, CompareKind::Equal, true) => {
+                limit.checked_sub(step)
+            }
+            // Everything else bounds the counter from below, not above.
+            (None, _, _) => None,
         };
         let Some(admitted) = admitted else {
             continue;
@@ -8454,13 +8557,24 @@ fn induction_upper_bounds(
         }
         // An inequality only stops a counter that lands on the limit: from 0
         // by twos, 65 is never reached and the loop is not bounded by it.
-        if comparison.kind == CompareKind::NotEqual
+        if matches!(comparison.kind, CompareKind::NotEqual | CompareKind::Equal)
+            && strictly_below.is_none()
             && start.is_none_or(|start| (limit - start) % step != 0)
         {
             continue;
         }
         // The counter steps to the last value the test admits and no further,
-        // so the highest it reaches in the body is that value.
+        // so the highest it reaches in the body is that value. Where the test
+        // stands decides whether the body sees one more step, so both places
+        // belong in the record.
+        r2il::refusal_evidence!(
+            "induction-bound",
+            "{:?} step={step} bound={last} (admitted={admitted}, on_update={on_update}, test at {:#x}, header {:#x}, kind={:?}, limit={limit})",
+            induction.phi,
+            predicate.block_addr,
+            loop_fact.header,
+            comparison.kind
+        );
         bounds.insert(induction.phi, last);
     }
     // Which counters carry a bound, and which loops had no test to give one,
@@ -17922,6 +18036,259 @@ mod tests {
             .get(&access.object)
             .expect("indexed stack slot certificate")
             .array_layout
+    }
+
+    /// `for (i = 0; i < 8; i++) buffer[i] = 7;` with the exit test in the
+    /// header, spelled as the machine spells it: the limit on the left.
+    fn counted_loop_array_artifact(exit_test: bool) -> SsaArtifact {
+        let sp = Varnode::register(32, 8);
+        let counter = Varnode::register(40, 8);
+        let guard = Varnode::register(24, 1);
+        let scaled = Varnode::unique(0x7308, 8);
+        let address = Varnode::unique(0x7310, 8);
+
+        let mut entry = R2ILBlock::new(0x7300, 4);
+        entry.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(64, 8),
+        });
+        entry.push(R2ILOp::Copy {
+            dst: counter.clone(),
+            src: Varnode::constant(0, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x7304, 8),
+        });
+
+        let mut header = R2ILBlock::new(0x7304, 4);
+        if exit_test {
+            // `i >= 8`, which has no spelling of its own: the machine compares
+            // the limit against the counter and leaves when that holds.
+            header.push(R2ILOp::IntLessEqual {
+                dst: guard.clone(),
+                a: Varnode::constant(8, 8),
+                b: counter.clone(),
+            });
+            header.push(R2ILOp::CBranch {
+                target: Varnode::ram(0x7310, 8),
+                cond: guard,
+            });
+        } else {
+            // `i > 7`, the same exit spelled with a strict comparison.
+            header.push(R2ILOp::IntLess {
+                dst: guard.clone(),
+                a: Varnode::constant(7, 8),
+                b: counter.clone(),
+            });
+            header.push(R2ILOp::CBranch {
+                target: Varnode::ram(0x7310, 8),
+                cond: guard,
+            });
+        }
+
+        let mut body = R2ILBlock::new(0x7308, 4);
+        body.push(R2ILOp::IntMult {
+            dst: scaled.clone(),
+            a: counter.clone(),
+            b: Varnode::constant(4, 8),
+        });
+        body.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: sp.clone(),
+            b: scaled,
+        });
+        body.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: address,
+            val: Varnode::constant(7, 4),
+        });
+        body.push(R2ILOp::Branch {
+            target: Varnode::ram(0x730c, 8),
+        });
+
+        let mut latch = R2ILBlock::new(0x730c, 4);
+        latch.push(R2ILOp::IntAdd {
+            dst: counter.clone(),
+            a: counter,
+            b: Varnode::constant(1, 8),
+        });
+        latch.push(R2ILOp::Branch {
+            target: Varnode::ram(0x7304, 8),
+        });
+
+        let mut exit = R2ILBlock::new(0x7310, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+
+        let roles =
+            SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+                .and_then(|roles| {
+                    roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
+                        SourceStackGrowth::LowerAddresses,
+                    ))
+                })
+                .expect("counted loop machine roles");
+        SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+            &[entry, header, body, latch, exit],
+            Some(&return_boundary_arch()),
+            Some(preserved_stack_interface()),
+            roles,
+            Vec::new(),
+        )
+        .expect("counted loop artifact")
+    }
+
+    /// The same loop filling both halves of an eight-byte element, the second
+    /// through an address displaced four bytes from the element's base.
+    fn counted_loop_pair_artifact(backwards: bool) -> SsaArtifact {
+        let sp = Varnode::register(32, 8);
+        let counter = Varnode::register(40, 8);
+        let guard = Varnode::register(24, 1);
+        let scaled = Varnode::unique(0x7408, 8);
+        let low = Varnode::unique(0x7410, 8);
+        let high = Varnode::unique(0x7418, 8);
+
+        let mut entry = R2ILBlock::new(0x7400, 4);
+        entry.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(128, 8),
+        });
+        entry.push(R2ILOp::Copy {
+            dst: counter.clone(),
+            src: Varnode::constant(0, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x7404, 8),
+        });
+
+        let mut header = R2ILBlock::new(0x7404, 4);
+        header.push(R2ILOp::IntLessEqual {
+            dst: guard.clone(),
+            a: Varnode::constant(8, 8),
+            b: counter.clone(),
+        });
+        header.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x7410, 8),
+            cond: guard,
+        });
+
+        let mut body = R2ILBlock::new(0x7408, 4);
+        body.push(R2ILOp::IntMult {
+            dst: scaled.clone(),
+            a: counter.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        body.push(R2ILOp::IntAdd {
+            dst: low.clone(),
+            a: sp.clone(),
+            b: scaled.clone(),
+        });
+        body.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: low,
+            val: Varnode::constant(7, 4),
+        });
+        body.push(R2ILOp::IntAdd {
+            dst: high.clone(),
+            a: sp.clone(),
+            b: scaled,
+        });
+        body.push(R2ILOp::IntAdd {
+            dst: high.clone(),
+            a: high.clone(),
+            b: Varnode::constant(if backwards { u64::MAX - 3 } else { 4 }, 8),
+        });
+        body.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: high,
+            val: Varnode::constant(9, 4),
+        });
+        body.push(R2ILOp::Branch {
+            target: Varnode::ram(0x740c, 8),
+        });
+
+        let mut latch = R2ILBlock::new(0x740c, 4);
+        latch.push(R2ILOp::IntAdd {
+            dst: counter.clone(),
+            a: counter,
+            b: Varnode::constant(1, 8),
+        });
+        latch.push(R2ILOp::Branch {
+            target: Varnode::ram(0x7404, 8),
+        });
+
+        let mut exit = R2ILBlock::new(0x7410, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+
+        let roles =
+            SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))
+                .and_then(|roles| {
+                    roles.with_stack_allocation_contract(SourceStackAllocationContract::new(
+                        SourceStackGrowth::LowerAddresses,
+                    ))
+                })
+                .expect("counted loop machine roles");
+        SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+            &[entry, header, body, latch, exit],
+            Some(&return_boundary_arch()),
+            Some(preserved_stack_interface()),
+            roles,
+            Vec::new(),
+        )
+        .expect("counted loop pair artifact")
+    }
+
+    #[test]
+    fn a_displaced_element_write_reaches_past_its_index() {
+        // Eight elements of eight bytes: the write four bytes into the last
+        // element reaches 64, not the 60 its index alone accounts for. The
+        // same write four bytes back is a step backwards, not an index of
+        // 2^64 - 4, and leaves the extent the other accesses prove.
+        assert_eq!(counted_loop_pair_extent(false), Some(64));
+        // Four bytes back from the element, the furthest write is the plain
+        // one at 56, so the object is the 60 bytes its accesses reach.
+        assert_eq!(counted_loop_pair_extent(true), Some(60));
+    }
+
+    fn counted_loop_pair_extent(backwards: bool) -> Option<u32> {
+        let artifact = counted_loop_pair_artifact(backwards);
+        let object = artifact
+            .facts()
+            .structured
+            .memory_accesses
+            .values()
+            .find(|access| artifact.objects().address_is_indexed(access.address))
+            .expect("indexed stack access")
+            .object;
+        artifact
+            .certificates()
+            .stack_slots
+            .get(&object)
+            .expect("indexed stack slot certificate")
+            .size
+    }
+
+    #[test]
+    fn a_counted_loop_reaches_the_last_value_its_header_admits() {
+        // Eight elements of four bytes: the counter the body sees stops at 7,
+        // whichever way the machine spelled the test it leaves on.
+        for exit_test in [false, true] {
+            let artifact = counted_loop_array_artifact(exit_test);
+            assert!(
+                matches!(
+                    indexed_stack_layout(&artifact),
+                    super::StackArrayLayoutDisposition::Proven(layout)
+                        if layout.element_width == 4 && layout.extent == 32
+                ),
+                "exit_test={exit_test}: {:?}",
+                indexed_stack_layout(&artifact)
+            );
+        }
     }
 
     #[test]

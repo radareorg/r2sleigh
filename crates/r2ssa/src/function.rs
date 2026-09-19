@@ -6161,6 +6161,20 @@ fn indexed_stack_address_root_from_add(
     {
         return Some(base);
     }
+    // `buf + i + 4` is still inside `buf`, exactly as `buf + i - 3` is: a
+    // base that is already indexed stays in its object when a constant
+    // displaces it, which is how a machine folds a member's offset into the
+    // addressing mode of an indexed access.
+    if let Some(base) = stack_root_of(a, a_root, indexed_roots)
+        && signed_stack_delta_of(b, b_root).is_some()
+    {
+        return Some(base);
+    }
+    if let Some(base) = stack_root_of(b, b_root, indexed_roots)
+        && signed_stack_delta_of(a, a_root).is_some()
+    {
+        return Some(base);
+    }
     None
 }
 
@@ -13361,6 +13375,91 @@ mod tests {
         artifact.function().promoted_slot_sites().clone()
     }
 
+    fn promotion_fixture_with_argument(
+        ops: Vec<R2ILOp>,
+        argument: CanonicalStorageId,
+    ) -> BTreeSet<(u64, usize)> {
+        let mut arch = ArchSpec::new("promotion-test");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("sp", 0, 8));
+        arch.add_register(RegisterDef::new("ra", 8, 8));
+        arch.add_register(RegisterDef::new("r1", 16, 8));
+        arch.add_register(RegisterDef::new("r2", 24, 8));
+        arch.add_space(r2il::AddressSpace::ram(8));
+        let storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"promotion-test".to_vec(),
+            "test-abi",
+            [SourceAbiParameterSpec::new(0, argument)],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_return_address_storage(storage(8)))
+        .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
+        .expect("interface");
+        let mut block = R2ILBlock::new(0x4000, 4);
+        for op in ops {
+            block.push(op);
+        }
+        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+            .expect("artifact");
+        artifact.function().promoted_slot_sites().clone()
+    }
+
+    #[test]
+    fn a_constant_spilled_into_a_slot_is_not_a_parameter_home() {
+        // sp -= 32; [sp + 8] = 16; load [sp + 8]. The stored constant has the
+        // argument carrier's offset and is still a constant, not the parameter.
+        let sp = make_reg(0, 8);
+        let argument = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 16,
+            size: 8,
+        };
+        let sites = promotion_fixture_with_argument(
+            vec![
+                R2ILOp::IntSub {
+                    dst: sp.clone(),
+                    a: sp.clone(),
+                    b: make_const(32, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: make_unique(0x100, 8),
+                    a: sp.clone(),
+                    b: make_const(8, 8),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: make_unique(0x100, 8),
+                    val: make_const(16, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: make_unique(0x108, 8),
+                    a: sp.clone(),
+                    b: make_const(8, 8),
+                },
+                R2ILOp::Load {
+                    dst: make_unique(0x110, 8),
+                    space: SpaceId::Ram,
+                    addr: make_unique(0x108, 8),
+                },
+                R2ILOp::Return {
+                    target: make_reg(8, 8),
+                },
+            ],
+            argument,
+        );
+        assert_eq!(
+            sites,
+            BTreeSet::from([(0x4000, 2), (0x4000, 4)]),
+            "the slot holding a constant promotes"
+        );
+    }
+
     #[test]
     fn an_escaped_frame_address_keeps_the_places_above_it_in_memory() {
         // sp -= 32; r1 = sp + 16 (through a temporary, as add-immediate lifts);
@@ -13708,14 +13807,17 @@ fn spills_an_incoming_value(
             _ => break,
         }
     }
-    let entered_with_the_call = root.space == r2il::SpaceId::Register
-        && !entry.ops[..at].iter().any(|earlier| {
-            earlier.output().is_some_and(|dst| {
-                dst.space == root.space
-                    && dst.offset < root.offset + u64::from(root.size)
-                    && root.offset < dst.offset + u64::from(dst.size)
-            })
-        });
+    // A constant is not a value the call brought in, whatever its offset happens to be.
+    if root.space != r2il::SpaceId::Register {
+        return false;
+    }
+    let entered_with_the_call = !entry.ops[..at].iter().any(|earlier| {
+        earlier.output().is_some_and(|dst| {
+            dst.space == root.space
+                && dst.offset < root.offset + u64::from(root.size)
+                && root.offset < dst.offset + u64::from(dst.size)
+        })
+    });
     entered_with_the_call
         || argument_carriers.iter().any(|carrier| {
             carrier.space == CanonicalStorageSpace::Register && carrier.offset == root.offset
@@ -13809,6 +13911,62 @@ fn r2il_constant_before(
         _ => return None,
     };
     Some(value & mask)
+}
+
+/// Leading zero bits a value is proven to carry before `upto` in this block.
+fn r2il_leading_zeros_before(
+    block: &R2ILBlock,
+    upto: usize,
+    varnode: &r2il::Varnode,
+    depth: usize,
+) -> Option<u32> {
+    let width_bits = varnode.size.checked_mul(8)?;
+    let bit_length = |value: u64| 64 - value.leading_zeros();
+    if varnode.space == r2il::SpaceId::Const {
+        return Some(width_bits.saturating_sub(bit_length(varnode.offset)));
+    }
+    if depth >= 8 {
+        return None;
+    }
+    let at = block.ops[..upto]
+        .iter()
+        .rposition(|op| op.output() == Some(varnode))?;
+    let operand = |vn: &r2il::Varnode| r2il_leading_zeros_before(block, at, vn, depth + 1);
+    let constant = |vn: &r2il::Varnode| r2il_constant_before(block, at, vn, depth + 1);
+    let zeros = match &block.ops[at] {
+        R2ILOp::Copy { src, .. } if src.size == varnode.size => operand(src)?,
+        R2ILOp::IntZExt { src, .. } => {
+            width_bits.checked_sub(src.size.checked_mul(8)?)? + operand(src).unwrap_or(0)
+        }
+        R2ILOp::IntMult { a, b, .. } => match (constant(a), constant(b)) {
+            (Some(scale), _) => operand(b)?.checked_sub(bit_length(scale))?,
+            (_, Some(scale)) => operand(a)?.checked_sub(bit_length(scale))?,
+            _ => return None,
+        },
+        R2ILOp::IntLeft { a, b, .. } => {
+            operand(a)?.checked_sub(u32::try_from(constant(b)?).ok()?)?
+        }
+        R2ILOp::IntRight { a, b, .. } => {
+            (operand(a)? + u32::try_from(constant(b)?).ok()?).min(width_bits)
+        }
+        R2ILOp::IntAnd { a, b, .. } => match (constant(a), constant(b)) {
+            (Some(mask), _) => {
+                (width_bits.saturating_sub(bit_length(mask))).max(operand(b).unwrap_or(0))
+            }
+            (_, Some(mask)) => {
+                (width_bits.saturating_sub(bit_length(mask))).max(operand(a).unwrap_or(0))
+            }
+            _ => operand(a)?.max(operand(b)?),
+        },
+        R2ILOp::IntAdd { a, b, .. } => operand(a)?.min(operand(b)?).checked_sub(1)?,
+        _ => return None,
+    };
+    Some(zeros.min(width_bits))
+}
+
+/// Whether a value's top bit is proven clear before `upto` in this block.
+fn r2il_non_negative_before(block: &R2ILBlock, upto: usize, varnode: &r2il::Varnode) -> bool {
+    r2il_leading_zeros_before(block, upto, varnode, 0).is_some_and(|zeros| zeros >= 1)
 }
 
 fn frame_displacement(
@@ -14035,8 +14193,15 @@ fn promote_private_stack_slots(
         // Everything this block derives from a frame base, with the place in
         // the frame it points at.
         let mut derived = Vec::<(r2il::Varnode, i64)>::new();
+        // Frame addresses displaced by an index: at or above the place named, wherever the index reaches.
+        let mut indexed = Vec::<(r2il::Varnode, i64)>::new();
         let holds = |set: &Vec<(r2il::Varnode, i64)>, want: &r2il::Varnode| {
             set.iter().any(|(held, _)| held == want)
+        };
+        let from_of = |set: &Vec<(r2il::Varnode, i64)>, want: &r2il::Varnode| {
+            set.iter()
+                .find(|(held, _)| held == want)
+                .map(|(_, from)| *from)
         };
         // The slot a call spends on its return address: the callee refunds
         // it, so neither the move nor the store is the frame's.
@@ -14292,13 +14457,72 @@ fn promote_private_stack_slots(
                         is_frame_base(dst, index, at)
                     );
                     if !is_frame_base(dst, index, at) {
+                        // A non-negative index of unknown size reaches the base and everything above it, and nothing below.
+                        if place.is_none()
+                            && let Some(from) = place_of(base).flatten()
+                            && r2il_constant_before(block, at, other, 0).is_none()
+                            && r2il_non_negative_before(block, at, other)
                         {
+                            r2il::refusal_evidence!(
+                                "promote-stack-slot",
+                                "{:#x}:{at} {dst} indexes the frame from {from}",
+                                block.addr
+                            );
+                            derived.retain(|(held, _)| held != dst);
+                            indexed.retain(|(held, _)| held != dst);
+                            indexed.push((dst.clone(), from));
+                            escaped.insert(from);
+                            derived_here = true;
+                        } else {
                             // A redefinition replaces the place the register held, so a later reader finds this one and not the first.
                             let place = unplaced(place, block, at)?;
                             derived.retain(|(held, _)| held != dst);
+                            indexed.retain(|(held, _)| held != dst);
                             derived.push((dst.clone(), place));
                             derived_here = true;
                         }
+                    }
+                }
+                R2ILOp::IntAdd { dst, a, b } | R2ILOp::IntSub { dst, a, b }
+                    if holds(&indexed, a) || holds(&indexed, b) =>
+                {
+                    let (base, other) = if holds(&indexed, a) { (a, b) } else { (b, a) };
+                    let from = from_of(&indexed, base).expect("held");
+                    let amount =
+                        r2il_constant_before(block, at, other, 0).map(|amount| amount as i64);
+                    let from = match (op, amount) {
+                        (R2ILOp::IntAdd { .. }, Some(amount)) => Some(from + amount),
+                        (R2ILOp::IntSub { .. }, Some(amount)) if base == a => Some(from - amount),
+                        (R2ILOp::IntAdd { .. }, None)
+                            if r2il_non_negative_before(block, at, other) =>
+                        {
+                            Some(from)
+                        }
+                        _ => None,
+                    };
+                    let Some(from) = from else {
+                        r2il::refusal_evidence!(
+                            "promote-stack-slot",
+                            "{:#x}:{at} moves an indexed frame address somewhere the frame cannot place",
+                            block.addr
+                        );
+                        return None;
+                    };
+                    if !is_frame_base(dst, index, at) {
+                        derived.retain(|(held, _)| held != dst);
+                        indexed.retain(|(held, _)| held != dst);
+                        indexed.push((dst.clone(), from));
+                        escaped.insert(from);
+                        derived_here = true;
+                    }
+                }
+                R2ILOp::Copy { dst, src } if holds(&indexed, src) => {
+                    let from = from_of(&indexed, src).expect("held");
+                    if !is_frame_base(dst, index, at) {
+                        derived.retain(|(held, _)| held != dst);
+                        indexed.retain(|(held, _)| held != dst);
+                        indexed.push((dst.clone(), from));
+                        derived_here = true;
                     }
                 }
                 R2ILOp::IntSub { dst, a, b } if place_of(a).is_some() || place_of(b).is_some() => {
@@ -14320,7 +14544,11 @@ fn promote_private_stack_slots(
                 // lets anything else reach it; the lift computes flags beside
                 // every address it forms.
                 _ if op.output().is_some_and(|dst| dst.size == 1) => {}
-                _ if op.inputs().into_iter().any(|input| holds(&derived, input)) => {
+                _ if op
+                    .inputs()
+                    .into_iter()
+                    .any(|input| holds(&derived, input) || holds(&indexed, input)) =>
+                {
                     r2il::refusal_evidence!(
                         "promote-stack-slot",
                         "{:#x}:{at} reads a frame address it does not access through: {op}",
@@ -14344,6 +14572,7 @@ fn promote_private_stack_slots(
             // is next written with something else.
             if !derived_here && let Some(dst) = op.output() {
                 derived.retain(|(held, _)| held != dst);
+                indexed.retain(|(held, _)| held != dst);
             }
         }
     }

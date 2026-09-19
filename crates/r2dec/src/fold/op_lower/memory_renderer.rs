@@ -734,7 +734,13 @@ impl<'a> FoldingContext<'a> {
                 .planned_slot_bytes_expr(*binding, *offset, &elem_ty)
                 .map(PendingMemoryAccessExpr::Planned),
             AccessSyntax::SlotIndexedBytes { binding, index } => self
-                .planned_slot_indexed_bytes_expr(*binding, *index, fact.access, &elem_ty)
+                .planned_slot_indexed_bytes_expr(
+                    *binding,
+                    *index,
+                    fact.address,
+                    fact.access,
+                    &elem_ty,
+                )
                 .map(PendingMemoryAccessExpr::Planned),
             AccessSyntax::Address { .. } => {
                 self.render_certified_memory_address_access(fact, elem_ty)
@@ -778,6 +784,7 @@ impl<'a> FoldingContext<'a> {
         &self,
         binding: crate::binding_plan::BindingId,
         index: r2ssa::ValueId,
+        address_value: r2ssa::ValueId,
         access: r2ssa::StructuredAccessId,
         elem_ty: &CType,
     ) -> Option<CExpr> {
@@ -791,6 +798,23 @@ impl<'a> FoldingContext<'a> {
         };
         let index_expr = self.observe_certified_address_read_expr(index, access, index_expr);
         let address = CExpr::binary(BinaryOp::Add, bytes, index_expr);
+        // Where the address starts from is part of it: `buf[i - 3]` is the
+        // same index three bytes back, and spelling only the index would put
+        // every write of an unrolled loop on one byte.
+        let displacement = self.prepared_ssa().map_or(0, |prepared| {
+            prepared.objects().indexed_displacement(address_value)
+        });
+        let address = match displacement {
+            0 => address,
+            displacement if displacement > 0 => {
+                CExpr::binary(BinaryOp::Add, address, CExpr::IntLit(displacement))
+            }
+            displacement => CExpr::binary(
+                BinaryOp::Sub,
+                address,
+                CExpr::IntLit(displacement.saturating_neg()),
+            ),
+        };
         Some(CExpr::Deref(Box::new(CExpr::cast(
             CType::ptr(elem_ty.clone()),
             address,

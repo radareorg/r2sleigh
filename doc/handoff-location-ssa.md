@@ -28870,3 +28870,83 @@ held and the conflict was visible.
 The rule now declines when the stored value already is another object.
 `coalescing-union` prints each union the pre-partition makes, beside the
 declines it already printed.
+
+
+## A loop's exit test reads backwards when the limit is on the left
+
+`i >= 8` has no spelling in the comparison algebra: `CompareKind` carries only
+`Less`, `LessEqual`, `Equal`, `NotEqual` and their signed forms, so the machine's
+`cmp i, 8; b.hs exit` reaches `induction_upper_bounds` as
+`LessEqual(8, i)` on the branch's *exit* edge. The old code matched the counter
+against either side, took the other side as the limit, and then applied the
+comparison kind as if the counter had been on the left. `8 <= i` was read as
+`i <= 8`, so the counter's bound came out 8 for a loop that runs 0..7.
+
+Every array a counted loop fills was therefore one element too large, and the
+span an index reaches ran one element past the object. On arm64 `-O0`
+`shape_struct_array` that span covered the stack-guard slot, which then became a
+member of the table: the rendering assigned a pointer into
+`((uint64_t*)stack_m88)[8]` and stopped compiling.
+
+The bound now derives the condition under which the loop *continues*, from two
+facts it already had: which side the counter sits on, and which edge of the
+branch stays in the body. `8 <= i` on an exit edge is `i < 8` continuing, which
+admits 7. `7 < i` on an exit edge is `i <= 7`. A test that bounds the counter
+from below carries no upper bound and is skipped rather than misread.
+
+`a_counted_loop_reaches_the_last_value_its_header_admits` covers both machine
+spellings of the same loop.
+
+## A constant stored into a slot is not a spilled parameter
+
+`spills_an_incoming_value` compared the stored value's offset against the
+argument carriers' offsets without first checking that the value was a register
+at all. `movl $0x0, -0x64(%rbp)` stores a constant whose varnode offset is 0,
+which matched a carrier and made the loop counter's slot a parameter home; a
+parameter home stays in memory, so the counter was never promoted, the loop had
+no induction fact, and the table it indexed could not be sized.
+
+## A non-negative index into the frame does not stop promotion
+
+`promote_private_stack_slots` bailed out of the whole function when it met a
+frame address the frame could not place, and `buffer + i` is exactly that: the
+place depends on `i`. Every `-O0` function with an indexed local therefore kept
+all its slots in memory.
+
+An indexed address is now tracked beside the placed ones, carrying the base it
+was measured from. It escapes that place and everything above it -- which is
+what an unbounded non-negative index can reach -- and the slots below it still
+promote. `r2il_leading_zeros_before` proves the index non-negative from the
+block's own operations; an index that cannot be proven non-negative still stops
+the pass.
+
+## An indexed access reaches from where its address starts
+
+`table[i].high` is addressed as the table's base plus four, indexed: the
+machine folds the member's offset into the addressing mode, so the object model
+files the access at offset zero and keeps the displacement on the base value.
+`accessed_object_extent` then measured the reach as the index bound plus the
+access width and lost the four bytes, which sized an eight-element table of
+pairs at 60 bytes instead of 64 and put the last write out of bounds.
+
+The object model now records what each indexed address starts from, beside the
+set of displaced ones it already kept, and the extent adds it. A displaced base
+still refuses the array *layout*, because the index no longer says which element
+an access names; the extent is a separate question and has an answer.
+
+The two machines spell that displacement on opposite sides of the index. x86-64
+folds it into the base (`-0x4c(%rbp,%rax,8)`), so the base is displaced and then
+indexed. arm64 folds it into the access (`add x9, x9, x10, lsl #3` then
+`str w8, [x9, #4]`), so the address is indexed and then displaced. Only the
+first was recognised: an indexed base plus a constant matched no rule in
+`indexed_stack_address_root_from_add`, so the address left its object entirely
+and became an escaped-unknown access, and the constant was recorded as if it
+were the index. The rule now mirrors the one already written for subtraction --
+an already-indexed base displaced by a constant stays inside its object -- and
+the object model adds the constant to the address's displacement instead of
+taking it for an index.
+
+A displacement the object model records has to be spelled where the access is
+rendered, or the rendering says every unrolled write of a loop lands on one
+byte. `planned_slot_indexed_bytes_expr` now adds it back, which is what makes
+`buf[i - 3]` and `buf[i]` different bytes again.
