@@ -596,3 +596,71 @@ population is `missing machine projection authorization`, which is
 far enough to hit it. `machine.rs::lower_op`'s final `_ =>` arm is where an
 operation the machine model does not lower turns into that refusal; the next
 step is to name which operations land there on ARM.
+
+## The gate is green, and the tiers are becoming readable
+
+The native certification gate (`scripts/diff_capture.py --bins
+<radare2>/test/bins/elf --limit 24 --functions 8 --native-only`) went from
+**83 rendered / 15 refused** to **98 / 0** across one session. The undefined
+read stayed at one throughout: `main` in `abcde-qt32` reads `R3_3`, which is a
+separate and older thread.
+
+Four things moved it.
+
+**ARM predication, from one owner.** `r2il::predicated_transfer` reports *which*
+transfer a skip guards, so `b<cond>` becomes a `ConditionalBranch` and
+`bx<cond>` the new `BlockTerminator::ConditionalExit`. An earlier boolean form
+of the same predicate was wrong: it reported only *that* a transfer was
+guarded, which turned `beq label` into an unconditional fall-through and lost
+the branch target. `r2ssa::branch_condition` is now the single answer to "which
+branch does this block turn on", replacing a copy in `r2dec`'s `fold/flags.rs`
+whose rule -- that the branch must be the block's *last* operation -- a
+predicated branch never satisfies. That alone had blocked the majority case:
+in `libarm.so`, 991 of 997 predicated transfers are `b<cond> label`.
+
+**A load nothing reads still reads.** `frame_dummy` loads `r0` and `r1` at
+0x8200 and overwrites `r0` at 0x820c on every path, the linker having elided
+the call that used them. The decision taken was to render the load for its
+effect, and the blocker was that the binding plan, its seal and the observation
+journal each treated *the value is elided* as *the instruction owes no
+statement*. `ElisionReason::UnreadEffectfulValue` separates them; the read now
+renders as `(void)*(uint32_t*)0x8238;`.
+
+**A branch that leaves a return address is a call.** `flush_cleanup` is ARM's
+pre-`blx` idiom: `mvn r3, 0xf000; mov lr, pc; sub pc, r3, 0x3f`, a call to the
+kernel helper page at `0xFFFF0FC0`. Sleigh lifts it as a branch because that is
+the opcode; the link register holding the address after the transfer is what
+makes it a call. `r2il::returns_to` states that once, and the body walk, the
+block's declared successors and `lift_owned_function` all read it. The link
+register itself comes from the compiler specification's `<returnaddress>`,
+never from the shape: `body::Program` gained `return_address_register`, and
+`r2s` resolves the name against the architecture's register table.
+
+**The analysis tier is printable.** `pdim` renders `r2engine::native::prepared`,
+which is `decompile` stopped before the rendering. One command now answers what
+previously needed an `lldb` breakpoint inside `fold_block_with_sites`: whether a
+block holds the operations a defect is about. `dump_blocks` was also printing
+operations through the derived `Debug` while printing its own phis through
+`Display`; it uses `SSAOp`'s `Display` now.
+
+### What the tiers still owe
+
+`pdil` and `pdih` are not written. `pdil` wants register names in `R2ILOp`'s
+`Display`, which today spells `reg:0x58[4]`; the names live in three rival
+printers (`r2sleigh-lift`'s `format_op` and `format_varnode`, and the plugin's
+`format_r2il_op_short`) that exist only because the canonical one lacks them.
+`pdih` wants the engine to return the AST rather than a formatted `String`,
+which is the same typed-value change the fact-lattice split needs at discovery.
+`pdim` prints the SSA but not yet each value's binding-plan disposition, which
+is the half that names an elision reason.
+
+### Two CI breaks, one of them six days old
+
+`cargo test --workspace --all-features` had not compiled since 14 September:
+`r2plugin`'s tests build `r2ssa::SSABlock` literals and the `phis` field was
+added without them. A second, from this session, was the same shape on
+`r2image::Symbol`'s `thumb` field. Both are fixed. The lesson is that a
+per-crate test run without `--features sleigh` clears neither.
+
+`plain_o2_check_secret` and `plain_o2_sum_array` still fail at SSA hash
+`9a9df9f6a934275a`, unchanged by any of the above.
