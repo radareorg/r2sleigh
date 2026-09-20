@@ -30332,3 +30332,43 @@ The shape of the real fix is the same in both places: the DWARF reader emits C
 width, an aggregate's layout, or what a typedef names. Reading DWARF into a
 `SourceTypeGraph` directly, rather than into strings that are parsed again,
 removes this class and the aggregate-parameter refusal with it.
+
+### What a declaration has to carry, and what it bought
+
+The call-result class is closed, and the three things it turned on were all
+about what a declaration carries rather than about placement.
+
+A C spelling is a lossy channel. `idx_t` says nothing about width or
+indirection to anything that only has the text, and a hundred and four of the
+eight hundred and thirty-five prototypes in the `diffutils` binaries hold such
+a name, each leaving its whole prototype untyped. `r2abi::Spelled` carries both
+what the declaration writes and what that names, the debug information fills
+both, and the type layer reads the second while the renderer reads the first.
+The parser also declined `long unsigned int` outright -- C says the order of
+type specifiers is immaterial and the debug information takes it at its word --
+so specifiers are now read as a set.
+
+`void` has no extent and no alignment, and the type graph says so; the
+interning gave it a byte's alignment, which made every prototype through a
+`void *` unstatable. That is most of the allocating ones.
+
+A callee is now prepared against what the binary declares about it, exactly as
+the root is. Prepared without its declaration a callee proves only what its
+instructions show, which for a result register is nothing, so `ximalloc`
+rendered as returning nothing at every call site and the local it filled was
+read and never written.
+
+With those, a call's result can be declined from the union that renames a slot
+after its values: the call renders an expression and the store is the statement
+that names what it produced.
+
+Measured over `cmp`, `sdiff`, `diff3` and `diff` -- DecBench's `-O0 -g`
+binaries -- refusals fall from 36 to 18 and rendered functions from 842 to 860
+of 878. Functions whose parameters are named from the source went from none to
+689, and those carrying at least one source-named local from none to 389.
+
+What remains there, largest first: five `unprovable_execution_order`, five
+`missing_definition`, four `ConflictingValue`, two `OpLowering`. The
+`missing_definition` instances are a slot whose binding holds only its own
+reloads -- read and never written in this body -- which is a different producer
+from the call result and not yet traced.
