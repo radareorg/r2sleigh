@@ -40,6 +40,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
     let (verb, argument) = split_verb(line);
     match verb {
         "q" | "quit" | "exit" => Err("quit".to_owned()),
+        "?e" => Ok(argument.to_owned()),
         "s" => seek(session, argument),
         "i" => info(session),
         "ie" => entries(session),

@@ -167,6 +167,16 @@ def _r2_bin() -> Path | None:
     return Path(found) if found else None
 
 
+def _r2s_bin() -> Path | None:
+    """The engine's own shell, which answers without radare2 in the process."""
+    explicit = os.environ.get("R2SLEIGH_R2S_BIN")
+    if explicit:
+        candidate = Path(explicit)
+        return candidate if candidate.exists() else None
+    found = shutil.which("r2s")
+    return Path(found) if found else None
+
+
 def _signal_name(number: int) -> str:
     """``SIGSEGV`` rather than ``11``; the bare number hides which bug it is."""
     try:
@@ -228,11 +238,17 @@ class _R2Run:
         return "completed"
 
 
-def _run_r2(binary: Path, commands: str, timeout: float) -> _R2Run:
-    executable = _r2_bin()
+def _run_r2(
+    binary: Path,
+    commands: str,
+    timeout: float,
+    executable: Path | None = None,
+    flags: tuple[str, ...] = _R2_FLAGS,
+) -> _R2Run:
+    executable = executable or _r2_bin()
     if executable is None:
         raise RuntimeError("no r2 on PATH and $R2SLEIGH_R2_BIN unset")
-    argv = [str(executable), *_R2_FLAGS, "-c", commands, str(binary)]
+    argv = [str(executable), *flags, "-c", commands, str(binary)]
     try:
         proc = subprocess.run(  # noqa: S603
             argv,
@@ -268,6 +284,29 @@ class RawR2SleighDecompiler(Decompiler):
     #
     # Decompiler interface
     #
+
+    #
+    # The route: what is asked, and of which shell. The plugin route asks
+    # radare2 with the architecture swapped; the native route asks the engine's
+    # own shell, which has no radare2 in the process at all. Everything else
+    # below -- naming, refusal parsing, the census, where a batch stopped -- is
+    # the same question of both and is asked once.
+    #
+
+    def _executable(self) -> Path | None:
+        return _r2_bin()
+
+    def _flags(self) -> tuple[str, ...]:
+        return _R2_FLAGS
+
+    def _prologue(self) -> list[str]:
+        return ["a:sla", "aaa"]
+
+    def _render_command(self) -> str:
+        return "pd:s"
+
+    def _ask(self, binary: Path, commands: str, timeout: float) -> _R2Run:
+        return _run_r2(binary, commands, timeout, self._executable(), self._flags())
 
     def is_available(self) -> bool:
         if _r2_bin() is None:
@@ -312,7 +351,7 @@ class RawR2SleighDecompiler(Decompiler):
         one it is reporting, otherwise the fix for the batch pass just moves the
         silence one step earlier.
         """
-        run = _run_r2(binary_path, "a:sla; aaa; e bin.baddr; aflj", timeout=timeout)
+        run = self._ask(binary_path, "a:sla; aaa; e bin.baddr; aflj", timeout)
         out = run.stdout
         # `e bin.baddr` answers with a bare integer, decimal or `0x`-prefixed,
         # and prints `0` for a position-independent executable.
@@ -423,13 +462,14 @@ class RawR2SleighDecompiler(Decompiler):
         unreached = 0
 
         if candidates:
-            script = ["a:sla", "aaa"]
+            script = list(self._prologue())
+            render = self._render_command()
             for index, (_, addr) in enumerate(candidates):
                 script.append(f"?e {_BEGIN}{index}")
                 script.append(f"s {addr}")
-                script.append("pd:s")
+                script.append(render)
                 script.append(f"?e {_END}{index}")
-            decompile = _run_r2(binary_path, "; ".join(script), timeout=binary_timeout)
+            decompile = self._ask(binary_path, "; ".join(script), binary_timeout)
 
             # Slice once and keep the answers, because where the slices stop is
             # itself the finding. The batch is a single process, so the first
@@ -664,3 +704,82 @@ def _slice(out: str, index: int) -> str | None:
     if end < 0:
         return None
     return out[begin + 1 : end]
+
+
+@register_decompiler("r2sleigh_native")
+class RawR2SleighNativeDecompiler(RawR2SleighDecompiler):
+    """The same engine asked through its own shell, with no radare2 present.
+
+    The plugin route and this one share a decompiler and differ in who supplies
+    the capture: radare2's analysis there, the engine's own image reader, body
+    walk and value analysis here. Registering both measures that difference
+    against the source rather than against each other, which is the only
+    reference that does not move as the engine improves past whatever it is
+    being compared to.
+    """
+
+    name = "r2sleigh_native"
+    display_name = "r2sleigh (native)"
+
+    def _executable(self) -> Path | None:
+        return _r2s_bin()
+
+    def _flags(self) -> tuple[str, ...]:
+        # The engine's shell has no colour or analysis settings to turn off.
+        return ()
+
+    def _prologue(self) -> list[str]:
+        return []
+
+    def _render_command(self) -> str:
+        return "pdd"
+
+    def is_available(self) -> bool:
+        executable = _r2s_bin()
+        if executable is None:
+            return False
+        try:
+            out = self._ask(Path("/bin/ls"), "i", timeout=60.0).stdout
+        except Exception:  # noqa: BLE001
+            return False
+        return "format" in out
+
+    def get_version(self) -> str | None:
+        if self._version_probed:
+            return self._version_value
+        self._version_probed = True
+        executable = _r2s_bin()
+        self._version_value = f"r2sleigh native via {executable}" if executable else None
+        return self._version_value
+
+    def _discover(
+        self, binary_path: Path, timeout: float
+    ) -> tuple[list[tuple[str, int]], int, _R2Run]:
+        """Every function the image's own symbol tables name, and the load base.
+
+        Discovery here is the engine's, so it reads both symbol tables rather
+        than radare2's analysis. A stripped binary therefore lists what
+        `.dynsym` still carries and nothing more, which is the honest answer
+        until prelude scanning exists.
+        """
+        run = self._ask(binary_path, "i; is", timeout)
+        baddr = 0
+        functions: list[tuple[str, int]] = []
+        for line in run.stdout.splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == "baddr":
+                try:
+                    baddr = int(fields[1], 0)
+                except ValueError:
+                    pass
+                continue
+            # `is` prints `nth vaddr size type name`, and only a function with
+            # a body is a candidate.
+            if len(fields) >= 5 and fields[3] == "FUNC":
+                try:
+                    address = int(fields[1], 0)
+                except ValueError:
+                    continue
+                if address and int(fields[2], 0) > 0:
+                    functions.append((fields[4], address))
+        return functions, baddr, run

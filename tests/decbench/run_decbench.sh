@@ -462,6 +462,13 @@ LOCAL_R2_DIR="$FORK_REMOTE" make -C r2plugin RUST_FEATURES=all-archs install >"$
     tail -30 "$REMOTE/install.log"
     exit 70
 }
+# The engine's own shell, which answers with no radare2 in the process. It is
+# what the native route is measured through, and it is built from the same tree
+# as the plugin so the two routes differ only in who supplies the capture.
+cargo build --release -p r2s --features sleigh >"$REMOTE/r2s-build.log" 2>&1 || {
+    tail -30 "$REMOTE/r2s-build.log"
+    exit 70
+}
 lib=$(find "$PRIVATE_HOME/.local/share/radare2/plugins" -name 'libr2sleigh_plugin.*' -print -quit)
 [ -n "$lib" ] || { echo "no plugin library was installed" >&2; exit 70; }
 grep -a -q "$WITNESS" "$lib" || {
@@ -497,7 +504,7 @@ for ((project_index = 0; project_index < ${#projects[@]}; project_index++)); do
     fi
     echo "project $project (${requested_opts[*]})"
     ssh "${ssh_keepalive[@]}" "$host" \
-        "REMOTE='$remote' PRIVATE_HOME='$private_home' PROJECT='$project' OPTS='$selection_opts' WORKERS='$workers' INCLUDE_REFERENCE='$include_reference' WITNESS='$witness' bash -s" <<'RUN'
+        "REMOTE='$remote' PRIVATE_HOME='$private_home' PROJECT='$project' OPTS='$selection_opts' WORKERS='$workers' INCLUDE_REFERENCE='$include_reference' WITNESS='$witness' R2SLEIGH_DECBENCH_TARGET='${R2SLEIGH_DECBENCH_TARGET:-/root/decbench-shared-target}' bash -s" <<'RUN'
 set -euo pipefail
 work="$REMOTE/work/$PROJECT"
 mkdir -p "$work" "$REMOTE/results" "$REMOTE/logs" "$REMOTE/witness-checks"
@@ -551,7 +558,12 @@ fi
 cd /root/decbench
 cmd=(./venv/bin/python "$REMOTE/tree/tests/decbench/decbench_cli.py" run "projects/sailr/$PROJECT.toml")
 for opt in "${opts[@]}"; do cmd+=(-O "$opt"); done
-cmd+=(-d r2sleigh)
+# The native route is graded against the source like every other decompiler
+# here; the plugin route stays measured beside it as a diagnostic rather than
+# as the bar.
+export R2SLEIGH_R2S_BIN=${R2SLEIGH_DECBENCH_TARGET:-/root/decbench-shared-target}/release/r2s
+[ -x "$R2SLEIGH_R2S_BIN" ] || { echo "the engine's shell was not built: $R2SLEIGH_R2S_BIN" >&2; exit 70; }
+cmd+=(-d r2sleigh -d r2sleigh_native)
 if [ "$INCLUDE_REFERENCE" = 1 ]; then cmd+=(-d angr); fi
 cmd+=(-m ged -m vj_ged -m byte_match -m type_match -j "$WORKERS" -o "$work/out")
 export R2SLEIGH_DECBENCH_PHASE_LOG="$REMOTE/logs/$PROJECT.phases.tsv"

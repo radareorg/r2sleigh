@@ -11,10 +11,22 @@ We have never been measured on it. `doc/decbench-plan.md` records what was
 measured here instead and why that is not the same thing. This directory holds
 the harness that closes that gap.
 
-`r2sleigh_raw.py` is a DecBench decompiler backend for this plugin. It belongs
-in *their* tree, at `decbench/decompilers/raw/r2sleigh_raw.py`, and is kept here
-so the work is not stranded in a scratch directory and so the next person can
-see what it assumes about us.
+`r2sleigh_raw.py` is a DecBench decompiler backend for this engine, and it
+registers two of them. `r2sleigh` drives the radare2 plugin, where radare2
+supplies the capture; `r2sleigh_native` drives `r2s`, the engine's own shell,
+where the engine supplies its own image reader, body walk and value analysis.
+They share a decompiler and differ only in who captured the function, so
+running both grades that difference against the source.
+
+The source is the reference here, and the plugin route is not. It was until the
+native route overtook it -- on twelve corpus binaries the two-sided comparison
+read `same 0, differ 15, native refused 0, plugin refused 14` -- at which point
+holding the engine to the plugin's output would have meant making it worse to
+match the weaker side.
+
+The file belongs in *their* tree, at `decbench/decompilers/raw/r2sleigh_raw.py`,
+and is kept here so the work is not stranded in a scratch directory and so the
+next person can see what it assumes about us.
 
 Running it
 ----------
@@ -27,7 +39,8 @@ cp tests/decbench/r2sleigh_raw.py decbench/decbench/decompilers/raw/
 #   decbench/decompilers/raw/__init__.py: add `r2sleigh_raw,` to the import list
 venv/bin/decbench list-decompilers     # r2sleigh should read Available: Y
 venv/bin/decbench download sample-set --dest data
-venv/bin/decbench evaluate-tree data -d r2sleigh -d angr -m ged -m type_match -m byte_match
+venv/bin/decbench evaluate-tree data -d r2sleigh -d r2sleigh_native -d angr \
+    -m ged -m type_match -m byte_match
 ```
 
 `angr` is worth running alongside: it is the strongest conventional decompiler

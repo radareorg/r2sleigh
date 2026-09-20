@@ -97,5 +97,47 @@ class SourceNameTests(unittest.TestCase):
         self.assertEqual(r2sleigh_raw._retitle(code, "usage", "usage"), code)
 
 
+class NativeRouteTests(unittest.TestCase):
+    """The native route reads the engine's own listing, not radare2's analysis."""
+
+    LISTING = "\n".join(
+        [
+            "file     /bin/ls",
+            "format   Elf",
+            "baddr    0x00400000",
+            "entry    0x00005ae0",
+            "nth vaddr      size type name",
+            "-" * 60,
+            "0   0x00015c80   17 FUNC _obstack_begin",
+            "1   0x00015ca0    0 FUNC _empty",
+            "2   0x00017168    1 OBJ  a_global",
+            "3   0x00015cc0  251 FUNC _obstack_newchunk",
+        ]
+    )
+
+    def _route(self):
+        route = r2sleigh_raw.RawR2SleighNativeDecompiler.__new__(
+            r2sleigh_raw.RawR2SleighNativeDecompiler
+        )
+        route._ask = lambda binary, commands, timeout: r2sleigh_raw._R2Run(
+            stdout=self.LISTING, returncode=0, timeout=timeout
+        )
+        return route
+
+    def test_it_asks_for_the_engines_own_rendering(self):
+        route = r2sleigh_raw.RawR2SleighNativeDecompiler
+        self.assertEqual(route._render_command(route), "pdd")
+        # Nothing swaps an architecture: there is no radare2 in the process.
+        self.assertEqual(route._prologue(route), [])
+
+    def test_it_reads_the_load_base_and_only_sized_functions(self):
+        functions, baddr, _ = self._route()._discover(Path("/bin/ls"), 1.0)
+        self.assertEqual(baddr, 0x400000)
+        self.assertEqual(
+            functions,
+            [("_obstack_begin", 0x15C80), ("_obstack_newchunk", 0x15CC0)],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
