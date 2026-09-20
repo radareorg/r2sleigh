@@ -457,12 +457,32 @@ as one block and the tail call was never lifted at all. Measured: rendered
 23 -> 25 while bodies were silently truncated, which is worse than the refusal
 it replaced.
 
-The shape is a block that *conditionally leaves the function*. A block must
-not start inside an instruction -- the decided rule for repeated string
-instructions says so -- and `BlockTerminator` has no variant for "transfers
-out on one arm, continues on the other". That variant is the fix, the same
-kind of addition as `SourceFunctionReturn::Unproven`, and it is what stands
-between ARM and roughly four fifths of its remaining refusals.
+The shape is a block that *conditionally leaves the function*, and the block
+may legally end at the predicated instruction, because that is an instruction
+boundary. Six attempts moved the failure one layer at a time, which is the
+project's own signal that the work is in the wrong layer:
+
+1. `cfg.rs::analyze_terminator` calls the block an unconditional transfer,
+   because it reads the last control operation. Fixing it there stops the
+   truncation and the walk reaches the next instruction.
+2. The SSA builder then refuses: the transfer is no longer the block's last
+   instruction. Ending the block at the predicated instruction answers that.
+3. `disasm.rs::genuine_block_successors` then names no successor while the
+   advisory graph names the fall-through, and the two are compared and
+   refused. It already carries the concept -- `control_op_is_intra_instruction`
+   says an AArch64 `ccmp` skip to the next instruction "decides no successor"
+   -- but a predicated *transfer* needs the opposite answer from the same
+   shape, and making it say so did not take, so a fourth derivation is
+   involved.
+
+Three places derive "where does this block go" and a fourth refuses when they
+disagree. The fact that wants stating once, by the lift that knows it, is
+**this instruction conditionally leaves the function**; every consumer should
+read that rather than re-deriving it from the operation order. A variant on
+`BlockTerminator` alone is not enough, which is why the attempt that added one
+did not land. The enum has 135 consumers across thirteen files, many with
+catch-all arms, so the variant must arrive with the single owner of the fact,
+not before it.
 
 The old framing of the same wall follows.
 
