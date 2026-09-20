@@ -30154,7 +30154,7 @@ stripped, and `Image::parse` read only `.symtab`. It has 467 functions in
 `.dynsym`, and reading both tables is the whole of that fix.
 
 Of the 402 of them large enough to walk, 197 refused when they first became
-visible and 153 refuse now. Every number below is that census, taken with
+visible and 151 refuse now. Every number below is that census, taken with
 `r2s -c "s <addr>; pdd"` over the list and counted by refusal class; nothing in
 it moved any other gate, which held at 98 rendered / 0 refused / 1 undefined
 read on the native corpus and at 47 unexpected failures under `tests/r2r`
@@ -30195,10 +30195,18 @@ from the cause, which is why the entity, access-authority and function-image
 checks now each say which of their terms failed rather than answering
 "mismatch".
 
-What remains, largest first: 52 functions refuse with `RenderedValueRequired`,
-always a comparison planned `Inline` and unobserved at the seal, and always
-with the gap that would cover it reaching a control transfer it cannot stand in
-for; 31 with `missing program-variable authorization`; 25 with `ConflictingUse`;
-11 with `OverlappingFunctionBlockRanges`. The first is the one to take next,
-and the question it turns on is why a condition planned to be spelled at its
-reader is spelled nowhere.
+Two more were one question with two answers. A slot adopts its reloads'
+binding when that binding holds exactly the slot's own values, and the plan
+said so as a count -- the reloads plus the stores -- which counts twice a value
+that is both, while the seal said so as a comparison of sets. And a
+ninety-six-bit stack object was declared `BitVector(96)` by the rule that names
+it while the rule that checks a declaration read a bitvector's width only above
+what C's integers reach, so it had no width at all.
+
+What remains, largest first: 25 functions refuse with `ConflictingUse`; 25 at
+the effect ledger with five conflicting occurrences, always at a
+`live-value-producer`; 24 with `OverlappingFunctionBlockRanges`, which grew
+from 11 as the walk began following predicated transfers and is worth reading
+as a boundary question rather than a summary one; 22 at `OpLowering`. The
+`RenderedValueRequired` class that was the largest is gone: it was the IT-block
+artefact the decoder-context fix removed.
