@@ -175,11 +175,24 @@ pub(super) fn shared_reload_binding(
     // exactly its own values looked as though it held one too few, the object
     // minted a binding of its own, and the seal -- which asks the same
     // question as a comparison of sets -- disagreed.
-    unanimous_value_binding(dispositions, reload_values.iter().copied()).filter(|binding| {
+    let shared = unanimous_value_binding(dispositions, reload_values.iter().copied());
+    let taken = shared.filter(|binding| {
         bound_values
             .get(binding)
             .is_some_and(|members| slot_members_agree(members, reload_values, stored_values))
-    })
+    });
+    if taken.is_none() && r2il::refusal_evidence::tracing() {
+        r2il::refusal_evidence!(
+            "shared-reload-binding",
+            "reloads {:?} stores {stored_values:?} share {shared:?} whose members are {:?}",
+            reload_values
+                .iter()
+                .map(|value| (*value, dispositions.get(value.0 as usize)))
+                .collect::<Vec<_>>(),
+            shared.and_then(|binding| bound_values.get(&binding))
+        );
+    }
+    taken
 }
 
 /// Whether one binding's members are exactly a slot's reloads and stores.
