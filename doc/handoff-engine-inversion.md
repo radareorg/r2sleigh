@@ -385,3 +385,67 @@ recovers a carrier the convention does not name, and the thunk is declared
 a register the callee's interface names as its result is not preserved across
 that call. It must not be widened to "the callee's body writes it": every
 save-and-restore callee writes the registers it saves.
+
+## ARM 32-bit is admitted, and what it took
+
+`TrustedSleighProfile::from_tuple` now admits `("arm","arm",32,Little)` and
+`("arm","thumb",32,Little)`. Four things had to be true first, each a defect
+rather than a policy:
+
+- The snapshot's machine tuple carries a **processor context**. `arm` and
+  `thumb` are one instruction set under one architecture name, so the context
+  is the only fact that tells the trusted lift which decoder to load;
+  `EmbeddedMachine::cpu` and `NativeTarget::cpu` carry it.
+- `bx`'s `setISAMode` user operation expands to nothing. The p-code has
+  already written the mode bit and masked the target by the time it fires, so
+  the operation spells nothing further; leaving it a `CallOther` refused every
+  function containing a `bx`.
+- A machine reaches its return address through transport the fact did not
+  follow: `bx lr` masks the link register's low bit -- the instruction-set
+  select, not the address -- and `ldmia sp!,{fp,pc}` pops the frame word
+  straight into the program counter. Three near-identical arms became one
+  backward walk over the steps a machine uses to reach its control value.
+- **ARM predicates whole instructions, transfers included.** `bxeq lr` lifts
+  to a local conditional skip over the instruction's own return, and the
+  normalizer only converted a skip whose operations were all speculatable
+  values, so a predicated transfer became `Unimplemented` and the function
+  refused as volatile. A skip that jumps over a transfer to the end of the
+  instruction is an ordinary machine edge to the next instruction, and is now
+  spelled as one.
+
+Stub naming was rebuilt on the way: the cell is derived from the engine's own
+`terminal_indirect_loaded_slot` rather than a stride between transfers, which
+an x86-32 PLT (two transfers per cell) and ARM's three-instruction slot
+computation both defeated. A relocation slot now answers for its import too,
+because a stub's tail transfer names the slot rather than any code address.
+
+Measured on the 20 ARM 32-bit ELF binaries in radare2's corpus, first eight
+functions each, from a standing start where every function refused:
+
+    rendered 25 / refused 30 / undefined reads 6
+
+The non-ARM window is unchanged at `77 / 0 / 0`.
+
+## The one wall ARM is behind now
+
+**24 of the 30 remaining ARM refusals are `observation journal:
+RenderedValueRequired`** -- one class, the same one three causes of were fixed
+for on x86 ("Claim a value cell where the rendering absorbed it"). The
+smallest repro is `arm-init` `__atexit_handler_wrapper` at `0x2f4`, three
+instructions: `cmp r0,0; bxeq lr; bx r0`. The seal demands `ValueId(0)`,
+disposition `Inline { term: TermId(0) }`, and the other unaccounted values are
+the flag computation (`IntEqual` into `tmpZR`) and the entry values. So on a
+predicated path the condition's own flag values, which the structurer folds
+into the `if`, have no cell. Fixing it where the cell should be allocated --
+not at the seal -- is the next piece, and it is worth roughly four fifths of
+ARM's remaining refusals.
+
+## The wire is not dead, and the deletion waits on the plugin
+
+`snapshot_wire.c`, `snapshot_walk.c` and `crates/r2source/src/snapshot_wire.rs`
+were proposed for deletion as the native route's leftovers. They are not
+leftovers: `r_anal_sleigh.c` and `snapshot_capture.c` write that wire and
+`r2plugin/src/ffi_v2.rs` decodes it, so `pd:s` runs through it -- and so does
+the plugin column of `scripts/diff_capture.py`, which is the only instrument
+that grades a capture against a known-good one. The wire becomes deletable
+when the plugin path does, and not before.
