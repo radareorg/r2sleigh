@@ -164,7 +164,6 @@ aaa
 s `afl~test_loop_switch$[0]` > /dev/null
 pd:s | jq -Rs 'contains("switch (")'
 EOF_CMDS
-BROKEN=1
 RUN
 
 NAME=dec_struct_field_uses_field_access
