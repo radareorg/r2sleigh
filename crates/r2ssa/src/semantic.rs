@@ -1628,6 +1628,9 @@ pub enum StackArrayLayoutRefusal {
     MissingConstantOffset,
     InvalidExtent,
     DisplacedIndexBase,
+    /// Two accesses step through the object by different amounts, so it has
+    /// no one element size.
+    ConflictingStrides,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8739,6 +8742,30 @@ fn stack_array_layout(
         );
     };
 
+    // How far apart the elements are is how far the index steps, which the
+    // value analysis says. Taking it from the access width instead reads an
+    // array of structures touched a member at a time as an array of that
+    // member.
+    let mut stride = None;
+    for address in &indexed_addresses {
+        let Some(step) = objects
+            .index_for_address(*address)
+            .and_then(|byte_offset| values.stride(byte_offset))
+            .and_then(|step| u32::try_from(step).ok())
+        else {
+            continue;
+        };
+        if stride.is_some_and(|known| known != step) {
+            return StackArrayLayoutDisposition::Refused(
+                StackArrayLayoutRefusal::ConflictingStrides,
+            );
+        }
+        stride = Some(step);
+    }
+    // An object every access reaches at a constant offset has no step to
+    // read, and its elements are as wide as the accesses.
+    let stride = stride.unwrap_or(element_width);
+
     let mut maximum_constant_offset = None;
     let mut indexed_elements = Vec::with_capacity(indexed_addresses.len());
     for address in &indexed_addresses {
@@ -8752,7 +8779,7 @@ fn stack_array_layout(
         indexed_elements.push(StackArrayElementCertificate {
             address: *address,
             byte_offset,
-            element_index: stack_array_element_index(graph, byte_offset, element_width),
+            element_index: stack_array_element_index(graph, byte_offset, stride),
         });
     }
     r2il::refusal_evidence!(
@@ -8768,11 +8795,10 @@ fn stack_array_layout(
             StackArrayLayoutRefusal::MissingConstantOffset,
         );
     };
-    let stride = element_width;
     let Some(extent) = maximum_constant_offset.checked_add(u64::from(stride)) else {
         return StackArrayLayoutDisposition::Refused(StackArrayLayoutRefusal::InvalidExtent);
     };
-    if extent == 0 || !extent.is_multiple_of(u64::from(element_width)) {
+    if extent == 0 || !extent.is_multiple_of(u64::from(stride)) {
         return StackArrayLayoutDisposition::Refused(StackArrayLayoutRefusal::InvalidExtent);
     }
     StackArrayLayoutDisposition::Proven(StackArrayLayoutCertificate {
