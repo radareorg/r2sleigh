@@ -649,7 +649,11 @@ impl Importer<'_> {
             MachineExprKind::Phi { .. }
             | MachineExprKind::PopulationCount { .. }
             | MachineExprKind::Divide { .. }
-            | MachineExprKind::Remainder { .. } => None,
+            | MachineExprKind::Remainder { .. }
+            // Whether a conditional store took is not a term the rewriter can
+            // say anything about: it is not a function of the operands, so
+            // nothing it could be rewritten into would mean the same.
+            | MachineExprKind::ExclusiveStoreSucceeded { .. } => None,
             // A lane insert is the root with one window replaced, which is what
             // joining the parts either side of that window says.
             MachineExprKind::InsertLane {

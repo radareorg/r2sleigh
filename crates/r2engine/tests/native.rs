@@ -644,3 +644,48 @@ fn a_machine_operation_the_specification_names_is_called_and_declared() {
     assert!(output.contains("DataMemoryBarrier("), "{output}");
     assert!(output.contains("void DataMemoryBarrier("), "{output}");
 }
+
+#[test]
+fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
+    // `ldrex`/`strex` are a linked read and a conditional store, and the
+    // machine model states both exactly. Before it did, the projection could
+    // not describe either and every function using them refused there --
+    // which is every C++ atomic on this architecture.
+    const ATOMIC_INCREMENT: &[u8] = &[
+        0x10, 0xb5, // push {r4, lr}
+        0x51, 0xe8, 0x00, 0x2f, // ldrex r2, [r1, 0]
+        0x01, 0x32, // adds r2, 1
+        0x41, 0xe8, 0x00, 0x23, // strex r3, r2, [r1, 0]
+        0x10, 0xbd, // pop {r4, pc}
+    ];
+    let machine = r2sleigh_lift::embedded_machine("thumb").expect("thumb machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ATOMIC_INCREMENT,
+        name: "increment",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    assert!(
+        !format!("{:?}", response.render_refusal).contains("MachineProjection"),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    assert!(
+        response.output.contains("store_conditional") || response.output.contains("load_linked"),
+        "{}",
+        response.output
+    );
+}

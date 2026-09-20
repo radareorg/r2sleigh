@@ -675,6 +675,16 @@ impl Builder<'_> {
                 }
                 CValue::Typed(own)
             }
+            // The address is a pointer and the value is whatever was stored;
+            // what comes back is the machine's answer about the monitor, at
+            // the width the instruction writes it.
+            MachineExprKind::ExclusiveStoreSucceeded { value, .. } => {
+                let stored = self.produced(*value);
+                if let Some(stored) = stored.as_type().cloned() {
+                    self.require(id, 1, stored);
+                }
+                CValue::Typed(own)
+            }
         }
     }
 }

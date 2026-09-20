@@ -34,28 +34,62 @@ fn memory_access_authorities_match(
     // the member rather than being the store's only access.
     let member =
         member_run.and_then(|run| run.members.iter().find(|member| member.access == fact.id));
-    if graph.op_site_for_inst(fact.id.inst) != Some((fact.block_addr, fact.op_index))
-        || (fact.id.ordinal != 0 && member.is_none())
-        || fact.space != context_space
-        || graph
-            .inst(fact.id.inst)
-            .is_none_or(|inst| !matches!(&inst.payload, InstPayload::Op(op) if op == graph_op))
-        || graph_op != prepared_op
-        || graph_op.memory_space() != Some(context_space)
-        || objects.object_for_value(fact.address, context_space) != Some(fact.object)
-        || objects
-            .object(fact.object)
-            .is_none_or(|object| object.kind.space() != context_space)
+    // Each term names a different layer to look at, so each says so.
+    let no = |why: &str| {
+        r2il::refusal_evidence!("memory-access-authority", "{:?}: {why}", fact.id);
+        false
+    };
+    if graph.op_site_for_inst(fact.id.inst) != Some((fact.block_addr, fact.op_index)) {
+        return no("the instruction does not stand where the access says");
+    }
+    // A conditional store performs two: it reads to test the monitor and
+    // writes where the monitor held, and both are its own.
+    let records_several = matches!(graph_op, SSAOp::StoreConditional { .. });
+    if fact.id.ordinal != 0 && member.is_none() && !records_several {
+        return no("a later access of an instruction that stores no member run");
+    }
+    if fact.space != context_space {
+        return no("the access and the context name different spaces");
+    }
+    if graph
+        .inst(fact.id.inst)
+        .is_none_or(|inst| !matches!(&inst.payload, InstPayload::Op(op) if op == graph_op))
     {
-        return false;
+        return no("the graph instruction is not this operation");
+    }
+    if graph_op != prepared_op {
+        return no("the graph and the prepared function spell it differently");
+    }
+    if graph_op.memory_space() != Some(context_space) {
+        return no("the operation names another space than the context");
+    }
+    if objects.object_for_value(fact.address, context_space) != Some(fact.object) {
+        return no("the address reaches another object than the access names");
+    }
+    if objects
+        .object(fact.object)
+        .is_none_or(|object| object.kind.space() != context_space)
+    {
+        return no("the object is not in this space");
     }
 
     match graph_op {
-        SSAOp::Load { dst, addr, .. } => {
+        SSAOp::Load { dst, addr, .. } | SSAOp::LoadLinked { dst, addr, .. } => {
             !fact.is_write
                 && graph.value_id_for_var(addr) == Some(fact.address)
                 && fact.value == graph.value_id_for_var(dst)
                 && fact.width == dst.size
+        }
+        // A conditional store reads to test the monitor and writes where the
+        // monitor held. The read names no value, because what it reads is not
+        // a value the program takes; the write names what was stored.
+        SSAOp::StoreConditional { addr, val, .. } => {
+            graph.value_id_for_var(addr) == Some(fact.address)
+                && fact.width == val.size
+                && match fact.is_write {
+                    false => fact.id.ordinal == 0 && fact.value.is_none(),
+                    true => fact.id.ordinal == 1 && fact.value == graph.value_id_for_var(val),
+                }
         }
         SSAOp::Store { addr, val, .. } => {
             let addressed = fact.is_write && graph.value_id_for_var(addr) == Some(fact.address);
@@ -267,7 +301,15 @@ impl MachineValueUse {
             .function()
             .get_block(fact.block_addr)
             .and_then(|block| block.ops.get(fact.op_index))
-            .ok_or(MachineBuildError::EntityMismatch(access.inst))?;
+            .ok_or_else(|| {
+                r2il::refusal_evidence!(
+                    "memory-access-entity",
+                    "{access:?}: no prepared operation at {:#x}:{}",
+                    fact.block_addr,
+                    fact.op_index
+                );
+                MachineBuildError::EntityMismatch(access.inst)
+            })?;
         if !memory_access_authorities_match(
             artifact.graph(),
             artifact.objects(),
@@ -281,6 +323,12 @@ impl MachineValueUse {
                 .member_run_stores
                 .get(&access.inst),
         ) {
+            r2il::refusal_evidence!(
+                "memory-access-entity",
+                "{access:?}: {source_op:?} and the access at {:#x}:{} do not describe one another",
+                fact.block_addr,
+                fact.op_index
+            );
             return Err(MachineBuildError::EntityMismatch(access.inst));
         }
         let model = artifact.machine_context().memory_model();
@@ -958,6 +1006,18 @@ pub enum MachineExprKind {
     Phi {
         inputs: Box<[MachineExprId]>,
     },
+    /// Whether the conditional store at this instruction took.
+    ///
+    /// The one value on a machine that is not a function of its operands: two
+    /// runs of the same instruction on the same address and the same value
+    /// answer differently, because what decides it is whether anything else
+    /// wrote between the linked load and here. It is still exactly stated --
+    /// this store, of this value, through this address -- which is what makes
+    /// the branch that reads it renderable.
+    ExclusiveStoreSucceeded {
+        address: MachineExprId,
+        value: MachineExprId,
+    },
 }
 
 impl MachineExprKind {
@@ -1000,6 +1060,7 @@ impl MachineExprKind {
                 if_true,
                 if_false,
             } => vec![*condition, *if_true, *if_false],
+            Self::ExclusiveStoreSucceeded { address, value } => vec![*address, *value],
             Self::Phi { inputs } => inputs.to_vec(),
         }
     }
@@ -1503,7 +1564,18 @@ impl MachineProjection {
             let Some(output) = inst.output else {
                 continue;
             };
-            if entities.get(output).is_some() == failed_outputs.get(output).is_some() {
+            let projected = entities.get(output).is_some();
+            if projected == failed_outputs.get(output).is_some() {
+                r2il::refusal_evidence!(
+                    "machine-entity",
+                    "{:?} at {:?} is {}",
+                    inst.id,
+                    inst.payload,
+                    match projected {
+                        true => "both projected and refused",
+                        false => "neither projected nor refused",
+                    }
+                );
                 return Err(MachineBuildError::EntityMismatch(inst.id));
             }
         }
@@ -2474,6 +2546,13 @@ impl MachineFunction {
                 return Err(MachineBuildError::DuplicateEntity(entity.output.value));
             }
             if binding_for_value(value)? != entity.output {
+                r2il::refusal_evidence!(
+                    "machine-entity",
+                    "{:?}: the value binds {:?} and the entity states {:?}",
+                    entity.output.value,
+                    binding_for_value(value)?,
+                    entity.output
+                );
                 return Err(MachineBuildError::EntityMismatch(
                     graph
                         .def_inst(entity.output.value)
@@ -2493,6 +2572,13 @@ impl MachineFunction {
                     .get(entity.root)
                     .is_none_or(|root| root.origin != Some(entity.producer))
             {
+                r2il::refusal_evidence!(
+                    "machine-entity",
+                    "{inst_id:?}: the disposition names {:?}, the entity names {:?}, the root names {:?}",
+                    disposition.id,
+                    entity.producer,
+                    self.arena.get(entity.root).and_then(|root| root.origin)
+                );
                 return Err(MachineBuildError::EntityMismatch(inst_id));
             }
             if disposition.obligations != entity.source_obligations
@@ -2873,6 +2959,11 @@ impl MachineFunction {
                         .iter()
                         .all(|input| child(*input).is_ok_and(same_width))
             }
+            MachineExprKind::ExclusiveStoreSucceeded { address, value } => {
+                child(*address).is_ok()
+                    && child(*value).is_ok()
+                    && matches!(expr.ty, MachineType::Bool { .. })
+            }
         };
         if valid {
             Ok(())
@@ -2898,22 +2989,39 @@ impl MachineFunction {
         inst: &GraphInst,
         entity: &MachineEntity,
     ) -> Result<(), MachineBuildError> {
+        // Each check says what it rejected. "The entity does not match" alone
+        // leaves a reader to rediscover which of four rules it broke.
+        let mismatch = |why: &str| {
+            r2il::refusal_evidence!("machine-entity", "{:?}: {why}", inst.id);
+            MachineBuildError::EntityMismatch(inst.id)
+        };
         let root = self
             .arena
             .get(entity.root)
-            .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
+            .ok_or_else(|| mismatch("the root is not an expression"))?;
         if root.ty.width_bits() != entity.output.width_bits {
-            return Err(MachineBuildError::EntityMismatch(inst.id));
+            return Err(mismatch(&format!(
+                "the root is {} bits and the output is {}",
+                root.ty.width_bits(),
+                entity.output.width_bits
+            )));
         }
         let inputs = root.kind.children();
         if inputs.len() != inst.inputs.len() {
-            return Err(MachineBuildError::EntityMismatch(inst.id));
+            return Err(mismatch(&format!(
+                "the root takes {} operands and the instruction has {}",
+                inputs.len(),
+                inst.inputs.len()
+            )));
         }
         for (child, expected) in inputs.iter().zip(&inst.inputs) {
             let binding = operand_leaf_binding(&self.arena, *child)
-                .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
+                .ok_or_else(|| mismatch(&format!("operand {child:?} is not a leaf")))?;
             if binding.value != *expected {
-                return Err(MachineBuildError::EntityMismatch(inst.id));
+                return Err(mismatch(&format!(
+                    "operand {child:?} reads {:?} and the instruction reads {expected:?}",
+                    binding.value
+                )));
             }
         }
         let shape_matches = match (&inst.payload, &root.kind) {
@@ -2927,7 +3035,10 @@ impl MachineFunction {
             _ => false,
         };
         if !shape_matches {
-            return Err(MachineBuildError::EntityMismatch(inst.id));
+            return Err(mismatch(&format!(
+                "{:?} does not have the shape of {:?} at {:?}",
+                root.kind, inst.payload, root.ty
+            )));
         }
         if let MachineExprKind::MemoryRead { .. } = &root.kind {
             self.validate_memory_read(artifact, inst, entity, root)?;
@@ -2981,8 +3092,16 @@ impl MachineFunction {
             .memory_space_at(fact.block_addr, fact.op_index)
             .ok_or(MachineBuildError::MachineContextMismatch)?;
         let source_op = match &inst.payload {
-            InstPayload::Op(op @ SSAOp::Load { .. }) => op,
-            _ => return Err(MachineBuildError::EntityMismatch(inst.id)),
+            InstPayload::Op(op @ (SSAOp::Load { .. } | SSAOp::LoadLinked { .. })) => op,
+            _ => {
+                r2il::refusal_evidence!(
+                    "machine-entity",
+                    "{:?}: a memory read projected from {:?}",
+                    inst.id,
+                    inst.payload
+                );
+                return Err(MachineBuildError::EntityMismatch(inst.id));
+            }
         };
         let prepared_op = artifact
             .function()
@@ -3189,7 +3308,9 @@ impl MachineBuilder {
             }
             self.record_whole_use(graph, inst, input_idx)?;
         }
-        if let InstPayload::Op(op @ SSAOp::Store { .. }) = &inst.payload {
+        if let InstPayload::Op(op @ (SSAOp::Store { .. } | SSAOp::StoreConditional { .. })) =
+            &inst.payload
+        {
             self.intern_store_address(artifact, inst, op)?;
         }
         Ok(())
@@ -3656,7 +3777,40 @@ impl MachineBuilder {
         let unsigned = integer_type(output.width_bits, MachineSignedness::Unsigned);
         let signed = integer_type(output.width_bits, MachineSignedness::Signed);
         match op {
-            SSAOp::Load { .. } => {
+            // What a conditional store answers is its own notion: the store
+            // it names, through the address it names, and whether anything
+            // took the monitor away in between. The operands are stated and
+            // the outcome is not derived from them, which is exactly true of
+            // the machine.
+            SSAOp::StoreConditional { .. } => {
+                let mut operands = Vec::with_capacity(2);
+                for (input_idx, input) in inst.inputs.iter().enumerate() {
+                    let value = graph
+                        .value(*input)
+                        .ok_or(MachineBuildError::MissingGraphValue(*input))?;
+                    operands.push(self.intern_value(value)?);
+                    self.record_whole_use(graph, inst, input_idx)?;
+                }
+                let [address, value] = operands.as_slice() else {
+                    return Err(MachineBuildError::WrongOperandCount {
+                        inst: inst.id,
+                        expected: 2,
+                        actual: operands.len(),
+                    });
+                };
+                Ok((
+                    MachineType::Bool {
+                        storage_bits: output.width_bits,
+                    },
+                    MachineExprKind::ExclusiveStoreSucceeded {
+                        address: *address,
+                        value: *value,
+                    },
+                ))
+            }
+            // A linked load reads what a plain one reads: the linkage it sets
+            // is an effect of the instruction, not a property of the value.
+            SSAOp::Load { .. } | SSAOp::LoadLinked { .. } => {
                 let accesses = artifact
                     .facts()
                     .structured
@@ -4522,8 +4676,13 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
     }
     matches!(
         (op, kind),
-        (SSAOp::Load { .. }, MachineExprKind::MemoryRead { .. })
-            | (SSAOp::CallDefine { .. }, MachineExprKind::Source { .. })
+        (
+            SSAOp::Load { .. } | SSAOp::LoadLinked { .. },
+            MachineExprKind::MemoryRead { .. }
+        ) | (
+            SSAOp::StoreConditional { .. },
+            MachineExprKind::ExclusiveStoreSucceeded { .. }
+        ) | (SSAOp::CallDefine { .. }, MachineExprKind::Source { .. })
             | (SSAOp::Copy { .. }, MachineExprKind::Copy { .. })
             | (SSAOp::CallRestore { .. }, MachineExprKind::Copy { .. })
             | (
@@ -4927,12 +5086,14 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         | SSAOp::BoolNot { .. }
         | SSAOp::BoolAnd { .. }
         | SSAOp::BoolOr { .. }
-        | SSAOp::BoolXor { .. } => {
+        | SSAOp::BoolXor { .. }
+        | SSAOp::StoreConditional { .. } => {
             *ty == MachineType::Bool {
                 storage_bits: output_bits,
             }
         }
         SSAOp::Load { .. }
+        | SSAOp::LoadLinked { .. }
         | SSAOp::Copy { .. }
         | SSAOp::CallRestore { .. }
         | SSAOp::IntAdd { .. }
@@ -4998,6 +5159,9 @@ fn value_has_boolean_producer(graph: &crate::graph::SsaGraph, value: ValueId) ->
                     | SSAOp::BoolAnd { .. }
                     | SSAOp::BoolOr { .. }
                     | SSAOp::BoolXor { .. }
+                    // Whether a conditional store took is one or nought, and
+                    // the instruction after it reads exactly that.
+                    | SSAOp::StoreConditional { .. }
                     | SSAOp::FloatNaN { .. }
                     | SSAOp::FloatEqual { .. }
                     | SSAOp::FloatNotEqual { .. }

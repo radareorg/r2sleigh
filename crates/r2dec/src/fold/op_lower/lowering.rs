@@ -263,16 +263,23 @@ impl<'a> FoldingContext<'a> {
             obligations.extend(self.block_transfer_effect_obligations(block_addr, op_idx));
             return obligations;
         }
-        let memory = match op {
-            SSAOp::Load { .. } => self
-                .certified_memory_access_for_current_op(false)
-                .map(|cert| (EffectOccurrenceKind::MemoryRead, cert)),
-            SSAOp::Store { .. } => self
-                .certified_memory_access_for_current_op(true)
-                .map(|cert| (EffectOccurrenceKind::MemoryWrite, cert)),
-            _ => None,
+        // A linked load reads; a conditional store tests the monitor and then
+        // writes, so it does both. The statement each renders as accounts for
+        // the memory it touches, the way a plain load or store does.
+        let directions: &[bool] = match op {
+            SSAOp::Load { .. } | SSAOp::LoadLinked { .. } => &[false],
+            SSAOp::Store { .. } => &[true],
+            SSAOp::StoreConditional { .. } => &[false, true],
+            _ => &[],
         };
-        if let Some((kind, cert)) = memory {
+        for is_write in directions.iter().copied() {
+            let Some(cert) = self.certified_memory_access_for_current_op(is_write) else {
+                continue;
+            };
+            let kind = match is_write {
+                true => EffectOccurrenceKind::MemoryWrite,
+                false => EffectOccurrenceKind::MemoryRead,
+            };
             obligations.extend(self.exact_effect_obligations_for_normalized_memory(
                 kind,
                 block_addr,

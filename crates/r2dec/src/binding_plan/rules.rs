@@ -2531,15 +2531,17 @@ fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
         | Kind::FloatArithmetic { .. }
         | Kind::FloatUnary { .. }
         | Kind::FloatCompare { .. } => true,
-        // A read is a memory effect and a merge is not an expression; the
-        // remaining four have no form in the materialiser.
+        // A read is a memory effect, a merge is not an expression, and a
+        // conditional store's outcome belongs to the statement that performs
+        // the store; the rest have no form in the materialiser.
         Kind::Source { .. }
         | Kind::MemoryRead { .. }
         | Kind::Phi { .. }
         | Kind::InsertLane { .. }
         | Kind::PopulationCount { .. }
         | Kind::Divide { .. }
-        | Kind::Remainder { .. } => false,
+        | Kind::Remainder { .. }
+        | Kind::ExclusiveStoreSucceeded { .. } => false,
     }
 }
 
