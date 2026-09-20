@@ -19,6 +19,7 @@ pub struct Session {
     /// Which import each slot the loader fills stands for. A stub's tail
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
+    #[cfg(feature = "sleigh")]
     pub slots: std::collections::BTreeMap<u64, String>,
     /// What this binary defines at each address, indexed once.
     ///
@@ -69,6 +70,7 @@ impl Session {
             flags: Flags::of(&image),
             #[cfg(feature = "sleigh")]
             imports: std::collections::BTreeMap::new(),
+            #[cfg(feature = "sleigh")]
             slots: std::collections::BTreeMap::new(),
             #[cfg(feature = "sleigh")]
             defined: definitions(&image),
@@ -109,11 +111,6 @@ impl Session {
             }
         }
         Ok(())
-    }
-
-    #[cfg(feature = "sleigh")]
-    pub fn machine(&self) -> Option<&r2sleigh_lift::EmbeddedMachine> {
-        self.machine.as_ref()
     }
 
     /// The decoder the code at this address is written in.

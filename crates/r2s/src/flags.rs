@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use r2il::{R2ILOp, SpaceId};
+use r2il::R2ILOp;
 use r2image::{EntryKind, Image, SymbolKind};
 use r2sleigh_lift::Disassembler;
 
