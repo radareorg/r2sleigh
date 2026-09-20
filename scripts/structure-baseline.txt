@@ -1,4 +1,4 @@
-too_many_arguments 165
+too_many_arguments 161
 too_many_lines 481
 cognitive_complexity 65
 excessive_nesting 1125

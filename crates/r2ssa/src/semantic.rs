@@ -6986,7 +6986,6 @@ fn collect_callee_stack_allocation_certificates(
 ) -> BTreeMap<ObjectId, CalleeStackAllocationCertificate> {
     let AllocationSizing {
         array_layouts,
-        induction_bounds,
         values,
     } = sizing;
     let Some(machine_context) = machine_context else {
@@ -7075,15 +7074,8 @@ fn collect_callee_stack_allocation_certificates(
             }
             Some(StackArrayLayoutDisposition::NotIndexed)
             | Some(StackArrayLayoutDisposition::Refused(_))
-            | None => accessed_object_storage(
-                graph,
-                values,
-                induction_bounds,
-                objects,
-                structured,
-                *object,
-            )
-            .unwrap_or((element_width, false)),
+            | None => accessed_object_storage(graph, values, objects, structured, *object)
+                .unwrap_or((element_width, false)),
         };
 
         let mut active_sp_offsets = BTreeSet::new();
@@ -8073,7 +8065,6 @@ fn collect_stack_geometry_certificate(
 fn accessed_object_storage(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
-    inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
@@ -8081,8 +8072,7 @@ fn accessed_object_storage(
     // A callee proven to write the object from its base wrote that far,
     // whatever this body reads of it afterwards.
     if let Some(reach) = objects.callee_write_reach.get(&object) {
-        let accessed =
-            accessed_object_extent(graph, values, inductions, objects, structured, object);
+        let accessed = accessed_object_extent(values, objects, structured, object);
         return Some((accessed.map_or(*reach, |extent| extent.max(*reach)), true));
     }
     // An access at a computed index lands wherever the index reaches, so the
@@ -8092,7 +8082,7 @@ fn accessed_object_storage(
         .values()
         .any(|access| access.object == object && objects.address_is_indexed(access.address))
     {
-        return accessed_object_extent(graph, values, inductions, objects, structured, object)
+        return accessed_object_extent(values, objects, structured, object)
             .map(|extent| (extent, true));
     }
     let mut width = None;
@@ -8138,10 +8128,8 @@ fn accessed_object_storage(
                     "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
                     access.width
                 );
-                return accessed_object_extent(
-                    graph, values, inductions, objects, structured, object,
-                )
-                .map(|extent| (extent, true));
+                return accessed_object_extent(values, objects, structured, object)
+                    .map(|extent| (extent, true));
             }
         }
     }
@@ -8335,7 +8323,6 @@ fn evidenced_stack_roots(
     induction: &InductionBounds<'_>,
     callee_write_spans: &BTreeMap<StackAddressRoot, i64>,
 ) -> EvidencedStackRoots {
-    let induction_bounds = induction.upper;
     let induction_starts = induction.lower;
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
@@ -8456,7 +8443,6 @@ fn evidenced_stack_roots(
     // and treating it as one splits a buffer a vectoriser touched at fixed
     // offsets into fragments nothing is proven to write.
     let mut spans = BTreeMap::<StackAddressRoot, i64>::new();
-    let mut memo = BTreeMap::new();
     for block in function.blocks() {
         for (at, op) in block.ops.iter().enumerate() {
             let (addr, width) = match op {
@@ -8491,15 +8477,7 @@ fn evidenced_stack_roots(
             else {
                 continue;
             };
-            let Some(bound) = indexed_offset_upper_bound(
-                graph,
-                induction.values,
-                induction_bounds,
-                true,
-                index,
-                &mut memo,
-                &mut BTreeSet::new(),
-            ) else {
+            let Some(bound) = induction.values.upper_bound(index) else {
                 continue;
             };
             let Ok(reach) = i64::try_from(bound.saturating_add(u64::from(width))) else {
@@ -8605,15 +8583,12 @@ fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) 
 /// The extent an object's accesses reach, when every one lands at a known
 /// non-negative offset inside it; the containment proof is the offsets.
 fn accessed_object_extent(
-    graph: &SsaGraph,
     values: &crate::values::ValueRanges,
-    inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
 ) -> Option<u32> {
     let mut extent = 0u32;
-    let mut memo = BTreeMap::new();
     for access in structured.memory_accesses.values() {
         if access.object != object {
             continue;
@@ -8627,15 +8602,7 @@ fn accessed_object_extent(
         // frame's own layout answers instead.
         let offset = if objects.address_is_indexed(access.address) {
             let index = objects.index_for_address(access.address)?;
-            let bound = indexed_offset_upper_bound(
-                graph,
-                values,
-                inductions,
-                false,
-                index,
-                &mut memo,
-                &mut BTreeSet::new(),
-            );
+            let bound = values.upper_bound(index);
             // One unbounded index leaves the whole object unsized, so which
             // access it was is the fact that says why a buffer lost its size.
             r2il::refusal_evidence!(
@@ -8696,7 +8663,6 @@ fn object_index_operand(
 /// objects and the bounds their indices stay within.
 struct AllocationSizing<'a> {
     array_layouts: &'a BTreeMap<ObjectId, StackArrayLayoutDisposition>,
-    induction_bounds: &'a BTreeMap<ValueId, u64>,
     values: &'a crate::values::ValueRanges,
 }
 
@@ -8742,186 +8708,6 @@ fn indexed_offset_lower_bound(
         SSAOp::IntMult { .. } => lower(0)?.checked_mul(lower(1)?)?,
         _ => 0,
     })
-}
-
-/// The largest value `x & mask` can take while `x` stays at or below `bound`.
-///
-/// Every mask bit outranks all the bits under it, so taking the highest one
-/// that still fits is the maximum; nothing here approximates.
-fn masked_upper_bound(mask: u64, bound: u64) -> u64 {
-    let mut taken = 0u64;
-    for bit in (0..u64::BITS).rev() {
-        let candidate = taken | (1u64 << bit);
-        if mask & (1u64 << bit) != 0 && candidate <= bound {
-            taken = candidate;
-        }
-    }
-    taken
-}
-
-/// Exact unsigned byte bound carried by one index computation.
-///
-/// This is deliberately a small algebra, not a general range guess. Constants,
-/// masks, remainders, and checked compositions of already-bounded values have
-/// an exact finite upper bound. A merge, load, subtraction, or unsupported
-/// operation has none. The visited set is sized by the data it clears, so a
-/// cyclic graph refuses without an arbitrary depth constant.
-/// The divisor of a remainder the machine spelled as `x - (x / k) * k`.
-///
-/// Both operands of the multiplication are admitted in either order, and the
-/// dividend is compared through the copies and widenings that carry it, since
-/// the quotient is computed in a wider carrier on some machines.
-fn divided_remainder_divisor(graph: &SsaGraph, dividend: ValueId, product: ValueId) -> Option<u64> {
-    // Every operand is taken through the copies that carry it: the quotient
-    // reaches the multiplication in a register of its own, and the divisor is
-    // a register the machine loaded the constant into.
-    let canonical = |value: ValueId| crate::constant::root_of(graph, value);
-    let inst = graph.inst(graph.def_inst(canonical(product))?)?;
-    let InstPayload::Op(SSAOp::IntMult { .. }) = &inst.payload else {
-        return None;
-    };
-    let constant_of = |value: ValueId| crate::constant::folded_value(graph, value);
-    let operands = [
-        (*inst.inputs.first()?, *inst.inputs.get(1)?),
-        (*inst.inputs.get(1)?, *inst.inputs.first()?),
-    ];
-    for (quotient, divisor) in operands {
-        let Some(divisor) = constant_of(divisor).filter(|divisor| *divisor > 0) else {
-            continue;
-        };
-        let Some(quotient_inst) = graph
-            .def_inst(canonical(quotient))
-            .and_then(|inst| graph.inst(inst))
-        else {
-            continue;
-        };
-        let InstPayload::Op(SSAOp::IntDiv { .. }) = &quotient_inst.payload else {
-            continue;
-        };
-        let same_dividend = canonical(*quotient_inst.inputs.first()?) == canonical(dividend);
-        if same_dividend && constant_of(*quotient_inst.inputs.get(1)?) == Some(divisor) {
-            return Some(divisor);
-        }
-    }
-    None
-}
-
-fn indexed_offset_upper_bound(
-    graph: &SsaGraph,
-    values: &crate::values::ValueRanges,
-    inductions: &BTreeMap<ValueId, u64>,
-    strict: bool,
-    value: ValueId,
-    memo: &mut BTreeMap<ValueId, Option<u64>>,
-    visiting: &mut BTreeSet<ValueId>,
-) -> Option<u64> {
-    // The value analysis answers this for every value, having joined at the
-    // merges and widened where it had to. The walk below is what it replaces
-    // and stands only where the analysis reached no bound.
-    if let Some(bound) = values.upper_bound(value) {
-        return Some(bound);
-    }
-    if let Some(bound) = inductions.get(&value) {
-        return Some(*bound);
-    }
-    if let Some(bound) = memo.get(&value) {
-        return *bound;
-    }
-    if let Some(constant) = graph.value(value)?.var.constant_bits() {
-        memo.insert(value, Some(constant));
-        return Some(constant);
-    }
-    if !visiting.insert(value) {
-        return None;
-    }
-    let bound = (|| {
-        let inst = graph.inst(graph.def_inst(value)?)?;
-        let InstPayload::Op(op) = &inst.payload else {
-            return None;
-        };
-        let input = |index: usize| inst.inputs.get(index).copied();
-        let constant =
-            |index: usize| input(index).and_then(|value| graph.value(value)?.var.constant_bits());
-        let mut bound_of = |index: usize| {
-            indexed_offset_upper_bound(
-                graph,
-                values,
-                inductions,
-                strict,
-                input(index)?,
-                memo,
-                visiting,
-            )
-        };
-        match op {
-            SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
-                bound_of(0)
-            }
-            SSAOp::IntAdd { .. } => bound_of(0)?.checked_add(bound_of(1)?),
-            SSAOp::IntMult { .. } => bound_of(0)?.checked_mul(bound_of(1)?),
-            // The mask alone is not the bound: `i & 0xf8` with `i` below 64
-            // reaches 56, not 248. The answer is the largest value the mask
-            // admits that the other operand can reach.
-            // A mask bounds what it masks only together with what the other
-            // operand reaches. The mask's own magnitude is an assumption about
-            // that operand, and a span built on one swallowed every
-            // neighbouring local in the frame.
-            // A mask bounds what it masks together with what the other
-            // operand reaches; the mask's own magnitude is an assumption about
-            // that operand. Assuming it is safe where the answer sizes one
-            // object, since a wider local is still that local, and unsafe
-            // where the answer decides which positions are objects at all: a
-            // span built on the assumption swallowed every neighbouring local.
-            SSAOp::IntAnd { .. } => match (constant(0), constant(1)) {
-                (Some(mask), _) => match bound_of(1) {
-                    Some(bound) => Some(masked_upper_bound(mask, bound)),
-                    None => (!strict).then_some(mask),
-                },
-                (_, Some(mask)) => match bound_of(0) {
-                    Some(bound) => Some(masked_upper_bound(mask, bound)),
-                    None => (!strict).then_some(mask),
-                },
-                (None, None) => Some(bound_of(0)?.min(bound_of(1)?)),
-            },
-            // A remainder is below its divisor however the machine widened
-            // that divisor. x86-64 divides a 128-bit dividend, so `(a + i) % 3`
-            // reaches here with the three zero-extended into a sixteen-byte
-            // value and the constant no longer the operand itself.
-            SSAOp::IntRem { .. } => crate::constant::folded_value(graph, input(1)?)?.checked_sub(1),
-            // A machine with no remainder instruction spells one as
-            // `x - (x / k) * k`, which is below `k` whatever `x` reaches.
-            // AArch64 divides and multiplies back, so the modulo that picks a
-            // table entry arrives in this shape rather than as a remainder.
-            SSAOp::IntSub { .. } => {
-                divided_remainder_divisor(graph, input(0)?, input(1)?)?.checked_sub(1)
-            }
-            // The low piece of a bounded value is bounded by the same number,
-            // or by what its own width can hold. Taking it back out of the
-            // wide carrier a division left it in is the other half of the
-            // remainder above.
-            SSAOp::Subpiece { dst, offset, .. } if *offset == 0 => {
-                let bits = dst.size.saturating_mul(8).min(64);
-                let mask = if bits >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << bits) - 1
-                };
-                Some(bound_of(0)?.min(mask))
-            }
-            SSAOp::IntLeft { .. } => {
-                let shift = u32::try_from(constant(1)?).ok()?;
-                bound_of(0)?.checked_shl(shift)
-            }
-            SSAOp::IntRight { .. } => {
-                let shift = u32::try_from(constant(1)?).ok()?;
-                bound_of(0)?.checked_shr(shift)
-            }
-            _ => None,
-        }
-    })();
-    visiting.remove(&value);
-    memo.insert(value, bound);
-    bound
 }
 
 /// Remove the certified byte stride from one offset without manufacturing a
@@ -8972,7 +8758,6 @@ fn stack_array_element_index(
 fn stack_array_layout(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
-    inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
@@ -9022,22 +8807,13 @@ fn stack_array_layout(
         );
     };
 
-    let mut memo = BTreeMap::new();
     let mut maximum_constant_offset = None;
     let mut indexed_elements = Vec::with_capacity(indexed_addresses.len());
     for address in &indexed_addresses {
         let Some(byte_offset) = objects.index_for_address(*address) else {
             continue;
         };
-        if let Some(bound) = indexed_offset_upper_bound(
-            graph,
-            values,
-            inductions,
-            false,
-            byte_offset,
-            &mut memo,
-            &mut BTreeSet::new(),
-        ) {
+        if let Some(bound) = values.upper_bound(byte_offset) {
             maximum_constant_offset =
                 Some(maximum_constant_offset.map_or(bound, |old: u64| old.max(bound)));
         }
@@ -9668,9 +9444,6 @@ fn collect_prepared_function_certificates(
         })
         .collect();
 
-    // The value analysis answers this for every value, so the certificates
-    // read it rather than a map built only for a counted loop's counter.
-    let induction_bounds = BTreeMap::new();
     let stack_array_layouts = objects
         .objects
         .keys()
@@ -9678,14 +9451,7 @@ fn collect_prepared_function_certificates(
         .map(|object| {
             (
                 object,
-                stack_array_layout(
-                    graph,
-                    values,
-                    &induction_bounds,
-                    objects,
-                    structured,
-                    object,
-                ),
+                stack_array_layout(graph, values, objects, structured, object),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -9698,7 +9464,6 @@ fn collect_prepared_function_certificates(
         &exact_stack_slots,
         &AllocationSizing {
             array_layouts: &stack_array_layouts,
-            induction_bounds: &induction_bounds,
             values,
         },
     );
@@ -9770,7 +9535,7 @@ fn collect_prepared_function_certificates(
                 let storage = if declared {
                     None
                 } else {
-                    accessed_object_storage(graph, values, &induction_bounds, objects, structured, *object)
+                    accessed_object_storage(graph, values, objects, structured, *object)
                         // No access sizes it and nothing declares it, but its address left the body: a buffer a callee fills.
                         // The frame lays it out between its neighbours, and that gap is its extent, as bytes.
                         // An address that never leaves and is never accessed is a stack position, not an object, and the gap says nothing about it.
