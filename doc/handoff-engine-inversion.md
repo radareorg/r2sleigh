@@ -270,7 +270,7 @@ the gate reads that count. A value in one of the convention's argument slots is
 excluded from it, so a parameter the recovery missed still reads as a defect
 rather than being absorbed by the new column.
 
-## `SourceFunctionReturn` needs a third state, and this is the measurement
+## `SourceFunctionReturn` has a third state now, and this is why (closed)
 
 A function whose tail transfer has an unprovable result cannot recover its
 parameters, because the guard returns no interface at all. Letting it recover
@@ -280,10 +280,33 @@ displaces the caller's convention fallback, so every `.part.NN` function that
 had been getting its result that way lost it.
 
 So "this function proves no result" and "this function returns nothing" are
-different facts and the contract has one spelling for both. The same gap is why
-a return address that lives on a stack slot has nowhere to go: `r2abi` now
-keeps the location x86 declares (`CompilerSpec::return_address_slot`), but the
-machine roles carry register storages only. Both want the same missing state.
+different facts and the contract had one spelling for both. It is now
+`SourceFunctionReturn::Unproven`, which a caller treats as unknown and answers
+from the convention, exactly as it answers an absent interface. The recovery
+side had the same conflation in `Option<RecoveredResult>` and gained the same
+third case.
+
+One rule came out of building it, with the measurement that forced it: an
+unproven result mints **no call-site contract**. Minting one cost the gate
+97 → 93 rendered, because an import thunk reads no argument slot, so its
+proven parameter list is empty, and every Qt call in `abcde-qt32::main` lost
+its four arguments. The parameters of a body whose tail nobody read are a
+floor, not a contract; the caller stays on its convention fallback.
+
+The second fact that gap was holding up also landed. A body whose every return
+reloads its control value from the entry stack slot, where nothing writes that
+object and every live-out result roots at a read of it, **returns the address
+the call pushed** (`SourceFunctionInterface::body_proven_return_address`). The
+caller rewrites reads of that carrier to the constant one operation above the
+call, before preparation, because `inst_combine` is what folds `const + n` and
+nothing downstream of preparation folds. `__x86.get_pc_thunk.si` then gives
+`abcde-qt32::main` its string literal instead of `ESI_1 + 0xe0d`, and the
+`*_tm_clones` functions compute real addresses (`0x2008`,
+`*(uint32_t*)0x1fec`) rather than offsets from a value nothing assigned.
+
+Note for anyone re-deriving this: the value `mov esi,[esp]` reads and the value
+the `ret` pops are **not** the same SSA value -- the lift makes two loads of
+`[esp]`. Object identity plus "nothing writes it" is what holds.
 
 ## Open
 
