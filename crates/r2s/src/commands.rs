@@ -368,11 +368,15 @@ fn with_native<T>(
 
     // The format says which platform's own declarations apply: `_Exit` is
     // declared by the platform, not by the table every target shares.
-    let prototypes = r2abi::Prototypes::embedded_for(match session.image.format() {
+    let mut prototypes = r2abi::Prototypes::embedded_for(match session.image.format() {
         r2image::Format::Elf => r2abi::Platform::Linux,
         r2image::Format::MachO => r2abi::Platform::Darwin,
         _ => r2abi::Platform::Unknown,
     });
+    // What the binary's own debug information says beats the shared table: the
+    // table describes what a library is expected to look like, and this
+    // describes what this one is.
+    prototypes.declare(session.image.debug_prototypes().prototypes());
     let target = r2engine::native::NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,

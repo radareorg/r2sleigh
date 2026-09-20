@@ -58,6 +58,13 @@ codegen-units = 16
 panic = "unwind"
 strip = true
 
+# A debug build whose variables a debugger can read. `[profile.dev]` keeps only
+# line tables so that several worktrees of this workspace fit on one disk; this
+# is what to build when a breakpoint has to show a value rather than a line.
+[profile.debugger]
+inherits = "dev"
+debug = "full"
+
 [profile.dist]
 inherits = "release"
 lto = true

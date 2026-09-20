@@ -6,7 +6,9 @@ license.workspace = true
 description = "Program image: binary format parsing and virtual address mapping"
 
 [dependencies]
+gimli = { version = "0.34.0", default-features = false, features = ["read", "std"] }
 object.workspace = true
+r2abi = { version = "0.1.0", path = "../r2abi" }
 thiserror.workspace = true
 
 [lints]

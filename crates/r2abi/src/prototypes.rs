@@ -12,11 +12,30 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prototype {
     pub name: String,
-    /// One C type spelling per fixed parameter, in order.
-    pub parameters: Vec<String>,
+    /// One fixed parameter per entry, in order.
+    pub parameters: Vec<Parameter>,
     pub returns: String,
     /// Whether arguments continue past the fixed ones.
     pub variadic: bool,
+}
+
+/// One declared parameter: what it is, and what the declaration calls it.
+///
+/// The spelling decides how the call is read; the name decides only how it is
+/// rendered, and a declaration that gives none renders the position instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Parameter {
+    pub spelling: String,
+    pub name: Option<String>,
+}
+
+impl Parameter {
+    pub fn new(spelling: impl Into<String>, name: Option<impl Into<String>>) -> Self {
+        Self {
+            spelling: spelling.into(),
+            name: name.map(Into::into),
+        }
+    }
 }
 
 /// Every prototype the data declares.
@@ -63,7 +82,7 @@ impl Prototypes {
 
     pub fn parse(text: &str) -> Self {
         let mut by_name: BTreeMap<String, Prototype> = BTreeMap::new();
-        let mut slots: BTreeMap<String, BTreeMap<usize, String>> = BTreeMap::new();
+        let mut slots: BTreeMap<String, BTreeMap<usize, Parameter>> = BTreeMap::new();
         for line in text.lines() {
             let Some((key, value)) = line.trim().split_once('=') else {
                 continue;
@@ -84,11 +103,14 @@ impl Prototypes {
                     continue;
                 };
                 declare(&mut by_name, name);
-                let spelling = value.split(',').next().unwrap_or_default().trim();
-                slots
-                    .entry(name.to_owned())
-                    .or_default()
-                    .insert(index, spelling.to_owned());
+                let (spelling, called) = match value.split_once(',') {
+                    Some((spelling, called)) => (spelling.trim(), Some(called.trim())),
+                    None => (value, None),
+                };
+                slots.entry(name.to_owned()).or_default().insert(
+                    index,
+                    Parameter::new(spelling, called.filter(|called| !called.is_empty())),
+                );
                 continue;
             }
 
@@ -105,17 +127,28 @@ impl Prototypes {
             let Some(prototype) = by_name.get_mut(&name) else {
                 continue;
             };
-            for spelling in positions.into_values() {
+            for parameter in positions.into_values() {
                 // An empty spelling is the ellipsis: everything after it is
                 // whatever the caller passes.
-                if spelling.is_empty() {
+                if parameter.spelling.is_empty() {
                     prototype.variadic = true;
                     break;
                 }
-                prototype.parameters.push(spelling);
+                prototype.parameters.push(parameter);
             }
         }
         Self { by_name }
+    }
+
+    /// Layer prototypes the binary itself declares over the shipped ones.
+    ///
+    /// What a binary's own debug information says beats what the shared table
+    /// declares for the same name: the table is what a library is expected to
+    /// look like, and the binary is what it is.
+    pub fn declare(&mut self, prototypes: impl IntoIterator<Item = Prototype>) {
+        for prototype in prototypes {
+            self.by_name.insert(prototype.name.clone(), prototype);
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&Prototype> {
@@ -154,7 +187,7 @@ mod tests {
     fn a_fixed_prototype_reads_whole() {
         let prototypes = Prototypes::embedded();
         let puts = prototypes.get("puts").expect("puts");
-        assert_eq!(puts.parameters, ["const char *"]);
+        assert_eq!(puts.parameters, [Parameter::new("const char *", Some("s"))]);
         assert_eq!(puts.returns, "int");
         assert!(!puts.variadic);
     }
@@ -163,7 +196,10 @@ mod tests {
     fn the_ellipsis_is_variadic_rather_than_a_parameter() {
         let prototypes = Prototypes::embedded();
         let printf = prototypes.get("printf").expect("printf");
-        assert_eq!(printf.parameters, ["const char *"]);
+        assert_eq!(
+            printf.parameters,
+            [Parameter::new("const char *", Some("format"))]
+        );
         assert!(printf.variadic);
     }
 

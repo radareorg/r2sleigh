@@ -359,7 +359,29 @@ fn analyse(
         facts.push(derived);
     }
 
-    let first = native.prepare(&root, &callees)?;
+    // What the binary's own debug information says this function takes is a
+    // declaration, exactly as an import's is, so it is placed in the
+    // convention's slots the same way and the body is prepared against it.
+    // Without this the engine reads every parameter as the width of the
+    // register it arrived in, whatever the source said.
+    let declared_root = native
+        .program
+        .name_at(entry)
+        .and_then(|name| target.prototypes.get(&name).cloned())
+        .and_then(|prototype| {
+            // The spelling and the interface are one declaration: a signature
+            // whose arity the convention could not place would render a
+            // parameter list the body was never prepared against.
+            Some(Restatement {
+                interface: Some(declared_interface(&prototype, &native.machine, ptr_bits)?),
+                signature: Some(declared_signature(&prototype)),
+            })
+        })
+        .unwrap_or_default();
+    let first = match declared_root.interface.is_some() {
+        false => native.prepare(&root, &callees)?,
+        true => native.prepare_restated(&root, &callees, Vec::new(), declared_root.clone(), &[])?,
+    };
     // A dispatch through a table is where the first walk stopped: it could see
     // the branch and not where it goes. The analysis it has just been through
     // says where the table is and how far it runs, so the table is read and
@@ -387,7 +409,15 @@ fn analyse(
     let folded = native.folded_literals(&first, &root);
     let artifact = match restated.is_none() && folded.is_empty() && tables.is_empty() {
         true => first,
-        false => native.prepare_restated(&root, &callees, folded, restated, &tables)?,
+        false => {
+            // A body that proved no frame slot restates nothing, and the
+            // declaration it was prepared against is still the declaration.
+            let restatement = Restatement {
+                interface: restated.or(declared_root.interface),
+                signature: declared_root.signature,
+            };
+            native.prepare_restated(&root, &callees, folded, restatement, &tables)?
+        }
     };
     Ok(Prepared {
         artifact,
@@ -396,6 +426,59 @@ fn analyse(
         declared,
         ptr_bits,
     })
+}
+
+/// What a capture states about the boundary beyond what the bytes say.
+///
+/// Both halves describe the same declaration -- where each parameter arrives
+/// and what it is called -- so they travel together and a capture that has one
+/// without the other would render a signature its body was not prepared for.
+#[derive(Debug, Clone, Default)]
+struct Restatement {
+    interface: Option<r2source::SourceFunctionInterface>,
+    signature: Option<r2source::SourceSignaturePresentation>,
+}
+
+/// How a declaration spells a function, for rendering rather than for reading.
+///
+/// The interface carries the widths; without this the renderer has only those,
+/// so a `size_t` arrives as a 64-bit register and is spelled as one.
+fn declared_signature(prototype: &r2abi::Prototype) -> r2source::SourceSignaturePresentation {
+    let parameters = prototype.parameters.iter().map(|parameter| {
+        r2source::SourceSignatureParameter::new(
+            parameter.name.clone(),
+            Some(parameter.spelling.clone()),
+        )
+    });
+    let ellipsis = prototype
+        .variadic
+        .then(|| r2source::SourceSignatureParameter::new(Some("..."), None::<String>));
+    r2source::SourceSignaturePresentation::new(
+        Some(prototype.returns.clone()),
+        None::<String>,
+        false,
+        parameters.chain(ellipsis),
+    )
+}
+
+/// What to call each parameter the interface declares.
+///
+/// Exactly as long as that list, because the presentation is read positionally
+/// against it. A declaration that named no parameter, or none at all, leaves
+/// the position as the name.
+fn declared_parameter_names(
+    signature: Option<&r2source::SourceSignaturePresentation>,
+    count: usize,
+) -> Vec<String> {
+    (0..count)
+        .map(|index| {
+            signature
+                .and_then(|signature| signature.named_parameters().get(index))
+                .and_then(r2source::SourceSignatureParameter::name)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("arg{index}"))
+        })
+        .collect()
 }
 
 /// The declared interfaces of the library functions this body calls.
@@ -461,11 +544,12 @@ fn declared_interface(
     let parameter_values = prototype
         .parameters
         .iter()
-        .map(|spelling| graph.value(spelling, ptr_bits))
+        .enumerate()
+        .map(|(index, parameter)| graph.value(&parameter.spelling, ptr_bits, slots[index].size))
         .collect::<Vec<_>>();
-    let return_value = match returns {
-        r2source::SourceFunctionReturn::Void => None,
-        _ => graph.value(&prototype.returns, ptr_bits),
+    let return_value = match (returns, machine.slots.result_slot()) {
+        (r2source::SourceFunctionReturn::Void, _) | (_, None) => None,
+        (_, Some(storage)) => graph.value(&prototype.returns, ptr_bits, storage.size),
     };
     let typed = parameter_values.iter().all(Option::is_some)
         && matches!(returns, r2source::SourceFunctionReturn::Void) == return_value.is_none();
@@ -494,27 +578,50 @@ fn declared_interface(
         ),
     };
 
-    interface
-        .ok()
-        .and_then(|interface| {
-            let roles = machine.roles;
-            interface
-                .with_return_address_storage(roles.return_address_storage()?)
-                .ok()?
-                .with_stack_pointer_storage(roles.stack_pointer_storage()?)
-                .ok()
-        })
-        // The types are radare2's declarations, which is exactly what this flag
-        // says: the prototype was read rather than recovered.
-        .map(r2source::SourceFunctionInterface::with_prototype_from_source_types)
-        .or_else(|| {
+    let interface = match interface {
+        Ok(interface) => interface,
+        Err(error) => {
             r2il::refusal_evidence!(
                 "declared-interface",
-                "{} could not be stated in this machine's carriers",
+                "{} does not state an interface: {error:?}",
+                prototype.name
+            );
+            return None;
+        }
+    };
+    let roles = machine.roles;
+    let Some(return_address) = roles.return_address_storage() else {
+        r2il::refusal_evidence!(
+            "declared-interface",
+            "{}: this machine names no return address carrier",
+            prototype.name
+        );
+        return None;
+    };
+    let Some(stack_pointer) = roles.stack_pointer_storage() else {
+        r2il::refusal_evidence!(
+            "declared-interface",
+            "{}: this machine names no stack pointer carrier",
+            prototype.name
+        );
+        return None;
+    };
+    let placed = interface
+        .with_return_address_storage(return_address)
+        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer));
+    match placed {
+        // The types are radare2's declarations, which is exactly what this flag
+        // says: the prototype was read rather than recovered.
+        Ok(interface) => Some(interface.with_prototype_from_source_types()),
+        Err(error) => {
+            r2il::refusal_evidence!(
+                "declared-interface",
+                "{} does not fit this machine's carriers: {error:?}",
                 prototype.name
             );
             None
-        })
+        }
+    }
 }
 
 /// One interface again, with stack slots it did not have.
@@ -526,9 +633,10 @@ fn declared_interface(
 fn restate(
     interface: &r2source::SourceFunctionInterface,
     slots: Vec<r2source::SourceStackSlotSpec>,
+    revision: Vec<u8>,
 ) -> Option<r2source::SourceFunctionInterface> {
     let mut restated = r2source::SourceFunctionInterface::new_exact_with_logical_types(
-        interface.revision_identity().to_vec(),
+        revision,
         interface.calling_convention(),
         interface.parameters().to_vec(),
         interface.return_kind(),
@@ -575,14 +683,29 @@ struct DeclaredTypes {
 }
 
 impl DeclaredTypes {
-    /// The logical value one C spelling stands for.
-    fn value(&mut self, spelling: &str, ptr_bits: u32) -> Option<r2source::SourceLogicalValue> {
+    /// The logical value one C spelling stands for, in the carrier it arrives
+    /// in.
+    ///
+    /// A declared type narrower than its carrier occupies the carrier's low
+    /// bits and says so, which is what `int` in a 64-bit register is. Calling
+    /// that the whole carrier is what made every prototype with an `int` in it
+    /// refuse, and with it every `main`.
+    fn value(
+        &mut self,
+        spelling: &str,
+        ptr_bits: u32,
+        carrier_size_bytes: u32,
+    ) -> Option<r2source::SourceLogicalValue> {
         let parsed = r2types::parse_c_type_like(spelling, ptr_bits)?;
         let id = self.intern(&parsed, ptr_bits)?;
         let bits = self.types[id as usize].size_bits();
+        let kind = match bits == u64::from(carrier_size_bytes) * 8 {
+            true => r2source::SourceCarrierKind::Full,
+            false => r2source::SourceCarrierKind::LowBits,
+        };
         Some(r2source::SourceLogicalValue::new(
             id,
-            r2source::SourceCarrierProjection::new(r2source::SourceCarrierKind::Full, 0, bits),
+            r2source::SourceCarrierProjection::new(kind, 0, bits),
         ))
     }
 
@@ -622,8 +745,8 @@ impl DeclaredTypes {
 /// than contributing a parameter list with a hole in it.
 fn function_type(prototype: &r2abi::Prototype, ptr_bits: u32) -> Option<r2types::FunctionType> {
     let mut params = Vec::with_capacity(prototype.parameters.len());
-    for spelling in &prototype.parameters {
-        params.push(r2types::parse_c_type_like(spelling, ptr_bits)?);
+    for parameter in &prototype.parameters {
+        params.push(r2types::parse_c_type_like(&parameter.spelling, ptr_bits)?);
     }
     Some(r2types::FunctionType {
         return_type: r2types::parse_c_type_like(&prototype.returns, ptr_bits)?,
@@ -896,7 +1019,7 @@ impl Native<'_> {
             })
             .collect::<Vec<_>>();
 
-        restate(interface, slots)
+        restate(interface, slots, interface.revision_identity().to_vec())
     }
 
     fn prepare_with_literals(
@@ -905,7 +1028,7 @@ impl Native<'_> {
         callees: &Callees,
         extra_literals: Vec<(u64, String)>,
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        self.prepare_restated(walked, callees, extra_literals, None, &[])
+        self.prepare_restated(walked, callees, extra_literals, Restatement::default(), &[])
     }
 
     fn prepare_restated(
@@ -913,32 +1036,49 @@ impl Native<'_> {
         walked: &Walked,
         callees: &Callees,
         extra_literals: Vec<(u64, String)>,
-        interface: Option<r2source::SourceFunctionInterface>,
+        restatement: Restatement,
         tables: &[NativePointerTable],
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        let Restatement {
+            interface,
+            signature,
+        } = restatement;
+        let arity = interface.as_ref().map_or(0, |i| i.parameters().len());
+        let blocks = walked
+            .body
+            .blocks
+            .iter()
+            .map(|block| NativeBlock {
+                address: block.lifted.addr,
+                bytes: block.bytes.clone(),
+                successors: block.successors.clone(),
+                switch: tables
+                    .iter()
+                    .find(|table| {
+                        (block.lifted.addr..block.lifted.addr + u64::from(block.lifted.size))
+                            .contains(&table.instruction)
+                    })
+                    .map(|table| r2source::native::NativeSwitch {
+                        instruction: table.instruction,
+                        cases: table.cases.clone(),
+                    }),
+            })
+            .collect::<Vec<_>>();
+        // The capture keeps an interface only where it is about the revision
+        // being captured, which is what stops a restatement of other bytes
+        // reaching this body. A declaration is about this body too, so it is
+        // stated against this revision rather than against the name it was
+        // read under -- without which a declared prototype was silently
+        // dropped and every parameter went back to the width of its register.
+        let identity = r2source::native::revision_identity(walked.body.entry, &blocks);
+        let interface = interface.and_then(|interface| {
+            let slots = interface.stack_slots().to_vec();
+            restate(&interface, slots, identity.to_vec())
+        });
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
-            blocks: walked
-                .body
-                .blocks
-                .iter()
-                .map(|block| NativeBlock {
-                    address: block.lifted.addr,
-                    bytes: block.bytes.clone(),
-                    successors: block.successors.clone(),
-                    switch: tables
-                        .iter()
-                        .find(|table| {
-                            (block.lifted.addr..block.lifted.addr + u64::from(block.lifted.size))
-                                .contains(&table.instruction)
-                        })
-                        .map(|table| r2source::native::NativeSwitch {
-                            instruction: table.instruction,
-                            cases: table.cases.clone(),
-                        }),
-                })
-                .collect(),
+            blocks,
             calls: call_sites(&walked.body, self.program),
             string_literals: {
                 let mut literals = self.literals(&walked.body);
@@ -949,9 +1089,8 @@ impl Native<'_> {
             },
             data_symbols: self.data_symbols(&walked.body),
             code_pointer_tables: tables.iter().map(|table| table.table.clone()).collect(),
-            parameter_names: (0..interface.as_ref().map_or(0, |i| i.parameters().len()))
-                .map(|index| format!("arg{index}"))
-                .collect(),
+            parameter_names: declared_parameter_names(signature.as_ref(), arity),
+            signature,
             interface,
             loader_role: None,
         };

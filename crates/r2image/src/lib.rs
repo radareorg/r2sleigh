@@ -7,6 +7,8 @@
 //! threads behind an `Arc`.
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
+pub mod debug;
+
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -341,6 +343,7 @@ pub struct Image {
     segments: Vec<Segment>,
     sections: Vec<Section>,
     symbols: Vec<Symbol>,
+    debug_prototypes: debug::DebugPrototypes,
     entry_points: Vec<EntryPoint>,
     relocations: Vec<Relocation>,
 }
@@ -471,6 +474,10 @@ impl Image {
         relocations.sort_by(|left, right| left.vaddr.cmp(&right.vaddr));
         relocations.dedup_by_key(|relocation| relocation.vaddr);
 
+        // Read while the parsed view is alive; the bytes it borrows move into
+        // the image below.
+        let debug_prototypes = debug::read(&file);
+
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
@@ -558,6 +565,7 @@ impl Image {
             segments,
             sections,
             symbols,
+            debug_prototypes,
             entry_points,
             relocations,
         })
@@ -585,6 +593,12 @@ impl Image {
 
     pub fn symbols(&self) -> &[Symbol] {
         &self.symbols
+    }
+
+    /// What the binary's own debug information says its functions take and
+    /// return. Empty where it carries none.
+    pub fn debug_prototypes(&self) -> &debug::DebugPrototypes {
+        &self.debug_prototypes
     }
 
     /// The slots the loader fills, in address order.
@@ -813,6 +827,7 @@ mod tests {
             symbols: Vec::new(),
             entry_points: Vec::new(),
             relocations: Vec::new(),
+            debug_prototypes: debug::DebugPrototypes::default(),
         }
     }
 

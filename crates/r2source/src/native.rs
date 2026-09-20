@@ -20,7 +20,7 @@ use crate::{
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
     OwnedFunctionSnapshot, SnapshotValidationError, SourceCodePointerTable, SourceConventionSlots,
     SourceDataObject, SourceEndianness, SourceFunctionInterface, SourceLoaderRole,
-    SourceMachineRoles,
+    SourceMachineRoles, SourceSignaturePresentation,
 };
 
 /// The machine every function in one capture session runs on.
@@ -99,6 +99,12 @@ pub struct NativeFunction {
     /// What to call each parameter the interface declares. Presentation only,
     /// and exactly as long as that list.
     pub parameter_names: Vec<String>,
+    /// How the declaration spells this function, where one was found.
+    ///
+    /// The interface says where each parameter arrives and how wide it is; this
+    /// says what the source called it, which is the only place a spelling like
+    /// `size_t` or a parameter's own name survives.
+    pub signature: Option<SourceSignaturePresentation>,
     pub loader_role: Option<SourceLoaderRole>,
 }
 
@@ -198,7 +204,7 @@ pub fn capture(
                 .map(|name| name.as_str().into())
                 .collect(),
             stack_slot_names: Box::from([]),
-            signature: None,
+            signature: function.signature,
             callee_signatures: Box::from([]),
         },
         OwnedFunctionImage {
@@ -251,7 +257,7 @@ fn field(
 /// needs, and different bytes are a different revision even at one address.
 /// FNV-1a because it must be identical on every machine and every run, which
 /// a randomly seeded hash is not.
-fn revision_identity(address: u64, blocks: &[NativeBlock]) -> Box<[u8]> {
+pub fn revision_identity(address: u64, blocks: &[NativeBlock]) -> Box<[u8]> {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |byte: u8| {
         hash ^= u64::from(byte);
@@ -326,6 +332,7 @@ mod tests {
             code_pointer_tables: Vec::new(),
             interface: None,
             parameter_names: Vec::new(),
+            signature: None,
             loader_role: None,
         }
     }
