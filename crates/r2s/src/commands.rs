@@ -49,6 +49,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "px" => hexdump(session, argument),
         "pd" => disassemble(session, argument),
         "pdd" => decompile(session, argument),
+        "pdim" => medium_tier(session, argument),
         other => Err(format!("unknown command '{}'", other)),
     }
 }
@@ -276,10 +277,46 @@ fn decompile(_session: &mut Session, _argument: &str) -> Result<String, String> 
     Err("built without the sleigh feature, so pdd cannot decompile".to_owned())
 }
 
+/// The analysis tier for one function: blocks, phis, operations, edges.
+///
+/// The renderer's input, printed. A defect in the C is either already here or
+/// is the lowering's, and that is the whole reason this exists.
+#[cfg(feature = "sleigh")]
+fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> {
+    let addr = parse_number(session, argument)?;
+    with_native(session, addr, |target, program| {
+        r2engine::native::prepared(target, program, addr)
+            .map(|artifact| artifact.artifact().function().dump())
+            .map_err(|refusal: r2engine::native::NativeRefusal| refusal.to_string())
+    })
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn medium_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature".to_owned())
+}
+
 /// `pdd`: decompile the function at the cursor, with no radare2 anywhere.
 #[cfg(feature = "sleigh")]
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
+    with_native(session, addr, |target, program| {
+        r2engine::native::decompile(target, program, addr)
+            .map(|response| response.output)
+            .map_err(|refusal| refusal.to_string())
+    })
+}
+
+/// Open the binary the way the engine wants it, and ask one question.
+///
+/// Every tier is asked for through here, so the machine, the conventions, the
+/// compiler specification and the image are assembled once.
+#[cfg(feature = "sleigh")]
+fn with_native<T>(
+    session: &mut Session,
+    addr: u64,
+    ask: impl FnOnce(&r2engine::native::NativeTarget<'_>, &OpenImage<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     session.ensure_machine()?;
     let machine = session
         .machine_at(addr)
@@ -330,9 +367,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
         slots: &session.slots,
         defined: &session.defined,
     };
-    let response = r2engine::native::decompile(&target, &program, addr)
-        .map_err(|refusal| refusal.to_string())?;
-    Ok(response.output)
+    ask(&target, &program)
 }
 
 /// The open binary, as the engine asks about it.

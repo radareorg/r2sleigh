@@ -101,11 +101,67 @@ impl std::fmt::Display for NativeRefusal {
 impl std::error::Error for NativeRefusal {}
 
 /// Decompile the function at `entry`.
+/// The medium tier for one function: SSA, prepared against its callees.
+///
+/// The same work `decompile` does, stopping before the rendering, so a reader
+/// can ask what the analysis tier holds without asking for C.
+pub fn prepared(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<std::sync::Arc<TrustedSsaArtifact>, NativeRefusal> {
+    analyse(target, program, entry).map(|prepared| prepared.artifact)
+}
+
+/// One function's analysis, before anything is rendered from it.
+struct Prepared {
+    artifact: std::sync::Arc<TrustedSsaArtifact>,
+    root: Walked,
+    facts: Vec<crate::CalleeFacts>,
+    declared: Vec<r2types::SourceOwnedCalleeSignature>,
+    ptr_bits: u32,
+}
+
 pub fn decompile(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
+    let Prepared {
+        artifact,
+        root,
+        facts,
+        declared,
+        ptr_bits,
+    } = analyse(target, program, entry)?;
+    let block_count = artifact.source_block_count();
+    let signatures = declared_signatures(target, &root, ptr_bits);
+    let input = EngineFunctionDecompileRequestInput::single_function(
+        EngineFunctionInput {
+            function_name: root.name,
+            function_addr: entry,
+            // The artifact owns the lift and the request reads it from there.
+            blocks: Vec::new(),
+            arch: Some(target.arch.clone()),
+            semantic_metadata_enabled: true,
+            source_snapshot: None,
+        },
+        Some(ptr_bits),
+        signatures,
+    )
+    .with_input_quality(EngineFunctionInputQuality::complete(block_count))
+    .with_trusted_ssa(artifact)
+    .with_callee_facts(facts)
+    .with_declared_signatures(declared);
+
+    Ok(EngineSession::new().decompile_function_from_input(input))
+}
+
+fn analyse(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<Prepared, NativeRefusal> {
     let native = Native {
         target,
         program,
@@ -201,27 +257,13 @@ pub fn decompile(
         true => first,
         false => native.prepare_restated(&root, &callees, folded, restated)?,
     };
-    let block_count = artifact.source_block_count();
-    let signatures = declared_signatures(target, &root, ptr_bits);
-    let input = EngineFunctionDecompileRequestInput::single_function(
-        EngineFunctionInput {
-            function_name: root.name,
-            function_addr: entry,
-            // The artifact owns the lift and the request reads it from there.
-            blocks: Vec::new(),
-            arch: Some(target.arch.clone()),
-            semantic_metadata_enabled: true,
-            source_snapshot: None,
-        },
-        Some(ptr_bits),
-        signatures,
-    )
-    .with_input_quality(EngineFunctionInputQuality::complete(block_count))
-    .with_trusted_ssa(artifact)
-    .with_callee_facts(facts)
-    .with_declared_signatures(declared);
-
-    Ok(EngineSession::new().decompile_function_from_input(input))
+    Ok(Prepared {
+        artifact,
+        root,
+        facts,
+        declared,
+        ptr_bits,
+    })
 }
 
 /// The declared interfaces of the library functions this body calls.

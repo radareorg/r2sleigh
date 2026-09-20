@@ -2691,9 +2691,10 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
                 out.push_str(&format!("  {} = phi({})\n", phi.dst, sources.join(", ")));
             }
 
-            // Operations
+            // Operations, spelled the way the phis above are: `SSAOp` has a
+            // Display of its own and the derived Debug was shadowing it.
             for op in &block.ops {
-                out.push_str(&format!("  {:?}\n", op));
+                out.push_str(&format!("  {op}\n"));
             }
 
             // Successors

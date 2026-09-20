@@ -418,3 +418,37 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
         response.output
     );
 }
+
+/// The analysis tier can be asked for on its own, without asking for C.
+///
+/// A defect in the output is either already visible here or belongs to the
+/// lowering below it, which is the whole reason the tier is printable.
+#[test]
+fn the_medium_tier_is_readable_without_rendering() {
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ARM_DEAD_LOAD,
+        name: "dead_load",
+        link: None,
+    };
+    let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+    let dump = artifact.artifact().function().dump();
+
+    // The load is in the tier whether or not anything renders it, and the
+    // operations are spelled by `SSAOp`'s own Display rather than by Debug.
+    assert!(dump.contains("Block 0x1000:"), "{dump}");
+    assert!(dump.contains("LOAD [ram]"), "{dump}");
+    assert!(!dump.contains("SSAVar {"), "derived Debug leaked:\n{dump}");
+}
