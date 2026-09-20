@@ -886,6 +886,10 @@ impl BindingPlan {
                     || certificate.stored_values != stored_values
                     || certificate.callee_allocation != callee_allocation
             }) {
+                r2il::refusal_evidence!(
+                    "stack-object-seal",
+                    "{object:?}: the source certifies no slot with this geometry"
+                );
                 return Err(BindingPlanBuildError::Seal(
                     BindingPlanSourceMismatch::UnexpectedStackObjectDisposition { object },
                 ));
@@ -900,6 +904,11 @@ impl BindingPlan {
                     reason: r2ssa::ledger::ElisionReason::StackFrame,
                 };
                 if self.stack_object_disposition(object) != Some(expected) {
+                    r2il::refusal_evidence!(
+                        "stack-object-seal",
+                        "{object:?}: the frame round trip is elided and the plan says {:?}",
+                        self.stack_object_disposition(object)
+                    );
                     return Err(BindingPlanBuildError::Seal(
                         BindingPlanSourceMismatch::UnexpectedStackObjectDisposition { object },
                     ));
@@ -921,6 +930,11 @@ impl BindingPlan {
                             reason: StackObjectRefusal::InvalidWidth { object, size_bytes },
                         };
                         if self.stack_object_disposition(object) != Some(expected) {
+                            r2il::refusal_evidence!(
+                                "stack-object-seal",
+                                "{object:?}: no width, so the plan has to refuse it and says {:?}",
+                                self.stack_object_disposition(object)
+                            );
                             return Err(BindingPlanBuildError::Seal(
                                 BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
                                     object,
@@ -1105,6 +1119,11 @@ impl BindingPlan {
                             reason: StackObjectRefusal::InvalidWidth { object, size_bytes },
                         };
                         if self.stack_object_disposition(object) != Some(expected) {
+                            r2il::refusal_evidence!(
+                                "stack-object-seal",
+                                "{object:?}: no width, so the plan has to refuse it and says {:?}",
+                                self.stack_object_disposition(object)
+                            );
                             return Err(BindingPlanBuildError::Seal(
                                 BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
                                     object,
@@ -1261,6 +1280,11 @@ impl BindingPlan {
                 }
             };
             if self.stack_object_disposition(object) != Some(expected_disposition) {
+                r2il::refusal_evidence!(
+                    "stack-object-seal",
+                    "{object:?}: the plan says {:?} and the source says {expected_disposition:?}",
+                    self.stack_object_disposition(object)
+                );
                 return Err(BindingPlanBuildError::Seal(
                     BindingPlanSourceMismatch::UnexpectedStackObjectDisposition { object },
                 ));
