@@ -168,7 +168,11 @@ def undefined_reads(lines):
         if not declared:
             continue
         name = declared.group(1)
-        if name in ("return", "else", "struct", "union"):
+        # `goto L2;` has the shape of a declaration: a word, a name, a
+        # semicolon. The name is a label, which no statement assigns.
+        if name in ("return", "else", "struct", "union") or line.strip().startswith(
+            "goto "
+        ):
             continue
         if any(assigns(other, name) for other in lines):
             continue
