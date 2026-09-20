@@ -2106,8 +2106,8 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         let inductions = collect_induction_facts(graph, &loops);
-        let induction_bounds = induction_upper_bounds(graph, &predicates, &loops, &inductions);
-        let induction_starts = induction_lower_bounds(graph, &inductions);
+        let induction_bounds = BTreeMap::new();
+        let induction_starts = BTreeMap::new();
         phase("loops", loops.len());
         // What every value can be, once, where nine walks used to each answer
         // a bound for their own question. The loops above say where the
@@ -8709,21 +8709,6 @@ struct InductionBounds<'a> {
     values: &'a crate::values::ValueRanges,
 }
 
-/// Where each counted loop's counter starts, when that is a constant: the
-/// least value it takes while stepping up.
-fn induction_lower_bounds(
-    graph: &SsaGraph,
-    inductions: &BTreeMap<ValueId, InductionFact>,
-) -> BTreeMap<ValueId, u64> {
-    inductions
-        .values()
-        .filter(|induction| matches!(induction.step, InductionStep::AddConst(step) if step > 0))
-        .filter_map(|induction| {
-            crate::constant::folded_value(graph, induction.init).map(|start| (induction.phi, start))
-        })
-        .collect()
-}
-
 /// The least value an index takes: a constant, a counter's start, and sums
 /// and products of those; anything else is at least zero.
 fn indexed_offset_lower_bound(
@@ -8757,188 +8742,6 @@ fn indexed_offset_lower_bound(
         SSAOp::IntMult { .. } => lower(0)?.checked_mul(lower(1)?)?,
         _ => 0,
     })
-}
-
-fn induction_upper_bounds(
-    graph: &SsaGraph,
-    predicates: &PredicateFacts,
-    loops: &BTreeMap<LoopId, StructuredLoopFact>,
-    inductions: &BTreeMap<ValueId, InductionFact>,
-) -> BTreeMap<ValueId, u64> {
-    let mut bounds = BTreeMap::new();
-    let constant = |value: ValueId| crate::constant::folded_value(graph, value);
-    for induction in inductions.values() {
-        let InductionStep::AddConst(step) = induction.step else {
-            continue;
-        };
-        if step == 0 {
-            continue;
-        }
-        let Some(loop_fact) = loops
-            .values()
-            .find(|loop_fact| loop_fact.id == induction.loop_id)
-        else {
-            continue;
-        };
-        let Some(predicate) = loop_fact
-            .condition
-            .and_then(|condition| predicates.predicates.get(&condition))
-        else {
-            continue;
-        };
-        let Some(comparison) = predicate.comparison.as_ref() else {
-            continue;
-        };
-        // The counter on one side, what bounds it on the other, either read
-        // through the copies the machine makes of it.
-        let through_copies = |value: ValueId| {
-            let mut value = value;
-            for _ in 0..8 {
-                let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
-                    break;
-                };
-                let InstPayload::Op(SSAOp::Copy { .. }) = inst.payload else {
-                    break;
-                };
-                let Some(source) = inst.inputs.first() else {
-                    break;
-                };
-                value = *source;
-            }
-            value
-        };
-        let phi = through_copies(induction.phi);
-        let update = through_copies(induction.update);
-        let lhs = through_copies(comparison.lhs);
-        let rhs = through_copies(comparison.rhs);
-        let (limit, counter_on_left, on_update) = if lhs == phi {
-            (comparison.rhs, true, false)
-        } else if rhs == phi {
-            (comparison.lhs, false, false)
-        } else if lhs == update {
-            (comparison.rhs, true, true)
-        } else if rhs == update {
-            (comparison.lhs, false, true)
-        } else {
-            continue;
-        };
-        // The comparison is the branch's, and the branch may leave the loop
-        // when it holds: `i >= 8` is spelled `8 <= i` and read at the exit
-        // edge. What bounds the counter is the condition under which the loop
-        // continues, so the side the counter sits on and the edge the truth
-        // takes both decide which way the test reads.
-        let stays_when_true = loop_fact.body.contains(&predicate.true_target);
-        let stays_when_false = loop_fact.body.contains(&predicate.false_target);
-        if stays_when_true == stays_when_false {
-            continue;
-        }
-        let negated = !stays_when_true;
-        let Some(limit) = constant(limit) else {
-            continue;
-        };
-        // A signed test bounds the unsigned value only where both sides stay
-        // non-negative, which a constant start at or below the limit gives.
-        let start = constant(induction.init);
-        // The last value of the compared quantity the loop admits. An
-        // inequality admits everything before the limit, and only stops a
-        // counter that lands on it at all.
-        let strictly_below = match (comparison.kind, counter_on_left, negated) {
-            // `i < limit`, either written that way or as the negation of
-            // `limit <= i` at an exit edge.
-            (CompareKind::Less | CompareKind::SignedLess, true, false)
-            | (CompareKind::LessEqual | CompareKind::SignedLessEqual, false, true) => Some(true),
-            // `i <= limit`, likewise.
-            (CompareKind::LessEqual | CompareKind::SignedLessEqual, true, false)
-            | (CompareKind::Less | CompareKind::SignedLess, false, true) => Some(false),
-            _ => None,
-        };
-        let admitted = match (strictly_below, comparison.kind, negated) {
-            (Some(true), _, _) => limit.checked_sub(1),
-            (Some(false), _, _) => Some(limit),
-            // A counter the loop runs while it differs from the limit stops
-            // on the step that lands there; equality is the same test negated.
-            (None, CompareKind::NotEqual, false) | (None, CompareKind::Equal, true) => {
-                limit.checked_sub(step)
-            }
-            // Everything else bounds the counter from below, not above.
-            (None, _, _) => None,
-        };
-        let Some(admitted) = admitted else {
-            continue;
-        };
-        // What the body sees: the admitted value when the test is on the
-        // update or guards the trip in the header, and one more step when a
-        // bottom test admits the merge itself, since the body runs once more.
-        let last = if on_update || predicate.block_addr == loop_fact.header {
-            admitted
-        } else {
-            match admitted.checked_add(step) {
-                Some(last) => last,
-                None => continue,
-            }
-        };
-        if matches!(
-            comparison.kind,
-            CompareKind::SignedLess | CompareKind::SignedLessEqual
-        ) && (limit >> 63) != 0
-        {
-            continue;
-        }
-        // In the header the test guards the first trip too; anywhere else the
-        // body has already run once with the value it started at.
-        if predicate.block_addr != loop_fact.header && start.is_none_or(|start| start > last) {
-            continue;
-        }
-        if start.is_some_and(|start| start > last) {
-            continue;
-        }
-        // An inequality only stops a counter that lands on the limit: from 0
-        // by twos, 65 is never reached and the loop is not bounded by it.
-        if matches!(comparison.kind, CompareKind::NotEqual | CompareKind::Equal)
-            && strictly_below.is_none()
-            && start.is_none_or(|start| (limit - start) % step != 0)
-        {
-            continue;
-        }
-        // The counter steps to the last value the test admits and no further,
-        // so the highest it reaches in the body is that value. Where the test
-        // stands decides whether the body sees one more step, so both places
-        // belong in the record.
-        r2il::refusal_evidence!(
-            "induction-bound",
-            "{:?} step={step} bound={last} (admitted={admitted}, on_update={on_update}, test at {:#x}, header {:#x}, kind={:?}, limit={limit})",
-            induction.phi,
-            predicate.block_addr,
-            loop_fact.header,
-            comparison.kind
-        );
-        bounds.insert(induction.phi, last);
-    }
-    // Which counters carry a bound, and which loops had no test to give one,
-    // is what says whether a buffer a loop fills can be sized at all.
-    if r2il::refusal_evidence::tracing() {
-        for induction in inductions.values() {
-            if bounds.contains_key(&induction.phi) {
-                continue;
-            }
-            let loop_fact = loops
-                .values()
-                .find(|loop_fact| loop_fact.id == induction.loop_id);
-            r2il::refusal_evidence!(
-                "induction-unbounded",
-                "{:?} step={:?} has no bound: condition={:?} comparison={:?} init={:?}",
-                induction.phi,
-                induction.step,
-                loop_fact.and_then(|loop_fact| loop_fact.condition),
-                loop_fact
-                    .and_then(|loop_fact| loop_fact.condition)
-                    .and_then(|condition| predicates.predicates.get(&condition))
-                    .and_then(|predicate| predicate.comparison.clone()),
-                constant(induction.init)
-            );
-        }
-    }
-    bounds
 }
 
 /// The largest value `x & mask` can take while `x` stays at or below `bound`.
@@ -9865,8 +9668,9 @@ fn collect_prepared_function_certificates(
         })
         .collect();
 
-    let induction_bounds =
-        induction_upper_bounds(graph, predicates, &structured.loops, &structured.inductions);
+    // The value analysis answers this for every value, so the certificates
+    // read it rather than a map built only for a counted loop's counter.
+    let induction_bounds = BTreeMap::new();
     let stack_array_layouts = objects
         .objects
         .keys()
