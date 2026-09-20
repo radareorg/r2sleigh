@@ -8728,3 +8728,45 @@ mod integration_tests {
         drop_test_context(context);
     }
 }
+
+/// The C writer and the Rust reader are one build.
+///
+/// `snapshot_wire.rs` says so in as many words and nothing held them to it, so
+/// a revision that added a discriminant to the Rust side left the C side
+/// writing the version before it. Every capture the plugin made was then
+/// rejected -- `snapshot wire decode failed: UnsupportedVersion(19)` -- for
+/// however long it took anyone to run the plugin route.
+#[cfg(test)]
+mod wire_version {
+    /// The header the C writer takes its constants from.
+    const HEADER: &str = include_str!("../snapshot_wire.h");
+
+    fn defined(name: &str) -> u32 {
+        let line = HEADER
+            .lines()
+            .find(|line| line.starts_with(&format!("#define {name} ")))
+            .unwrap_or_else(|| panic!("{name} is not defined in snapshot_wire.h"));
+        let value = line
+            .rsplit(' ')
+            .next()
+            .map(|value| value.trim_end_matches('u'))
+            .unwrap_or_default();
+        match value.strip_prefix("0x") {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => value.parse().ok(),
+        }
+        .unwrap_or_else(|| panic!("{name} is not a number: {line}"))
+    }
+
+    #[test]
+    fn the_writer_writes_the_format_the_reader_reads() {
+        assert_eq!(
+            defined("R2SLEIGH_SNAPSHOT_WIRE_FORMAT_VERSION"),
+            r2source::snapshot_wire::SNAPSHOT_WIRE_FORMAT_VERSION
+        );
+        assert_eq!(
+            defined("R2SLEIGH_SNAPSHOT_WIRE_MAGIC"),
+            r2source::snapshot_wire::SNAPSHOT_WIRE_MAGIC
+        );
+    }
+}
