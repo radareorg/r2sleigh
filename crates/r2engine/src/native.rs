@@ -1008,16 +1008,37 @@ impl DeclaredTypes {
                 let target_type_id = self.intern(target, ptr_bits)?;
                 (Kind::Pointer { target_type_id }, ptr_bits)
             }
+            // A name for a type is that type. The graph carries no names, and
+            // the spelling that keeps `size_t` readable travels beside it, so
+            // interning the target is the whole of what this has to do --
+            // without which one `size_t` in a prototype left the function with
+            // no exact type and no source name at all.
+            // A qualifier changes no layout and no register class, so the
+            // graph node is the type it qualifies. Without this a single
+            // `const char *` parameter left the whole prototype untyped, which
+            // is most of the library functions there are.
+            CTypeLike::Typedef { ty, .. } | CTypeLike::Const(ty) => {
+                return self.intern(ty, ptr_bits);
+            }
             // An aggregate needs a layout this declaration does not carry.
             _ => return None,
         };
+        // One node per distinct type. Interning the same spelling twice used
+        // to make two nodes, and the graph must have nothing in it that its
+        // roots cannot reach -- so a node whose only reference was a slot the
+        // body later proved for itself left the whole interface unstatable.
+        let size_bits = u64::from(bits);
+        let align_bits = u64::from(bits.max(8));
+        if let Some(found) = self.types.iter().find(|type_| {
+            type_.kind() == kind
+                && type_.size_bits() == size_bits
+                && type_.align_bits() == align_bits
+        }) {
+            return Some(found.id());
+        }
         let id = u32::try_from(self.types.len()).ok()?;
-        self.types.push(r2source::SourceType::new(
-            id,
-            kind,
-            u64::from(bits),
-            u64::from(bits.max(8)),
-        ));
+        self.types
+            .push(r2source::SourceType::new(id, kind, size_bits, align_bits));
         Some(id)
     }
 }
@@ -1028,7 +1049,7 @@ impl DeclaredTypes {
 /// for something else: `size_t` arrives where an unsigned long does.
 fn unnamed(parsed: &r2types::CTypeLike) -> &r2types::CTypeLike {
     match parsed {
-        r2types::CTypeLike::Typedef { ty, .. } => unnamed(ty),
+        r2types::CTypeLike::Typedef { ty, .. } | r2types::CTypeLike::Const(ty) => unnamed(ty),
         other => other,
     }
 }
@@ -1388,18 +1409,35 @@ impl Native<'_> {
         // proves where its own slots are, and it proves nothing about a slot
         // it never touched. A slot both describe keeps the recovered one,
         // which is the proven statement.
+        let covers = |slot: &r2source::SourceStackSlotSpec,
+                      other: &r2source::SourceStackSlotSpec| {
+            slot.base() == other.base()
+                && slot.offset() < other.offset() + i64::from(other.size_bytes())
+                && other.offset() < slot.offset() + i64::from(slot.size_bytes())
+        };
         let kept = declared
             .iter()
-            .filter(|declared| {
-                !slots.iter().any(|slot| {
-                    slot.base() == declared.base()
-                        && slot.offset() < declared.offset() + i64::from(declared.size_bytes())
-                        && declared.offset() < slot.offset() + i64::from(slot.size_bytes())
-                })
-            })
+            .filter(|declared| !slots.iter().any(|slot| covers(slot, declared)))
             .cloned()
             .collect::<Vec<_>>();
-        let mut slots = slots;
+        // A slot both describe is one slot: the body's extent stands, and the
+        // declaration still says what type sits there.
+        let mut slots = slots
+            .into_iter()
+            .map(|slot| {
+                match declared.iter().find(|other| {
+                    covers(&slot, other)
+                        && other.offset() == slot.offset()
+                        && other.size_bytes() == slot.size_bytes()
+                }) {
+                    Some(other) => match other.logical_type() {
+                        None => slot,
+                        Some(id) => slot.with_logical_type(id),
+                    },
+                    None => slot,
+                }
+            })
+            .collect::<Vec<_>>();
         slots.extend(kept);
 
         restate(interface, slots, interface.revision_identity().to_vec())

@@ -3755,11 +3755,19 @@ impl FunctionFacts {
             // which is what a function with no graph already falls back to --
             // and the rest of the graph still serves its slots and members.
             let Some(value) = value else {
+                r2il::refusal_evidence!(
+                    "exact-source-signature",
+                    "parameter {index} carries no logical value"
+                );
                 return false;
             };
             let Some(ty) =
                 crate::writeback::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
             else {
+                r2il::refusal_evidence!(
+                    "exact-source-signature",
+                    "parameter {index}'s logical type is not in the graph"
+                );
                 return false;
             };
             let ty = match spelled_types
@@ -3788,6 +3796,10 @@ impl FunctionFacts {
             r2ssa::SourceFunctionReturn::Unproven => None,
         };
         let Some(ret_type) = ret_type else {
+            r2il::refusal_evidence!(
+                "exact-source-signature",
+                "the return type is not in the graph"
+            );
             return false;
         };
         let signature = crate::FunctionSignatureSpec {
@@ -3798,6 +3810,10 @@ impl FunctionFacts {
             &signature,
             [SignatureCertificateSource::SourceInterface],
         ) else {
+            r2il::refusal_evidence!(
+                "exact-source-signature",
+                "the signature carries no certificate: {signature:?}"
+            );
             return false;
         };
         self.types.merged_signature = Some(signature);

@@ -780,11 +780,17 @@ impl SourceTypeGraph {
         }
         match value.carrier.kind {
             SourceCarrierKind::Full => source_type.size_bits == carrier_bits,
+            // A scalar narrower than the register it travels in occupies that
+            // register's low bits, and a floating-point value is such a scalar:
+            // a `double` returned in a 128-bit vector register is the low half
+            // of it, exactly as an `int` is the low half of a 64-bit register.
             SourceCarrierKind::LowBits => {
                 source_type.size_bits < carrier_bits
                     && matches!(
                         source_type.kind,
-                        SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+                        SourceTypeKind::SignedInteger
+                            | SourceTypeKind::UnsignedInteger
+                            | SourceTypeKind::Float
                     )
             }
         }

@@ -5960,11 +5960,15 @@ fn projected_logical_register_storage(
     }
     match carrier.kind() {
         SourceCarrierKind::Full if carrier.size_bits() == abi_bits => Some(abi_storage),
+        // A float occupies its carrier's low lane as an integer does, which is
+        // how a `double` travels in a 128-bit vector register.
         SourceCarrierKind::LowBits
             if carrier.size_bits() < abi_bits
                 && matches!(
                     source_type.kind(),
-                    SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+                    SourceTypeKind::SignedInteger
+                        | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Float
                 ) =>
         {
             Some(CanonicalStorageId {
@@ -10788,11 +10792,15 @@ pub(crate) fn exact_logical_return_projection(
         {
             Some((boundary.value, storage.size, Some(logical)))
         }
+        // A float is a scalar in the carrier's low lane exactly as an integer
+        // is: a `double` returned in a 128-bit vector register is its low half.
         SourceCarrierKind::LowBits
             if projection.size_bits() < physical_bits
                 && matches!(
                     source_type.kind(),
-                    SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+                    SourceTypeKind::SignedInteger
+                        | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Float
                 ) =>
         {
             let Ok(logical_width) = u32::try_from(projection.size_bits() / 8) else {
