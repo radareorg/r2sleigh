@@ -30235,3 +30235,76 @@ from 11 as the walk began following predicated transfers and is worth reading
 as a boundary question rather than a summary one; 22 at `OpLowering`. The
 `RenderedValueRequired` class that was the largest is gone: it was the IT-block
 artefact the decoder-context fix removed.
+
+## The binary's own debug information
+
+The engine read no debug information at all: radare2's importer turned DWARF
+into its analysis model, the capture read that model, and the result crossed
+the bridge, so the native route had an exact type for nothing and every
+parameter was the width of the register it arrived in. `crates/r2image/src/debug.rs`
+reads the entries directly with `gimli` and produces `r2abi::Prototype`, the
+same shape the shipped calling-convention data already hands the engine, so a
+signature read from DWARF and one read from a declaration reach the renderer
+by one path. The prototype grew what only DWARF can say: each parameter's
+name and frame offset, where the frame is measured from, and each frame
+variable's name, spelling, offset and extent.
+
+Placing a declaration turned out to need three corrections that had nothing to
+do with DWARF. A declared type narrower than its carrier occupies the
+carrier's low bits and has to say so, without which every prototype holding an
+`int` -- `main` among them -- refused. Interning saw through neither `const`
+nor a typedef, so one `const char *` left a whole prototype untyped. And a
+parameter arrives in the registers its own class uses, so a `double` goes in a
+floating-point register and returns in one; calling the integer result
+register a `double`'s carrier made `mean` return the bits of a loop counter.
+An aggregate parameter now refuses the whole declaration rather than taking
+the next integer register, because how it travels depends on its members.
+
+Where the debug information measures the frame from the frame pointer, the
+declaration is restated into the coordinates objects are identified in -- the
+pointer the function was entered with -- by lining up a parameter the prologue
+spills, which is the one place the same slot is stated in both systems. GCC
+states `DW_OP_call_frame_cfa` and needs no such anchor; clang states
+`DW_OP_reg6` and does.
+
+On `cmp` built at `-O0` with `-g`, which is what DecBench grades, this renders
+`uint64_t count_newlines(int8_t* buf, uint64_t bufsize)` with six local names
+from the source where it rendered none before.
+
+## A call result spilled into its own local
+
+`read_before_assignment` is the largest refusal class on the DecBench
+binaries -- eleven of twenty over four of them. It is traced to the end and
+the fix is not taken, because the last step of it renders wrongly.
+
+The chain: a slot adopts its reloads' binding only when *every* reload names
+that binding, and a reload the plan elided or inlined names nothing, so an
+ordinary `-O0` local whose value is reloaded twice and folded once shares
+nothing and the slot mints a binding of its own. Counting only the reloads
+that name a variable fixes that (the seal has its own copy of the rule and
+needs the same change). Then the slot and its value are one binding, the store
+into the slot is `x = x` and is elided -- and nothing is left that assigns the
+name, because the value is a call's result: the call operation renders an
+expression rather than an assignment, and the define that names the result was
+absorbed into the store's own statement.
+
+Recognising the store's own read of that value as naming what the statement
+produces is nearly right: the read and the write are in *different* statements,
+so the statement-identity test that `self_defined` uses cannot see it, and
+asking by value identity instead does. But then the rendering is
+`ximalloc(s + 1); result = result;` -- the assignment is lost rather than
+spelled. What is missing is that eliding the store has to re-materialise the
+absorbed define, and that decision is made during normalization, before the
+journal that elides the store exists.
+
+## The gate's three undefined reads
+
+`scripts/diff_capture.py --native-only` has stood at 98 rendered, 0 refused
+and 3 undefined reads across this session; the reads were checked against the
+session's starting commit and are not new. All three are `__x86.get_pc_thunk.*`
+reading `stack_p0`, which is the return address the caller pushed: the PIC
+idiom `mov ebx, [esp]; ret`. The slot at the entry stack pointer is not a
+local, and the compiler specification already states where the return address
+sits (`CompilerSpec::return_address_slot`). Giving that slot a role of its own
+in the interface, so a read of it is a read of a declared object rather than of
+an unassigned local, is what closes the class.
