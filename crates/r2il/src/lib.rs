@@ -47,7 +47,7 @@ pub use metadata::{
 };
 pub use opcode::{
     BlockTransferKind, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, guarded_transfer,
-    predicated_transfer,
+    predicated_transfer, returns_to,
 };
 pub use regname::select_register_name;
 pub use serialize::{

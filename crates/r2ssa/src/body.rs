@@ -41,6 +41,13 @@ pub trait Program {
     /// cannot see that the target belongs to someone else, and a program that
     /// knows its own functions can.
     fn is_entry(&self, vaddr: u64) -> bool;
+
+    /// The register a call leaves the return address in, where the machine
+    /// names one. The compiler specification states it; the walk reads the
+    /// bytes and cannot know it, which is why it is asked for here.
+    fn return_address_register(&self) -> Option<r2il::Varnode> {
+        None
+    }
 }
 
 /// A function body: its blocks, who it calls, and what it could not follow.
@@ -222,6 +229,32 @@ impl<'a> Walk<'a> {
         })
     }
 
+    /// Whether the instructions leading to this transfer left `next` in the
+    /// link register, which is what makes the transfer a call.
+    ///
+    /// Only the contiguous run before it is read, and only up to the start of
+    /// the block: a return address written further back, across a join, is not
+    /// this instruction's.
+    fn returns_after(&self, addr: u64, next: u64) -> bool {
+        let Some(link) = self.program.return_address_register() else {
+            return false;
+        };
+        let mut at = addr;
+        while let Some((start, instruction)) = self.decoded.range(..at).next_back() {
+            if instruction.end() != at {
+                return false;
+            }
+            if r2il::returns_to(&instruction.lifted.ops, next, &link) {
+                return true;
+            }
+            if self.leaders.contains(start) {
+                return false;
+            }
+            at = *start;
+        }
+        false
+    }
+
     fn stop(&mut self, addr: u64, reason: UnresolvedReason) -> Option<Instruction> {
         r2il::refusal_evidence!("body-walk", "stopping at {:#x}: {:?}", addr, reason);
         self.unresolved.push(Unresolved { addr, reason });
@@ -291,7 +324,14 @@ impl<'a> Walk<'a> {
                 self.continues(fallthrough, &mut successors)
             }
             BlockTerminator::IndirectBranch => {
-                self.stop(addr, UnresolvedReason::IndirectBranch);
+                // A machine with no indirect call instruction spells one by
+                // leaving the return address in the link register and then
+                // branching. Control comes back, so the walk does too.
+                if self.returns_after(addr, next) {
+                    self.continues(Some(next), &mut successors);
+                } else {
+                    self.stop(addr, UnresolvedReason::IndirectBranch);
+                }
             }
             // A switch needs a value domain to resolve, which is why the walk
             // never produces one; a return and a terminal block have nowhere
@@ -312,6 +352,7 @@ impl<'a> Walk<'a> {
     /// instruction is a leader, or until the instructions stop being
     /// contiguous, which is where an unresolved transfer left a hole.
     fn into_body(self) -> Body {
+        let link = self.program.return_address_register();
         let mut blocks: Vec<BodyBlock> = Vec::new();
         let mut parts: Vec<Instruction> = Vec::new();
 
@@ -320,16 +361,16 @@ impl<'a> Walk<'a> {
                 .last()
                 .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
             if broken {
-                blocks.push(finish(&mut parts));
+                blocks.push(finish(&mut parts, link.as_ref()));
             }
             let ends = instruction.ends_block();
             parts.push(instruction);
             if ends {
-                blocks.push(finish(&mut parts));
+                blocks.push(finish(&mut parts, link.as_ref()));
             }
         }
         if !parts.is_empty() {
-            blocks.push(finish(&mut parts));
+            blocks.push(finish(&mut parts, link.as_ref()));
         }
 
         Body {
@@ -346,13 +387,25 @@ impl<'a> Walk<'a> {
 ///
 /// The successors are the last instruction's, because that is the only
 /// instruction in a basic block that control can leave by.
-fn finish(parts: &mut Vec<Instruction>) -> BodyBlock {
+fn finish(parts: &mut Vec<Instruction>, link: Option<&r2il::Varnode>) -> BodyBlock {
     let start = parts[0].lifted.addr;
     let last = parts
         .last()
         .expect("a block holds at least one instruction");
     let end = last.end();
-    let successors = successors_of(&last.terminator, end);
+    // A transfer the block returns from continues after it, whatever the
+    // opcode was: the link register holding the address after the block is
+    // what says so, and the walk followed it for the same reason.
+    let returns = matches!(last.terminator, BlockTerminator::IndirectBranch)
+        && link.is_some_and(|link| {
+            parts
+                .iter()
+                .any(|part| r2il::returns_to(&part.lifted.ops, end, link))
+        });
+    let successors = match returns {
+        true => vec![(AdvisorySuccessorKind::Fallthrough, end)],
+        false => successors_of(&last.terminator, end),
+    };
     let size = u32::try_from(end - start).unwrap_or(u32::MAX);
     let mut bytes = Vec::with_capacity(size as usize);
     for part in parts.iter() {

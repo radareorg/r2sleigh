@@ -1773,6 +1773,18 @@ impl Disassembler {
         }
         let mut ranges = Vec::with_capacity(source.image().blocks().len());
         let mut blocks = Vec::with_capacity(source.image().blocks().len());
+        // The register a call returns through, in the coordinates the lift
+        // spells. Absent on a machine that pushes the return address instead.
+        let link = source
+            .machine_roles()
+            .return_address_storage()
+            .filter(|storage| storage.space == r2source::CanonicalStorageSpace::Register)
+            .map(|storage| r2il::Varnode {
+                space: r2il::SpaceId::Register,
+                offset: storage.offset,
+                size: storage.size,
+                meta: None,
+            });
         for block in source.image().blocks() {
             let size = u32::try_from(block.bytes().len()).map_err(|_| {
                 LiftError::Parse("owned source block exceeds r2il size range".to_string())
@@ -1821,6 +1833,26 @@ impl Disassembler {
                         default_target,
                         cases,
                     });
+                }
+            }
+            // Sleigh lifts `sub pc, r3, 0x3f` as a branch, because that is
+            // the opcode. What makes it a call is the return address the
+            // block left in the link register: control comes back, and every
+            // derivation below reads the operation to know that.
+            if let Some(link) = link.as_ref() {
+                let next = lifted_block
+                    .block
+                    .addr
+                    .wrapping_add(u64::from(lifted_block.block.size));
+                if r2il::returns_to(&lifted_block.block.ops, next, link)
+                    && let Some(last) = lifted_block
+                        .block
+                        .ops
+                        .iter()
+                        .rposition(|op| matches!(op, r2il::R2ILOp::BranchInd { .. }))
+                    && let r2il::R2ILOp::BranchInd { target } = lifted_block.block.ops[last].clone()
+                {
+                    lifted_block.block.ops[last] = r2il::R2ILOp::CallInd { target };
                 }
             }
             blocks.push(lifted_block);

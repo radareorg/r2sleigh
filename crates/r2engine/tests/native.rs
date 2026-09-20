@@ -32,6 +32,8 @@ const PC_THUNK: &[u8] = &[
 struct Fixture {
     bytes: &'static [u8],
     name: &'static str,
+    /// The register a call returns through, where the test needs one.
+    link: Option<r2il::Varnode>,
 }
 
 impl r2ssa::body::Program for Fixture {
@@ -43,6 +45,10 @@ impl r2ssa::body::Program for Fixture {
 
     fn is_entry(&self, vaddr: u64) -> bool {
         vaddr == BASE
+    }
+
+    fn return_address_register(&self) -> Option<r2il::Varnode> {
+        self.link.clone()
     }
 }
 
@@ -76,6 +82,7 @@ fn a_function_is_decompiled_from_bytes_alone() {
     let program = Fixture {
         bytes: ADD_TWO,
         name: "add_two",
+        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -111,6 +118,7 @@ fn an_address_the_program_does_not_map_refuses() {
     let program = Fixture {
         bytes: ADD_TWO,
         name: "add_two",
+        link: None,
     };
     let refusal = decompile(&target, &program, 0x9000).expect_err("unmapped");
     assert_eq!(refusal.to_string(), "nothing mapped at 0x9000");
@@ -134,6 +142,7 @@ fn a_call_is_rendered_from_the_callee_body() {
     let program = Fixture {
         bytes: CALLER,
         name: "caller",
+        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -167,6 +176,7 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let program = Fixture {
         bytes: PC_THUNK,
         name: "pc_caller",
+        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -280,6 +290,7 @@ fn a_function_is_decompiled_on_aarch64_too() {
     let program = Fixture {
         bytes: AARCH64_ADD_ONE,
         name: "add_one",
+        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -292,4 +303,118 @@ fn a_function_is_decompiled_on_aarch64_too() {
     assert!(response.output.contains("add_one("), "{}", response.output);
     assert!(response.output.contains("X0_0"), "{}", response.output);
     assert!(response.output.contains("return"), "{}", response.output);
+}
+
+/// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
+const ARM_DEAD_LOAD: &[u8] = &[
+    0x04, 0x00, 0x9f, 0xe5, // 0x1000 ldr r0, [pc, 4]  -> 0x100c
+    0x00, 0x00, 0xa0, 0xe3, // 0x1004 mov r0, 0
+    0x1e, 0xff, 0x2f, 0xe1, // 0x1008 bx lr
+    0x78, 0x56, 0x34, 0x12, // 0x100c the word it loads
+];
+
+/// A read the program performs is rendered even when nothing uses it.
+///
+/// `mov r0, 0` overwrites what the load produced, so the value is dead; the
+/// read still happened, so the statement stands and discards its result
+/// rather than disappearing.
+#[test]
+fn a_load_nothing_reads_still_reads() {
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ARM_DEAD_LOAD,
+        name: "dead_load",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    assert!(
+        response.output.contains("(void)*"),
+        "the discarded read is missing:\n{}",
+        response.output
+    );
+}
+
+/// mvn r3, 0xf000; mov lr, pc; sub pc, r3, 0x3f; bx lr
+///
+/// ARM's pre-`blx` indirect call: the link register is loaded with the address
+/// after the transfer, and `0xFFFF0FFF - 0x3F` is the kernel helper page.
+const ARM_LINK_REGISTER_CALL: &[u8] = &[
+    0x0f, 0x3a, 0xe0, 0xe3, // 0x1000 mvn r3, 0xf000
+    0x0f, 0xe0, 0xa0, 0xe1, // 0x1004 mov lr, pc
+    0x3f, 0xf0, 0x43, 0xe2, // 0x1008 sub pc, r3, 0x3f
+    0x1e, 0xff, 0x2f, 0xe1, // 0x100c bx lr
+];
+
+/// A branch that leaves the return address behind is a call.
+///
+/// Sleigh lifts `sub pc, r3, 0x3f` as a branch, because that is the opcode.
+/// The link register holding `0x100c` is what says control comes back, so the
+/// walk follows it and the transfer renders as a call.
+#[test]
+fn a_branch_that_leaves_a_return_address_is_a_call() {
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    // The specification names it; nothing here guesses which register it is.
+    let name = compiler.return_address.clone().expect("a link register");
+    let link = machine
+        .arch
+        .registers
+        .iter()
+        .find(|register| register.name.eq_ignore_ascii_case(&name))
+        .map(|register| r2il::Varnode {
+            space: r2il::SpaceId::Register,
+            offset: register.offset,
+            size: register.size,
+            meta: None,
+        })
+        .expect("the link register is in the architecture");
+
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ARM_LINK_REGISTER_CALL,
+        name: "helper_call",
+        link: Some(link),
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    assert!(
+        response.output.contains("0xffff0fc0"),
+        "the helper call is missing:\n{}",
+        response.output
+    );
 }

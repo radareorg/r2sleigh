@@ -308,8 +308,24 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
         compiler: &compiler,
         prototypes: &prototypes,
     };
+    // The specification names the register; the architecture says where it
+    // lives, and the lift spells writes to it in those coordinates.
+    let link = compiler.return_address.as_ref().and_then(|name| {
+        machine
+            .arch
+            .registers
+            .iter()
+            .find(|register| register.name.eq_ignore_ascii_case(name))
+            .map(|register| r2il::Varnode {
+                space: r2il::SpaceId::Register,
+                offset: register.offset,
+                size: register.size,
+                meta: None,
+            })
+    });
     let program = OpenImage {
         image: &session.image,
+        link,
         imports: &session.imports,
         slots: &session.slots,
         defined: &session.defined,
@@ -323,6 +339,9 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 #[cfg(feature = "sleigh")]
 struct OpenImage<'a> {
     image: &'a r2image::Image,
+    /// The register a call returns through, as the compiler specification
+    /// names it, resolved to the storage the lift spells.
+    link: Option<r2il::Varnode>,
     imports: &'a std::collections::BTreeMap<u64, String>,
     slots: &'a std::collections::BTreeMap<u64, String>,
     defined: &'a std::collections::BTreeMap<u64, crate::session::Definition>,
@@ -344,6 +363,10 @@ impl r2ssa::body::Program for OpenImage<'_> {
                 .defined
                 .get(&vaddr)
                 .is_some_and(|definition| definition.function)
+    }
+
+    fn return_address_register(&self) -> Option<r2il::Varnode> {
+        self.link.clone()
     }
 }
 

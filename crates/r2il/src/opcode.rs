@@ -1316,6 +1316,35 @@ pub struct R2ILBlock {
     pub op_metadata: BTreeMap<usize, OpMetadata>,
 }
 
+/// Whether these operations leave the return address in `link`.
+///
+/// A machine with no indirect call instruction spells one by writing the
+/// address after the transfer into the link register and then branching:
+/// ARM's `mov lr, pc; sub pc, r3, 0x3f` is a call to whatever `r3 - 0x3f`
+/// names, returning to the instruction after it. Sleigh lifts the branch as a
+/// branch, because that is what the opcode is; what makes it a call is the
+/// register the convention names for the return address holding the address
+/// control comes back to.
+///
+/// Only the constants the lift itself produces are folded -- a copy, and an
+/// addition or subtraction of two constants, which is how a program counter
+/// read becomes a literal. Anything else is not recognised here.
+pub fn returns_to(ops: &[R2ILOp], next: u64, link: &Varnode) -> bool {
+    let same =
+        |a: &Varnode, b: &Varnode| a.space == b.space && a.offset == b.offset && a.size == b.size;
+    let literal = |vn: &Varnode| (vn.space == SpaceId::Const).then_some(vn.offset);
+    ops.iter().any(|op| match op {
+        R2ILOp::Copy { dst, src } if same(dst, link) => literal(src) == Some(next),
+        R2ILOp::IntAdd { dst, a, b } if same(dst, link) => {
+            matches!((literal(a), literal(b)), (Some(a), Some(b)) if a.wrapping_add(b) == next)
+        }
+        R2ILOp::IntSub { dst, a, b } if same(dst, link) => {
+            matches!((literal(a), literal(b)), (Some(a), Some(b)) if a.wrapping_sub(b) == next)
+        }
+        _ => false,
+    })
+}
+
 /// The transfer an instruction performs only when its predicate holds.
 ///
 /// `ops` are the operations a predicate skips over. A transfer among them is
