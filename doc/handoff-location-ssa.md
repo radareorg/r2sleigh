@@ -30203,6 +30203,15 @@ ninety-six-bit stack object was declared `BitVector(96)` by the rule that names
 it while the rule that checks a declaration read a bitvector's width only above
 what C's integers reach, so it had no width at all.
 
+The `ConflictingUse` class is already traced and is one shape: the same use
+site is observed twice, once elided as a dead stack base and once recorded
+exactly. Whether the base is dead is decided from the symbols of the rendered
+expression -- a spelling that names the object absorbs it, one that names the
+stack pointer does not -- so a use the renderer spells in two places with two
+spellings gets two answers for one cell. The observation is keyed by use site
+and the rendering is not, which is the same seam as the rewriter reporting
+where a read moved.
+
 What remains, largest first: 25 functions refuse with `ConflictingUse`; 25 at
 the effect ledger with five conflicting occurrences, always at a
 `live-value-producer`; 24 with `OverlappingFunctionBlockRanges`, which grew
