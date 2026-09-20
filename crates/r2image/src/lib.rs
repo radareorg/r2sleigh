@@ -382,33 +382,46 @@ impl Image {
             segments.sort_by_key(|segment| segment.vaddr);
         }
 
-        let symbols: Vec<Symbol> = file
-            .symbols()
-            .filter_map(|symbol| {
-                let name = symbol.name().ok()?;
-                if name.is_empty() {
-                    return None;
-                }
-                Some(Symbol {
-                    name: name.to_owned(),
-                    vaddr: match symbol.kind() {
-                        object::SymbolKind::Text => code_address(&arch, symbol.address()),
-                        _ => symbol.address(),
-                    },
-                    size: symbol.size(),
-                    kind: match symbol.kind() {
-                        object::SymbolKind::Text => SymbolKind::Function,
-                        object::SymbolKind::Data => SymbolKind::Data,
-                        object::SymbolKind::Section => SymbolKind::Section,
-                        _ => SymbolKind::Other,
-                    },
-                    defined: symbol.is_definition(),
-                    thumb: is_arm32(&arch)
-                        && symbol.kind() == object::SymbolKind::Text
-                        && symbol.address() & 1 == 1,
-                })
+        // Both tables, because a stripped shared library has no `.symtab` and
+        // every name it still carries is in `.dynsym`. Reading only the first
+        // is why such a library listed no functions at all.
+        let read_symbol = |symbol: object::read::Symbol<'_, '_>| {
+            let name = symbol.name().ok()?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(Symbol {
+                name: name.to_owned(),
+                vaddr: match symbol.kind() {
+                    object::SymbolKind::Text => code_address(&arch, symbol.address()),
+                    _ => symbol.address(),
+                },
+                size: symbol.size(),
+                kind: match symbol.kind() {
+                    object::SymbolKind::Text => SymbolKind::Function,
+                    object::SymbolKind::Data => SymbolKind::Data,
+                    object::SymbolKind::Section => SymbolKind::Section,
+                    _ => SymbolKind::Other,
+                },
+                defined: symbol.is_definition(),
+                thumb: is_arm32(&arch)
+                    && symbol.kind() == object::SymbolKind::Text
+                    && symbol.address() & 1 == 1,
             })
+        };
+        let mut symbols: Vec<Symbol> = file
+            .symbols()
+            .filter_map(&read_symbol)
+            .chain(file.dynamic_symbols().filter_map(&read_symbol))
             .collect();
+        // One name at one address is one symbol, whichever table held it.
+        symbols.sort_by(|left, right| {
+            left.vaddr
+                .cmp(&right.vaddr)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| right.defined.cmp(&left.defined))
+        });
+        symbols.dedup_by(|left, right| left.vaddr == right.vaddr && left.name == right.name);
 
         // What the loader will write into each slot it fills. `object` reports
         // the dynamic relocations for a linked image and the static ones for an
@@ -840,5 +853,100 @@ mod tests {
             read_pointer(&[0x12, 0x34, 0x56, 0x78], Endian::Big),
             0x1234_5678
         );
+    }
+}
+
+#[cfg(test)]
+mod dynamic_symbol_tests {
+    use super::*;
+
+    /// A shared object with a `.dynsym` and no `.symtab`, which is what a
+    /// stripped library is.
+    fn stripped_library() -> Vec<u8> {
+        const TEXT: u64 = 0x1000;
+        let names = b"\0pick\0";
+        let sections = b"\0.text\0.dynstr\0.dynsym\0.shstrtab\0";
+        let mut out = vec![0u8; TEXT as usize];
+        out.extend_from_slice(&[0x31, 0xc0, 0xc3]); // xor eax, eax; ret
+        let dynstr = out.len() as u64;
+        out.extend_from_slice(names);
+        let dynsym = out.len() as u64;
+        out.extend_from_slice(&[0u8; 24]); // the null symbol
+        out.extend_from_slice(&1u32.to_le_bytes()); // st_name -> "pick"
+        out.push(0x12); // global function
+        out.push(0); // st_other
+        out.extend_from_slice(&1u16.to_le_bytes()); // st_shndx -> .text
+        out.extend_from_slice(&TEXT.to_le_bytes());
+        out.extend_from_slice(&3u64.to_le_bytes()); // st_size
+        let shstrtab = out.len() as u64;
+        out.extend_from_slice(sections);
+        while out.len() % 8 != 0 {
+            out.push(0);
+        }
+        let shoff = out.len() as u64;
+
+        let mut section = |name: u32, kind: u32, addr: u64, offset: u64, size: u64, link: u32| {
+            out.extend_from_slice(&name.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&0u64.to_le_bytes()); // sh_flags
+            out.extend_from_slice(&addr.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&link.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+            out.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign
+            out.extend_from_slice(&if kind == 11 { 24u64 } else { 0 }.to_le_bytes());
+        };
+        section(0, 0, 0, 0, 0, 0); // the null section
+        section(1, 1, TEXT, TEXT, 3, 0); // .text
+        section(7, 3, 0, dynstr, names.len() as u64, 0); // .dynstr
+        section(15, 11, 0, dynsym, 48, 2); // .dynsym, linked to .dynstr
+        section(23, 3, 0, shstrtab, sections.len() as u64, 0); // .shstrtab
+
+        let mut header = Vec::new();
+        header.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+        header.extend_from_slice(&[0u8; 8]);
+        header.extend_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        header.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        header.extend_from_slice(&1u32.to_le_bytes());
+        header.extend_from_slice(&TEXT.to_le_bytes()); // e_entry
+        header.extend_from_slice(&64u64.to_le_bytes()); // e_phoff
+        header.extend_from_slice(&shoff.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+        header.extend_from_slice(&64u16.to_le_bytes());
+        header.extend_from_slice(&56u16.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes()); // one program header
+        header.extend_from_slice(&64u16.to_le_bytes());
+        header.extend_from_slice(&5u16.to_le_bytes()); // five sections
+        header.extend_from_slice(&4u16.to_le_bytes()); // .shstrtab
+
+        let mut program = Vec::new();
+        program.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        program.extend_from_slice(&5u32.to_le_bytes()); // read and execute
+        program.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+        program.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+        program.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+        program.extend_from_slice(&shoff.to_le_bytes()); // p_filesz
+        program.extend_from_slice(&shoff.to_le_bytes()); // p_memsz
+        program.extend_from_slice(&1u64.to_le_bytes()); // p_align
+
+        out[..64].copy_from_slice(&header);
+        out[64..120].copy_from_slice(&program);
+        out
+    }
+
+    #[test]
+    fn a_stripped_library_still_lists_the_functions_its_dynamic_table_names() {
+        // Every name such a library carries is in `.dynsym`; reading only
+        // `.symtab` left one listing no functions at all.
+        let image = Image::parse(stripped_library()).expect("the fixture parses");
+        let named = image
+            .symbols()
+            .iter()
+            .find(|symbol| symbol.name == "pick")
+            .expect("the dynamic table names it");
+        assert_eq!(named.vaddr, 0x1000);
+        assert_eq!(named.kind, SymbolKind::Function);
+        assert!(named.defined);
     }
 }
