@@ -998,6 +998,18 @@ impl BindingPlan {
                         width_bits,
                         ptr_bits,
                     ) {
+                        r2il::refusal_evidence!(
+                            "stack-object-declaration",
+                            "{object:?}: the plan declares {:?} for an object {width_bits} bits \
+                             wide, and the rule would declare {:?}",
+                            planned.declaration_type,
+                            super::rules::declaration_type_for_stack_object(
+                                source_owned,
+                                object,
+                                width_bits,
+                                ptr_bits,
+                            )
+                        );
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::StackObjectDeclarationWidth {
                                 object,
@@ -1077,6 +1089,20 @@ impl BindingPlan {
                                 ptr_bits,
                             )
                         }) {
+                            r2il::refusal_evidence!(
+                                "stack-object-declaration",
+                                "{object:?}: the plan declares {:?} for an object {width_bits:?} \
+                                 bits wide, and the rule would declare {:?}",
+                                planned.declaration_type,
+                                width_bits.map(|width_bits| {
+                                    super::rules::declaration_type_for_stack_object(
+                                        source_owned,
+                                        object,
+                                        width_bits,
+                                        ptr_bits,
+                                    )
+                                })
+                            );
                             return Err(BindingPlanBuildError::Seal(
                                 BindingPlanSourceMismatch::StackObjectDeclarationWidth {
                                     object,
@@ -1205,6 +1231,18 @@ impl BindingPlan {
                                 width_bits,
                                 ptr_bits,
                             ) {
+                                r2il::refusal_evidence!(
+                                    "stack-object-declaration",
+                                    "{object:?}: the plan declares {:?} for a declared slot \
+                                     {width_bits} bits wide, and the rule would declare {:?}",
+                                    planned.declaration_type,
+                                    super::rules::declaration_type_for_stack_object(
+                                        source_owned,
+                                        object,
+                                        width_bits,
+                                        ptr_bits,
+                                    )
+                                );
                                 return Err(BindingPlanBuildError::Seal(
                                     BindingPlanSourceMismatch::StackObjectDeclarationWidth {
                                         object,

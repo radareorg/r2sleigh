@@ -953,7 +953,12 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         CTypeLike::Array(element, Some(count)) => {
             declaration_type_width_bits(element, ptr_bits)?.checked_mul(u32::try_from(*count).ok()?)
         }
-        CTypeLike::BitVector(bits) if *bits > 128 => Some(*bits),
+        // A bitvector is as wide as it says. The width used to be read only
+        // above what C's integers reach, so a ninety-six-bit object -- which
+        // is exactly why the spelling exists, C having no such integer -- was
+        // declared `BitVector(96)` by the rule that names it and had no width
+        // at all to the rule that checks it.
+        CTypeLike::BitVector(bits) => Some(*bits),
         // A name is as wide as what it stands for. The target is asked first
         // because it is evidence -- the capture resolved it -- and the name
         // text is only a fallback for a spelling C itself defines.
@@ -9280,5 +9285,25 @@ mod tests {
                 }
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod bitvector_width_tests {
+    use super::*;
+
+    #[test]
+    fn a_bitvector_is_as_wide_as_it_says() {
+        // The width was read only above what C's integers reach, so a
+        // ninety-six-bit object -- which is why the spelling exists, C having
+        // no such integer -- was named `BitVector(96)` by the rule that
+        // declares a stack object and had no width at all to the seal that
+        // checks the declaration against the object.
+        for bits in [96, 128, 256] {
+            assert_eq!(
+                declaration_type_width_bits(&CTypeLike::BitVector(bits), 32),
+                Some(bits)
+            );
+        }
     }
 }
