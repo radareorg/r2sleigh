@@ -2120,7 +2120,7 @@ impl PreparedFunctionFacts {
         );
         phase("objects", objects.objects.len());
         let boundaries =
-            collect_source_boundary_facts(function, graph, &call_sites, machine_context);
+            collect_source_boundary_facts(function, graph, &call_sites, machine_context, &live_out);
         phase("boundaries", boundaries.calls.len());
         let structured = collect_structured_dataflow_facts(
             function,
@@ -5012,6 +5012,7 @@ fn convention_call_boundary(
     function: &SSAFunction,
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
+    live_out: &crate::liveout::FunctionLiveOut,
     block_addr: u64,
     op_index: usize,
 ) -> Option<ConventionCallBoundary> {
@@ -5108,7 +5109,7 @@ fn convention_call_boundary(
         .result_slot()
         .and_then(|storage| {
             observed_convention_call_result_after_call(
-                function, graph, block_addr, op_index, storage,
+                function, graph, live_out, block_addr, op_index, storage,
             )
         })
         .into_iter()
@@ -5187,6 +5188,7 @@ fn collect_source_boundary_facts(
     graph: &SsaGraph,
     call_sites: &CallSiteFacts,
     machine_context: Option<&SourceMachineContext>,
+    live_out: &crate::liveout::FunctionLiveOut,
 ) -> SourceBoundaryFacts {
     // Calls read register arguments implicitly, so a preserved entry carrier
     // has no graph use at the call instruction. Index exact entry values once
@@ -5418,41 +5420,47 @@ fn collect_source_boundary_facts(
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.op_site_for_inst(call_site.at)
         {
+            let convention = convention_call_boundary(
+                function,
+                graph,
+                machine_context,
+                live_out,
+                block_addr,
+                op_index,
+            );
+            // One record of what the fallback was asked and what it answered.
             r2il::refusal_evidence!(
                 "call-boundary-fallback",
-                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} interface={}",
+                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} interface={} built={} arguments={} results={}",
                 call_site.raw_identity,
                 call_site
                     .raw_identity
                     .is_some_and(|identity| machine_context
                         .call_site_interface(identity)
-                        .is_some())
+                        .is_some()),
+                convention.is_some(),
+                convention.as_ref().map_or(0, |found| found.arguments.len()),
+                convention.as_ref().map_or(0, |found| found.results.len())
             );
-        }
-        if !boundary.complete
-            && boundary.calling_convention.is_none()
-            && let Some(machine_context) = machine_context
-            && let Some((block_addr, op_index)) = graph.op_site_for_inst(call_site.at)
-            && let Some(convention) =
-                convention_call_boundary(function, graph, machine_context, block_addr, op_index)
-        {
-            boundary.calling_convention = Some(convention.calling_convention);
-            // Nothing said this callee is variadic, and the count came from
-            // the machine rather than from a prototype, so every argument
-            // found is a fixed one as far as anything here can tell.
-            boundary.variadic = Some(false);
-            boundary.fixed_argument_count = Some(convention.arguments.len());
-            boundary.arguments = convention.arguments;
-            boundary.results = convention.results;
-            // Deliberately not the result kind. Where the convention says a
-            // result would be left is a fact about the caller's side, and
-            // recording it here would make interface recovery read a thunk's
-            // tail transfer as proof that its target returns a value. What
-            // the callee returns stays unproven; the renderer's disposition
-            // decides what a transfer through this boundary looks like.
-            boundary.complete = true;
-            boundary.arguments_complete = true;
-            boundary.results_complete = true;
+            if let Some(convention) = convention {
+                boundary.calling_convention = Some(convention.calling_convention);
+                // Nothing said this callee is variadic, and the count came from
+                // the machine rather than from a prototype, so every argument
+                // found is a fixed one as far as anything here can tell.
+                boundary.variadic = Some(false);
+                boundary.fixed_argument_count = Some(convention.arguments.len());
+                boundary.arguments = convention.arguments;
+                boundary.results = convention.results;
+                // Deliberately not the result kind. Where the convention says a
+                // result would be left is a fact about the caller's side, and
+                // recording it here would make interface recovery read a thunk's
+                // tail transfer as proof that its target returns a value. What
+                // the callee returns stays unproven; the renderer's disposition
+                // decides what a transfer through this boundary looks like.
+                boundary.complete = true;
+                boundary.arguments_complete = true;
+                boundary.results_complete = true;
+            }
         }
         facts.calls.insert(call_site.id, boundary);
     }
@@ -6639,6 +6647,7 @@ fn call_result_values_after_call(
 fn observed_convention_call_result_after_call(
     function: &SSAFunction,
     graph: &SsaGraph,
+    live_out: &crate::liveout::FunctionLiveOut,
     block_addr: u64,
     call_op_index: usize,
     convention_storage: CanonicalStorageId,
@@ -6666,7 +6675,8 @@ fn observed_convention_call_result_after_call(
                 return None;
             }
             let value = graph_inst.output?;
-            if dst.size != storage.size || graph.use_sites(value).is_empty() {
+            // The caller of this body is a reader too, and the use list alone cannot see it.
+            if dst.size != storage.size || !crate::liveout::is_read(graph, live_out, value) {
                 return None;
             }
             Some(CallBoundaryValueFact {
@@ -20132,5 +20142,44 @@ mod tests {
             member_run_source(&[ByteSource::Constant(0x34), ByteSource::Constant(0x12)]),
             Some(MemberRunSource::Constant(0x1234))
         );
+    }
+
+    /// The call result a body only returns is still the call's result.
+    #[test]
+    fn a_convention_result_read_only_by_the_return_is_the_call_result() {
+        let mut arch = ArchSpec::new("x86");
+        arch.addr_size = 4;
+        arch.add_register(RegisterDef::new("eax", 0, 4));
+        arch.add_register(RegisterDef::new("ecx", 4, 4));
+        arch.add_register(RegisterDef::new("edx", 8, 4));
+        arch.add_register(RegisterDef::new("eip", 12, 4));
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Call {
+            target: Varnode::ram(0x2000, 4),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(12, 4),
+        });
+        let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("artifact");
+        let eax = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 4,
+        };
+        let (function, graph) = (artifact.function(), artifact.graph());
+        let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &[eax]);
+        let call_index = function
+            .get_block(0x1000)
+            .expect("entry block")
+            .ops
+            .iter()
+            .position(|op| matches!(op, SSAOp::Call { .. }))
+            .expect("the call survives");
+        let found = super::observed_convention_call_result_after_call(
+            function, graph, &live_out, 0x1000, call_index, eax,
+        )
+        .expect("the returned clobber is this call's result");
+        // Nothing in the body reads it, which is what the use list alone gets wrong.
+        assert!(graph.use_sites(found.value).is_empty());
     }
 }
