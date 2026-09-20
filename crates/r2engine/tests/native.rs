@@ -689,3 +689,46 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
         response.output
     );
 }
+
+#[test]
+fn a_leaf_that_only_orders_memory_still_proves_it_left_the_stack_alone() {
+    // No prologue, no epilogue: this function never touches the stack
+    // pointer, so it plainly returns the one it was entered with. The walk
+    // that proves that treated a user operation as a call, and a call
+    // clobbers everything, so a barrier standing before the return made the
+    // proof impossible and the function refused for a frame it never had.
+    const BARRIER_LEAF: &[u8] = &[
+        0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
+        0x1e, 0xff, 0x2f, 0xe1, // bx lr
+    ];
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: BARRIER_LEAF,
+        name: "order",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    assert!(
+        response.output.contains("DataMemoryBarrier("),
+        "{}",
+        response.output
+    );
+}

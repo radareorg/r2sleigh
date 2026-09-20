@@ -6397,8 +6397,14 @@ fn reaching_abi_value_before(
         // A call's clobbers are the `CallDefine`s that follow it, each a
         // definition the overlap check below sees; the call itself is a
         // barrier only for the carrier the transfer moves.
+        //
+        // A user operation is not a call. It writes the output the
+        // specification gives it and nothing else -- which is how every other
+        // phase here reads it -- so treating it as a barrier for every
+        // register meant a function with a barrier instruction before its
+        // return could not prove it left the stack pointer alone.
         if policy.calls_are_barriers
-            && (matches!(op, SSAOp::CallOther { .. } | SSAOp::Return { .. })
+            && (matches!(op, SSAOp::Return { .. })
                 || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
                     && policy
                         .transfer_carrier
