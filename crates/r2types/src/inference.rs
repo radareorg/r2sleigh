@@ -1770,12 +1770,12 @@ mod tests {
                 R2ILOp::Load {
                     dst: Varnode::unique(0x41, 4),
                     space: SpaceId::Ram,
-                    addr: ram_addr.clone(),
+                    addr: ram_addr,
                 },
                 R2ILOp::Load {
                     dst: Varnode::unique(0x51, 8),
                     space: SpaceId::Custom(7),
-                    addr: custom_addr.clone(),
+                    addr: custom_addr,
                 },
             ],
             None,
@@ -2079,13 +2079,7 @@ mod tests {
         let ti = TypeInference::new(64);
         let cond = Varnode::unique(0x70, 1);
         let target = Varnode::constant(0x2000, 8);
-        let func = ssa_from_ops(
-            vec![R2ILOp::CBranch {
-                target,
-                cond: cond.clone(),
-            }],
-            None,
-        );
+        let func = ssa_from_ops(vec![R2ILOp::CBranch { target, cond }], None);
         let constraints = emit_inferred_for_test(&ti, &func);
         let has_bool = constraints.iter().any(|c| match c {
             Constraint::SetType { ty, .. } => {

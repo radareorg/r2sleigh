@@ -640,7 +640,7 @@ mod tests {
                     },
                     SSAOp::CBranch {
                         target: SSAVar::constant(0x20, 8),
-                        cond: cond.clone(),
+                        cond,
                     },
                 ],
             },
@@ -659,21 +659,21 @@ mod tests {
                 ops: vec![
                     SSAOp::IntMult {
                         dst: scaled.clone(),
-                        a: index.clone(),
+                        a: index,
                         b: SSAVar::constant(8, 8),
                     },
                     SSAOp::IntAdd {
                         dst: addr.clone(),
                         a: SSAVar::constant(0xc000, 8),
-                        b: scaled.clone(),
+                        b: scaled,
                     },
                     SSAOp::Load {
                         dst: callee.clone(),
                         space: r2il::SpaceId::Ram,
-                        addr: addr.clone(),
+                        addr,
                     },
                     SSAOp::CallInd {
-                        target: callee.clone(),
+                        target: callee,
                         instruction: None,
                     },
                 ],
@@ -757,16 +757,16 @@ mod tests {
                     },
                     SSAOp::BoolNot {
                         dst: negated.clone(),
-                        src: flag.clone(),
+                        src: flag,
                     },
                     SSAOp::BoolOr {
                         dst: lower_or_same.clone(),
-                        a: negated.clone(),
-                        b: zero.clone(),
+                        a: negated,
+                        b: zero,
                     },
                     SSAOp::CBranch {
                         target: SSAVar::new("ram:20", 0, 8),
-                        cond: lower_or_same.clone(),
+                        cond: lower_or_same,
                     },
                 ],
             },
@@ -790,30 +790,30 @@ mod tests {
                     },
                     SSAOp::IntAdd {
                         dst: base.clone(),
-                        a: page.clone(),
+                        a: page,
                         b: SSAVar::constant(0x10, 8),
                     },
                     SSAOp::IntZExt {
                         dst: widened.clone(),
-                        src: index.clone(),
+                        src: index,
                     },
                     SSAOp::IntLeft {
                         dst: scaled.clone(),
-                        a: widened.clone(),
+                        a: widened,
                         b: SSAVar::constant(3, 8),
                     },
                     SSAOp::IntAdd {
                         dst: addr.clone(),
-                        a: base.clone(),
-                        b: scaled.clone(),
+                        a: base,
+                        b: scaled,
                     },
                     SSAOp::Load {
                         dst: callee.clone(),
                         space: r2il::SpaceId::Ram,
-                        addr: addr.clone(),
+                        addr,
                     },
                     SSAOp::BranchInd {
-                        target: callee.clone(),
+                        target: callee,
                         instruction: None,
                     },
                 ],
@@ -864,21 +864,21 @@ mod tests {
             ops: vec![
                 SSAOp::IntMult {
                     dst: scaled.clone(),
-                    a: index.clone(),
+                    a: index,
                     b: SSAVar::constant(8, 8),
                 },
                 SSAOp::IntAdd {
                     dst: addr.clone(),
                     a: SSAVar::constant(0xc000, 8),
-                    b: scaled.clone(),
+                    b: scaled,
                 },
                 SSAOp::Load {
                     dst: callee.clone(),
                     space: r2il::SpaceId::Ram,
-                    addr: addr.clone(),
+                    addr,
                 },
                 SSAOp::CallInd {
-                    target: callee.clone(),
+                    target: callee,
                     instruction: None,
                 },
             ],

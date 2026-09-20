@@ -32,3 +32,6 @@ all-archs = ["x86", "arm", "mips", "riscv", "decompile"]
 [dependencies.sleigh-config]
 workspace = true
 optional = true
+
+[lints]
+workspace = true

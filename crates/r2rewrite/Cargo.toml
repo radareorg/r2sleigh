@@ -13,3 +13,6 @@ serde.workspace = true
 
 [dev-dependencies]
 z3.workspace = true
+
+[lints]
+workspace = true

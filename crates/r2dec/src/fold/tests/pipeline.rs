@@ -45,7 +45,7 @@ mod tests {
     fn spelled(ctx: &FoldingContext<'_>, expr: &CExpr) -> String {
         let raw = format!("{expr:?}");
         let pattern = regex_lite_symbol_ids(&raw);
-        let mut out = raw.clone();
+        let mut out = raw;
         for (whole, index) in pattern {
             let id_expr = ctx
                 .symbols
@@ -1937,7 +1937,7 @@ mod tests {
             .expect("prepared SSA should build")
             .with_name("seventh"),
         );
-        let input = crate::DecompilerInput::new(prepared.facts.clone());
+        let input = crate::DecompilerInput::new(prepared.facts);
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
         assert_eq!(audit.render_refusal(), None, "{}", audit.output());
@@ -1997,7 +1997,7 @@ mod tests {
             ..Default::default()
         };
         let fixture = SourceOwnedPreparedFixture::new_with_context(prepared, context);
-        let input = crate::DecompilerInput::new(fixture.facts.clone());
+        let input = crate::DecompilerInput::new(fixture.facts);
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
         assert_eq!(audit.render_refusal(), None, "{}", audit.output());
@@ -2067,7 +2067,7 @@ mod tests {
         // indirect dispatch nobody resolved.
         let prepared = prepared_from_r2il_blocks(std::slice::from_ref(&thunk), &arch)
             .with_name("unresolved_dispatch");
-        let input = crate::DecompilerInput::new(prepared.facts.clone());
+        let input = crate::DecompilerInput::new(prepared.facts);
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
         assert!(
@@ -2110,7 +2110,7 @@ mod tests {
             val: Varnode::register(0x30, 8),
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch).with_name("gap_between");
-        let input = crate::DecompilerInput::new(prepared.facts.clone());
+        let input = crate::DecompilerInput::new(prepared.facts);
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
         let output = audit.output();
@@ -2166,7 +2166,7 @@ mod tests {
             )
         }));
 
-        let input = crate::DecompilerInput::new(prepared.facts.clone());
+        let input = crate::DecompilerInput::new(prepared.facts);
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
 

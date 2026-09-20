@@ -4173,7 +4173,7 @@ fn prepared_callee_resolution_facts(
         .collect::<HashMap<_, _>>();
     // The linkage radare2 read off the symbol or relocation that named each
     // call target is the fact import policy rests on; a name's shape is not.
-    let mut callee_facts = type_facts.callee_facts.clone();
+    let mut callee_facts = type_facts.callee_facts;
     for cert in prepared.certificates().callsites.values() {
         let linkage = match cert.callee_linkage {
             r2source::AdvisoryCalleeLinkage::Unknown => continue,
@@ -7142,7 +7142,7 @@ mod tests {
                     source: StringLiteralRenderSource::TypedFunctionFacts,
                 },
             )]),
-            member_accesses_by_op: BTreeMap::from([(member_op, vec![member_access.clone()])]),
+            member_accesses_by_op: BTreeMap::from([(member_op, vec![member_access])]),
             ..FunctionRenderFacts::default()
         };
         let mut facts = FunctionFacts::default()
@@ -8224,7 +8224,7 @@ mod tests {
                     truth: true,
                 }],
             )]),
-            loops: BTreeMap::from([(loop_fact.loop_id, loop_fact.clone())]),
+            loops: BTreeMap::from([(loop_fact.loop_id, loop_fact)]),
             switches: BTreeMap::from([(switch.block_addr, switch.clone())]),
             control_domains: r2ssa::ControlDomainFacts::default(),
         };
@@ -8584,7 +8584,7 @@ mod tests {
             "wrong object identity must not authorize array rendering"
         );
 
-        let mut wrong_access = render.clone();
+        let mut wrong_access = render;
         wrong_access
             .array_accesses_by_op
             .get_mut(&(0x401000, 4, false))

@@ -8030,8 +8030,7 @@ mod tests {
             .observe_normalized_input_expr(site, input_idx, CExpr::Var(symbol))
             .expect("value marker");
         duplicate_function.body = vec![CStmt::Expr(marked.clone()), CStmt::Expr(marked)];
-        let mut duplicate_ready =
-            crate::codegen::prepare_function_for_emission(duplicate_function.clone());
+        let mut duplicate_ready = crate::codegen::prepare_function_for_emission(duplicate_function);
         let unchanged = duplicate_ready.function_for_marker_test().clone();
         assert!(matches!(
             duplicate_journal.seal(&source, &mut duplicate_ready),
@@ -8052,7 +8051,7 @@ mod tests {
         };
         *id = test_render_observation_id(2);
         range_function.body = vec![CStmt::Expr(marked)];
-        let mut range_ready = crate::codegen::prepare_function_for_emission(range_function.clone());
+        let mut range_ready = crate::codegen::prepare_function_for_emission(range_function);
         let unchanged = range_ready.function_for_marker_test().clone();
         assert!(matches!(
             range_journal.seal(&source, &mut range_ready),

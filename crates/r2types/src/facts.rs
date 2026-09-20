@@ -1973,7 +1973,7 @@ mod tests {
                     base: ExternalStackBase::FramePointer,
                     offset: -0x10,
                 },
-                spec.clone(),
+                spec,
             )]),
             ..FunctionTypeFactInputs::default()
         })

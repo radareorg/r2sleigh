@@ -2944,7 +2944,7 @@ mod sccp_tests {
             fold_through_definition(&read(0, 1), &widened),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
-                src: lane.clone(),
+                src: lane,
                 offset: 0,
             })
         );
@@ -2968,7 +2968,7 @@ mod sccp_tests {
         // A copy of a non-constant is a statement the prepared SSA keeps.
         let copied = defined_by(SSAOp::Copy {
             dst: root.clone(),
-            src: older.clone(),
+            src: older,
         });
         assert_eq!(fold_through_definition(&read(0, 4), &copied), None);
         let _ = byte;
@@ -3161,7 +3161,7 @@ mod signed_flag_tests {
             },
             R2ILOp::IntEqual {
                 dst: r(0x42, 1),
-                a: x.clone(),
+                a: x,
                 b: c(1, 8),
             },
             R2ILOp::Copy {

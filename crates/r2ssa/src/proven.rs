@@ -208,7 +208,7 @@ mod tests {
         }
         ops.push(SSAOp::CBranch {
             target: SSAVar::constant(0x20, 8),
-            cond: cond.clone(),
+            cond,
         });
         let blocks = vec![
             SSABlock {
@@ -293,15 +293,15 @@ mod tests {
                     },
                     SSAOp::Copy {
                         dst: carried.clone(),
-                        src: flag.clone(),
+                        src: flag,
                     },
                     SSAOp::BoolNot {
                         dst: negated.clone(),
-                        src: carried.clone(),
+                        src: carried,
                     },
                     SSAOp::CBranch {
                         target: SSAVar::constant(0x20, 8),
-                        cond: negated.clone(),
+                        cond: negated,
                     },
                 ],
             },

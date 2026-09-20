@@ -306,7 +306,7 @@ mod tests {
 
         let source = MockPcodeSource {
             output: None,
-            inputs: vec![target.clone(), cond.clone()],
+            inputs: vec![target, cond],
         };
 
         let result = translate_cbranch(&source).unwrap();

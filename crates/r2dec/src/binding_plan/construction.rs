@@ -398,14 +398,12 @@ pub(super) fn binding_components_with(
                         r2il::refusal_evidence!(
                             "union-declined",
                             "{} is live where {} is written",
-                            graph.value(left).map_or("?".to_string(), |value| value
-                                .var
-                                .display_name()
-                                .to_string()),
-                            graph.value(right).map_or("?".to_string(), |value| value
-                                .var
-                                .display_name()
-                                .to_string())
+                            graph
+                                .value(left)
+                                .map_or("?".to_string(), |value| value.var.display_name()),
+                            graph
+                                .value(right)
+                                .map_or("?".to_string(), |value| value.var.display_name())
                         );
                         return true;
                     }

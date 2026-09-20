@@ -2979,7 +2979,7 @@ mod tests {
             Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
         assert_eq!(
-            variadic.clone().with_radare2_format_parameter(2),
+            variadic.with_radare2_format_parameter(2),
             Err(SourceCallSiteInterfaceError::InvalidFormatParameterIndex)
         );
 

@@ -121,7 +121,7 @@ impl ValueReaders {
                             }
                         }),
                         out.and_then(|out| graph.value(out))
-                            .map_or("-".to_string(), |v| v.var.display_name().to_string()),
+                            .map_or("-".to_string(), |v| v.var.display_name()),
                         out.map_or(0, |out| graph.use_sites(out).len())
                     )
                 })
@@ -135,7 +135,7 @@ impl ValueReaders {
                         "i{}={}[{} uses]{}",
                         inst.0,
                         out.and_then(|out| graph.value(out))
-                            .map_or("-".to_string(), |v| v.var.display_name().to_string()),
+                            .map_or("-".to_string(), |v| v.var.display_name()),
                         out.map_or(0, |out| graph.use_sites(out).len()),
                         graph.inst(*inst).map_or(String::new(), |inst| format!(
                             " {:?}",

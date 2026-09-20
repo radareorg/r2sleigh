@@ -24,3 +24,6 @@ riscv = ["sleigh-config/RISCV"]
 
 [dev-dependencies]
 sleigh-config = { workspace = true, features = ["AARCH64"] }
+
+[lints]
+workspace = true

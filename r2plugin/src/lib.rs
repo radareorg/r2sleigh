@@ -8299,7 +8299,7 @@ mod integration_tests {
                     function_name: "sym._sum_array".to_string(),
                     function_addr: 0x100000610,
                     blocks,
-                    arch: Some(arch.clone()),
+                    arch: Some(arch),
                     semantic_metadata_enabled: false,
                     source_snapshot: Some(source_snapshot),
                 },

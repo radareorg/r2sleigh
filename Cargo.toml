@@ -94,3 +94,18 @@ opt-level = 1
 sleigh-config = { git = "https://github.com/0verflowme/sleigh-config.git", branch = "main" }
 libsla = { git = "https://github.com/0verflowme/libsla.git", branch = "main" }
 libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "main" }
+
+# The structural lints are measured rather than denied.
+#
+# There is more of this debt than one change can clear, so denying them would
+# stop all work and warning on them would break `-D warnings` in CI. They are
+# allowed here and re-enabled by `scripts/structure-report.sh`, which holds the
+# counts and fails when one rises. `clippy.toml` sets the thresholds.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[workspace.lints.clippy]
+excessive_nesting = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+cognitive_complexity = "allow"

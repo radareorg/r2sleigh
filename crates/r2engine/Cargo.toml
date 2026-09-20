@@ -25,5 +25,5 @@ r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false, features 
     "arm",
 ] }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+[lints]
+workspace = true

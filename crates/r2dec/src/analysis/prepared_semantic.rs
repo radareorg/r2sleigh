@@ -3957,7 +3957,7 @@ mod tests {
         let callsite_facts = test_callsite_facts(&prepared);
         let function_facts = FunctionFacts::default()
             .with_callee_resolution(callee_resolution.clone())
-            .with_callsites(callsite_facts.clone());
+            .with_callsites(callsite_facts);
 
         let view = PreparedSemanticView::build(
             &symbols,
@@ -4145,8 +4145,8 @@ mod tests {
         let visible_bindings = Vec::new();
         let callsite_facts = test_callsite_facts(&prepared);
         let function_facts = FunctionFacts::default()
-            .with_callee_resolution(callee_resolution.clone())
-            .with_callsites(callsite_facts.clone());
+            .with_callee_resolution(callee_resolution)
+            .with_callsites(callsite_facts);
 
         let view = PreparedSemanticView::build(
             &symbols,
@@ -4261,7 +4261,7 @@ mod tests {
         let callsite_facts = test_callsite_facts(&prepared);
         let stack_slots = BTreeMap::new();
         let visible_bindings = Vec::new();
-        let function_facts = FunctionFacts::default().with_callsites(callsite_facts.clone());
+        let function_facts = FunctionFacts::default().with_callsites(callsite_facts);
 
         let view = PreparedSemanticView::build(
             &symbols,

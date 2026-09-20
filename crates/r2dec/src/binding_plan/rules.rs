@@ -2420,7 +2420,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
         if traced {
             let name = graph
                 .value(value)
-                .map(|v| v.var.display_name().to_string())
+                .map(|v| v.var.display_name())
                 .unwrap_or_default();
             let verdict = if rewritten {
                 "stays bound: an object the expression reads is written between definition and reader"

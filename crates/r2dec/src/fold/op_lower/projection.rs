@@ -388,7 +388,7 @@ mod tests {
     fn a_slice_of_a_pointer_takes_the_address_width_step_first() {
         let base = binding_expr();
         let (projected, _) = project_machine_use_of(
-            base.clone(),
+            base,
             Some(&CValue::Typed(CType::ptr(CType::u8()))),
             slice(0, 32, 64),
             64,

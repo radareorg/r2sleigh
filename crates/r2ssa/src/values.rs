@@ -353,7 +353,7 @@ mod tests {
         let mut merge_block = SSABlock::new(merge, 16);
         merge_block.phis.push(PhiNode {
             dst: merged.clone(),
-            sources: vec![(left, taken.clone()), (right, other.clone())],
+            sources: vec![(left, taken), (right, other)],
             canonical_storage: None,
         });
 
@@ -402,7 +402,7 @@ mod tests {
             canonical_storage: None,
         });
         header_block.ops.push(crate::op::SSAOp::IntAdd {
-            dst: stepped.clone(),
+            dst: stepped,
             a: counter.clone(),
             b: constant(1, 4),
         });

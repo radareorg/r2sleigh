@@ -909,17 +909,17 @@ mod tests {
                 source: ConstraintSource::Inferred,
             },
             Constraint::Equal {
-                a: v0.clone(),
+                a: v0,
                 b: v1.clone(),
                 source: ConstraintSource::Inferred,
             },
             Constraint::Equal {
-                a: v1.clone(),
+                a: v1,
                 b: v2.clone(),
                 source: ConstraintSource::Inferred,
             },
             Constraint::Equal {
-                a: v2.clone(),
+                a: v2,
                 b: v3.clone(),
                 source: ConstraintSource::Inferred,
             },

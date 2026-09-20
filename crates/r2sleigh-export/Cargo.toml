@@ -21,3 +21,6 @@ sleigh-config = { workspace = true, features = ["x86"] }
 default = []
 dec = []
 x86 = ["sleigh-config/x86", "r2sleigh-lift/x86"]
+
+[lints]
+workspace = true

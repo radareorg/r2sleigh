@@ -15,5 +15,5 @@ serde_json.workspace = true
 [features]
 default = []
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+[lints]
+workspace = true

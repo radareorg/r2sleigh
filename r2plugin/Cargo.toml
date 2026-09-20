@@ -42,3 +42,6 @@ arm = ["sleigh-config/ARM", "sleigh-config/AARCH64", "r2sleigh-lift/arm"]
 mips = ["sleigh-config/MIPS", "r2sleigh-lift/mips"]
 riscv = ["sleigh-config/RISCV", "r2sleigh-lift/riscv"]
 all-archs = ["x86", "arm", "mips", "riscv"]
+
+[lints]
+workspace = true

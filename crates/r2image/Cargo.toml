@@ -8,3 +8,6 @@ description = "Program image: binary format parsing and virtual address mapping"
 [dependencies]
 object.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

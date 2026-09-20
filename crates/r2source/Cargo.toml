@@ -9,5 +9,5 @@ description = "Opaque ownership for coherent reverse-engineering source snapshot
 r2il = { path = "../r2il" }
 serde.workspace = true
 
-[lints.rust]
-unsafe_code = "deny"
+[lints]
+workspace = true

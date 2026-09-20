@@ -481,12 +481,7 @@ mod tests {
             64,
         );
         assert_eq!(converted, value);
-        let converted = convert(
-            value.clone(),
-            &typed(CType::typedef("size_t")),
-            &CType::u64(),
-            32,
-        );
+        let converted = convert(value, &typed(CType::typedef("size_t")), &CType::u64(), 32);
         assert!(
             cast_of(&converted).is_some(),
             "size_t is 32 bits on a 32-bit target"
@@ -507,13 +502,8 @@ mod tests {
         // Exact, and still spelled: the operator that reads the value
         // computes in the type the value has, not in the one it fits.
         let byte = name(CType::u8());
-        let (ty, _, _) = cast_of(&convert(
-            byte.clone(),
-            &typed(CType::u8()),
-            &CType::u64(),
-            64,
-        ))
-        .expect("a widening is spelled");
+        let (ty, _, _) = cast_of(&convert(byte, &typed(CType::u8()), &CType::u64(), 64))
+            .expect("a widening is spelled");
         assert_eq!(ty, CType::u64());
         let half = name(CType::u32());
         assert!(cast_of(&convert(half, &typed(CType::u32()), &CType::u64(), 64)).is_some());
@@ -530,13 +520,8 @@ mod tests {
         ))
         .expect("narrowing is spelled");
         assert_eq!((ty, role), (CType::u32(), CastRole::Conversion));
-        let (ty, _, _) = cast_of(&convert(
-            word.clone(),
-            &typed(CType::u64()),
-            &CType::i64(),
-            64,
-        ))
-        .expect("a change of signedness is spelled");
+        let (ty, _, _) = cast_of(&convert(word, &typed(CType::u64()), &CType::i64(), 64))
+            .expect("a change of signedness is spelled");
         assert_eq!(ty, CType::i64());
         let signed = name(CType::i32());
         assert!(
@@ -556,12 +541,7 @@ mod tests {
         ))
         .expect("pointer to its own integer");
         assert_eq!((ty, role), (CType::u64(), CastRole::PointerWidthStep));
-        let narrowed = convert(
-            pointer.clone(),
-            &typed(CType::ptr(CType::u8())),
-            &CType::u32(),
-            64,
-        );
+        let narrowed = convert(pointer, &typed(CType::ptr(CType::u8())), &CType::u32(), 64);
         let (outer, inner, outer_role) = cast_of(&narrowed).expect("narrowing");
         assert_eq!((outer, outer_role), (CType::u32(), CastRole::Conversion));
         let (step, _, step_role) = cast_of(&inner).expect("the step beneath it");

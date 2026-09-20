@@ -3858,10 +3858,7 @@ impl Decompiler {
                 inst.payload,
                 inst.output
                     .and_then(|output| graph.value(output))
-                    .map(|value| (
-                        value.var.display_name().to_string(),
-                        value.canonical_storage
-                    )),
+                    .map(|value| (value.var.display_name(), value.canonical_storage)),
                 inst.output
                     .is_some_and(|output| graph.caller_supplied(output))
             );
@@ -4777,12 +4774,10 @@ mod tests {
         }];
         exit_ops.push(R2ILOp::IntAdd {
             dst: rsp.clone(),
-            a: rsp.clone(),
+            a: rsp,
             b: Varnode::constant(8, 8),
         });
-        exit_ops.push(R2ILOp::Return {
-            target: rip.clone(),
-        });
+        exit_ops.push(R2ILOp::Return { target: rip });
         let mut exit_meta = std::collections::BTreeMap::new();
         for i in 0..exit_ops.len() {
             exit_meta.insert(

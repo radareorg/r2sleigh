@@ -8,6 +8,10 @@
 //! Stable hashes remain diagnostics; exact authority is the retained `Arc`
 //! identity of one capture event.
 
+// This crate holds the source's own facts and has no reason to reach for
+// unsafe; the manifest said so until the lints moved to the workspace.
+#![deny(unsafe_code)]
+
 pub mod display_names;
 pub mod native;
 pub use display_names::DisplayNames;
@@ -1408,7 +1412,7 @@ mod tests {
                 valid.image().clone(),
                 Box::new([]),
                 Box::from([7]),
-                Some(interface.clone()),
+                Some(interface),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
                 missing_return_mechanism,

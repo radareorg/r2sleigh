@@ -260,7 +260,7 @@ impl BindingNameResolution {
                             Some(ValueDisposition::Bound { binding }) if *binding == binding_id
                         )
                     })
-                    .map(|value| value.var.display_name().to_string())
+                    .map(|value| value.var.display_name())
                     .collect::<Vec<_>>();
                 r2il::refusal_evidence!(
                     "binding-role-conflict",

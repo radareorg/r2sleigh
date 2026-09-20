@@ -11890,7 +11890,7 @@ mod tests {
             confidence: 80,
         };
         let low = ScalarArrayAddrExpr {
-            pointer: pointer.clone(),
+            pointer,
             field_offset: 0x10,
             confidence: 30,
         };

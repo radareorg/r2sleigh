@@ -26,5 +26,5 @@ workspace = true
 optional = true
 features = ["x86"]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+[lints]
+workspace = true

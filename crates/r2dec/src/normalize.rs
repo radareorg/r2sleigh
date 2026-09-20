@@ -2212,10 +2212,7 @@ mod tests {
     fn initializer_removal_uses_exact_origin_not_duplicate_copy_shape() {
         let dst = SSAVar::new("RAX", 2, 8);
         let src = SSAVar::new("RAX", 1, 8);
-        let op = SSAOp::Copy {
-            dst: dst.clone(),
-            src: src.clone(),
-        };
+        let op = SSAOp::Copy { dst, src };
         let definition = OriginalPhiDefinition {
             inst: InstId(10),
             value: ValueId(2),
@@ -2383,7 +2380,7 @@ mod tests {
             .expect("omitted predecessor")
             .ops
             .remove(omitted_op_idx);
-        let mut duplicate_and_omitted_origins = origins.clone();
+        let mut duplicate_and_omitted_origins = origins;
         duplicate_and_omitted_origins
             .rows_mut(block_id)
             .expect("duplicated predecessor origins")
@@ -2536,7 +2533,7 @@ mod tests {
             },
             SSAOp::CBranch {
                 target: SSAVar::new("ram:1004", 0, 8),
-                cond: cond.clone(),
+                cond,
             },
         ];
         func.get_block_mut(0x100c).expect("exit").ops = vec![SSAOp::Return {

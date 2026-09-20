@@ -2262,7 +2262,7 @@ mod tests {
         internal_without_evidence.class = CalleeClass::Internal;
         assert!(!internal_without_evidence.is_internal_name_hint());
 
-        let mut raw_with_evidence = base.clone();
+        let mut raw_with_evidence = base;
         raw_with_evidence
             .evidence
             .insert(CalleeIdentityEvidence::RawMemoryName);

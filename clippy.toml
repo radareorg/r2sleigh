@@ -1,0 +1,26 @@
+# Thresholds for the structural lints.
+#
+# The standing definition of good structure here is few branches, fewer nested
+# loops, few parameters and short names. Clippy can measure the first three,
+# but not at its own defaults: `too-many-arguments` ships at seven and never
+# fires in this tree, and `excessive-nesting` is off entirely unless a depth is
+# given. These are set where they separate the tail from the body of the
+# distribution rather than at a round number, and `scripts/structure-report.sh`
+# holds the counts they produce so the debt can only fall.
+
+# Four or five values that always travel together are one thing that has not
+# been named, so the context type is the fix rather than a sixth parameter.
+too-many-arguments-threshold = 5
+
+# A block four deep is answering more than one question. Deeper than that is
+# also where superlinear cost hides, which is why this and the algorithm are
+# the same piece of work.
+excessive-nesting-threshold = 4
+
+# Clippy's default is twenty-five. Twenty is the knee in this tree: below it
+# the functions read as one idea, above it they are a switchboard.
+cognitive-complexity-threshold = 20
+
+# Long enough for a lowering with one match over an opcode set, short enough
+# that a second responsibility shows up as length.
+too-many-lines-threshold = 80

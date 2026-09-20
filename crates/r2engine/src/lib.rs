@@ -3030,7 +3030,7 @@ impl EngineSession {
         );
         if !matches!(route_decision.kind, EngineTypeRouteKind::FullWriteback) {
             return Err(engine_execution_refusal(
-                route_decision.reason.clone().unwrap_or_else(|| {
+                route_decision.reason.unwrap_or_else(|| {
                     "bounded or summary-only type evidence cannot authorize writeback".to_string()
                 }),
                 EnginePhase::Types,
@@ -3098,7 +3098,7 @@ impl EngineSession {
         } = request;
         let execution = analysis_request.execution.clone();
         let canonical_name = analysis_request.function_name.clone();
-        let display_name = canonical_name.clone();
+        let display_name = canonical_name;
         if let Err(refusal) = poll_engine_execution(
             &execution,
             EnginePhase::SnapshotContext,
@@ -3298,7 +3298,7 @@ impl EngineSession {
             return refused_decompile_response_with_metrics_and_audits(
                 &request.function_name,
                 "trusted SSA does not match the source-owned function facts",
-                input_quality.clone(),
+                input_quality,
                 request.metrics,
                 EngineDiagnostics::default(),
                 Some(response_function_facts),
@@ -3319,7 +3319,7 @@ impl EngineSession {
             return refused_decompile_response_with_metrics_and_audits(
                 &request.function_name,
                 &refusal.reason,
-                input_quality.clone(),
+                input_quality,
                 *refusal.metrics,
                 *refusal.diagnostics,
                 Some(response_function_facts),
@@ -3349,7 +3349,7 @@ impl EngineSession {
                 return refused_decompile_response_with_metrics_and_audits(
                     &request.function_name,
                     &refusal.reason,
-                    input_quality.clone(),
+                    input_quality,
                     *refusal.metrics,
                     *refusal.diagnostics,
                     Some(response_function_facts),
@@ -4685,8 +4685,8 @@ mod tests {
                 function: EngineFunctionInput {
                     function_name: "sym.no_snapshot".to_string(),
                     function_addr: 0x401000,
-                    blocks: blocks.clone(),
-                    arch: Some(arch.clone()),
+                    blocks,
+                    arch: Some(arch),
                     source_snapshot: None,
                     semantic_metadata_enabled: false,
                 },
@@ -5222,7 +5222,7 @@ mod tests {
                     function_name: "sym.grouped".to_string(),
                     function_addr: 0x403000,
                     blocks: const_return_blocks(0x403000, 0),
-                    arch: explicit.arch.clone(),
+                    arch: explicit.arch,
                     source_snapshot: Some(test_source_snapshot("sym.grouped/rev1")),
                     semantic_metadata_enabled: false,
                 },
@@ -5386,7 +5386,7 @@ mod tests {
             r2ssa::SsaArtifact::for_decompile_with_interface(
                 &helper_blocks,
                 Some(&arch),
-                interface.clone(),
+                interface,
             )
             .expect("helper prepared"),
         );
@@ -7407,7 +7407,7 @@ mod tests {
 
         assert_eq!(request_plan.engine_plan(), EnginePlan::RefuseWithEvidence);
         assert_eq!(diagnostics.refusal, Some(comment.clone()));
-        assert_eq!(diagnostics.route_reason, Some(comment.clone()));
+        assert_eq!(diagnostics.route_reason, Some(comment));
     }
 
     #[test]

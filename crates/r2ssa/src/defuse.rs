@@ -478,7 +478,7 @@ mod tests {
         // RAX_1 = RAX_0 + 1
         block.push(SSAOp::IntAdd {
             dst: rax_1.clone(),
-            a: rax_0.clone(),
+            a: rax_0,
             b: SSAVar::constant(1, 8),
         });
 
@@ -486,7 +486,7 @@ mod tests {
         block.push(SSAOp::IntAdd {
             dst: rax_2.clone(),
             a: rax_1.clone(),
-            b: rbx_0.clone(),
+            b: rbx_0,
         });
 
         let info = def_use(&block);

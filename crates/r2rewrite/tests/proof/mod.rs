@@ -237,7 +237,7 @@ impl<'a> Encoder<'a> {
                 let c_wide = if count_width < 64 {
                     c.zero_ext(64 - count_width)
                 } else {
-                    c.clone()
+                    c
                 };
                 let c_wide = match overshift {
                     MachineOvershiftBehavior::MaskCount => {
@@ -291,12 +291,12 @@ impl<'a> Encoder<'a> {
                     }
                     MachineArithmeticFlagOp::SignedCarry => {
                         let exact = l.sign_ext(1).bvadd(r.sign_ext(1));
-                        let wrapped = l.bvadd(r.clone()).sign_ext(1);
+                        let wrapped = l.bvadd(r).sign_ext(1);
                         exact.eq(wrapped).not()
                     }
                     MachineArithmeticFlagOp::SignedBorrow => {
                         let exact = l.sign_ext(1).bvsub(r.sign_ext(1));
-                        let wrapped = l.bvsub(r.clone()).sign_ext(1);
+                        let wrapped = l.bvsub(r).sign_ext(1);
                         exact.eq(wrapped).not()
                     }
                 };

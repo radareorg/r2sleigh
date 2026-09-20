@@ -3886,9 +3886,7 @@ mod tests {
                 &[block(
                     0x4000,
                     vec![
-                        R2ILOp::Call {
-                            target: target.clone(),
-                        },
+                        R2ILOp::Call { target },
                         R2ILOp::Return { target: reg(0, 8) },
                     ],
                 )],

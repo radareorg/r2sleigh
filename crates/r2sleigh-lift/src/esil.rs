@@ -1635,8 +1635,8 @@ mod tests {
             },
             R2ILOp::BoolXor {
                 dst: dst.clone(),
-                a: a.clone(),
-                b: b.clone(),
+                a,
+                b,
             },
             R2ILOp::PopCount {
                 dst: dst.clone(),
@@ -1666,10 +1666,7 @@ mod tests {
                 dst: dst.clone(),
                 src: src.clone(),
             },
-            R2ILOp::Trunc {
-                dst: dst.clone(),
-                src: src.clone(),
-            },
+            R2ILOp::Trunc { dst, src },
             R2ILOp::Unimplemented,
         ];
         let disassembler = x86_64();

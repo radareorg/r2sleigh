@@ -5552,7 +5552,7 @@ mod tests {
                 b: count.var.clone(),
             }),
         };
-        let values = vec![value.clone(), count.clone()];
+        let values = vec![value, count];
         let graph = SsaGraph {
             entry: BlockId(0),
             block_order: vec![BlockId(0)],

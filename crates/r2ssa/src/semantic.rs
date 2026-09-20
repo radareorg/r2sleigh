@@ -15793,7 +15793,7 @@ mod tests {
         });
         block.push(R2ILOp::Copy {
             dst: fp.clone(),
-            src: sp.clone(),
+            src: sp,
         });
         // The aggregate's base, then a member eight bytes into it.
         block.push(R2ILOp::IntSub {
@@ -15808,7 +15808,7 @@ mod tests {
         });
         block.push(R2ILOp::IntSub {
             dst: second.clone(),
-            a: fp.clone(),
+            a: fp,
             b: Varnode::constant(24, 8),
         });
         block.push(R2ILOp::Store {
@@ -15913,11 +15913,11 @@ mod tests {
         });
         block.push(R2ILOp::Copy {
             dst: fp.clone(),
-            src: sp.clone(),
+            src: sp,
         });
         block.push(R2ILOp::IntSub {
             dst: local_addr.clone(),
-            a: fp.clone(),
+            a: fp,
             b: Varnode::constant(8, 8),
         });
         block.push(R2ILOp::Store {
@@ -16255,7 +16255,7 @@ mod tests {
             });
             block.push(R2ILOp::Store {
                 space: SpaceId::Ram,
-                addr: sp.clone(),
+                addr: sp,
                 val: if escapes {
                     held
                 } else {
@@ -17841,7 +17841,7 @@ mod tests {
         });
         body.push(R2ILOp::IntAdd {
             dst: sp.clone(),
-            a: sp.clone(),
+            a: sp,
             b: Varnode::constant(0x40, 8),
         });
         body.push(R2ILOp::Branch {
@@ -17943,7 +17943,7 @@ mod tests {
         let counter = Varnode::register(40, 8);
         let mut entry = R2ILBlock::new(0x7000, 4);
         entry.push(R2ILOp::Copy {
-            dst: counter.clone(),
+            dst: counter,
             src: Varnode::constant(0, 8),
         });
         entry.push(R2ILOp::Branch {
@@ -18296,7 +18296,7 @@ mod tests {
                 b: Varnode::constant(31, 8),
             },
             R2ILOp::IntAdd {
-                dst: counter.clone(),
+                dst: counter,
                 a: scaled,
                 b: Varnode::constant(7, 8),
             },
@@ -18640,7 +18640,7 @@ mod tests {
         if let Some(mask) = mask {
             block.push(R2ILOp::IntAnd {
                 dst: index.clone(),
-                a: input.clone(),
+                a: input,
                 b: Varnode::constant(mask, 8),
             });
         } else {
@@ -18760,7 +18760,7 @@ mod tests {
         });
         body.push(R2ILOp::IntAdd {
             dst: address.clone(),
-            a: sp.clone(),
+            a: sp,
             b: scaled,
         });
         body.push(R2ILOp::Store {
@@ -18858,7 +18858,7 @@ mod tests {
         });
         body.push(R2ILOp::IntAdd {
             dst: high.clone(),
-            a: sp.clone(),
+            a: sp,
             b: scaled,
         });
         body.push(R2ILOp::IntAdd {

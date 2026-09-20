@@ -6855,7 +6855,7 @@ mod tests {
         });
         block.push(R2ILOp::IntZExt {
             dst: index.clone(),
-            src: byte.clone(),
+            src: byte,
         });
         block.push(R2ILOp::IntLeft {
             dst: scaled.clone(),
@@ -10264,11 +10264,11 @@ mod tests {
                     addr: slot,
                 },
                 R2ILOp::Copy {
-                    dst: alias.clone(),
+                    dst: alias,
                     src: loaded.clone(),
                 },
                 R2ILOp::Subpiece {
-                    dst: truncated.clone(),
+                    dst: truncated,
                     src: loaded,
                     offset: 0,
                 },
@@ -10346,7 +10346,7 @@ mod tests {
                     addr: slot,
                 },
                 R2ILOp::IntSExt {
-                    dst: extended.clone(),
+                    dst: extended,
                     src: loaded,
                 },
             ],
@@ -11423,7 +11423,7 @@ mod tests {
                 },
             },
         ];
-        let mut geometry_blocks = blocks.clone();
+        let mut geometry_blocks = blocks;
         geometry_blocks[0].ops = vec![
             R2ILOp::Copy {
                 dst: make_unique(0x1b00, 8),
@@ -13470,7 +13470,7 @@ mod tests {
             std::slice::from_ref(&block),
             DecompileInputs {
                 arch: Some(&arch),
-                callee_preserved_carriers: preserved.clone(),
+                callee_preserved_carriers: preserved,
                 ..Default::default()
             },
         )
@@ -13877,7 +13877,7 @@ mod tests {
                 },
                 R2ILOp::IntAdd {
                     dst: make_unique(0x108, 8),
-                    a: sp.clone(),
+                    a: sp,
                     b: make_const(8, 8),
                 },
                 R2ILOp::Load {
@@ -13929,7 +13929,7 @@ mod tests {
             },
             R2ILOp::IntAdd {
                 dst: make_unique(0x110, 8),
-                a: sp.clone(),
+                a: sp,
                 b: make_const(20, 8),
             },
             R2ILOp::Load {
@@ -14007,7 +14007,7 @@ mod tests {
             R2ILOp::Load {
                 dst: make_reg(16, 8),
                 space: SpaceId::Ram,
-                addr: sp.clone(),
+                addr: sp,
             },
             R2ILOp::Return {
                 target: make_reg(8, 8),
@@ -14037,7 +14037,7 @@ mod tests {
             },
             R2ILOp::Copy {
                 dst: temp.clone(),
-                src: sp.clone(),
+                src: sp,
             },
             R2ILOp::Store {
                 space: SpaceId::Ram,
@@ -14097,7 +14097,7 @@ mod tests {
             },
             R2ILOp::Store {
                 space: SpaceId::Ram,
-                addr: sp.clone(),
+                addr: sp,
                 val: make_const(0x100d, 8),
             },
             R2ILOp::Call {
@@ -14209,7 +14209,7 @@ mod tests {
             },
             R2ILOp::Store {
                 space: SpaceId::Ram,
-                addr: sp.clone(),
+                addr: sp,
                 val: make_const(0x100d, 8),
             },
             R2ILOp::Call {

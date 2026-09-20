@@ -2869,7 +2869,7 @@ fn opaque_operations_are_typed_refusals_before_ast_lowering() {
 
     let opaque = [
         SSAOp::CallOther {
-            output: Some(output.clone()),
+            output: Some(output),
             userop: u32::MAX,
             inputs: vec![input.clone()],
         },
