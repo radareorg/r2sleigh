@@ -30146,3 +30146,59 @@ measurement was.
 The element type is still `uint8_t[32]` read through a cast rather than
 `uint64_t[4]`. The stride is known, so the element width is available to say so,
 and that is the next refinement rather than a defect.
+
+## The native route on a stripped ARM library
+
+`libarm.so` was the step-four target because it yielded nothing at all: it is
+stripped, and `Image::parse` read only `.symtab`. It has 467 functions in
+`.dynsym`, and reading both tables is the whole of that fix.
+
+Of the 402 of them large enough to walk, 197 refused when they first became
+visible and 153 refuse now. Every number below is that census, taken with
+`r2s -c "s <addr>; pdd"` over the list and counted by refusal class; nothing in
+it moved any other gate, which held at 98 rendered / 0 refused / 1 undefined
+read on the native corpus and at 47 unexpected failures under `tests/r2r`
+throughout.
+
+Five defects accounted for the movement, and four of them were one defect
+wearing different clothes: the engine treated a machine operation it had no
+model for as an operation with no meaning.
+
+The walk decoded one instruction at a time and the trusted lift decoded whole
+blocks. Thumb's `it` puts the condition for the following instructions in the
+decoder's context, so the walk read a conditional move and a conditional return
+as unconditional while the lift read them correctly, and the two disagreed
+about where control goes. The walk now keeps the context across a contiguous
+run, which is what the block lift always did.
+
+A user operation was a barrier for every register in the walk that proves a
+function left the stack pointer alone. It writes the output the specification
+gives it and nothing else, which is how every other phase reads it, so a leaf
+function with a `dmb` before its return could not prove a frame it never had.
+
+`ldrex` and `strex` arrive as user operations beside an ordinary load and a
+store the instruction branches over. They are exactly `LoadLinked` and
+`StoreConditional`; the branch over the store is what made the whole
+instruction `Unimplemented`. A predicated load or store is the same argument
+and is exactly `LoadGuarded` and `StoreGuarded` -- the guard is the branch's
+own condition, negated, so nothing is invented. A guarded read goes to a
+temporary and an ordinary copy takes it, because a guarded load writing its
+destination outright would claim the destination holds the loaded value even
+where the guard did not hold.
+
+Each of those needed admitting at more tiers than expected: the memory-access
+authority rule, the use-disposition filter for a memory address, the
+boolean-producer rule, the obligation-occurrence rule, the effect ledger's
+memory directions, the arena's address-node set, and the exhaustive matches in
+`r2rewrite` and `r2dec`. Missing any one shows up as a refusal several layers
+from the cause, which is why the entity, access-authority and function-image
+checks now each say which of their terms failed rather than answering
+"mismatch".
+
+What remains, largest first: 52 functions refuse with `RenderedValueRequired`,
+always a comparison planned `Inline` and unobserved at the seal, and always
+with the gap that would cover it reaching a control transfer it cannot stand in
+for; 31 with `missing program-variable authorization`; 25 with `ConflictingUse`;
+11 with `OverlappingFunctionBlockRanges`. The first is the one to take next,
+and the question it turns on is why a condition planned to be spelled at its
+reader is spelled nowhere.
