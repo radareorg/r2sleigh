@@ -246,21 +246,32 @@ pub(super) fn verified_stack_slot_role(
     match role {
         r2ssa::SourceStackSlotRole::ParameterHome {
             parameter_index, ..
-        } => match parameter_binding(parameter_index) {
-            Some(binding)
-                if !parameter_home_is_written(
+        } => {
+            let binding = parameter_binding(parameter_index);
+            let written = binding.is_some_and(|binding| {
+                parameter_home_is_written(
                     source_owned,
                     projection,
                     canonical,
                     dispositions,
                     object,
                     binding,
-                ) =>
-            {
-                r2ssa::SourceStackSlotRole::Local
+                )
+            });
+            // A home nothing writes the parameter into is a local that
+            // happens to sit where the convention would have put one. The
+            // plan and the seal both ask this, and an answer that differs
+            // between them is why an object's binding disagrees.
+            r2il::refusal_evidence!(
+                "stack-slot-role",
+                "{object:?} home of parameter {parameter_index}: binding={binding:?} written={written}"
+            );
+            match written {
+                true => role,
+                false if binding.is_some() => r2ssa::SourceStackSlotRole::Local,
+                false => role,
             }
-            _ => role,
-        },
+        }
         _ => role,
     }
 }

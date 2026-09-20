@@ -1325,20 +1325,10 @@ fn adopted_reload_binding(
         .filter(|binding| {
             actual_by_binding
                 .get(binding.index())
-                .is_some_and(|actual| slot_members_agree(actual, reload_values, stored_values))
+                .is_some_and(|actual| {
+                    super::construction::slot_members_agree(actual, reload_values, stored_values)
+                })
         })
-}
-
-/// The binding holds every reload and nothing but reloads and stored values.
-fn slot_members_agree(
-    actual: &BTreeSet<ValueId>,
-    reload_values: &BTreeSet<ValueId>,
-    stored_values: &BTreeSet<ValueId>,
-) -> bool {
-    actual.is_superset(reload_values)
-        && actual
-            .iter()
-            .all(|value| reload_values.contains(value) || stored_values.contains(value))
 }
 
 /// Whether the binding a stack object took carries the object's certificate.
@@ -1358,7 +1348,7 @@ fn stack_object_certificate_agrees(
             .certificate
             .sources
             .contains(&BindingCertificateSource::CertifiedEntity(entity))
-            && slot_members_agree(actual, reload_values, stored_values)
+            && super::construction::slot_members_agree(actual, reload_values, stored_values)
     } else {
         planned.certificate.sources.as_ref() == [BindingCertificateSource::CertifiedEntity(entity)]
             && actual.is_empty()

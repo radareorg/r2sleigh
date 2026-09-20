@@ -155,7 +155,7 @@ pub(super) fn unanimous_value_binding(
 /// and naming the slot after it would turn `rax - 2` into a write of the slot.
 pub(super) fn shared_reload_binding(
     dispositions: &[ValueDisposition],
-    bound_value_counts: &BTreeMap<BindingId, usize>,
+    bound_values: &BTreeMap<BindingId, BTreeSet<ValueId>>,
     reload_values: &BTreeSet<ValueId>,
     stored_values: &BTreeSet<ValueId>,
     declaration_type: &CType,
@@ -169,19 +169,29 @@ pub(super) fn shared_reload_binding(
     ) {
         return None;
     }
-    // The binding holds the reloads and whichever stored values joined it.
+    // The binding holds every reload and nothing but reloads and stored
+    // values. Said as a count of members it was wrong: a value that is both
+    // reloaded and stored was counted twice, so a slot whose binding held
+    // exactly its own values looked as though it held one too few, the object
+    // minted a binding of its own, and the seal -- which asks the same
+    // question as a comparison of sets -- disagreed.
     unanimous_value_binding(dispositions, reload_values.iter().copied()).filter(|binding| {
-        let stored = stored_values
-            .iter()
-            .filter(|value| {
-                matches!(
-                    dispositions.get(value.0 as usize),
-                    Some(ValueDisposition::Bound { binding: bound }) if bound == binding
-                )
-            })
-            .count();
-        bound_value_counts.get(binding).copied() == Some(reload_values.len() + stored)
+        bound_values
+            .get(binding)
+            .is_some_and(|members| slot_members_agree(members, reload_values, stored_values))
     })
+}
+
+/// Whether one binding's members are exactly a slot's reloads and stores.
+pub(super) fn slot_members_agree(
+    members: &BTreeSet<ValueId>,
+    reload_values: &BTreeSet<ValueId>,
+    stored_values: &BTreeSet<ValueId>,
+) -> bool {
+    members.is_superset(reload_values)
+        && members
+            .iter()
+            .all(|value| reload_values.contains(value) || stored_values.contains(value))
 }
 
 /// The binding a stack object takes, sharing one with the values its reloads
@@ -1322,10 +1332,13 @@ impl BindingPlan {
 
         crate::stage_timing::mark("plan_bindings");
         let mut stack_objects = BTreeMap::new();
-        let mut bound_value_counts = BTreeMap::<BindingId, usize>::new();
-        for disposition in &dispositions {
+        let mut bound_values = BTreeMap::<BindingId, BTreeSet<ValueId>>::new();
+        for (index, disposition) in dispositions.iter().enumerate() {
             if let ValueDisposition::Bound { binding } = disposition {
-                *bound_value_counts.entry(*binding).or_default() += 1;
+                bound_values
+                    .entry(*binding)
+                    .or_default()
+                    .insert(ValueId(index as u32));
             }
         }
         if let Some(render) = source_owned.report().render() {
@@ -1449,7 +1462,7 @@ impl BindingPlan {
                         &mut bindings,
                         shared_reload_binding(
                             &dispositions,
-                            &bound_value_counts,
+                            &bound_values,
                             reload_values,
                             stored_values,
                             &declaration_type,
@@ -1483,7 +1496,7 @@ impl BindingPlan {
                         &mut bindings,
                         shared_reload_binding(
                             &dispositions,
-                            &bound_value_counts,
+                            &bound_values,
                             reload_values,
                             stored_values,
                             &declaration_type,
@@ -1572,7 +1585,7 @@ impl BindingPlan {
                             &mut bindings,
                             shared_reload_binding(
                                 &dispositions,
-                                &bound_value_counts,
+                                &bound_values,
                                 reload_values,
                                 stored_values,
                                 &declaration_type,
