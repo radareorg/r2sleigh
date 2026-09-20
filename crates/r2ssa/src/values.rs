@@ -155,10 +155,19 @@ fn phi_block_addr(graph: &SsaGraph, inst: &GraphInst) -> Option<u64> {
         .map(|block| block.addr)
 }
 
+/// The width a value is read at, in the widest the domain can describe.
+///
+/// A vector register is wider than the domain's `u64`, and a value described
+/// at sixty-four bits is top there, which is the honest answer rather than a
+/// shift by a distance that does not exist.
 const fn width_of(size_bytes: u32) -> u32 {
-    match size_bytes {
-        0 => 64,
+    let bits = match size_bytes {
+        0 => StridedInterval::MAX_WIDTH_BITS,
         size => size.saturating_mul(8),
+    };
+    match bits > StridedInterval::MAX_WIDTH_BITS {
+        true => StridedInterval::MAX_WIDTH_BITS,
+        false => bits,
     }
 }
 

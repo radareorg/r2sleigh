@@ -286,7 +286,7 @@ impl StridedInterval {
 
     /// A left shift is a multiplication by a power of two.
     pub fn shl(&self, places: u32) -> Self {
-        if places >= self.width_bits {
+        if places >= self.width_bits.min(Self::MAX_WIDTH_BITS) {
             return Self::constant(self.width_bits, 0);
         }
         self.mul(&Self::constant(self.width_bits, 1u64 << places))
@@ -294,7 +294,7 @@ impl StridedInterval {
 
     /// A logical right shift divides, and divides the stride with it.
     pub fn shr(&self, places: u32) -> Self {
-        if places >= self.width_bits {
+        if places >= self.width_bits.min(Self::MAX_WIDTH_BITS) {
             return Self::constant(self.width_bits, 0);
         }
         let Some(body) = self.body else {
@@ -340,8 +340,15 @@ impl StridedInterval {
         }
     }
 
+    /// The widest value this domain describes.
+    ///
+    /// A vector register is a hundred and twenty-eight bits and this is built
+    /// on `u64`, so anything wider is described at sixty-four and is top there
+    /// rather than shifted by a distance `u64` does not have.
+    pub const MAX_WIDTH_BITS: u32 = 64;
+
     fn mask_for(width_bits: u32) -> u64 {
-        match width_bits >= 64 {
+        match width_bits >= Self::MAX_WIDTH_BITS {
             true => u64::MAX,
             false => (1u64 << width_bits) - 1,
         }
@@ -500,6 +507,17 @@ mod tests {
         let shifted = scaled.shr(1);
         assert_eq!(shifted.bounds(), Some((0, 40)));
         assert_eq!(shifted.stride(), Some(4));
+    }
+
+    #[test]
+    fn a_value_wider_than_the_domain_is_described_at_its_widest() {
+        // A vector register is a hundred and twenty-eight bits; shifting by
+        // that much is not something `u64` can do, and a NEON expansion found
+        // it.
+        let wide = StridedInterval::top(128);
+        assert!(wide.shr(80).is_top() || wide.shr(80).as_constant() == Some(0));
+        assert!(wide.shl(80).is_top() || wide.shl(80).as_constant() == Some(0));
+        assert_eq!(wide.bounds(), Some((0, u64::MAX)));
     }
 
     #[test]
