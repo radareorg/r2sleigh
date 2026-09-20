@@ -428,6 +428,19 @@ The non-ARM window is unchanged at `77 / 0 / 0`.
 
 ## The one wall ARM is behind now
 
+**The engine cannot render an indirect tail call through a value**, and that
+is what the 24 `RenderedValueRequired` refusals are. Traced: `SSAOp::BranchInd`
+lowers to `None` in `op_to_stmt_impl` ("handled by control flow structuring"),
+and the structurer spells its target only through `dispatch_operand_expr`,
+which runs when the branch renders as a `switch`. A `bx r0` is neither a
+switch nor a certified tail call -- `AdvisoryCallTransfer` has `Call`,
+`TailJump` and `TailSlot`, and a register target is none of them -- so nothing
+spells the target, no `ObservationTarget::Value` is allocated for it, and the
+seal demands a cell nobody owes. ARM dispatchers are built from this shape, so
+it accounts for four fifths of what is left there.
+
+The old framing of the same wall follows.
+
 **24 of the 30 remaining ARM refusals are `observation journal:
 RenderedValueRequired`** -- one class, the same one three causes of were fixed
 for on x86 ("Claim a value cell where the rendering absorbed it"). The
