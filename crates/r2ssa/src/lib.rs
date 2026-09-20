@@ -57,6 +57,7 @@ pub(crate) mod rename;
 pub(crate) mod semantic;
 mod slice;
 pub mod span;
+mod strided;
 pub mod taint;
 pub(crate) mod var;
 
@@ -182,5 +183,6 @@ pub use semantic::{
     VariadicCallsiteArgumentCountRefusal,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
+pub use strided::StridedInterval;
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};

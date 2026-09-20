@@ -5677,6 +5677,7 @@ mod tests {
             })
             .expect("compatible controlled r2dec route");
         EngineDecompileRequest {
+            tier: RenderTier::C,
             function_name: "sym.r2dec_controlled".to_string(),
             source_owned_facts,
             trusted_ssa: None,
@@ -6789,6 +6790,7 @@ mod tests {
         let session = EngineSession::new();
 
         let response = session.decompile_function(EngineFunctionDecompileRequest {
+            tier: RenderTier::C,
             input_quality: None,
             analysis: EngineAnalyzeRequest {
                 function_name: "dbg.init_node".to_string(),
@@ -6846,6 +6848,7 @@ mod tests {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
+            tier: RenderTier::C,
         });
 
         assert!(
@@ -6908,6 +6911,7 @@ mod tests {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
+            tier: RenderTier::C,
         });
 
         assert!(
@@ -6968,6 +6972,7 @@ mod tests {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
+            tier: RenderTier::C,
         });
 
         assert!(
@@ -7020,6 +7025,7 @@ mod tests {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
+            tier: RenderTier::C,
         });
 
         assert!(
@@ -7072,6 +7078,7 @@ mod tests {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
+            tier: RenderTier::C,
         });
 
         let quality = response
@@ -7092,6 +7099,7 @@ mod tests {
         let session = EngineSession::new();
 
         let response = session.decompile_function(EngineFunctionDecompileRequest {
+            tier: RenderTier::C,
             input_quality: Some(EngineFunctionInputQuality {
                 expected_blocks: 2,
                 lifted_blocks: 1,
@@ -7147,6 +7155,7 @@ mod tests {
         let session = EngineSession::new();
 
         let response = session.decompile_function(EngineFunctionDecompileRequest {
+            tier: RenderTier::C,
             input_quality: None,
             analysis: EngineAnalyzeRequest {
                 function_name: "dbg.raw_name".to_string(),
@@ -7191,6 +7200,7 @@ mod tests {
         let session = EngineSession::new();
 
         let response = session.decompile_function(EngineFunctionDecompileRequest {
+            tier: RenderTier::C,
             input_quality: None,
             analysis: EngineAnalyzeRequest {
                 function_name: "sym.caller".to_string(),
@@ -7233,6 +7243,7 @@ mod tests {
         let session = EngineSession::new();
 
         let response = session.decompile_function(EngineFunctionDecompileRequest {
+            tier: RenderTier::C,
             input_quality: None,
             analysis: EngineAnalyzeRequest {
                 function_name: "sym.string_const".to_string(),
@@ -7264,6 +7275,7 @@ mod tests {
     fn decompile_request_builder_owns_analysis_policy() {
         let request = EngineFunctionDecompileRequest::full_semantics_for_function(
             EngineFunctionDecompileRequestInput {
+                tier: RenderTier::C,
                 function: EngineFunctionInput {
                     function_name: "sym.demo".to_string(),
                     function_addr: 0x401000,
