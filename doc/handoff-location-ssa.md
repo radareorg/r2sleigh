@@ -30308,3 +30308,27 @@ local, and the compiler specification already states where the return address
 sits (`CompilerSpec::return_address_slot`). Giving that slot a role of its own
 in the interface, so a read of it is a read of a declared object rather than of
 an unassigned local, is what closes the class.
+
+### What the call-result class actually turns on
+
+Two more attempts, both reverted, and they narrow it further. Excluding a
+call's result from the union that renames a slot after its values is right --
+the call renders an expression and the store is the statement that names what
+it produced -- and it turns `ximemdup0`'s refusal into a rendering. The
+rendering is still wrong: `ximalloc(s + 1); result_2 = RAX_3;` declares
+`RAX_3` and never assigns it, because the callee is declared as returning
+nothing.
+
+That declaration is the root of it. DWARF says `void *ximalloc (idx_t)`, and
+`idx_t` is a gnulib typedef the C-spelling parser does not know, so
+`function_type` refuses the whole prototype and the call site falls back to
+what the body proved, which says nothing about the result. Spelling a typedef
+as the type it names was tried and is worse: `idx_t` resolves through
+`ptrdiff_t` to a base type whose spelling the parser also declines, and the
+parameter rendered as `void *`.
+
+The shape of the real fix is the same in both places: the DWARF reader emits C
+*spellings*, and a spelling is a lossy channel -- it cannot carry an enum's
+width, an aggregate's layout, or what a typedef names. Reading DWARF into a
+`SourceTypeGraph` directly, rather than into strings that are parsed again,
+removes this class and the aggregate-parameter refusal with it.
