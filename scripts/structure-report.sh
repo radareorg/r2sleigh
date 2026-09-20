@@ -36,16 +36,15 @@ for lint in "${lints[@]}"; do
     flags+=(-W "clippy::$lint")
 done
 
-# Measured on the second run, deliberately.
+# Measured in a target directory of its own.
 #
-# The first clippy invocation with a given set of lint flags reports only the
-# crates it rebuilds for them; the run after that replays the diagnostics for
-# the whole workspace from cache and is stable from then on. Measured three
-# times, a cold reading gave 684 over-nested blocks and every warm one gave
-# 1126, so the cold number is the wrong one. The first run here is thrown
-# away for that reason rather than to be slow.
-cargo clippy --workspace --all-targets --all-features \
-    --message-format=short -- "${flags[@]}" >/dev/null 2>&1 || true
+# Clippy reports diagnostics only for what it compiles and replays the rest
+# from cache, so a tree that ordinary `cargo clippy` and `cargo test` runs
+# have been touching gives a different count every time -- readings of 684,
+# 1126, 402 and 481 for the same code, all from cache states rather than from
+# the code. With its own directory the build state belongs to this script and
+# the counts repeat exactly.
+export CARGO_TARGET_DIR="$root/target/structure"
 
 findings=$(cargo clippy --workspace --all-targets --all-features \
     --message-format=short -- "${flags[@]}" 2>&1 |
