@@ -643,16 +643,38 @@ block holds the operations a defect is about. `dump_blocks` was also printing
 operations through the derived `Debug` while printing its own phis through
 `Display`; it uses `SSAOp`'s `Display` now.
 
-### What the tiers still owe
+### All three tiers are printable now
 
-`pdil` and `pdih` are not written. `pdil` wants register names in `R2ILOp`'s
-`Display`, which today spells `reg:0x58[4]`; the names live in three rival
-printers (`r2sleigh-lift`'s `format_op` and `format_varnode`, and the plugin's
-`format_r2il_op_short`) that exist only because the canonical one lacks them.
-`pdih` wants the engine to return the AST rather than a formatted `String`,
-which is the same typed-value change the fact-lattice split needs at discovery.
-`pdim` prints the SSA but not yet each value's binding-plan disposition, which
-is the half that names an elision reason.
+`pdil` prints the operations Sleigh produced per block, with the
+architecture's register names; `pdim` the SSA; `pdih` the structured tree the C
+is generated from, with its statements spelled by the emitter that writes the
+C. Invariant eight asked for this and nothing implemented it.
+
+Two corrections to an earlier reading of the tree. There are **not** three
+rival IL printers to delete: `r2sleigh-lift`'s `format_varnode` and `format_op`
+generate *ESIL text* for radare2, and the plugin's `format_r2il_op_short`
+writes short labels inside ASCII CFG boxes. Different consumers, different
+jobs, and deleting any of them would remove working function. The one real
+duplication was `dump_blocks` printing operations through the derived `Debug`
+while printing its own phis through `Display`, which is fixed.
+
+`pdil` spells registers by rewriting `Varnode`'s own Display output against the
+architecture's table, rather than by threading a resolver through the
+two-hundred-line operation printer or by giving every varnode a name it would
+allocate for. A varnode visitor would be the general answer and has exactly one
+consumer today, so it has not earned itself yet.
+
+What the tiers still owe: `pdim` prints the SSA but not each value's
+binding-plan disposition, which is the half that names an elision reason and
+the half that would have answered the dead-load defect directly. `pdih` loses
+its structured-region markers, because sealing strips them before the tree is
+emission-ready, so block attribution has to come from `pdim`.
+
+The tier tests are targeted assertions in `crates/r2engine/tests/native.rs`
+rather than `insta` snapshots. Full snapshots were planned; they are the wrong
+instrument immediately before a pass that will churn every tier's output, and
+the r2r suite cannot reach the native route at all, which is why the tests live
+there and not in `tests/r2r/`.
 
 ### Two CI breaks, one of them six days old
 
