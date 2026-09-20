@@ -3488,6 +3488,22 @@ impl MachineBuilder {
     ) -> Result<MachineExprId, MachineBuildError> {
         let binding = binding_for_value(value)?;
         if !value_has_boolean_producer(graph, value.id) {
+            // Which operand is not a boolean, and what produced it: the
+            // operation refuses as a whole, and "unsupported" alone does not
+            // say which of its inputs is the one to look at.
+            r2il::refusal_evidence!(
+                "boolean-operand",
+                "{:?} reads {:?}, produced by {:?}, which is not a boolean",
+                inst,
+                value.id,
+                graph
+                    .def_inst(value.id)
+                    .and_then(|def| graph.inst(def))
+                    .map(|def| format!("{:?}", def.payload)
+                        .chars()
+                        .take(90)
+                        .collect::<String>())
+            );
             return Err(MachineBuildError::UnsupportedOperation {
                 inst,
                 op: Box::new(
@@ -5243,6 +5259,21 @@ fn value_has_boolean_producer(graph: &crate::graph::SsaGraph, value: ValueId) ->
         {
             visiting.remove(&value);
             return true;
+        }
+        // A value the function was entered with has no producer to ask, and
+        // this is only ever asked of a value a boolean operation reads. The
+        // p-code specification defines those operations over booleans, so the
+        // operation itself is the evidence: a one-byte entry value read by
+        // `BOOL_AND` is a boolean because the translator emits that operation
+        // over nothing else. Refusing it refused every function entered with
+        // a condition flag live -- a hundred and forty-five of them in one
+        // library, against one refusal of every other kind.
+        if graph.def_inst(value).is_none() {
+            let entry_boolean = graph
+                .value(value)
+                .is_some_and(|value| value.var.size == 1 && !value.var.is_const());
+            visiting.remove(&value);
+            return entry_boolean;
         }
         let result = graph
             .def_inst(value)
