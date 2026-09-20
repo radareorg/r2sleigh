@@ -30385,3 +30385,26 @@ address. Declaring it split it out of the object the callee writes, so nothing
 in the body assigns it. Whether a declared slot whose address reaches a call
 counts as written by that call is the question -- `callee_reached_frame_objects`
 already answers it for objects the body itself discovered.
+
+## The plugin route was dead, and the tests said so for weeks
+
+`snapshot_wire.rs` says in as many words that producer and consumer are one
+build: `r2plugin/snapshot_wire.c` writes the format it reads. Nothing held them
+to it. The revision that added `RESULT_UNPROVEN` bumped the reader to format
+version 20 and left the writer at 19, so every capture the plugin made was
+rejected with `snapshot wire decode failed: UnsupportedVersion(19)` and `pd:s`
+rendered nothing at all.
+
+The forty-seven `tests/r2r` failures this project had been carrying as a
+baseline were that. With the writer bumped, r2r goes from 58 passing and 47
+failing to 101 passing and 4 failing, and the four that remain are in
+`db/wip/r2sleigh_regression_watch`. One test marked broken now passes and its
+marker should go.
+
+It is also why the DecBench comparison showed the `r2sleigh` route at zero on
+every metric while `r2sleigh_native` scored normally: the plugin decompiled
+nothing for the whole sweep.
+
+A test in `r2plugin` now reads the C header and requires its magic and format
+version to equal the Rust crate's. It is the cheapest possible check and it
+would have caught this the moment it was introduced.
