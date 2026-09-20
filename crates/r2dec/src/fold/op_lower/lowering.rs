@@ -170,6 +170,24 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Whether this operation's own obligations include an effect on memory.
+    ///
+    /// A load whose value nothing reads is still a read the program performs,
+    /// so the statement stands even though the value is dead: the effect is
+    /// discharged by rendering it, not by proving it away once the value it
+    /// produced turned out to be unused.
+    pub(super) fn op_has_memory_effect(&self, op: &SSAOp, block_addr: u64, op_idx: usize) -> bool {
+        self.exact_normalized_op_effects(op, block_addr, op_idx)
+            .iter()
+            .any(|id| {
+                matches!(
+                    id.kind,
+                    r2ssa::SemanticObligationKind::ObservableMemoryRead
+                        | r2ssa::SemanticObligationKind::ObservableMemoryWrite
+                )
+            })
+    }
+
     fn exact_normalized_op_effects(
         &self,
         op: &SSAOp,

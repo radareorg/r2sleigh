@@ -7368,6 +7368,7 @@ mod integration_tests {
     fn infer_structs_from_ssa_recovers_arm64_spilled_struct_fields() {
         let arch = ArchSpec::new("aarch64");
         let block = r2ssa::SSABlock {
+            phis: Vec::new(),
             addr: 0x100000bb4,
             size: 52,
             ops: vec![
@@ -7454,6 +7455,7 @@ mod integration_tests {
     fn enrich_decompiler_type_context_prefers_stronger_local_struct_with_offset_zero_field() {
         let arch = ArchSpec::new("aarch64");
         let block = r2ssa::SSABlock {
+            phis: Vec::new(),
             addr: 0x100000bb4,
             size: 52,
             ops: vec![
@@ -7569,6 +7571,7 @@ mod integration_tests {
     fn infer_structs_from_ssa_recovers_arm64_indexed_struct_fields() {
         let arch = ArchSpec::new("aarch64");
         let block = r2ssa::SSABlock {
+            phis: Vec::new(),
             addr: 0x100000e40,
             size: 96,
             ops: vec![

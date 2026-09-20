@@ -1536,9 +1536,11 @@ impl<'a> FoldingContext<'a> {
                 break;
             }
 
-            // Skip operations that produce dead values
+            // Skip operations that produce dead values, unless the operation
+            // touches memory: the read happens whether or not anything uses
+            // what it produced, and the statement is what accounts for it.
             if let Some(dst) = op.dst() {
-                if self.is_dead(dst) {
+                if self.is_dead(dst) && !self.op_has_memory_effect(op, block.addr, op_idx) {
                     continue;
                 }
 
@@ -1769,7 +1771,14 @@ impl<'a> FoldingContext<'a> {
                         self.current_op_idx.get().unwrap_or_default()
                     ))));
                 }
-                let lhs = self.assignment_lhs_expr(dst)?;
+                // A load nothing reads still reads memory. There is no object
+                // to assign to -- a value with no reader is in no binding -- so
+                // the read stands as the statement, which is what accounts for
+                // the effect.
+                let lhs = match self.is_dead(dst) {
+                    true => None,
+                    false => Some(self.assignment_lhs_expr(dst)?),
+                };
                 // A load is unsigned unless something sign-extends it, and
                 // Sleigh says so explicitly with `IntSExt` when it does. Giving
                 // a bare byte load a signed pointee makes C sign-extend where
@@ -1782,7 +1791,16 @@ impl<'a> FoldingContext<'a> {
                     .unwrap_or_else(|| uint_type_from_size(dst.size));
                 let rhs = self.render_certified_load_access_expr(dst, addr, elem_ty.clone())?;
                 let rhs = self.observed_memory_input(frame, 0, rhs);
-                self.assign_typed(lhs, rhs, Some(CValue::Typed(elem_ty)))
+                match lhs {
+                    Some(lhs) => self.assign_typed(lhs, rhs, Some(CValue::Typed(elem_ty))),
+                    // Cast away: the read is the statement, and C warns on a
+                    // bare one whose value goes nowhere.
+                    None => Some(CStmt::Expr(CExpr::Cast {
+                        ty: crate::ast::CType::Void,
+                        expr: Box::new(rhs),
+                        role: crate::ast::CastRole::Conversion,
+                    })),
+                }
             }
             SSAOp::BlockTransfer(transfer) => self.block_transfer_stmt(
                 frame,

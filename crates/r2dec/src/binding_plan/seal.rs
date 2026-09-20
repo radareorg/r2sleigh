@@ -416,6 +416,7 @@ impl BindingPlan {
         let unread = super::rules::unread_defined_values(plan_facts);
         let unrendered =
             super::rules::unrendered_defined_values(plan_facts, &self.partition.canonical);
+        let effectful = super::rules::effectful_definition_values(source);
         for (index, graph_value) in graph.values.iter().enumerate() {
             if graph_value.id.0 as usize != index {
                 return Err(BindingPlanBuildError::Seal(
@@ -544,6 +545,19 @@ impl BindingPlan {
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && (unread.contains(&value) || unrendered.contains(&value)) => {}
+                // Unread, and its instruction renders anyway. The proof is
+                // both halves: the value is dead by one of the ordinary
+                // measures, and its definition owns a memory effect.
+                ValueDisposition::Elided { reason, proof }
+                    if *reason == r2ssa::ledger::ElisionReason::UnreadEffectfulValue
+                        && proof.authority == *source.authority()
+                        && proof.value == value
+                        && effectful.contains(&value)
+                        && (unread.contains(&value)
+                            || unrendered.contains(&value)
+                            || structural_unused.contains(&value)
+                            || unobserved_values.contains(&value)
+                            || unobserved_merges.contains(value)) => {}
                 ValueDisposition::Elided { .. } => {
                     return Err(BindingPlanBuildError::Seal(
                         BindingPlanSourceMismatch::InvalidElisionProof { value },

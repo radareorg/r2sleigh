@@ -679,6 +679,36 @@ impl<'a> PlanFacts<'a> {
     }
 }
 
+/// Values whose defining instruction performs a memory effect of its own.
+///
+/// A load's read of memory happens whether or not anything uses what it
+/// produced, so such a value can be unread while its instruction still
+/// renders. Every other dead-value reason means the instruction renders
+/// nothing; this set is what separates the two, and the plan and its seal read
+/// the same answer from here.
+pub(super) fn effectful_definition_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    source
+        .obligations()
+        .obligations()
+        .values()
+        .filter(|obligation| {
+            matches!(
+                obligation.id.kind,
+                r2ssa::SemanticObligationKind::ObservableMemoryRead
+                    | r2ssa::SemanticObligationKind::ObservableMemoryWrite
+            )
+        })
+        .filter_map(|obligation| match obligation.id.instruction.site {
+            r2ssa::CanonicalInstructionSite::Op(op_idx) => {
+                graph.inst_id_for_op_site(obligation.id.instruction.block_addr, op_idx as usize)
+            }
+            _ => None,
+        })
+        .filter_map(|inst| graph.inst(inst).and_then(|inst| inst.output))
+        .collect()
+}
+
 /// Values defined in this function that no graph or certified boundary reads.
 ///
 /// Entry values are deliberately outside this set: an exact interface can own

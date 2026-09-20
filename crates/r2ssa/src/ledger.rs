@@ -167,6 +167,13 @@ pub enum ElisionReason {
     /// A source-classified structural instruction produced a value with no
     /// graph use and owns no semantic obligation.
     UnusedStructuralValue,
+    /// A value nothing reads, whose defining instruction renders regardless.
+    ///
+    /// A load's read of memory happens whether or not anything uses what it
+    /// produced, so the value is elided and the statement is not: the effect is
+    /// discharged by rendering it. Every other dead-value reason means the
+    /// instruction renders nothing, which is why this one is separate.
+    UnreadEffectfulValue,
     /// The content an object already held when the function started.
     ///
     /// A value with no defining instruction was put there by the caller, so no
@@ -251,6 +258,7 @@ impl std::fmt::Display for ElisionReason {
             Self::UnobservedMerge => "unobserved-merge",
             Self::UnobservedValue => "unobserved-value",
             Self::UnusedStructuralValue => "unused-structural-value",
+            Self::UnreadEffectfulValue => "unread-effectful-value",
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
             Self::CallClobberedDeclaration => "call-clobbered-declaration",

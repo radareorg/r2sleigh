@@ -5143,6 +5143,14 @@ impl LegacyObservationJournal {
                     ObservationTarget::CertifiedArrayIndexRead { .. } => Ok(()),
                     ObservationTarget::Value(value) => {
                         match plan.disposition(value) {
+                            // The one elision that renders: nothing reads the
+                            // value, and its instruction still performs the
+                            // read. The statement spells the read, not the
+                            // value, so there is no name to disagree about.
+                            Some(ValueDisposition::Elided {
+                                reason: r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+                                ..
+                            }) => {}
                             Some(ValueDisposition::Elided { reason, .. }) => {
                                 // Which value, and why the plan elided it, is
                                 // what separates a wrong plan from a wrong
@@ -5874,6 +5882,20 @@ fn classify_value_node(
         } else {
             LegacyValueObservation::InlineNonLiteral
         });
+    }
+    // The same principle for the one elision that renders: the statement is the
+    // instruction's effect rather than a spelling of the value, so the plan's
+    // decision classifies it and the shape is not evidence against that.
+    if matches!(
+        disposition,
+        Some(ValueDisposition::Elided {
+            reason: r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+            ..
+        })
+    ) {
+        return Ok(LegacyValueObservation::Elided(
+            r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+        ));
     }
     let (expr, statement_level) = match node {
         RenderObservationNode::Expr(expr) => (expr.unobserved(), false),

@@ -898,6 +898,13 @@ impl BindingPlan {
         let stack_frame_values = certified_stack_frame_values(source);
         let stack_geometry_values = certified_stack_geometry_values(source);
         let unobserved_values = source.unobserved_values();
+        let effectful = super::rules::effectful_definition_values(source);
+        let elision_for = |value: r2ssa::ValueId, dead: r2ssa::ledger::ElisionReason| match effectful
+            .contains(&value)
+        {
+            true => r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+            false => dead,
+        };
         let structural_unused = source
             .obligations()
             .structural_unused_values(graph, source.unobserved_merges().unobserved_uses())
@@ -990,7 +997,7 @@ impl BindingPlan {
                 };
             } else if source.unobserved_merges().contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::UnobservedMerge,
+                    reason: elision_for(graph_value.id, r2ssa::ledger::ElisionReason::UnobservedMerge),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -998,7 +1005,7 @@ impl BindingPlan {
                 };
             } else if unobserved_values.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::UnobservedValue,
+                    reason: elision_for(graph_value.id, r2ssa::ledger::ElisionReason::UnobservedValue),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1006,7 +1013,7 @@ impl BindingPlan {
                 };
             } else if structural_unused.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::UnusedStructuralValue,
+                    reason: elision_for(graph_value.id, r2ssa::ledger::ElisionReason::UnusedStructuralValue),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1022,7 +1029,7 @@ impl BindingPlan {
                 };
             } else if unread.contains(&graph_value.id) || unrendered.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+                    reason: elision_for(graph_value.id, r2ssa::ledger::ElisionReason::DeadUnusedTemporary),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
