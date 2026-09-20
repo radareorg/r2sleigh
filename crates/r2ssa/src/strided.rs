@@ -131,6 +131,19 @@ impl StridedInterval {
         self.body.map(|body| (body.low, body.high))
     }
 
+    /// Every value this describes, in order.
+    ///
+    /// Useful only where the count is small -- the case labels of a switch --
+    /// and the caller is the one who knows that.
+    pub fn values(&self) -> impl Iterator<Item = u64> + '_ {
+        let body = self.body;
+        let step = body.map_or(1, |body| body.stride.max(1));
+        std::iter::successors(body.map(|body| body.low), move |at| {
+            let next = at.checked_add(step)?;
+            body.filter(|body| next <= body.high).map(|_| next)
+        })
+    }
+
     /// How many values this describes, where that is worth counting.
     pub fn count(&self) -> Option<u64> {
         let body = self.body?;

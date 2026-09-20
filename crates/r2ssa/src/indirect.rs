@@ -1,17 +1,17 @@
 //! Which entries of a pointer table a call can actually reach.
 //!
-//! A call through `table[index]` reaches exactly the entries `index` can select,
-//! and nothing else. The table's contents are a fact the source carries; the
-//! range of the index is not, because it follows from the branches that had to
-//! be taken to arrive at the call. Proving that range is what turns an opaque
-//! dispatch into a set of real edges.
+//! A call through `table[index]` reaches exactly the entries `index` can
+//! select, and nothing else. What the dispatch reads is the whole of the
+//! question: the value analysis answers what the load's address can be, and
+//! a bounded strided interval over it *is* the read -- its low bound is the
+//! first entry, its stride is the entry size, its high bound is the last.
+//! Nothing here decomposes the address into a table and an index, or walks
+//! the dominators for a bound on that index; the analysis has both already,
+//! narrowed by the branches that had to be taken to arrive.
 //!
-//! The proof is deliberately narrow. A block that strictly dominates the call
-//! and ends in a conditional branch tells us which way that branch went, but
-//! only when exactly one of its successors dominates the call: if both do, the
-//! condition says nothing about how we got here. Every such branch contributes
-//! one bound on one value, the bounds are intersected, and a range that is not
-//! fully pinned inside the table yields nothing at all.
+//! The read is reported whether or not any table is known at it, because on
+//! the native route nothing has read that memory yet and the description is
+//! what says where to look.
 //!
 //! Failing closed is the point. An unproven target set would be a guess about
 //! control flow, and a wrong edge is worse than a missing one.
@@ -63,6 +63,393 @@ pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) 
         .then_some(value)
 }
 
+/// How a dispatch turns a table entry into the address it goes to.
+///
+/// `target = scale * entry + displacement`, read signed where the machine
+/// sign-extended the entry. An absolute table is the identity; the compact
+/// forms store an offset from a base the instruction stream carries, which is
+/// the displacement, at the instruction size, which is the scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryTransform {
+    pub scale: u64,
+    pub displacement: u64,
+    pub signed: bool,
+}
+
+impl EntryTransform {
+    const IDENTITY: Self = Self {
+        scale: 1,
+        displacement: 0,
+        signed: false,
+    };
+
+    /// Where the entry read out of the table sends control.
+    pub fn target(&self, entry: u64, entry_size: u32) -> u64 {
+        let entry = match self.signed {
+            true => sign_extend(entry, entry_size),
+            false => entry,
+        };
+        self.scale
+            .wrapping_mul(entry)
+            .wrapping_add(self.displacement)
+    }
+}
+
+/// Read a table entry of `size` bytes as a signed value of the machine's width.
+fn sign_extend(entry: u64, size: u32) -> u64 {
+    let bits = size.saturating_mul(8);
+    match bits == 0 || bits >= 64 {
+        true => entry,
+        false => ((entry << (64 - bits)) as i64 >> (64 - bits)) as u64,
+    }
+}
+
+/// Where a dispatch reads its target, before anything has read that memory.
+///
+/// The native route captures a function's own bytes and nothing else, so a
+/// jump table in another section is unread at this point. This says where it
+/// is, how far it runs, and what the entries mean, which is what a reader
+/// needs to go and fetch it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchTableRead {
+    pub block_addr: u64,
+    pub op_index: usize,
+    /// The instruction that makes the transfer, where the lift recorded it.
+    /// What the body walk is keyed by, so it can be told where to continue.
+    pub instruction: Option<u64>,
+    /// The first entry the dispatch can read.
+    pub address: u64,
+    /// Bytes between the entries it steps through, which is the entry size.
+    pub entry_size: u32,
+    /// How many entries it can reach, counted from `address`.
+    pub entries: usize,
+    pub transform: EntryTransform,
+    /// The value the dispatch switches on.
+    pub selector: ValueId,
+    /// What that value is on each entry, in the order the entries are read.
+    pub cases: Vec<u64>,
+}
+
+/// Walk an index chain down to its end, folding the arithmetic on the way.
+///
+/// At every step `end = scale * value + displacement` holds of the value
+/// reached, so the walk answers two questions at once: which value a target
+/// or an address is built from, and how. A table of absolute addresses takes
+/// one step with the identity; a compact table takes the add and the shift
+/// that turn a byte into an instruction address.
+///
+/// The transform is dropped where a coefficient is not a constant, and the
+/// walk goes on. Such a table's entries cannot be read, but which value it is
+/// indexed by is still a fact, and naming it is what a switch needs.
+fn walk_index(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    from: ValueId,
+) -> (ValueId, Option<EntryTransform>) {
+    let constant = |value: ValueId| values.get(value).and_then(|range| range.as_constant());
+    let mut transform = Some(EntryTransform::IDENTITY);
+    let mut at = from;
+    while let Some(carries) = index_operand(graph, values, at) {
+        let Some(inst) = graph.def_inst(at).and_then(|inst| graph.inst(inst)) else {
+            break;
+        };
+        let InstPayload::Op(op) = &inst.payload else {
+            break;
+        };
+        let coefficient = inst
+            .inputs
+            .iter()
+            .find(|input| **input != carries)
+            .and_then(|input| constant(*input));
+        transform = transform.and_then(|mut transform| {
+            match op {
+                SSAOp::IntAdd { .. } => {
+                    transform.displacement = transform
+                        .displacement
+                        .wrapping_add(transform.scale.wrapping_mul(coefficient?));
+                }
+                SSAOp::IntMult { .. } => {
+                    transform.scale = transform.scale.wrapping_mul(coefficient?);
+                }
+                SSAOp::IntLeft { .. } => {
+                    let places = u32::try_from(coefficient?).ok()?;
+                    transform.scale = transform.scale.wrapping_mul(1u64.checked_shl(places)?);
+                }
+                SSAOp::IntSExt { .. } => transform.signed = true,
+                _ => {}
+            }
+            Some(transform)
+        });
+        at = carries;
+    }
+    (at, transform)
+}
+
+/// The load a dispatch's target comes from, and the arithmetic between them.
+fn table_entry_of<'a>(
+    graph: &'a SsaGraph,
+    values: &crate::values::ValueRanges,
+    value: ValueId,
+) -> Option<(&'a GraphInst, Option<EntryTransform>)> {
+    let (entry, transform) = walk_index(graph, values, value);
+    let inst = graph.inst(graph.def_inst(entry)?)?;
+    matches!(inst.payload, InstPayload::Op(SSAOp::Load { .. })).then_some((inst, transform))
+}
+
+/// The value a dispatch switches on, and how the address is built from it.
+///
+/// The address a table is read at is built from the program's own selector by
+/// scaling it and adding where the table lives, so the selector is the end of
+/// that arithmetic walked back down. That end is what the program wrote --
+/// `switch (n)` rather than `switch (n * 4 + 0x100000628)`, and the byte
+/// itself where a table of states was read through one.
+///
+/// Taking the selector and its case labels from the same walk is what makes
+/// them agree: a label is the value of the selector that puts the read on
+/// that entry, which is the transform run backwards. Every step is injective,
+/// so this is exact. A truncation is the step that is not, which is why the
+/// walk does not cross one: the program compared the low half, and the
+/// register it was cut from can hold values that comparison never saw.
+fn selector_of(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    address: ValueId,
+) -> (ValueId, Option<EntryTransform>) {
+    walk_index(graph, values, address)
+}
+
+/// The operand an address step carries its index in, where the step is one.
+///
+/// Of a sum, the index is the side that is not the base: the side the
+/// analysis pinned to a constant is where the table lives, and where neither
+/// is constant the scaled side is the index, because scaling by the entry
+/// size is what indexing is. A load ends the walk -- what it read is the
+/// index, which is how `switch (table[c])` names `c`.
+fn index_operand(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    value: ValueId,
+) -> Option<ValueId> {
+    let inst = graph.inst(graph.def_inst(value)?)?;
+    let InstPayload::Op(op) = &inst.payload else {
+        return None;
+    };
+    let constant = |value: ValueId| values.get(value).and_then(|range| range.as_constant());
+    let input = |index: usize| inst.inputs.get(index).copied();
+    let scaled = |value: ValueId| {
+        graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .is_some_and(|inst| {
+                matches!(
+                    inst.payload,
+                    InstPayload::Op(SSAOp::IntMult { .. } | SSAOp::IntLeft { .. })
+                )
+            })
+    };
+    let index_of =
+        |left: ValueId, right: ValueId| match (constant(left).is_some(), constant(right).is_some())
+        {
+            (true, false) => Some(right),
+            (false, true) => Some(left),
+            _ => match (scaled(left), scaled(right)) {
+                (true, false) => Some(left),
+                (false, true) => Some(right),
+                _ => None,
+            },
+        };
+    match op {
+        SSAOp::Copy { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. } => {
+            input(0)
+        }
+        SSAOp::IntAdd { .. } => index_of(input(0)?, input(1)?),
+        SSAOp::IntMult { .. } => match (constant(input(0)?), constant(input(1)?)) {
+            (Some(_), None) => input(1),
+            (None, Some(_)) => input(0),
+            _ => None,
+        },
+        SSAOp::IntLeft { .. } => constant(input(1)?).and(input(0)),
+        _ => None,
+    }
+}
+
+/// The load one indirect transfer takes its target from, and how.
+fn dispatch_load<'a>(
+    graph: &'a SsaGraph,
+    values: &crate::values::ValueRanges,
+    block_addr: u64,
+    op_index: usize,
+    op: &SSAOp,
+) -> Option<(Option<&'a GraphInst>, Option<EntryTransform>, ValueId)> {
+    // A tail call through a table is a branch, not a call, and it reaches the
+    // same set of functions either way.
+    let (SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. }) = op else {
+        return None;
+    };
+    let call_inst = graph
+        .inst_id_for_op_site(block_addr, op_index)
+        .and_then(|inst| graph.inst(inst))?;
+    let target_value = exact_input(graph, call_inst, 0)?;
+    if graph.value_id_for_var(target) != Some(target_value) {
+        return None;
+    }
+    let target_value = crate::constant::root_of(graph, target_value);
+    let Some((load_inst, transform)) = table_entry_of(graph, values, target_value) else {
+        // Nothing read it: the branch goes through a register the walk cannot
+        // see a producer for, and that register is what it switches on.
+        return Some((None, None, target_value));
+    };
+    let address = exact_input(graph, load_inst, 0)?;
+    Some((Some(load_inst), transform, address))
+}
+
+/// Where one indirect transfer reads its target, where that is a table read.
+fn dispatch_table_read(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    block_addr: u64,
+    op_index: usize,
+    op: &SSAOp,
+) -> Option<DispatchTableRead> {
+    let (SSAOp::CallInd { instruction, .. } | SSAOp::BranchInd { instruction, .. }) = op else {
+        return None;
+    };
+    // What stopped a dispatch resolving is the one thing worth saying about
+    // it: either the target is not read out of memory, or what it reads is
+    // not a bounded walk of one table.
+    let evidence = |why: &str| {
+        r2il::refusal_evidence!("dispatch-table", "{block_addr:#x}:{op_index}: {why}");
+    };
+    let Some((Some(load_inst), Some(transform), address)) =
+        dispatch_load(graph, values, block_addr, op_index, op)
+    else {
+        evidence("the target is not a constant affine function of a load");
+        return None;
+    };
+    let InstPayload::Op(SSAOp::Load { dst, .. }) = &load_inst.payload else {
+        return None;
+    };
+    let reach = values
+        .get(address)
+        .unwrap_or_else(|| crate::StridedInterval::top(64));
+    let (Some((base, last)), Some(stride)) = (reach.bounds(), reach.stride()) else {
+        evidence(&format!("the address {address:?} reaches only {reach:?}"));
+        return None;
+    };
+    // The entry size is how far the read steps and how wide it reads. A read
+    // that steps by anything but what it reads leaves gaps or overlaps, and
+    // neither is a table walk.
+    let entry_size = u32::try_from(stride).ok()?;
+    if entry_size == 0 || entry_size != dst.size {
+        evidence(&format!(
+            "it steps by {stride} and reads {} bytes",
+            dst.size
+        ));
+        return None;
+    }
+    let entries = usize::try_from((last - base) / stride + 1).ok()?;
+    let (selector, indexing) = selector_of(graph, values, address);
+    // What the selector was on an entry is where that entry sits, put back
+    // through the arithmetic that placed it.
+    let Some(cases) = indexing
+        .filter(|indexing| indexing.scale != 0)
+        .and_then(|indexing| {
+            (0..entries)
+                .map(|step| {
+                    let at = base.wrapping_add((step as u64).wrapping_mul(stride));
+                    let offset = at.checked_sub(indexing.displacement)?;
+                    offset
+                        .is_multiple_of(indexing.scale)
+                        .then(|| offset / indexing.scale)
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+    else {
+        evidence(&format!(
+            "selector {selector:?} does not label {entries} entries"
+        ));
+        return None;
+    };
+    r2il::refusal_evidence!(
+        "dispatch-table",
+        "{block_addr:#x}:{op_index} at {instruction:?} reads {base:#x}..={last:#x} by {entry_size}, target = {}*entry + {:#x}, on {selector:?}",
+        transform.scale,
+        transform.displacement
+    );
+    Some(DispatchTableRead {
+        block_addr,
+        op_index,
+        instruction: *instruction,
+        address: base,
+        entry_size,
+        entries,
+        transform,
+        selector,
+        cases,
+    })
+}
+
+/// What each dispatching block switches on.
+///
+/// Offered to the phase that records what a switch is about. Walking the
+/// operations back from the branch is what this replaces: the arithmetic
+/// between a selector and a table address is affine, and which of its
+/// operands is the base is a question about values rather than about opcodes.
+pub(crate) fn dispatch_selectors(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+) -> std::collections::BTreeMap<u64, ValueId> {
+    function
+        .blocks()
+        .iter()
+        .filter_map(|block| {
+            let (op_index, op) =
+                block.ops.iter().enumerate().rev().find(|(_, op)| {
+                    matches!(op, SSAOp::CallInd { .. } | SSAOp::BranchInd { .. })
+                })?;
+            let (_, _, address) = dispatch_load(graph, values, block.addr, op_index, op)?;
+            Some((block.addr, selector_of(graph, values, address).0))
+        })
+        .collect()
+}
+
+/// Every dispatch in one function that reads its target from a table.
+fn dispatch_table_reads_in_graph(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+) -> Vec<DispatchTableRead> {
+    function
+        .blocks()
+        .iter()
+        .flat_map(|block| {
+            block.ops.iter().enumerate().filter_map(|(op_index, op)| {
+                dispatch_table_read(graph, values, block.addr, op_index, op)
+            })
+        })
+        .collect()
+}
+
+/// The entries one read selects, where a known table holds them.
+fn selected_targets<T: PointerTable>(read: &DispatchTableRead, tables: &[T]) -> Option<Vec<u64>> {
+    let entry = u64::from(read.entry_size);
+    // The base need not be the address the table was read from: a table read
+    // as one run may be indexed from an entry inside it. What it must be is an
+    // entry boundary, or the read steps between entries.
+    let table = tables.iter().find(|table| {
+        table.entry_size() == read.entry_size
+            && read.address >= table.address()
+            && (read.address - table.address()).is_multiple_of(entry)
+    })?;
+    let first = usize::try_from((read.address - table.address()) / entry).ok()?;
+    // A range reaching past the last entry read is not proven: the table may
+    // continue where the read stopped.
+    let last = first.checked_add(read.entries.checked_sub(1)?)?;
+    let selected = table.targets().get(first..=last)?;
+    (!selected.is_empty()).then(|| selected.to_vec())
+}
+
 /// Resolve every indirect transfer whose reachable target set can be proven.
 fn resolve_indirect_calls_in_graph<T: PointerTable>(
     function: &SSAFunction,
@@ -70,96 +457,29 @@ fn resolve_indirect_calls_in_graph<T: PointerTable>(
     values: &crate::values::ValueRanges,
     tables: &[T],
 ) -> Vec<ResolvedIndirectCall> {
-    let mut resolved = Vec::new();
-    for block in function.blocks() {
-        for (op_index, op) in block.ops.iter().enumerate() {
-            // A tail call through a table is a branch, not a call, and it
-            // reaches the same set of functions either way.
-            let (SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. }) = op else {
-                continue;
-            };
-            let Some(call_inst) = graph
-                .inst_id_for_op_site(block.addr, op_index)
-                .and_then(|inst| graph.inst(inst))
-            else {
-                continue;
-            };
-            let Some(target_value) = exact_input(graph, call_inst, 0) else {
-                continue;
-            };
-            if graph.value_id_for_var(target) != Some(target_value) {
-                continue;
-            }
-            // The callee is whatever the table held, so the target has to be a
-            // load rather than a computed address.
-            let target_value = crate::constant::root_of(graph, target_value);
-            let Some(load_inst) = graph
-                .def_inst(target_value)
-                .and_then(|inst| graph.inst(inst))
-            else {
-                continue;
-            };
-            let InstPayload::Op(SSAOp::Load { .. }) = &load_inst.payload else {
-                continue;
-            };
-            let Some(address) = exact_input(graph, load_inst, 0) else {
-                continue;
-            };
-            // What the address can be is what the table read selects: the
-            // low bound is the first entry, the stride is how far apart the
-            // entries it steps through are, and the high bound is the last.
-            // Decomposing the address syntactically and then proving a bound
-            // on the index separately is what this replaces.
-            let Some(reach) = values
-                .get(address)
-                .filter(|reach| !reach.is_top() && !reach.is_bottom())
-            else {
-                continue;
-            };
-            let (Some((base, last)), Some(stride)) = (reach.bounds(), reach.stride()) else {
-                continue;
-            };
-            // The base need not be the address the table was read from: a table
-            // read as one run may be indexed from an entry inside it. What it
-            // must be is an entry boundary, or the index steps between entries.
-            let Some(table) = tables.iter().find(|table| {
-                let entry = u64::from(table.entry_size());
-                entry != 0
-                    && base >= table.address()
-                    && (base - table.address()).is_multiple_of(entry)
-                    && (base - table.address()) / entry < table.targets().len() as u64
-            }) else {
-                continue;
-            };
-            // Stepping by anything but one entry selects something the read
-            // never described, so where it lands is not a fact about this
-            // table.
-            if stride != u64::from(table.entry_size()) {
-                continue;
-            }
-            let entry_size = u64::from(table.entry_size());
-            let first = (base - table.address()) / entry_size;
-            let last = (last - table.address()) / entry_size;
-            // A range reaching past the last entry read is not proven: the
-            // table may continue where the read stopped.
-            if last as usize >= table.targets().len() {
-                continue;
-            }
-            let Some(selected) = table.targets().get(first as usize..=last as usize) else {
-                continue;
-            };
-            if selected.is_empty() {
-                continue;
-            }
-            resolved.push(ResolvedIndirectCall {
-                block_addr: block.addr,
-                op_index,
-                table_address: base,
-                targets: selected.to_vec(),
-            });
-        }
-    }
-    resolved
+    dispatch_table_reads_in_graph(function, graph, values)
+        .into_iter()
+        .filter_map(|read| {
+            Some(ResolvedIndirectCall {
+                block_addr: read.block_addr,
+                op_index: read.op_index,
+                table_address: read.address,
+                targets: selected_targets(&read, tables)?,
+            })
+        })
+        .collect()
+}
+
+/// Where every dispatch in one function reads its target.
+///
+/// Answered without any table in hand, which is how the native route learns
+/// which memory it has to read before it can resolve anything.
+pub fn dispatch_table_reads(artifact: &SsaArtifact) -> Vec<DispatchTableRead> {
+    dispatch_table_reads_in_graph(
+        artifact.function(),
+        artifact.graph(),
+        &artifact.facts().values,
+    )
 }
 
 /// Resolve every indirect transfer against the graph retained by the artifact.

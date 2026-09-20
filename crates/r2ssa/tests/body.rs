@@ -3,6 +3,8 @@
 #![cfg(feature = "sleigh-config")]
 
 use r2sleigh_lift::Disassembler;
+use std::collections::BTreeMap;
+
 use r2ssa::body::{Body, UnresolvedReason, lift_body};
 use r2ssa::cfg::CFG;
 
@@ -64,7 +66,7 @@ const DIAMOND: &[u8] = &[
 
 #[test]
 fn conditional_branch_splits_three_blocks() {
-    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect("body");
     assert_eq!(addrs(&body), vec![0x1000, 0x1006, 0x100b]);
     let sizes: Vec<u32> = body.blocks.iter().map(|block| block.lifted.size).collect();
     assert_eq!(sizes, vec![6, 5, 1]);
@@ -77,7 +79,7 @@ fn conditional_branch_splits_three_blocks() {
 fn a_block_states_where_control_leaves_it() {
     use r2source::AdvisorySuccessorKind::{Direct, Fallthrough};
 
-    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect("body");
     assert_eq!(
         body.blocks[0].successors,
         vec![(Direct, 0x100b), (Fallthrough, 0x1006)]
@@ -89,7 +91,7 @@ fn a_block_states_where_control_leaves_it() {
 
 #[test]
 fn the_walk_feeds_the_graph() {
-    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect("body");
     let lifted = lifted(&body);
     let cfg = CFG::from_blocks(&lifted).expect("cfg");
     assert_eq!(cfg.entry, 0x1000);
@@ -108,7 +110,7 @@ const CALLING: &[u8] = &[
 
 #[test]
 fn a_call_is_recorded_and_the_block_runs_on() {
-    let body = lift_body(BASE, &x86_64(), &reader(CALLING)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(CALLING), &BTreeMap::new()).expect("body");
     assert_eq!(body.calls, vec![0x1010]);
     assert_eq!(body.blocks.len(), 1);
     assert_eq!(body.blocks[0].lifted.addr, 0x1000);
@@ -120,7 +122,7 @@ const INDIRECT: &[u8] = &[0xff, 0xe0];
 
 #[test]
 fn an_indirect_branch_is_refused_not_guessed() {
-    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT), &BTreeMap::new()).expect("body");
     assert_eq!(body.blocks.len(), 1);
     assert_eq!(
         body.unresolved
@@ -141,13 +143,14 @@ const LOOP: &[u8] = &[
 
 #[test]
 fn a_loop_terminates_and_keeps_one_block_per_leader() {
-    let body = lift_body(BASE, &x86_64(), &reader(LOOP)).expect("body");
+    let body = lift_body(BASE, &x86_64(), &reader(LOOP), &BTreeMap::new()).expect("body");
     assert_eq!(addrs(&body), vec![0x1000, 0x1005]);
 }
 
 #[test]
 fn an_unmapped_entry_refuses() {
-    let error = lift_body(0x9000, &x86_64(), &reader(DIAMOND)).expect_err("unmapped");
+    let error =
+        lift_body(0x9000, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect_err("unmapped");
     assert_eq!(error.to_string(), "nothing mapped at 0x9000");
 }
 
@@ -164,7 +167,7 @@ fn a_branch_to_another_function_ends_the_body() {
         bytes: TAIL,
         entries: &[0x1010],
     };
-    let body = lift_body(BASE, &x86_64(), &program).expect("body");
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
     // One block, and the other function's code is not in it.
     assert_eq!(addrs(&body), vec![0x1000]);
     assert_eq!(body.tail_calls, vec![0x1010]);
@@ -177,7 +180,7 @@ fn a_branch_to_a_function_the_program_does_not_declare_is_followed() {
         bytes: TAIL,
         entries: &[],
     };
-    let body = lift_body(BASE, &x86_64(), &program).expect("body");
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
     assert_eq!(addrs(&body), vec![0x1000, 0x1010]);
     assert!(body.tail_calls.is_empty());
 }

@@ -33,7 +33,7 @@ pub(crate) mod execution;
 pub(crate) mod fingerprint;
 pub mod function;
 pub mod graph;
-pub(crate) mod indirect;
+pub mod indirect;
 pub(crate) mod integrity;
 pub mod interproc;
 pub mod ledger;

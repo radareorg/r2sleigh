@@ -505,45 +505,66 @@ impl OwnedFunctionImage {
     /// Advisory edges are checked for internal consistency here; trusted lift
     /// code must still independently derive and exactly compare machine CFG.
     #[allow(dead_code)]
+    /// Whether the captured image describes one coherent function.
+    ///
+    /// Each rule says what it rejected. A capture that fails this is a bug in
+    /// whoever assembled it, and "invalid" alone leaves the reader to find
+    /// which of a dozen rules it broke.
     fn is_structurally_valid(&self) -> bool {
-        if self.blocks.is_empty()
-            || !self
-                .blocks
-                .iter()
-                .any(|block| block.address == self.entry_address)
+        let no = |why: &str| {
+            r2il::refusal_evidence!("function-image", "{why}");
+            false
+        };
+        if self.blocks.is_empty() {
+            return no("no blocks");
+        }
+        if !self
+            .blocks
+            .iter()
+            .any(|block| block.address == self.entry_address)
         {
-            return false;
+            return no("no block starts at the entry");
         }
         let mut previous_end = None;
         let mut starts = BTreeSet::new();
         let mut byte_sum = 0usize;
         for block in &self.blocks {
-            if block.bytes.is_empty() || !starts.insert(block.address) {
-                return false;
+            if block.bytes.is_empty() {
+                return no(&format!("block {:#x} has no bytes", block.address));
+            }
+            if !starts.insert(block.address) {
+                return no(&format!("block {:#x} starts twice", block.address));
             }
             let Ok(size) = u64::try_from(block.bytes.len()) else {
-                return false;
+                return no("a block is longer than an address");
             };
             let Some(end) = block.address.checked_add(size) else {
-                return false;
+                return no("a block ends past the address space");
             };
             if previous_end.is_some_and(|previous| block.address < previous) {
-                return false;
+                return no(&format!("block {:#x} is out of order", block.address));
             }
             let Some(next_sum) = byte_sum.checked_add(block.bytes.len()) else {
-                return false;
+                return no("the blocks are longer than memory");
             };
             byte_sum = next_sum;
             if block
                 .switch_instruction
                 .is_some_and(|address| address < block.address || address >= end)
             {
-                return false;
+                return no(&format!(
+                    "block {:#x} dispatches at {:#x}, outside itself",
+                    block.address,
+                    block.switch_instruction.unwrap_or_default()
+                ));
             }
             previous_end = Some(end);
         }
         if byte_sum != self.total_source_bytes {
-            return false;
+            return no(&format!(
+                "the blocks hold {byte_sum} bytes and the capture states {}",
+                self.total_source_bytes
+            ));
         }
         let mut observed_external = BTreeSet::new();
         for block in &self.blocks {
@@ -553,17 +574,28 @@ impl OwnedFunctionImage {
             let mut switch_default_count = 0usize;
             for successor in &block.successors {
                 if !unique.insert((successor.kind, successor.target, successor.case_value)) {
-                    return false;
+                    return no(&format!(
+                        "block {:#x} names {:#x} twice",
+                        block.address, successor.target
+                    ));
                 }
                 let is_switch = matches!(
                     successor.kind,
                     AdvisorySuccessorKind::SwitchCase | AdvisorySuccessorKind::SwitchDefault
                 );
-                if is_switch && !has_switch
-                    || matches!(successor.kind, AdvisorySuccessorKind::SwitchCase)
-                        != successor.case_value.is_some()
+                if is_switch && !has_switch {
+                    return no(&format!(
+                        "block {:#x} has a switch edge and no dispatch",
+                        block.address
+                    ));
+                }
+                if matches!(successor.kind, AdvisorySuccessorKind::SwitchCase)
+                    != successor.case_value.is_some()
                 {
-                    return false;
+                    return no(&format!(
+                        "block {:#x} edge to {:#x}: a case value belongs to a case and nothing else",
+                        block.address, successor.target
+                    ));
                 }
                 match successor.kind {
                     AdvisorySuccessorKind::SwitchCase => switch_case_count += 1,
@@ -579,8 +611,26 @@ impl OwnedFunctionImage {
                             candidate.address < successor.target && successor.target < end
                         })
                 });
-                if interior || successor.external == internal {
-                    return false;
+                if interior {
+                    return no(&format!(
+                        "block {:#x} goes to {:#x}, which is inside a block",
+                        block.address, successor.target
+                    ));
+                }
+                if successor.external == internal {
+                    return no(&format!(
+                        "block {:#x} calls {:#x} {}, and it is {}",
+                        block.address,
+                        successor.target,
+                        match successor.external {
+                            true => "external",
+                            false => "internal",
+                        },
+                        match internal {
+                            true => "a block here",
+                            false => "not",
+                        }
+                    ));
                 }
                 if successor.external {
                     observed_external.insert(successor.target);
@@ -592,12 +642,27 @@ impl OwnedFunctionImage {
             // exist rather than requiring a synthetic one. A dispatch block may
             // additionally carry the linear flow edge, so non-switch successors
             // are not evidence of an inconsistent block.
-            if has_switch && (switch_case_count == 0 || switch_default_count > 1) {
-                return false;
+            if has_switch && switch_case_count == 0 {
+                return no(&format!("block {:#x} dispatches to no case", block.address));
+            }
+            if switch_default_count > 1 {
+                return no(&format!(
+                    "block {:#x} has {switch_default_count} defaults",
+                    block.address
+                ));
             }
         }
-        self.external_exits.iter().copied().collect::<BTreeSet<_>>() == observed_external
-            && self.external_exits.windows(2).all(|pair| pair[0] < pair[1])
+        if self.external_exits.iter().copied().collect::<BTreeSet<_>>() != observed_external {
+            return no(&format!(
+                "the capture states {} external exits and the blocks reach {}",
+                self.external_exits.len(),
+                observed_external.len()
+            ));
+        }
+        if !self.external_exits.windows(2).all(|pair| pair[0] < pair[1]) {
+            return no("the external exits are not in order");
+        }
+        true
     }
 }
 

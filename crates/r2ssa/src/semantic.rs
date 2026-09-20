@@ -2089,7 +2089,7 @@ impl PreparedFunctionFacts {
         // reaches says how far a buffer it indexes extends, and that has to be
         // known while the frame's objects are still being decided. Nothing in
         // this subtree reads the object model.
-        let predicates = collect_predicate_facts(function, graph);
+        let mut predicates = collect_predicate_facts(function, graph);
         phase("predicates", 0);
         let return_storages = machine_context
             .into_iter()
@@ -2115,6 +2115,14 @@ impl PreparedFunctionFacts {
             .map(|fact| fact.header)
             .collect::<std::collections::BTreeSet<_>>();
         let values = crate::values::solve_value_ranges(graph, function, &predicates, &widen_at);
+        // What a table dispatch switches on is what the read of that table is
+        // indexed by, which is only knowable now.
+        for (block_addr, selector) in crate::indirect::dispatch_selectors(function, graph, &values)
+        {
+            if let Some(fact) = predicates.switches.get_mut(&block_addr) {
+                fact.selector.get_or_insert(selector);
+            }
+        }
         let (bounded, total) = values.bounded();
         r2il::refusal_evidence!("value-ranges", "{bounded} of {total} values bounded");
         phase("values", bounded);
@@ -8602,10 +8610,6 @@ fn accessed_object_extent(
     (extent > 0).then_some(extent)
 }
 
-/// A constant a machine widened to reach an operand's width.
-///
-/// A zero extension, a cast or a copy of a constant is that constant; the
-/// widening is how the operation is spelled and says nothing about the value.
 /// The operand of an indexed address that supplies the index.
 ///
 /// The same question `ObjectModel::index_for_address` answers, asked before
@@ -8627,15 +8631,6 @@ fn object_index_operand(
     }
 }
 
-/// The largest value a counted loop's counter reaches, per header merge.
-///
-/// A recurrence alone says nothing: `x = x + 1` wraps, so the only bound it
-/// carries is the width's. What bounds the counter is the loop's own exit
-/// test, and the test bounds every body access only where it runs before the
-/// body does -- a test in the header. A bottom test lets the body run once
-/// before it, so the counter's initial value has to satisfy the bound itself.
-/// What sizes a stack allocation: the element layouts proven for the
-/// objects and the bounds their indices stay within.
 /// The analysis before one has been solved: nothing is bounded.
 fn empty_value_ranges() -> &'static crate::values::ValueRanges {
     static EMPTY: std::sync::OnceLock<crate::values::ValueRanges> = std::sync::OnceLock::new();
@@ -13254,19 +13249,14 @@ fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) -> Predicat
                     block_addr,
                     SwitchPredicateFact {
                         block_addr,
-                        selector: function.infer_switch_selector_var(block.addr).and_then(
-                            |selector| {
-                                let value = graph.value_id_for_var(&selector);
-                                if value.is_none() {
-                                    r2il::refusal_evidence!(
-                                        "switch-selector-walk",
-                                        "{block_addr:#x} selector {} has no value in the graph",
-                                        selector.display_name()
-                                    );
-                                }
-                                value
-                            },
-                        ),
+                        // A fused comparison chain names its selector
+                        // outright. A dispatch through a table does not, and
+                        // what it switches on comes from the value analysis,
+                        // which has not run yet -- it is filled in there.
+                        selector: block.ops.iter().rev().find_map(|op| match op {
+                            SSAOp::Switch { selector } => graph.value_id_for_var(selector),
+                            _ => None,
+                        }),
                         cases: cases.clone(),
                         default: *default,
                     },

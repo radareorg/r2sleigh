@@ -26,7 +26,7 @@ use crate::cfg::{BasicBlock, BlockTerminator};
 
 /// Longest instruction any supported architecture encodes, and the window
 /// Sleigh wants for a decode wherever the address is mapped.
-const WINDOW: usize = 16;
+pub const WINDOW: usize = 16;
 
 /// The program the walk reads, and the one question about it a walk cannot
 /// answer for itself.
@@ -125,8 +125,9 @@ pub fn lift_body(
     entry: u64,
     disasm: &Disassembler,
     program: &dyn Program,
+    dispatched: &BTreeMap<u64, Vec<u64>>,
 ) -> Result<Body, BodyError> {
-    Walk::run(entry, disasm, program).map(Walk::into_body)
+    Walk::run(entry, disasm, program, dispatched).map(Walk::into_body)
 }
 
 /// One instruction the walk decoded, and where control goes after it.
@@ -157,6 +158,9 @@ impl Instruction {
 struct Walk<'a> {
     entry: u64,
     program: &'a dyn Program,
+    /// Where a dispatch a previous pass resolved goes, by the address of the
+    /// instruction that makes it.
+    dispatched: &'a BTreeMap<u64, Vec<u64>>,
     decoded: BTreeMap<u64, Instruction>,
     leaders: BTreeSet<u64>,
     calls: BTreeSet<u64>,
@@ -165,10 +169,16 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    fn run(entry: u64, disasm: &Disassembler, program: &'a dyn Program) -> Result<Self, BodyError> {
+    fn run(
+        entry: u64,
+        disasm: &Disassembler,
+        program: &'a dyn Program,
+        dispatched: &'a BTreeMap<u64, Vec<u64>>,
+    ) -> Result<Self, BodyError> {
         let mut walk = Self {
             entry,
             program,
+            dispatched,
             decoded: BTreeMap::new(),
             leaders: BTreeSet::from([entry]),
             calls: BTreeSet::new(),
@@ -327,15 +337,26 @@ impl<'a> Walk<'a> {
                 // A machine with no indirect call instruction spells one by
                 // leaving the return address in the link register and then
                 // branching. Control comes back, so the walk does too.
-                if self.returns_after(addr, next) {
-                    self.continues(Some(next), &mut successors);
-                } else {
-                    self.stop(addr, UnresolvedReason::IndirectBranch);
+                //
+                // Otherwise the walk goes wherever a previous pass proved this
+                // dispatch reads, and stops only where nothing did.
+                match self.dispatched.get(&addr) {
+                    _ if self.returns_after(addr, next) => {
+                        self.continues(Some(next), &mut successors)
+                    }
+                    Some(targets) => {
+                        for target in targets.clone() {
+                            self.transfer(target, &mut successors);
+                        }
+                    }
+                    None => {
+                        self.stop(addr, UnresolvedReason::IndirectBranch);
+                    }
                 }
             }
-            // A switch needs a value domain to resolve, which is why the walk
-            // never produces one; a return and a terminal block have nowhere
-            // to go.
+            // A return and a terminal block have nowhere to go, and a switch
+            // is an indirect branch until something reads the table it goes
+            // through.
             BlockTerminator::Switch { .. } | BlockTerminator::Return | BlockTerminator::None => {}
         }
 
@@ -361,16 +382,16 @@ impl<'a> Walk<'a> {
                 .last()
                 .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
             if broken {
-                blocks.push(finish(&mut parts, link.as_ref()));
+                blocks.push(finish(&mut parts, link.as_ref(), self.dispatched));
             }
             let ends = instruction.ends_block();
             parts.push(instruction);
             if ends {
-                blocks.push(finish(&mut parts, link.as_ref()));
+                blocks.push(finish(&mut parts, link.as_ref(), self.dispatched));
             }
         }
         if !parts.is_empty() {
-            blocks.push(finish(&mut parts, link.as_ref()));
+            blocks.push(finish(&mut parts, link.as_ref(), self.dispatched));
         }
 
         Body {
@@ -387,7 +408,11 @@ impl<'a> Walk<'a> {
 ///
 /// The successors are the last instruction's, because that is the only
 /// instruction in a basic block that control can leave by.
-fn finish(parts: &mut Vec<Instruction>, link: Option<&r2il::Varnode>) -> BodyBlock {
+fn finish(
+    parts: &mut Vec<Instruction>,
+    link: Option<&r2il::Varnode>,
+    dispatched: &BTreeMap<u64, Vec<u64>>,
+) -> BodyBlock {
     let start = parts[0].lifted.addr;
     let last = parts
         .last()
@@ -402,9 +427,13 @@ fn finish(parts: &mut Vec<Instruction>, link: Option<&r2il::Varnode>) -> BodyBlo
                 .iter()
                 .any(|part| r2il::returns_to(&part.lifted.ops, end, link))
         });
+    let arms = dispatched
+        .get(&last.lifted.addr)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let successors = match returns {
         true => vec![(AdvisorySuccessorKind::Fallthrough, end)],
-        false => successors_of(&last.terminator, end),
+        false => successors_of(&last.terminator, end, arms),
     };
     let size = u32::try_from(end - start).unwrap_or(u32::MAX);
     let mut bytes = Vec::with_capacity(size as usize);
@@ -420,7 +449,14 @@ fn finish(parts: &mut Vec<Instruction>, link: Option<&r2il::Varnode>) -> BodyBlo
 }
 
 /// Where control goes after a block that ends this way.
-fn successors_of(terminator: &BlockTerminator, end: u64) -> Vec<(AdvisorySuccessorKind, u64)> {
+///
+/// A dispatch a previous pass read goes to the arms it read, which is the
+/// only case where the terminator alone does not say.
+fn successors_of(
+    terminator: &BlockTerminator,
+    end: u64,
+    dispatched: &[u64],
+) -> Vec<(AdvisorySuccessorKind, u64)> {
     match terminator {
         BlockTerminator::Fallthrough { next } => {
             vec![(AdvisorySuccessorKind::Fallthrough, *next)]
@@ -441,9 +477,10 @@ fn successors_of(terminator: &BlockTerminator, end: u64) -> Vec<(AdvisorySuccess
         BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
             vec![(AdvisorySuccessorKind::Fallthrough, end)]
         }
-        BlockTerminator::Switch { .. }
-        | BlockTerminator::IndirectBranch
-        | BlockTerminator::Return
-        | BlockTerminator::None => Vec::new(),
+        BlockTerminator::Switch { .. } | BlockTerminator::IndirectBranch => dispatched
+            .iter()
+            .map(|target| (AdvisorySuccessorKind::Direct, *target))
+            .collect(),
+        BlockTerminator::Return | BlockTerminator::None => Vec::new(),
     }
 }

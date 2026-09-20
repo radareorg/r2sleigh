@@ -10,7 +10,10 @@ use crate::cfg::{BlockTerminator, CFG};
 use crate::function::{SSABlock, SSAFunction, SsaArtifact};
 use crate::graph::SsaGraph;
 
-use crate::indirect::{PointerTable, ResolvedIndirectCall, exact_input, resolve_indirect_calls};
+use crate::indirect::{
+    DispatchTableRead, PointerTable, ResolvedIndirectCall, dispatch_table_reads, exact_input,
+    resolve_indirect_calls,
+};
 use crate::{SSAOp, SSAVar};
 use std::collections::BTreeMap;
 
@@ -26,6 +29,9 @@ pub struct UnreachableBlock {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProvenFacts {
     pub indirect_calls: Vec<ResolvedIndirectCall>,
+    /// Where each dispatch reads its target, resolved or not. A reader that
+    /// can fetch that memory turns an unresolved one into a table.
+    pub table_reads: Vec<DispatchTableRead>,
     pub unreachable_blocks: Vec<UnreachableBlock>,
 }
 
@@ -179,6 +185,7 @@ fn unreachable_blocks_with_decisions(
 pub fn prove<T: PointerTable>(artifact: &SsaArtifact, tables: &[T]) -> ProvenFacts {
     ProvenFacts {
         indirect_calls: resolve_indirect_calls(artifact, tables),
+        table_reads: dispatch_table_reads(artifact),
         unreachable_blocks: unreachable_blocks_in_graph(artifact.function(), artifact.graph()),
     }
 }

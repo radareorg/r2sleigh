@@ -22,7 +22,7 @@ use r2source::{
     SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
-use r2ssa::body::{BodyError, lift_body};
+use r2ssa::body::{BodyError, WINDOW, lift_body};
 use r2ssa::{CalleePreservedCarriers, SummaryArgumentReach, TrustedSsaArtifact};
 
 use crate::{
@@ -111,8 +111,8 @@ pub fn lifted(
     program: &dyn Program,
     entry: u64,
 ) -> Result<String, NativeRefusal> {
-    let body =
-        r2ssa::body::lift_body(entry, target.disasm, program).map_err(NativeRefusal::Body)?;
+    let body = r2ssa::body::lift_body(entry, target.disasm, program, &BTreeMap::new())
+        .map_err(NativeRefusal::Body)?;
     let names = register_spellings(target.arch);
     let mut out = format!("Entry: {entry:#x}\nBlocks: {}\n", body.blocks.len());
     for block in &body.blocks {
@@ -340,6 +340,22 @@ fn analyse(
     }
 
     let first = native.prepare(&root, &callees)?;
+    // A dispatch through a table is where the first walk stopped: it could see
+    // the branch and not where it goes. The analysis it has just been through
+    // says where the table is and how far it runs, so the table is read and
+    // the body walked again through it. The blocks this adds are the switch
+    // arms, which nothing has seen until now.
+    let tables = native.pointer_tables(&first);
+    let root = match tables.is_empty() {
+        true => root,
+        false => native.walk_dispatched(
+            entry,
+            &tables
+                .iter()
+                .map(|table| (table.instruction, table.targets.clone()))
+                .collect(),
+        )?,
+    };
     // A second capture states what the first proved. Preparation recovers the
     // interface off the instructions and proves which frame slots home which
     // parameter; declaring those turns the spill into the parameter again,
@@ -349,9 +365,9 @@ fn analyse(
     // literal lives at appears only once those are folded.
     let restated = native.restated(&first);
     let folded = native.folded_literals(&first, &root);
-    let artifact = match restated.is_none() && folded.is_empty() {
+    let artifact = match restated.is_none() && folded.is_empty() && tables.is_empty() {
         true => first,
-        false => native.prepare_restated(&root, &callees, folded, restated)?,
+        false => native.prepare_restated(&root, &callees, folded, restated, &tables)?,
     };
     Ok(Prepared {
         artifact,
@@ -627,6 +643,15 @@ struct Walked {
 }
 
 /// One program, one machine, and the walk over it.
+/// One dispatch's table, read, and where the dispatch that reads it stands.
+struct NativePointerTable {
+    instruction: u64,
+    targets: Vec<u64>,
+    /// What the selector is on each arm, and where that arm goes.
+    cases: Vec<(u64, u64)>,
+    table: r2source::SourceCodePointerTable,
+}
+
 struct Native<'a> {
     target: &'a NativeTarget<'a>,
     program: &'a dyn Program,
@@ -637,8 +662,17 @@ struct Native<'a> {
 
 impl Native<'_> {
     fn walk(&self, entry: u64) -> Result<Walked, NativeRefusal> {
-        let body =
-            lift_body(entry, self.target.disasm, self.program).map_err(NativeRefusal::Body)?;
+        self.walk_dispatched(entry, &BTreeMap::new())
+    }
+
+    /// The same walk, told where the dispatches a previous pass read go.
+    fn walk_dispatched(
+        &self,
+        entry: u64,
+        dispatched: &BTreeMap<u64, Vec<u64>>,
+    ) -> Result<Walked, NativeRefusal> {
+        let body = lift_body(entry, self.target.disasm, self.program, dispatched)
+            .map_err(NativeRefusal::Body)?;
         let callee_names = body
             .calls
             .iter()
@@ -652,6 +686,104 @@ impl Native<'_> {
             body,
             callee_names,
         })
+    }
+
+    /// The tables the dispatches in a prepared body read, fetched.
+    ///
+    /// The engine captures a function's own bytes and nothing else, so a jump
+    /// table in another section is memory nobody has looked at. The value
+    /// analysis says where each dispatch reads and how far; this goes and
+    /// reads it.
+    ///
+    /// Every entry must decode, or none of them are taken. A table is one
+    /// object: an address in the middle of it that is not an instruction says
+    /// the read was not a table walk, and half a table would be a guess about
+    /// control flow, which is the one thing worse than an unresolved branch.
+    fn pointer_tables(&self, artifact: &TrustedSsaArtifact) -> Vec<NativePointerTable> {
+        let reads = r2ssa::indirect::dispatch_table_reads(artifact.shared_artifact().as_ref());
+        let tables = reads
+            .iter()
+            .filter_map(|read| self.pointer_table(read))
+            .collect::<Vec<_>>();
+        r2il::refusal_evidence!(
+            "dispatch-table",
+            "{} of {} dispatch reads fetched",
+            tables.len(),
+            reads.len()
+        );
+        tables
+    }
+
+    fn pointer_table(
+        &self,
+        read: &r2ssa::indirect::DispatchTableRead,
+    ) -> Option<NativePointerTable> {
+        let entry = usize::try_from(read.entry_size).ok()?;
+        let span = read.entries.checked_mul(entry)?;
+        let bytes = self.program.read(read.address, span).unwrap_or_default();
+        if bytes.len() < span {
+            r2il::refusal_evidence!(
+                "dispatch-table",
+                "{:#x}: {} of {span} bytes are mapped",
+                read.address,
+                bytes.len()
+            );
+            return None;
+        }
+        let targets = bytes
+            .chunks_exact(entry)
+            .map(|slot| match self.machine.endianness {
+                SourceEndianness::Little => {
+                    slot.iter().rev().fold(0u64, |v, b| (v << 8) | *b as u64)
+                }
+                SourceEndianness::Big => slot.iter().fold(0u64, |v, b| (v << 8) | *b as u64),
+            })
+            .map(|slot| read.transform.target(slot, read.entry_size))
+            .collect::<Vec<_>>();
+        if !targets.iter().all(|target| self.decodes(*target)) {
+            r2il::refusal_evidence!(
+                "dispatch-table",
+                "{:#x} x{} of {} bytes: an entry is not an instruction",
+                read.address,
+                read.entries,
+                read.entry_size
+            );
+            return None;
+        }
+        Some(NativePointerTable {
+            instruction: read.instruction?,
+            cases: read
+                .cases
+                .iter()
+                .copied()
+                .zip(targets.iter().copied())
+                .collect(),
+            table: r2source::SourceCodePointerTable::new(
+                read.address,
+                read.entry_size,
+                targets.clone(),
+                targets
+                    .iter()
+                    .map(|target| self.program.name_at(*target).map(Into::into))
+                    .collect::<Vec<_>>(),
+            ),
+            targets,
+        })
+    }
+
+    /// Whether an instruction lives at an address, which is what makes a table
+    /// entry a place control can go.
+    fn decodes(&self, target: u64) -> bool {
+        let Some(bytes) = self.program.read(target, WINDOW) else {
+            return false;
+        };
+        let mut fetch = bytes;
+        let available = fetch.len();
+        fetch.resize(WINDOW, 0);
+        self.target
+            .disasm
+            .lift(&fetch, target)
+            .is_ok_and(|lifted| lifted.size != 0 && lifted.size as usize <= available)
     }
 
     /// The text a prepared body points at.
@@ -750,7 +882,7 @@ impl Native<'_> {
         callees: &Callees,
         extra_literals: Vec<(u64, String)>,
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        self.prepare_restated(walked, callees, extra_literals, None)
+        self.prepare_restated(walked, callees, extra_literals, None, &[])
     }
 
     fn prepare_restated(
@@ -759,6 +891,7 @@ impl Native<'_> {
         callees: &Callees,
         extra_literals: Vec<(u64, String)>,
         interface: Option<r2source::SourceFunctionInterface>,
+        tables: &[NativePointerTable],
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
         let function = NativeFunction {
             address: walked.body.entry,
@@ -771,6 +904,16 @@ impl Native<'_> {
                     address: block.lifted.addr,
                     bytes: block.bytes.clone(),
                     successors: block.successors.clone(),
+                    switch: tables
+                        .iter()
+                        .find(|table| {
+                            (block.lifted.addr..block.lifted.addr + u64::from(block.lifted.size))
+                                .contains(&table.instruction)
+                        })
+                        .map(|table| r2source::native::NativeSwitch {
+                            instruction: table.instruction,
+                            cases: table.cases.clone(),
+                        }),
                 })
                 .collect(),
             calls: call_sites(&walked.body, self.program),
@@ -782,6 +925,7 @@ impl Native<'_> {
                 literals
             },
             data_symbols: self.data_symbols(&walked.body),
+            code_pointer_tables: tables.iter().map(|table| table.table.clone()).collect(),
             parameter_names: (0..interface.as_ref().map_or(0, |i| i.parameters().len()))
                 .map(|index| format!("arg{index}"))
                 .collect(),

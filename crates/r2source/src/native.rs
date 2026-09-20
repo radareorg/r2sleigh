@@ -18,8 +18,9 @@ use crate::{
     AdvisoryCallSite, AdvisoryCallTransfer, AdvisoryCalleeLinkage, AdvisorySuccessor,
     AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity, FunctionIdentity,
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
-    OwnedFunctionSnapshot, SnapshotValidationError, SourceConventionSlots, SourceDataObject,
-    SourceEndianness, SourceFunctionInterface, SourceLoaderRole, SourceMachineRoles,
+    OwnedFunctionSnapshot, SnapshotValidationError, SourceCodePointerTable, SourceConventionSlots,
+    SourceDataObject, SourceEndianness, SourceFunctionInterface, SourceLoaderRole,
+    SourceMachineRoles,
 };
 
 /// The machine every function in one capture session runs on.
@@ -44,6 +45,17 @@ pub struct NativeBlock {
     /// Where control continues, and how. A target outside this function's own
     /// blocks is marked external by the capture rather than by the caller.
     pub successors: Vec<(AdvisorySuccessorKind, u64)>,
+    /// The dispatch this block ends in, where a previous pass read its table.
+    pub switch: Option<NativeSwitch>,
+}
+
+/// A multiway dispatch, as the engine proved it.
+#[derive(Debug, Clone)]
+pub struct NativeSwitch {
+    /// The instruction that makes the transfer.
+    pub instruction: u64,
+    /// What the selector is on each arm, and where that arm goes.
+    pub cases: Vec<(u64, u64)>,
 }
 
 /// One direct transfer to another function the body makes.
@@ -72,6 +84,11 @@ pub struct NativeFunction {
     pub string_literals: Vec<(u64, String)>,
     /// Program data the body points at, named.
     pub data_symbols: Vec<SourceDataObject>,
+    /// Tables of code pointers the body dispatches through, as read.
+    ///
+    /// Empty on a first capture: finding one needs the value analysis to say
+    /// where the dispatch reads, and that runs on what a first capture builds.
+    pub code_pointer_tables: Vec<SourceCodePointerTable>,
     /// The interface this capture states, where a first pass has proved one.
     ///
     /// Absent on a first capture, which is what makes the artifact builder
@@ -123,16 +140,29 @@ pub fn capture(
             successors: block
                 .successors
                 .iter()
-                .map(|(kind, target)| AdvisorySuccessor {
-                    kind: *kind,
-                    target: *target,
-                    case_value: None,
-                    external: !own_blocks.contains(target),
+                .map(|(kind, target)| {
+                    // What the selector was on an arm is a fact the dispatch
+                    // carries, so an arm it names is one of its cases and is
+                    // labelled from there rather than being a plain edge.
+                    let case = block.switch.as_ref().and_then(|switch| {
+                        switch
+                            .cases
+                            .iter()
+                            .find(|(_, arm)| arm == target)
+                            .map(|(value, _)| *value)
+                    });
+                    AdvisorySuccessor {
+                        kind: match case {
+                            Some(_) => AdvisorySuccessorKind::SwitchCase,
+                            None => *kind,
+                        },
+                        target: *target,
+                        case_value: case,
+                        external: !own_blocks.contains(target),
+                    }
                 })
                 .collect(),
-            // A switch needs a value domain to resolve, and this walk refuses
-            // an indirect branch rather than guessing one.
-            switch_instruction: None,
+            switch_instruction: block.switch.as_ref().map(|switch| switch.instruction),
         })
         .collect::<Vec<_>>();
 
@@ -177,9 +207,7 @@ pub fn capture(
             external_exits: external_exits.into_boxed_slice(),
             string_literals: function.string_literals.into_boxed_slice(),
             data_symbols: function.data_symbols.into_boxed_slice(),
-            // A table of code pointers is found by proving what indexes it,
-            // which needs the value domain this walk does not have.
-            code_pointer_tables: Box::from([]),
+            code_pointer_tables: function.code_pointer_tables.into_boxed_slice(),
             total_source_bytes,
         },
         advisory_calls.into_boxed_slice(),
@@ -283,16 +311,19 @@ mod tests {
                     address: 0x1000,
                     bytes: vec![0x48, 0x89, 0xf8, 0xc3],
                     successors: vec![(AdvisorySuccessorKind::Direct, 0x1004)],
+                    switch: None,
                 },
                 NativeBlock {
                     address: 0x1004,
                     bytes: vec![0xc3],
                     successors: Vec::new(),
+                    switch: None,
                 },
             ],
             calls: Vec::new(),
             string_literals: Vec::new(),
             data_symbols: Vec::new(),
+            code_pointer_tables: Vec::new(),
             interface: None,
             parameter_names: Vec::new(),
             loader_role: None,
