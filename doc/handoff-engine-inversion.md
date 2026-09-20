@@ -439,6 +439,31 @@ spells the target, no `ObservationTarget::Value` is allocated for it, and the
 seal demands a cell nobody owes. ARM dispatchers are built from this shape, so
 it accounts for four fifths of what is left there.
 
+An indirect branch that leaves the body is now named as the call it is
+(`Native::name_indirect_tail_calls`): a terminal `BranchInd` that dispatches
+no switch, reads no relocated slot and has no successor becomes `CallInd`
+followed by a return, so every mechanism an ordinary indirect call already has
+renders it. It is dormant on this corpus, because the ARM functions shaped
+like that refuse earlier, on predication.
+
+## ARM predication needs a conditional-exit terminator, and a naive edge is worse than the refusal
+
+`bxeq lr` lifts to a local conditional skip over the instruction's own return.
+Converting that skip into a machine edge to the next instruction was tried and
+**reverted**: the transfer's `Return` then stands last in the block, so
+`analyze_terminator`, which reads the last control operation, calls the whole
+block an unconditional return. `arm-init`'s `cmp r0,0; bxeq lr; bx r0` walked
+as one block and the tail call was never lifted at all. Measured: rendered
+23 -> 25 while bodies were silently truncated, which is worse than the refusal
+it replaced.
+
+The shape is a block that *conditionally leaves the function*. A block must
+not start inside an instruction -- the decided rule for repeated string
+instructions says so -- and `BlockTerminator` has no variant for "transfers
+out on one arm, continues on the other". That variant is the fix, the same
+kind of addition as `SourceFunctionReturn::Unproven`, and it is what stands
+between ARM and roughly four fifths of its remaining refusals.
+
 The old framing of the same wall follows.
 
 **24 of the 30 remaining ARM refusals are `observation journal:
