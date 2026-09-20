@@ -75,6 +75,34 @@ impl RecoveredResult {
     }
 }
 
+/// What the body proves it leaves for its caller.
+///
+/// `Void` is the claim that no return path fills a result carrier. `Unproven`
+/// is the absence of a claim: a body nobody read owns the result boundary, so
+/// the caller falls back to its convention instead of being told there is
+/// nothing there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveredFunctionResult {
+    Void,
+    Register(RecoveredResult),
+    Unproven,
+}
+
+impl RecoveredFunctionResult {
+    /// A carrier the walk found, or the void claim its absence makes.
+    fn from_slot(result: Option<RecoveredResult>) -> Self {
+        result.map_or(Self::Void, Self::Register)
+    }
+
+    /// The carrier this result names, where it names one.
+    pub const fn register(self) -> Option<RecoveredResult> {
+        match self {
+            Self::Register(result) => Some(result),
+            Self::Void | Self::Unproven => None,
+        }
+    }
+}
+
 /// One argument slot in the caller's frame the function reads before anything
 /// in it writes there, and how much of it the read covered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +144,9 @@ pub enum RecoveredReturnMechanism {
 pub struct RecoveredInterface {
     parameters: Box<[RecoveredParameter]>,
     stack_parameters: Box<[RecoveredStackParameter]>,
-    result: Option<RecoveredResult>,
+    result: RecoveredFunctionResult,
+    /// Whether that result is the return address the caller pushed.
+    result_is_return_address: bool,
     return_mechanism: Option<RecoveredReturnMechanism>,
 }
 
@@ -133,15 +163,85 @@ impl RecoveredInterface {
         &self.stack_parameters
     }
 
-    /// The result slot and observed logical width, when every return defines it.
-    pub const fn result(&self) -> Option<RecoveredResult> {
+    /// What the body proves it returns.
+    pub const fn result(&self) -> RecoveredFunctionResult {
         self.result
+    }
+
+    /// Whether the result is the return address the caller pushed.
+    pub const fn result_is_return_address(&self) -> bool {
+        self.result_is_return_address
     }
 
     /// How the function returns, when every exit agrees.
     pub const fn return_mechanism(&self) -> Option<RecoveredReturnMechanism> {
         self.return_mechanism
     }
+}
+
+/// The stack slot every return reloads its control value from, when they agree.
+fn return_address_object(
+    facts: &crate::semantic::PreparedFunctionFacts,
+) -> Option<crate::semantic::ObjectId> {
+    let mut found = None;
+    for at in facts.boundaries.returns.keys() {
+        let object = facts
+            .certificates
+            .machine_return_controls
+            .get(at)?
+            .reload_object?;
+        if found.is_some_and(|known| known != object) {
+            return None;
+        }
+        found = Some(object);
+    }
+    found
+}
+
+/// Whether what the body leaves in its result carrier is the return address.
+///
+/// A position-independent thunk is `mov esi, [esp]; ret`: it hands its caller
+/// back the address the call pushed. A stacked return mechanism already proves
+/// every return takes its control value out of that entry slot, so a result
+/// read from the same slot -- in a body that never writes it, which would make
+/// the read and the return two different contents -- is the address control
+/// goes back to.
+fn result_is_the_return_address(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
+    mechanism: Option<RecoveredReturnMechanism>,
+) -> bool {
+    let Some(RecoveredReturnMechanism::Stacked { slot_bytes }) = mechanism else {
+        return false;
+    };
+    let Some(object) = return_address_object(facts) else {
+        return false;
+    };
+    let accesses = facts
+        .structured
+        .memory_accesses
+        .values()
+        .filter(|access| access.object == object);
+    // A write of any width leaves the read and the return two contents apart.
+    if accesses.clone().any(|access| access.is_write) {
+        return false;
+    }
+    let read_values = accesses
+        .filter(|access| access.width == slot_bytes)
+        .filter_map(|access| access.value)
+        .collect::<BTreeSet<_>>();
+    let proven = !live_out.is_empty()
+        && live_out
+            .iter()
+            .all(|value| read_values.contains(&crate::constant::root_of(graph, value)));
+    if proven {
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "the result is read from {object:?}, the slot every return takes its address from"
+        );
+    }
+    proven
 }
 
 /// Where the function's exits take the return address from, when they agree.
@@ -711,12 +811,12 @@ fn recover_interface_inner(
              so the result is void"
         );
     }
-    let exact_tail_result = match tail_result_storage(&facts) {
-        TailResult::NoTailBoundary => None,
-        TailResult::Exact(result) => Some(result),
+    let tail = match tail_result_storage(&facts) {
+        TailResult::NoTailBoundary => TailResult::NoTailBoundary,
+        TailResult::Exact(result) => TailResult::Exact(result),
         // The loader discards whatever the tail callee returns, so an
         // unproven tail result is not a question this boundary has to answer.
-        TailResult::Unproven if loader_role.is_some() => None,
+        TailResult::Unproven if loader_role.is_some() => TailResult::NoTailBoundary,
         // The body hands control to a callee it names nothing about, and
         // that callee's result is this function's result on that path. A
         // register the body never wrote is not evidence of a void result
@@ -739,13 +839,13 @@ fn recover_interface_inner(
                 "a tail transfer owns one path and a direct return owns another; \
                  the direct return's {slot:?} is the result"
             );
-            Some(slot)
+            TailResult::Exact(slot)
         }
         TailResult::Unproven => {
             r2il::refusal_evidence!(
                 "interface-recovery",
                 "a tail transfer to a target without a complete prototype owns the result \
-                 boundary, so no interface is recovered; tails {:?}",
+                 boundary, so the result is unproven; tails {:?}",
                 facts
                     .call_sites
                     .by_id
@@ -763,21 +863,26 @@ fn recover_interface_inner(
                     })
                     .collect::<Vec<_>>()
             );
-            return None;
+            TailResult::Unproven
         }
     };
-    let mut result = exact_tail_result
-        .flatten()
-        .filter(|_| loader_role.is_none())
-        .map(|slot| RecoveredResult {
-            slot,
-            observed: slot,
-        });
+    // The loader's hook has a void result whatever its tail leaves behind.
+    let mut result = match tail {
+        TailResult::Unproven => RecoveredFunctionResult::Unproven,
+        TailResult::Exact(Some(slot)) if loader_role.is_none() => {
+            RecoveredFunctionResult::Register(RecoveredResult {
+                slot,
+                observed: slot,
+            })
+        }
+        TailResult::NoTailBoundary | TailResult::Exact(_) => RecoveredFunctionResult::Void,
+    };
+    let no_tail_boundary = matches!(tail, TailResult::NoTailBoundary);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
-    if exact_tail_result.is_none()
+    if no_tail_boundary
         && loader_role.is_none()
         && let Some(candidate) = slots.result_slot()
     {
@@ -785,7 +890,12 @@ fn recover_interface_inner(
             crate::liveout::FunctionLiveOut::compute(func, &graph, &[candidate]);
         if !candidate_live_out.is_empty() && candidate_live_out.unresolved_blocks().next().is_none()
         {
-            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
+            result = RecoveredFunctionResult::from_slot(recovered_result(
+                &graph,
+                &facts,
+                &candidate_live_out,
+                candidate,
+            ));
             live_out = candidate_live_out;
         }
     }
@@ -793,10 +903,15 @@ fn recover_interface_inner(
     // independent code thunk returns the address a call pushed, in whichever
     // register its name says. Only one carrier may qualify, or the body has
     // proven nothing about which of them a caller reads.
-    if exact_tail_result.is_none() && loader_role.is_none() && result.is_none() {
+    if no_tail_boundary && loader_role.is_none() && result.register().is_none() {
         let mut proven = body_proven_result(func, &graph, &facts, machine_context, slots);
         if let Some((candidate, candidate_live_out)) = proven.take() {
-            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
+            result = RecoveredFunctionResult::from_slot(recovered_result(
+                &graph,
+                &facts,
+                &candidate_live_out,
+                candidate,
+            ));
             live_out = candidate_live_out;
         }
     }
@@ -870,6 +985,8 @@ fn recover_interface_inner(
             .collect::<Vec<_>>()
     );
     let return_mechanism = recovered_return_mechanism(&facts);
+    let result_is_return_address = result.register().is_some()
+        && result_is_the_return_address(&graph, &facts, &live_out, return_mechanism);
     // The convention fills every register slot before the argument area, so
     // a stack slot is a parameter only once each register slot is proven.
     let stack_parameters = if parameters.len() == slots.argument_slots().len() {
@@ -905,6 +1022,7 @@ fn recover_interface_inner(
         parameters: parameters.into_boxed_slice(),
         stack_parameters: stack_parameters.into_boxed_slice(),
         result,
+        result_is_return_address,
         return_mechanism,
     })
 }
@@ -1038,6 +1156,7 @@ pub fn mint_recovered_interface(
                 .collect::<Vec<_>>(),
             recovered
                 .result()
+                .register()
                 .map(|result| (result.slot().size, result.observed().size))
         );
     }
@@ -1107,7 +1226,7 @@ fn mint_recovered_interface_inner(
                 .map(|parameter| parameter.slot_bytes().checked_mul(8)),
         )
         .collect::<Option<Vec<_>>>()?;
-    let result_width = match recovered.result() {
+    let result_width = match recovered.result().register() {
         Some(result) => Some(width_of(&mut widths, result.observed())?),
         None => None,
     };
@@ -1202,12 +1321,14 @@ fn mint_recovered_interface_inner(
         .map(Some)
         .collect::<Vec<_>>();
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
-        (Some(result), Some(bits)) => (
+        (RecoveredFunctionResult::Register(result), Some(bits)) => (
             SourceFunctionReturn::Register {
                 storage: result.slot(),
             },
             Some(logical(bits, result.slot().size.checked_mul(8)?)?),
         ),
+        // A body nobody read owns this result, so nothing is claimed for it.
+        (RecoveredFunctionResult::Unproven, _) => (SourceFunctionReturn::Unproven, None),
         _ => (SourceFunctionReturn::Void, None),
     };
 
@@ -1231,6 +1352,11 @@ fn mint_recovered_interface_inner(
     .ok()?
     .with_stack_pointer_storage(stack_pointer_storage)
     .ok()?;
+    let interface = if recovered.result_is_return_address() {
+        interface.with_body_proven_return_address().ok()?
+    } else {
+        interface
+    };
     // A stacked return names the slot the call spent, which is what places
     // the argument area at a call site; a stack parameter without it would
     // be looked for at the wrong offset, so the interface is not minted.
@@ -1302,6 +1428,16 @@ pub fn mint_recovered_call_site_interface(
     let result = match callee.return_kind() {
         SourceFunctionReturn::Void => SourceCallResult::Void,
         SourceFunctionReturn::Register { storage } => SourceCallResult::Register { storage },
+        // A body nobody read owns the arguments beside the result: an import
+        // thunk forwards every one and reads none, so what its own body proves
+        // is a floor rather than this call's contract.
+        SourceFunctionReturn::Unproven => {
+            r2il::refusal_evidence!(
+                "call-site-minting",
+                "the callee's result is unproven, so its body describes no call contract"
+            );
+            return None;
+        }
     };
     SourceCallSiteInterface::new(
         revision_identity.to_vec(),
@@ -1514,13 +1650,13 @@ mod tests {
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
         let observed = recover_interface(&func, &candidates(), None).expect("recovery");
         assert!(
-            observed.result().is_some(),
+            observed.result().register().is_some(),
             "the defined result register is live out"
         );
         let hook = recover_interface(&func, &candidates(), Some(r2source::SourceLoaderRole::Init))
             .expect("recovery");
         assert!(
-            hook.result().is_none(),
+            hook.result() == RecoveredFunctionResult::Void,
             "the loader discards the hook's result"
         );
         assert!(hook.parameters().is_empty());
@@ -1571,7 +1707,7 @@ mod tests {
         // x0 was written, so the result carrier is defined
         assert_eq!(
             interface.result(),
-            Some(RecoveredResult {
+            RecoveredFunctionResult::Register(RecoveredResult {
                 slot: register(0, 8),
                 observed: register(0, 8),
             })
@@ -1590,7 +1726,10 @@ mod tests {
             src: Varnode::register(0, 4),
         });
         let recovered = recovered(block);
-        let result = recovered.result().expect("recovered narrow result");
+        let result = recovered
+            .result()
+            .register()
+            .expect("recovered narrow result");
         assert_eq!(result.slot(), register(0, 8));
         assert_eq!(result.observed(), register(0, 4));
 
@@ -1716,7 +1855,7 @@ mod tests {
             src: Varnode::register(0, 8),
         });
         let interface = recovered(block);
-        assert_eq!(interface.result(), None);
+        assert_eq!(interface.result(), RecoveredFunctionResult::Void);
     }
 
     #[test]
@@ -1760,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tail_transfer_to_an_unknown_target_recovers_no_interface() {
+    fn a_tail_transfer_to_an_unknown_target_leaves_the_result_unproven() {
         // An import thunk: load the relocated slot, jump through it. The body
         // writes no register, which says nothing about what the target
         // returns.
@@ -1794,9 +1933,22 @@ mod tests {
             Vec::new(),
             vec![identity],
         );
-        assert!(
-            recover_interface_with_context(&function, &candidates(), &unknown, None).is_none(),
+        let unproven = recover_interface_with_context(&function, &candidates(), &unknown, None)
+            .expect("an unproven result is still an interface");
+        assert_eq!(
+            unproven.result(),
+            RecoveredFunctionResult::Unproven,
             "a body that hands its result to an unknown target proves nothing about it"
+        );
+        let roles = SourceMachineRoles::new(Some(register(0x80, 8)), Some(register(0x88, 8)))
+            .expect("machine roles");
+        let minted = mint_recovered_interface(&unproven, &roles, b"thunk-revision", "arm64")
+            .expect("an unproven result mints an interface");
+        assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
+        // Nothing this body proves describes a call to it, arguments included.
+        assert!(
+            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision").is_none(),
+            "an unproven result cannot be a call site's exact contract"
         );
 
         // The same body behind a complete prototype recovers that prototype's
@@ -1826,7 +1978,7 @@ mod tests {
         let recovered = recover_interface_with_context(&function, &candidates(), &known, None)
             .expect("a proven tail boundary owns the result");
         assert_eq!(
-            recovered.result().map(|result| result.slot()),
+            recovered.result().register().map(|result| result.slot()),
             Some(register(0, 8))
         );
     }
@@ -1891,7 +2043,7 @@ mod tests {
         let recovered = recover_interface_with_context(&function, &candidates(), &context, None)
             .expect("a direct return answers the boundary the tail leaves open");
         assert_eq!(
-            recovered.result().map(|result| result.slot()),
+            recovered.result().register().map(|result| result.slot()),
             Some(register(0, 8))
         );
     }

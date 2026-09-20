@@ -2113,7 +2113,7 @@ fn exact_function_return_storage(prepared: &SsaArtifact) -> Option<crate::Canoni
         .return_kind()
     {
         crate::SourceFunctionReturn::Register { storage } => Some(storage),
-        crate::SourceFunctionReturn::Void => None,
+        crate::SourceFunctionReturn::Void | crate::SourceFunctionReturn::Unproven => None,
     }
 }
 

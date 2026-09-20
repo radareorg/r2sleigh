@@ -16,6 +16,18 @@ const CALLER: &[u8] = &[
     0x89, 0xf8, 0x01, 0xf0, 0xc3, // 0x100a add_two
 ];
 
+/// A thunk that hands back the address the call pushed, and a caller that
+/// forms an address from it: `call 0x100b; lea rax, [rsi + 0x10]; ret` over
+/// `mov rsi, [rsp]; ret`.
+const PC_THUNK: &[u8] = &[
+    0xe8, 0x06, 0x00, 0x00, 0x00, // 0x1000 call 0x100b
+    0x48, 0x8d, 0x46, 0x10, // 0x1005 lea rax, [rsi + 0x10]
+    0xc3, // 0x1009 ret
+    0x90, // 0x100a padding
+    0x48, 0x8b, 0x34, 0x24, // 0x100b mov rsi, [rsp]
+    0xc3, // 0x100f ret
+];
+
 /// One run of bytes mapped at `BASE`, under one name.
 struct Fixture {
     bytes: &'static [u8],
@@ -132,6 +144,40 @@ fn a_call_is_rendered_from_the_callee_body() {
         response.output
     );
     assert!(response.output.contains("sub_100a("), "{}", response.output);
+}
+
+#[test]
+fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
+    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: PC_THUNK,
+        name: "pc_caller",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+
+    // The pushed address is the one after the call: 0x1005 + 0x10.
+    assert!(
+        response.output.contains("0x1015"),
+        "the address the thunk's result names is not spelled: {}",
+        response.output
+    );
+    // Spelled at its use, the call's own result binding has no reader left.
+    assert!(
+        !response.output.contains("RSI"),
+        "the result binding outlived its readers: {}",
+        response.output
+    );
 }
 
 /// A program where the called address is a library function by name, as an

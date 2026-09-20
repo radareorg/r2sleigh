@@ -48,6 +48,11 @@ impl SSAFunction {
                 }
             }
         }
+        self.apply_forwarding(forwarded)
+    }
+
+    /// Rewrite every read of a forwarded variable to the value it names.
+    fn apply_forwarding(&mut self, forwarded: HashMap<SSAVar, SSAVar>) -> Forwarding {
         let mut stats = Forwarding::default();
         if forwarded.is_empty() {
             return stats;
@@ -88,6 +93,74 @@ impl SSAFunction {
 }
 
 impl SSAFunction {
+    /// A call's result is the address the call pushed, where its callee's body
+    /// proves that is what it returns.
+    ///
+    /// A position-independent thunk hands back the return address, which this
+    /// caller wrote as a literal one operation before the transfer. They are
+    /// one value, so a reader of the carrier reads the literal -- and the
+    /// address arithmetic above it then folds into the address it names
+    /// instead of standing as `ESI + 0xe0d`. The `CallDefine` stays where it
+    /// was, read by nothing, exactly as a forwarded copy does.
+    pub(crate) fn forward_proven_call_return_addresses(
+        &mut self,
+        callees: &super::CalleeBoundaries,
+    ) -> Forwarding {
+        if callees.return_addresses().is_empty() {
+            return Forwarding::default();
+        }
+        let mut forwarded = HashMap::<SSAVar, SSAVar>::new();
+        for block in &self.blocks {
+            let mut pushed: Option<&SSAVar> = None;
+            let mut carrier = None;
+            for op in &block.ops {
+                match op {
+                    SSAOp::Store { addr, val, .. } if val.is_const() => {
+                        pushed = self
+                            .canonical_storage_by_var
+                            .get(addr)
+                            .filter(|storage| Some(**storage) == self.stack_pointer_carrier)
+                            .map(|_| val);
+                    }
+                    SSAOp::Call { target, .. } => {
+                        carrier = self
+                            .canonical_storage_by_var
+                            .get(target)
+                            .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
+                            .and_then(|storage| callees.return_addresses().get(&storage.offset))
+                            .copied();
+                    }
+                    SSAOp::CallDefine { dst } if carrier.is_some() => {
+                        r2il::refusal_evidence!(
+                            "call-return-address",
+                            "{:#x}: {} defines {:?} against the proven carrier {carrier:?}, \
+                             pushed {:?}",
+                            block.addr,
+                            dst.display_name(),
+                            self.canonical_storage_by_var.get(dst),
+                            pushed.map(SSAVar::display_name)
+                        );
+                        if self.canonical_storage_by_var.get(dst) == carrier.as_ref()
+                            && let Some(pushed) = pushed.filter(|pushed| pushed.size == dst.size)
+                        {
+                            forwarded.insert(dst.clone(), pushed.clone());
+                        }
+                    }
+                    // The boundary's own reads and defines are inside the run.
+                    SSAOp::CallDefine { .. }
+                    | SSAOp::CallRestore { .. }
+                    | SSAOp::CallUse { .. } => {}
+                    // Anything else ends it; one call's address is not the next's.
+                    _ => {
+                        pushed = None;
+                        carrier = None;
+                    }
+                }
+            }
+        }
+        self.apply_forwarding(forwarded)
+    }
+
     /// Whether a copy is one the program means, so its statement stays.
     ///
     /// Three copies mean something: a write of a named object, which is the

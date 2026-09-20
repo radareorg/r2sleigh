@@ -89,7 +89,7 @@ pub enum StackAddressBase {
     Realigned,
 }
 
-pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 11;
+pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 12;
 pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 3;
 pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 1;
 
@@ -970,7 +970,17 @@ impl SourceAbiParameterSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceFunctionReturn {
     Void,
-    Register { storage: CanonicalStorageId },
+    Register {
+        storage: CanonicalStorageId,
+    },
+    /// The body proves no result, which is not a claim that it returns nothing.
+    ///
+    /// A function whose result boundary is owned by a body nobody read -- a
+    /// tail transfer to a target without a prototype -- knows everything about
+    /// its parameters and nothing about its result. `Void` would be an active
+    /// claim that displaces the caller's convention, so the caller must read
+    /// this as unknown and fall back to what its convention says instead.
+    Unproven,
 }
 
 /// Exact source-owned mechanism used to recover the return address and final
@@ -1438,6 +1448,9 @@ pub struct SourceFunctionInterface {
     /// string, for callers whose prototype for it names none. A property of
     /// the function, unlike the per-callsite count rule a literal decides.
     body_proven_format_parameter: Option<u32>,
+    /// Whether the body proves its result is the return address it was called
+    /// with, which is what a position-independent code thunk returns.
+    body_proven_return_address: bool,
     /// The prototype is radare2's, found by an import's name rather than
     /// linked to the address or stated by debug information.
     prototype_from_source_types: bool,
@@ -1776,6 +1789,7 @@ impl SourceFunctionInterface {
                     // carries no logical value, the same as such a parameter.
                     // A void return never has one.
                     (SourceFunctionReturn::Void, None)
+                    | (SourceFunctionReturn::Unproven, None)
                     | (SourceFunctionReturn::Register { .. }, None) => {}
                     (SourceFunctionReturn::Register { storage }, Some(value)) => {
                         if !graph.validates_logical_value(value, storage.size) {
@@ -1784,9 +1798,9 @@ impl SourceFunctionInterface {
                             });
                         }
                     }
-                    (SourceFunctionReturn::Void, Some(_)) => {
+                    (SourceFunctionReturn::Void | SourceFunctionReturn::Unproven, Some(_)) => {
                         return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                            reason: "a void return has no logical value",
+                            reason: "a return that names no carrier has no logical value",
                         });
                     }
                 }
@@ -1842,6 +1856,7 @@ impl SourceFunctionInterface {
             stack_pointer_preserved_across_calls: false,
             frame_pointer_preserved_across_calls: false,
             body_proven_format_parameter: None,
+            body_proven_return_address: false,
             prototype_from_source_types: false,
         })
     }
@@ -1908,14 +1923,15 @@ impl SourceFunctionInterface {
 
     /// The same interface with a return register the callee's body proved.
     ///
-    /// Only a `Void` is replaced: an absent prototype defaults to void, and a
-    /// body that fills the return register on every return path outranks that
-    /// default. A stated return is never overridden.
+    /// Only a return that claims no carrier is replaced: an absent prototype
+    /// defaults to void and an unproven boundary claims nothing, while a body
+    /// that fills the return register on every return path outranks both. A
+    /// stated return is never overridden.
     pub fn with_body_proven_return(
         mut self,
         storage: CanonicalStorageId,
     ) -> Result<Self, SourceFunctionInterfaceError> {
-        if !matches!(self.return_kind, SourceFunctionReturn::Void) {
+        if matches!(self.return_kind, SourceFunctionReturn::Register { .. }) {
             return Ok(self);
         }
         if !valid_register_storage(storage) {
@@ -1953,6 +1969,22 @@ impl SourceFunctionInterface {
         self.body_proven_format_parameter
     }
 
+    /// Record that the body hands its caller back the return address it was
+    /// called with. Only a register return can carry one, so a return naming
+    /// no carrier is refused rather than silently marked.
+    pub fn with_body_proven_return_address(mut self) -> Result<Self, SourceFunctionInterfaceError> {
+        if !matches!(self.return_kind, SourceFunctionReturn::Register { .. }) {
+            return Err(SourceFunctionInterfaceError::InvalidRegisterStorage);
+        }
+        self.body_proven_return_address = true;
+        Ok(self)
+    }
+
+    /// Whether the result is the return address the caller pushed.
+    pub const fn body_proven_return_address(&self) -> bool {
+        self.body_proven_return_address
+    }
+
     /// The same interface, with its prototype marked as radare2's by-name lookup.
     pub const fn with_prototype_from_source_types(mut self) -> Self {
         self.prototype_from_source_types = true;
@@ -1970,7 +2002,7 @@ impl SourceFunctionInterface {
                 .iter()
                 .filter_map(SourceAbiParameterSpec::register_storage)
                 .chain(match self.return_kind {
-                    SourceFunctionReturn::Void => None,
+                    SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
                     SourceFunctionReturn::Register { storage } => Some(storage),
                 })
                 .chain(self.stack_pointer_storage)
@@ -1995,7 +2027,7 @@ impl SourceFunctionInterface {
             .iter()
             .filter_map(SourceAbiParameterSpec::register_storage)
             .chain(match self.return_kind {
-                SourceFunctionReturn::Void => None,
+                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
                 SourceFunctionReturn::Register { storage } => Some(storage),
             })
             .chain(self.return_address_storage)
@@ -2033,7 +2065,7 @@ impl SourceFunctionInterface {
             .iter()
             .filter_map(SourceAbiParameterSpec::register_storage)
             .chain(match self.return_kind {
-                SourceFunctionReturn::Void => None,
+                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
                 SourceFunctionReturn::Register { storage } => Some(storage),
             })
             .chain(self.return_address_storage)
@@ -2265,7 +2297,7 @@ impl SourceFunctionInterface {
             .iter()
             .filter_map(SourceAbiParameterSpec::register_storage)
             .chain(match self.return_kind {
-                SourceFunctionReturn::Void => None,
+                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => None,
                 SourceFunctionReturn::Register { storage } => Some(storage),
             })
             .chain(Some(return_address))
@@ -2665,6 +2697,10 @@ impl SourceCallSiteInterface {
         let expected_result = match callee.return_kind() {
             SourceFunctionReturn::Void => SourceCallResult::Void,
             SourceFunctionReturn::Register { storage } => SourceCallResult::Register { storage },
+            // An unproven result is no claim, so no exact contract holds it.
+            SourceFunctionReturn::Unproven => {
+                return Err(SourceCallSiteInterfaceError::IncompatibleCalleeInterface);
+            }
         };
         let carriers_match = self.complete
             && !self.noreturn

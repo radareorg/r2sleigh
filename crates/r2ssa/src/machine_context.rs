@@ -28,7 +28,7 @@ pub use r2source::{
     SourceTypeGraph, SourceTypeGraphError, SourceTypeKind, StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 24;
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 25;
 
 /// Canonical architecture family captured from the exact lifting profile.
 ///
@@ -195,7 +195,7 @@ impl MachineAbiModel {
             })
             .collect::<Vec<_>>();
         let return_registers = match interface.return_kind() {
-            SourceFunctionReturn::Void => Vec::new(),
+            SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => Vec::new(),
             SourceFunctionReturn::Register { storage } => {
                 vec![MachineAbiRegisterSlot { index: 0, storage }]
             }
@@ -855,6 +855,7 @@ fn write_function_interface(
             writer.u8(1);
             writer.storage(storage);
         }
+        SourceFunctionReturn::Unproven => writer.u8(2),
     }
     writer.option_storage(interface.return_address_storage());
     writer.option_storage(interface.stack_pointer_storage());
@@ -914,6 +915,8 @@ fn write_function_interface(
         }
         None => writer.u8(0),
     }
+    // A result that is the return address is a constant at every call site.
+    writer.bool(interface.body_proven_return_address());
 }
 
 fn write_call_identity(
@@ -1175,7 +1178,7 @@ impl SourceMachineContext {
                 .filter_map(SourceAbiParameterSpec::register_storage)
                 .all(storage_exists);
             let return_storage_exists = match interface.return_kind() {
-                SourceFunctionReturn::Void => true,
+                SourceFunctionReturn::Void | SourceFunctionReturn::Unproven => true,
                 SourceFunctionReturn::Register { storage } => storage_exists(storage),
             };
             let slot_base_storages_exist = interface
@@ -1453,7 +1456,8 @@ impl SourceMachineContext {
         match self.function_interface.as_ref().map(|i| i.return_kind()) {
             Some(r2source::SourceFunctionReturn::Void) => None,
             Some(r2source::SourceFunctionReturn::Register { storage }) => Some(storage),
-            None => self.result_slot(),
+            // An unproven result claims nothing, so the convention answers.
+            Some(r2source::SourceFunctionReturn::Unproven) | None => self.result_slot(),
         }
     }
 
@@ -2524,8 +2528,8 @@ mod tests {
         let x86_context = SourceMachineContext::from_blocks(&[], Some(&x86));
         let arm_context = SourceMachineContext::from_blocks(&[], Some(&arm));
 
-        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 24);
-        assert_eq!(x86_context.schema_version(), 24);
+        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 25);
+        assert_eq!(x86_context.schema_version(), 25);
         assert_eq!(
             x86_context.architecture_family(),
             MachineArchitectureFamily::X86_64

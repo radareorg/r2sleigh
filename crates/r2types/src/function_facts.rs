@@ -3761,6 +3761,8 @@ impl FunctionFacts {
                     crate::writeback::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
                 })
             }
+            // Nothing proved a result, so no return type can be spelled.
+            r2ssa::SourceFunctionReturn::Unproven => None,
         };
         let Some(ret_type) = ret_type else {
             return false;

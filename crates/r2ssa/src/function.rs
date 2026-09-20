@@ -2785,6 +2785,8 @@ pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 pub(crate) struct CalleeBoundaries {
     preserved: CalleePreservedCarriers,
     results: BTreeMap<u64, CallBoundaryDef>,
+    /// Callees whose body proves the result carrier holds the return address.
+    return_addresses: BTreeMap<u64, CanonicalStorageId>,
 }
 
 impl CalleeBoundaries {
@@ -2797,6 +2799,7 @@ impl CalleeBoundaries {
         let names = arch.map(cached_register_name_map);
         let mut preserved = preserved.clone();
         let mut results = BTreeMap::new();
+        let mut return_addresses = BTreeMap::new();
         for (address, interface) in interfaces {
             let crate::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
                 continue;
@@ -2819,8 +2822,20 @@ impl CalleeBoundaries {
                     size: storage.size,
                 },
             );
+            if interface.body_proven_return_address() {
+                return_addresses.insert(*address, storage);
+            }
         }
-        Self { preserved, results }
+        Self {
+            preserved,
+            results,
+            return_addresses,
+        }
+    }
+
+    /// The carrier each callee proves holds the address the call pushed.
+    pub(crate) const fn return_addresses(&self) -> &BTreeMap<u64, CanonicalStorageId> {
+        &self.return_addresses
     }
 }
 
@@ -3489,7 +3504,9 @@ impl SSAFunction {
             .chain(questions.for_return_boundary().and_then(|interface| {
                 match interface.return_kind() {
                     crate::SourceFunctionReturn::Register { storage } => Some(storage),
-                    crate::SourceFunctionReturn::Void => None,
+                    crate::SourceFunctionReturn::Void | crate::SourceFunctionReturn::Unproven => {
+                        None
+                    }
                 }
             }))
             .collect::<Vec<_>>();
@@ -3536,6 +3553,8 @@ impl SSAFunction {
         phase("raw", func.num_blocks());
         func.call_preserved_carriers = call_preserved_carriers;
         func.stack_pointer_carrier = stack_pointer_carrier;
+        // Before preparation, so the arithmetic above the constant folds with it.
+        func.forward_proven_call_return_addresses(callees);
         // Preparation reads the interface for the return projection only.
         func.prepare_for_decompile_with_interface_and_control(
             &crate::optimize::DecompilePrepConfig::default(),

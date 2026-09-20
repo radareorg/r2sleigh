@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 19;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 20;
 /// The reader speaks exactly the format the writer writes.
 ///
 /// Producer and consumer are one build: `r2plugin/snapshot_wire.c` writes the
@@ -1232,6 +1232,8 @@ pub fn read_image(
 
 const RESULT_VOID: u8 = 0;
 const RESULT_REGISTER: u8 = 1;
+/// A result nothing proved, which is not the claim that there is none.
+const RESULT_UNPROVEN: u8 = 2;
 
 pub fn write_call_result(writer: &mut SnapshotWireWriter, result: &SourceCallResult) {
     match result {
@@ -1526,6 +1528,7 @@ pub fn write_function_return(writer: &mut SnapshotWireWriter, kind: &SourceFunct
             writer.u8(RESULT_REGISTER);
             write_storage(writer, *storage);
         }
+        SourceFunctionReturn::Unproven => writer.u8(RESULT_UNPROVEN),
     }
 }
 
@@ -1537,6 +1540,7 @@ pub fn read_function_return(
         RESULT_REGISTER => Ok(SourceFunctionReturn::Register {
             storage: read_storage(reader)?,
         }),
+        RESULT_UNPROVEN => Ok(SourceFunctionReturn::Unproven),
         tag => Err(SnapshotWireError::UnknownDiscriminant {
             record: "function return",
             tag: u64::from(tag),
@@ -3209,6 +3213,7 @@ mod tests {
         for kind in [
             SourceFunctionReturn::Void,
             SourceFunctionReturn::Register { storage },
+            SourceFunctionReturn::Unproven,
         ] {
             let mut writer = SnapshotWireWriter::new();
             write_abi_parameter(&mut writer, &parameter);
