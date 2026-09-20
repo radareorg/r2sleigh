@@ -577,6 +577,27 @@ pub(super) fn binding_components_with(
                 if find(&mut parent, index) == find(&mut parent, mate.0 as usize) {
                     continue;
                 }
+                // A call's result is assigned into the slot, not renamed by
+                // it: the call renders an expression and the store is the
+                // statement that names what it produced. Joining the two made
+                // that store `x = x`, and eliding it left the name read and
+                // never written.
+                if graph
+                    .def_inst(stored)
+                    .and_then(|inst| graph.inst(inst))
+                    .is_some_and(|inst| {
+                        matches!(
+                            inst.payload,
+                            r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
+                        )
+                    })
+                {
+                    r2il::refusal_evidence!(
+                        "store-declined",
+                        "{id:?} stored {stored:?}: a call's result is assigned, not renamed"
+                    );
+                    continue;
+                }
                 let proposed = BTreeSet::from([stored, mate]);
                 // A value that is already another object -- a parameter, a
                 // different slot -- was copied into this slot, not renamed by

@@ -347,7 +347,14 @@ fn analyse(
         let Ok(walked) = native.walk(*address) else {
             continue;
         };
-        let Ok(artifact) = native.prepare(&walked, &Callees::default()) else {
+        // Against what the binary declares about it, exactly as the root is
+        // prepared: a callee prepared without its declaration proves only what
+        // its instructions show, which for a result register is nothing, and
+        // then the call site renders it as returning nothing.
+        let declared = declaration_for(&native, target, *address, ptr_bits);
+        let Ok(artifact) =
+            native.prepare_restated(&walked, &Callees::default(), Vec::new(), declared, &[])
+        else {
             continue;
         };
         // The interface is what the callee's body proves about its boundary,
@@ -376,26 +383,7 @@ fn analyse(
         .program
         .name_at(entry)
         .and_then(|name| target.prototypes.get(&name).cloned());
-    let declared_root = declared_prototype
-        .clone()
-        .and_then(|prototype| {
-            // The spelling and the interface are one declaration: a signature
-            // whose arity the convention could not place would render a
-            // parameter list the body was never prepared against.
-            let frame = declared_frame(&prototype, target, &native.machine, ptr_bits);
-            Some(Restatement {
-                interface: Some(declared_interface(
-                    &prototype,
-                    target,
-                    &native.machine,
-                    ptr_bits,
-                    &frame,
-                )?),
-                signature: Some(declared_signature(&prototype)),
-                slot_names: frame.names,
-            })
-        })
-        .unwrap_or_default();
+    let declared_root = declaration_for(&native, target, entry, ptr_bits);
     let first = match declared_root.interface.is_some() {
         false => native.prepare(&root, &callees)?,
         true => native.prepare_restated(&root, &callees, Vec::new(), declared_root.clone(), &[])?,
@@ -479,14 +467,14 @@ fn declared_signature(prototype: &r2abi::Prototype) -> r2source::SourceSignature
     let parameters = prototype.parameters.iter().map(|parameter| {
         r2source::SourceSignatureParameter::new(
             parameter.name.clone(),
-            Some(parameter.spelling.clone()),
+            Some(parameter.spelling.as_written().to_owned()),
         )
     });
     let ellipsis = prototype
         .variadic
         .then(|| r2source::SourceSignatureParameter::new(Some("..."), None::<String>));
     r2source::SourceSignaturePresentation::new(
-        Some(prototype.returns.clone()),
+        Some(prototype.returns.as_written().to_owned()),
         None::<String>,
         false,
         parameters.chain(ellipsis),
@@ -677,7 +665,12 @@ fn declared_frame(
         let offset = local.frame_offset.saturating_add(from_entry);
         frame.names.push(
             r2source::SourceStackSlotName::new(base, offset, local.name.clone())
-                .with_type_spelling(local.spelling.clone()),
+                .with_type_spelling(
+                    local
+                        .spelling
+                        .as_ref()
+                        .map(|spelled| spelled.as_written().to_owned()),
+                ),
         );
         frame.slots.push(r2source::SourceStackSlotSpec::new_local(
             base,
@@ -707,6 +700,36 @@ fn declared_parameter_names(
                 .unwrap_or_else(|| format!("arg{index}"))
         })
         .collect()
+}
+
+/// What the binary declares about the function at this address, placed in this
+/// machine's carriers.
+fn declaration_for(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+    ptr_bits: u32,
+) -> Restatement {
+    let Some(prototype) = native
+        .program
+        .name_at(address)
+        .and_then(|name| target.prototypes.get(&name).cloned())
+    else {
+        return Restatement::default();
+    };
+    // The spelling and the interface are one declaration: a signature whose
+    // arity the convention could not place would render a parameter list the
+    // body was never prepared against.
+    let frame = declared_frame(&prototype, target, &native.machine, ptr_bits);
+    let Some(interface) = declared_interface(&prototype, target, &native.machine, ptr_bits, &frame)
+    else {
+        return Restatement::default();
+    };
+    Restatement {
+        interface: Some(interface),
+        signature: Some(declared_signature(&prototype)),
+        slot_names: frame.names,
+    }
 }
 
 /// The declared interfaces of the library functions this body calls.
@@ -756,7 +779,7 @@ fn declared_interface(
     // floating-point registers returns a `double` in one of those, and calling
     // it the integer result register would have the renderer read the bits of
     // whatever the integer register happened to hold.
-    let result = match float_spelling(&prototype.returns, ptr_bits) {
+    let result = match float_spelling(prototype.returns.as_type(), ptr_bits) {
         true => target
             .convention
             .float_return
@@ -764,7 +787,7 @@ fn declared_interface(
             .and_then(|slot| storage(target.arch, slot.name()).ok()),
         false => machine.slots.result_slot(),
     };
-    let returns = match (prototype.returns.as_str(), result) {
+    let returns = match (prototype.returns.as_type(), result) {
         ("void" | "", _) | (_, None) => r2source::SourceFunctionReturn::Void,
         (_, Some(storage)) => r2source::SourceFunctionReturn::Register { storage },
     };
@@ -794,11 +817,13 @@ fn declared_interface(
         .parameters
         .iter()
         .zip(&placed)
-        .map(|(parameter, storage)| graph.value(&parameter.spelling, ptr_bits, storage.size))
+        .map(|(parameter, storage)| {
+            graph.value(parameter.spelling.as_type(), ptr_bits, storage.size)
+        })
         .collect::<Vec<_>>();
     let return_value = match (returns, result) {
         (r2source::SourceFunctionReturn::Void, _) | (_, None) => None,
-        (_, Some(storage)) => graph.value(&prototype.returns, ptr_bits, storage.size),
+        (_, Some(storage)) => graph.value(prototype.returns.as_type(), ptr_bits, storage.size),
     };
     let typed = parameter_values.iter().all(Option::is_some)
         && matches!(returns, r2source::SourceFunctionReturn::Void) == return_value.is_none();
@@ -1028,7 +1053,14 @@ impl DeclaredTypes {
         // roots cannot reach -- so a node whose only reference was a slot the
         // body later proved for itself left the whole interface unstatable.
         let size_bits = u64::from(bits);
-        let align_bits = u64::from(bits.max(8));
+        // An object the graph does not describe has no extent and no
+        // alignment, and the graph says so: giving `void` a byte's alignment
+        // made every prototype through a `void *` unstatable, which is most of
+        // the allocating ones.
+        let align_bits = match kind {
+            Kind::Void | Kind::Code => 0,
+            _ => u64::from(bits.max(8)),
+        };
         if let Some(found) = self.types.iter().find(|type_| {
             type_.kind() == kind
                 && type_.size_bits() == size_bits
@@ -1080,12 +1112,13 @@ fn placed_parameters(
     let mut floats = 0usize;
     let mut placed = Vec::with_capacity(prototype.parameters.len());
     for parameter in &prototype.parameters {
-        let Some(parsed) = r2types::parse_c_type_like(&parameter.spelling, ptr_bits) else {
+        let Some(parsed) = r2types::parse_c_type_like(parameter.spelling.as_type(), ptr_bits)
+        else {
             r2il::refusal_evidence!(
                 "declared-interface",
                 "{}: no register class for `{}`",
                 prototype.name,
-                parameter.spelling
+                parameter.spelling.as_written()
             );
             return None;
         };
@@ -1106,7 +1139,7 @@ fn placed_parameters(
                     "declared-interface",
                     "{}: `{}` is an aggregate and its register class depends on its members",
                     prototype.name,
-                    parameter.spelling
+                    parameter.spelling.as_written()
                 );
                 return None;
             }
@@ -1128,10 +1161,13 @@ fn placed_parameters(
 fn function_type(prototype: &r2abi::Prototype, ptr_bits: u32) -> Option<r2types::FunctionType> {
     let mut params = Vec::with_capacity(prototype.parameters.len());
     for parameter in &prototype.parameters {
-        params.push(r2types::parse_c_type_like(&parameter.spelling, ptr_bits)?);
+        params.push(r2types::parse_c_type_like(
+            parameter.spelling.as_type(),
+            ptr_bits,
+        )?);
     }
     Some(r2types::FunctionType {
-        return_type: r2types::parse_c_type_like(&prototype.returns, ptr_bits)?,
+        return_type: r2types::parse_c_type_like(prototype.returns.as_type(), ptr_bits)?,
         params,
         variadic: prototype.variadic,
     })

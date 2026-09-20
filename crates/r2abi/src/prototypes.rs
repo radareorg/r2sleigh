@@ -20,13 +20,62 @@ pub struct Prototype {
     pub name: String,
     /// One fixed parameter per entry, in order.
     pub parameters: Vec<Parameter>,
-    pub returns: String,
+    pub returns: Spelled,
     /// Whether arguments continue past the fixed ones.
     pub variadic: bool,
     /// What the offsets in `locals` are measured from.
     pub frame_base: Option<FrameBase>,
     /// Each named variable the declaration places in the frame.
     pub locals: Vec<Local>,
+}
+
+/// One C type, as the declaration writes it and as the language reads it.
+///
+/// A name for a type is not the type: `idx_t` says nothing about width or
+/// indirection to anything that only has the text, so a prototype holding one
+/// was left untyped whole -- a hundred and four of the eight hundred and
+/// thirty-five in the `diffutils` binaries. The debug information knows what
+/// the name stands for, and this is where it says so. The name stays because
+/// it is what the source called it and it is what a reader wants to see.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Spelled {
+    /// What the declaration writes.
+    pub declared: String,
+    /// What that names, where it is a name for something else.
+    pub resolved: Option<String>,
+}
+
+impl Spelled {
+    pub fn new(declared: impl Into<String>, resolved: Option<impl Into<String>>) -> Self {
+        let declared = declared.into();
+        let resolved = resolved.map(Into::into).filter(|other| *other != declared);
+        Self { declared, resolved }
+    }
+
+    /// The spelling to read the type from.
+    pub fn as_type(&self) -> &str {
+        self.resolved.as_deref().unwrap_or(&self.declared)
+    }
+
+    /// The spelling to render.
+    pub fn as_written(&self) -> &str {
+        &self.declared
+    }
+}
+
+impl From<String> for Spelled {
+    fn from(declared: String) -> Self {
+        Self {
+            declared,
+            resolved: None,
+        }
+    }
+}
+
+impl From<&str> for Spelled {
+    fn from(declared: &str) -> Self {
+        Self::from(declared.to_owned())
+    }
 }
 
 /// Where a function's frame offsets are measured from.
@@ -46,7 +95,7 @@ pub enum FrameBase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Local {
     pub name: String,
-    pub spelling: Option<String>,
+    pub spelling: Option<Spelled>,
     /// Bytes from the frame base.
     pub frame_offset: i64,
     /// How many bytes it occupies, where the declaration states an extent.
@@ -90,7 +139,7 @@ pub enum FrameRole {
 /// rendered, and a declaration that gives none renders the position instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parameter {
-    pub spelling: String,
+    pub spelling: Spelled,
     pub name: Option<String>,
     /// Bytes from the frame base, where the declaration says it is kept in the
     /// frame. This is the one place a declaration states the same slot in two
@@ -99,7 +148,7 @@ pub struct Parameter {
 }
 
 impl Parameter {
-    pub fn new(spelling: impl Into<String>, name: Option<impl Into<String>>) -> Self {
+    pub fn new(spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {
         Self {
             spelling: spelling.into(),
             name: name.map(Into::into),
@@ -193,7 +242,7 @@ impl Prototypes {
                 "args" => {
                     declare(&mut by_name, name);
                 }
-                "ret" => declare(&mut by_name, name).returns = value.to_owned(),
+                "ret" => declare(&mut by_name, name).returns = Spelled::from(value),
                 _ => {}
             }
         }
@@ -205,7 +254,7 @@ impl Prototypes {
             for parameter in positions.into_values() {
                 // An empty spelling is the ellipsis: everything after it is
                 // whatever the caller passes.
-                if parameter.spelling.is_empty() {
+                if parameter.spelling.declared.is_empty() {
                     prototype.variadic = true;
                     break;
                 }
@@ -263,7 +312,7 @@ mod tests {
         let prototypes = Prototypes::embedded();
         let puts = prototypes.get("puts").expect("puts");
         assert_eq!(puts.parameters, [Parameter::new("const char *", Some("s"))]);
-        assert_eq!(puts.returns, "int");
+        assert_eq!(puts.returns.as_written(), "int");
         assert!(!puts.variadic);
     }
 
@@ -282,7 +331,7 @@ mod tests {
     fn a_decorated_name_finds_its_undecorated_prototype() {
         let prototypes = Prototypes::embedded();
         assert_eq!(
-            prototypes.get("_strlen").map(|p| p.returns.as_str()),
+            prototypes.get("_strlen").map(|p| p.returns.as_written()),
             Some("size_t")
         );
         // The declaration keeps two underscores and the linker adds a third.

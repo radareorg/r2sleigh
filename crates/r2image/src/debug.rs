@@ -149,7 +149,7 @@ fn subprogram<'a>(
     let returns = match entry.attr_value(gimli::DW_AT_type) {
         Some(value) => spell(dwarf, unit, value)?,
         // A subprogram with no type returns nothing, which C spells `void`.
-        None => "void".to_owned(),
+        None => r2abi::Spelled::from("void"),
     };
     let frame_base = entry
         .attr_value(gimli::DW_AT_frame_base)
@@ -271,8 +271,20 @@ fn spell<'a>(
     dwarf: &gimli::Dwarf<Slice<'a>>,
     unit: &gimli::Unit<Slice<'a>>,
     value: AttributeValue<Slice<'a>>,
-) -> Option<String> {
-    spell_at(dwarf, unit, value, 0)
+) -> Option<r2abi::Spelled> {
+    let declared = spell_at(dwarf, unit, value, Names::Keep, 0)?;
+    let resolved = spell_at(dwarf, unit, value, Names::Resolve, 0);
+    Some(r2abi::Spelled::new(declared, resolved))
+}
+
+/// Whether a name for a type is kept or read through.
+///
+/// Both are wanted: the name is what the source called it and what a reader
+/// wants to see, and what it names is the only thing that says a width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Names {
+    Keep,
+    Resolve,
 }
 
 /// The type graph is a graph, and a type that refers to itself through a
@@ -284,6 +296,7 @@ fn spell_at<'a>(
     dwarf: &gimli::Dwarf<Slice<'a>>,
     unit: &gimli::Unit<Slice<'a>>,
     value: AttributeValue<Slice<'a>>,
+    names: Names,
     depth: usize,
 ) -> Option<String> {
     if depth >= SPELLING_DEPTH {
@@ -300,30 +313,33 @@ fn spell_at<'a>(
     };
     match entry.tag() {
         gimli::DW_TAG_base_type => string(dwarf, unit, entry, gimli::DW_AT_name),
-        gimli::DW_TAG_typedef => named(""),
+        gimli::DW_TAG_typedef => match names {
+            Names::Keep => named(""),
+            Names::Resolve => spell_at(dwarf, unit, inner(gimli::DW_AT_type)?, names, depth + 1),
+        },
         gimli::DW_TAG_structure_type => named("struct "),
         gimli::DW_TAG_union_type => named("union "),
         gimli::DW_TAG_enumeration_type => named("enum "),
         gimli::DW_TAG_pointer_type => match inner(gimli::DW_AT_type) {
             // `void *` is a pointer entry with no target.
             None => Some("void *".to_owned()),
-            Some(target) => spell_at(dwarf, unit, target, depth + 1).map(pointer_to),
+            Some(target) => spell_at(dwarf, unit, target, names, depth + 1).map(pointer_to),
         },
         gimli::DW_TAG_const_type => match inner(gimli::DW_AT_type) {
             None => Some("const void".to_owned()),
             Some(target) => {
-                spell_at(dwarf, unit, target, depth + 1).map(|to| format!("const {to}"))
+                spell_at(dwarf, unit, target, names, depth + 1).map(|to| format!("const {to}"))
             }
         },
         // `volatile` and `restrict` change no layout and no argument passing,
         // so the spelling is the type they qualify.
         gimli::DW_TAG_volatile_type | gimli::DW_TAG_restrict_type => {
-            spell_at(dwarf, unit, inner(gimli::DW_AT_type)?, depth + 1)
+            spell_at(dwarf, unit, inner(gimli::DW_AT_type)?, names, depth + 1)
         }
         // An array decays to a pointer wherever a parameter can hold one, and
         // a parameter is the only place this walk spells a type.
         gimli::DW_TAG_array_type => {
-            spell_at(dwarf, unit, inner(gimli::DW_AT_type)?, depth + 1).map(pointer_to)
+            spell_at(dwarf, unit, inner(gimli::DW_AT_type)?, names, depth + 1).map(pointer_to)
         }
         _ => None,
     }
@@ -406,12 +422,12 @@ mod tests {
             .parameters
             .iter()
             .map(|parameter| match &parameter.name {
-                Some(called) => format!("{} {called}", parameter.spelling),
-                None => parameter.spelling.clone(),
+                Some(called) => format!("{} {called}", parameter.spelling.as_written()),
+                None => parameter.spelling.as_written().to_owned(),
             })
             .collect::<Vec<_>>()
             .join(", ");
-        format!("{} {name}({parameters})", prototype.returns)
+        format!("{} {name}({parameters})", prototype.returns.as_written())
     }
 
     #[test]
@@ -451,7 +467,10 @@ mod tests {
             .iter()
             .find(|local| local.name == "moved")
             .expect("moved");
-        assert_eq!(moved.spelling.as_deref(), Some("struct point"));
+        assert_eq!(
+            moved.spelling.as_ref().map(r2abi::Spelled::as_written),
+            Some("struct point")
+        );
         assert!(moved.frame_offset < 0, "{moved:?}");
     }
 
