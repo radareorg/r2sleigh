@@ -101,6 +101,80 @@ impl std::fmt::Display for NativeRefusal {
 impl std::error::Error for NativeRefusal {}
 
 /// Decompile the function at `entry`.
+/// The low tier for one function: the operations Sleigh lifted, per block.
+///
+/// Before SSA, before any analysis: what the specification says the bytes
+/// mean. A defect the medium tier shows is either already here or belongs to
+/// the construction between them.
+pub fn lifted(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<String, NativeRefusal> {
+    let body =
+        r2ssa::body::lift_body(entry, target.disasm, program).map_err(NativeRefusal::Body)?;
+    let names = register_spellings(target.arch);
+    let mut out = format!("Entry: {entry:#x}\nBlocks: {}\n", body.blocks.len());
+    for block in &body.blocks {
+        out.push_str(&format!(
+            "\nBlock {:#x} ({} bytes, {} ops)\n",
+            block.lifted.addr,
+            block.lifted.size,
+            block.lifted.ops.len()
+        ));
+        for (index, op) in block.lifted.ops.iter().enumerate() {
+            out.push_str(&format!(
+                "  {index:3}: {}\n",
+                spell_registers(&op.to_string(), &names)
+            ));
+        }
+        for (kind, target) in &block.successors {
+            out.push_str(&format!("  -> {target:#x} ({kind:?})\n"));
+        }
+    }
+    for stop in &body.unresolved {
+        out.push_str(&format!(
+            "\nstopped at {:#x}: {:?}\n",
+            stop.addr, stop.reason
+        ));
+    }
+    Ok(out)
+}
+
+/// How this architecture's registers are spelled by `Varnode`'s own Display,
+/// and what to call each instead.
+///
+/// The decoration below rewrites that spelling rather than the operations: a
+/// register name is wanted only by a reader, and giving every varnode one
+/// would cost an allocation per operand for something no analysis reads.
+fn register_spellings(arch: &r2il::ArchSpec) -> Vec<(String, String)> {
+    let mut spellings: Vec<(String, String)> = arch
+        .registers
+        .iter()
+        .map(|register| {
+            (
+                format!("reg:{:#x}[{}]", register.offset, register.size),
+                register.name.clone(),
+            )
+        })
+        .collect();
+    // Longest first, so a wider register's spelling is never rewritten by the
+    // prefix of a narrower one that starts at the same offset.
+    spellings.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+    spellings.dedup_by(|a, b| a.0 == b.0);
+    spellings
+}
+
+fn spell_registers(line: &str, names: &[(String, String)]) -> String {
+    let mut line = line.to_owned();
+    for (spelling, name) in names {
+        if line.contains(spelling.as_str()) {
+            line = line.replace(spelling.as_str(), name);
+        }
+    }
+    line
+}
+
 /// The medium tier for one function: SSA, prepared against its callees.
 ///
 /// The same work `decompile` does, stopping before the rendering, so a reader

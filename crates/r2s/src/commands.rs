@@ -49,6 +49,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "px" => hexdump(session, argument),
         "pd" => disassemble(session, argument),
         "pdd" => decompile(session, argument),
+        "pdil" => low_tier(session, argument),
         "pdim" => medium_tier(session, argument),
         "pdih" => high_tier(session, argument),
         other => Err(format!("unknown command '{}'", other)),
@@ -276,6 +277,20 @@ fn relocations(session: &Session) -> Result<String, String> {
 #[cfg(not(feature = "sleigh"))]
 fn decompile(_session: &mut Session, _argument: &str) -> Result<String, String> {
     Err("built without the sleigh feature, so pdd cannot decompile".to_owned())
+}
+
+/// The lift tier: the operations Sleigh produced, before any analysis.
+#[cfg(feature = "sleigh")]
+fn low_tier(session: &mut Session, argument: &str) -> Result<String, String> {
+    let addr = parse_number(session, argument)?;
+    with_native(session, addr, |target, program| {
+        r2engine::native::lifted(target, program, addr).map_err(|refusal| refusal.to_string())
+    })
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn low_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature".to_owned())
 }
 
 /// The analysis tier for one function: blocks, phis, operations, edges.

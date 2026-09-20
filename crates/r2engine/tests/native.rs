@@ -490,3 +490,36 @@ fn the_structured_tier_is_the_tree_the_c_comes_from() {
     assert!(tree.contains("(void)*"), "{tree}");
     assert!(c.contains("(void)*"), "{c}");
 }
+
+/// The lift tier is what Sleigh produced, with the machine's own names.
+#[test]
+fn the_low_tier_spells_the_machine_registers() {
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ARM_LINK_REGISTER_CALL,
+        name: "helper_call",
+        link: None,
+    };
+    let lifted = r2engine::native::lifted(&target, &program, BASE).expect("lifted");
+
+    assert!(lifted.contains("Block 0x1000"), "{lifted}");
+    // The link register is spelled, not offset-numbered, and the write to it
+    // is what the call recovery reads.
+    assert!(lifted.contains("lr"), "{lifted}");
+    assert!(
+        !lifted.contains("reg:0x58"),
+        "unspelled register:\n{lifted}"
+    );
+}
