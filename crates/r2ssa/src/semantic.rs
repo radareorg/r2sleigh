@@ -2106,8 +2106,6 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         let inductions = collect_induction_facts(graph, &loops);
-        let induction_bounds = BTreeMap::new();
-        let induction_starts = BTreeMap::new();
         phase("loops", loops.len());
         // What every value can be, once, where nine walks used to each answer
         // a bound for their own question. The loops above say where the
@@ -2127,11 +2125,7 @@ impl PreparedFunctionFacts {
             &call_sites,
             machine_context,
             &declared_slots,
-            &InductionBounds {
-                upper: &induction_bounds,
-                lower: &induction_starts,
-                values: &values,
-            },
+            &values,
         );
         phase("objects", objects.objects.len());
         let boundaries =
@@ -2434,8 +2428,8 @@ struct ObjectModelBuilder<'a> {
     escaping_roots: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     callee_write_spans: BTreeMap<StackAddressRoot, i64>,
-    /// Where each counted loop's counter starts, for an index's lower bound.
-    induction_starts: BTreeMap<ValueId, u64>,
+    /// What every value can be, for an index's lower bound.
+    values: &'a crate::values::ValueRanges,
     /// Addresses whose displaced parent is being resolved, against a cycle.
     resolving: BTreeSet<ValueId>,
     stack_pointer_carrier: Option<CanonicalStorageId>,
@@ -2497,7 +2491,7 @@ impl<'a> ObjectModelBuilder<'a> {
             evidenced_spans: BTreeMap::new(),
             escaping_roots: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
-            induction_starts: BTreeMap::new(),
+            values: empty_value_ranges(),
             resolving: BTreeSet::new(),
             stack_pointer_carrier: machine_context
                 .and_then(SourceMachineContext::stack_pointer_carrier),
@@ -2523,19 +2517,13 @@ impl<'a> ObjectModelBuilder<'a> {
         mut self,
         function: &SSAFunction,
         graph: &SsaGraph,
-        induction_bounds: &BTreeMap<ValueId, u64>,
-        induction_starts: &BTreeMap<ValueId, u64>,
-        values: &crate::values::ValueRanges,
+        values: &'a crate::values::ValueRanges,
     ) -> ObjectModel {
-        self.induction_starts = induction_starts.clone();
+        self.values = values;
         if let Some(facts) = self.facts {
-            for (start, end) in callee_write_spans(
-                facts,
-                function,
-                graph,
-                self.machine_context,
-                induction_bounds,
-            ) {
+            for (start, end) in
+                callee_write_spans(facts, function, graph, self.machine_context, values)
+            {
                 self.callee_write_spans
                     .entry(start)
                     .and_modify(|known| *known = (*known).max(end))
@@ -2547,11 +2535,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 function,
                 graph,
                 self.stack_pointer_carrier,
-                &InductionBounds {
-                    upper: induction_bounds,
-                    lower: induction_starts,
-                    values,
-                },
+                values,
                 &self.callee_write_spans,
             );
             self.evidenced_roots = evidenced.roots;
@@ -2846,7 +2830,9 @@ impl<'a> ObjectModelBuilder<'a> {
                 if self.evidenced_roots.contains(&position) {
                     return None;
                 }
-                let first = indexed_offset_lower_bound(graph, &self.induction_starts, index, 0)
+                let first = self
+                    .values
+                    .lower_bound(index)
                     .and_then(|lower| i64::try_from(lower).ok())?;
                 let reached = position.offset.checked_add(first)?;
                 let container = self
@@ -3110,17 +3096,11 @@ fn collect_object_and_memory_facts(
     call_sites: &CallSiteFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
-    induction: &InductionBounds<'_>,
+    values: &crate::values::ValueRanges,
 ) -> (ObjectModel, MemorySSAFacts) {
     let facts = function.decompile_prep_facts();
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    let object_model = builder.build(
-        function,
-        graph,
-        induction.upper,
-        induction.lower,
-        induction.values,
-    );
+    let object_model = builder.build(function, graph, values);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model, call_sites);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
@@ -8175,7 +8155,7 @@ fn callee_write_spans(
     function: &SSAFunction,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
-    induction_bounds: &BTreeMap<ValueId, u64>,
+    values: &crate::values::ValueRanges,
 ) -> Vec<(StackAddressRoot, i64)> {
     let Some(machine_context) = machine_context else {
         return Vec::new();
@@ -8240,15 +8220,12 @@ fn callee_write_spans(
                     let mut bound = |scaling: usize| {
                         let var = argument(scaling)?;
                         let value = graph.value_id_for_var(var)?;
-                        // A counted loop bounds the index it drives; a literal
-                        // index is its own bound, which is how a call that
-                        // names one element reaches exactly that far.
-                        induction_bounds
-                            .get(&value)
-                            .or_else(|| {
-                                induction_bounds.get(&crate::constant::root_of(graph, value))
-                            })
-                            .copied()
+                        // What the index can be bounds how far the call
+                        // reaches, which is how one that names a single
+                        // element reaches exactly that far.
+                        values
+                            .upper_bound(value)
+                            .or_else(|| values.upper_bound(crate::constant::root_of(graph, value)))
                             .or_else(|| crate::constant::folded_value(graph, value))
                     };
                     let Some(end) = proven
@@ -8320,10 +8297,9 @@ fn evidenced_stack_roots(
     function: &SSAFunction,
     graph: &SsaGraph,
     stack_pointer_carrier: Option<CanonicalStorageId>,
-    induction: &InductionBounds<'_>,
+    values: &crate::values::ValueRanges,
     callee_write_spans: &BTreeMap<StackAddressRoot, i64>,
 ) -> EvidencedStackRoots {
-    let induction_starts = induction.lower;
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
     let definition = |var: &SSAVar| {
@@ -8376,9 +8352,7 @@ fn evidenced_stack_roots(
                         let first_reached = |index: &SSAVar| {
                             graph
                                 .value_id_for_var(index)
-                                .and_then(|index| {
-                                    indexed_offset_lower_bound(graph, induction_starts, index, 0)
-                                })
+                                .and_then(|index| values.lower_bound(index))
                                 .and_then(|lower| i64::try_from(lower).ok())
                                 .unwrap_or(0)
                         };
@@ -8477,7 +8451,7 @@ fn evidenced_stack_roots(
             else {
                 continue;
             };
-            let Some(bound) = induction.values.upper_bound(index) else {
+            let Some(bound) = values.upper_bound(index) else {
                 continue;
             };
             let Ok(reach) = i64::try_from(bound.saturating_add(u64::from(width))) else {
@@ -8491,7 +8465,8 @@ fn evidenced_stack_roots(
                 "{:#x}:{at} {root:?} index={index:?} bound={bound} width={width} end={end}",
                 block.addr
             );
-            let first = indexed_offset_lower_bound(graph, induction_starts, index, 0)
+            let first = values
+                .lower_bound(index)
                 .and_then(|lower| i64::try_from(lower).ok())
                 .unwrap_or(0);
             let start = StackAddressRoot {
@@ -8661,53 +8636,15 @@ fn object_index_operand(
 /// before it, so the counter's initial value has to satisfy the bound itself.
 /// What sizes a stack allocation: the element layouts proven for the
 /// objects and the bounds their indices stay within.
+/// The analysis before one has been solved: nothing is bounded.
+fn empty_value_ranges() -> &'static crate::values::ValueRanges {
+    static EMPTY: std::sync::OnceLock<crate::values::ValueRanges> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(crate::values::ValueRanges::default)
+}
+
 struct AllocationSizing<'a> {
     array_layouts: &'a BTreeMap<ObjectId, StackArrayLayoutDisposition>,
     values: &'a crate::values::ValueRanges,
-}
-
-/// What each counted loop's counter is known to stay within.
-struct InductionBounds<'a> {
-    upper: &'a BTreeMap<ValueId, u64>,
-    lower: &'a BTreeMap<ValueId, u64>,
-    /// What the value analysis proved, which answers the same question for
-    /// every value rather than only for a counted loop's counter.
-    values: &'a crate::values::ValueRanges,
-}
-
-/// The least value an index takes: a constant, a counter's start, and sums
-/// and products of those; anything else is at least zero.
-fn indexed_offset_lower_bound(
-    graph: &SsaGraph,
-    starts: &BTreeMap<ValueId, u64>,
-    value: ValueId,
-    depth: u32,
-) -> Option<u64> {
-    if let Some(start) = starts.get(&value) {
-        return Some(*start);
-    }
-    if let Some(constant) = graph.value(value)?.var.constant_bits() {
-        return Some(constant);
-    }
-    if depth > 16 {
-        return Some(0);
-    }
-    let inst = graph.inst(graph.def_inst(value)?)?;
-    let InstPayload::Op(op) = &inst.payload else {
-        return Some(0);
-    };
-    let input = |index: usize| inst.inputs.get(index).copied();
-    let lower = |index: usize| {
-        input(index).and_then(|value| indexed_offset_lower_bound(graph, starts, value, depth + 1))
-    };
-    Some(match op {
-        SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
-            lower(0)?
-        }
-        SSAOp::IntAdd { .. } => lower(0)?.checked_add(lower(1)?)?,
-        SSAOp::IntMult { .. } => lower(0)?.checked_mul(lower(1)?)?,
-        _ => 0,
-    })
 }
 
 /// Remove the certified byte stride from one offset without manufacturing a
@@ -14903,13 +14840,7 @@ mod tests {
             &stack_declared,
             Some(stack.machine_context()),
         )
-        .build(
-            stack.function(),
-            stack.graph(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &Default::default(),
-        );
+        .build(stack.function(), stack.graph(), super::empty_value_ranges());
         let ram_stack = super::memory_location_for_addr(
             Some(&stack_facts),
             stack.addresses(),
