@@ -5016,21 +5016,6 @@ fn convention_call_boundary(
     op_index: usize,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
-    // A register untouched since entry holds a value only where this
-    // function's own interface says one arrived there. Without that, the
-    // register holds whatever the caller left -- which every register does --
-    // and passing it on is not something the machine can be seen to do.
-    let declared_on_entry = |storage: CanonicalStorageId| {
-        machine_context
-            .function_interface()
-            .is_some_and(|interface| {
-                interface.parameters().iter().any(|parameter| {
-                    parameter
-                        .register_storage()
-                        .is_some_and(|carrier| register_storages_overlap(carrier, storage))
-                })
-            })
-    };
     let mut arguments = Vec::new();
     for (position, slot) in convention.argument_slots().iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {
@@ -5046,7 +5031,10 @@ fn convention_call_boundary(
         ) else {
             break;
         };
-        if graph.def_inst(value).is_none() && !declared_on_entry(*slot) {
+        // A call whose signature nothing knows takes its arity from the
+        // registers this body provably wrote before it. One the caller merely
+        // arrived holding is not evidence the call reads it.
+        if graph.def_inst(value).is_none() {
             break;
         }
         arguments.push(SourceCallArgumentFact {
