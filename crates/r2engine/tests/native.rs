@@ -28,6 +28,37 @@ const PC_THUNK: &[u8] = &[
     0xc3, // 0x100f ret
 ];
 
+/// A jump table of absolute addresses, the form x86-64 uses:
+///
+/// ```text
+///   1000  cmp  edi, 3              ; the bound the guard proves
+///   1003  ja   0x1020              ; out of range takes the default
+///   1005  mov  edi, edi            ; the index, zero-extended
+///   1007  jmp  [rdi*8 + 0x1030]    ; read one entry of the table
+///   100e  mov  eax, 10  ; ret      ; case 0
+///   1014  mov  eax, 20  ; ret      ; case 1
+///   101a  mov  eax, 30  ; ret      ; case 2
+///   1020  mov  eax, -1  ; ret      ; default
+///   1026  mov  eax, 40  ; ret      ; case 3
+///   1030  the four entries
+/// ```
+const TABLE_SWITCH: &[u8] = &[
+    0x83, 0xff, 0x03, // 1000 cmp edi, 3
+    0x77, 0x1b, // 1003 ja 0x1020
+    0x89, 0xff, // 1005 mov edi, edi
+    0xff, 0x24, 0xfd, 0x30, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1030]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 100e case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1014 case 1
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 101a case 2
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 1020 default
+    0xb8, 0x28, 0x00, 0x00, 0x00, 0xc3, // 1026 case 3
+    0x00, 0x00, 0x00, 0x00, // 102c padding
+    0x0e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1030 -> 0x100e
+    0x14, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1038 -> 0x1014
+    0x1a, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 -> 0x101a
+    0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1026
+];
+
 /// One run of bytes mapped at `BASE`, under one name.
 struct Fixture {
     bytes: &'static [u8],
@@ -521,5 +552,53 @@ fn the_low_tier_spells_the_machine_registers() {
     assert!(
         !lifted.contains("reg:0x58"),
         "unspelled register:\n{lifted}"
+    );
+}
+
+#[test]
+fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
+    // Nothing hands the engine this table: the guard bounds the index, the
+    // value analysis says the dispatch reads four entries from 0x1030, and
+    // the engine goes and reads them. Without that the walk stops at the
+    // branch and the arms are never seen at all.
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
+    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: TABLE_SWITCH,
+        name: "pick",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    let output = &response.output;
+    assert!(output.contains("switch ("), "{output}");
+    // Every arm, with the value the source case returned, in order.
+    for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
+        assert!(output.contains(&format!("case {case}:")), "{output}");
+        assert!(output.contains(&format!("return {returns};")), "{output}");
+    }
+    let labels = output
+        .match_indices("case ")
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    assert!(
+        labels.windows(2).all(|pair| pair[0] < pair[1]),
+        "the arms are written in label order: {output}"
     );
 }

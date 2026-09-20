@@ -572,10 +572,21 @@ impl ControlFlowStructurer<'_, '_> {
             Some(target) => Some(self.edge(placement, addr, target)?),
             None => None,
         };
+        let mut bodies = BTreeMap::new();
+        for target in &order {
+            let body = self.edge(placement, addr, *target)?;
+            bodies.insert(*target, body);
+        }
+        // Ascending by label is how a switch is written and how it is read.
+        // An arm that runs into the next one depends on the order they were
+        // laid out in, so wherever one does, that order stands.
+        if bodies.values().all(|body| ends_the_arm(body)) {
+            order.sort_by_key(|target| by_target[target].iter().min().copied());
+        }
         let count = order.len();
         for (index, target) in order.into_iter().enumerate() {
             let values = &by_target[&target];
-            let body = self.edge(placement, addr, target)?;
+            let body = bodies.remove(&target).unwrap_or_default();
             let last_is_default = default_on_last && index + 1 == count;
             let (leading, last) = if last_is_default {
                 (&values[..], None)
@@ -628,5 +639,24 @@ impl ControlFlowStructurer<'_, '_> {
             1 => stmts.remove(0),
             _ => CStmt::Block(stmts),
         }
+    }
+}
+
+/// Whether an arm ends rather than running into the one after it.
+fn ends_the_arm(body: &[CStmt]) -> bool {
+    let mut stmt = match body.last() {
+        Some(stmt) => stmt,
+        None => return false,
+    };
+    loop {
+        stmt = match stmt {
+            CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => stmt,
+            CStmt::Block(inner) => match inner.last() {
+                Some(last) => last,
+                None => return false,
+            },
+            CStmt::Break | CStmt::Continue | CStmt::Return(_) | CStmt::Goto(_) => return true,
+            _ => return false,
+        };
     }
 }
