@@ -306,6 +306,7 @@ mod tests {
                 size: 0,
                 kind: SymbolKind::Function,
                 defined: true,
+                thumb: false,
             };
             assert!(!names_an_address(&symbol), "{name}");
         }
