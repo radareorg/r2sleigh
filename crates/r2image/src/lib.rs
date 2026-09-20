@@ -880,7 +880,7 @@ mod dynamic_symbol_tests {
         out.extend_from_slice(&3u64.to_le_bytes()); // st_size
         let shstrtab = out.len() as u64;
         out.extend_from_slice(sections);
-        while out.len() % 8 != 0 {
+        while !out.len().is_multiple_of(8) {
             out.push(0);
         }
         let shoff = out.len() as u64;
