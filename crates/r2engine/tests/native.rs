@@ -297,7 +297,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     assert!(
         response
             .output
-            .contains("1 callee prototype supplied by radare2"),
+            .contains("1 callee prototype supplied by the source"),
         "{}",
         response.output
     );

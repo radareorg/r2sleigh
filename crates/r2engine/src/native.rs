@@ -312,7 +312,15 @@ fn analyse(
         let Some(prototype) = target.prototypes.get(&name) else {
             continue;
         };
-        let Some(interface) = declared_interface(prototype, &native.machine, ptr_bits) else {
+        // An import has no body here, so nothing it declares about its own
+        // frame is about anything this program can see.
+        let Some(interface) = declared_interface(
+            prototype,
+            target,
+            &native.machine,
+            ptr_bits,
+            &DeclaredFrame::default(),
+        ) else {
             continue;
         };
         if let Some(signature) = function_type(prototype, ptr_bits)
@@ -364,17 +372,27 @@ fn analyse(
     // convention's slots the same way and the body is prepared against it.
     // Without this the engine reads every parameter as the width of the
     // register it arrived in, whatever the source said.
-    let declared_root = native
+    let declared_prototype = native
         .program
         .name_at(entry)
-        .and_then(|name| target.prototypes.get(&name).cloned())
+        .and_then(|name| target.prototypes.get(&name).cloned());
+    let declared_root = declared_prototype
+        .clone()
         .and_then(|prototype| {
             // The spelling and the interface are one declaration: a signature
             // whose arity the convention could not place would render a
             // parameter list the body was never prepared against.
+            let frame = declared_frame(&prototype, target, &native.machine, ptr_bits);
             Some(Restatement {
-                interface: Some(declared_interface(&prototype, &native.machine, ptr_bits)?),
+                interface: Some(declared_interface(
+                    &prototype,
+                    target,
+                    &native.machine,
+                    ptr_bits,
+                    &frame,
+                )?),
                 signature: Some(declared_signature(&prototype)),
+                slot_names: frame.names,
             })
         })
         .unwrap_or_default();
@@ -405,7 +423,19 @@ fn analyse(
     // program. Text the body points at is harvested the same way, because
     // aarch64 forms an address from a page and an offset and the constant the
     // literal lives at appears only once those are folded.
-    let restated = native.restated(&first);
+    // The debug information may measure the frame from the frame pointer, and
+    // objects are identified by where they sit relative to the pointer the
+    // function was entered with. The distance between the two is what the
+    // prologue moved, which the first pass proved for every object it placed,
+    // so the declaration is restated into those coordinates rather than
+    // dropped for being in the other ones.
+    let declared_root = rebased(declared_root, &first, &declared_prototype);
+    let declared_slots = declared_root
+        .interface
+        .as_ref()
+        .map(|interface| interface.stack_slots().to_vec())
+        .unwrap_or_default();
+    let restated = native.restated(&first, &declared_slots);
     let folded = native.folded_literals(&first, &root);
     let artifact = match restated.is_none() && folded.is_empty() && tables.is_empty() {
         true => first,
@@ -415,6 +445,7 @@ fn analyse(
             let restatement = Restatement {
                 interface: restated.or(declared_root.interface),
                 signature: declared_root.signature,
+                slot_names: declared_root.slot_names,
             };
             native.prepare_restated(&root, &callees, folded, restatement, &tables)?
         }
@@ -437,6 +468,7 @@ fn analyse(
 struct Restatement {
     interface: Option<r2source::SourceFunctionInterface>,
     signature: Option<r2source::SourceSignaturePresentation>,
+    slot_names: Vec<r2source::SourceStackSlotName>,
 }
 
 /// How a declaration spells a function, for rendering rather than for reading.
@@ -459,6 +491,202 @@ fn declared_signature(prototype: &r2abi::Prototype) -> r2source::SourceSignature
         false,
         parameters.chain(ellipsis),
     )
+}
+
+/// One declaration, with anything it measured from the frame pointer measured
+/// from the entry stack pointer instead.
+///
+/// Unchanged where the declaration used no frame pointer, and unchanged where
+/// the body placed no object against one -- there is then nothing to restate
+/// it by, and a guessed distance would put every local at the wrong address.
+fn rebased(
+    declared: Restatement,
+    artifact: &TrustedSsaArtifact,
+    prototype: &Option<r2abi::Prototype>,
+) -> Restatement {
+    let frame_based = |base| base == r2source::StackAddressBase::FramePointer;
+    if !declared
+        .slot_names
+        .iter()
+        .any(|name| frame_based(name.base()))
+    {
+        return declared;
+    }
+    let Some(from_entry) = prototype
+        .as_ref()
+        .and_then(|prototype| frame_pointer_from_entry(artifact, prototype))
+    else {
+        r2il::refusal_evidence!(
+            "declared-stack-slot",
+            "nothing states one slot in both coordinate systems, so the \
+             declaration's frame-relative slots cannot be restated"
+        );
+        return declared;
+    };
+    let interface = declared.interface.and_then(|interface| {
+        // A slot measured from the entry pointer names the stack pointer as
+        // its base, whatever register the declaration measured it from.
+        let stack_pointer = interface.stack_pointer_storage()?;
+        let slots = interface
+            .stack_slots()
+            .iter()
+            .map(|slot| match frame_based(slot.base()) {
+                false => *slot,
+                true => {
+                    let rebased = r2source::SourceStackSlotSpec::new_local(
+                        r2source::StackAddressBase::StackPointer,
+                        stack_pointer,
+                        slot.offset().saturating_add(from_entry),
+                        slot.size_bytes(),
+                    );
+                    match slot.logical_type() {
+                        None => rebased,
+                        Some(id) => rebased.with_logical_type(id),
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let revision = interface.revision_identity().to_vec();
+        restate(&interface, slots, revision)
+    });
+    Restatement {
+        interface,
+        signature: declared.signature,
+        slot_names: declared
+            .slot_names
+            .into_iter()
+            .map(|name| match frame_based(name.base()) {
+                false => name,
+                true => r2source::SourceStackSlotName::new(
+                    r2source::StackAddressBase::StackPointer,
+                    name.offset().saturating_add(from_entry),
+                    name.name(),
+                )
+                .with_type_spelling(name.type_spelling()),
+            })
+            .collect(),
+    }
+}
+
+/// How far the frame pointer sits from the pointer the function was entered
+/// with.
+///
+/// A parameter the prologue spills is the one place the same slot is stated
+/// twice: the declaration says where it sits in the frame, and the body proves
+/// where it sits relative to the pointer the function was entered with. The
+/// difference is the distance, and every such parameter has to agree on it --
+/// a frame pointer that moved during the body is not one distance.
+fn frame_pointer_from_entry(
+    artifact: &TrustedSsaArtifact,
+    prototype: &r2abi::Prototype,
+) -> Option<i64> {
+    let prepared = artifact.shared_artifact();
+    let mut proved: Option<i64> = None;
+    for slot in r2ssa::recover_interface::recovered_stack_slots(prepared.as_ref()) {
+        let Some(declared) = slot
+            .parameter
+            .and_then(|index| prototype.parameters.get(index as usize))
+            .and_then(|parameter| parameter.frame_offset)
+        else {
+            continue;
+        };
+        let distance = slot.offset.checked_sub(declared)?;
+        match proved {
+            None => proved = Some(distance),
+            Some(proved) if proved == distance => {}
+            Some(_) => return None,
+        }
+    }
+    proved
+}
+
+/// The frame the declaration states, in this machine's coordinates.
+///
+/// A slot and its name are built together because the snapshot requires every
+/// name to land on a slot the interface carries: a name for a place the
+/// function does not have would be rendered against whatever the engine
+/// happened to recover there.
+#[derive(Default)]
+struct DeclaredFrame {
+    names: Vec<r2source::SourceStackSlotName>,
+    slots: Vec<r2source::SourceStackSlotSpec>,
+    /// The register the declaration says the frame is measured from, where it
+    /// names one. A slot measured from it is a false statement about the
+    /// machine unless the interface says which register that is.
+    frame_pointer: Option<CanonicalStorageId>,
+}
+
+/// What the declaration calls each frame slot, in this machine's coordinates.
+///
+/// The debug information measures a frame offset from an origin it names, and
+/// the engine measures one from the stack pointer this function was entered
+/// with or from the frame pointer. Both origins are exact, so the distance
+/// between them is derived rather than assumed: the canonical frame address is
+/// the caller's stack pointer before the call, which is this function's entry
+/// pointer plus whatever the call itself pushed.
+fn declared_frame(
+    prototype: &r2abi::Prototype,
+    target: &NativeTarget<'_>,
+    machine: &NativeMachine,
+    ptr_bits: u32,
+) -> DeclaredFrame {
+    let (Some(stated), Some(stack_pointer)) =
+        (prototype.frame_base, machine.roles.stack_pointer_storage())
+    else {
+        return DeclaredFrame::default();
+    };
+    let mut frame = DeclaredFrame::default();
+    let (base, base_storage, from_entry) = match stated {
+        r2abi::FrameBase::CallFrameCfa => {
+            // The canonical frame address is the caller's stack pointer before
+            // the call, so it is the entry pointer plus whatever the call left
+            // on the stack. The specification states that slot, and a machine
+            // that leaves the return address in a register states none.
+            let pushed = target
+                .compiler
+                .return_address_slot
+                .map_or(0, |(_, size)| i64::from(size));
+            (
+                r2source::StackAddressBase::StackPointer,
+                stack_pointer,
+                pushed,
+            )
+        }
+        r2abi::FrameBase::Register(number) => {
+            match r2abi::dwarf_frame_register(target.arch.name.as_str(), ptr_bits, number) {
+                Some((r2abi::FrameRole::FramePointer, name)) => {
+                    let Ok(storage) = storage(target.arch, name) else {
+                        return DeclaredFrame::default();
+                    };
+                    frame.frame_pointer = Some(storage);
+                    (r2source::StackAddressBase::FramePointer, storage, 0)
+                }
+                // A base that is the stack pointer inside the body is a
+                // distance from a value the body moves, which names no origin
+                // the engine can place a slot against.
+                _ => return DeclaredFrame::default(),
+            }
+        }
+    };
+    for local in &prototype.locals {
+        // A slot with no stated extent is not a slot, and a name for it would
+        // have nothing to attach to.
+        let Some(size_bytes) = local.size_bytes else {
+            continue;
+        };
+        let offset = local.frame_offset.saturating_add(from_entry);
+        frame.names.push(
+            r2source::SourceStackSlotName::new(base, offset, local.name.clone())
+                .with_type_spelling(local.spelling.clone()),
+        );
+        frame.slots.push(r2source::SourceStackSlotSpec::new_local(
+            base,
+            base_storage,
+            offset,
+            size_bytes,
+        ));
+    }
+    frame
 }
 
 /// What to call each parameter the interface declares.
@@ -513,27 +741,30 @@ fn declared_signatures(
 /// only reached for a function whose body the program does not carry.
 fn declared_interface(
     prototype: &r2abi::Prototype,
+    target: &NativeTarget<'_>,
     machine: &NativeMachine,
     ptr_bits: u32,
+    frame: &DeclaredFrame,
 ) -> Option<r2source::SourceFunctionInterface> {
-    let slots = machine.slots.argument_slots();
-    if prototype.parameters.len() > slots.len() {
-        r2il::refusal_evidence!(
-            "declared-interface",
-            "{} declares {} parameters and the convention has {} registers",
-            prototype.name,
-            prototype.parameters.len(),
-            slots.len()
-        );
-        return None;
-    }
-    let parameters = prototype
-        .parameters
+    let placed = placed_parameters(prototype, target, machine, ptr_bits)?;
+    let parameters = placed
         .iter()
         .enumerate()
-        .map(|(index, _)| r2source::SourceAbiParameterSpec::new(index as u32, slots[index]))
+        .map(|(index, storage)| r2source::SourceAbiParameterSpec::new(index as u32, *storage))
         .collect::<Vec<_>>();
-    let returns = match (prototype.returns.as_str(), machine.slots.result_slot()) {
+    // A result arrives where its own class arrives: a machine with separate
+    // floating-point registers returns a `double` in one of those, and calling
+    // it the integer result register would have the renderer read the bits of
+    // whatever the integer register happened to hold.
+    let result = match float_spelling(&prototype.returns, ptr_bits) {
+        true => target
+            .convention
+            .float_return
+            .as_ref()
+            .and_then(|slot| storage(target.arch, slot.name()).ok()),
+        false => machine.slots.result_slot(),
+    };
+    let returns = match (prototype.returns.as_str(), result) {
         ("void" | "", _) | (_, None) => r2source::SourceFunctionReturn::Void,
         (_, Some(storage)) => r2source::SourceFunctionReturn::Register { storage },
     };
@@ -541,13 +772,31 @@ fn declared_interface(
     // The declared types, as the graph the interface carries. A spelling this
     // build cannot place leaves the prototype untyped rather than half-typed.
     let mut graph = DeclaredTypes::default();
+    // A slot's own declared type joins the same graph, so a local declared
+    // `double` is rendered as one rather than as the bits its carrier holds.
+    // A spelling with no place in the graph leaves its slot untyped, which the
+    // interface allows: the slot is still a slot of that size.
+    let slots_declared = frame
+        .names
+        .iter()
+        .zip(&frame.slots)
+        .map(|(name, slot)| {
+            match name
+                .type_spelling()
+                .and_then(|spelling| graph.type_id(spelling, ptr_bits))
+            {
+                None => *slot,
+                Some(id) => slot.with_logical_type(id),
+            }
+        })
+        .collect::<Vec<_>>();
     let parameter_values = prototype
         .parameters
         .iter()
-        .enumerate()
-        .map(|(index, parameter)| graph.value(&parameter.spelling, ptr_bits, slots[index].size))
+        .zip(&placed)
+        .map(|(parameter, storage)| graph.value(&parameter.spelling, ptr_bits, storage.size))
         .collect::<Vec<_>>();
-    let return_value = match (returns, machine.slots.result_slot()) {
+    let return_value = match (returns, result) {
         (r2source::SourceFunctionReturn::Void, _) | (_, None) => None,
         (_, Some(storage)) => graph.value(&prototype.returns, ptr_bits, storage.size),
     };
@@ -564,7 +813,7 @@ fn declared_interface(
             machine.slots.calling_convention(),
             parameters,
             returns,
-            Vec::new(),
+            slots_declared.clone(),
             parameter_values,
             return_value,
             type_graph,
@@ -574,7 +823,8 @@ fn declared_interface(
             machine.slots.calling_convention(),
             parameters,
             returns,
-            Vec::new(),
+            // With no graph to name them in, a slot carries no type.
+            frame.slots.clone(),
         ),
     };
 
@@ -608,7 +858,11 @@ fn declared_interface(
     };
     let placed = interface
         .with_return_address_storage(return_address)
-        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer));
+        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer))
+        .and_then(|interface| match frame.frame_pointer {
+            None => Ok(interface),
+            Some(storage) => interface.with_frame_pointer_storage(storage),
+        });
     match placed {
         // The types are radare2's declarations, which is exactly what this flag
         // says: the prototype was read rather than recovered.
@@ -645,30 +899,53 @@ fn restate(
         interface.return_logical_value(),
         interface.type_graph().cloned(),
     )
+    .inspect_err(|error| {
+        r2il::refusal_evidence!("restate-interface", "the slots do not restate: {error:?}");
+    })
     .ok()?
     .with_role_register_names(interface.role_register_names())
     .with_preserved_call_carriers(
         interface.stack_pointer_preserved_across_calls(),
         interface.frame_pointer_preserved_across_calls(),
     );
+    let carried = |what: &str, placed: Result<_, _>| {
+        placed
+            .inspect_err(|error| {
+                r2il::refusal_evidence!(
+                    "restate-interface",
+                    "the restated slots do not carry the {what}: {error:?}"
+                );
+            })
+            .ok()
+    };
     if let Some(storage) = interface.return_address_storage() {
-        restated = restated.with_return_address_storage(storage).ok()?;
+        restated = carried(
+            "return address",
+            restated.with_return_address_storage(storage),
+        )?;
     }
     if let Some(storage) = interface.stack_pointer_storage() {
-        restated = restated.with_stack_pointer_storage(storage).ok()?;
+        restated = carried(
+            "stack pointer",
+            restated.with_stack_pointer_storage(storage),
+        )?;
     }
     if let Some(storage) = interface.frame_pointer_storage() {
-        restated = restated.with_frame_pointer_storage(storage).ok()?;
+        restated = carried(
+            "frame pointer",
+            restated.with_frame_pointer_storage(storage),
+        )?;
     }
     if let Some(mechanism) = interface.return_mechanism() {
-        restated = restated
-            .with_exact_stacked_return(
+        restated = carried(
+            "return mechanism",
+            restated.with_exact_stacked_return(
                 mechanism.stack_offset(),
                 mechanism.slot_size_bytes(),
                 mechanism.stack_pointer_delta_bytes(),
                 mechanism.address_size_bytes(),
-            )
-            .ok()?;
+            ),
+        )?;
     }
     if interface.prototype_from_source_types() {
         restated = restated.with_prototype_from_source_types();
@@ -683,6 +960,12 @@ struct DeclaredTypes {
 }
 
 impl DeclaredTypes {
+    /// The graph node one C spelling stands for.
+    fn type_id(&mut self, spelling: &str, ptr_bits: u32) -> Option<u32> {
+        let parsed = r2types::parse_c_type_like(spelling, ptr_bits)?;
+        self.intern(&parsed, ptr_bits)
+    }
+
     /// The logical value one C spelling stands for, in the carrier it arrives
     /// in.
     ///
@@ -737,6 +1020,84 @@ impl DeclaredTypes {
         ));
         Some(id)
     }
+}
+
+/// What a spelling stands for, with any name it was given taken off.
+///
+/// A register class is decided by what a type is, and a `typedef` is a name
+/// for something else: `size_t` arrives where an unsigned long does.
+fn unnamed(parsed: &r2types::CTypeLike) -> &r2types::CTypeLike {
+    match parsed {
+        r2types::CTypeLike::Typedef { ty, .. } => unnamed(ty),
+        other => other,
+    }
+}
+
+/// Whether a spelling names a floating-point type.
+fn float_spelling(spelling: &str, ptr_bits: u32) -> bool {
+    r2types::parse_c_type_like(spelling, ptr_bits)
+        .is_some_and(|parsed| matches!(unnamed(&parsed), r2types::CTypeLike::Float(_)))
+}
+
+/// Where each declared parameter arrives.
+///
+/// A parameter arrives in the registers its own class uses, and the two
+/// classes are counted separately: the third integer argument takes the third
+/// integer register however many floating-point arguments came before it. A
+/// class this does not place -- an aggregate, which the ABI may split across
+/// registers or put in memory depending on its members -- refuses the whole
+/// declaration rather than putting it in the next integer register and being
+/// wrong about every argument after it.
+fn placed_parameters(
+    prototype: &r2abi::Prototype,
+    target: &NativeTarget<'_>,
+    machine: &NativeMachine,
+    ptr_bits: u32,
+) -> Option<Vec<CanonicalStorageId>> {
+    let integer_slots = machine.slots.argument_slots();
+    let mut integers = 0usize;
+    let mut floats = 0usize;
+    let mut placed = Vec::with_capacity(prototype.parameters.len());
+    for parameter in &prototype.parameters {
+        let Some(parsed) = r2types::parse_c_type_like(&parameter.spelling, ptr_bits) else {
+            r2il::refusal_evidence!(
+                "declared-interface",
+                "{}: no register class for `{}`",
+                prototype.name,
+                parameter.spelling
+            );
+            return None;
+        };
+        let storage = match unnamed(&parsed) {
+            r2types::CTypeLike::Float(_) => {
+                let slot = target.convention.float_args.get(floats)?;
+                floats += 1;
+                storage(target.arch, slot.name()).ok()?
+            }
+            // How an aggregate travels depends on its size and on what its
+            // members are: one register, two, or memory. Nothing here knows
+            // its members, so it refuses rather than taking the next integer
+            // register and being wrong about every argument after it too.
+            r2types::CTypeLike::Struct(_)
+            | r2types::CTypeLike::Union(_)
+            | r2types::CTypeLike::Array(..) => {
+                r2il::refusal_evidence!(
+                    "declared-interface",
+                    "{}: `{}` is an aggregate and its register class depends on its members",
+                    prototype.name,
+                    parameter.spelling
+                );
+                return None;
+            }
+            _ => {
+                let storage = *integer_slots.get(integers)?;
+                integers += 1;
+                storage
+            }
+        };
+        placed.push(storage);
+    }
+    Some(placed)
 }
 
 /// One declared prototype as the type layer states it.
@@ -978,13 +1339,17 @@ impl Native<'_> {
     ///
     /// `None` where the body proves no slot, which is every function that
     /// keeps its arguments in registers.
-    fn restated(&self, artifact: &TrustedSsaArtifact) -> Option<r2source::SourceFunctionInterface> {
+    fn restated(
+        &self,
+        artifact: &TrustedSsaArtifact,
+        declared: &[r2source::SourceStackSlotSpec],
+    ) -> Option<r2source::SourceFunctionInterface> {
         let prepared = artifact.shared_artifact();
         let prepared = prepared.as_ref();
         let interface = prepared.machine_context().function_interface()?;
         let base_storage = prepared.machine_context().stack_pointer_carrier()?;
         let proved = r2ssa::recover_interface::recovered_stack_slots(prepared);
-        if proved.is_empty() {
+        if proved.is_empty() && declared.is_empty() {
             return None;
         }
 
@@ -1019,6 +1384,24 @@ impl Native<'_> {
             })
             .collect::<Vec<_>>();
 
+        // What the declaration stated about the frame stays stated: the body
+        // proves where its own slots are, and it proves nothing about a slot
+        // it never touched. A slot both describe keeps the recovered one,
+        // which is the proven statement.
+        let kept = declared
+            .iter()
+            .filter(|declared| {
+                !slots.iter().any(|slot| {
+                    slot.base() == declared.base()
+                        && slot.offset() < declared.offset() + i64::from(declared.size_bytes())
+                        && declared.offset() < slot.offset() + i64::from(slot.size_bytes())
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut slots = slots;
+        slots.extend(kept);
+
         restate(interface, slots, interface.revision_identity().to_vec())
     }
 
@@ -1042,6 +1425,7 @@ impl Native<'_> {
         let Restatement {
             interface,
             signature,
+            slot_names,
         } = restatement;
         let arity = interface.as_ref().map_or(0, |i| i.parameters().len());
         let blocks = walked
@@ -1090,6 +1474,19 @@ impl Native<'_> {
             data_symbols: self.data_symbols(&walked.body),
             code_pointer_tables: tables.iter().map(|table| table.table.clone()).collect(),
             parameter_names: declared_parameter_names(signature.as_ref(), arity),
+            // A name has to land on a slot the interface carries, and which
+            // slots survive is decided by what the body proved, so the names
+            // are cut to fit here rather than where they were read.
+            stack_slot_names: slot_names
+                .into_iter()
+                .filter(|name| {
+                    interface.as_ref().is_some_and(|interface| {
+                        interface.stack_slots().iter().any(|slot| {
+                            slot.base() == name.base() && slot.offset() == name.offset()
+                        })
+                    })
+                })
+                .collect(),
             signature,
             interface,
             loader_role: None,

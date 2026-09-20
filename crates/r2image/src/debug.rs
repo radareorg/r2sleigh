@@ -20,54 +20,22 @@ use std::collections::BTreeMap;
 
 use gimli::AttributeValue;
 
-/// Everything the debug information states about one function.
-#[derive(Debug, Clone)]
-pub struct DebugFunction {
-    pub prototype: r2abi::Prototype,
-    /// What the offsets in `locals` are measured from.
-    pub frame_base: Option<FrameBase>,
-    /// Each named variable the source placed in the frame.
-    pub locals: Vec<DebugLocal>,
-}
-
-/// Where a function's frame offsets are measured from.
-///
-/// Only the two forms a compiler emits for a whole function are read. A
-/// location list, which says the base moves during the body, states no single
-/// origin and so states nothing here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameBase {
-    /// `DW_OP_call_frame_cfa`: the caller's stack pointer before the call.
-    CallFrameCfa,
-    /// `DW_OP_reg<n>`, by the number this machine's DWARF register table gives.
-    Register(u16),
-}
-
-/// One variable the source named and the compiler put in the frame.
-#[derive(Debug, Clone)]
-pub struct DebugLocal {
-    pub name: String,
-    pub type_spelling: Option<String>,
-    /// Bytes from the frame base, as `DW_OP_fbreg` states it.
-    pub frame_offset: i64,
-}
-
 /// Every function the debug information states, by the address it states it
 /// at and by name.
 #[derive(Debug, Clone, Default)]
 pub struct DebugPrototypes {
-    by_address: BTreeMap<u64, DebugFunction>,
-    by_name: BTreeMap<String, DebugFunction>,
+    by_address: BTreeMap<u64, r2abi::Prototype>,
+    by_name: BTreeMap<String, r2abi::Prototype>,
 }
 
 impl DebugPrototypes {
     /// What the debug information says about the function at this address.
-    pub fn at(&self, address: u64) -> Option<&DebugFunction> {
+    pub fn at(&self, address: u64) -> Option<&r2abi::Prototype> {
         self.by_address.get(&address)
     }
 
     /// The same, by the name a call site spells.
-    pub fn named(&self, name: &str) -> Option<&DebugFunction> {
+    pub fn named(&self, name: &str) -> Option<&r2abi::Prototype> {
         self.by_name.get(name)
     }
 
@@ -86,9 +54,7 @@ impl DebugPrototypes {
 
     /// Every prototype it states, for layering over the shipped declarations.
     pub fn prototypes(&self) -> impl Iterator<Item = r2abi::Prototype> + '_ {
-        self.by_name
-            .values()
-            .map(|function| function.prototype.clone())
+        self.by_name.values().cloned()
     }
 }
 
@@ -144,13 +110,13 @@ fn read_unit<'a>(
         }
     }
     for (offset, low_pc) in subprograms {
-        let Some(function) = subprogram(dwarf, unit, offset) else {
+        let Some(prototype) = subprogram(dwarf, unit, offset) else {
             continue;
         };
         found
             .by_name
-            .insert(function.prototype.name.clone(), function.clone());
-        found.by_address.insert(low_pc, function);
+            .insert(prototype.name.clone(), prototype.clone());
+        found.by_address.insert(low_pc, prototype);
     }
 }
 
@@ -175,7 +141,7 @@ fn subprogram<'a>(
     dwarf: &gimli::Dwarf<Slice<'a>>,
     unit: &gimli::Unit<Slice<'a>>,
     at: gimli::UnitOffset,
-) -> Option<DebugFunction> {
+) -> Option<r2abi::Prototype> {
     let mut tree = unit.entries_tree(Some(at)).ok()?;
     let root = tree.root().ok()?;
     let entry = root.entry();
@@ -203,20 +169,24 @@ fn subprogram<'a>(
                 let value = entry.attr_value(gimli::DW_AT_type)?;
                 let spelling = spell(dwarf, unit, value)?;
                 let called = string(dwarf, unit, entry, gimli::DW_AT_name);
-                parameters.push(r2abi::Parameter::new(spelling, called));
+                parameters.push(
+                    r2abi::Parameter::new(spelling, called).at_frame_offset(
+                        entry
+                            .attr_value(gimli::DW_AT_location)
+                            .and_then(frame_offset_of),
+                    ),
+                );
             }
             gimli::DW_TAG_unspecified_parameters => variadic = true,
             _ => {}
         }
         collect_locals(dwarf, unit, child, &mut locals);
     }
-    Some(DebugFunction {
-        prototype: r2abi::Prototype {
-            name,
-            parameters,
-            returns,
-            variadic,
-        },
+    Some(r2abi::Prototype {
+        name,
+        parameters,
+        returns,
+        variadic,
         frame_base,
         locals,
     })
@@ -227,7 +197,7 @@ fn collect_locals<'a>(
     dwarf: &gimli::Dwarf<Slice<'a>>,
     unit: &gimli::Unit<Slice<'a>>,
     node: gimli::EntriesTreeNode<'_, '_, Slice<'a>>,
-    into: &mut Vec<DebugLocal>,
+    into: &mut Vec<r2abi::Local>,
 ) {
     let entry = node.entry();
     if entry.tag() == gimli::DW_TAG_variable
@@ -236,12 +206,12 @@ fn collect_locals<'a>(
             .attr_value(gimli::DW_AT_location)
             .and_then(frame_offset_of)
     {
-        into.push(DebugLocal {
+        let declared = entry.attr_value(gimli::DW_AT_type);
+        into.push(r2abi::Local {
             name,
-            type_spelling: entry
-                .attr_value(gimli::DW_AT_type)
-                .and_then(|value| spell(dwarf, unit, value)),
+            spelling: declared.and_then(|value| spell(dwarf, unit, value)),
             frame_offset,
+            size_bytes: declared.and_then(|value| extent(unit, value, 0)),
         });
     }
     let mut children = node.children();
@@ -251,7 +221,7 @@ fn collect_locals<'a>(
 }
 
 /// `DW_OP_call_frame_cfa` or `DW_OP_reg<n>`, and nothing else.
-fn frame_base_of(value: AttributeValue<Slice<'_>>) -> Option<FrameBase> {
+fn frame_base_of(value: AttributeValue<Slice<'_>>) -> Option<r2abi::FrameBase> {
     use gimli::Reader as _;
     let AttributeValue::Exprloc(expression) = value else {
         return None;
@@ -263,9 +233,11 @@ fn frame_base_of(value: AttributeValue<Slice<'_>>) -> Option<FrameBase> {
         return None;
     }
     match op {
-        op if op == gimli::constants::DW_OP_call_frame_cfa.0 => Some(FrameBase::CallFrameCfa),
+        op if op == gimli::constants::DW_OP_call_frame_cfa.0 => {
+            Some(r2abi::FrameBase::CallFrameCfa)
+        }
         op if (gimli::constants::DW_OP_reg0.0..=gimli::constants::DW_OP_reg31.0).contains(&op) => {
-            Some(FrameBase::Register(u16::from(
+            Some(r2abi::FrameBase::Register(u16::from(
                 op - gimli::constants::DW_OP_reg0.0,
             )))
         }
@@ -357,6 +329,43 @@ fn spell_at<'a>(
     }
 }
 
+/// How many bytes one type entry occupies.
+///
+/// A qualifier occupies what it qualifies. Anything whose extent the entry
+/// does not state answers with nothing -- an array is usually such an entry,
+/// since its extent is its element's size times a count stated by a child --
+/// and the variable that needed it declares no slot rather than one of a
+/// guessed width.
+fn extent<'a>(
+    unit: &gimli::Unit<Slice<'a>>,
+    value: AttributeValue<Slice<'a>>,
+    depth: usize,
+) -> Option<u32> {
+    if depth >= SPELLING_DEPTH {
+        return None;
+    }
+    let AttributeValue::UnitRef(offset) = value else {
+        return None;
+    };
+    let mut cursor = unit.entries_at_offset(offset).ok()?;
+    let entry = cursor.next_dfs().ok()??;
+    if let Some(size) = entry
+        .attr_value(gimli::DW_AT_byte_size)
+        .and_then(|value| value.udata_value())
+    {
+        return u32::try_from(size).ok();
+    }
+    match entry.tag() {
+        gimli::DW_TAG_typedef
+        | gimli::DW_TAG_const_type
+        | gimli::DW_TAG_volatile_type
+        | gimli::DW_TAG_restrict_type => {
+            extent(unit, entry.attr_value(gimli::DW_AT_type)?, depth + 1)
+        }
+        _ => None,
+    }
+}
+
 /// A pointer to this type, spelled as C spells it: `char **`, not `char * *`.
 fn pointer_to(target: String) -> String {
     match target.ends_with('*') {
@@ -392,7 +401,7 @@ mod tests {
     }
 
     fn spelled(found: &DebugPrototypes, name: &str) -> String {
-        let prototype = &found.named(name).expect(name).prototype;
+        let prototype = found.named(name).expect(name);
         let parameters = prototype
             .parameters
             .iter()
@@ -436,13 +445,13 @@ mod tests {
     fn a_frame_variable_is_read_with_its_offset_from_the_frame_base() {
         let found = prototypes();
         let shifted = found.named("shifted").expect("shifted");
-        assert_eq!(shifted.frame_base, Some(FrameBase::Register(6)));
+        assert_eq!(shifted.frame_base, Some(r2abi::FrameBase::Register(6)));
         let moved = shifted
             .locals
             .iter()
             .find(|local| local.name == "moved")
             .expect("moved");
-        assert_eq!(moved.type_spelling.as_deref(), Some("struct point"));
+        assert_eq!(moved.spelling.as_deref(), Some("struct point"));
         assert!(moved.frame_offset < 0, "{moved:?}");
     }
 

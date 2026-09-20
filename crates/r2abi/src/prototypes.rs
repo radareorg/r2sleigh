@@ -8,7 +8,13 @@
 
 use std::collections::BTreeMap;
 
-/// One function's declared interface, in C spellings.
+/// What a declaration says about one function, in C spellings.
+///
+/// The shipped table declares interfaces only. A binary's own debug
+/// information declares the same interface and, for a function it has the body
+/// of, where that body keeps its named variables -- which reaches the engine
+/// by this same shape so that a declaration read from DWARF and one read from
+/// the table never become two models of the same thing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prototype {
     pub name: String,
@@ -17,6 +23,65 @@ pub struct Prototype {
     pub returns: String,
     /// Whether arguments continue past the fixed ones.
     pub variadic: bool,
+    /// What the offsets in `locals` are measured from.
+    pub frame_base: Option<FrameBase>,
+    /// Each named variable the declaration places in the frame.
+    pub locals: Vec<Local>,
+}
+
+/// Where a function's frame offsets are measured from.
+///
+/// Only the two forms that hold for a whole function are carried. A base that
+/// moves as the body runs states no single origin, so it states nothing here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameBase {
+    /// The caller's stack pointer before the call: DWARF's canonical frame
+    /// address.
+    CallFrameCfa,
+    /// One register, by the number this machine's DWARF table gives it.
+    Register(u16),
+}
+
+/// One variable the source named and the compiler put in the frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    pub name: String,
+    pub spelling: Option<String>,
+    /// Bytes from the frame base.
+    pub frame_offset: i64,
+    /// How many bytes it occupies, where the declaration states an extent.
+    pub size_bytes: Option<u32>,
+}
+
+/// What role a machine gives one DWARF register number.
+///
+/// Only the two that a frame base can name are answered, and only for the
+/// machines this engine lifts. The numbering is each platform's ABI document,
+/// which is also where radare2's own copy of this comes from; a number no
+/// document here assigns is evidence of nothing rather than a guess.
+pub fn dwarf_frame_register(
+    arch: &str,
+    bits: u32,
+    number: u16,
+) -> Option<(FrameRole, &'static str)> {
+    let (frame_pointer, stack_pointer) = match (crate::family(arch)?, bits) {
+        ("x86", 64) => ((6, "rbp"), (7, "rsp")),
+        ("x86", 32) => ((5, "ebp"), (4, "esp")),
+        ("arm", 64) => ((29, "x29"), (31, "sp")),
+        ("arm", 32) => ((11, "r11"), (13, "sp")),
+        _ => return None,
+    };
+    match number {
+        number if number == frame_pointer.0 => Some((FrameRole::FramePointer, frame_pointer.1)),
+        number if number == stack_pointer.0 => Some((FrameRole::StackPointer, stack_pointer.1)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameRole {
+    FramePointer,
+    StackPointer,
 }
 
 /// One declared parameter: what it is, and what the declaration calls it.
@@ -27,6 +92,10 @@ pub struct Prototype {
 pub struct Parameter {
     pub spelling: String,
     pub name: Option<String>,
+    /// Bytes from the frame base, where the declaration says it is kept in the
+    /// frame. This is the one place a declaration states the same slot in two
+    /// coordinate systems, which is what lets the two be lined up.
+    pub frame_offset: Option<i64>,
 }
 
 impl Parameter {
@@ -34,7 +103,13 @@ impl Parameter {
         Self {
             spelling: spelling.into(),
             name: name.map(Into::into),
+            frame_offset: None,
         }
+    }
+
+    pub fn at_frame_offset(mut self, frame_offset: Option<i64>) -> Self {
+        self.frame_offset = frame_offset;
+        self
     }
 }
 
@@ -221,5 +296,36 @@ mod tests {
     fn the_data_declares_a_few_thousand_functions() {
         let count = Prototypes::embedded().len();
         assert!(count > 500, "{count}");
+    }
+}
+
+#[cfg(test)]
+mod dwarf_tests {
+    use super::*;
+
+    #[test]
+    fn each_machines_frame_and_stack_registers_are_answered_by_number() {
+        assert_eq!(
+            dwarf_frame_register("x86-64", 64, 6),
+            Some((FrameRole::FramePointer, "rbp"))
+        );
+        assert_eq!(
+            dwarf_frame_register("x86-64", 64, 7),
+            Some((FrameRole::StackPointer, "rsp"))
+        );
+        assert_eq!(
+            dwarf_frame_register("aarch64", 64, 29),
+            Some((FrameRole::FramePointer, "x29"))
+        );
+        assert_eq!(
+            dwarf_frame_register("arm", 32, 13),
+            Some((FrameRole::StackPointer, "sp"))
+        );
+    }
+
+    #[test]
+    fn a_number_no_document_here_assigns_answers_nothing() {
+        assert_eq!(dwarf_frame_register("x86-64", 64, 0), None);
+        assert_eq!(dwarf_frame_register("riscv", 64, 8), None);
     }
 }

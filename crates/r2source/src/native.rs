@@ -20,7 +20,7 @@ use crate::{
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
     OwnedFunctionSnapshot, SnapshotValidationError, SourceCodePointerTable, SourceConventionSlots,
     SourceDataObject, SourceEndianness, SourceFunctionInterface, SourceLoaderRole,
-    SourceMachineRoles, SourceSignaturePresentation,
+    SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
 };
 
 /// The machine every function in one capture session runs on.
@@ -99,6 +99,11 @@ pub struct NativeFunction {
     /// What to call each parameter the interface declares. Presentation only,
     /// and exactly as long as that list.
     pub parameter_names: Vec<String>,
+    /// What the declaration calls each frame slot, where one said.
+    ///
+    /// Keyed by where the slot sits rather than by position, so a name lands
+    /// on the slot the body proves rather than on the nth one recovered.
+    pub stack_slot_names: Vec<SourceStackSlotName>,
     /// How the declaration spells this function, where one was found.
     ///
     /// The interface says where each parameter arrives and how wide it is; this
@@ -203,7 +208,7 @@ pub fn capture(
                 .iter()
                 .map(|name| name.as_str().into())
                 .collect(),
-            stack_slot_names: Box::from([]),
+            stack_slot_names: function.stack_slot_names.into_boxed_slice(),
             signature: function.signature,
             callee_signatures: Box::from([]),
         },
@@ -332,6 +337,7 @@ mod tests {
             code_pointer_tables: Vec::new(),
             interface: None,
             parameter_names: Vec::new(),
+            stack_slot_names: Vec::new(),
             signature: None,
             loader_role: None,
         }

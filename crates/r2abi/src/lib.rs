@@ -14,7 +14,9 @@ pub mod compiler_spec;
 pub mod prototypes;
 
 pub use compiler_spec::CompilerSpec;
-pub use prototypes::{Parameter, Platform, Prototype, Prototypes};
+pub use prototypes::{
+    FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, dwarf_frame_register,
+};
 
 use std::collections::BTreeMap;
 

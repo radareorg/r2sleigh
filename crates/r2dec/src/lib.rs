@@ -422,7 +422,7 @@ fn note_unproven_constructs(
         };
         let _ = write!(
             &mut detail,
-            "; {radare_typed_objects} {noun} supplied by radare2"
+            "; {radare_typed_objects} {noun} supplied by the source"
         );
     }
     if refused_object_types > 0 {
@@ -441,7 +441,7 @@ fn note_unproven_constructs(
         };
         let _ = write!(
             &mut detail,
-            "; {radare2_variadic_format_counts} {noun} supplied by radare2 format literals"
+            "; {radare2_variadic_format_counts} {noun} supplied by the source's format literals"
         );
     }
     if radare2_prototypes > 0 {
@@ -452,7 +452,7 @@ fn note_unproven_constructs(
         };
         let _ = write!(
             &mut detail,
-            "; {radare2_prototypes} {noun} supplied by radare2"
+            "; {radare2_prototypes} {noun} supplied by the source"
         );
     }
     if radare2_local_names > 0 {
@@ -463,7 +463,7 @@ fn note_unproven_constructs(
         };
         let _ = write!(
             &mut detail,
-            "; {radare2_local_names} {noun} supplied by radare2"
+            "; {radare2_local_names} {noun} supplied by the source"
         );
     }
     func.body.insert(
@@ -5206,7 +5206,7 @@ mod tests {
         );
         assert!(rendered.contains("return global_counter;"), "{rendered}");
         assert!(
-            rendered.contains("1 data object type supplied by radare2"),
+            rendered.contains("1 data object type supplied by the source"),
             "{rendered}"
         );
         assert!(
@@ -6294,7 +6294,7 @@ mod tests {
         };
         assert!(
             note.contains(
-                "2 variadic callsite argument counts supplied by radare2 format literals"
+                "2 variadic callsite argument counts supplied by the source's format literals"
             ),
             "{note}"
         );
