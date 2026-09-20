@@ -656,12 +656,42 @@ fn declared_frame(
             }
         }
     };
+    // Two locals declared over one place are two names for it: the compiler
+    // gave them the same storage because their scopes do not overlap, and
+    // `mbsstr_trimmed_wordbounded` has three at one offset. Nothing here knows
+    // which name the storage holds at a given point, so neither is stated --
+    // and stating both made the whole declaration unstatable, which cost the
+    // function its parameter types as well as its locals.
+    let places = prototype
+        .locals
+        .iter()
+        .filter_map(|local| Some((local.frame_offset, local.size_bytes?)))
+        .collect::<Vec<_>>();
+    let overlaps = |local: &r2abi::Local, size: u32| {
+        places
+            .iter()
+            .filter(|(offset, other)| {
+                local.frame_offset < offset.saturating_add(i64::from(*other))
+                    && *offset < local.frame_offset.saturating_add(i64::from(size))
+            })
+            .count()
+            > 1
+    };
     for local in &prototype.locals {
         // A slot with no stated extent is not a slot, and a name for it would
         // have nothing to attach to.
         let Some(size_bytes) = local.size_bytes else {
             continue;
         };
+        if overlaps(local, size_bytes) {
+            r2il::refusal_evidence!(
+                "declared-stack-slot",
+                "{}: `{}` shares its place with another declaration",
+                prototype.name,
+                local.name
+            );
+            continue;
+        }
         let offset = local.frame_offset.saturating_add(from_entry);
         frame.names.push(
             r2source::SourceStackSlotName::new(base, offset, local.name.clone())
