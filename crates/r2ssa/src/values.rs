@@ -25,7 +25,7 @@ use crate::strided::StridedInterval;
 use crate::{InstPayload, ValueId};
 
 /// What every value in one function can be.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValueRanges {
     by_value: Vec<StridedInterval>,
 }
@@ -67,6 +67,19 @@ impl ValueRanges {
 
     pub fn is_empty(&self) -> bool {
         self.by_value.is_empty()
+    }
+
+    /// How many values the analysis bounded, out of how many there are.
+    ///
+    /// The number that says whether this is answering anything: a solver that
+    /// reaches top everywhere costs the same as one that works.
+    pub fn bounded(&self) -> (usize, usize) {
+        let bounded = self
+            .by_value
+            .iter()
+            .filter(|range| !range.is_top() && !range.is_bottom())
+            .count();
+        (bounded, self.by_value.len())
     }
 }
 

@@ -1977,6 +1977,9 @@ pub struct PreparedAssumptionBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedFunctionFacts {
     pub addresses: AddressProvenanceFacts,
+    /// What every value can be. One answer, where each question used to walk
+    /// the graph for a bound of its own.
+    pub values: crate::values::ValueRanges,
     pub objects: ObjectModel,
     pub memory: MemorySSAFacts,
     pub predicates: PredicateFacts,
@@ -2106,6 +2109,17 @@ impl PreparedFunctionFacts {
         let induction_bounds = induction_upper_bounds(graph, &predicates, &loops, &inductions);
         let induction_starts = induction_lower_bounds(graph, &inductions);
         phase("loops", loops.len());
+        // What every value can be, once, where nine walks used to each answer
+        // a bound for their own question. The loops above say where the
+        // fixpoint has to widen to terminate, which is why it runs here.
+        let widen_at = loops
+            .values()
+            .map(|fact| fact.header)
+            .collect::<std::collections::BTreeSet<_>>();
+        let values = crate::values::solve_value_ranges(graph, &widen_at);
+        let (bounded, total) = values.bounded();
+        r2il::refusal_evidence!("value-ranges", "{bounded} of {total} values bounded");
+        phase("values", bounded);
         let (objects, memory) = collect_object_and_memory_facts(
             function,
             graph,
@@ -2116,6 +2130,7 @@ impl PreparedFunctionFacts {
             &InductionBounds {
                 upper: &induction_bounds,
                 lower: &induction_starts,
+                values: &values,
             },
         );
         phase("objects", objects.objects.len());
@@ -2166,6 +2181,7 @@ impl PreparedFunctionFacts {
             machine_context,
         };
         let derived = Derived {
+            values: &values,
             boundaries: &boundaries,
             objects: &objects,
             memory: &memory,
@@ -2193,6 +2209,7 @@ impl PreparedFunctionFacts {
         phase("assumptions", 0);
         Self {
             addresses,
+            values,
             objects,
             memory,
             predicates,
@@ -2508,6 +2525,7 @@ impl<'a> ObjectModelBuilder<'a> {
         graph: &SsaGraph,
         induction_bounds: &BTreeMap<ValueId, u64>,
         induction_starts: &BTreeMap<ValueId, u64>,
+        values: &crate::values::ValueRanges,
     ) -> ObjectModel {
         self.induction_starts = induction_starts.clone();
         if let Some(facts) = self.facts {
@@ -2532,6 +2550,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 &InductionBounds {
                     upper: induction_bounds,
                     lower: induction_starts,
+                    values,
                 },
                 &self.callee_write_spans,
             );
@@ -3095,7 +3114,13 @@ fn collect_object_and_memory_facts(
 ) -> (ObjectModel, MemorySSAFacts) {
     let facts = function.decompile_prep_facts();
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    let object_model = builder.build(function, graph, induction.upper, induction.lower);
+    let object_model = builder.build(
+        function,
+        graph,
+        induction.upper,
+        induction.lower,
+        induction.values,
+    );
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model, call_sites);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
@@ -6962,6 +6987,7 @@ fn collect_callee_stack_allocation_certificates(
     let AllocationSizing {
         array_layouts,
         induction_bounds,
+        values,
     } = sizing;
     let Some(machine_context) = machine_context else {
         return BTreeMap::new();
@@ -7049,10 +7075,15 @@ fn collect_callee_stack_allocation_certificates(
             }
             Some(StackArrayLayoutDisposition::NotIndexed)
             | Some(StackArrayLayoutDisposition::Refused(_))
-            | None => {
-                accessed_object_storage(graph, induction_bounds, objects, structured, *object)
-                    .unwrap_or((element_width, false))
-            }
+            | None => accessed_object_storage(
+                graph,
+                values,
+                induction_bounds,
+                objects,
+                structured,
+                *object,
+            )
+            .unwrap_or((element_width, false)),
         };
 
         let mut active_sp_offsets = BTreeSet::new();
@@ -8041,6 +8072,7 @@ fn collect_stack_geometry_certificate(
 /// a slot and slices of one variable both render through the byte spelling.
 fn accessed_object_storage(
     graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
     inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -8049,7 +8081,8 @@ fn accessed_object_storage(
     // A callee proven to write the object from its base wrote that far,
     // whatever this body reads of it afterwards.
     if let Some(reach) = objects.callee_write_reach.get(&object) {
-        let accessed = accessed_object_extent(graph, inductions, objects, structured, object);
+        let accessed =
+            accessed_object_extent(graph, values, inductions, objects, structured, object);
         return Some((accessed.map_or(*reach, |extent| extent.max(*reach)), true));
     }
     // An access at a computed index lands wherever the index reaches, so the
@@ -8059,7 +8092,7 @@ fn accessed_object_storage(
         .values()
         .any(|access| access.object == object && objects.address_is_indexed(access.address))
     {
-        return accessed_object_extent(graph, inductions, objects, structured, object)
+        return accessed_object_extent(graph, values, inductions, objects, structured, object)
             .map(|extent| (extent, true));
     }
     let mut width = None;
@@ -8105,8 +8138,10 @@ fn accessed_object_storage(
                     "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
                     access.width
                 );
-                return accessed_object_extent(graph, inductions, objects, structured, object)
-                    .map(|extent| (extent, true));
+                return accessed_object_extent(
+                    graph, values, inductions, objects, structured, object,
+                )
+                .map(|extent| (extent, true));
             }
         }
     }
@@ -8458,6 +8493,7 @@ fn evidenced_stack_roots(
             };
             let Some(bound) = indexed_offset_upper_bound(
                 graph,
+                induction.values,
                 induction_bounds,
                 true,
                 index,
@@ -8570,6 +8606,7 @@ fn frame_gap_extent(objects: &ObjectModel, base: StackAddressBase, offset: i64) 
 /// non-negative offset inside it; the containment proof is the offsets.
 fn accessed_object_extent(
     graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
     inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -8592,6 +8629,7 @@ fn accessed_object_extent(
             let index = objects.index_for_address(access.address)?;
             let bound = indexed_offset_upper_bound(
                 graph,
+                values,
                 inductions,
                 false,
                 index,
@@ -8659,12 +8697,16 @@ fn object_index_operand(
 struct AllocationSizing<'a> {
     array_layouts: &'a BTreeMap<ObjectId, StackArrayLayoutDisposition>,
     induction_bounds: &'a BTreeMap<ValueId, u64>,
+    values: &'a crate::values::ValueRanges,
 }
 
 /// What each counted loop's counter is known to stay within.
 struct InductionBounds<'a> {
     upper: &'a BTreeMap<ValueId, u64>,
     lower: &'a BTreeMap<ValueId, u64>,
+    /// What the value analysis proved, which answers the same question for
+    /// every value rather than only for a counted loop's counter.
+    values: &'a crate::values::ValueRanges,
 }
 
 /// Where each counted loop's counter starts, when that is a constant: the
@@ -8963,12 +9005,19 @@ fn divided_remainder_divisor(graph: &SsaGraph, dividend: ValueId, product: Value
 
 fn indexed_offset_upper_bound(
     graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
     inductions: &BTreeMap<ValueId, u64>,
     strict: bool,
     value: ValueId,
     memo: &mut BTreeMap<ValueId, Option<u64>>,
     visiting: &mut BTreeSet<ValueId>,
 ) -> Option<u64> {
+    // The value analysis answers this for every value, having joined at the
+    // merges and widened where it had to. The walk below is what it replaces
+    // and stands only where the analysis reached no bound.
+    if let Some(bound) = values.upper_bound(value) {
+        return Some(bound);
+    }
     if let Some(bound) = inductions.get(&value) {
         return Some(*bound);
     }
@@ -8991,7 +9040,15 @@ fn indexed_offset_upper_bound(
         let constant =
             |index: usize| input(index).and_then(|value| graph.value(value)?.var.constant_bits());
         let mut bound_of = |index: usize| {
-            indexed_offset_upper_bound(graph, inductions, strict, input(index)?, memo, visiting)
+            indexed_offset_upper_bound(
+                graph,
+                values,
+                inductions,
+                strict,
+                input(index)?,
+                memo,
+                visiting,
+            )
         };
         match op {
             SSAOp::Copy { .. } | SSAOp::New { .. } | SSAOp::Cast { .. } | SSAOp::IntZExt { .. } => {
@@ -9111,6 +9168,7 @@ fn stack_array_element_index(
 /// Decide array geometry once, beside the object and memory facts that own it.
 fn stack_array_layout(
     graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
     inductions: &BTreeMap<ValueId, u64>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -9170,6 +9228,7 @@ fn stack_array_layout(
         };
         if let Some(bound) = indexed_offset_upper_bound(
             graph,
+            values,
             inductions,
             false,
             byte_offset,
@@ -9664,6 +9723,7 @@ struct Body<'a> {
 /// over it.
 #[derive(Clone, Copy)]
 struct Derived<'a> {
+    values: &'a crate::values::ValueRanges,
     boundaries: &'a SourceBoundaryFacts,
     objects: &'a ObjectModel,
     memory: &'a MemorySSAFacts,
@@ -9687,6 +9747,7 @@ fn collect_prepared_function_certificates(
         machine_context,
     } = body;
     let Derived {
+        values,
         boundaries,
         objects,
         memory,
@@ -9813,7 +9874,14 @@ fn collect_prepared_function_certificates(
         .map(|object| {
             (
                 object,
-                stack_array_layout(graph, &induction_bounds, objects, structured, object),
+                stack_array_layout(
+                    graph,
+                    values,
+                    &induction_bounds,
+                    objects,
+                    structured,
+                    object,
+                ),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -9827,6 +9895,7 @@ fn collect_prepared_function_certificates(
         &AllocationSizing {
             array_layouts: &stack_array_layouts,
             induction_bounds: &induction_bounds,
+            values,
         },
     );
     let (stack_frame_round_trips, stack_frame_round_trip_by_inst) =
@@ -9897,7 +9966,7 @@ fn collect_prepared_function_certificates(
                 let storage = if declared {
                     None
                 } else {
-                    accessed_object_storage(graph, &induction_bounds, objects, structured, *object)
+                    accessed_object_storage(graph, values, &induction_bounds, objects, structured, *object)
                         // No access sizes it and nothing declares it, but its address left the body: a buffer a callee fills.
                         // The frame lays it out between its neighbours, and that gap is its extent, as bytes.
                         // An address that never leaves and is never accessed is a stack position, not an object, and the gap says nothing about it.
@@ -15270,6 +15339,7 @@ mod tests {
             stack.graph(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &Default::default(),
         );
         let ram_stack = super::memory_location_for_addr(
             Some(&stack_facts),
@@ -15402,6 +15472,7 @@ mod tests {
                 machine_context: Some(artifact.machine_context()),
             },
             super::Derived {
+                values: &Default::default(),
                 boundaries: &facts.boundaries,
                 objects: &objects,
                 memory: &facts.memory,
@@ -15455,6 +15526,7 @@ mod tests {
                 machine_context: Some(artifact.machine_context()),
             },
             super::Derived {
+                values: &Default::default(),
                 boundaries: &facts.boundaries,
                 objects: &mismatched_objects,
                 memory: &facts.memory,
@@ -16059,6 +16131,7 @@ mod tests {
                 machine_context: Some(allocated.machine_context()),
             },
             super::Derived {
+                values: &Default::default(),
                 boundaries: &allocated_facts.boundaries,
                 objects: allocated.objects(),
                 memory: &allocated_facts.memory,
@@ -16100,6 +16173,7 @@ mod tests {
                 machine_context: Some(allocated.machine_context()),
             },
             super::Derived {
+                values: &Default::default(),
                 boundaries: &allocated_facts.boundaries,
                 objects: &overlapping_objects,
                 memory: &allocated_facts.memory,
