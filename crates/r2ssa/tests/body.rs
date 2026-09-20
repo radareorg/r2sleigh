@@ -184,3 +184,33 @@ fn a_branch_to_a_function_the_program_does_not_declare_is_followed() {
     assert_eq!(addrs(&body), vec![0x1000, 0x1010]);
     assert!(body.tail_calls.is_empty());
 }
+
+/// `cmp r0, 0; it eq; moveq r0, 1; bx lr` in Thumb: the move runs only where
+/// the comparison held.
+const PREDICATED: &[u8] = &[
+    0x00, 0x28, // cmp r0, 0
+    0x08, 0xbf, // it eq
+    0x01, 0x20, // moveq r0, 1
+    0x70, 0x47, // bx lr
+];
+
+#[test]
+fn a_run_keeps_the_decoder_context_that_predicates_it() {
+    // Thumb's `it` says what the next instruction runs under, so a decoder
+    // that starts afresh at each address reads it as unconditional. The walk
+    // used to do exactly that and then disagreed with the block lift of the
+    // same bytes about where control goes.
+    let machine = r2sleigh_lift::embedded_machine("thumb").expect("thumb machine");
+    let body =
+        lift_body(BASE, &machine.disasm, &reader(PREDICATED), &BTreeMap::new()).expect("body");
+    let ops = body
+        .blocks
+        .iter()
+        .flat_map(|block| block.lifted.ops.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, r2il::R2ILOp::Select { .. })),
+        "{ops:?}"
+    );
+}

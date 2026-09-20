@@ -166,6 +166,9 @@ struct Walk<'a> {
     calls: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
     unresolved: Vec<Unresolved>,
+    /// The address the last decoded instruction ended at, so the next one can
+    /// keep the decoder's context where it follows on.
+    continuing_from: Option<u64>,
 }
 
 impl<'a> Walk<'a> {
@@ -184,6 +187,7 @@ impl<'a> Walk<'a> {
             calls: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
             unresolved: Vec::new(),
+            continuing_from: None,
         };
 
         let mut pending = vec![entry];
@@ -218,7 +222,13 @@ impl<'a> Walk<'a> {
         let mut fetch = window;
         fetch.resize(WINDOW, 0);
 
-        let Ok(lifted) = disasm.lift(&fetch, addr) else {
+        // Continue the decoder's context where this instruction follows the
+        // last one decoded, exactly as a block lift of the same bytes would.
+        let lifted = match self.continuing_from == Some(addr) {
+            true => disasm.lift_continuing(&fetch, addr),
+            false => disasm.lift(&fetch, addr),
+        };
+        let Ok(lifted) = lifted else {
             return self.stop(addr, UnresolvedReason::Undecodable);
         };
         if lifted.size == 0 {
@@ -232,6 +242,7 @@ impl<'a> Walk<'a> {
         // callee, and the walk of one body cannot hold it.
         let terminator = BasicBlock::from_r2il_continuing(&lifted, true).terminator;
         let bytes = fetch[..lifted.size as usize].to_vec();
+        self.continuing_from = Some(lifted.addr + u64::from(lifted.size));
         Some(Instruction {
             lifted,
             bytes,

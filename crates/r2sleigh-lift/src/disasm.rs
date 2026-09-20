@@ -2008,6 +2008,20 @@ impl Disassembler {
         self.lift_with_options(bytes, addr, SemanticMetadataOptions::default())
     }
 
+    /// Lift the instruction that follows the one just lifted, keeping the
+    /// decoder's context.
+    ///
+    /// Some of that context is the meaning of what comes next: Thumb's `it`
+    /// sets the condition the following instructions run under, and a decoder
+    /// that starts afresh reads them as unconditional. A walk that lifts one
+    /// instruction at a time therefore saw a different program from the block
+    /// lift that reads the same bytes in a run -- unconditional where the
+    /// machine is predicated -- and the two disagreed about where control
+    /// goes.
+    pub fn lift_continuing(&self, bytes: &[u8], addr: u64) -> Result<R2ILBlock> {
+        self.lift_canonical(bytes, addr)
+    }
+
     /// Lift a single instruction with explicit semantic metadata options.
     pub fn lift_with_options(
         &self,
