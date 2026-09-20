@@ -59,6 +59,7 @@ mod slice;
 pub mod span;
 mod strided;
 pub mod taint;
+mod values;
 pub(crate) mod var;
 
 pub use abi::AbiProfile;
@@ -185,4 +186,5 @@ pub use semantic::{
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
+pub use values::{ValueRanges, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
