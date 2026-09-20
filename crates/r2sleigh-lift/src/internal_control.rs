@@ -12,7 +12,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use r2il::{BlockTransferKind, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode};
 
-pub(crate) fn normalize_instruction_local_control(block: &mut R2ILBlock) {
+pub(crate) fn normalize_instruction_local_control(
+    block: &mut R2ILBlock,
+    names: &dyn Fn(u32) -> Option<String>,
+) {
     // A repeated string instruction's p-code is a loop, and the loop is how the
     // specification writes a block operation. Recognising it first is what
     // keeps the guard below from turning the whole instruction into
@@ -22,6 +25,11 @@ pub(crate) fn normalize_instruction_local_control(block: &mut R2ILBlock) {
         block.op_metadata = BTreeMap::new();
         return;
     }
+    // A conditional store is the other idiom the guard below cannot keep: it
+    // skips over a store, which is not a value operation and cannot be
+    // speculated past. The whole sequence is one linked load or one
+    // conditional store, and the vocabulary already has both.
+    rewrite_exclusive_access(block, names);
     loop {
         let Some((branch_index, branch, target_index)) = block
             .ops
@@ -566,6 +574,166 @@ impl InstructionTempAllocator {
     }
 }
 
+/// Rewrite ARM's exclusive-access idioms into the linked load and conditional
+/// store they are.
+///
+/// Sleigh writes `ldrex` as a user operation that marks the monitor followed
+/// by an ordinary load, and `strex` as a user operation that tests the
+/// monitor, a branch over the store, and the store. Neither carries any
+/// semantics on its own, so a function using them refused whole -- and the
+/// branch, skipping a store rather than a value, could not be speculated past
+/// either. Both are exactly `LoadLinked` and `StoreConditional`.
+fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option<String>) {
+    fn user_op(
+        block: &R2ILBlock,
+        index: usize,
+        names: &dyn Fn(u32) -> Option<String>,
+    ) -> Option<(String, Option<Varnode>, Vec<Varnode>)> {
+        let R2ILOp::CallOther {
+            userop,
+            output,
+            inputs,
+        } = block.ops.get(index)?
+        else {
+            return None;
+        };
+        Some((names(*userop)?, output.clone(), inputs.clone()))
+    }
+    let mut at = 0;
+    while at < block.ops.len() {
+        let Some((name, output, inputs)) = user_op(block, at, names) else {
+            at += 1;
+            continue;
+        };
+        let rewritten = match name.as_str() {
+            "ExclusiveAccess" => linked_load(block, at, &inputs),
+            "hasExclusiveAccess" => conditional_store(block, at, output.as_ref(), &inputs),
+            _ => None,
+        };
+        match rewritten {
+            Some((span, ops)) => {
+                block.ops.splice(at..at + span, ops);
+                block.op_metadata = BTreeMap::new();
+            }
+            None => at += 1,
+        }
+    }
+}
+
+/// `ExclusiveAccess(addr); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`.
+fn linked_load(block: &R2ILBlock, at: usize, inputs: &[Varnode]) -> Option<(usize, Vec<R2ILOp>)> {
+    let [addr] = inputs else {
+        return None;
+    };
+    let R2ILOp::Load {
+        dst,
+        space,
+        addr: loaded,
+    } = block.ops.get(at + 1)?
+    else {
+        return None;
+    };
+    same(loaded, addr).then(|| {
+        (
+            2,
+            vec![R2ILOp::LoadLinked {
+                dst: dst.clone(),
+                space: *space,
+                addr: addr.clone(),
+                // The bare exclusive load orders nothing; an acquiring one
+                // spells its barrier as a separate operation.
+                ordering: r2il::MemoryOrdering::Relaxed,
+            }],
+        )
+    })
+}
+
+/// The `strex` sequence, which writes nought on success:
+///
+/// ```text
+///   ok  = hasExclusiveAccess(addr)
+///   rd  = 1
+///   not = !ok
+///   if (not) goto done
+///   rd  = 0
+///   STORE [ram] addr = val
+/// done:
+/// ```
+fn conditional_store(
+    block: &R2ILBlock,
+    at: usize,
+    ok: Option<&Varnode>,
+    inputs: &[Varnode],
+) -> Option<(usize, Vec<R2ILOp>)> {
+    let [addr] = inputs else {
+        return None;
+    };
+    let ok = ok?;
+    let R2ILOp::Copy {
+        dst: failed,
+        src: one,
+    } = block.ops.get(at + 1)?
+    else {
+        return None;
+    };
+    let R2ILOp::BoolNot {
+        dst: not,
+        src: tested,
+    } = block.ops.get(at + 2)?
+    else {
+        return None;
+    };
+    let R2ILOp::CBranch { cond, .. } = block.ops.get(at + 3)? else {
+        return None;
+    };
+    let R2ILOp::Copy {
+        dst: succeeded,
+        src: zero,
+    } = block.ops.get(at + 4)?
+    else {
+        return None;
+    };
+    let R2ILOp::Store {
+        space,
+        addr: stored,
+        val,
+    } = block.ops.get(at + 5)?
+    else {
+        return None;
+    };
+    if !(same(tested, ok)
+        && same(cond, not)
+        && same(failed, succeeded)
+        && same(stored, addr)
+        && constant_value(one) == Some(1)
+        && constant_value(zero) == Some(0))
+    {
+        return None;
+    }
+    Some((
+        6,
+        vec![
+            R2ILOp::StoreConditional {
+                result: Some(ok.clone()),
+                space: *space,
+                addr: addr.clone(),
+                val: val.clone(),
+                ordering: r2il::MemoryOrdering::Relaxed,
+            },
+            R2ILOp::BoolNot {
+                dst: not.clone(),
+                src: ok.clone(),
+            },
+            // The machine writes nought where the store took, so the register
+            // the instruction names is the negation of the success it reports.
+            R2ILOp::IntZExt {
+                dst: failed.clone(),
+                src: not.clone(),
+            },
+        ],
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,7 +770,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block);
+        normalize_instruction_local_control(&mut block, &|_| None);
 
         assert!(
             !block
@@ -645,7 +813,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block);
+        normalize_instruction_local_control(&mut block, &|_| None);
 
         assert!(matches!(block.ops.first(), Some(R2ILOp::Unimplemented)));
     }
@@ -671,7 +839,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block);
+        normalize_instruction_local_control(&mut block, &|_| None);
 
         assert!(
             !block
@@ -710,7 +878,7 @@ mod tests {
         let mut block = R2ILBlock::new(0x1000, 4);
         block.ops = vec![branch.clone()];
 
-        normalize_instruction_local_control(&mut block);
+        normalize_instruction_local_control(&mut block, &|_| None);
 
         assert_eq!(block.ops, vec![branch]);
     }

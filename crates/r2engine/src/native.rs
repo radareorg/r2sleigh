@@ -147,17 +147,27 @@ pub fn lifted(
 /// The decoration below rewrites that spelling rather than the operations: a
 /// register name is wanted only by a reader, and giving every varnode one
 /// would cost an allocation per operand for something no analysis reads.
+/// What the machine data calls the numbers a tier prints.
+///
+/// A register offset and a user operation's index are both indices into the
+/// specification, and a reader who has to look them up is reading a worse
+/// tier than the one that exists.
 fn register_spellings(arch: &r2il::ArchSpec) -> Vec<(String, String)> {
-    let mut spellings: Vec<(String, String)> = arch
-        .registers
-        .iter()
-        .map(|register| {
-            (
-                format!("reg:{:#x}[{}]", register.offset, register.size),
-                register.name.clone(),
+    let mut spellings: Vec<(String, String)> =
+        arch.registers
+            .iter()
+            .map(|register| {
+                (
+                    format!("reg:{:#x}[{}]", register.offset, register.size),
+                    register.name.clone(),
+                )
+            })
+            .chain(
+                arch.user_ops.iter().enumerate().map(|(index, name)| {
+                    (format!("CALLOTHER({index})"), format!("CALLOTHER({name})"))
+                }),
             )
-        })
-        .collect();
+            .collect();
     // Longest first, so a wider register's spelling is never rewritten by the
     // prefix of a narrower one that starts at the same offset.
     spellings.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));

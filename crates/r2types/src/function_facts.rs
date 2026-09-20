@@ -1690,6 +1690,10 @@ pub struct FunctionFacts {
     /// Spellings radare2 already holds for the addresses this function
     /// touches. Rendering reads them; nothing that decides behaviour does.
     display_names: crate::DisplayNames,
+    /// What the architecture calls its user-defined operations, indexed the
+    /// way `SSAOp::CallOther` indexes them. Only the lift ever saw the
+    /// architecture, and an index means nothing without the table.
+    user_operations: Option<std::sync::Arc<[String]>>,
     callsites: FunctionCallsiteFacts,
     call_results: FunctionCallResultFacts,
     call_render: FunctionCallRenderFacts,
@@ -2246,6 +2250,7 @@ impl FunctionFacts {
             input_quality: None,
             callee_resolution: CalleeResolutionFacts::default(),
             display_names: crate::DisplayNames::default(),
+            user_operations: None,
             callsites: FunctionCallsiteFacts::default(),
             call_results: FunctionCallResultFacts::default(),
             call_render: FunctionCallRenderFacts::default(),
@@ -2472,6 +2477,18 @@ impl FunctionFacts {
     /// Attach the spellings radare2 already holds.
     pub fn set_display_names(&mut self, names: crate::DisplayNames) {
         self.display_names = names;
+    }
+
+    /// The name the architecture gives one of its user-defined operations.
+    ///
+    /// `None` where the artifact was built without an architecture or the
+    /// index is outside the table, both of which mean the operation cannot be
+    /// identified and must be refused rather than guessed at.
+    pub fn user_operation_name(&self, userop: u32) -> Option<&str> {
+        self.user_operations
+            .as_ref()?
+            .get(userop as usize)
+            .map(String::as_str)
     }
 
     pub fn control_facts(&self) -> &FunctionControlFacts {
@@ -3206,6 +3223,7 @@ impl FunctionFacts {
         self.call_render = prepared_call_render;
         self.control = prepared_control;
         self.render = prepared_render;
+        self.user_operations = Some(prepared.user_operations());
     }
 
     /// Bind canonical entry values to ABI parameter-slot semantic identities.

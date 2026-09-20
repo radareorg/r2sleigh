@@ -1164,6 +1164,11 @@ impl SsaArtifact {
             .map(String::as_str)
     }
 
+    /// The whole table, for a consumer that outlives the artifact.
+    pub fn user_operations(&self) -> Arc<[String]> {
+        Arc::clone(&self.user_operations)
+    }
+
     pub fn objects(&self) -> &ObjectModel {
         &self.facts.objects
     }

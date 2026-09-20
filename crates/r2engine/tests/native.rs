@@ -602,3 +602,45 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
         "the arms are written in label order: {output}"
     );
 }
+
+#[test]
+fn a_machine_operation_the_specification_names_is_called_and_declared() {
+    // A barrier has no C spelling and Sleigh gives it none either: it arrives
+    // as a user operation with an index. The index names an operation in the
+    // specification, and saying that is both more than refusing the function
+    // said and less than claiming an ordering the operand was never read for.
+    const BARRIER: &[u8] = &[
+        0x10, 0x40, 0x2d, 0xe9, // push {r4, lr}
+        0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
+        0x10, 0x80, 0xbd, 0xe8, // pop {r4, pc}
+    ];
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: BARRIER,
+        name: "barrier",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = &response.output;
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
+    );
+    // Called by the name the specification gives it, and declared, so the
+    // rendering still compiles.
+    assert!(output.contains("DataMemoryBarrier("), "{output}");
+    assert!(output.contains("void DataMemoryBarrier("), "{output}");
+}

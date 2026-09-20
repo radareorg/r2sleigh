@@ -927,6 +927,31 @@ impl<'a> FoldingContext<'a> {
         })
     }
 
+    /// Declare a machine operation so the rendering that calls it compiles.
+    ///
+    /// Its operands are machine words of the widths the operation was given,
+    /// which is all that is known about them: the specification names the
+    /// operation and says nothing about its C type.
+    fn record_machine_operation(&self, name: &str, output: Option<&SSAVar>, inputs: &[SSAVar]) {
+        let word = |size: u32| crate::ast::CType::Int {
+            bits: size.saturating_mul(8).max(8),
+            signedness: r2types::Signedness::Unsigned,
+        };
+        self.callee_declarations
+            .borrow_mut()
+            .entry(name.to_owned())
+            .or_insert_with(|| crate::fold::context::RecordedCalleeDeclaration {
+                declaration: crate::ast::CExternDecl {
+                    name: name.to_owned(),
+                    ret_type: output.map_or(crate::ast::CType::Void, |dst| word(dst.size)),
+                    params: Some(inputs.iter().map(|input| word(input.size)).collect()),
+                    variadic: false,
+                    noreturn: false,
+                },
+                from_source_signature: false,
+            });
+    }
+
     fn assignment_lhs_expr(&self, _dst: &SSAVar) -> OpLoweringResult<CExpr> {
         match self.planned_current_output_expr() {
             Ok(Some(planned)) => Ok(planned),
@@ -1738,7 +1763,50 @@ impl<'a> FoldingContext<'a> {
             Ok(self.observed_input(frame, input_idx, self.get_expr(var)?))
         };
         Ok(match op {
-            SSAOp::CallOther { .. } | SSAOp::CpuId { .. } => {
+            // An operation the specification names and models no further is
+            // rendered as itself: a call to an operation of that name, with
+            // the operands it was given. That claims exactly what the machine
+            // does and nothing about what it means -- a barrier's ordering, a
+            // coprocessor access's effect -- which is the honest statement
+            // and the one a reader can act on. Refusing the whole function
+            // said less about more.
+            SSAOp::CallOther {
+                output,
+                userop,
+                inputs,
+            } => {
+                let Some(name) = self
+                    .inputs
+                    .function_facts
+                    .user_operation_name(*userop)
+                    .map(crate::ast::c_identifier)
+                else {
+                    // Without the table the index names nothing, and an
+                    // operation that cannot be identified must not be spelled.
+                    return Err(OpLoweringRefusal::missing_machine_projection());
+                };
+                let args = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, var)| input(index, var))
+                    .collect::<OpLoweringResult<Vec<_>>>()?;
+                self.record_machine_operation(&name, output.as_ref(), inputs);
+                let call = CExpr::call(
+                    CExpr::External {
+                        name,
+                        kind: crate::symbol::ExternalKind::Intrinsic,
+                    },
+                    args,
+                );
+                match output {
+                    Some(dst) => {
+                        let lhs = self.assignment_lhs_expr(dst)?;
+                        Some(CStmt::Expr(CExpr::assign(lhs, call)))
+                    }
+                    None => Some(CStmt::Expr(call)),
+                }
+            }
+            SSAOp::CpuId { .. } => {
                 return Err(OpLoweringRefusal::missing_machine_projection());
             }
             SSAOp::Load { space, .. } if *space != r2il::SpaceId::Ram => {

@@ -2054,7 +2054,9 @@ impl Disassembler {
 
         // Translate P-code to r2il
         let mut block = self.translate_pcode(pcode, addr)?;
-        crate::internal_control::normalize_instruction_local_control(&mut block);
+        crate::internal_control::normalize_instruction_local_control(&mut block, &|userop| {
+            self.user_op_name(userop).map(str::to_owned)
+        });
         Ok(block)
     }
 
@@ -2289,10 +2291,14 @@ impl Disassembler {
 
     /// Translate a single P-code instruction to an r2il operation.
     /// The name the architecture gives the user-defined operation at `index`.
+    /// Read from the specification rather than from the trust profile. What
+    /// an operation is called is data the specification carries, and taking it
+    /// from the optional profile meant every lift outside the plugin -- the
+    /// engine's own route among them -- saw no names, and so got none of the
+    /// expansions below.
     fn user_op_name(&self, index: u32) -> Option<&str> {
-        self.genuine_authority
-            .as_ref()?
-            .arch_spec()
+        self.spec
+            .arch
             .user_ops
             .get(index as usize)
             .map(String::as_str)

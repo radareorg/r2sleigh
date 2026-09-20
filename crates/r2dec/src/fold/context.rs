@@ -1557,6 +1557,28 @@ impl<'a> FoldingContext<'a> {
                     r2ssa::InstPayload::Op(r2ssa::SSAOp::Breakpoint) => {
                         obligation.id.kind == ObligationKind::Trap && inst.output == value
                     }
+                    // An ordering operation is the same argument again. A
+                    // fence renders as the statement that takes it and
+                    // carries no value at all; a linked load and a
+                    // conditional store carry theirs and owe the ordering and
+                    // the atomicity beside it. Without this every function
+                    // using a barrier or an exclusive pair was refused for
+                    // effects its rendering did state.
+                    r2ssa::InstPayload::Op(
+                        r2ssa::SSAOp::Fence { .. }
+                        | r2ssa::SSAOp::LoadLinked { .. }
+                        | r2ssa::SSAOp::StoreConditional { .. }
+                        | r2ssa::SSAOp::CallOther { .. },
+                    ) => {
+                        inst.output == value
+                            && matches!(
+                                obligation.id.kind,
+                                ObligationKind::MemoryOrdering
+                                    | ObligationKind::Atomicity
+                                    | ObligationKind::VolatileOrUnknownEffect
+                                    | ObligationKind::LiveValueProducer
+                            )
+                    }
                     _ => {
                         obligation.id.kind == ObligationKind::LiveValueProducer
                             && inst.output == value
