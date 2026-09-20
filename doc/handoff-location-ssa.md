@@ -30372,3 +30372,12 @@ What remains there, largest first: five `unprovable_execution_order`, five
 `missing_definition` instances are a slot whose binding holds only its own
 reloads -- read and never written in this body -- which is a different producer
 from the call result and not yet traced.
+
+The `missing_definition` instances are narrowed one step further. In
+`mbsstr_trimmed_wordbounded` the binding is a slot the debug information
+declares as a local at entry offset -112 with a type, which the body reads
+twice and never writes: it is part of an iterator the source fills through its
+address. Declaring it split it out of the object the callee writes, so nothing
+in the body assigns it. Whether a declared slot whose address reaches a call
+counts as written by that call is the question -- `callee_reached_frame_objects`
+already answers it for objects the body itself discovered.
