@@ -75,6 +75,9 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                     true_target,
                     false_target,
                 } => format!("jcc t:0x{:x} f:0x{:x}", true_target, false_target),
+                r2ssa::cfg::BlockTerminator::ConditionalExit { next } => {
+                    format!("ret? \u{2192} 0x{:x}", next)
+                }
                 r2ssa::cfg::BlockTerminator::Return => "ret".to_string(),
                 r2ssa::cfg::BlockTerminator::Call { target, .. } => format!("call 0x{:x}", target),
                 r2ssa::cfg::BlockTerminator::IndirectBranch => "jmp [reg]".to_string(),
@@ -247,6 +250,7 @@ pub(crate) fn r2cfg_function_json(
                 r2ssa::cfg::BlockTerminator::Fallthrough { .. } => "fallthrough",
                 r2ssa::cfg::BlockTerminator::Branch { .. } => "branch",
                 r2ssa::cfg::BlockTerminator::ConditionalBranch { .. } => "conditional",
+                r2ssa::cfg::BlockTerminator::ConditionalExit { .. } => "conditional_exit",
                 r2ssa::cfg::BlockTerminator::Return => "return",
                 r2ssa::cfg::BlockTerminator::Call { .. } => "call",
                 r2ssa::cfg::BlockTerminator::IndirectBranch => "indirect_branch",

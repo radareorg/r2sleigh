@@ -507,3 +507,92 @@ leftovers: `r_anal_sleigh.c` and `snapshot_capture.c` write that wire and
 the plugin column of `scripts/diff_capture.py`, which is the only instrument
 that grades a capture against a known-good one. The wire becomes deletable
 when the plugin path does, and not before.
+
+
+## ARM predication, resolved: one owner, and the majority case was never an exit
+
+The six-attempt chain above ended by asking the wrong question. A predicated
+instruction was being treated as a block that conditionally *leaves*, and the
+cost of saying so honestly kept rising: a new terminator, a predicate fact with
+no second target, a statement shape the renderer had never minted, and an
+obligation with no owner. Each layer that had to be taught about it is the
+project's own signal that the work sat in the wrong place.
+
+Counting settled it. In `libarm.so` -- 31,415 instructions, 1,000 functions --
+there are 997 predicated transfers, and **991 of them are `b<cond> label`**.
+Those are ordinary two-target conditional branches: both arms are real block
+addresses, and the existing `if`/`else` machinery renders them with nothing new
+at all. Only 6 are `bx<cond>` or `pop<cond> {pc}`, the shape that genuinely
+leaves. 255 of the 1,000 functions contain a predicated branch, so this is a
+quarter of the binary, not an edge case.
+
+That also retired the alternative. Sub-instruction block identity --
+`(address, p-code offset)`, which is Ghidra's model and would need no new
+terminator -- was costed at 88 files and roughly 2,270 line hits, with four
+explicit duplicate-address refusals and the fingerprint schema in the way. It
+is the right model in the abstract and the wrong one to buy for 6 instructions
+in 31,415.
+
+What landed:
+
+- **One owner for the fact.** `r2il::predicated_transfer` returns *which*
+  transfer a skip guards, and `r2il::guarded_transfer` the same for a slice.
+  An earlier boolean version of this was wrong: it reported only *that* a
+  transfer was guarded, so `beq label` -- which lifts to the same skip-plus-
+  transfer shape -- became an unconditional fall-through, silently losing the
+  branch target. Reporting the operation is what keeps the two cases apart.
+- `analyze_terminator` reads that owner before its reverse scan, which sees
+  only the last control operation. A guarded `Branch` becomes
+  `ConditionalBranch { true_target: next, false_target: label }`; a guarded
+  `Return` or `BranchInd` becomes the new `BlockTerminator::ConditionalExit`.
+  A guarded *call* is deliberately not included: both its arms reach the next
+  instruction, so its predicate guards an effect, not an edge, and nothing
+  renders that guard yet -- it keeps the old refusal.
+- Both of `disasm.rs`'s successor derivations read the same owner, so the
+  machine graph, the reachability walk and the terminator cannot disagree.
+- **`r2ssa::branch_condition`** is now the single answer to "which branch does
+  this block turn on", replacing a copy in `r2dec`'s `fold/flags.rs`. It
+  accepts a unique `CBranch` that either ends the block or guards its tail.
+  The old rule required the branch to be the block's *last* operation, which a
+  predicated one never is -- that alone blocked the 991-instruction majority.
+- `collect_predicate_facts` reads it too, so a predicated `b<cond>` gets the
+  predicate fact its rendering needs.
+- The guarded tail of a `ConditionalExit` block is rendered by the structurer
+  as `if (!cond) { <transfer> }`, splitting the block's folded statements at
+  the guard. The condition comes from the branch's own operand rather than a
+  predicate fact, because a fact carries the two blocks a test reaches and one
+  arm of this one reaches none.
+- The control certificate learned two things: a block that conditionally exits
+  expects one edge, the arm that stays (leaving is not an edge, exactly as
+  `Return` expects none); and control arriving at the text of the block it is
+  already inside continues that occurrence whatever label it carries, rather
+  than minting a duplicate.
+- `exact_control_obligations` now owns the branch *and* the transfer it
+  decides. It had used `rposition(is_control_flow)`, the last control
+  operation, which for a predicated block is the transfer -- leaving the
+  guard's own obligation unaccounted.
+
+Measured on the native gate (`--bins <radare2>/test/bins/elf --limit 24
+--functions 8 --native-only`): **rendered 83 -> 92, refused 15 -> 6**, with
+undefined reads unchanged at 1. No function that rendered before refuses now. `arm-init`'s dispatcher renders its
+guarded return and its tail call, and `arm1.bin`'s `save_for_backup` -- 257
+obligations, 0 refused -- renders its `beq` as an `if`/`else` and its
+`movge r4, r3` as a signed `min` ternary, both checked by eye against the
+disassembly.
+
+One harness defect was found and fixed on the way: `scripts/diff_capture.py`
+read `goto L2;` as a declaration of `L2`, because a word followed by a name and
+a semicolon is the shape it matches, and then reported the label as a read of
+something nothing assigns. It only surfaced when a function containing a `goto`
+newly rendered.
+
+### What ARM is behind now
+
+With predication no longer the gate, the dominant refusal on the predicated
+population is `missing machine projection authorization`, which is
+`MachineUseRefusal::UnsupportedOperation` reaching the journal as
+`RefusedRenderedUse`. On `libarm.so` it is 16 of a 40-function sample, up from
+2 at baseline -- the rise is the predication fix letting those functions get
+far enough to hit it. `machine.rs::lower_op`'s final `_ =>` arm is where an
+operation the machine model does not lower turns into that refusal; the next
+step is to name which operations land there on ARM.

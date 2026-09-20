@@ -499,9 +499,8 @@ struct Native<'a> {
 
 impl Native<'_> {
     fn walk(&self, entry: u64) -> Result<Walked, NativeRefusal> {
-        let mut body =
+        let body =
             lift_body(entry, self.target.disasm, self.program).map_err(NativeRefusal::Body)?;
-        self.name_indirect_tail_calls(&mut body);
         let callee_names = body
             .calls
             .iter()
@@ -515,62 +514,6 @@ impl Native<'_> {
             body,
             callee_names,
         })
-    }
-
-    /// Say that a branch leaving through a register is a call this body ends
-    /// with.
-    ///
-    /// A dispatcher jumps to an address it was handed -- ARM's `bx r0` is the
-    /// shape -- and that is an indirect call whose result is this function's,
-    /// which is what a tail call means. Spelled as a bare indirect branch it
-    /// is spelled by nobody: op lowering leaves it to the structurer, and the
-    /// structurer only names a target that dispatches a switch. Saying what
-    /// it is here lets the machinery every other call already uses render it.
-    fn name_indirect_tail_calls(&self, body: &mut r2ssa::body::Body) {
-        let Ok(link) = storage(self.target.arch, self.machine_return_address_name()) else {
-            return;
-        };
-        for block in &mut body.blocks {
-            let terminal = block.lifted.ops.len().saturating_sub(1);
-            let Some(r2il::R2ILOp::BranchInd { target }) = block.lifted.ops.get(terminal) else {
-                continue;
-            };
-            // A switch dispatches inside the body, and a slot read is the
-            // import stub the capture already names.
-            if block.lifted.switch_info.is_some()
-                || r2ssa::terminal_indirect_loaded_slot(&block.lifted, terminal).is_some()
-                || !block.successors.is_empty()
-            {
-                continue;
-            }
-            let target = target.clone();
-            block.lifted.ops[terminal] = r2il::R2ILOp::CallInd {
-                target: target.clone(),
-            };
-            block.lifted.ops.push(r2il::R2ILOp::Return {
-                target: r2il::Varnode {
-                    space: r2il::SpaceId::Register,
-                    offset: link.offset,
-                    size: link.size,
-                    meta: None,
-                },
-            });
-            r2il::refusal_evidence!(
-                "indirect-tail-call",
-                "{:#x} leaves through {target:?}, so it ends in an indirect call",
-                block.lifted.addr
-            );
-        }
-    }
-
-    /// The register a call leaves the return address in, or the program
-    /// counter where the machine pushes it instead.
-    fn machine_return_address_name(&self) -> &str {
-        self.target
-            .compiler
-            .return_address
-            .as_deref()
-            .unwrap_or_else(|| self.target.disasm.program_counter())
     }
 
     /// The text a prepared body points at.

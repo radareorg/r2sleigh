@@ -268,6 +268,11 @@ impl<'a> Walk<'a> {
                 self.continues(Some(after), &mut successors)
             }
             BlockTerminator::Branch { target } => self.transfer(target, &mut successors),
+            // The arm that leaves is this instruction's own transfer; only the
+            // arm that stays has anywhere for the walk to go.
+            BlockTerminator::ConditionalExit { next: after } => {
+                self.continues(Some(after), &mut successors)
+            }
             BlockTerminator::ConditionalBranch {
                 true_target,
                 false_target,
@@ -368,6 +373,9 @@ fn successors_of(terminator: &BlockTerminator, end: u64) -> Vec<(AdvisorySuccess
             vec![(AdvisorySuccessorKind::Fallthrough, *next)]
         }
         BlockTerminator::Branch { target } => vec![(AdvisorySuccessorKind::Direct, *target)],
+        BlockTerminator::ConditionalExit { next } => {
+            vec![(AdvisorySuccessorKind::Direct, *next)]
+        }
         BlockTerminator::ConditionalBranch {
             true_target,
             false_target,

@@ -1316,6 +1316,41 @@ pub struct R2ILBlock {
     pub op_metadata: BTreeMap<usize, OpMetadata>,
 }
 
+/// The transfer an instruction performs only when its predicate holds.
+///
+/// `ops` are the operations a predicate skips over. A transfer among them is
+/// the instruction's own -- ARM's `bxeq lr` returns, `beq` branches -- and it
+/// runs on one arm of the predicate only.
+///
+/// A call is not one. A predicated call reaches the next instruction either
+/// way, so its predicate guards an effect rather than an edge, and nothing
+/// downstream renders that guard yet.
+pub fn guarded_transfer(ops: &[R2ILOp]) -> Option<&R2ILOp> {
+    ops.iter().find(|op| {
+        matches!(
+            op,
+            R2ILOp::Return { .. } | R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }
+        )
+    })
+}
+
+/// The transfer these block operations perform only when a predicate holds.
+///
+/// A predicated instruction is lifted as a conditional branch over the
+/// instruction's own operations, targeting the instruction after it. That skip
+/// is one of the block's two machine edges and the transfer it guards is the
+/// other, so every derivation of where the block goes has to read the same
+/// pair. They ask here.
+pub fn predicated_transfer(ops: &[R2ILOp], next: u64) -> Option<&R2ILOp> {
+    let skip = ops.iter().position(|op| match op {
+        R2ILOp::CBranch { target, .. } => {
+            matches!(target.space, SpaceId::Const | SpaceId::Ram) && target.offset == next
+        }
+        _ => false,
+    })?;
+    guarded_transfer(&ops[skip + 1..])
+}
+
 impl R2ILBlock {
     /// Create a new empty block.
     pub fn new(addr: u64, size: u32) -> Self {

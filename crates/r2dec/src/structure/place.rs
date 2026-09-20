@@ -12,7 +12,7 @@ use r2ssa::SSAOp;
 use r2ssa::cfg::BlockTerminator;
 use r2ssa::domtree::DomTree;
 
-use crate::ast::{CExpr, CStmt, SwitchCase};
+use crate::ast::{CExpr, CStmt, SwitchCase, UnaryOp};
 use crate::structured_region::{StructuredRegionKind, StructuredRegionMarker};
 
 use super::{ControlFlowStructureResult, ControlFlowStructurer};
@@ -290,12 +290,23 @@ impl ControlFlowStructurer<'_, '_> {
             // observation targets for statements nobody emits.
             let entries = self.folded_block_entries(block, addr)?;
             self.mark_terminal_callee(block, addr, &entries);
-            stmts.extend(
-                entries
-                    .into_iter()
-                    .filter(|entry| !self.certified_for_header_sites.contains(&entry.site))
-                    .map(|entry| entry.stmt),
-            );
+            let guard = self.guarded_tail(block, addr);
+            let kept = entries
+                .into_iter()
+                .filter(|entry| !self.certified_for_header_sites.contains(&entry.site));
+            match guard {
+                Some((cond, tail)) => {
+                    let (before, guarded): (Vec<_>, Vec<_>) =
+                        kept.partition(|entry| entry.site.op_idx < tail);
+                    stmts.extend(before.into_iter().map(|entry| entry.stmt));
+                    let body = CStmt::Block(guarded.into_iter().map(|entry| entry.stmt).collect());
+                    stmts.push(self.observe_control_ownership(
+                        addr,
+                        CStmt::if_stmt(CExpr::unary(UnaryOp::Not, cond), body, None),
+                    ));
+                }
+                None => stmts.extend(kept.map(|entry| entry.stmt)),
+            }
         }
         stmts.extend(self.arms(placement, addr)?);
         for merge in placement
@@ -352,6 +363,21 @@ impl ControlFlowStructurer<'_, '_> {
         }
     }
 
+    /// The condition guarding this block's tail, and where that tail starts.
+    ///
+    /// Only a block that conditionally leaves has one: the predicate skips the
+    /// instruction that transfers, so the operations after the skip run when
+    /// the condition fails and the caller renders them negated.
+    fn guarded_tail(
+        &mut self,
+        block: &r2ssa::FunctionSSABlock,
+        addr: u64,
+    ) -> Option<(CExpr, usize)> {
+        let terminator = &self.func.cfg().get_block(addr)?.terminator;
+        matches!(terminator, BlockTerminator::ConditionalExit { .. }).then_some(())?;
+        self.fold_ctx.guarded_tail_condition(block)
+    }
+
     /// The block's terminator, one transfer per edge.
     fn arms(&mut self, placement: &Placement, addr: u64) -> ControlFlowStructureResult<Vec<CStmt>> {
         let Some(cfg_block) = self.func.cfg().get_block(addr) else {
@@ -367,7 +393,12 @@ impl ControlFlowStructurer<'_, '_> {
             }
             | BlockTerminator::IndirectCall {
                 fallthrough: Some(target),
-            } => self.edge(placement, addr, target),
+            }
+            // The arm that leaves is written by the predicated instruction's
+            // own statement, so only the arm that stays needs an edge here.
+            | BlockTerminator::ConditionalExit { next: target } => {
+                self.edge(placement, addr, target)
+            }
             BlockTerminator::ConditionalBranch {
                 true_target,
                 false_target,

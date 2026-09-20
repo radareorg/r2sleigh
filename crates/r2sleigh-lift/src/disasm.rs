@@ -961,6 +961,11 @@ fn genuine_block_successors(block: &GenuineLiftedBlock) -> Result<Vec<u64>> {
             )));
         }
     }
+    // Same fact, same owner: a predicated instruction transfers on one arm and
+    // continues to the next instruction on the other.
+    if let Some(successors) = predicated_successors(block, fallthrough) {
+        return Ok(successors);
+    }
     match block_terminator(block) {
         Some(R2ILOp::Return { .. } | R2ILOp::Breakpoint) => Ok(Vec::new()),
         Some(R2ILOp::Branch { target }) => constant_control_target(target)
@@ -1072,6 +1077,22 @@ fn validate_genuine_function_cfg(
     Ok(successor_manifest)
 }
 
+/// Whether this block leaves the function on one arm of a predicated
+/// instruction and continues to `fallthrough` on the other.
+///
+/// The guard Sleigh writes for a predicated instruction skips that
+/// instruction's own operations by naming the next instruction. Where those
+/// operations transfer, the block goes both ways: on to `fallthrough`, and
+/// wherever the transfer says. This is the same fact
+/// `BasicBlock::analyze_terminator` reads, asked in one place so the two
+/// graphs cannot disagree about it.
+fn predicated_successors(block: &GenuineLiftedBlock, fallthrough: u64) -> Option<Vec<u64>> {
+    match r2il::predicated_transfer(&block.block.ops, fallthrough)? {
+        R2ILOp::Branch { target } => Some(vec![fallthrough, constant_control_target(target)?]),
+        _ => Some(vec![fallthrough]),
+    }
+}
+
 fn typed_genuine_block_successors(
     block: &GenuineLiftedBlock,
 ) -> Result<Vec<(AdvisorySuccessorKind, u64, Option<u64>)>> {
@@ -1080,6 +1101,15 @@ fn typed_genuine_block_successors(
         .addr
         .checked_add(u64::from(block.block.size))
         .ok_or_else(|| LiftError::Parse("trusted block fallthrough overflows".to_string()))?;
+    // A predicated instruction is the one shape that both transfers and goes
+    // on: the guard skipping its transfer names the next instruction, and the
+    // transfer stays the block's last.
+    if let Some(successors) = predicated_successors(block, fallthrough) {
+        return Ok(successors
+            .into_iter()
+            .map(|target| (AdvisorySuccessorKind::Direct, target, None))
+            .collect());
+    }
     match block_terminator(block) {
         Some(R2ILOp::Return { .. } | R2ILOp::Breakpoint) => Ok(Vec::new()),
         Some(R2ILOp::Branch { target }) => constant_control_target(target)

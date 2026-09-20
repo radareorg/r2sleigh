@@ -11,6 +11,33 @@ use crate::name::{InternedName, intern_ascii_lowercase, intern_fmt};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 
+/// The single conditional branch this block turns on, and where it sits.
+///
+/// It ends the block, or it guards the block's tail: a predicated
+/// instruction's branch skips the instruction's own operations, so the
+/// transfer it decides stands after it. `r2il::guarded_transfer` is where the
+/// machine graph reads the same shape, and this is the SSA form of it.
+pub fn branch_condition(block: &SSABlock) -> Option<(usize, &SSAVar)> {
+    let terminal = block.ops.len().checked_sub(1)?;
+    let mut branches = block
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, op)| match op {
+            SSAOp::CBranch { cond, .. } => Some((idx, cond)),
+            _ => None,
+        });
+    let found = branches.next()?;
+    branches.next().is_none().then_some(())?;
+    let guards_tail = block.ops[found.0 + 1..].iter().any(|op| {
+        matches!(
+            op,
+            SSAOp::Return { .. } | SSAOp::Branch { .. } | SSAOp::BranchInd { .. }
+        )
+    });
+    (found.0 == terminal || guards_tail).then_some(found)
+}
+
 /// An SSA basic block containing versioned operations.
 ///
 /// Lifting produces one with no phis and renaming fills them in, so the two

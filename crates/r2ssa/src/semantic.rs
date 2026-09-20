@@ -13628,7 +13628,7 @@ fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) -> Predicat
                 true_target,
                 false_target,
             } => {
-                let Some(SSAOp::CBranch { cond, .. }) = block.ops.last() else {
+                let Some((_, cond)) = crate::branch_condition(block) else {
                     continue;
                 };
                 let id = PredicateId(next_predicate_id);

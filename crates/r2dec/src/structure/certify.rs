@@ -289,7 +289,12 @@ impl Walker<'_> {
     /// Control arriving at `block`'s text: the same occurrence when the text
     /// is merely continuing, a fresh one entered by every open end otherwise.
     fn enter_block(&mut self, open: Vec<OpenEnd>, block: u64) -> Vec<OpenEnd> {
-        if let [(id, EdgeLabel::Normal)] = open.as_slice()
+        // Any label, not just `Normal`: a predicated instruction puts part of
+        // its own block's text under an `if`, so control reaches that text
+        // carrying the arm's label. It is the same occurrence continuing --
+        // which `edges.is_empty()` still distinguishes from the block's text
+        // being rendered a second time.
+        if let [(id, _)] = open.as_slice()
             && self.occurrences[*id].block == block
             && self.occurrences[*id].edges.is_empty()
         {
@@ -890,6 +895,12 @@ fn expected_edges(
             (contract(*true_target), EdgeLabel::True),
             (contract(*false_target), EdgeLabel::False),
         ],
+        // Leaving the function is not an edge here, as `Return` shows: only
+        // the arm that stays has one, and the guard renders it as the `if`'s
+        // false arm because its true arm is the transfer.
+        BlockTerminator::ConditionalExit { next } => {
+            vec![(contract(*next), EdgeLabel::False)]
+        }
         BlockTerminator::Switch { cases, default } => {
             let mut by_target = BTreeMap::<u64, BTreeSet<u64>>::new();
             for (value, target) in cases {

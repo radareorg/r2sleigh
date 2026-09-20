@@ -63,6 +63,13 @@ pub enum BlockTerminator {
     Branch { target: u64 },
     /// Conditional branch with true and false targets.
     ConditionalBranch { true_target: u64, false_target: u64 },
+    /// Conditionally leaves the function, continuing at `next` otherwise.
+    ///
+    /// A predicated return or indirect transfer -- ARM's `bxeq lr` -- performs
+    /// its transfer on one arm and runs on to the next instruction on the
+    /// other. The arm that leaves has no block of its own: it is the tail of
+    /// this one.
+    ConditionalExit { next: u64 },
     /// Indirect branch (target unknown at compile time).
     IndirectBranch,
     /// Switch statement with multiple targets.
@@ -242,6 +249,27 @@ impl BasicBlock {
         continues: bool,
     ) -> BlockTerminator {
         let continuation = continues.then_some(fallthrough_addr);
+        // A predicated instruction transfers on one arm and continues to the
+        // next instruction on the other, so the block has both edges. Read
+        // before the scan below, which sees only the last control operation
+        // and would report the transfer as the block's only way out.
+        if let Some(next) = continuation {
+            match r2il::predicated_transfer(ops, next) {
+                Some(R2ILOp::Branch { target }) => {
+                    return match Self::extract_const_addr(target) {
+                        Some(addr) => BlockTerminator::ConditionalBranch {
+                            true_target: next,
+                            false_target: addr,
+                        },
+                        None => BlockTerminator::IndirectBranch,
+                    };
+                }
+                Some(R2ILOp::Return { .. } | R2ILOp::BranchInd { .. }) => {
+                    return BlockTerminator::ConditionalExit { next };
+                }
+                _ => {}
+            }
+        }
         // Look for control flow operations at the end
         for op in ops.iter().rev() {
             match op {
@@ -312,7 +340,9 @@ impl BasicBlock {
     /// Get the successor addresses of this block.
     pub fn successors(&self) -> Vec<u64> {
         match &self.terminator {
-            BlockTerminator::Fallthrough { next } => vec![*next],
+            BlockTerminator::Fallthrough { next } | BlockTerminator::ConditionalExit { next } => {
+                vec![*next]
+            }
             BlockTerminator::Branch { target } => vec![*target],
             BlockTerminator::ConditionalBranch {
                 true_target,
@@ -642,7 +672,9 @@ impl CFG {
         let terminator = block.terminator.clone();
 
         match terminator {
-            BlockTerminator::Fallthrough { next } | BlockTerminator::Branch { target: next } => {
+            BlockTerminator::Fallthrough { next }
+            | BlockTerminator::Branch { target: next }
+            | BlockTerminator::ConditionalExit { next } => {
                 if let Some(&target_idx) = self.addr_to_node.get(&next) {
                     self.graph.add_edge(node_idx, target_idx, CFGEdge::Normal);
                 }

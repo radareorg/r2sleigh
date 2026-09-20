@@ -643,7 +643,7 @@ fn body_proven_result(
         .filter(|value| graph.def_inst(value.id).is_some())
         .filter_map(|value| value.canonical_storage)
         .filter(|storage| storage.space == crate::CanonicalStorageSpace::Register)
-        .filter(|storage| !excluded.iter().any(|carrier| *carrier == Some(*storage)))
+        .filter(|storage| !excluded.contains(&Some(*storage)))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter_map(|candidate| {

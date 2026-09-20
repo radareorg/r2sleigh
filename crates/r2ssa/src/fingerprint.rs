@@ -195,6 +195,10 @@ fn hash_terminator(writer: &mut FingerprintWriter, terminator: &BlockTerminator)
         }
         BlockTerminator::Return => writer.tag(8),
         BlockTerminator::None => writer.tag(9),
+        BlockTerminator::ConditionalExit { next } => {
+            writer.tag(10);
+            writer.u64(*next);
+        }
     }
 }
 

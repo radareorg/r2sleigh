@@ -1,4 +1,4 @@
-use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
+use r2ssa::{FunctionSSABlock, SSAVar};
 
 use super::context::FoldingContext;
 use crate::ast::CExpr;
@@ -35,7 +35,7 @@ impl<'a> FoldingContext<'a> {
             r2il::refusal_evidence!("branch-condition", "block {:#x}: {gate}", block.addr);
             None::<(CExpr, r2ssa::PredicateId, r2ssa::ValueId)>
         };
-        let Some((branch_idx, cond)) = Self::unique_terminal_branch_condition(block) else {
+        let Some((branch_idx, cond)) = r2ssa::branch_condition(block) else {
             return declined("no single conditional branch ends the block");
         };
         let Some(predicate) = self
@@ -53,18 +53,21 @@ impl<'a> FoldingContext<'a> {
         Some((expr, predicate.id, predicate.condition))
     }
 
-    fn unique_terminal_branch_condition(block: &FunctionSSABlock) -> Option<(usize, &SSAVar)> {
-        let terminal_idx = block.ops.len().checked_sub(1)?;
-        let mut branches = block
-            .ops
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, op)| match op {
-                SSAOp::CBranch { cond, .. } => Some((idx, cond)),
-                _ => None,
-            });
-        let (branch_idx, cond) = branches.next()?;
-        (branches.next().is_none() && branch_idx == terminal_idx).then_some((branch_idx, cond))
+    /// The condition guarding this block's tail, and where that tail starts.
+    ///
+    /// A predicated instruction runs only when its condition fails: the branch
+    /// is the skip over it. The operations after the skip are the guarded
+    /// ones, so the caller renders them under the negated condition.
+    pub fn guarded_tail_condition(&self, block: &FunctionSSABlock) -> Option<(CExpr, usize)> {
+        let (branch_idx, _) = r2ssa::branch_condition(block)?;
+        if branch_idx + 1 >= block.ops.len() {
+            return None;
+        }
+        // The branch's own operand, read the way every operand is read. No
+        // predicate fact names this branch: a fact carries the two blocks a
+        // test reaches, and one arm of this one leaves the function.
+        let expr = self.exact_branch_input_expr(block.addr, branch_idx)?;
+        Some((expr, branch_idx + 1))
     }
 
     pub(super) fn resolve_predicate_rhs_for_var(&self, _src: &SSAVar, fallback: CExpr) -> CExpr {

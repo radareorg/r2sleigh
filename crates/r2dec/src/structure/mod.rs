@@ -415,8 +415,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             let Some(block) = self.func.blocks().iter().find(|block| block.addr == anchor) else {
                 continue;
             };
-            // The transfer, not whatever merge copy normalisation appended after it.
-            let Some(op_idx) = block
+            // The transfer, not whatever merge copy normalisation appended
+            // after it -- and the branch that decides it, which a predicated
+            // instruction leaves standing before the transfer rather than
+            // last. One statement renders both, so it owns both.
+            let Some(transfer) = block
                 .ops
                 .iter()
                 .rposition(|op| op.is_control_flow())
@@ -424,19 +427,26 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             else {
                 continue;
             };
-            let owned = self.fold_ctx.exact_effect_obligations_for_normalized_value(
-                crate::fold::context::EffectOccurrenceKind::Expression,
-                anchor,
-                op_idx,
-                None,
-            );
-            r2il::refusal_evidence!(
-                "control-ownership",
-                "{anchor:#x} op {op_idx} {:?} owns {} obligations",
-                block.ops[op_idx],
-                owned.len()
-            );
-            obligations.extend(owned);
+            let branch = r2ssa::branch_condition(block).map(|(idx, _)| idx);
+            for op_idx in [Some(transfer), branch]
+                .into_iter()
+                .flatten()
+                .collect::<BTreeSet<_>>()
+            {
+                let owned = self.fold_ctx.exact_effect_obligations_for_normalized_value(
+                    crate::fold::context::EffectOccurrenceKind::Expression,
+                    anchor,
+                    op_idx,
+                    None,
+                );
+                r2il::refusal_evidence!(
+                    "control-ownership",
+                    "{anchor:#x} op {op_idx} {:?} owns {} obligations",
+                    block.ops[op_idx],
+                    owned.len()
+                );
+                obligations.extend(owned);
+            }
         }
         obligations
     }
