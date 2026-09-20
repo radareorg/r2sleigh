@@ -50,6 +50,10 @@ pub trait Program: r2ssa::body::Program {
 pub struct NativeTarget<'a> {
     pub arch: &'a ArchSpec,
     pub disasm: &'a Disassembler,
+    /// The processor context the decoder runs in, as the snapshot's machine
+    /// tuple spells it. `arm` and `thumb` share an architecture, and this is
+    /// the one fact the trusted lift has to tell them apart.
+    pub cpu: &'a str,
     /// The convention every function is assumed to use, which is the one the
     /// data declares as the default until something says otherwise.
     pub convention: &'a Convention,
@@ -872,7 +876,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
 
     Ok(NativeMachine {
         arch_id: family.to_owned(),
-        cpu_id: family.to_owned(),
+        cpu_id: target.cpu.to_owned(),
         bits,
         endianness,
         roles,

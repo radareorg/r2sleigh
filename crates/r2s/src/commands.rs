@@ -303,6 +303,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let target = r2engine::native::NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,
@@ -310,6 +311,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let program = OpenImage {
         image: &session.image,
         imports: &session.imports,
+        slots: &session.slots,
         defined: &session.defined,
     };
     let response = r2engine::native::decompile(&target, &program, addr)
@@ -322,6 +324,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 struct OpenImage<'a> {
     image: &'a r2image::Image,
     imports: &'a std::collections::BTreeMap<u64, String>,
+    slots: &'a std::collections::BTreeMap<u64, String>,
     defined: &'a std::collections::BTreeMap<u64, crate::session::Definition>,
 }
 
@@ -351,12 +354,16 @@ impl r2engine::native::Program for OpenImage<'_> {
         // what a reader expects to see there.
         self.imports
             .get(&vaddr)
+            .or_else(|| self.slots.get(&vaddr))
             .or_else(|| self.defined.get(&vaddr).map(|defined| &defined.name))
             .cloned()
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {
-        self.imports.get(&vaddr).cloned()
+        self.imports
+            .get(&vaddr)
+            .or_else(|| self.slots.get(&vaddr))
+            .cloned()
     }
 }
 

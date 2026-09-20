@@ -155,11 +155,19 @@ fn section_stubs(
     section: &r2image::Section,
     slots: &BTreeMap<u64, &str>,
 ) -> Vec<(u64, String)> {
-    // Where each stub reads the slot the loader fills. One stub reads one
-    // slot, so the distance between two readers is the size the linker gave
-    // the cells, and neither a landing pad nor alignment padding can be
-    // mistaken for the start of one.
+    // Where each stub reads the slot the loader fills. A stub is a run of
+    // instructions ending in its transfer, and which slot that transfer reads
+    // is one question with one answer: the reaching-origin pass the engine
+    // asks when it correlates the site. x86 loads the slot directly and ARM
+    // computes its address across three instructions; both answer here.
     let mut readers: Vec<(u64, String)> = Vec::new();
+    let mut run = r2il::R2ILBlock {
+        addr: section.vaddr,
+        size: 0,
+        ops: Vec::new(),
+        switch_info: None,
+        op_metadata: BTreeMap::new(),
+    };
     let mut pc = section.vaddr;
     let end = section.vaddr + section.vsize;
     while pc < end {
@@ -179,26 +187,51 @@ fn section_stubs(
         if lifted.size == 0 {
             break;
         }
-        for op in &lifted.ops {
-            if let R2ILOp::Load { addr, .. } | R2ILOp::Store { addr, .. } = op
-                && matches!(addr.space, SpaceId::Ram | SpaceId::Const)
-                && let Some(found) = slots.get(&addr.offset)
-            {
-                readers.push((pc, (*found).to_owned()));
-            }
-        }
+        let leaves = lifted
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
+        run.ops.extend(lifted.ops);
+        run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
+        let leaving_at = pc;
         pc += u64::from(lifted.size);
+        if !leaves {
+            continue;
+        }
+        let terminal = run.ops.len().saturating_sub(1);
+        if let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
+            && let Some(found) = slots.get(&slot.offset)
+        {
+            readers.push((leaving_at, (*found).to_owned()));
+        }
+        run = r2il::R2ILBlock {
+            addr: pc,
+            size: 0,
+            ops: Vec::new(),
+            switch_info: None,
+            op_metadata: BTreeMap::new(),
+        };
     }
 
+    // The stubs are uniform cells filling the section's tail: whatever header
+    // the linker put first, the last cell ends where the section ends. That
+    // anchors every cell without deciding what a landing pad or an alignment
+    // nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
+    // twenty-byte header alike.
     let stride = match readers.as_slice() {
-        [first, second, ..] => second.0.checked_sub(first.0).unwrap_or(1),
+        [first, second, ..] => second.0.saturating_sub(first.0),
         [_] | [] => return readers,
     };
+    if stride == 0 {
+        return Vec::new();
+    }
+    let count = readers.len() as u64;
     readers
         .into_iter()
-        .filter_map(|(reader, symbol)| {
-            let cell = reader.checked_sub(section.vaddr)? / stride.max(1);
-            Some((section.vaddr + cell * stride, symbol))
+        .enumerate()
+        .filter_map(|(index, (_, symbol))| {
+            let from_end = count.checked_sub(index as u64)?.checked_mul(stride)?;
+            Some((end.checked_sub(from_end)?, symbol))
         })
         .collect()
 }

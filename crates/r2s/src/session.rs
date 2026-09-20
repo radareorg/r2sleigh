@@ -16,6 +16,10 @@ pub struct Session {
     /// Which stub stands for which import, by the import's own name.
     #[cfg(feature = "sleigh")]
     pub imports: std::collections::BTreeMap<u64, String>,
+    /// Which import each slot the loader fills stands for. A stub's tail
+    /// transfer names the slot it reads rather than any code address, so the
+    /// slot has to answer for the import too; only a stub is an entry.
+    pub slots: std::collections::BTreeMap<u64, String>,
     /// What this binary defines at each address, indexed once.
     ///
     /// The engine asks this per call target and per branch target of every
@@ -65,6 +69,7 @@ impl Session {
             flags: Flags::of(&image),
             #[cfg(feature = "sleigh")]
             imports: std::collections::BTreeMap::new(),
+            slots: std::collections::BTreeMap::new(),
             #[cfg(feature = "sleigh")]
             defined: definitions(&image),
             image,
@@ -89,6 +94,12 @@ impl Session {
                 .map_err(|error| error.to_string())?;
             // The import stubs can only be read once there is a decoder.
             self.imports = crate::flags::imports(&self.image, &machine.disasm);
+            self.slots = self
+                .image
+                .relocations()
+                .iter()
+                .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
+                .collect();
             self.flags.name_imports(&self.imports);
             self.machine = Some(machine);
             // Only where a function says it is Thumb, so a machine with no

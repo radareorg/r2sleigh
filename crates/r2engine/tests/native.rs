@@ -68,6 +68,7 @@ fn a_function_is_decompiled_from_bytes_alone() {
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,
@@ -102,6 +103,7 @@ fn an_address_the_program_does_not_map_refuses() {
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,
@@ -124,6 +126,7 @@ fn a_call_is_rendered_from_the_callee_body() {
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,
@@ -156,6 +159,7 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,
@@ -219,6 +223,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,
@@ -267,6 +272,7 @@ fn a_function_is_decompiled_on_aarch64_too() {
     let target = NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
+        cpu: machine.cpu,
         convention,
         compiler: &compiler,
         prototypes: &prototypes,

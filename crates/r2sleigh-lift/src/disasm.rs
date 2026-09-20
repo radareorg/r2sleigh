@@ -86,6 +86,8 @@ pub enum TrustedSleighProfile {
     #[cfg(feature = "arm")]
     ArmCortexLe,
     #[cfg(feature = "arm")]
+    ArmThumbLe,
+    #[cfg(feature = "arm")]
     Aarch64Le,
     #[cfg(feature = "arm")]
     Aarch64AppleSilicon,
@@ -126,6 +128,13 @@ impl TrustedSleighProfile {
             Self::ArmCortexLe => (
                 sleigh_config::processor_arm::SLA_ARM8_LE,
                 sleigh_config::processor_arm::PSPEC_ARMT,
+                "ARM",
+            ),
+            // The same language with TMode set: Ghidra's own Thumb decoder.
+            #[cfg(feature = "arm")]
+            Self::ArmThumbLe => (
+                sleigh_config::processor_arm::SLA_ARM8_LE,
+                sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
                 "ARM",
             ),
             #[cfg(feature = "arm")]
@@ -205,6 +214,10 @@ impl TrustedSleighProfile {
             ("x86", "x86", 64, SourceEndianness::Little) => Ok(Self::X86_64),
             #[cfg(feature = "arm")]
             ("arm", "arm", 64, SourceEndianness::Little) => Ok(Self::Aarch64Le),
+            #[cfg(feature = "arm")]
+            ("arm", "arm", 32, SourceEndianness::Little) => Ok(Self::ArmCortexLe),
+            #[cfg(feature = "arm")]
+            ("arm", "thumb", 32, SourceEndianness::Little) => Ok(Self::ArmThumbLe),
             _ => Err(LiftError::Unsupported(format!(
                 "no manually verified trusted Sleigh profile for source tuple {}/{}/{}/{:?}",
                 arch_id, cpu_id, bits, endianness
@@ -1487,6 +1500,10 @@ pub struct EmbeddedMachine {
     pub disasm: Disassembler,
     /// Ghidra's compiler specification, which names the stack pointer.
     pub compiler_spec: &'static str,
+    /// The processor context this machine decodes in, as the snapshot's
+    /// machine tuple spells it: `arm` and `thumb` share one instruction set
+    /// and one architecture name, and only this tells the trusted lift apart.
+    pub cpu: &'static str,
 }
 
 /// Load the embedded machine an architecture name selects.
@@ -1496,7 +1513,7 @@ pub struct EmbeddedMachine {
 /// one processor agrees about that; the prototype models, which do differ, are
 /// not read here.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    let (sla, pspec, cspec, name) = embedded_specification(&arch_name.to_ascii_lowercase())
+    let (sla, pspec, cspec, name, cpu) = embedded_specification(&arch_name.to_ascii_lowercase())
         .ok_or_else(|| {
             LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
         })?;
@@ -1505,12 +1522,19 @@ pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
         arch,
         disasm,
         compiler_spec: cspec,
+        cpu,
     })
 }
 
 /// The embedded data one lower-cased architecture name selects, if any is
 /// compiled in for it.
-type EmbeddedSpecification = (&'static [u8], &'static str, &'static str, &'static str);
+type EmbeddedSpecification = (
+    &'static [u8],
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
 
 fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
     match arch_name {
@@ -1520,12 +1544,14 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
             sleigh_config::processor_x86::PSPEC_X86_64,
             sleigh_config::processor_x86::CSPEC_X86_64_GCC,
             "x86-64",
+            "x86",
         )),
         #[cfg(feature = "x86")]
         "x86" | "x86-32" | "i386" | "i686" => Some((
             sleigh_config::processor_x86::SLA_X86,
             sleigh_config::processor_x86::PSPEC_X86,
             sleigh_config::processor_x86::CSPEC_X86GCC,
+            "x86",
             "x86",
         )),
         #[cfg(feature = "arm")]
@@ -1534,6 +1560,7 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
             sleigh_config::processor_aarch64::PSPEC_AARCH64,
             sleigh_config::processor_aarch64::CSPEC_AARCH64,
             "aarch64",
+            "arm",
         )),
         #[cfg(feature = "arm")]
         "arm" | "arm32" => Some((
@@ -1541,6 +1568,7 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
             sleigh_config::processor_arm::PSPEC_ARMT,
             sleigh_config::processor_arm::CSPEC_ARM,
             "ARM",
+            "arm",
         )),
         // The same instruction set with TMode set, which is how Ghidra itself
         // ships a Thumb decoder: one language, two processor contexts.
@@ -1550,6 +1578,7 @@ fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
             sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
             sleigh_config::processor_arm::CSPEC_ARM,
             "ARM",
+            "thumb",
         )),
         _ => None,
     }
@@ -2255,6 +2284,11 @@ impl Disassembler {
             Some("SoftwareBreakpoint") | Some("UndefinedInstructionException") => {
                 Some(vec![R2ILOp::Breakpoint])
             }
+            // ARM `bx` switches instruction set by the target's low bit. The
+            // p-code has already written the mode bit and masked the target
+            // by the time this fires, so the operation itself spells nothing
+            // more; which set a body decodes in is the function's own fact.
+            Some("setISAMode") => Some(Vec::new()),
             _ => None,
         };
         expanded.unwrap_or_else(|| vec![op])
@@ -4050,9 +4084,22 @@ mod tests {
 
     #[test]
     #[cfg(feature = "arm")]
+    fn trusted_arm32_tuples_select_the_instruction_set_the_symbol_named() {
+        assert_eq!(
+            TrustedSleighProfile::from_tuple("arm", "arm", 32, SourceEndianness::Little).unwrap(),
+            TrustedSleighProfile::ArmCortexLe
+        );
+        assert_eq!(
+            TrustedSleighProfile::from_tuple("arm", "thumb", 32, SourceEndianness::Little).unwrap(),
+            TrustedSleighProfile::ArmThumbLe
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
     fn trusted_arm64_radare_tuple_refuses_unverified_neighbors() {
         for (arch_id, cpu_id, bits, endianness) in [
-            ("arm", "arm", 32, SourceEndianness::Little),
+            ("arm", "arm", 32, SourceEndianness::Big),
             ("arm", "arm", 64, SourceEndianness::Big),
             ("aarch64", "arm", 64, SourceEndianness::Little),
             ("arm", "arm64", 64, SourceEndianness::Little),

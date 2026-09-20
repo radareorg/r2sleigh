@@ -2180,6 +2180,15 @@ pub fn terminal_indirect_loaded_slot(
                     _ => None,
                 }
             }
+            // ARM clears the low bit of a loaded target before branching to
+            // it: the bit selects the instruction set, not the address, so the
+            // value still names the slot it was loaded from.
+            R2ILOp::IntAnd { a, b, dst }
+                if b.space == SpaceId::Const
+                    && b.offset == truncated_raw_value(u64::MAX << 1, dst.size) =>
+            {
+                raw_value_origin(&origins, a)
+            }
             R2ILOp::Load {
                 dst,
                 space: SpaceId::Ram,
