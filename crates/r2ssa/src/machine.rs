@@ -404,12 +404,7 @@ impl MachineValueUse {
         let is_memory_address = site.input_idx == 0
             && matches!(
                 &inst.payload,
-                InstPayload::Op(
-                    SSAOp::Load { .. }
-                        | SSAOp::Store { .. }
-                        | SSAOp::LoadGuarded { .. }
-                        | SSAOp::StoreGuarded { .. }
-                )
+                InstPayload::Op(SSAOp::Load { .. } | SSAOp::Store { .. })
             );
         if !is_memory_address {
             return Ok(None);
