@@ -47,25 +47,6 @@ pub(crate) fn normalize_instruction_local_control(block: &mut R2ILBlock) {
                     .all(R2ILOp::is_speculatable_value)
                 {
                     rewrite_conditional_forward_branch(block, branch_index, target_index, cond);
-                } else if predicated_transfer_to_next_instruction(block, branch_index, target_index)
-                {
-                    // ARM predicates a whole instruction, transfers included:
-                    // `bxeq lr` returns or falls through. The skip over it is
-                    // a machine edge to the next instruction, not local
-                    // control the lift has to speculate past.
-                    block.ops[branch_index] = R2ILOp::CBranch {
-                        cond,
-                        target: Varnode {
-                            space: SpaceId::Ram,
-                            offset: block.addr.wrapping_add(u64::from(block.size)),
-                            size: block.ops[branch_index..]
-                                .iter()
-                                .find_map(transfer_target_size)
-                                .unwrap_or(8),
-                            meta: None,
-                        },
-                    };
-                    break;
                 } else {
                     block.ops[branch_index] = R2ILOp::Unimplemented;
                 }
@@ -327,37 +308,6 @@ impl LocalBranch {
         match self {
             Self::Unconditional(target) | Self::Conditional { target, .. } => target,
         }
-    }
-}
-
-/// Whether this local skip jumps over the instruction's own transfer to its
-/// end -- what a predicated `bxeq lr` or `moveq pc, lr` is.
-///
-/// The skipped operations end in a transfer and nothing follows them, so the
-/// only outcome the skip selects is "do not transfer, go on to the next
-/// instruction". That is an ordinary machine edge, and spelling it as one is
-/// what keeps a predicated return from refusing the function.
-fn predicated_transfer_to_next_instruction(
-    block: &R2ILBlock,
-    branch_index: usize,
-    target_index: usize,
-) -> bool {
-    target_index == block.ops.len()
-        && block.size != 0
-        && block.ops[branch_index + 1..]
-            .iter()
-            .any(|op| transfer_target_size(op).is_some())
-}
-
-/// The width of the control value a transfer reads, where the operation is one.
-fn transfer_target_size(op: &R2ILOp) -> Option<u32> {
-    match op {
-        R2ILOp::Return { target }
-        | R2ILOp::BranchInd { target }
-        | R2ILOp::Branch { target }
-        | R2ILOp::Call { target }
-        | R2ILOp::CallInd { target } => Some(target.size),
-        _ => None,
     }
 }
 
