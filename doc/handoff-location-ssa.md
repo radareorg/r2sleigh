@@ -30362,16 +30362,20 @@ With those, a call's result can be declined from the union that renames a slot
 after its values: the call renders an expression and the store is the statement
 that names what it produced.
 
-Measured over `cmp`, `sdiff`, `diff3` and `diff` -- DecBench's `-O0 -g`
-binaries -- refusals fall from 36 to 18 and rendered functions from 842 to 860
-of 878. Functions whose parameters are named from the source went from none to
-689, and those carrying at least one source-named local from none to 389.
+One more followed from reading those declarations: the compiler gives locals in
+disjoint scopes the same storage, and stating both as slots made the whole
+declaration unstatable -- so a function lost its parameter types to a pair of
+locals it never even rendered. Neither is stated now.
 
-What remains there, largest first: five `unprovable_execution_order`, five
-`missing_definition`, four `ConflictingValue`, two `OpLowering`. The
-`missing_definition` instances are a slot whose binding holds only its own
-reloads -- read and never written in this body -- which is a different producer
-from the call result and not yet traced.
+Measured over `cmp`, `sdiff`, `diff3` and `diff` -- DecBench's `-O0 -g`
+binaries -- refusals fall from 36 to 14 and rendered functions from 842 to 864
+of 878. `cmp` and `sdiff` refuse nothing at all. Functions whose parameters are
+named from the source went from none to 689, and those carrying at least one
+source-named local from none to 389.
+
+What remains there, largest first: five `unprovable_execution_order`, four
+`ConflictingValue`, two `OpLowering`, one each of `RenderedValueRequired`,
+`missing program-variable authorization` and `missing_definition`.
 
 The `missing_definition` instances are narrowed one step further. In
 `mbsstr_trimmed_wordbounded` the binding is a slot the debug information
