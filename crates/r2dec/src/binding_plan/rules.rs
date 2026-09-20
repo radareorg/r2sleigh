@@ -2541,7 +2541,8 @@ fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
         | Kind::PopulationCount { .. }
         | Kind::Divide { .. }
         | Kind::Remainder { .. }
-        | Kind::ExclusiveStoreSucceeded { .. } => false,
+        | Kind::ExclusiveStoreSucceeded { .. }
+        | Kind::GuardedRead { .. } => false,
     }
 }
 

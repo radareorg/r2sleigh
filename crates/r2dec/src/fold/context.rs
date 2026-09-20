@@ -1568,6 +1568,8 @@ impl<'a> FoldingContext<'a> {
                         r2ssa::SSAOp::Fence { .. }
                         | r2ssa::SSAOp::LoadLinked { .. }
                         | r2ssa::SSAOp::StoreConditional { .. }
+                        | r2ssa::SSAOp::LoadGuarded { .. }
+                        | r2ssa::SSAOp::StoreGuarded { .. }
                         | r2ssa::SSAOp::CallOther { .. },
                     ) => {
                         inst.output == value
@@ -1575,6 +1577,7 @@ impl<'a> FoldingContext<'a> {
                                 obligation.id.kind,
                                 ObligationKind::MemoryOrdering
                                     | ObligationKind::Atomicity
+                                    | ObligationKind::ControlPredicate
                                     | ObligationKind::VolatileOrUnknownEffect
                                     | ObligationKind::LiveValueProducer
                             )

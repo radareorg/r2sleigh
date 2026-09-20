@@ -653,7 +653,11 @@ impl Importer<'_> {
             // Whether a conditional store took is not a term the rewriter can
             // say anything about: it is not a function of the operands, so
             // nothing it could be rewritten into would mean the same.
-            | MachineExprKind::ExclusiveStoreSucceeded { .. } => None,
+            | MachineExprKind::ExclusiveStoreSucceeded { .. }
+            // A read that happens only under a condition is not a term over
+            // its address: rewriting it would move a read the program makes
+            // conditionally to somewhere it is made always.
+            | MachineExprKind::GuardedRead { .. } => None,
             // A lane insert is the root with one window replaced, which is what
             // joining the parts either side of that window says.
             MachineExprKind::InsertLane {

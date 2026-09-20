@@ -628,10 +628,18 @@ impl Builder<'_> {
                 self.require(id, 2, own.clone());
                 CValue::Typed(own)
             }
-            // The address of a read is a pointer to what is read.
+            // The address of a read is a pointer to what is read, and a
+            // guarded read states the condition it happens under beside it.
             MachineExprKind::MemoryRead { address, .. } => {
                 self.produced(*address);
                 self.require(id, 0, CTypeLike::ptr(own.clone()));
+                CValue::Typed(own)
+            }
+            MachineExprKind::GuardedRead { address, guard, .. } => {
+                self.produced(*address);
+                self.produced(*guard);
+                self.require(id, 0, CTypeLike::ptr(own.clone()));
+                self.require(id, 1, CTypeLike::Bool);
                 CValue::Typed(own)
             }
             // `__builtin_popcountll` takes an unsigned long long and returns

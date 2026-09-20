@@ -267,8 +267,8 @@ impl<'a> FoldingContext<'a> {
         // writes, so it does both. The statement each renders as accounts for
         // the memory it touches, the way a plain load or store does.
         let directions: &[bool] = match op {
-            SSAOp::Load { .. } | SSAOp::LoadLinked { .. } => &[false],
-            SSAOp::Store { .. } => &[true],
+            SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. } => &[false],
+            SSAOp::Store { .. } | SSAOp::StoreGuarded { .. } => &[true],
             SSAOp::StoreConditional { .. } => &[false, true],
             _ => &[],
         };

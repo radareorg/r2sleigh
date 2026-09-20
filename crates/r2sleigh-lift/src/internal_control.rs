@@ -570,57 +570,110 @@ fn guard_memory_in_range(
     }) {
         return false;
     }
-    let Some(guard) = InstructionTempAllocator::for_ops(&block.ops).allocate(1) else {
+    let mut allocator = InstructionTempAllocator::for_ops(&block.ops);
+    let Some(guard) = allocator.allocate(1) else {
         return false;
     };
     // The branch skips the access when the condition holds, so the access
     // happens when it does not.
-    let negate = R2ILOp::BoolNot {
-        dst: guard.clone(),
-        src: cond.clone(),
-    };
-    for index in range {
-        let op = &mut block.ops[index];
-        *op = match std::mem::replace(op, R2ILOp::Unimplemented) {
-            R2ILOp::Load { dst, space, addr } => R2ILOp::LoadGuarded {
-                dst,
-                space,
-                addr,
-                guard: guard.clone(),
-                // A predicated access orders nothing; a machine that wanted
-                // ordering spells a barrier beside it.
-                ordering: r2il::MemoryOrdering::Relaxed,
-            },
-            R2ILOp::Store { space, addr, val } => R2ILOp::StoreGuarded {
-                space,
-                addr,
-                val,
-                guard: guard.clone(),
-                ordering: r2il::MemoryOrdering::Relaxed,
-            },
-            other => other,
-        };
-    }
-    block.ops.insert(branch_index, negate);
-    block.op_metadata = shift_metadata(&block.op_metadata, branch_index);
-    true
-}
-
-/// The metadata of a block one operation was inserted into at `at`.
-fn shift_metadata(
-    metadata: &BTreeMap<usize, OpMetadata>,
-    at: usize,
-) -> BTreeMap<usize, OpMetadata> {
-    metadata
+    // Each guarded read adds the copy that takes its value, so a skip spelled
+    // as a count of operations has to count those too. The guard itself goes
+    // before the branch and so leaves the distance alone.
+    let inserted = block.ops[range.clone()]
         .iter()
-        .map(|(index, meta)| {
-            let moved = match *index >= at {
-                true => index + 1,
-                false => *index,
-            };
-            (moved, meta.clone())
-        })
-        .collect()
+        .filter(|op| matches!(op, R2ILOp::Load { .. }))
+        .count();
+    let mut rewritten = Vec::with_capacity(block.ops.len() + guarded + 1);
+    let mut metadata = BTreeMap::new();
+    for (index, op) in block.ops.iter().enumerate() {
+        if index == branch_index {
+            push_with_old_metadata(
+                &mut rewritten,
+                &mut metadata,
+                R2ILOp::BoolNot {
+                    dst: guard.clone(),
+                    src: cond.clone(),
+                },
+                &block.op_metadata,
+                index,
+            );
+        }
+        if index == branch_index
+            && let R2ILOp::CBranch { target, cond } = op
+            && target.space == SpaceId::Const
+        {
+            push_with_old_metadata(
+                &mut rewritten,
+                &mut metadata,
+                R2ILOp::CBranch {
+                    target: Varnode {
+                        offset: target.offset.wrapping_add(inserted as u64),
+                        ..target.clone()
+                    },
+                    cond: cond.clone(),
+                },
+                &block.op_metadata,
+                index,
+            );
+            continue;
+        }
+        let guarded = match op {
+            // The read goes to a temporary and the destination takes it
+            // through an ordinary copy, because what the destination holds
+            // when the guard does not hold is what it held before -- and a
+            // guarded load writing the destination outright would claim
+            // otherwise. The copy is the one operation the skip rewrite
+            // speculates, and its select is exactly that claim.
+            R2ILOp::Load { dst, space, addr } => allocator.allocate(dst.size).map(|read| {
+                vec![
+                    R2ILOp::LoadGuarded {
+                        dst: read.clone(),
+                        space: *space,
+                        addr: addr.clone(),
+                        guard: guard.clone(),
+                        // A predicated access orders nothing; a machine that
+                        // wanted ordering spells a barrier beside it.
+                        ordering: r2il::MemoryOrdering::Relaxed,
+                    },
+                    R2ILOp::Copy {
+                        dst: dst.clone(),
+                        src: read,
+                    },
+                ]
+            }),
+            R2ILOp::Store { space, addr, val } => Some(vec![R2ILOp::StoreGuarded {
+                space: *space,
+                addr: addr.clone(),
+                val: val.clone(),
+                guard: guard.clone(),
+                ordering: r2il::MemoryOrdering::Relaxed,
+            }]),
+            _ => None,
+        };
+        match guarded.filter(|_| range.contains(&index)) {
+            Some(ops) => {
+                for op in ops {
+                    push_with_old_metadata(
+                        &mut rewritten,
+                        &mut metadata,
+                        op,
+                        &block.op_metadata,
+                        index,
+                    );
+                }
+            }
+            None => push_with_old_metadata(
+                &mut rewritten,
+                &mut metadata,
+                op.clone(),
+                &block.op_metadata,
+                index,
+            ),
+        }
+    }
+    block.ops = rewritten;
+    block.op_metadata = metadata;
+    true
 }
 
 fn push_unimplemented(
@@ -900,6 +953,63 @@ mod tests {
         assert_eq!(select.2, &result);
         assert_eq!(select.3.space, SpaceId::Unique);
         assert_ne!(select.3, &result);
+    }
+
+    #[test]
+    fn conditional_relative_branch_over_a_load_guards_it_and_selects_the_value() {
+        // The read carries the condition, and what the destination holds when
+        // the condition does not hold is what it held before -- which is the
+        // selection the skip rewrite already emits, over an ordinary copy.
+        let cond = Varnode::register(0x20, 1);
+        let dst = Varnode::register(0x30, 4);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.ops = vec![
+            R2ILOp::CBranch {
+                target: Varnode::constant(2, 8),
+                cond: cond.clone(),
+            },
+            R2ILOp::Load {
+                dst: dst.clone(),
+                space: SpaceId::Ram,
+                addr: Varnode::register(0x28, 4),
+            },
+        ];
+
+        normalize_instruction_local_control(&mut block, &|_| None);
+
+        let R2ILOp::BoolNot { dst: guard, src } = block.ops.first().expect("the guard") else {
+            panic!("{:?}", block.ops);
+        };
+        assert_eq!(src, &cond);
+        let read = block
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                R2ILOp::LoadGuarded {
+                    dst, guard: stated, ..
+                } if stated == guard => Some(dst.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{:?}", block.ops));
+        // The read goes to a temporary of its own, never to the register.
+        assert_eq!(read.space, SpaceId::Unique);
+        assert!(
+            block.ops.iter().any(|op| matches!(
+                op,
+                R2ILOp::Select { dst: selected, cond: on, if_true, .. }
+                    if selected == &dst && on == &cond && if_true == &dst
+            )),
+            "{:?}",
+            block.ops
+        );
+        assert!(
+            !block
+                .ops
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Unimplemented | R2ILOp::Load { .. })),
+            "{:?}",
+            block.ops
+        );
     }
 
     #[test]

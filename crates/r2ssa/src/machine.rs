@@ -74,7 +74,9 @@ fn memory_access_authorities_match(
     }
 
     match graph_op {
-        SSAOp::Load { dst, addr, .. } | SSAOp::LoadLinked { dst, addr, .. } => {
+        SSAOp::Load { dst, addr, .. }
+        | SSAOp::LoadLinked { dst, addr, .. }
+        | SSAOp::LoadGuarded { dst, addr, .. } => {
             !fact.is_write
                 && graph.value_id_for_var(addr) == Some(fact.address)
                 && fact.value == graph.value_id_for_var(dst)
@@ -90,6 +92,12 @@ fn memory_access_authorities_match(
                     false => fact.id.ordinal == 0 && fact.value.is_none(),
                     true => fact.id.ordinal == 1 && fact.value == graph.value_id_for_var(val),
                 }
+        }
+        SSAOp::StoreGuarded { addr, val, .. } => {
+            fact.is_write
+                && graph.value_id_for_var(addr) == Some(fact.address)
+                && fact.value == graph.value_id_for_var(val)
+                && fact.width == val.size
         }
         SSAOp::Store { addr, val, .. } => {
             let addressed = fact.is_write && graph.value_id_for_var(addr) == Some(fact.address);
@@ -115,6 +123,26 @@ fn memory_access_authorities_match(
             }
         }
         _ => false,
+    }
+}
+
+/// Whether a read names exactly the operands its kind has.
+///
+/// A plain or linked read names its address and nothing else; a guarded one
+/// names its condition after it.
+fn read_operands_are_exact(op: Option<&SSAOp>, inputs: &[ValueId], address: ValueId) -> bool {
+    match op {
+        Some(SSAOp::LoadGuarded { .. }) => inputs.len() == 2 && inputs.first() == Some(&address),
+        Some(_) => inputs == [address],
+        None => false,
+    }
+}
+
+/// The operation an instruction performs, where it performs one.
+fn source_op_of(inst: &GraphInst) -> Option<&SSAOp> {
+    match &inst.payload {
+        InstPayload::Op(op) => Some(op),
+        InstPayload::Phi { .. } => None,
     }
 }
 
@@ -376,7 +404,12 @@ impl MachineValueUse {
         let is_memory_address = site.input_idx == 0
             && matches!(
                 &inst.payload,
-                InstPayload::Op(SSAOp::Load { .. } | SSAOp::Store { .. })
+                InstPayload::Op(
+                    SSAOp::Load { .. }
+                        | SSAOp::Store { .. }
+                        | SSAOp::LoadGuarded { .. }
+                        | SSAOp::StoreGuarded { .. }
+                )
             );
         if !is_memory_address {
             return Ok(None);
@@ -1006,6 +1039,22 @@ pub enum MachineExprKind {
     Phi {
         inputs: Box<[MachineExprId]>,
     },
+    /// The read this instruction performs where its guard holds.
+    ///
+    /// A predicated load reads memory only under its condition, so the read
+    /// itself carries that condition. What the destination holds otherwise is
+    /// what it held before, which the selection the lift writes beside this
+    /// states; here the claim is only about the access.
+    GuardedRead {
+        access: StructuredAccessId,
+        object: ObjectId,
+        space: MachineAddressSpace,
+        endianness: MachineMemoryEndianness,
+        word_size_bytes: u32,
+        address: MachineExprId,
+        guard: MachineExprId,
+        width_bits: u32,
+    },
     /// Whether the conditional store at this instruction took.
     ///
     /// The one value on a machine that is not a function of its operands: two
@@ -1060,6 +1109,7 @@ impl MachineExprKind {
                 if_true,
                 if_false,
             } => vec![*condition, *if_true, *if_false],
+            Self::GuardedRead { address, guard, .. } => vec![*address, *guard],
             Self::ExclusiveStoreSucceeded { address, value } => vec![*address, *value],
             Self::Phi { inputs } => inputs.to_vec(),
         }
@@ -2658,7 +2708,8 @@ impl MachineFunction {
             .arena
             .iter()
             .filter_map(|(_, expression)| match expression.kind() {
-                MachineExprKind::MemoryRead { address, .. } => Some(*address),
+                MachineExprKind::MemoryRead { address, .. }
+                | MachineExprKind::GuardedRead { address, .. } => Some(*address),
                 _ => None,
             })
             .chain(self.store_addresses.iter().map(|(_, node)| *node))
@@ -2959,6 +3010,16 @@ impl MachineFunction {
                         .iter()
                         .all(|input| child(*input).is_ok_and(same_width))
             }
+            MachineExprKind::GuardedRead {
+                address,
+                guard,
+                width_bits,
+                ..
+            } => {
+                child(*address).is_ok()
+                    && child(*guard).is_ok_and(|guard| matches!(guard.ty, MachineType::Bool { .. }))
+                    && *width_bits == expr.ty.width_bits()
+            }
             MachineExprKind::ExclusiveStoreSucceeded { address, value } => {
                 child(*address).is_ok()
                     && child(*value).is_ok()
@@ -3061,7 +3122,7 @@ impl MachineFunction {
         entity: &MachineEntity,
         root: &MachineExpr,
     ) -> Result<(), MachineBuildError> {
-        let MachineExprKind::MemoryRead {
+        let (MachineExprKind::MemoryRead {
             access,
             object,
             space,
@@ -3069,7 +3130,17 @@ impl MachineFunction {
             word_size_bytes,
             address,
             width_bits,
-        } = &root.kind
+        }
+        | MachineExprKind::GuardedRead {
+            access,
+            object,
+            space,
+            endianness,
+            word_size_bytes,
+            address,
+            width_bits,
+            ..
+        }) = &root.kind
         else {
             return Err(MachineBuildError::EntityMismatch(inst.id));
         };
@@ -3084,7 +3155,7 @@ impl MachineFunction {
                     && !fact.is_write
                     && fact.id.ordinal == 0
                     && fact.value == Some(entity.output.value)
-                    && inst.inputs.as_slice() == [fact.address]
+                    && read_operands_are_exact(source_op_of(inst), &inst.inputs, fact.address)
             })
             .ok_or(MachineBuildError::EntityMismatch(inst.id))?;
         let source_space = artifact
@@ -3092,7 +3163,9 @@ impl MachineFunction {
             .memory_space_at(fact.block_addr, fact.op_index)
             .ok_or(MachineBuildError::MachineContextMismatch)?;
         let source_op = match &inst.payload {
-            InstPayload::Op(op @ (SSAOp::Load { .. } | SSAOp::LoadLinked { .. })) => op,
+            InstPayload::Op(
+                op @ (SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }),
+            ) => op,
             _ => {
                 r2il::refusal_evidence!(
                     "machine-entity",
@@ -3308,8 +3381,10 @@ impl MachineBuilder {
             }
             self.record_whole_use(graph, inst, input_idx)?;
         }
-        if let InstPayload::Op(op @ (SSAOp::Store { .. } | SSAOp::StoreConditional { .. })) =
-            &inst.payload
+        if let InstPayload::Op(
+            op
+            @ (SSAOp::Store { .. } | SSAOp::StoreConditional { .. } | SSAOp::StoreGuarded { .. }),
+        ) = &inst.payload
         {
             self.intern_store_address(artifact, inst, op)?;
         }
@@ -3810,7 +3885,8 @@ impl MachineBuilder {
             }
             // A linked load reads what a plain one reads: the linkage it sets
             // is an effect of the instruction, not a property of the value.
-            SSAOp::Load { .. } | SSAOp::LoadLinked { .. } => {
+            // A guarded one reads the same, under its condition.
+            SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. } => {
                 let accesses = artifact
                     .facts()
                     .structured
@@ -3855,7 +3931,9 @@ impl MachineBuilder {
                             )
                         })
                     })
-                    || inst.inputs.as_slice() != [access.address]
+                    // A guarded read states its condition beside the
+                    // address; every other read names the address alone.
+                    || !read_operands_are_exact(Some(op), &inst.inputs, access.address)
                     || width_bits == 0
                     || width_bits != output.width_bits
                     || !model.is_available()
@@ -3880,15 +3958,41 @@ impl MachineBuilder {
                     space_model.address_bits(),
                 )?;
                 self.record_whole_use(graph, inst, 0)?;
+                let Some(guard) = inst.inputs.get(1).copied() else {
+                    return Ok((
+                        unsigned,
+                        MachineExprKind::MemoryRead {
+                            access: access.id,
+                            object: access.object,
+                            space,
+                            endianness: space_model.endianness(),
+                            word_size_bytes: space_model.word_size_bytes(),
+                            address,
+                            width_bits,
+                        },
+                    ));
+                };
+                let guard_value = graph
+                    .value(guard)
+                    .ok_or(MachineBuildError::MissingGraphValue(guard))?;
+                let binding = binding_for_value(guard_value)?;
+                let guard = self.intern_value_with_type(
+                    guard_value,
+                    MachineType::Bool {
+                        storage_bits: binding.width_bits,
+                    },
+                )?;
+                self.record_whole_use(graph, inst, 1)?;
                 Ok((
                     unsigned,
-                    MachineExprKind::MemoryRead {
+                    MachineExprKind::GuardedRead {
                         access: access.id,
                         object: access.object,
                         space,
                         endianness: space_model.endianness(),
                         word_size_bytes: space_model.word_size_bytes(),
                         address,
+                        guard,
                         width_bits,
                     },
                 ))
@@ -4682,6 +4786,9 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
         ) | (
             SSAOp::StoreConditional { .. },
             MachineExprKind::ExclusiveStoreSucceeded { .. }
+        ) | (
+            SSAOp::LoadGuarded { .. },
+            MachineExprKind::GuardedRead { .. }
         ) | (SSAOp::CallDefine { .. }, MachineExprKind::Source { .. })
             | (SSAOp::Copy { .. }, MachineExprKind::Copy { .. })
             | (SSAOp::CallRestore { .. }, MachineExprKind::Copy { .. })
@@ -5094,6 +5201,7 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         }
         SSAOp::Load { .. }
         | SSAOp::LoadLinked { .. }
+        | SSAOp::LoadGuarded { .. }
         | SSAOp::Copy { .. }
         | SSAOp::CallRestore { .. }
         | SSAOp::IntAdd { .. }
