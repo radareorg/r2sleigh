@@ -30203,14 +30203,30 @@ ninety-six-bit stack object was declared `BitVector(96)` by the rule that names
 it while the rule that checks a declaration read a bitvector's width only above
 what C's integers reach, so it had no width at all.
 
-The `ConflictingUse` class is already traced and is one shape: the same use
-site is observed twice, once elided as a dead stack base and once recorded
-exactly. Whether the base is dead is decided from the symbols of the rendered
-expression -- a spelling that names the object absorbs it, one that names the
-stack pointer does not -- so a use the renderer spells in two places with two
-spellings gets two answers for one cell. The observation is keyed by use site
-and the rendering is not, which is the same seam as the rewriter reporting
-where a read moved.
+The `ConflictingUse` class is traced to its cause and the obvious fix is
+measured and rejected. The conflicting use is a guarded access's address: the
+renderer absorbs the stack base into the object's name and elides it, while
+the machine projection records it exactly, so one cell has two answers. It has
+two answers because `memory_address_for_use` -- the rule that decides whether
+an operand is a memory address rather than an ordinary value -- names `Load`
+and `Store` and not `LoadGuarded` and `StoreGuarded`.
+
+Adding them was tried and costs more than it buys: eleven functions gain and
+eighteen lose, because where the memory context cannot describe a guarded
+access's address the canonical disposition becomes `Refused` rather than the
+`Exact` value it was, and the gap that would cover it reaches a control
+transfer. The next step is that second defect -- why `memory_address_for_access`
+has no context for those addresses -- and not the filter, which only moves the
+refusal.
+
+Two things were cleared out of the way of that measurement. A condition flag
+the function was entered with has no producer, so the machine model called
+every operation reading it unsupported: a hundred and forty-five times in this
+library against one refusal of every other kind. And every constant whose bytes
+read as text was taken for the address of a string, which is almost any pair of
+bytes -- a structure offset of eighty rendered as the string at address eighty,
+two bytes of the ELF header, because `.shstrtab` is reported at address zero
+and so covered the start of the image.
 
 What remains, largest first: 25 functions refuse with `ConflictingUse`; 25 at
 the effect ledger with five conflicting occurrences, always at a
