@@ -17,10 +17,8 @@
 //! control flow, and a wrong edge is worse than a missing one.
 
 use crate::SSAOp;
-use crate::cfg::BlockTerminator;
 use crate::function::{SSAFunction, SsaArtifact};
 use crate::graph::{GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
-use std::collections::BTreeMap;
 
 /// A call site and the table entries it can reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,45 +27,6 @@ pub struct ResolvedIndirectCall {
     pub op_index: usize,
     pub table_address: u64,
     pub targets: Vec<u64>,
-}
-
-/// Inclusive bounds on one value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Interval {
-    low: i128,
-    high: i128,
-}
-
-impl Interval {
-    const fn unbounded() -> Self {
-        Self {
-            low: i128::MIN,
-            high: i128::MAX,
-        }
-    }
-
-    fn meet(self, other: Self) -> Self {
-        Self {
-            low: self.low.max(other.low),
-            high: self.high.min(other.high),
-        }
-    }
-
-    /// The smallest interval containing both.
-    ///
-    /// A disjunction holds when either side does, so what is proven is the
-    /// union. Between two intervals the union may have a hole, and covering the
-    /// hole is the conservative direction: it claims less about the value.
-    fn join(self, other: Self) -> Self {
-        Self {
-            low: self.low.min(other.low),
-            high: self.high.max(other.high),
-        }
-    }
-
-    const fn is_empty(self) -> bool {
-        self.low > self.high
-    }
 }
 
 /// One table of function pointers as the caller sees it.
@@ -92,13 +51,6 @@ impl PointerTable for r2source::SourceCodePointerTable {
     }
 }
 
-/// How far a value may be chased back through its definitions.
-///
-/// Every step is exact, so the limit is not about soundness: it bounds the work
-/// on code that defines a value through a long chain, and a chain that runs off
-/// the end simply proves nothing.
-const MAX_DEFINITION_DEPTH: usize = 32;
-
 pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) -> Option<ValueId> {
     let value = *inst.inputs.get(input_idx)?;
     graph
@@ -111,337 +63,11 @@ pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) 
         .then_some(value)
 }
 
-/// Move a bound off a computed value and onto the value it was computed from.
-///
-/// Hardware compares by subtracting: the zero flag is not `x == 3` but
-/// `x - 3 == 0`. The two say the same thing about `x`, and only the second is
-/// written down, so a bound on the difference has to be shifted back onto `x`
-/// before it can meet a bound stated about `x` directly.
-///
-/// Shifting is exact only while it stays inside the width the subtraction was
-/// done at. Past that the machine wraps, the true set of values wraps with it,
-/// and an interval can no longer describe it -- so the bound is dropped.
-fn rebase(graph: &SsaGraph, value: ValueId, interval: Interval) -> Option<(ValueId, Interval)> {
-    let mut value = value;
-    let mut interval = interval;
-    for _ in 0..MAX_DEFINITION_DEPTH {
-        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
-            return Some((value, interval));
-        };
-        let (source, offset) = match &inst.payload {
-            InstPayload::Op(SSAOp::IntSub { .. }) => {
-                match crate::constant::folded_value(graph, exact_input(graph, inst, 1)?) {
-                    Some(constant) => (exact_input(graph, inst, 0)?, i128::from(constant)),
-                    None => return Some((value, interval)),
-                }
-            }
-            InstPayload::Op(SSAOp::IntAdd { .. }) => {
-                let left = exact_input(graph, inst, 0)?;
-                let right = exact_input(graph, inst, 1)?;
-                match (
-                    crate::constant::folded_value(graph, right),
-                    crate::constant::folded_value(graph, left),
-                ) {
-                    (Some(constant), _) => (left, -i128::from(constant)),
-                    (_, Some(constant)) => (right, -i128::from(constant)),
-                    _ => return Some((value, interval)),
-                }
-            }
-            _ => return Some((value, interval)),
-        };
-        let width = graph.value(source)?.var.size * 8;
-        if width == 0 || width > 64 {
-            return Some((value, interval));
-        }
-        let ceiling = 1i128 << width;
-        let shifted = Interval {
-            low: interval.low.checked_add(offset)?,
-            high: interval.high.checked_add(offset)?,
-        };
-        if interval.low < 0
-            || interval.high >= ceiling
-            || shifted.low < 0
-            || shifted.high >= ceiling
-        {
-            return Some((value, interval));
-        }
-        let next = crate::constant::root_of(graph, source);
-        if next == value {
-            return Some((value, interval));
-        }
-        value = next;
-        interval = shifted;
-    }
-    Some((value, interval))
-}
-
-/// The bound a comparison places on one side when it is known to hold.
-///
-/// Only a comparison against a value we can pin says anything usable here: two
-/// unknown values bound each other and neither is pinned.
-fn bound_from_comparison(
-    graph: &SsaGraph,
-    inst: &GraphInst,
-    holds: bool,
-) -> Option<(ValueId, Interval)> {
-    let InstPayload::Op(op) = &inst.payload else {
-        return None;
-    };
-    // Equality pins a value exactly when it holds, and says nothing usable when
-    // it does not: "anything but seven" is not a range.
-    if let SSAOp::IntEqual { .. } | SSAOp::IntNotEqual { .. } = op {
-        let equal = matches!(op, SSAOp::IntEqual { .. }) == holds;
-        if !equal {
-            return None;
-        }
-        let left = exact_input(graph, inst, 0)?;
-        let right = exact_input(graph, inst, 1)?;
-        for (value, other) in [(left, right), (right, left)] {
-            if let Some(pinned) = crate::constant::folded_value(graph, other) {
-                let pinned = i128::from(pinned);
-                return rebase(
-                    graph,
-                    crate::constant::root_of(graph, value),
-                    Interval {
-                        low: pinned,
-                        high: pinned,
-                    },
-                );
-            }
-        }
-        return None;
-    }
-    let (strict, signed) = match op {
-        SSAOp::IntSLess { .. } => (true, true),
-        SSAOp::IntSLessEqual { .. } => (false, true),
-        SSAOp::IntLess { .. } => (true, false),
-        SSAOp::IntLessEqual { .. } => (false, false),
-        _ => return None,
-    };
-    let a = exact_input(graph, inst, 0)?;
-    let b = exact_input(graph, inst, 1)?;
-    // An unsigned comparison also proves the value is not negative, which is
-    // half the bound a table index needs.
-    let floor = if signed { i128::MIN } else { 0 };
-    // A signed comparison reads its literal as signed at the compared width;
-    // an unsigned one reads the same bits as a magnitude.
-    let literal = |value: ValueId| -> Option<i128> {
-        let bits = crate::constant::folded_value(graph, value)?;
-        let width = graph.value(value)?.var.size * 8;
-        if signed && (1..64).contains(&width) {
-            Some(i128::from((bits as i64) << (64 - width) >> (64 - width)))
-        } else if signed {
-            Some(i128::from(bits as i64))
-        } else {
-            Some(i128::from(bits))
-        }
-    };
-    if let Some(limit) = literal(b) {
-        // a < limit, or its negation limit <= a
-        let interval = if holds {
-            Interval {
-                low: floor,
-                high: if strict { limit - 1 } else { limit },
-            }
-        } else {
-            Interval {
-                low: if strict { limit } else { limit + 1 },
-                high: i128::MAX,
-            }
-        };
-        return rebase(graph, crate::constant::root_of(graph, a), interval);
-    }
-    if let Some(limit) = literal(a) {
-        // limit < b, or its negation b <= limit
-        let interval = if holds {
-            Interval {
-                low: if strict { limit + 1 } else { limit },
-                high: i128::MAX,
-            }
-        } else {
-            Interval {
-                low: floor,
-                high: if strict { limit } else { limit - 1 },
-            }
-        };
-        return rebase(graph, crate::constant::root_of(graph, b), interval);
-    }
-    None
-}
-
-/// The bound a branch condition places, following how the condition was built.
-///
-/// Hardware does not compare and branch in one step: the comparison lands in a
-/// flag, the flag is copied, and the branch tests it -- often inverted. Each of
-/// those is followed here, because the proof is about the comparison and not
-/// about which register the answer travelled in.
-fn bound_from_condition(
-    graph: &SsaGraph,
-    condition: ValueId,
-    holds: bool,
-    depth: usize,
-) -> Option<(ValueId, Interval)> {
-    if depth >= MAX_DEFINITION_DEPTH {
-        return None;
-    }
-    let inst = graph
-        .def_inst(condition)
-        .and_then(|inst| graph.inst(inst))?;
-    let InstPayload::Op(op) = &inst.payload else {
-        return None;
-    };
-    match op {
-        SSAOp::Copy { .. } => {
-            bound_from_condition(graph, exact_input(graph, inst, 0)?, holds, depth + 1)
-        }
-        SSAOp::BoolNot { .. } => {
-            bound_from_condition(graph, exact_input(graph, inst, 0)?, !holds, depth + 1)
-        }
-        // A condition built from two others bounds a value only when both sides
-        // bound the same value: otherwise each says something about a different
-        // thing and neither survives the combination.
-        SSAOp::BoolOr { .. } | SSAOp::BoolAnd { .. } => {
-            let disjunction = matches!(op, SSAOp::BoolOr { .. }) == holds;
-            let (left_value, left) =
-                bound_from_condition(graph, exact_input(graph, inst, 0)?, holds, depth + 1)?;
-            let (right_value, right) =
-                bound_from_condition(graph, exact_input(graph, inst, 1)?, holds, depth + 1)?;
-            if left_value != right_value {
-                return None;
-            }
-            // Either side may hold, so the union; both must hold, so the
-            // intersection.
-            let combined = if disjunction {
-                left.join(right)
-            } else {
-                left.meet(right)
-            };
-            Some((left_value, combined))
-        }
-        _ => bound_from_comparison(graph, inst, holds),
-    }
-}
-
-/// Bounds that hold on every path reaching `call_block`.
-///
-/// Control flow is read from the graph rather than re-derived from the branch
-/// operand: the graph is what the rest of the analysis agrees on, and a proof
-/// that disagreed with it about which edge goes where would be proving
-/// something about a different function.
-fn proven_bounds(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    call_block: u64,
-) -> BTreeMap<ValueId, Interval> {
-    let mut bounds = BTreeMap::new();
-    for block in function.blocks() {
-        if block.addr == call_block || !function.domtree().dominates(block.addr, call_block) {
-            continue;
-        }
-        let Some((op_index, SSAOp::CBranch { cond, .. })) =
-            block.ops.iter().enumerate().next_back()
-        else {
-            continue;
-        };
-        let Some(branch_inst) = graph
-            .inst_id_for_op_site(block.addr, op_index)
-            .and_then(|inst| graph.inst(inst))
-        else {
-            continue;
-        };
-        // CBranch input zero is its control target; the predicate is the
-        // second exact graph use.
-        let Some(condition) = exact_input(graph, branch_inst, 1) else {
-            continue;
-        };
-        if graph.value_id_for_var(cond) != Some(condition) {
-            continue;
-        }
-        let Some(BlockTerminator::ConditionalBranch {
-            true_target,
-            false_target,
-        }) = function
-            .cfg()
-            .get_block(block.addr)
-            .map(|basic| &basic.terminator)
-        else {
-            continue;
-        };
-        // The branch tells us which way we came only when one side leads here
-        // and the other cannot. If both reach the call, it says nothing.
-        let holds = match (
-            function.domtree().dominates(*true_target, call_block),
-            function.domtree().dominates(*false_target, call_block),
-        ) {
-            (true, false) => true,
-            (false, true) => false,
-            _ => continue,
-        };
-        if let Some((value, interval)) = bound_from_condition(graph, condition, holds, 0) {
-            let merged = bounds
-                .get(&value)
-                .copied()
-                .unwrap_or_else(Interval::unbounded)
-                .meet(interval);
-            bounds.insert(value, merged);
-        }
-    }
-    bounds
-}
-
-/// Split an address into the table it indexes and the value indexing it.
-fn table_and_index(graph: &SsaGraph, address: ValueId) -> Option<(u64, ValueId, u64)> {
-    let address = crate::constant::root_of(graph, address);
-    let inst = graph.def_inst(address).and_then(|inst| graph.inst(inst))?;
-    let InstPayload::Op(SSAOp::IntAdd { .. }) = &inst.payload else {
-        return None;
-    };
-    let left = exact_input(graph, inst, 0)?;
-    let right = exact_input(graph, inst, 1)?;
-    // Either operand may carry the base; the other has to scale an index.
-    for (base, scaled) in [(left, right), (right, left)] {
-        let Some(base_value) = crate::constant::folded_value(graph, base) else {
-            continue;
-        };
-        let scaled = crate::constant::root_of(graph, scaled);
-        let Some(scale_inst) = graph.def_inst(scaled).and_then(|inst| graph.inst(inst)) else {
-            continue;
-        };
-        let (index, scale) = match &scale_inst.payload {
-            InstPayload::Op(SSAOp::IntMult { .. }) => {
-                let a = exact_input(graph, scale_inst, 0)?;
-                let b = exact_input(graph, scale_inst, 1)?;
-                match (
-                    crate::constant::folded_value(graph, b),
-                    crate::constant::folded_value(graph, a),
-                ) {
-                    (Some(scale), _) => (a, scale),
-                    (_, Some(scale)) => (b, scale),
-                    _ => continue,
-                }
-            }
-            InstPayload::Op(SSAOp::IntLeft { .. }) => {
-                let index = exact_input(graph, scale_inst, 0)?;
-                let shift = exact_input(graph, scale_inst, 1)?;
-                match crate::constant::folded_value(graph, shift) {
-                    Some(shift) if shift < 8 => (index, 1u64 << shift),
-                    _ => continue,
-                }
-            }
-            _ => continue,
-        };
-        if scale == 0 {
-            continue;
-        }
-        return Some((base_value, crate::constant::root_of(graph, index), scale));
-    }
-    None
-}
-
 /// Resolve every indirect transfer whose reachable target set can be proven.
 fn resolve_indirect_calls_in_graph<T: PointerTable>(
     function: &SSAFunction,
     graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
     tables: &[T],
 ) -> Vec<ResolvedIndirectCall> {
     let mut resolved = Vec::new();
@@ -479,7 +105,18 @@ fn resolve_indirect_calls_in_graph<T: PointerTable>(
             let Some(address) = exact_input(graph, load_inst, 0) else {
                 continue;
             };
-            let Some((base, index, scale)) = table_and_index(graph, address) else {
+            // What the address can be is what the table read selects: the
+            // low bound is the first entry, the stride is how far apart the
+            // entries it steps through are, and the high bound is the last.
+            // Decomposing the address syntactically and then proving a bound
+            // on the index separately is what this replaces.
+            let Some(reach) = values
+                .get(address)
+                .filter(|reach| !reach.is_top() && !reach.is_bottom())
+            else {
+                continue;
+            };
+            let (Some((base, last)), Some(stride)) = (reach.bounds(), reach.stride()) else {
                 continue;
             };
             // The base need not be the address the table was read from: a table
@@ -494,35 +131,21 @@ fn resolve_indirect_calls_in_graph<T: PointerTable>(
             }) else {
                 continue;
             };
-            // The index steps through this table only if it steps by one entry.
-            // Any other stride selects something the read never described, so
-            // the entry it lands on is not a fact about this table.
-            if scale != u64::from(table.entry_size()) {
+            // Stepping by anything but one entry selects something the read
+            // never described, so where it lands is not a fact about this
+            // table.
+            if stride != u64::from(table.entry_size()) {
                 continue;
             }
-            let bounds = proven_bounds(function, graph, block.addr);
-            let Some(interval) = bounds.get(&index).copied() else {
-                continue;
-            };
-            if interval.is_empty() || interval.low < 0 {
-                continue;
-            }
-            let first = (base - table.address()) / u64::from(table.entry_size());
-            let entries = i128::try_from(table.targets().len()).unwrap_or(0);
-            let Some(low) = interval.low.checked_add(i128::from(first)) else {
-                continue;
-            };
-            let Some(high) = interval.high.checked_add(i128::from(first)) else {
-                continue;
-            };
-            // A range reaching past the last entry we read is not proven: the
+            let entry_size = u64::from(table.entry_size());
+            let first = (base - table.address()) / entry_size;
+            let last = (last - table.address()) / entry_size;
+            // A range reaching past the last entry read is not proven: the
             // table may continue where the read stopped.
-            if high >= entries {
+            if last as usize >= table.targets().len() {
                 continue;
             }
-            let low = usize::try_from(low).unwrap_or(usize::MAX);
-            let high = usize::try_from(high).unwrap_or(usize::MAX);
-            let Some(selected) = table.targets().get(low..=high) else {
+            let Some(selected) = table.targets().get(first as usize..=last as usize) else {
                 continue;
             };
             if selected.is_empty() {
@@ -545,7 +168,12 @@ pub fn resolve_indirect_calls<T: PointerTable>(
     artifact: &SsaArtifact,
     tables: &[T],
 ) -> Vec<ResolvedIndirectCall> {
-    resolve_indirect_calls_in_graph(artifact.function(), artifact.graph(), tables)
+    resolve_indirect_calls_in_graph(
+        artifact.function(),
+        artifact.graph(),
+        &artifact.facts().values,
+        tables,
+    )
 }
 
 #[cfg(test)]
@@ -582,7 +210,12 @@ mod tests {
     ) -> Vec<ResolvedIndirectCall> {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg.clone());
         let graph = SsaGraph::from_function(&function);
-        resolve_indirect_calls_in_graph(&function, &graph, tables)
+        // The dispatch is resolved from what the address can be, so the test
+        // solves for that exactly as the analysis phase does.
+        let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
+        let values =
+            crate::values::solve_value_ranges(&graph, &function, &predicates, &Default::default());
+        resolve_indirect_calls_in_graph(&function, &graph, &values, tables)
     }
 
     /// The graph for a straight guard: entry dominates both arms.

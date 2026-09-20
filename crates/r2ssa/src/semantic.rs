@@ -2114,7 +2114,7 @@ impl PreparedFunctionFacts {
             .values()
             .map(|fact| fact.header)
             .collect::<std::collections::BTreeSet<_>>();
-        let values = crate::values::solve_value_ranges(graph, &widen_at);
+        let values = crate::values::solve_value_ranges(graph, function, &predicates, &widen_at);
         let (bounded, total) = values.bounded();
         r2il::refusal_evidence!("value-ranges", "{bounded} of {total} values bounded");
         phase("values", bounded);
@@ -13180,6 +13180,16 @@ fn collect_structured_recursive_call_facts(
         );
     }
     recursive_calls
+}
+
+/// The predicates one function's branches establish, for a test that needs
+/// the same narrowing the analysis phase gets.
+#[cfg(test)]
+pub(crate) fn collect_predicate_facts_for_test(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+) -> PredicateFacts {
+    collect_predicate_facts(function, graph)
 }
 
 fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) -> PredicateFacts {

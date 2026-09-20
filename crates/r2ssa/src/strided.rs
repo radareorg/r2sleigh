@@ -269,6 +269,36 @@ impl StridedInterval {
         self.bounded(stride, low, high)
     }
 
+    /// A remainder is smaller than its divisor, and no larger than what it
+    /// divides. That is the bound a table indexed by `x % n` needs, and it
+    /// holds whatever the dividend was.
+    pub fn rem(&self, divisor: &Self) -> Self {
+        let width = self.width_bits;
+        let (Some((_, dividend)), Some((low, high))) = (self.bounds(), divisor.bounds()) else {
+            return Self::bottom(width);
+        };
+        // A divisor that can be nought says nothing: the division does not
+        // happen, and the width is the only honest answer.
+        match low >= 1 {
+            true => Self::interval(width, 0, dividend.min(high.saturating_sub(1))),
+            false => Self::top(width),
+        }
+    }
+
+    /// A quotient shrinks by at least the smallest its divisor can be.
+    pub fn div(&self, divisor: &Self) -> Self {
+        let width = self.width_bits;
+        let (Some((dividend_low, dividend_high)), Some((low, high))) =
+            (self.bounds(), divisor.bounds())
+        else {
+            return Self::bottom(width);
+        };
+        match low >= 1 {
+            true => Self::interval(width, dividend_low / high, dividend_high / low),
+            false => Self::top(width),
+        }
+    }
+
     /// A mask keeps the values below it, which is how a modulo by a power of
     /// two is spelled and how an alignment is imposed.
     pub fn and_mask(&self, mask: u64) -> Self {
@@ -518,6 +548,36 @@ mod tests {
         assert!(wide.shr(80).is_top() || wide.shr(80).as_constant() == Some(0));
         assert!(wide.shl(80).is_top() || wide.shl(80).as_constant() == Some(0));
         assert_eq!(wide.bounds(), Some((0, u64::MAX)));
+    }
+
+    #[test]
+    fn a_remainder_is_smaller_than_its_divisor_whatever_it_divides() {
+        let anything = StridedInterval::top(32);
+        let three = StridedInterval::constant(32, 3);
+        assert_eq!(anything.rem(&three).bounds(), Some((0, 2)));
+        // A dividend smaller than the divisor is its own remainder's bound.
+        assert_eq!(
+            StridedInterval::interval(32, 0, 1).rem(&three).bounds(),
+            Some((0, 1))
+        );
+        // A divisor that can be nought divides nothing, so nothing is proven.
+        assert!(anything.rem(&StridedInterval::interval(32, 0, 4)).is_top());
+    }
+
+    #[test]
+    fn a_quotient_shrinks_by_what_divides_it() {
+        let hundred = StridedInterval::interval(32, 10, 100);
+        assert_eq!(
+            hundred.div(&StridedInterval::constant(32, 10)).bounds(),
+            Some((1, 10))
+        );
+        // The widest quotient takes the smallest divisor, and the narrowest
+        // the largest.
+        assert_eq!(
+            hundred.div(&StridedInterval::interval(32, 2, 5)).bounds(),
+            Some((2, 50))
+        );
+        assert!(hundred.div(&StridedInterval::top(32)).is_top());
     }
 
     #[test]
