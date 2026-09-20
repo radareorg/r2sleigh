@@ -653,35 +653,93 @@ fn fixed_width_integer(spelling: &str) -> Option<CTypeLike> {
 
 /// The spellings whose width depends on the target, plus the plain C keywords.
 fn named_integer_bits(spelling: &str, ptr_bits: u32) -> Option<(u32, Signedness)> {
-    let (base, signedness) = match spelling.strip_prefix("unsigned") {
-        Some(rest) => (rest.trim(), Signedness::Unsigned),
-        None => match spelling.strip_prefix("signed") {
-            Some(rest) => (rest.trim(), Signedness::Signed),
-            None => (spelling, Signedness::Signed),
-        },
-    };
-    let base = if base.is_empty() { "int" } else { base };
-    let bits = match base {
-        "char" => 8,
-        "short" | "short int" => 16,
-        "int" => 32,
-        "long" | "long int" | "size_t" | "ssize_t" | "uintptr_t" | "intptr_t" | "ptrdiff_t" => {
-            ptr_bits
+    // The declared names first: each stands for one integer type and none of
+    // them combines with a specifier.
+    match spelling {
+        "size_t" | "uintptr_t" => return Some((ptr_bits, Signedness::Unsigned)),
+        "ssize_t" | "intptr_t" | "ptrdiff_t" => return Some((ptr_bits, Signedness::Signed)),
+        _ => {}
+    }
+    // Then the specifiers, in any order, because C says their order is
+    // immaterial and the debug information takes it at its word: GCC writes
+    // `long unsigned int`, which no leading-`unsigned` rule reads.
+    let mut signed = None;
+    let mut longs = 0u32;
+    let mut short = false;
+    let mut char_ = false;
+    let mut int = false;
+    for token in spelling.split_whitespace() {
+        match token {
+            "unsigned" => signed = Some(Signedness::Unsigned),
+            "signed" => signed = Some(Signedness::Signed),
+            "long" => longs += 1,
+            "short" => short = true,
+            "char" => char_ = true,
+            "int" => int = true,
+            _ => return None,
         }
-        "long long" | "long long int" => 64,
-        _ => return None,
+    }
+    // `unsigned` alone is `unsigned int`; `long` alone is `long int`.
+    if !(int || char_ || short || longs > 0 || signed.is_some()) {
+        return None;
+    }
+    // A `char` is neither `short` nor `long` and a `short` is not `long`, so a
+    // spelling combining them is not a type this states a width for.
+    if char_ && (short || longs > 0 || int) || (short && longs > 0) || longs > 2 {
+        return None;
+    }
+    let bits = match (char_, short, longs) {
+        (true, _, _) => 8,
+        (_, true, _) => 16,
+        (_, _, 0) => 32,
+        (_, _, 1) => ptr_bits,
+        (_, _, _) => 64,
     };
-    let signedness = match base {
-        "size_t" | "uintptr_t" => Signedness::Unsigned,
-        "ssize_t" | "intptr_t" | "ptrdiff_t" => Signedness::Signed,
-        _ => signedness,
-    };
-    Some((bits, signedness))
+    Some((bits, signed.unwrap_or(Signedness::Signed)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// C says the order of type specifiers is immaterial, and the debug
+    /// information takes it at its word: GCC writes `long unsigned int`.
+    #[test]
+    fn integer_specifiers_are_read_in_any_order() {
+        let unsigned_long = CTypeLike::Int {
+            bits: 64,
+            signedness: Signedness::Unsigned,
+        };
+        for spelling in ["unsigned long", "long unsigned", "long unsigned int"] {
+            assert_eq!(
+                parse_c_type_like(spelling, 64),
+                Some(unsigned_long.clone()),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            parse_c_type_like("short unsigned int", 64),
+            Some(CTypeLike::Int {
+                bits: 16,
+                signedness: Signedness::Unsigned
+            })
+        );
+        assert_eq!(
+            parse_c_type_like("long long unsigned int", 64),
+            Some(CTypeLike::Int {
+                bits: 64,
+                signedness: Signedness::Unsigned
+            })
+        );
+    }
+
+    /// A run of specifiers that names no type states no width.
+    #[test]
+    fn specifiers_that_do_not_combine_name_nothing() {
+        for spelling in ["short long", "long char", "short char int"] {
+            assert_eq!(parse_c_type_like(spelling, 64), None, "{spelling}");
+        }
+    }
+
     /// radare2's own spellings, which arrive dotted and unspaced.
     ///
     /// These are what `canonicalize_writeback_apply_type_name` was rewriting by
