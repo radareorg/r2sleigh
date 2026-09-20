@@ -84,6 +84,12 @@ impl r2ssa::body::Program for Fixture {
 }
 
 impl Program for Fixture {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        // The fixture maps one run of instruction bytes and declares no
+        // sections, so nothing in it is a place a string could live.
+        false
+    }
+
     fn name_at(&self, vaddr: u64) -> Option<String> {
         (vaddr == BASE).then(|| self.name.to_owned())
     }
@@ -242,6 +248,10 @@ impl r2ssa::body::Program for Importing {
 }
 
 impl Program for Importing {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
     fn name_at(&self, vaddr: u64) -> Option<String> {
         self.import_at(vaddr)
             .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))

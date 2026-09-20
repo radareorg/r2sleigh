@@ -93,6 +93,14 @@ pub struct Section {
     pub file_offset: u64,
     pub file_size: u64,
     pub is_code: bool,
+    /// Whether the loader maps this section, so `vaddr` is an address at all.
+    ///
+    /// A section the loader ignores -- `.shstrtab`, `.symtab`, the debug
+    /// sections -- is reported at address zero, which makes it appear to cover
+    /// the start of the image. A consumer asking what lives at an address got
+    /// `.shstrtab` for everything below its size, which is how a structure
+    /// offset of eighty came to be rendered as the string at address eighty.
+    pub loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +180,19 @@ fn is_arm32(arch: &ImageArch) -> bool {
 /// indirect symbol table (`reserved1`) and how wide one entry is
 /// (`reserved2`), and the table says which symbol each entry stands for. That
 /// is the whole mapping, and it needs no bind-opcode interpreter.
+/// Whether the loader maps this section, asked of the format rather than
+/// guessed from the address.
+///
+/// ELF says so outright with `SHF_ALLOC`. The other formats have no section a
+/// loader ignores in the same way, so a section they declare is mapped.
+fn section_is_loaded<'a>(section: &impl object::read::ObjectSection<'a>) -> bool {
+    const SHF_ALLOC: u64 = 0x2;
+    match section.flags() {
+        object::SectionFlags::Elf { sh_flags } => sh_flags & SHF_ALLOC != 0,
+        _ => true,
+    }
+}
+
 fn macho_indirect_symbols(file: &object::File<'_>, data: &[u8]) -> Vec<Relocation> {
     match file {
         object::File::MachO64(macho) => indirect_symbols(macho, data),
@@ -461,6 +482,7 @@ impl Image {
                     file_offset,
                     file_size,
                     is_code: section.kind() == object::SectionKind::Text,
+                    loaded: section_is_loaded(&section),
                 }
             })
             .collect();
@@ -885,23 +907,28 @@ mod dynamic_symbol_tests {
         }
         let shoff = out.len() as u64;
 
-        let mut section = |name: u32, kind: u32, addr: u64, offset: u64, size: u64, link: u32| {
-            out.extend_from_slice(&name.to_le_bytes());
-            out.extend_from_slice(&kind.to_le_bytes());
-            out.extend_from_slice(&0u64.to_le_bytes()); // sh_flags
-            out.extend_from_slice(&addr.to_le_bytes());
-            out.extend_from_slice(&offset.to_le_bytes());
-            out.extend_from_slice(&size.to_le_bytes());
-            out.extend_from_slice(&link.to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
-            out.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign
-            out.extend_from_slice(&if kind == 11 { 24u64 } else { 0 }.to_le_bytes());
-        };
-        section(0, 0, 0, 0, 0, 0); // the null section
-        section(1, 1, TEXT, TEXT, 3, 0); // .text
-        section(7, 3, 0, dynstr, names.len() as u64, 0); // .dynstr
-        section(15, 11, 0, dynsym, 48, 2); // .dynsym, linked to .dynstr
-        section(23, 3, 0, shstrtab, sections.len() as u64, 0); // .shstrtab
+        // `sh_flags`: SHF_ALLOC marks what the loader maps, and only that.
+        const ALLOC: u64 = 0x2;
+        const EXEC: u64 = 0x4;
+        let mut section =
+            |name: u32, kind: u32, flags: u64, addr: u64, offset: u64, size: u64, link: u32| {
+                out.extend_from_slice(&name.to_le_bytes());
+                out.extend_from_slice(&kind.to_le_bytes());
+                out.extend_from_slice(&flags.to_le_bytes());
+                out.extend_from_slice(&addr.to_le_bytes());
+                out.extend_from_slice(&offset.to_le_bytes());
+                out.extend_from_slice(&size.to_le_bytes());
+                out.extend_from_slice(&link.to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+                out.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign
+                out.extend_from_slice(&if kind == 11 { 24u64 } else { 0 }.to_le_bytes());
+            };
+        section(0, 0, 0, 0, 0, 0, 0); // the null section
+        section(1, 1, ALLOC | EXEC, TEXT, TEXT, 3, 0); // .text
+        section(7, 3, ALLOC, 0, dynstr, names.len() as u64, 0); // .dynstr
+        section(15, 11, ALLOC, 0, dynsym, 48, 2); // .dynsym, linked to .dynstr
+        // The section-header string table is not mapped, and so has no address.
+        section(23, 3, 0, 0, shstrtab, sections.len() as u64, 0); // .shstrtab
 
         let mut header = Vec::new();
         header.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
@@ -933,6 +960,26 @@ mod dynamic_symbol_tests {
         out[..64].copy_from_slice(&header);
         out[64..120].copy_from_slice(&program);
         out
+    }
+
+    #[test]
+    fn a_section_the_loader_ignores_is_not_a_place_data_lives() {
+        // `.shstrtab` has no virtual address, so it is reported at zero and
+        // appears to cover the start of the image. A consumer asking what
+        // lives at an address got it for everything below its size, which is
+        // how a structure offset of eighty came to be rendered as the string
+        // at address eighty.
+        let image = Image::parse(stripped_library()).expect("the fixture parses");
+        let named = |name: &str| {
+            image
+                .sections()
+                .iter()
+                .find(|section| section.name == name)
+                .unwrap_or_else(|| panic!("{name} is in the fixture"))
+                .loaded
+        };
+        assert!(named(".text"));
+        assert!(!named(".shstrtab"));
     }
 
     #[test]

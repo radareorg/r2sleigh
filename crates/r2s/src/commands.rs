@@ -453,6 +453,15 @@ impl r2engine::native::Program for OpenImage<'_> {
             .cloned()
     }
 
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.image.sections().iter().any(|section| {
+            section.loaded
+                && !section.is_code
+                && vaddr >= section.vaddr
+                && vaddr - section.vaddr < section.vsize
+        })
+    }
+
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.imports
             .get(&vaddr)

@@ -44,6 +44,16 @@ pub trait Program: r2ssa::body::Program {
     /// defines its own `strlen` carries a body there, and rendering that
     /// against the library's declaration would be a claim it never made.
     fn import_at(&self, vaddr: u64) -> Option<String>;
+
+    /// Whether static data can live here: a section the program declares that
+    /// is not code.
+    ///
+    /// What makes a constant the address of a string is where it points, and
+    /// "the bytes there read as text" is far too weak a test -- almost any
+    /// pair of bytes does. A structure offset of eighty was rendered as the
+    /// string at address eighty, which is two bytes of the ELF header and in
+    /// no section at all.
+    fn holds_static_data(&self, vaddr: u64) -> bool;
 }
 
 /// Everything about the machine that does not change between functions.
@@ -818,7 +828,10 @@ impl Native<'_> {
             let Some(address) = prepared.folded_value(value) else {
                 continue;
             };
-            if address == 0 || already.contains(&address) {
+            if address == 0
+                || already.contains(&address)
+                || !self.program.holds_static_data(address)
+            {
                 continue;
             }
             if let Some(text) = self.text_at(address) {
@@ -1037,6 +1050,7 @@ impl Native<'_> {
     fn literals(&self, body: &r2ssa::body::Body) -> Vec<(u64, String)> {
         referenced(body)
             .into_iter()
+            .filter(|address| self.program.holds_static_data(*address))
             .filter_map(|address| Some((address, self.text_at(address)?)))
             .collect()
     }
