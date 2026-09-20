@@ -5807,6 +5807,11 @@ fn exact_return_address_fact(
     storage: CanonicalStorageId,
 ) -> Option<SourceReturnAddressFact> {
     let [target_id] = return_inst.inputs.as_slice() else {
+        r2il::refusal_evidence!(
+            "return-address",
+            "return has {} inputs, not one",
+            return_inst.inputs.len()
+        );
         return None;
     };
     let target = graph.value(*target_id)?;
@@ -5839,6 +5844,58 @@ fn exact_return_address_fact(
             storage,
             value: target.id,
         });
+    }
+
+    // A machine transports the address into its control value immediately
+    // before the transfer: a full-width copy, or ARM's mask of the low bit,
+    // which selects the instruction set rather than naming the address. Walk
+    // that transport back -- the steps it admits are the only ones a machine
+    // uses to reach its control value -- and the address is whatever it began
+    // at: the declared carrier,
+    // or the frame word an epilogue popped into the program counter.
+    let mut carried = target;
+    let mut consumer = return_inst.ordinal;
+    while let Some(producer) = graph.def_inst(carried.id).and_then(|id| graph.inst(id))
+        && producer.block == return_inst.block
+        && producer.ordinal < consumer
+        && producer.output == Some(carried.id)
+        && carried.var.size == storage.size
+    {
+        let source = match &producer.payload {
+            InstPayload::Op(SSAOp::Copy { dst, .. }) if carried.var == *dst => {
+                producer.inputs.first()
+            }
+            InstPayload::Op(SSAOp::IntAnd { dst, b, .. })
+                if carried.var == *dst
+                    && b.is_const()
+                    && b.constant_bits().is_some_and(|mask| mask & 1 == 0) =>
+            {
+                producer.inputs.first()
+            }
+            // The word an epilogue reloaded is the address the call pushed.
+            InstPayload::Op(SSAOp::Load {
+                space: r2il::SpaceId::Ram,
+                dst,
+                ..
+            }) if carried.var == *dst => {
+                return Some(SourceReturnAddressFact {
+                    storage,
+                    value: target.id,
+                });
+            }
+            _ => None,
+        };
+        let Some(source) = source.and_then(|id| graph.value(*id)) else {
+            break;
+        };
+        if source.canonical_storage == Some(storage) && source.var.size == storage.size {
+            return Some(SourceReturnAddressFact {
+                storage,
+                value: target.id,
+            });
+        }
+        carried = source;
+        consumer = producer.ordinal;
     }
 
     // Once copies are forwarded the return names the value itself -- the word

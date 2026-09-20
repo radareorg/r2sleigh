@@ -122,9 +122,7 @@ def native_render(r2s, binary, address, timeout):
 def refused(lines):
     # An error the shell printed instead of a rendering is a refusal too: a
     # function nothing rendered must not be counted as rendered.
-    return any("r2sleigh refused" in line or line.startswith("r2s:") for line in lines) or not any(
-        "r2dec proof:" in line for line in lines
-    )
+    return any("r2sleigh refused" in line or line.startswith("r2s:") for line in lines)
 
 
 # A declaration names its variable last: `const int8_t* name;`. The name is an

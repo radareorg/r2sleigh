@@ -160,7 +160,8 @@ fn section_stubs(
     // is one question with one answer: the reaching-origin pass the engine
     // asks when it correlates the site. x86 loads the slot directly and ARM
     // computes its address across three instructions; both answer here.
-    let mut readers: Vec<(u64, String)> = Vec::new();
+    // Each reader: where its transfer is, where its run began, and the import.
+    let mut readers: Vec<(u64, u64, String)> = Vec::new();
     let mut run = r2il::R2ILBlock {
         addr: section.vaddr,
         size: 0,
@@ -179,6 +180,7 @@ fn section_stubs(
         // Zero bytes are not an instruction, so nothing reads a slot in them.
         if fetch[0] == 0 {
             pc += 1;
+            run.addr = pc;
             continue;
         }
         let Ok(lifted) = decoder.lift(&fetch, pc) else {
@@ -202,7 +204,7 @@ fn section_stubs(
         if let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
             && let Some(found) = slots.get(&slot.offset)
         {
-            readers.push((leaving_at, (*found).to_owned()));
+            readers.push((leaving_at, run.addr, (*found).to_owned()));
         }
         run = r2il::R2ILBlock {
             addr: pc,
@@ -220,7 +222,10 @@ fn section_stubs(
     // twenty-byte header alike.
     let stride = match readers.as_slice() {
         [first, second, ..] => second.0.saturating_sub(first.0),
-        [_] | [] => return readers,
+        // One stub has no neighbour to measure against; its run is the cell,
+        // because nothing but a zero-byte pad can precede it in its section.
+        [(_, start, symbol)] => return vec![(*start, symbol.clone())],
+        [] => return Vec::new(),
     };
     if stride == 0 {
         return Vec::new();
@@ -229,7 +234,7 @@ fn section_stubs(
     readers
         .into_iter()
         .enumerate()
-        .filter_map(|(index, (_, symbol))| {
+        .filter_map(|(index, (_, _, symbol))| {
             let from_end = count.checked_sub(index as u64)?.checked_mul(stride)?;
             Some((end.checked_sub(from_end)?, symbol))
         })
