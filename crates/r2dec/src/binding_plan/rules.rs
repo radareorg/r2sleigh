@@ -126,6 +126,35 @@ pub(super) fn stack_object_is_caller_storage(
     )
 }
 
+/// Whether this object is the slot the caller pushed the return address into.
+///
+/// The machine states where that is: a convention whose call pushes the return
+/// address says so as a return mechanism, and the slot it names is at the
+/// pointer the function was entered with. It is caller storage like a stack
+/// argument, but it is not an argument -- nothing in the program assigns it,
+/// and a rendering that declares it as a local reads a name it never wrote.
+pub(super) fn stack_object_is_return_address(
+    source_owned: &SourceOwnedFunctionFacts,
+    object: r2ssa::ObjectId,
+) -> bool {
+    let Some(mechanism) = source_owned
+        .source()
+        .machine_context()
+        .function_interface()
+        .and_then(r2ssa::SourceFunctionInterface::return_mechanism)
+    else {
+        return false;
+    };
+    matches!(
+        source_owned.source().objects().object(object).map(|o| &o.kind),
+        Some(r2ssa::ObjectKind::StackSlot {
+            base: r2ssa::StackAddressBase::StackPointer,
+            offset,
+            ..
+        }) if *offset == mechanism.stack_offset()
+    )
+}
+
 pub(super) fn effective_stack_slot_role(
     source_owned: &SourceOwnedFunctionFacts,
     slot: &r2ssa::SourceStackSlotSpec,

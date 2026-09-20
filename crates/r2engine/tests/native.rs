@@ -231,6 +231,45 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     );
 }
 
+/// The slot a call pushes the return address into is not a local: nothing in
+/// the program assigns it, and a rendering that declares one and then reads it
+/// claims something the program does not.
+#[test]
+fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
+    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: PC_THUNK,
+        name: "pc_thunk",
+        link: None,
+    };
+    // The thunk itself: `mov rsi, [rsp]; ret`, which reads what the call left.
+    let response = decompile(&target, &program, BASE + 0x0b).expect("decompile");
+
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    assert!(
+        response.output.contains("__builtin_return_address(0"),
+        "the return address slot is not spelled: {}",
+        response.output
+    );
+}
+
 /// A program where the called address is a library function by name, as an
 /// import stub is: no body worth reading, and a declared prototype instead.
 struct Importing;

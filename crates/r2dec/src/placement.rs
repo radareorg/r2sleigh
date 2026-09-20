@@ -3368,10 +3368,33 @@ fn apply_decisions_once(
         });
         let statements = declarations
             .iter()
-            .map(|(_, ty, name)| CStmt::Decl {
+            .map(|(binding, ty, name)| CStmt::Decl {
                 ty: ty.clone(),
                 name: *name,
-                init: None,
+                // The one object a function reads without writing is the slot
+                // the caller pushed the return address into. C spells that
+                // value, so the declaration says where it came from rather
+                // than leaving a name that is read and never assigned.
+                init: names
+                    .plan()
+                    .binding_role(*binding)
+                    .and_then(|role| match role {
+                        crate::binding_plan::BindingRole::StackObject { object } => Some(object),
+                        _ => None,
+                    })
+                    .filter(|object| names.plan().return_address_objects().contains(object))
+                    .map(|_| {
+                        CExpr::cast(
+                            ty.clone(),
+                            CExpr::call(
+                                CExpr::External {
+                                    name: "__builtin_return_address".to_string(),
+                                    kind: crate::symbol::ExternalKind::Intrinsic,
+                                },
+                                vec![CExpr::UIntLit(0)],
+                            ),
+                        )
+                    }),
             })
             .collect::<Vec<_>>();
         match insert_region_declarations(&mut candidate.body, regions, *region, &statements) {

@@ -1328,6 +1328,11 @@ pub(crate) struct BindingPlan {
     /// Derived once here from the graph and the boundary certificates, so no
     /// consumer re-derives "supplied from outside this function" for itself.
     call_clobbers: BTreeSet<ValueId>,
+    /// The slots the caller pushed the return address into. Caller storage
+    /// like a stack argument, but not an argument: nothing in the program
+    /// assigns one, so a rendering declaring it as a local reads a name it
+    /// never wrote.
+    return_address_objects: BTreeSet<r2ssa::ObjectId>,
     /// The frame objects whose address this function hands to a call.
     ///
     /// Whatever the callee does through that pointer is a write this function
@@ -1495,6 +1500,11 @@ impl BindingPlan {
     /// The frame objects a call is proven to reach through an address this function handed it.
     pub(crate) fn callee_reached_frame_objects(&self) -> &BTreeSet<r2ssa::ObjectId> {
         &self.callee_reached_frame_objects
+    }
+
+    /// The slots the caller pushed the return address into.
+    pub(crate) fn return_address_objects(&self) -> &BTreeSet<r2ssa::ObjectId> {
+        &self.return_address_objects
     }
 
     pub(crate) fn binding_role(&self, binding: BindingId) -> Option<BindingRole> {

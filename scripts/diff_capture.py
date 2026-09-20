@@ -319,7 +319,23 @@ def main():
         help="render natively and report uncertified output; radare2 is not run",
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="measure whatever binary is already there",
+    )
     args = parser.parse_args()
+
+    # Build before measuring. The default binary is the debug one, which a
+    # plain `cargo build --release` does not touch, so a measurement taken
+    # after one reported the tree as it was several changes ago -- including a
+    # whole class of undefined reads that a fix had already closed.
+    if not args.no_build and args.r2s == str(here / "target/debug/r2s"):
+        subprocess.run(
+            ["cargo", "build", "-p", "r2s", "--features", "sleigh"],
+            cwd=here,
+            check=True,
+        )
 
     if args.binary:
         binaries = [pathlib.Path(args.binary)]

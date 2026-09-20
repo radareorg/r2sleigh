@@ -1724,6 +1724,11 @@ impl BindingPlan {
             escaped: escaped_frame_objects,
             reached_by_callee: callee_reached_frame_objects,
         } = super::rules::frame_objects_with_escaped_address(source_owned, &machine_projection);
+        let return_address_objects = stack_objects
+            .keys()
+            .copied()
+            .filter(|object| super::rules::stack_object_is_return_address(source_owned, *object))
+            .collect();
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,
@@ -1735,6 +1740,7 @@ impl BindingPlan {
             call_clobbers,
             escaped_frame_objects,
             callee_reached_frame_objects,
+            return_address_objects,
             access_syntax,
             typed: std::cell::OnceCell::new(),
         };
