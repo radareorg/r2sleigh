@@ -50,9 +50,18 @@ pub(crate) fn normalize_instruction_local_control(
                 rewrite_unconditional_forward_branch(block, branch_index, target_index);
             }
             LocalBranch::Conditional { cond, .. } => {
+                // A predicated access is a guarded one, and the vocabulary
+                // spells that. Guarding it first is what lets the skip be
+                // rewritten at all: a load or a store cannot be speculated
+                // past, so the whole instruction became `Unimplemented` and
+                // every function containing a Thumb `it` block over a `ldr`
+                // or a `str` refused.
+                if guard_memory_in_range(block, branch_index, target_index, &cond) {
+                    continue;
+                }
                 if block.ops[branch_index + 1..target_index]
                     .iter()
-                    .all(R2ILOp::is_speculatable_value)
+                    .all(|op| op.is_speculatable_value() || is_guarded_memory(op))
                 {
                     rewrite_conditional_forward_branch(block, branch_index, target_index, cond);
                 } else if predicated_transfer_to_next_instruction(block, branch_index, target_index)
@@ -486,6 +495,14 @@ fn rewrite_conditional_forward_branch(
                     *input = candidate.clone();
                 }
             }
+            // An access that already carries the guard needs no speculation:
+            // it performs its effect exactly where the machine does, and its
+            // destination keeps what it held when the guard does not hold,
+            // which is what the machine does too.
+            if is_guarded_memory(&op) {
+                push_with_old_metadata(&mut ops, &mut metadata, op, &old_metadata, old_index);
+                continue;
+            }
             let Some(dst) = op.output().cloned() else {
                 push_unimplemented(&mut ops, &mut metadata, &old_metadata, old_index);
                 continue;
@@ -517,6 +534,93 @@ fn rewrite_conditional_forward_branch(
     }
     block.ops = ops;
     block.op_metadata = metadata;
+}
+
+/// Whether this access already states the condition it happens under.
+fn is_guarded_memory(op: &R2ILOp) -> bool {
+    matches!(op, R2ILOp::LoadGuarded { .. } | R2ILOp::StoreGuarded { .. })
+}
+
+/// Give every access a forward conditional branch skips the guard it runs
+/// under, so the skip becomes ordinary predication.
+///
+/// Returns whether anything was rewritten, in which case the caller looks for
+/// the branch again: the guard is an operation of its own and the indices have
+/// moved.
+fn guard_memory_in_range(
+    block: &mut R2ILBlock,
+    branch_index: usize,
+    target_index: usize,
+    cond: &Varnode,
+) -> bool {
+    let range = branch_index + 1..target_index;
+    let guarded = block.ops[range.clone()]
+        .iter()
+        .filter(|op| matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. }))
+        .count();
+    if guarded == 0 {
+        return false;
+    }
+    // Only where everything else in the skip can be spoken for; otherwise the
+    // instruction is still beyond this and refusing is the honest answer.
+    if !block.ops[range.clone()].iter().all(|op| {
+        op.is_speculatable_value()
+            || is_guarded_memory(op)
+            || matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. })
+    }) {
+        return false;
+    }
+    let Some(guard) = InstructionTempAllocator::for_ops(&block.ops).allocate(1) else {
+        return false;
+    };
+    // The branch skips the access when the condition holds, so the access
+    // happens when it does not.
+    let negate = R2ILOp::BoolNot {
+        dst: guard.clone(),
+        src: cond.clone(),
+    };
+    for index in range {
+        let op = &mut block.ops[index];
+        *op = match std::mem::replace(op, R2ILOp::Unimplemented) {
+            R2ILOp::Load { dst, space, addr } => R2ILOp::LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard: guard.clone(),
+                // A predicated access orders nothing; a machine that wanted
+                // ordering spells a barrier beside it.
+                ordering: r2il::MemoryOrdering::Relaxed,
+            },
+            R2ILOp::Store { space, addr, val } => R2ILOp::StoreGuarded {
+                space,
+                addr,
+                val,
+                guard: guard.clone(),
+                ordering: r2il::MemoryOrdering::Relaxed,
+            },
+            other => other,
+        };
+    }
+    block.ops.insert(branch_index, negate);
+    block.op_metadata = shift_metadata(&block.op_metadata, branch_index);
+    true
+}
+
+/// The metadata of a block one operation was inserted into at `at`.
+fn shift_metadata(
+    metadata: &BTreeMap<usize, OpMetadata>,
+    at: usize,
+) -> BTreeMap<usize, OpMetadata> {
+    metadata
+        .iter()
+        .map(|(index, meta)| {
+            let moved = match *index >= at {
+                true => index + 1,
+                false => *index,
+            };
+            (moved, meta.clone())
+        })
+        .collect()
 }
 
 fn push_unimplemented(
@@ -799,12 +903,17 @@ mod tests {
     }
 
     #[test]
-    fn conditional_relative_branch_over_effect_refuses() {
+    fn conditional_relative_branch_over_a_store_guards_it() {
+        // A store cannot be speculated, so the skip over one used to make the
+        // whole instruction `Unimplemented`. It is not speculated now either:
+        // it carries the branch's own condition, negated, which is what a
+        // predicated store is and what the vocabulary already spells.
+        let cond = Varnode::register(0x20, 1);
         let mut block = R2ILBlock::new(0x1000, 4);
         block.ops = vec![
             R2ILOp::CBranch {
                 target: Varnode::constant(2, 8),
-                cond: Varnode::register(0x20, 1),
+                cond: cond.clone(),
             },
             R2ILOp::Store {
                 space: SpaceId::Ram,
@@ -815,7 +924,26 @@ mod tests {
 
         normalize_instruction_local_control(&mut block, &|_| None);
 
-        assert!(matches!(block.ops.first(), Some(R2ILOp::Unimplemented)));
+        let R2ILOp::BoolNot { dst: guard, src } = block.ops.first().expect("the guard") else {
+            panic!("{:?}", block.ops);
+        };
+        assert_eq!(src, &cond);
+        assert!(
+            block.ops.iter().any(|op| matches!(
+                op,
+                R2ILOp::StoreGuarded { guard: stated, .. } if stated == guard
+            )),
+            "{:?}",
+            block.ops
+        );
+        assert!(
+            !block
+                .ops
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Unimplemented | R2ILOp::Store { .. })),
+            "{:?}",
+            block.ops
+        );
     }
 
     #[test]

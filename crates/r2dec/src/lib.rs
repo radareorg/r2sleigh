@@ -2887,7 +2887,12 @@ impl Decompiler {
                 let kind = DecompileRenderRefusal::from(failure).kind().to_string();
                 r2il::refusal_evidence!(
                     "gap",
-                    "the proof named {anchor:?} as {kind}; planning a gap and rendering again"
+                    "the proof named {anchor:?} ({:?}) as {kind}; planning a gap and rendering again",
+                    input
+                        .prepared_ssa()
+                        .graph()
+                        .inst(anchor)
+                        .map(|inst| &inst.payload)
                 );
                 seed_gaps.insert(anchor, kind);
                 continue;
