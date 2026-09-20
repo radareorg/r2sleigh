@@ -122,10 +122,31 @@ struct Prepared {
     ptr_bits: u32,
 }
 
+/// The structured tier for one function: the tree the C is generated from.
+///
+/// The same analysis and the same request as `decompile`, rendered one step
+/// earlier, so the two can be read against each other.
+pub fn structured(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<EngineDecompileResponse, NativeRefusal> {
+    render(target, program, entry, crate::RenderTier::Structured)
+}
+
 pub fn decompile(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
+) -> Result<EngineDecompileResponse, NativeRefusal> {
+    render(target, program, entry, crate::RenderTier::C)
+}
+
+fn render(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+    tier: crate::RenderTier,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
     let Prepared {
         artifact,
@@ -152,7 +173,8 @@ pub fn decompile(
     .with_input_quality(EngineFunctionInputQuality::complete(block_count))
     .with_trusted_ssa(artifact)
     .with_callee_facts(facts)
-    .with_declared_signatures(declared);
+    .with_declared_signatures(declared)
+    .rendering(tier);
 
     Ok(EngineSession::new().decompile_function_from_input(input))
 }

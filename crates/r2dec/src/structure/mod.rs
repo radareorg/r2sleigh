@@ -4,6 +4,7 @@
 
 pub(crate) mod certify;
 mod place;
+pub(crate) mod print;
 mod rewrite;
 pub(crate) mod self_update;
 mod shape;

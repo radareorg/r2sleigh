@@ -2421,6 +2421,7 @@ pub struct EngineAnalyzeResponse {
 
 #[derive(Debug, Clone)]
 struct EngineDecompileRequest {
+    pub tier: RenderTier,
     pub function_name: String,
     pub source_owned_facts: r2types::SourceOwnedFunctionFacts,
     pub trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
@@ -2440,6 +2441,21 @@ impl EngineDecompileRequest {
 pub(crate) struct EngineFunctionDecompileRequest {
     analysis: EngineAnalyzeRequest,
     input_quality: Option<EngineFunctionInputQuality>,
+    /// Which tier to render: the C, or the tree it is generated from.
+    tier: RenderTier,
+}
+
+/// What a decompile is asked to produce.
+///
+/// The analysis is the same either way; this decides only what is rendered
+/// from it, which is why it travels with the rendering rather than with the
+/// request that computes the facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderTier {
+    #[default]
+    C,
+    /// The structured tree the C is generated from.
+    Structured,
 }
 
 #[derive(Debug, Clone)]
@@ -2452,6 +2468,7 @@ pub struct EngineFunctionDecompileRequestInput {
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
     callee_facts: Vec<CalleeFacts>,
     declared_signatures: Vec<r2types::SourceOwnedCalleeSignature>,
+    tier: RenderTier,
 }
 
 impl EngineFunctionDecompileRequestInput {
@@ -2478,6 +2495,7 @@ impl EngineFunctionDecompileRequestInput {
             trusted_ssa: None,
             callee_facts: Vec::new(),
             declared_signatures: Vec::new(),
+            tier: RenderTier::C,
         }
     }
 
@@ -2504,6 +2522,12 @@ impl EngineFunctionDecompileRequestInput {
 
     /// Attach the signatures the program declares for callees it carries no
     /// body for, which is what an import is.
+    /// Render the structured tree instead of the C generated from it.
+    pub fn rendering(mut self, tier: RenderTier) -> Self {
+        self.tier = tier;
+        self
+    }
+
     pub fn with_declared_signatures(
         mut self,
         signatures: impl IntoIterator<Item = r2types::SourceOwnedCalleeSignature>,
@@ -2539,6 +2563,7 @@ impl EngineFunctionDecompileRequest {
         let declared_signatures = input.declared_signatures;
         Self {
             input_quality: Some(input.input_quality),
+            tier: input.tier,
             analysis: EngineAnalyzeRequest::full_semantics_for_function(
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
@@ -3069,6 +3094,7 @@ impl EngineSession {
         let EngineFunctionDecompileRequest {
             analysis: analysis_request,
             input_quality,
+            tier,
         } = request;
         let execution = analysis_request.execution.clone();
         let canonical_name = analysis_request.function_name.clone();
@@ -3216,6 +3242,7 @@ impl EngineSession {
             normalization_started.elapsed(),
         );
         self.decompile(EngineDecompileRequest {
+            tier,
             function_name: display_name,
             source_owned_facts,
             trusted_ssa,
@@ -3611,6 +3638,25 @@ struct EngineRenderedDecompile {
     stopped: Option<EngineRenderExecutionStop>,
 }
 
+impl EngineRenderedDecompile {
+    /// A tier that is not the C: rendered, with no audit to make about it,
+    /// because nothing was sealed into an observation journal for it.
+    fn structured(output: String) -> Self {
+        Self {
+            product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
+                output,
+                binding_audit: BindingShadowAuditOutcome::NotRun,
+                effect_obligations: EffectObligationAudit::NOT_RUN,
+                placement_audit: PlacementAudit::NotRun,
+                render_refusal: None,
+            })),
+            semantic_kernel_warnings: Vec::new(),
+            structuring_executed: true,
+            stopped: None,
+        }
+    }
+}
+
 struct ReadyEngineRenderedProduct {
     output: String,
     binding_audit: BindingShadowAuditOutcome,
@@ -3795,6 +3841,22 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     // Keep a rendering the decompiler reached before it stopped. Discarding it
     // reports a function that ran out of budget as one that produced nothing,
     // and takes the ledger that would have said so with it.
+    if request.tier == RenderTier::Structured {
+        let structured = r2dec::Decompiler::new(request.render_target.to_decompiler_config())
+            .structured_input_with_control(&input, control)
+            .map_err(|stop| EngineRenderExecutionStop {
+                reason: format!("{stop:?}"),
+                phase: EnginePhase::Rendering,
+                binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
+                effect_obligations: Box::new(EffectObligationAudit::NOT_RUN),
+                placement_audit: PlacementAudit::NotRun,
+                render_refusal: None,
+                certification_completed: false,
+                normalization_completed: false,
+                structuring_completed: false,
+            })?;
+        return Ok(EngineRenderedDecompile::structured(structured));
+    }
     let audited = match r2dec::Decompiler::new(request.render_target.to_decompiler_config())
         .decompile_input_keeping_partial_with_pending_binding_audit(&input, control)
     {

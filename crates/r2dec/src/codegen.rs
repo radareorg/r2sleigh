@@ -416,9 +416,14 @@ impl<'c> CodeGenerator<'c> {
         }
     }
 
+    /// Read names from the table that issued them.
+    pub(crate) fn adopt_symbols(&mut self, symbols: &crate::symbol::SymbolTable) {
+        self.symbols = symbols.clone();
+    }
+
     /// Generate code for a statement.
-    #[cfg(test)]
     pub(crate) fn generate_stmt(&mut self, stmt: &CStmt) -> String {
+        #[cfg(test)]
         assert!(
             !stmt_has_render_observations(stmt),
             "marked C statement reached codegen without journal sealing"
@@ -429,7 +434,6 @@ impl<'c> CodeGenerator<'c> {
     }
 
     /// Generate code for an expression.
-    #[cfg(test)]
     pub(crate) fn generate_expr(&mut self, expr: &CExpr) -> String {
         self.output.clear();
         self.emit_expr(expr, 0);

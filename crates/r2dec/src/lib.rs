@@ -2727,6 +2727,23 @@ impl Decompiler {
         })
     }
 
+    /// The structured tier for this function, printed.
+    ///
+    /// The same pipeline `decompile_input_with_control` runs, stopping before
+    /// the C is generated. It answers even when the rendering refuses, which
+    /// is when a reader most wants to see the tree.
+    pub fn structured_input_with_control<'a>(
+        &self,
+        input: &'a DecompilerInput,
+        control: &'a dyn r2ssa::SsaWorkControl,
+    ) -> Result<String, DecompileExecutionStop> {
+        let product = self.prepare_decompile_with_control(input, control)?;
+        Ok(crate::structure::print::render(
+            product.emission().function_for_aggregate_definitions(),
+            self.config.codegen.clone(),
+        ))
+    }
+
     /// Render, keeping whatever was produced when a phase stopped.
     ///
     /// `decompile_input_with_control` returns only the stop, so a caller has to

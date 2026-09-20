@@ -50,6 +50,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "pd" => disassemble(session, argument),
         "pdd" => decompile(session, argument),
         "pdim" => medium_tier(session, argument),
+        "pdih" => high_tier(session, argument),
         other => Err(format!("unknown command '{}'", other)),
     }
 }
@@ -293,6 +294,25 @@ fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> 
 
 #[cfg(not(feature = "sleigh"))]
 fn medium_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature".to_owned())
+}
+
+/// The structured tier: the tree the C is generated from.
+///
+/// Read against `pdd`, this says whether a defect is already in the tree or
+/// belongs to the generation below it.
+#[cfg(feature = "sleigh")]
+fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
+    let addr = parse_number(session, argument)?;
+    with_native(session, addr, |target, program| {
+        r2engine::native::structured(target, program, addr)
+            .map(|response| response.output)
+            .map_err(|refusal| refusal.to_string())
+    })
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn high_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
     Err("r2s: built without the sleigh feature".to_owned())
 }
 

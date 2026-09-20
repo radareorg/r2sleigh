@@ -452,3 +452,41 @@ fn the_medium_tier_is_readable_without_rendering() {
     assert!(dump.contains("LOAD [ram]"), "{dump}");
     assert!(!dump.contains("SSAVar {"), "derived Debug leaked:\n{dump}");
 }
+
+/// The structured tier is the tree the C is generated from.
+///
+/// Read against the C, it says whether a defect is already in the tree or
+/// belongs to the generation below it.
+#[test]
+fn the_structured_tier_is_the_tree_the_c_comes_from() {
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ARM_DEAD_LOAD,
+        name: "dead_load",
+        link: None,
+    };
+    let tree = r2engine::native::structured(&target, &program, BASE)
+        .expect("structured")
+        .output;
+    let c = decompile(&target, &program, BASE)
+        .expect("decompile")
+        .output;
+
+    assert!(tree.contains("Function: dead_load"), "{tree}");
+    // The statements are spelled by the emitter that writes the C, so the two
+    // tiers disagree about their shape and about nothing else.
+    assert!(tree.contains("(void)*"), "{tree}");
+    assert!(c.contains("(void)*"), "{c}");
+}
