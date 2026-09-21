@@ -159,6 +159,34 @@ the bare string `401000`. So a call the engine spelled one way and a call it
 knew only by its target were two identities for one function. Both normalise to
 `addr:401000` now.
 
+### Source-gold is back, and it grades against the source
+
+The old gate could not be ported. Its fifteen expectations pin a rendering route
+that no longer exists -- `owner: r2sym`, "summary role hint", "render contract:
+summary facts only" -- so porting them would have pinned behaviour this project
+deleted. What the gate was *for* is the thing the user already ruled on: grade
+against the source the binary was compiled from.
+
+`scripts/differential_truth.py` was written for exactly that and only needed
+repointing. The same source compiled twice is ground truth for free: the debug
+build's DWARF says what every function is, the stripped build is what the engine
+sees, and both are now read through `r2s` rather than through radare2 and a
+plugin. Every fact lands in one of four buckets, and soundness -- the share of
+asserted facts that are not silently wrong -- is the number that matters.
+
+On `tests/corpus/hashes.c`: **17 of 17 functions, 50 facts correct, 0 missing,
+0 marked wrong, 1 silently wrong. 98 per cent recovery, 98 per cent soundness.**
+
+The gate fails on a silent error that is not already recorded, keyed by the
+function's name rather than its address so a rebuild elsewhere does not move it.
+`tests/gold/source_gold_baseline.json` holds the one that is, with its cause
+written beside it: with no debug information nothing proves the signedness of a
+32-bit return, so `main` renders `uint32_t` where the source says `int`. C has
+no spelling that declines to say, so whichever is chosen is a claim; `int` is the
+language's default and what an unproven 32-bit return usually is. Changing that
+default moves rendered output across the whole corpus, which makes it a
+decompiler-quality decision rather than an inversion one.
+
 ### The coverage baseline is re-blessed, and what it says
 
 `tests/coverage/sweep_binary.sh` drives `r2s` now. Two things had to be fixed

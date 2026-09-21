@@ -89,11 +89,13 @@ Carried with a cause, not as a baseline:
 - Entry condition flags cannot be booleans until the architecture
   specification carries a flag fact; nothing available today tells `CF` from
   `AL`.
-- The measurement harnesses under `scripts/` and `tests/decbench/` still drive
-  radare2 with the deleted plugin, and need repointing at `r2s`; the
-  source-gold and fixed-performance gates have no replacement yet.
-- The whole-binary coverage baseline has not been re-blessed since the sweep
-  moved from radare2's function set to this engine's.
+- `scripts/kernel_smoke.py`, `scripts/bench_semantic_metadata.py`,
+  `scripts/reversing_benchmark.py` and `tests/decbench/` still drive radare2
+  with the deleted plugin. Source-gold is restored natively; the
+  fixed-performance gate is not.
+- With no debug information nothing proves the signedness of a 32-bit return,
+  so `main` renders `uint32_t` where the source says `int`. Recorded in
+  `tests/gold/source_gold_baseline.json` with its cause.
 - `tools/dylints/r2sleigh_lints` has 32 file-scanning tests asserting on
   functions that were renamed or deleted in August and September; nothing runs
   them in continuous integration, which is why they rotted.
