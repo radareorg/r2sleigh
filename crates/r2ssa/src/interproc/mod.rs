@@ -1389,6 +1389,58 @@ impl PreparedCalleeSummary {
 /// The root still arrives as its exact allocation, because the evidence is
 /// sealed to it. A callee arrives as what it contributes, which is all the
 /// solve reads of it.
+/// The helpers whose blocks nothing else in the scope claims.
+///
+/// The root's own blocks always win: it is the function being rendered, and a
+/// helper is only there to lend its signature. A helper that overlaps the root
+/// or an earlier helper is left out, and says so.
+fn attributable_callees(
+    root: &SsaArtifact,
+    root_id: InterprocFunctionId,
+    callees: &[PreparedCalleeSummary],
+) -> Vec<PreparedCalleeSummary> {
+    let mut claimed: Vec<(u64, u64)> = root
+        .function()
+        .blocks()
+        .iter()
+        .filter_map(|block| {
+            block
+                .addr
+                .checked_add(u64::from(block.size))
+                .map(|end| (block.addr, end))
+        })
+        .collect();
+    let overlaps = |claimed: &[(u64, u64)], start: u64, end: u64| {
+        claimed
+            .iter()
+            .any(|(other_start, other_end)| start < *other_end && *other_start < end)
+    };
+    let mut kept = Vec::with_capacity(callees.len());
+    for callee in callees {
+        let ranges = callee
+            .blocks
+            .iter()
+            .filter_map(|(addr, size)| addr.checked_add(u64::from(*size)).map(|end| (*addr, end)))
+            .collect::<Vec<_>>();
+        if ranges.len() != callee.blocks.len()
+            || ranges
+                .iter()
+                .any(|(start, end)| overlaps(&claimed, *start, *end))
+        {
+            r2il::refusal_evidence!(
+                "interproc-scope",
+                "{:#x}: helper {:#x} shares blocks with the scope and is left out",
+                root_id.0,
+                callee.id.0
+            );
+            continue;
+        }
+        claimed.extend(ranges);
+        kept.push(callee.clone());
+    }
+    kept
+}
+
 pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     root: Arc<SsaArtifact>,
     callees: &[PreparedCalleeSummary],
@@ -1420,6 +1472,12 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
             return Err(PreparedInterprocSummaryError::ArchitectureMismatch);
         }
     }
+    // A helper whose blocks the root also claims is dropped rather than
+    // refused over. Two functions sharing a tail is a fact about the binary --
+    // `ld` merges them -- and it makes the ownership of those blocks
+    // ambiguous, not the root's signature unknowable. Refusing the set lost
+    // the root as well, which is a whole function for a helper's sake.
+    let callees = &attributable_callees(&root, root_id, callees);
     validate_interproc_block_ranges(
         root.function()
             .blocks()

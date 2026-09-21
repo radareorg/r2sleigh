@@ -834,7 +834,11 @@ fn machine_declaration_admitting_both(
         .zip(second_params)
         .take_while(|(left, right)| left == right)
         .count();
-    if shared == 0 {
+    // An empty list is no observation rather than an observation of zero
+    // arguments: a site that placed none proves nothing about the arity, so it
+    // does not contradict a site that placed one. Two non-empty lists that
+    // disagree at the first position still do.
+    if shared == 0 && !first_params.is_empty() && !second_params.is_empty() {
         return None;
     }
     Some(crate::ast::CExternDecl {

@@ -1,7 +1,7 @@
 {
   "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
   "functions": 570,
-  "rendered": 563,
+  "rendered": 565,
   "entries": {
     "branchy_arm64_O0::sym.__mh_execute_header": "rendered",
     "branchy_arm64_O0::sym._gate_one": "rendered",
@@ -461,9 +461,9 @@
     "system_ls_a97c50d3::0x1000016d4": "rendered",
     "system_ls_a97c50d3::0x1000019f8": "rendered",
     "system_ls_a97c50d3::0x100001a78": "native rendering refused: missing machine projection authorization: OpLowering(memory_renderer.rs)",
-    "system_ls_a97c50d3::0x100002328": "interprocedural summary construction failed: OverlappingFunctionBlockRanges",
+    "system_ls_a97c50d3::0x100002328": "rendered",
     "system_ls_a97c50d3::0x100002400": "rendered",
-    "system_ls_a97c50d3::0x100002524": "native rendering refused: missing machine projection authorization: OpLowering(calls.rs)",
+    "system_ls_a97c50d3::0x100002524": "rendered",
     "system_ls_a97c50d3::0x100002560": "rendered",
     "system_ls_a97c50d3::0x100002cac": "rendered",
     "system_ls_a97c50d3::0x100002d48": "rendered",
