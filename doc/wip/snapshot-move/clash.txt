@@ -1,1 +1,0 @@
-r_anal_function_signature_from_type_name

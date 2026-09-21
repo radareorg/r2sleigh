@@ -20,25 +20,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 mod contracts;
-/// Schema version of the function snapshot radare2 hands over.
-///
-/// Bumped whenever the wire layout in `snapshot_wire` changes, and asserted at
-/// the FFI boundary so a plugin and a radare2 built against different versions
-/// refuse rather than misread each other.
-///
-/// This is the one thing that outlived `radare_abi138`, the callback-based
-/// predecessor of the flat wire buffer. That module was 2,923 lines holding the
-/// largest concentration of `unsafe` in the tree, and nothing had called into
-/// it since the migration.
-pub const RADARE_FUNCTION_SNAPSHOT_SCHEMA_VERSION: u32 = 16;
-
-/// Version of the snapshot transport contract itself.
-pub const RADARE_SNAPSHOT_CONTRACT_VERSION: u32 = 1;
-
-/// Version of the accessor layout within a snapshot.
-pub const RADARE_SNAPSHOT_ACCESSOR_SCHEMA_VERSION: u32 = 5;
-
-pub mod snapshot_wire;
 
 pub use contracts::*;
 
@@ -730,6 +711,27 @@ pub struct AdvisoryCallPrototype {
 }
 
 impl AdvisoryCallSite {
+    /// A call site described by the capture, with no recovered prototype.
+    ///
+    /// A prototype is attached by the capture that recovered one; a site built
+    /// here states only where the call is, where it goes and how it leaves.
+    pub const fn described(
+        instruction_address: u64,
+        target_address: u64,
+        transfer: AdvisoryCallTransfer,
+        target_name: Option<String>,
+        linkage: AdvisoryCalleeLinkage,
+    ) -> Self {
+        Self {
+            instruction_address,
+            target_address,
+            transfer,
+            target_name,
+            linkage,
+            prototype: None,
+        }
+    }
+
     /// Borrow the prototype radare2 recovered for this site, if it recovered
     /// one.
     pub const fn prototype(&self) -> Option<&AdvisoryCallPrototype> {
@@ -1075,18 +1077,6 @@ impl OwnedFunctionSnapshot {
     /// the state for why it is not the revision.
     pub fn source_content_identity(&self) -> &[u8] {
         &self.0.source_content_identity
-    }
-
-    /// Replace the content identity with the one the capture reported.
-    ///
-    /// Only the wire decoder calls this, because it is the only place that
-    /// learns a callee's own identity: everywhere else a snapshot is minted
-    /// from parts that cannot distinguish the two, and the mint defaults them
-    /// equal.
-    pub(crate) fn with_source_content_identity(mut self, identity: Box<[u8]>) -> Self {
-        let state = std::sync::Arc::make_mut(&mut self.0);
-        state.source_content_identity = identity;
-        self
     }
 
     pub fn function_interface(&self) -> Option<&SourceFunctionInterface> {

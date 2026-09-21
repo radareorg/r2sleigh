@@ -6381,19 +6381,15 @@ mod tests {
     fn advisory_call_site(
         instruction: u64,
         target: u64,
-        transfer: u8,
+        transfer: r2source::AdvisoryCallTransfer,
     ) -> r2source::AdvisoryCallSite {
-        let mut writer = r2source::snapshot_wire::SnapshotWireWriter::new();
-        writer.u64(instruction);
-        writer.u64(target);
-        writer.string("").expect("empty call name");
-        writer.u8(transfer);
-        writer.u8(0);
-        writer.bool(false);
-        let bytes = writer.finish().expect("callsite wire");
-        let mut reader =
-            r2source::snapshot_wire::SnapshotWireReader::new(&bytes).expect("callsite reader");
-        r2source::snapshot_wire::read_call_site(&mut reader).expect("callsite")
+        r2source::AdvisoryCallSite::described(
+            instruction,
+            target,
+            transfer,
+            None,
+            r2source::AdvisoryCalleeLinkage::Unknown,
+        )
     }
 
     #[test]
@@ -6408,13 +6404,14 @@ mod tests {
                 ..r2il::OpMetadata::default()
             }),
         );
-        let tail = advisory_call_site(0x1000, 0x5000, 1);
+        let tail = advisory_call_site(0x1000, 0x5000, r2source::AdvisoryCallTransfer::TailJump);
         let identity = unique_call_site_identity(&[branch.clone()], &tail)
             .expect("exact terminal branch is the source-proven callsite");
         assert_eq!(identity.instruction(), 0x1000);
         assert_eq!(identity.target().offset, 0x5000);
 
-        let ordinary_call = advisory_call_site(0x1000, 0x5000, 0);
+        let ordinary_call =
+            advisory_call_site(0x1000, 0x5000, r2source::AdvisoryCallTransfer::Call);
         assert!(unique_call_site_identity(&[branch.clone()], &ordinary_call).is_none());
 
         branch.ops.push(R2ILOp::Nop);
@@ -6431,7 +6428,8 @@ mod tests {
             }),
         );
         call.push(R2ILOp::Nop);
-        let ordinary_call = advisory_call_site(0x2000, 0x6000, 0);
+        let ordinary_call =
+            advisory_call_site(0x2000, 0x6000, r2source::AdvisoryCallTransfer::Call);
         assert!(
             unique_call_site_identity(&[call], &ordinary_call).is_some(),
             "ordinary calls keep their original nonterminal correlation rule"
@@ -6441,7 +6439,7 @@ mod tests {
     #[test]
     fn tail_slot_identity_unifies_direct_ram_and_loaded_register_targets() {
         let slot = 0x1000_4010;
-        let tail = advisory_call_site(0x2010, slot, 2);
+        let tail = advisory_call_site(0x2010, slot, r2source::AdvisoryCallTransfer::TailSlot);
 
         let mut direct_ram = R2ILBlock::new(0x2000, 0x14);
         direct_ram.push_with_metadata(

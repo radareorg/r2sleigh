@@ -180,13 +180,14 @@ pub fn capture(
     let advisory_calls = function
         .calls
         .iter()
-        .map(|call| AdvisoryCallSite {
-            instruction_address: call.instruction,
-            target_address: call.target,
-            transfer: call.transfer,
-            target_name: call.name.clone(),
-            linkage: call.linkage,
-            prototype: None,
+        .map(|call| {
+            AdvisoryCallSite::described(
+                call.instruction,
+                call.target,
+                call.transfer,
+                call.name.clone(),
+                call.linkage,
+            )
         })
         .collect::<Vec<_>>();
 

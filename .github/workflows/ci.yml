@@ -49,48 +49,15 @@ jobs:
         run: cargo clippy --workspace --all-features -- -D warnings
       - name: Structure (the debt may fall, never rise)
         run: bash scripts/structure-report.sh
+      # --no-fail-fast, always: without it cargo stops at the first failing
+      # target, so one crate's known failure hides every failure after it.
       - name: Unit tests
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --no-fail-fast
 
-  # ── Fast snapshot tests (r2r) ───────────────────────────────────────
-  r2r:
-    name: Snapshot Tests (r2r)
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. See scripts/setup-runner.sh"
-            exit 1
-          fi
-      - name: Prepare shared target dir
-        run: mkdir -p "$CARGO_TARGET_DIR"
-      - name: Ensure radare2 + headers
-        run: bash .github/scripts/ensure-radare2-ci.sh
-
-      - name: Prepare r2r temp dir
-        run: |
-          # Keep this under /tmp. radare2/r2r pipe and diff helpers create
-          # nested temporary paths and can fail on long self-hosted runner paths.
-          R2R_TMPDIR="/tmp/r2sleigh-r2r-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
-          echo "R2R_TMPDIR=$R2R_TMPDIR" >> "$GITHUB_ENV"
-          rm -rf "$R2R_TMPDIR"
-          mkdir -p "$R2R_TMPDIR"
-      - name: Run r2r snapshot tests
-        env:
-          R2R_JOBS: "1"
-          R2R_OFFLINE: "1"
-        run: make -C tests/r2r run
-
-  # Correctness is intentionally separate from the fixed-machine performance
-  # contract. A semantic/source-gold failure cannot be hidden by faster output.
+  # ── Native certification gate ───────────────────────────────────────
+  #
+  # Every named function is rendered and the proof is read: a rendering may not
+  # read what nothing wrote. radare2 is not run here, which is the point.
   capture-gate:
     name: Native Capture Certification Gate
     runs-on: self-hosted
@@ -120,83 +87,10 @@ jobs:
             bins="$(ls -d /tmp/radare2-* 2>/dev/null | head -1)"
           fi
           test -d "$bins/test/bins/elf"
-          python3 scripts/diff_capture.py \
+          python3 scripts/certify_render.py \
             --bins "$bins/test/bins/elf" \
             --r2s target/release/r2s \
-            --limit 12 --functions 8 --native-only
-
-  source-gold:
-    name: Source-Gold Correctness Gate
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          command -v cargo >/dev/null
-      - name: Ensure radare2 + headers
-        run: bash .github/scripts/ensure-radare2-ci.sh
-      - name: Run source-gold closure gate
-        env:
-          SOURCE_GOLD_JOBS: "1"
-        run: make -C tests/r2r source-gold
-      - name: Archive source-gold report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-gold-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/r2sleigh-source-gold-current.json
-          if-no-files-found: warn
-
-  # Deployment assumption: this label identifies the stable Darwin/arm64
-  # performance host named by tests/gold/mem_scan2_performance.json. Unlike
-  # ordinary developer machines, this required job is not allowed to skip.
-  fixed-performance:
-    name: Fixed-Runner Bounded Performance Gate
-    runs-on: [self-hosted, r2sleigh-perf-v1]
-    env:
-      R2SLEIGH_FIXED_PERF_RUNNER: r2sleigh-darwin-arm64-perf-v1
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          command -v cargo >/dev/null
-      - name: Ensure radare2 + headers
-        run: bash .github/scripts/ensure-radare2-ci.sh
-      - name: Build fixed fixture and plugin
-        run: |
-          make -C tests/r2r link-bins
-          make -C r2plugin RUST_FEATURES=all-archs
-      - name: Run required fixed performance gate
-        run: |
-          perf_tmp="$(mktemp -d /tmp/r2sleigh-fixed-perf.XXXXXX)"
-          trap 'rm -rf "$perf_tmp"' EXIT
-          python3 scripts/reversing_benchmark.py \
-            --fixed-performance-gate tests/gold/mem_scan2_performance.json \
-            --require-fixed-performance \
-            --r2 "$R2SLEIGH_E2E_RADARE2" \
-            --plugin-dir r2plugin \
-            --tmpdir "$perf_tmp" \
-            --timeout 120 \
-            --out target/fixed-performance.json
-      - name: Archive fixed performance report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fixed-performance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/fixed-performance.json
-          if-no-files-found: error
+            --limit 12 --functions 8
 
   # ── Whole-binary render coverage ────────────────────────────────────
   #
@@ -232,24 +126,11 @@ jobs:
           path: tests/coverage/artifacts/coverage.json
           if-no-files-found: error
 
-  # ── Rust E2E / integration tests ────────────────────────────────────
-  e2e:
-    name: Rust E2E Tests
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v6
-      - name: Ensure radare2 + headers
-        run: bash .github/scripts/ensure-radare2-ci.sh
-      - name: Build r2sleigh plugin
-        run: make -C r2plugin RUST_FEATURES=all-archs
-      - name: Run Rust E2E tests
-        run: cargo e2e-test
-
   # ── Release build check ────────────────────────────────────────────
   release:
     name: Release Build
     runs-on: self-hosted
-    needs: [quality, r2r, source-gold, fixed-performance, e2e]
+    needs: [quality, capture-gate, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6
@@ -272,5 +153,3 @@ jobs:
 
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
-      - name: Build plugin release
-        run: make -C r2plugin RUST_FEATURES=all-archs

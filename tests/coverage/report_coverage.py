@@ -16,7 +16,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-BEGIN = re.compile(r"^R2SLEIGH_COV_BEGIN__(?P<name>.+)__(?P<size>\d+)$")
+BEGIN = re.compile(r"^R2SLEIGH_COV_BEGIN__(?P<name>.+)$")
 END = re.compile(r"^R2SLEIGH_COV_END__(?P<name>.+)$")
 FALLBACK = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
 
@@ -46,7 +46,7 @@ def parse_dump(path: Path) -> list[dict]:
     for line in path.read_text(errors="replace").splitlines():
         begin = BEGIN.match(line.strip())
         if begin:
-            current = {"function": begin["name"], "size": int(begin["size"])}
+            current = {"function": begin["name"]}
             body = []
             continue
         end = END.match(line.strip())

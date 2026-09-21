@@ -157,7 +157,7 @@ pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,
 };
-pub use r2source::{OwnedFunctionSnapshot, RADARE_FUNCTION_SNAPSHOT_SCHEMA_VERSION};
+pub use r2source::OwnedFunctionSnapshot;
 pub use semantic::{
     BlockAssumption, CallArgumentCertificate, CallArgumentLocation, CallBoundarySlot,
     CallBoundaryValueFact, CallMemoryEffect, CallResultCertificate, CallResultValueRelation,

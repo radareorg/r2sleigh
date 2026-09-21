@@ -1,13 +1,13 @@
 //! Prepared SSA, kept for the life of the process and keyed by what built it.
 //!
-//! Every request arrives as one wire snapshot carrying the function asked for
-//! and the bodies of the functions it calls, and the ingress lifted and
-//! prepared every one of them on every request. Measured on the DecBench
-//! `bzip2recover` build, three identical `pd:s` calls on one function in one
-//! radare2 session cost `callee_lift` 1.46s, 1.52s and 0.95s for the same
-//! three callees, against a `decode` of 50 microseconds. Roughly eighty per
-//! cent of a capture was work whose inputs had not changed since the last time
-//! it was done.
+//! Every request arrives as one capture carrying the function asked for and
+//! the bodies of the functions it calls, and the ingress lifted and prepared
+//! every one of them on every request. Measured on the DecBench
+//! `bzip2recover` build, three identical decompiles of one function in one
+//! session cost `callee_lift` 1.46s, 1.52s and 0.95s for the same three
+//! callees, against a `decode` of 50 microseconds. Roughly eighty per cent of
+//! a capture was work whose inputs had not changed since the last time it was
+//! done.
 //!
 //! **The key is the input, byte for byte, not a hash of it.** A miss here
 //! costs time; a wrong hit renders a body that is not the function's, and

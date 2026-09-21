@@ -1,5 +1,5 @@
 #!/bin/bash
-# Whole-binary render coverage: every function radare2 finds, not a named few.
+# Whole-binary render coverage: every function the engine finds, not a named few.
 #
 # The 54-cell matrix scores nine hand-picked functions and checks that what they
 # render is correct. That is a canary and does not answer the other question --
@@ -37,12 +37,10 @@ done
 
 mkdir -p "$artifact_root/bin" "$artifact_root/dumps"
 
-install_log="$artifact_root/plugin-install.log"
-make -C "$repo_root/r2plugin" RUST_FEATURES=all-archs install 2>&1 | tee "$install_log"
-if ! grep -q '^Installed to ' "$install_log"; then
-    echo "plugin install did not report its destination" >&2
-    exit 70
-fi
+# One build, and the sweep measures it. A sweep that runs against whatever
+# binary happened to be there reports a tree several changes old.
+cargo build --release --manifest-path "$repo_root/Cargo.toml" -p r2s --features sleigh
+export R2SLEIGH_R2S="$repo_root/target/release/r2s"
 
 configs=(x64_O0 x64_O1 x64_O2 arm64_O0 arm64_O1 arm64_O2)
 arches=(x86_64 x86_64 x86_64 arm64 arm64 arm64)
