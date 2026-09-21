@@ -44,18 +44,14 @@ type and convention data are not.
 
 These are decisions, not omissions.
 
-**No rewrite of radare2.** `libr` is roughly 1.1 million lines: 347k in `arch`,
-210k in `bin`, 179k in `core`, 117k in `anal`. A full rewrite produces a worse
-tool for years and ships nothing in the meantime. The plan is to invert the
-dependency and then delete C library by library, with something shippable at
-every step.
-
-**No native terminal user interface.** r2sleigh already runs inside radare2, so
-radare2's visual mode renders its output and the project gets a human terminal
-interface without owning one. The human surface is `r2sleigh-cli` plus the
-radare2 plugin. A typed listing model that separates results from rendering is
-still worth building — the agent interface and the plugin both consume it — but
-owning a renderer, a layout engine, a keymap and an input loop is not.
+**No line-by-line port of radare2.** `libr` is roughly 1.1 million lines: 347k
+in `arch`, 210k in `bin`, 179k in `core`, 117k in `anal`. Transliterating it
+would produce a worse tool for years and teach the new one the old one's
+mistakes. `r2s` replaces radare2 by answering the same questions better from its
+own core libraries, and it reaches parity through depth rather than breadth.
+Radare2's long tail — 97 binary formats against roughly eight mainstream ones,
+51 IO plugins, and 186 architecture plugins against roughly forty Sleigh
+specifications — is real, irreproducible, and explicitly not matched.
 
 **No new architectures.** x86 and ARM depth comes first, and stays first, until
 the phases below are complete and adding a CPU is cheap and safe. Work that
@@ -70,6 +66,25 @@ easily lost under delivery pressure.
 failure is that 186 architecture plugins each hand-wrote a stringly-typed
 approximation of their own instruction set, most incomplete and many wrong. That
 mistake is not to be repeated in any form, for any reason.
+
+### Two non-goals retired
+
+Recorded rather than quietly dropped, because both were load-bearing and the
+reversal changes the shape of the project.
+
+This document used to say **no rewrite of radare2**, on the argument that
+inverting the dependency and deleting C library by library kept something
+shippable at every step while the plugin carried existing users along. It also
+ruled out **a native terminal user interface**, because radare2's visual mode
+rendered r2sleigh's output and the project got a human surface without owning
+one. Both rested on the same assumption — that the plugin survives — and the
+plugin is abandoned. `r2s` is the tool, and it grows the surface radare2 users
+need rather than borrowing it.
+
+What does not change is the reason those non-goals existed: breadth is still not
+the goal, and a worse tool shipped sooner is still worse. The difference is that
+parity is now reached by building rather than by borrowing, and the argument for
+each piece of surface is made when it is planned rather than assumed here.
 
 ## Component topology
 
@@ -89,14 +104,14 @@ it, and remote targets are a first-class case. The protocol is an existing one �
 gdb-remote for remote targets, DAP for editor clients — rather than an invented
 one.
 
-**Frontends** are clients of a typed engine API. The radare2 plugin is one, the
-CLI is one, the agent interface is one. None of them is privileged, and the
-engine never formats output for any of them. This is the discipline `libr/core`
-lost: 5793 references to the console layer in 179k lines, against 93 in the
-whole of `libr/anal` and zero in `libr/arch`. The libraries stayed clean; the
-core fused command dispatch, analysis driving and rendering into one blob, and
-that is why radare2 cannot thread its analysis and cannot be tested at the
-interface.
+**Frontends** are clients of a typed engine API. The `r2s` command surface is
+one, the agent interface is one, an editor client is another. None of them is
+privileged, and the engine never formats output for any of them. This is the
+discipline `libr/core` lost: 5793 references to the console layer in 179k
+lines, against 93 in the whole of `libr/anal` and zero in `libr/arch`. The
+libraries stayed clean; the core fused command dispatch, analysis driving and
+rendering into one blob, and that is why radare2 cannot thread its analysis
+and cannot be tested at the interface.
 
 ## Inverting the dependency
 
@@ -131,148 +146,77 @@ currently supplies through the snapshot seam.
    radare2's real moat and has to be reproduced faithfully, including seeking,
    grepping, piping and iterators, or users will not follow.
 
-`r2s` becomes the host binary — `r2sleigh` stays the name of the Sleigh
-toolchain — and the radare2 plugin survives the whole way as a thin client of
-the same engine, so the integration work is not thrown away and existing users
-lose nothing.
+`r2s` becomes the tool. `r2sleigh` stays the name of the Sleigh toolchain, and
+the radare2 plugin is deleted rather than carried: keeping it alive cost roughly
+37,000 lines, and every capability listed above has to exist natively anyway.
 
-Item one splits in two, and only half of it is hard. **Body lift at a known
+Item one split in two, and only half of it was hard. **Body lift at a known
 address** is recursive descent over direct branches, terminating at returns and
 refusing at indirect transfers; it needs no value domain, and refusing a switch
 rather than guessing it is the discipline this project already has. **Discovery**
 — finding every function, and completing a body whose switch has to be resolved
-— does need the value domain, and is sequenced behind it. Until then a
-non-stripped binary's symbol table supplies the function list, which is what
-makes the milestone reachable early.
+— is a fixed point over that walk, and it now exists. What it cannot yet do is
+cross an indirect handoff, which is what the value domain is for.
 
-## The seam, measured
+## What radare2 supplied, and what replaces it
 
-The question of what the engine needs from radare2 has a measured answer, and it
-is smaller than the size of the bridge suggests.
+The bridge was measured before it was deleted, and the measurement is kept
+because it says what had to be rebuilt. About 15,500 lines of C —
+`snapshot_capture.c` at 8468, `r_anal_sleigh.c` at 5049, `snapshot_walk.c` at
+1218, `dwarf_facts.c` at 366, `arch_sleigh.c` at 244, `snapshot_wire.c` at 239 —
+plus `ffi_v2.rs` at 5268 and `snapshot_capture.h` at 960, calling **156 distinct
+radare2 symbols** at roughly 750 call sites.
 
-The plugin bridge is about 15,500 lines of C — `snapshot_capture.c` at 8468,
-`r_anal_sleigh.c` at 5049, `snapshot_walk.c` at 1218, `dwarf_facts.c` at 366,
-`arch_sleigh.c` at 244, `snapshot_wire.c` at 239 — plus `ffi_v2.rs` at 5268 and
-`snapshot_capture.h` at 960. Against that, it calls **156 distinct radare2
-symbols** at roughly 750 call sites.
+The density was the finding. `snapshot_capture.c` was 6 per cent radare2 calls,
+`snapshot_walk.c` 1 per cent, and `snapshot_wire.c` touched radare2 zero times
+while still being written in C. It was never an FFI layer; it was r2sleigh's own
+collection and marshalling logic living on the wrong side of a boundary. The
+`r_anal_function_snapshot_*` names were never a radare2 API either — they were
+`static` functions inside `snapshot_capture.c`, and the real coupling was to
+struct layouts, `RAnal`, `RAnalFunction`, `RAnalVar` and `RList`, walked
+directly.
 
-The density is the finding. `snapshot_capture.c` is 6 per cent radare2 calls;
-`snapshot_walk.c` is 1 per cent; `snapshot_wire.c` touches radare2 zero times
-and is still written in C. This is not an FFI layer. It is r2sleigh's own
-collection and marshalling logic living on the wrong side of the boundary, and
-moving it to Rust requires no new FFI at all.
+Of the 156 symbols, roughly thirty plus forty-one C-library substitutes
+evaporated once the logic was Rust; twenty-two were lookups into static sdb files
+that `r2abi` now reads itself; and the genuine remainder was never an FFI
+question at all — function discovery and boundaries, cross-references, names and
+flags, comments, and variables, the last of which `r2ssa` already recovers better
+than radare2's stack-pointer heuristics.
 
-Note also that the `r_anal_function_snapshot_*` names are not a radare2 API.
-They are `static` functions inside `snapshot_capture.c`, and nothing of that name
-exists in radare2's headers. The real coupling is to radare2's struct layouts —
-`RAnal`, `RAnalFunction`, `RAnalVar`, `RList` — walked directly.
+What the engine actually needs is bytes, an architecture and entry points.
+`object`, `gimli` and Sleigh supply all three, behind a six-method `Program`
+trait: `read`, `is_entry`, `return_address_register`, `name_at`, `import_at` and
+`holds_static_data`. Everything else radare2 was asked for is a capability this
+project owns.
 
-### The 156 symbols, by what happens to them
-
-**Delete and replace natively.** Roughly thirty, plus forty-one C-library
-substitutes (`r_str_*`, `r_list_*`, `r_strbuf_*`) that simply evaporate once the
-logic is Rust. Bytes and mapping (`r_io_map_*`, `r_io_desc_*`) become a native
-`Image`. Binary information (`r_bin_get_baddr`, `r_bin_get_info`, `r_bin_cur`)
-becomes `object` and `goblin`. Debug information (`r_bin_dwarf_parse_*`) becomes
-`gimli`. The register profile (`r_reg_*`, `r_anal_set_reg_profile`) comes from
-Sleigh's processor specification, which is where roadmap item six already points.
-Decoding (`r_anal_op`, `r_arch_session_decode`) is already covered by Sleigh.
-Output (`r_cons_print*`, `r_codemeta_*`) leaves the engine entirely under the
-rule that the engine never formats.
-
-**Import as data, not code.** Twenty-two symbols, and the cheapest win here. The
-twelve `r_anal_cc_*` calls, the ten `r_type_*` calls, `r_anal_base_type_*`,
-`r_anal_type_bitsize` and `r_anal_noreturn_at` are all lookups into static sdb
-files. The data is good and hard-won; only the lookup code crosses the boundary,
-and it should not.
-
-**Build in Rust.** The genuine gap, and not an FFI question: function discovery
-and boundaries (`r_anal_get_fcn_in`, `r_anal_get_function_at`,
-`r_anal_get_block_at`, `r_anal_bb_opaddr_i`, the min/max/linear-size family),
-cross-references (`r_anal_refs_get`, `r_anal_xrefs_*`), names and flags
-(`r_flag_*`), comments (`r_meta_*`), and variables (`r_anal_var_*` — noting that
-`r2ssa` already recovers variables better than radare2's heuristics, so this
-dependency is a liability being carried rather than a capability being used).
-
-**Keep, as the adapter.** `r_core_plugin_add`, `r_core_return_code`, and the
-apply and render path.
-
-### Engine at zero, adapter small, permanently
-
-The target is not "no FFI." It is that **all** the FFI lives in one small
-adapter crate and **none** of it lives in the engine. The engine needs bytes, an
-architecture, and entry points; `object`, `gimli` and Sleigh supply all three.
-The adapter keeps a radare2 dependency forever, because radare2 has to be able
-to call in and get results back, and that seam is how the work reaches users.
-
-Keeping `libr` as a backend is not a third option, because linking it *is* FFI.
-What it would buy is radare2's long tail — 97 binary formats against roughly
-eight mainstream ones in `object`, 51 IO plugins, 13 debug backends, 186
-architecture plugins against roughly forty Sleigh specifications. That coverage
-is real and irreproducible, and it is also explicitly out of scope: depth before
-breadth means x86, ARM, and ELF/PE/Mach-O is the whole target until the phases
-are done. An optional gated `libr` backend would also be exactly the
-old-support-beside-new-support shape this project rejects. If breadth ever
-becomes the goal, the decoder interface makes it a contained decision rather
-than an architectural one.
-
-Three things survive regardless: the sdb data files, imported natively; the
+Three things survive the deletion: the sdb data files, imported natively; the
 stream of general radare2 fixes going upstream as their own pull requests; and
-radare2 as the differential validation target for discovery, cross-references
-and boundaries, which is a dependency of the development process rather than of
-the binary.
+radare2 as the differential validation target for discovery, naming, decoding and
+cross-references. The last is a dependency of the development process rather than
+of the binary, and a disagreement with it may be radare2's defect rather than
+ours.
 
-### Peeling order
+### The lattice, and why refusal is not always available
 
-The bridge is not ported. It is made dead and then deleted, in that order,
-because the plugin needs it until `r2s` can answer what the plugin path answers.
+r2sleigh's contract as a decompiler is *given a function, render it, and refuse
+when the facts are not proven*. Certifying refusal is correct for a decompiler.
+It is wrong for an analysis engine: a function listing cannot refuse, and neither
+can a cross-reference query.
 
-1. **Native body lift at a given address.** Bytes from `Image`, decode and lift
-   through Sleigh, blocks and edges by recursive descent, refusing at indirect
-   transfers.
-2. **The sdb data import.** Types and calling conventions read natively. This is
-   not a side quest: `EngineAnalyzeRequest` carries `callee_facts`, and an empty
-   one degrades into a wall of refusals rather than failing, so a useful `pdd`
-   depends on it.
-3. **Native `EngineAnalyzeRequest` construction**, and `pdd` end to end in `r2s`.
-4. **Prove it** against the plugin path over the corpus: the same function, the
-   same rendering, from both sides.
-5. **Delete what that made dead** — `snapshot_wire.c` at 239 lines,
-   `snapshot_walk.c` at 1218 and `snapshot_wire.rs` at 3888, which is 5,345 lines
-   removed rather than relocated.
-6. **The name database**, which is also what closes eighteen of the twenty-four
-   `pd` disagreements against radare2 and so makes the differential oracle usable
-   for grading everything after it. `snapshot_capture.c` strands as this lands.
-7. **Discovery, cross-references, boundaries** — built in Rust, with confidence
-   attached. The engine exists.
-
-Every new FFI entry point added before step five makes step five harder, because
-it gives logic another reason to stay in C. The seam only shrinks from here. If a
-piece of work appears to need a new radare2 API, that is the signal that the
-logic belongs in Rust instead.
-
-### The tension this creates, stated now
-
-r2sleigh's contract today is *given a function, render it, and refuse when the
-facts are not proven*. Certifying refusal is correct for a decompiler. It is
-wrong for an analysis engine: a function listing cannot refuse, and neither can
-a cross-reference query.
-
-So the fact lattice needs two consumption policies rather than two pipelines.
-The engine tier answers best-effort with confidence attached; the decompiler
-tier keeps the right to refuse on top of those answers. `r2engine`'s request
-model and `r2source`'s fact ownership were both built assuming refusal is always
-available, and splitting that assumption is the real work of the inversion.
-Reshuffling crates is the easy part.
+So the fact lattice needs two consumption policies rather than two pipelines. The
+engine tier answers best-effort with confidence attached; the decompiler tier
+keeps the right to refuse on top of those answers. `r2engine`'s request model and
+`r2source`'s fact ownership were both built assuming refusal is always available,
+and splitting that assumption is the real work.
 
 The trigger is concrete rather than a judgement call. Everything `r2image`
 answers is parsed out of the container format and is genuinely proven, so the
-tension is not live yet. It goes live the instant discovery lands, because *this
-address is a function* is the first inferred fact in the tier. Until then the
-cheap half is taken and the expensive half is not: **every engine-tier fact
-carries a confidence field from the first one written**, even while every value
-of it is `Proven`. Adding the field now costs almost nothing; adding it later
-means touching every producer and every consumer.
+tension only goes live with discovery, because *this address is a function* is
+the first inferred fact in the tier. **Every engine-tier fact carries a
+confidence field from the first one written**, even while every value of it is
+`Proven`. Adding the field costs almost nothing; adding it later means touching
+every producer and every consumer. `Confidence` exists today and is mentioned in
+exactly one file, which is the gap rather than the state of the art.
 
 ## The IL, in tiers
 
@@ -511,9 +455,7 @@ Violating any of these costs more than the work it saves.
 
 ## Sequencing
 
-Dependency order, and each step ships something. The inversion comes first and
-the agent surface is done at the end, when the tracks merge; an earlier draft of
-this document had that the other way round.
+Dependency order, and each step ships something.
 
 1. **Native body lift at a given address.** Recursive descent over direct
    branches, refusing at indirect transfers. Nothing below this is callable
@@ -521,39 +463,48 @@ this document had that the other way round.
 2. **The sdb type and convention import.** A dependency of a useful `pdd`
    through `callee_facts`, not an independent win. *Done: `r2abi` reads the
    conventions and the five hundred library prototypes.*
-3. **Native request construction**, and `pdd` end to end in `r2s`. The
-   milestone. *Done, on x86-64 and aarch64; open threads in
-   `doc/handoff-engine-inversion.md`.*
-4. **The name database.** Closes eighteen of the twenty-four `pd` disagreements
-   and unblocks the differential oracle for everything after it. *Done:
-   symbols, entry, import stubs from their relocations, and the text a body
-   points at.*
-5. **Delete the bridge that is now dead.** Build, prove, then delete.
-6. **Discovery**, with confidence attached, and the fact lattice split at that
-   moment, because that is where the first inferred fact appears.
-7. **Value-set analysis and the memory model.** One project. Unblocks the
-   interprocedural graph, complete bodies through resolved switches, structure
-   and array recovery, rewriting, and deobfuscation.
-8. **Loop and induction variables.** Cheap, and already overdue.
-9. **Interprocedural control-flow graph to fixpoint.**
-10. **Binary diffing.** Independent of the above and high value.
-11. **Solver escalation**, with verification and value-set analysis as its
-    consumers, so it does not repeat the deleted crate's fate.
-12. **Equivalence checking**, which makes every later claim mechanical rather
+3. **Native request construction**, and `pdd` end to end in `r2s`. *Done, on
+   x86-64, aarch64 and ARM 32-bit.*
+4. **Printable IL tiers.** Every tier inspectable from a command, so a defect
+   belongs to exactly one lowering. *Done: `pdil`, `pdim`, `pdih`.*
+5. **Discovery**, with confidence attached. *Done as a fixed point over direct
+   transfers; it does not yet cross an indirect handoff.*
+6. **Delete the plugin and the bridge**, and rebuild the gate natively. The
+   plugin is not ported and not preserved.
+7. **The name database, cross-references and strings.** One address-to-name
+   table with a kind, a size and a confidence, plus a reverse index, replacing
+   every rival naming rule in the tree. Queries over the IL, not separate
+   scanners.
+8. **Discovery across a typed handoff.** A constant argument counts as a
+   function where the callee's declared prototype says that parameter is one.
+9. **Write and patch mode**, with incremental invalidation, which is the first
+   thing that actually exercises demand-driven analysis.
+10. **Value-set analysis and the memory model.** One project. Partly landed:
+    `values.rs` carries strided intervals with widening and `indirect.rs`
+    consumes them, and what remains is the memory model and the rest of the
+    consumers.
+11. **Interprocedural control-flow graph to fixpoint.** Callees are walked one
+    level deep today.
+12. **Exception-handler recovery**, and structure and array recovery over the
+    memory model.
+13. **Binary diffing.** Independent of the above and high value.
+14. **Solver escalation**, with verification and value-set analysis as its
+    consumers, so it does not repeat the deleted symbolic crate's fate.
+15. **Equivalence checking**, which makes every later claim mechanical rather
     than hand-checked.
-13. **The rest of the command language and r2pipe compatibility.** Begun: `r2s`
+16. **The rest of the command language and r2pipe compatibility.** Begun: `r2s`
     already spells its commands as radare2 spells them so the two can be diffed.
-14. **The agent surface**, at the merge: the stateless typed query API in
+17. **The agent surface**, at the merge: the stateless typed query API in
     `r2engine`, confidence carried through `r2source`'s contracts, explain over
     the existing ledger, a protocol of about a dozen tools plus function
     resources, and budget-aware rendering with elision reported and fetchable.
     The query API is the real work; the protocol is a wrapper.
-15. **Trace recording and query.**
+18. **Trace recording and query.**
 
-Step fourteen is small and makes this the best agent-facing binary analysis tool
-in existence, because nothing else ships confidence and nothing else can explain
-itself. It is last because it is worth more over an engine that owns its facts
-than over a bridge into someone else's.
+Step seventeen is small and makes this the best agent-facing binary analysis
+tool in existence, because nothing else ships confidence and nothing else can
+explain itself. It is late because it is worth more over an engine that owns its
+facts than over a bridge into someone else's.
 
 ## Open questions
 
