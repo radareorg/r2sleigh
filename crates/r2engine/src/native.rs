@@ -270,6 +270,37 @@ pub fn transfers(
     Some(transfers)
 }
 
+/// Every reference one function makes, from its own lift.
+///
+/// The sibling of `transfers`: where that says which addresses a body treats as
+/// code, this says every address it names at all, so a reverse index can be
+/// built by asking each discovered function once.
+pub fn data_refs(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Vec<r2ssa::DataRefFact> {
+    let Ok(machine) = machine(target) else {
+        return Vec::new();
+    };
+    let native = Native {
+        target,
+        program,
+        machine,
+        control: crate::EngineExecutionControl::default().ssa_execution_control(),
+    };
+    let Ok(walked) = native.walk(entry) else {
+        return Vec::new();
+    };
+    let blocks = walked
+        .body
+        .blocks
+        .iter()
+        .map(|block| block.lifted.clone())
+        .collect::<Vec<_>>();
+    r2ssa::data_refs_from_blocks(&blocks, Some(target.arch)).unwrap_or_default()
+}
+
 /// What the binding plan decided about each value.
 pub fn values(
     target: &NativeTarget<'_>,

@@ -123,7 +123,7 @@ pub fn name_strings(db: &mut NameDb, image: &Image) {
                 db.insert(
                     section.vaddr + at as u64,
                     Name {
-                        text: sanitised(text),
+                        text: text.to_owned(),
                         namespace: Namespace::String,
                         // The terminator belongs to the string: it is what a
                         // reader has to step over to reach the next one.
@@ -157,17 +157,6 @@ fn chance_run_length(size: u64) -> usize {
         return 1;
     }
     (expected.ln() / -PRINTABLE.ln()).ceil() as usize
-}
-
-/// The name radare2 writes for a string: its text, with everything that is not
-/// an identifier character replaced.
-fn sanitised(text: &str) -> String {
-    text.chars()
-        .map(|c| match c.is_ascii_alphanumeric() {
-            true => c,
-            false => '_',
-        })
-        .collect()
 }
 
 /// Give each import stub the name of the import it stands for.

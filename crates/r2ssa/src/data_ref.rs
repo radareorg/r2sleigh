@@ -490,7 +490,11 @@ pub fn data_refs_from_artifact_with_op_sources(
     })
 }
 
-/// Build the one authoritative SSA artifact used by the plugin xref callback.
+/// Every reference one body makes, read off the lift.
+///
+/// The cross-reference question is a query over the IL rather than a scanner
+/// of its own: a body that names an address names it in an operation, and the
+/// artifact this builds is what says which.
 pub fn data_refs_from_blocks(
     blocks: &[R2ILBlock],
     arch: Option<&ArchSpec>,

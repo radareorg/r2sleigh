@@ -28,6 +28,18 @@ cargo build --release -p r2s --features sleigh
 # Every function the engine finds, with why each one is believed
 target/release/r2s -q -c 'afl' /bin/ls
 
+# Every address the binary names, and every string it holds
+target/release/r2s -q -c 'f' /bin/ls
+target/release/r2s -q -c 'iz' /bin/ls
+
+# Every reference the program makes, and every one naming an address
+target/release/r2s -q -c 'ax' /bin/ls
+target/release/r2s -q -c 'axt 0x100003f10' /bin/ls
+
+# Patch a byte and decompile what the patched program does. The file on disk
+# is untouched; `wc` lists the patches and `wcr` takes them back.
+target/release/r2s -q -c 's main; wx 9090; pdd' /bin/ls
+
 # Decompile one
 target/release/r2s -q -c 's main; pdd' /bin/ls
 

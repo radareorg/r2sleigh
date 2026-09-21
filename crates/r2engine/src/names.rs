@@ -98,9 +98,26 @@ pub struct Name {
 
 impl Name {
     /// The name as a user expects to read it.
+    ///
+    /// A string is stored as the text it is, because that is what a listing of
+    /// strings is for; what a flag can be written as is a projection of it,
+    /// with everything an identifier cannot hold replaced.
     pub fn spelled(&self) -> String {
-        format!("{}{}", self.namespace.prefix(), self.text)
+        match self.namespace {
+            Namespace::String => format!("{}{}", self.namespace.prefix(), identifier(&self.text)),
+            _ => format!("{}{}", self.namespace.prefix(), self.text),
+        }
     }
+}
+
+/// The text with everything an identifier cannot hold replaced.
+fn identifier(text: &str) -> String {
+    text.chars()
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c,
+            false => '_',
+        })
+        .collect()
 }
 
 /// Every address this program has a name for.
@@ -202,6 +219,13 @@ mod tests {
             size,
             confidence,
         }
+    }
+
+    #[test]
+    fn a_string_is_stored_as_itself_and_spelled_as_an_identifier() {
+        let name = named("hello %s\n", Namespace::String, 10, Confidence::Stated);
+        assert_eq!(name.text, "hello %s\n");
+        assert_eq!(name.spelled(), "str.hello__s_");
     }
 
     #[test]

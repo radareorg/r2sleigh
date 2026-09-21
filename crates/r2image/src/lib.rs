@@ -10,6 +10,7 @@ use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 pub mod debug;
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -346,6 +347,13 @@ pub struct Image {
     debug_prototypes: debug::DebugPrototypes,
     entry_points: Vec<EntryPoint>,
     relocations: Vec<Relocation>,
+    /// Bytes written over the file's own, by address.
+    ///
+    /// A patch is a layer rather than an edit: the file on disk is untouched
+    /// until someone asks for it to be written, and every read sees through.
+    /// One byte per entry, because that is what makes a patch reversible at
+    /// any granularity and a listing of them a grouping rather than a record.
+    patches: BTreeMap<u64, u8>,
 }
 
 impl Image {
@@ -568,6 +576,7 @@ impl Image {
             debug_prototypes,
             entry_points,
             relocations,
+            patches: BTreeMap::new(),
         })
     }
 
@@ -633,6 +642,29 @@ impl Image {
             return None;
         }
 
+        // A patched range is answered from the layer, which means an owned
+        // copy; an unpatched one keeps the borrow it always had.
+        let end = vaddr.checked_add(len as u64)?;
+        if self.patches.range(vaddr..end).next().is_some() {
+            let mut bytes = self.read_unpatched(vaddr, len)?.into_owned();
+            for (at, byte) in self.patches.range(vaddr..end) {
+                bytes[(at - vaddr) as usize] = *byte;
+            }
+            return Some(Cow::Owned(bytes));
+        }
+        self.read_unpatched(vaddr, len)
+    }
+
+    /// The file's own bytes, with no patch layer over them.
+    fn read_unpatched(&self, vaddr: u64, len: usize) -> Option<Cow<'_, [u8]>> {
+        let segment = self.segment_at(vaddr)?;
+        if !segment.permissions.read {
+            return None;
+        }
+        let offset_in_segment = vaddr - segment.vaddr;
+        if (len as u64) > segment.vsize - offset_in_segment {
+            return None;
+        }
         let backed = segment
             .file_size
             .saturating_sub(offset_in_segment)
@@ -665,10 +697,105 @@ impl Image {
         self.read(vaddr, available)
     }
 
+    /// Write bytes over what the file holds, in a layer.
+    ///
+    /// Nothing reaches the file on disk. Every read after this sees the new
+    /// bytes, which is what makes the analysis of a patched program the
+    /// analysis of the program as patched: the engine keys a prepared function
+    /// by the bytes it captured, so a patched byte is a different key and the
+    /// work is done again rather than answered from before.
+    pub fn write(&mut self, vaddr: u64, bytes: &[u8]) -> Result<(), ImageError> {
+        let end = vaddr
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| ImageError::Parse(format!("write at {vaddr:#x} overflows")))?;
+        // Every byte must land somewhere the program maps, or the write is a
+        // claim about memory the program does not have.
+        if self.read_unpatched(vaddr, bytes.len()).is_none() && !bytes.is_empty() {
+            return Err(ImageError::Parse(format!(
+                "nothing mapped at {vaddr:#x}..{end:#x}"
+            )));
+        }
+        for (offset, byte) in bytes.iter().enumerate() {
+            self.patches.insert(vaddr + offset as u64, *byte);
+        }
+        Ok(())
+    }
+
+    /// Every byte written over the file's own, in address order.
+    pub fn patches(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
+        self.patches.iter().map(|(at, byte)| (*at, *byte))
+    }
+
+    /// Drop every patch, so the image reads as the file does.
+    pub fn revert(&mut self) {
+        self.patches.clear();
+    }
+
     /// Whether the address is inside a segment marked executable.
     pub fn is_executable(&self, vaddr: u64) -> bool {
         self.segment_at(vaddr)
             .is_some_and(|segment| segment.permissions.execute)
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    fn image() -> Image {
+        Image::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/coverage/pinned/hashes_gcc_x64_O2"
+        ))
+        .expect("the pinned fixture opens")
+    }
+
+    #[test]
+    fn a_write_is_seen_by_every_read_after_it() {
+        let mut image = image();
+        let before = image.read(0x401330, 4).expect("mapped").into_owned();
+        image.write(0x401330, &[0x90, 0x90]).expect("mapped");
+        let after = image.read(0x401330, 4).expect("mapped").into_owned();
+        assert_eq!(&after[..2], &[0x90, 0x90]);
+        assert_eq!(&after[2..], &before[2..]);
+    }
+
+    #[test]
+    fn a_write_reaches_a_window_that_only_overlaps_it() {
+        let mut image = image();
+        image.write(0x401332, &[0xcc]).expect("mapped");
+        let window = image.read_upto(0x401330, 8).expect("mapped");
+        assert_eq!(window[2], 0xcc);
+    }
+
+    #[test]
+    fn the_file_is_not_touched() {
+        let mut patched = image();
+        patched.write(0x401330, &[0x90]).expect("mapped");
+        assert_eq!(image().read(0x401330, 1).expect("mapped")[0], 0xf3);
+        assert_eq!(patched.read(0x401330, 1).expect("mapped")[0], 0x90);
+    }
+
+    #[test]
+    fn reverting_gives_the_file_back() {
+        let mut image = image();
+        let before = image.read(0x401330, 4).expect("mapped").into_owned();
+        image.write(0x401330, &[0x90, 0x90]).expect("mapped");
+        image.revert();
+        assert_eq!(
+            image.read(0x401330, 4).expect("mapped").as_ref(),
+            &before[..]
+        );
+        assert_eq!(image.patches().count(), 0);
+    }
+
+    #[test]
+    fn a_write_where_nothing_is_mapped_is_refused() {
+        // A patch claims something about memory the program has. Where it has
+        // none, the claim is refused rather than recorded and never read.
+        let mut image = image();
+        assert!(image.write(0x9999_0000, &[0x90]).is_err());
+        assert_eq!(image.patches().count(), 0);
     }
 }
 
@@ -828,6 +955,7 @@ mod tests {
             entry_points: Vec::new(),
             relocations: Vec::new(),
             debug_prototypes: debug::DebugPrototypes::default(),
+            patches: BTreeMap::new(),
         }
     }
 

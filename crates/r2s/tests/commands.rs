@@ -194,6 +194,87 @@ fn the_engine_and_the_listing_read_one_entry() {
 }
 
 #[test]
+fn a_string_is_listed_as_itself_and_flagged_as_an_identifier() {
+    // One row answers both: the text a reader wants and the name a listing
+    // can write. They cannot drift because they are the same entry.
+    let listed = r2s("iz");
+    assert!(listed.ok, "{}", listed.out);
+    assert!(
+        listed.out.contains("/lib64/ld-linux-x86-64.so.2"),
+        "{}",
+        listed.out
+    );
+    let flagged = r2s("f~str._lib64");
+    assert!(flagged.ok, "{}", flagged.out);
+    assert!(
+        flagged.out.contains("str._lib64_ld_linux_x86_64_so_2"),
+        "{}",
+        flagged.out
+    );
+}
+
+#[test]
+fn a_reference_is_a_query_over_the_lift() {
+    let all = r2s("ax");
+    assert!(all.ok, "{}", all.out);
+    let rows: Vec<&str> = all
+        .out
+        .lines()
+        .filter(|line| line.trim_start().starts_with("0x"))
+        .collect();
+    assert!(!rows.is_empty(), "{}", all.out);
+    // Every reference says whether the address is named as code or as data.
+    for row in &rows {
+        let kind = row.split_whitespace().nth(2).unwrap_or("");
+        assert!(kind == "c" || kind == "d", "{row}");
+    }
+    // And asking about one address gives back only the rows that name it.
+    let first: Vec<&str> = rows[0].split_whitespace().collect();
+    let one = r2s(&format!("axt {}", first[1]));
+    assert!(one.ok, "{}", one.out);
+    assert!(
+        one.out.contains(first[0]),
+        "{}\nlooking for {}",
+        one.out,
+        first[0]
+    );
+}
+
+#[test]
+fn a_patch_is_a_layer_the_analysis_reads_through() {
+    // The file is untouched and every read sees the new bytes, so the
+    // analysis of a patched program is the analysis of the program as
+    // patched rather than of the one on disk.
+    let before = r2s("s 0x401330; pd 1");
+    assert!(before.out.contains("endbr64"), "{}", before.out);
+
+    let patched = r2s("s 0x40133d; wx efbeadde; s 0x401330; pdd");
+    assert!(patched.ok, "{}", patched.out);
+    assert!(patched.out.contains("0xdeadbeef"), "{}", patched.out);
+
+    // And the next session reads the file, because nothing was written to it.
+    let again = r2s("s 0x401330; pdd");
+    assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
+}
+
+#[test]
+fn a_patch_is_listed_and_can_be_taken_back() {
+    let run = r2s("s 0x401330; wx 9090; wc");
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.contains("2 patched bytes"), "{}", run.out);
+
+    let reverted = r2s("s 0x401330; wx 9090; wcr; pd 1");
+    assert!(reverted.ok, "{}", reverted.out);
+    assert!(reverted.out.contains("endbr64"), "{}", reverted.out);
+}
+
+#[test]
+fn a_write_where_nothing_is_mapped_is_refused() {
+    let run = r2s("s 0x99990000; wx 90");
+    assert!(!run.ok, "{}", run.out);
+}
+
+#[test]
 fn the_image_reports_what_the_container_states() {
     let run = r2s("i");
     assert!(run.ok, "{}", run.out);

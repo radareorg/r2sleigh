@@ -652,8 +652,13 @@ fn render_esil_lines(
 /// Where instruction bytes come from: hex on the command line, or a binary.
 #[cfg(feature = "sleigh-config")]
 enum ByteSource {
-    Hex { base: u64, bytes: Vec<u8> },
-    Image(r2image::Image),
+    Hex {
+        base: u64,
+        bytes: Vec<u8>,
+    },
+    /// Boxed because an open image is an order of magnitude larger than a
+    /// hex literal, and the enum is passed by value.
+    Image(Box<r2image::Image>),
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -704,7 +709,7 @@ fn cmd_disasm(
                     .map(|entry| entry.vaddr)
                     .ok_or_else(|| format!("{} declares no entry point", path.display()))?,
             };
-            (ByteSource::Image(image), arch_name, start)
+            (ByteSource::Image(Box::new(image)), arch_name, start)
         }
         None => {
             let arch_name = arch

@@ -40,42 +40,41 @@ Done, and gated:
   and `Reached` on every address.
 - **The plugin and the snapshot bridge are deleted**, and the gate is rebuilt on
   `r2s` itself.
+- **One switch owner**: jump tables are derived from our own value ranges and
+  imported from nothing.
+- **One name database**, with a kind, a size and a confidence per address, plus
+  cross-references and strings: `f`, `iz`, `ax`, `axt`.
+- **Discovery crosses a typed handoff**: a stripped binary goes from 5 functions
+  to 20, because a declaration says `__libc_start_main` takes a function.
+- **Write and patch mode**: `w`, `wx`, `wc`, `wcr`. The patch is a layer, the
+  file is untouched, and the analysis follows the patched bytes because a
+  prepared function is keyed by the bytes it was captured from.
 
 Next, in order
 --------------
 
-1. **Collapse the switch import.** The native route derives its own jump tables
-   through `values.rs` and `indirect.rs`; what remains is one `SwitchInfo`
-   rather than two, an unresolved record for a switch with no dispatch, and the
-   redundant half of `dispatch_table_read`.
-2. **The name database, cross-references and strings.** One address-to-name
-   table with a kind, a size and a confidence, and a reverse index, replacing
-   every rival naming rule in the tree. Queries over the IL, not separate
-   scanners. New commands: `f`, `ax`/`axt`, `iz`/`izz`.
-3. **Discovery across a typed handoff.** A constant argument counts as a
-   function only where the callee's declared prototype says that parameter is
-   one, which is how a stripped binary reaches `main` through
-   `__libc_start_main`.
-4. **Write and patch mode**, with incremental invalidation. The first thing
-   that actually exercises demand-driven analysis, so it decides the shape.
-5. **The memory model**, finishing the value-set keystone: abstract locations
+1. **Finish the name collapse.** `r2source::DisplayNames` is a second naming
+   table, `r2dec` has two callee resolvers that disagree on how a call is
+   spelled, and three spellings of an unnamed function survive (`fcn.{x}`,
+   `fcn_{x}`, `sub_{x}`). One table already exists; these have to move into it.
+2. **The memory model**, finishing the value-set keystone: abstract locations
    in the CodeSurfer sense, a region and an offset, where the region is a
    global, a named stack frame or an allocation site.
-6. **Interprocedural control-flow graph to fixpoint.** Callees are walked one
+3. **Interprocedural control-flow graph to fixpoint.** Callees are walked one
    level deep today, which is the largest single improvement available to
    output quality.
-7. **Exception-handler recovery**, and structure and array recovery over the
+4. **Exception-handler recovery**, and structure and array recovery over the
    memory model.
-8. **Binary diffing.** Independent of the above and high value.
-9. **Solver escalation**, with verification and value-set analysis as its
+5. **Binary diffing.** Independent of the above and high value.
+6. **Solver escalation**, with verification and value-set analysis as its
    consumers, so it does not repeat the deleted symbolic crate's fate.
-10. **Equivalence checking**, which makes every later claim mechanical rather
-    than hand-checked.
-11. **The rest of the command language and r2pipe compatibility.**
-12. **The agent surface**: the stateless typed query API, confidence carried
-    through the contracts, explain over the existing ledger, and budget-aware
-    rendering with elision reported and fetchable.
-13. **Trace recording and query.**
+7. **Equivalence checking**, which makes every later claim mechanical rather
+   than hand-checked.
+8. **The rest of the command language and r2pipe compatibility.**
+9. **The agent surface**: the stateless typed query API, confidence carried
+   through the contracts, explain over the existing ledger, and budget-aware
+   rendering with elision reported and fetchable.
+10. **Trace recording and query.**
 
 Standing debt
 -------------
@@ -91,7 +90,13 @@ Carried with a cause, not as a baseline:
   specification carries a flag fact; nothing available today tells `CF` from
   `AL`.
 - The measurement harnesses under `scripts/` and `tests/decbench/` still drive
-  radare2, and need repointing at `r2s`.
+  radare2 with the deleted plugin, and need repointing at `r2s`; the
+  source-gold and fixed-performance gates have no replacement yet.
+- The whole-binary coverage baseline has not been re-blessed since the sweep
+  moved from radare2's function set to this engine's.
+- `tools/dylints/r2sleigh_lints` has 32 file-scanning tests asserting on
+  functions that were renamed or deleted in August and September; nothing runs
+  them in continuous integration, which is why they rotted.
 - The Dylint rules under `tools/dylints/` include lints written for plugin-side
   policy that can no longer fire.
 

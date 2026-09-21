@@ -52,6 +52,13 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "pdd" => decompile(session, argument),
         "afl" => discovered(session),
         "f" => flags(session),
+        "ax" => cross_references(session, argument),
+        "axt" => references_to(session, argument),
+        "iz" => strings(session),
+        "w" => write_text(session, argument),
+        "wx" => write_hex(session, argument),
+        "wc" => patches(session),
+        "wcr" => revert(session),
         "pdil" => low_tier(session, argument),
         "pdim" => medium_tier(session, argument),
         "pdih" => high_tier(session, argument),
@@ -203,6 +210,159 @@ fn discovered(session: &mut Session) -> Result<String, String> {
     }
     out.push_str(&format!("\n\n{} functions", found.len()));
     Ok(out)
+}
+
+/// Write text at the cursor.
+fn write_text(session: &mut Session, argument: &str) -> Result<String, String> {
+    patch(session, argument.as_bytes())
+}
+
+/// Write bytes spelled in hex at the cursor.
+fn write_hex(session: &mut Session, argument: &str) -> Result<String, String> {
+    let digits = argument.replace(' ', "");
+    if !digits.len().is_multiple_of(2) {
+        return Err("r2s: a byte is two hex digits".to_owned());
+    }
+    let bytes = digits
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| "r2s: not hex".to_owned())?;
+            u8::from_str_radix(text, 16).map_err(|_| format!("r2s: '{text}' is not hex"))
+        })
+        .collect::<Result<Vec<u8>, String>>()?;
+    patch(session, &bytes)
+}
+
+/// Put bytes in the patch layer at the cursor.
+///
+/// Nothing reaches the file. The analysis of a patched program is the analysis
+/// of the program as patched, because the engine keys a prepared function by
+/// the bytes it captured and patched bytes are a different key.
+fn patch(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
+    let addr = session.addr;
+    session
+        .image
+        .write(addr, bytes)
+        .map_err(|error| format!("r2s: {error}"))?;
+    Ok(format!("{} bytes at {addr:#x}", bytes.len()))
+}
+
+/// Every byte written over the file's own.
+fn patches(session: &mut Session) -> Result<String, String> {
+    let mut out = String::from("vaddr      byte\n");
+    out.push_str(&"-".repeat(16));
+    let mut count = 0usize;
+    for (vaddr, byte) in session.image.patches() {
+        count += 1;
+        out.push_str(&format!("\n{vaddr:#010x} {byte:02x}"));
+    }
+    out.push_str(&format!("\n\n{count} patched bytes"));
+    Ok(out)
+}
+
+/// Drop every patch, so the image reads as the file does.
+fn revert(session: &mut Session) -> Result<String, String> {
+    let count = session.image.patches().count();
+    session.image.revert();
+    Ok(format!("{count} patched bytes reverted"))
+}
+
+/// Every reference the program makes, from every function discovery believes.
+///
+/// A cross-reference is a query over the lift, not a scan: a body that names
+/// an address names it in an operation, and every function is asked once.
+#[cfg(feature = "sleigh")]
+fn references(session: &mut Session) -> Result<Vec<r2ssa::DataRefFact>, String> {
+    session.ensure_machine()?;
+    let mut seeds = stated_seeds(&session.image);
+    seeds.extend(
+        session
+            .imports
+            .keys()
+            .map(|vaddr| (*vaddr, r2engine::discovery::Confidence::Stated)),
+    );
+    let addr = session.addr;
+    with_native(session, addr, |target, program| {
+        let found = r2engine::discovery::functions(program, seeds, |entry| {
+            r2engine::native::transfers(target, program, entry)
+        });
+        let mut refs = found
+            .iter()
+            .flat_map(|one| r2engine::native::data_refs(target, program, one.address))
+            .collect::<Vec<_>>();
+        refs.sort_unstable();
+        refs.dedup();
+        Ok(refs)
+    })
+}
+
+/// Where each address is named from.
+#[cfg(feature = "sleigh")]
+fn cross_references(session: &mut Session, argument: &str) -> Result<String, String> {
+    if !argument.trim().is_empty() {
+        return Err("r2s: ax takes no argument; use axt <address>".to_owned());
+    }
+    let refs = references(session)?;
+    let mut out = String::from("from       to         kind\n");
+    out.push_str(&"-".repeat(34));
+    for fact in &refs {
+        out.push_str(&format!(
+            "\n{:#010x} {:#010x} {}",
+            fact.from,
+            fact.to,
+            fact.kind.as_str()
+        ));
+    }
+    out.push_str(&format!("\n\n{} references", refs.len()));
+    Ok(out)
+}
+
+/// Every place one address is named from.
+#[cfg(feature = "sleigh")]
+fn references_to(session: &mut Session, argument: &str) -> Result<String, String> {
+    let wanted = parse_number(session, argument)?;
+    let refs = references(session)?;
+    let mut out = String::new();
+    let mut count = 0usize;
+    for fact in refs.iter().filter(|fact| fact.to == wanted) {
+        count += 1;
+        out.push_str(&format!("{:#010x} {}\n", fact.from, fact.kind.as_str()));
+    }
+    out.push_str(&format!("\n{count} references to {wanted:#x}"));
+    Ok(out)
+}
+
+/// Every string the data sections hold.
+#[cfg(feature = "sleigh")]
+fn strings(session: &mut Session) -> Result<String, String> {
+    let mut out = String::from("vaddr       size string\n");
+    out.push_str(&"-".repeat(46));
+    let mut count = 0usize;
+    for (vaddr, name) in session.names.iter() {
+        if name.namespace != r2engine::names::Namespace::String {
+            continue;
+        }
+        count += 1;
+        out.push_str(&format!("\n{:#010x} {:>5} {}", vaddr, name.size, name.text));
+    }
+    out.push_str(&format!("\n\n{count} strings"));
+    Ok(out)
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn cross_references(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature, so nothing can be lifted".to_owned())
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn references_to(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature, so nothing can be lifted".to_owned())
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn strings(_session: &mut Session) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature, so the data cannot be read".to_owned())
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.
