@@ -137,6 +137,13 @@ pub enum EntryKind {
     Fini,
     /// Named by a symbol typed as a function.
     Symbol,
+    /// The C `main` the format names outright.
+    ///
+    /// Mach-O's `LC_MAIN` carries the offset of `main` itself, not of the
+    /// runtime's start routine, so the language's own declaration applies:
+    /// `main` returns `int`. An ELF entry is `_start`, which is a different
+    /// function and returns nothing, so this kind is never used for one.
+    CMain,
     /// Listed in the Mach-O function-starts table.
     ///
     /// The linker writes one entry per function it laid out, so this is the
@@ -181,6 +188,58 @@ fn code_address(arch: &ImageArch, value: u64) -> u64 {
 /// Whether the low bit of a function's address selects Thumb on this machine.
 fn is_arm32(arch: &ImageArch) -> bool {
     arch.name == "ARM" && arch.bits == 32
+}
+
+/// The address `LC_MAIN` names, where the Mach-O carries that command.
+fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<u64> {
+    match file {
+        object::File::MachO64(macho) => c_main(macho, data),
+        object::File::MachO32(macho) => c_main(macho, data),
+        _ => None,
+    }
+}
+
+fn c_main<'data, Mach, R>(
+    file: &object::read::macho::MachOFile<'data, Mach, R>,
+    data: &'data [u8],
+) -> Option<u64>
+where
+    Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
+    R: object::ReadRef<'data>,
+{
+    use object::macho;
+    use object::read::macho::Segment as _;
+
+    let endian = file.macho_header().endian().ok()?;
+    let mut commands = file.macho_header().load_commands(endian, data, 0).ok()?;
+    let mut text_base = None;
+    let mut entryoff = None;
+    while let Ok(Some(command)) = commands.next() {
+        if command.cmd() == macho::LC_MAIN
+            && let Ok(main) = command.data::<macho::EntryPointCommand<Mach::Endian>>()
+        {
+            entryoff = Some(main.entryoff.get(endian));
+        }
+        if text_base.is_none()
+            && let Ok(variant) = command.variant()
+        {
+            text_base = match variant {
+                object::read::macho::LoadCommandVariant::Segment32(segment, _)
+                    if segment.name() == b"__TEXT" =>
+                {
+                    Some(u64::from(segment.vmaddr.get(endian)))
+                }
+                object::read::macho::LoadCommandVariant::Segment64(segment, _)
+                    if segment.name() == b"__TEXT" =>
+                {
+                    Some(segment.vmaddr.get(endian))
+                }
+                _ => None,
+            };
+        }
+    }
+    // `entryoff` is measured from the start of the mapped image.
+    text_base?.checked_add(entryoff?)
 }
 
 /// Every function start the Mach-O linker recorded.
@@ -668,6 +727,14 @@ impl Image {
                     entry_points.push(EntryPoint { vaddr, kind });
                 }
             }
+        }
+        if let Some(vaddr) = macho_c_main(&file, data.as_slice())
+            && executable(vaddr)
+        {
+            entry_points.push(EntryPoint {
+                vaddr,
+                kind: EntryKind::CMain,
+            });
         }
         // The linker wrote one entry per function it laid out, so a body no
         // symbol names and nothing calls is still stated here.

@@ -30753,3 +30753,56 @@ The visibility work is the part to watch. Moving a private item into a sibling
 module makes it invisible; the fix is to promote exactly what the compiler asks
 for and nothing else, which is a loop of build-and-promote rather than a blanket
 `pub(crate)`. Every promotion in this pass was named by an error.
+
+## Four coverage and soundness defects, each a fact the binary already stated
+
+The rewrites left the gates where they were. These moved them: coverage from
+509 of 519 to 565 of 570, and source-gold from 98% recovery and soundness with
+one silent error to **100% of both with none**.
+
+**A call that never returns ends the block.** `crates/r2abi`'s shipped table
+carries `func.err.noreturn=true` for twenty-seven functions and the parser
+threw the line away, so `Prototype` had no such field and the body walk
+assumed every call comes back. On `/bin/ls` five adjacent `err(1, ...)` stubs
+became one 260-byte function claiming the four after it, and the
+interprocedural summary then refused all six for overlapping ranges. The
+parser now reads it, DWARF's `DW_AT_noreturn` fills it where the source said
+so, and `lift_body_where` takes a predicate the engine answers from the
+declarations -- resolving a call target through its stub to the import it
+stands for.
+
+**The binary states where its functions begin.** Stopping correctly at those
+calls cost ten discovered functions in `/bin/ls`, because they had only ever
+been found by a walk running past a noreturn call and sweeping linearly into
+them. Rather than restore the accident, `LC_FUNCTION_STARTS` is now read: a
+ULEB128 delta chain the linker writes from what it actually laid out, which
+names every function including the ones no symbol names and nothing calls.
+Discovery in `/bin/ls` went from 79 to 134.
+
+**A helper that shares a tail does not refuse the root.** `ld` merges
+identical tails across functions, so two stated functions can claim the same
+blocks. The interprocedural summary refused the whole set over it, losing the
+root as well. Block ownership being ambiguous does not make the root's
+signature unknowable, so the ambiguous helper is left out of the scope and
+says so.
+
+**An empty argument list is no observation.** Two call sites to `_wcwidth`
+disagreed -- one placed an argument, one placed none -- and the reconciliation
+refused because their shared prefix was empty. A site that placed no arguments
+has proven nothing about the arity; it does not contradict a site that placed
+one. Two non-empty lists disagreeing at the first position still do.
+
+**`LC_MAIN` names `main`, and the language declares what `main` returns.**
+The last silent error was `sym._main return: expected 'int', said 'uint32_t'`.
+It was not a bad inference: at `-O0` the compiler put `main`'s `return 0` and
+`xxhash32`'s `uint32_t` seed in one stack slot, so the only typed use of that
+value is an unsigned parameter and the engine read it faithfully. What the
+binary does carry is `LC_MAIN`, whose `entryoff` is `main` itself rather than a
+start routine -- so the address is named `main`, the shipped table's
+`func.main.ret=int` applies, and the rendering says `int32_t main(void)`.
+`EntryKind::CMain` exists to keep that apart from an ELF entry, which is
+`_start` and returns nothing.
+
+`wcwidth` is absent from the shipped prototype tables, which is why its arity
+had to be reconciled from call sites at all. That is a missing declaration in
+radare2's data and belongs upstream rather than here.

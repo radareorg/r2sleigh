@@ -456,7 +456,7 @@
     "system_ls_a97c50d3::0x1000008dc": "rendered",
     "system_ls_a97c50d3::0x1000008ec": "rendered",
     "system_ls_a97c50d3::0x100000924": "rendered",
-    "system_ls_a97c50d3::entry0": "native rendering refused: observation journal: RenderedValueRequired",
+    "system_ls_a97c50d3::main": "native rendering refused: observation journal: RenderedValueRequired",
     "system_ls_a97c50d3::0x100001564": "rendered",
     "system_ls_a97c50d3::0x1000016d4": "rendered",
     "system_ls_a97c50d3::0x1000019f8": "rendered",

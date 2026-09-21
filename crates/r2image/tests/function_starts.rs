@@ -35,3 +35,32 @@ fn a_stripped_mach_o_still_states_its_function_starts() {
         "{declared:?} are all named by {named:?}"
     );
 }
+
+/// `LC_MAIN` carries `main` itself, not a start routine.
+///
+/// The language declares what `main` returns, so reaching that declaration is
+/// what stops the engine stating a return type inferred from a slot the
+/// compiler happened to share with an unsigned argument.
+#[test]
+fn a_mach_o_names_the_c_main_the_language_declares() {
+    let bytes = include_bytes!("data/function_starts.macho").to_vec();
+    let image = r2image::Image::parse(bytes).expect("a mach-o fixture");
+
+    let c_main: Vec<u64> = image
+        .entry_points()
+        .iter()
+        .filter(|entry| entry.kind == r2image::EntryKind::CMain)
+        .map(|entry| entry.vaddr)
+        .collect();
+    assert_eq!(c_main.len(), 1, "one LC_MAIN: {c_main:?}");
+
+    // The same address is the format's entry, which is what makes naming it
+    // `entry0` as well a second name for one function.
+    let entry: Vec<u64> = image
+        .entry_points()
+        .iter()
+        .filter(|entry| entry.kind == r2image::EntryKind::Main)
+        .map(|entry| entry.vaddr)
+        .collect();
+    assert_eq!(entry, c_main);
+}

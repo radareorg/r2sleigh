@@ -161,6 +161,7 @@ fn entries(session: &Session) -> Result<String, String> {
                 r2image::EntryKind::Init => "init",
                 r2image::EntryKind::Fini => "fini",
                 r2image::EntryKind::Symbol => "symbol",
+                r2image::EntryKind::CMain => "main",
                 r2image::EntryKind::Declared => "declared",
             }
         ));

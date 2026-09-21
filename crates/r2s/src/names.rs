@@ -63,9 +63,21 @@ pub fn of(image: &Image) -> NameDb {
     // it, so it gets no second name here.
     let mut inits = 0;
     let mut finis = 0;
+    // Where the format names `main` outright, that address is `main` and not
+    // also `entry0`: `LC_MAIN` carries the C function, not a start routine.
+    let c_main: std::collections::BTreeSet<u64> = image
+        .entry_points()
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::CMain)
+        .map(|entry| entry.vaddr)
+        .collect();
     for entry in image.entry_points() {
         let text = match entry.kind {
+            EntryKind::Main if c_main.contains(&entry.vaddr) => continue,
             EntryKind::Main => "entry0".to_owned(),
+            // `LC_MAIN` names `main` itself, and the language declares what
+            // `main` returns, so the name is what reaches that declaration.
+            EntryKind::CMain => "main".to_owned(),
             EntryKind::Init => {
                 inits += 1;
                 format!("entry.init{}", inits - 1)
