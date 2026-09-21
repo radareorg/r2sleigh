@@ -236,6 +236,28 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
+/// Where one body transfers, without preparing or rendering it.
+///
+/// Discovery asks this of every address it believes, and it asks only for the
+/// transfers -- walking is the cheap half and a body that refuses to prepare
+/// still says who it calls.
+pub fn transfers(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Option<crate::discovery::Transfers> {
+    let native = Native {
+        target,
+        program,
+        machine: machine(target).ok()?,
+        control: crate::EngineExecutionControl::default().ssa_execution_control(),
+    };
+    native
+        .walk(entry)
+        .ok()
+        .map(|walked| crate::discovery::Transfers::from(&walked.body))
+}
+
 /// What the binding plan decided about each value.
 pub fn values(
     target: &NativeTarget<'_>,

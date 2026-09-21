@@ -90,6 +90,43 @@ unrecognised magic and two for an architecture with no mapping. Quote a figure
 from a run, not from this paragraph: every number in this document that was
 inherited rather than measured has been wrong by the time someone read it.
 
+## Discovery, and the first fact that carries confidence
+
+`afl` lists every function the program has. It was the symbol table, so a
+stripped binary had none -- while its entry point, its initialiser and
+finaliser arrays and a linkage stub per import were all parsed already and only
+the program's own entry was read.
+
+Discovery is the least set of addresses closed under "walk it and take where it
+transfers", started from what the image states. It terminates because the set
+only grows and the image is finite. `crates/r2engine/src/discovery.rs` holds
+the fixed point; the seeds are the host's, because the engine must not depend
+on the loader -- that is what `Program` is for.
+
+    cmp                 is 143 functions    afl 214
+    cmp, stripped       is   0 functions    afl  75
+
+**Every address says why it is believed**, because this is the first inferred
+fact the engine produces and a consumer that cannot tell a format's statement
+from this engine's reading of one instruction has to treat both as the weaker:
+
+  * `Stated` -- an entry point, a function symbol, a linkage stub the format
+    declares. Nothing is inferred.
+  * `Called` -- a walked body calls it, with a constant target.
+  * `Reached` -- a walked body leaves for it without returning, where whether
+    the target is a function of its own is exactly what a tail call makes
+    ambiguous.
+
+Found twice, an address keeps the stronger reason, so the order a walk happens
+to take does not decide how far a fact can be trusted.
+
+**Its reach is bounded, and the bound is named.** On a stripped binary the
+entry point tail-calls `__libc_start_main` and hands it `main` as a pointer, so
+`main` is never a direct call target and neither is anything below it. The
+seventy-five are the stubs, the entries, and `deregister_tm_clones`, which one
+walked body calls. Crossing that handoff is an indirect transfer, which is the
+value-set analysis the order already sequences after this.
+
 ## What grades the capture
 
 `scripts/diff_capture.py` renders one function from radare2's capture through

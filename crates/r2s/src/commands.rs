@@ -50,6 +50,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "px" => hexdump(session, argument),
         "pd" => disassemble(session, argument),
         "pdd" => decompile(session, argument),
+        "afl" => discovered(session),
         "pdil" => low_tier(session, argument),
         "pdim" => medium_tier(session, argument),
         "pdih" => high_tier(session, argument),
@@ -155,6 +156,78 @@ fn entries(session: &Session) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+/// Every function the program has, with how far each answer can be trusted.
+///
+/// The list was the symbol table, so a stripped binary had none -- while its
+/// entry point, its initialiser array and a linkage stub per import were
+/// already parsed and only the program entry was read. Discovery starts from
+/// all of them and closes over what the bodies call.
+#[cfg(feature = "sleigh")]
+fn discovered(session: &mut Session) -> Result<String, String> {
+    // The machine first: the stub table is decoded when it loads, and reading
+    // it before then is reading an empty map.
+    session.ensure_machine()?;
+    let mut seeds = stated_seeds(&session.image);
+    // A linkage stub is a function the format declares: the loader's own
+    // table says where each one begins, which is why they are stated rather
+    // than inferred. These were decoded already and read only for naming.
+    seeds.extend(
+        session
+            .imports
+            .keys()
+            .map(|vaddr| (*vaddr, r2engine::discovery::Confidence::Stated)),
+    );
+    let addr = session.addr;
+    let found = with_native(session, addr, |target, program| {
+        Ok(r2engine::discovery::functions(program, seeds, |entry| {
+            r2engine::native::transfers(target, program, entry)
+        }))
+    })?;
+    let mut out = String::from("vaddr      confidence name\n");
+    out.push_str(&"-".repeat(46));
+    for one in &found {
+        out.push_str(&format!(
+            "\n{:#010x} {:<10} {}",
+            one.address,
+            match one.confidence {
+                r2engine::discovery::Confidence::Stated => "stated",
+                r2engine::discovery::Confidence::Called => "called",
+                r2engine::discovery::Confidence::Reached => "reached",
+            },
+            one.name.as_deref().unwrap_or("-")
+        ));
+    }
+    out.push_str(&format!("\n\n{} functions", found.len()));
+    Ok(out)
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn discovered(_session: &mut Session) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature, so discovery cannot walk".to_owned())
+}
+
+/// What the image states about where code begins.
+///
+/// Every one of these was already computed and only the program's own entry
+/// point was read.
+#[cfg(feature = "sleigh")]
+fn stated_seeds(image: &r2image::Image) -> Vec<(u64, r2engine::discovery::Confidence)> {
+    use r2engine::discovery::Confidence;
+    image
+        .entry_points()
+        .iter()
+        .map(|entry| entry.vaddr)
+        .chain(
+            image
+                .symbols()
+                .iter()
+                .filter(|symbol| symbol.defined && symbol.kind == r2image::SymbolKind::Function)
+                .map(|symbol| symbol.vaddr),
+        )
+        .map(|vaddr| (vaddr, Confidence::Stated))
+        .collect()
 }
 
 fn sections(session: &Session) -> Result<String, String> {

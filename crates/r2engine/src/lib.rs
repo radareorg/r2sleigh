@@ -6,6 +6,7 @@
 //! needed for a request. Analysis artifacts are built directly for each
 //! source snapshot request.
 
+pub mod discovery;
 pub mod native;
 
 use std::collections::{BTreeSet, HashMap};
