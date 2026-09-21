@@ -149,8 +149,17 @@ impl NameDb {
 
     /// The plain name at exactly this address, which is what the engine keys
     /// prototypes and callee facts by.
+    ///
+    /// A section or a segment names a region, not the thing at its start, so
+    /// neither answers here: `.text` begins where the first function does, and
+    /// calling that function `.text` would key its prototype and spell its
+    /// rendering by the name of the place it lives in.
     pub fn text_at(&self, vaddr: u64) -> Option<&str> {
-        self.at(vaddr).map(|name| name.text.as_str())
+        self.by_address
+            .get(&vaddr)?
+            .iter()
+            .find(|name| !matches!(name.namespace, Namespace::Section | Namespace::Segment))
+            .map(|name| name.text.as_str())
     }
 
     /// The strongest name covering this address, and where it begins.
@@ -230,6 +239,19 @@ mod tests {
         backwards.insert(0x1000, weak);
         assert_eq!(forwards.at(0x1000), backwards.at(0x1000));
         assert_eq!(forwards.all_at(0x1000), backwards.all_at(0x1000));
+    }
+
+    #[test]
+    fn a_region_does_not_name_what_begins_inside_it() {
+        // `.text` begins where the first function does, and the engine keys a
+        // prototype by what a thing is called rather than by where it lives.
+        let mut db = NameDb::new();
+        db.insert(
+            0x1000,
+            named(".text", Namespace::Section, 0x200, Confidence::Stated),
+        );
+        assert_eq!(db.text_at(0x1000), None);
+        assert_eq!(db.at(0x1000).map(|name| name.text.as_str()), Some(".text"));
     }
 
     #[test]

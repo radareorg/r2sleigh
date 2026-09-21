@@ -6279,6 +6279,34 @@ fn reaching_stack_pointer_before(
     }
 }
 
+/// The value a storage holds immediately before one operation.
+///
+/// The walk `semantic.rs` does for a call's own arguments, named and made
+/// public: an engine that wants to know what a body put in a register before
+/// a call has no other way to ask, and a second walk would be a second answer
+/// to one question.
+pub fn value_reaching(
+    artifact: &crate::SsaArtifact,
+    block_addr: u64,
+    op_index: usize,
+    storage: CanonicalStorageId,
+) -> Option<ValueId> {
+    match reaching_abi_value_in_block_with_policy(
+        artifact.function(),
+        artifact.graph(),
+        artifact.machine_context(),
+        block_addr,
+        op_index,
+        storage,
+        true,
+    )? {
+        ReachingAbiState::Value(value) => Some(value),
+        // A carrier the callee is entered with unchanged is a fact about this
+        // function's own entry, not a value this body computed.
+        ReachingAbiState::PreservedEntry => None,
+    }
+}
+
 fn reaching_abi_value_in_block_with_policy(
     function: &SSAFunction,
     graph: &SsaGraph,

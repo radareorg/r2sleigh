@@ -252,10 +252,22 @@ pub fn transfers(
         machine: machine(target).ok()?,
         control: crate::EngineExecutionControl::default().ssa_execution_control(),
     };
-    native
-        .walk(entry)
-        .ok()
-        .map(|walked| crate::discovery::Transfers::from(&walked.body))
+    let walked = native.walk(entry).ok()?;
+    let mut transfers = crate::discovery::Transfers::from(&walked.body);
+    // Preparing a body costs far more than walking one, so it is done only
+    // where the typed rule could fire at all: this function has to call
+    // something whose declaration hands it a function. On an ordinary binary
+    // that is `entry0` and whoever registers a handler, and nothing else.
+    if native.hands_a_function(&walked) {
+        match native.prepare(&walked, &Callees::default()) {
+            Ok(artifact) => transfers.handed = native.handed_functions(&artifact, &walked),
+            Err(error) => r2il::refusal_evidence!(
+                "handed-function",
+                "{entry:#x}: preparing to read its arguments failed: {error:?}"
+            ),
+        }
+    }
+    Some(transfers)
 }
 
 /// What the binding plan decided about each value.
@@ -1729,6 +1741,129 @@ impl Native<'_> {
                 Some(SourceDataObject::new(address, name, None::<String>))
             })
             .collect()
+    }
+
+    /// What one call operation calls, where the program names it.
+    ///
+    /// A direct call names its target outright. An import is usually reached
+    /// indirectly, through a slot the loader fills, and what that slot stands
+    /// for is a relocation the program declares -- so the callee is named
+    /// there rather than guessed from the address the load lands on.
+    fn called_name(
+        &self,
+        prepared: &r2ssa::SsaArtifact,
+        sites: &[NativeCall],
+        op: &r2ssa::SSAOp,
+    ) -> Option<(u64, String)> {
+        match op {
+            r2ssa::SSAOp::Call {
+                instruction: Some(instruction),
+                ..
+            } => {
+                let site = sites.iter().find(|site| site.instruction == *instruction)?;
+                Some((*instruction, self.program.name_at(site.target)?))
+            }
+            r2ssa::SSAOp::CallInd {
+                target,
+                instruction: Some(instruction),
+            } => {
+                let graph = prepared.graph();
+                let value = graph.value_id_for_var(target)?;
+                let defined = graph.inst(graph.def_inst(value)?)?;
+                let r2ssa::InstPayload::Op(r2ssa::SSAOp::Load { addr, .. }) = &defined.payload
+                else {
+                    return None;
+                };
+                let slot = prepared.folded_value(graph.value_id_for_var(addr)?)?;
+                Some((*instruction, self.program.import_at(slot)?))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether any call this body makes is declared to take a function.
+    ///
+    /// The cheap half of the question, asked off the walk alone so that a body
+    /// which cannot hand a function anywhere is never prepared to find out.
+    fn hands_a_function(&self, walked: &Walked) -> bool {
+        let direct = call_sites(&walked.body, self.program)
+            .into_iter()
+            .filter_map(|site| self.program.name_at(site.target));
+        // An import is reached through a slot the loader fills, and the walk
+        // sees the load rather than the call's target, so every slot this body
+        // reads counts as a callee it might be handing something to.
+        let through_a_slot = walked
+            .body
+            .blocks
+            .iter()
+            .flat_map(|block| block.lifted.ops.iter())
+            .filter_map(|op| match op {
+                // The address is a constant operand; the space is where the
+                // load reads from, which is memory.
+                r2il::R2ILOp::Load { space, addr, .. }
+                    if *space == r2il::SpaceId::Ram && addr.space == r2il::SpaceId::Const =>
+                {
+                    self.program.import_at(addr.offset)
+                }
+                _ => None,
+            });
+        direct.chain(through_a_slot).any(|name| {
+            self.target.prototypes.get(&name).is_some_and(|prototype| {
+                prototype
+                    .parameters
+                    .iter()
+                    .any(r2abi::Parameter::is_function)
+            })
+        })
+    }
+
+    /// Addresses this body hands to a parameter a declaration calls a function.
+    ///
+    /// `entry0` never calls `main`. It puts `main` in an argument register and
+    /// calls `__libc_start_main`, whose prototype spells that parameter
+    /// `func`, so the address is a function on the declaration's authority.
+    /// Nothing here guesses: a constant is believed only where a declared type
+    /// says that slot holds a function and the constant decodes.
+    fn handed_functions(&self, artifact: &TrustedSsaArtifact, walked: &Walked) -> Vec<u64> {
+        let prepared = artifact.shared_artifact();
+        let sites = call_sites(&walked.body, self.program);
+        let mut found = Vec::new();
+        for block in prepared.function().blocks() {
+            for (op_index, op) in block.ops.iter().enumerate() {
+                let Some((instruction, callee)) = self.called_name(prepared.as_ref(), &sites, op)
+                else {
+                    continue;
+                };
+                let Some(prototype) = self.target.prototypes.get(&callee) else {
+                    continue;
+                };
+                for (index, parameter) in prototype.parameters.iter().enumerate() {
+                    if !parameter.is_function() {
+                        continue;
+                    }
+                    let Some(storage) = self.machine.slots.argument_slots().get(index) else {
+                        continue;
+                    };
+                    let Some(address) =
+                        r2ssa::value_reaching(prepared.as_ref(), block.addr, op_index, *storage)
+                            .and_then(|value| prepared.folded_value(value))
+                    else {
+                        continue;
+                    };
+                    if address != 0 && self.decodes(address) {
+                        r2il::refusal_evidence!(
+                            "handed-function",
+                            "{instruction:#x}: {} argument {index} is {address:#x}",
+                            prototype.name
+                        );
+                        found.push(address);
+                    }
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        found
     }
 
     /// The text at an address, where there is text there.

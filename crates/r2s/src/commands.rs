@@ -195,6 +195,7 @@ fn discovered(session: &mut Session) -> Result<String, String> {
             match one.confidence {
                 r2engine::discovery::Confidence::Stated => "stated",
                 r2engine::discovery::Confidence::Called => "called",
+                r2engine::discovery::Confidence::Handed => "handed",
                 r2engine::discovery::Confidence::Reached => "reached",
             },
             one.name.as_deref().unwrap_or("-")

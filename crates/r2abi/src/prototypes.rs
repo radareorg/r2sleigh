@@ -148,6 +148,16 @@ pub struct Parameter {
 }
 
 impl Parameter {
+    /// Whether the declaration says this parameter is a function.
+    ///
+    /// The type data spells it `func`, which is what `__libc_start_main` says
+    /// of `main` and `atexit` says of the handler it is given. A constant in
+    /// such a slot is a function address on the declaration's authority, which
+    /// is the only ground on which this engine will believe one.
+    pub fn is_function(&self) -> bool {
+        self.spelling.as_type().trim() == "func"
+    }
+
     pub fn new(spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {
         Self {
             spelling: spelling.into(),

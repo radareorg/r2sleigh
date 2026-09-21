@@ -274,3 +274,68 @@ mod dispatch_table {
         }
     }
 }
+
+/// The same program with its symbol table removed.
+///
+/// Nothing states where a function is, so discovery has to read the program:
+/// `entry0` hands `main` to `__libc_start_main`, whose declaration says that
+/// parameter is a function, and everything below `main` follows from there.
+mod stripped {
+    use super::{Run, on};
+    use std::path::PathBuf;
+
+    fn fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/hashes_gcc_x64_O2_stripped")
+    }
+
+    fn r2s(script: &str) -> Run {
+        on(fixture(), script)
+    }
+
+    #[test]
+    fn the_symbol_table_states_nothing() {
+        let run = r2s("is");
+        assert!(run.ok, "{}", run.out);
+        assert!(!run.out.contains("FUNC"), "{}", run.out);
+    }
+
+    #[test]
+    fn main_is_found_because_a_declaration_says_that_parameter_is_a_function() {
+        let run = r2s("afl");
+        assert!(run.ok, "{}", run.out);
+        // `main` is at 0x401050 in this build, and nothing calls it directly.
+        let handed: Vec<&str> = run
+            .out
+            .lines()
+            .filter(|line| line.contains("handed"))
+            .collect();
+        assert_eq!(handed.len(), 1, "{}", run.out);
+        assert!(handed[0].contains("0x00401050"), "{}", run.out);
+    }
+
+    #[test]
+    fn what_main_calls_is_found_with_it() {
+        // Without the handoff the walk sees the entry, the stubs and what they
+        // reach, and nothing else. Crossing it is worth the whole program.
+        let run = r2s("afl");
+        assert!(run.ok, "{}", run.out);
+        let found = run
+            .out
+            .lines()
+            .filter(|line| line.trim_start().starts_with("0x"))
+            .count();
+        assert!(found >= 20, "only {found} found:\n{}", run.out);
+    }
+
+    #[test]
+    fn a_halt_does_not_leave_its_block_without_a_terminator() {
+        // `hlt` lifts to a branch to its own address. Reading that as one step
+        // of a repeating instruction left the block with no terminator, so the
+        // machine graph named no successor while the walk named the self-edge,
+        // and every function ending in `hlt` refused on the contradiction.
+        let run = r2s("s 0x401240; pdd");
+        assert!(run.ok, "{}", run.out);
+        assert!(run.out.contains("0 refused"), "{}", run.out);
+    }
+}

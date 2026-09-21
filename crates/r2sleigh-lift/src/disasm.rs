@@ -873,11 +873,28 @@ fn control_op_is_intra_instruction(block: &GenuineLiftedBlock, op_index: usize) 
     let Some(target) = target else {
         return false;
     };
-    if block.instruction_spans.iter().any(|span| {
-        span.addr == instruction
-            && target >= span.addr
-            && target < span.addr.saturating_add(u64::from(span.size))
-    }) {
+    // Only where the instruction has something to iterate over. `hlt` is one
+    // operation, a branch to its own address, and that branch is the whole of
+    // what the instruction does rather than a step of it -- reading it as
+    // internal left the block with no terminator, so the machine named no
+    // successor while the walk named the self-edge, and every function ending
+    // in `hlt` refused on a contradiction neither graph was wrong about.
+    let operations_of_this_instruction = (0..block.block.ops.len())
+        .filter(|index| {
+            block
+                .block
+                .op_metadata(*index)
+                .and_then(|metadata| metadata.instruction_addr)
+                == Some(instruction)
+        })
+        .count();
+    if operations_of_this_instruction > 1
+        && block.instruction_spans.iter().any(|span| {
+            span.addr == instruction
+                && target >= span.addr
+                && target < span.addr.saturating_add(u64::from(span.size))
+        })
+    {
         return true;
     }
     // A branch to a later instruction of this same block leaves nothing: the
@@ -1278,6 +1295,13 @@ fn validate_owned_snapshot_cfg(
         if (!machine_only.is_empty() && !call_may_not_return)
             || (!advisory_only.is_empty() && !table_unresolved)
         {
+            r2il::refusal_evidence!(
+                "cfg-contradiction",
+                "{:#x} terminator {:?} over {} ops",
+                lifted_block.block().addr,
+                terminator,
+                lifted_block.block().ops.len()
+            );
             return Err(LiftError::Parse(format!(
                 "machine-derived CFG contradicts the owned advisory source CFG at {:#x}: \
                  machine names {machine_only:?}, source names {advisory_only:?}",

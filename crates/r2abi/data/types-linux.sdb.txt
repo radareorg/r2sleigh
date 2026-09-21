@@ -36,6 +36,23 @@ libc_init_array=func
 func.libc_init_array.args=0
 func.libc_init_array.ret=void
 
+# glibc exports this as `__libc_start_main`, which is the name a linked ELF
+# carries. Only one leading underscore is ever dropped when a declaration is
+# looked up, because dropping them until something matched turned
+# `__memcpy_chk` into `memcpy`, so the exported spelling is declared here
+# rather than reached by stripping.
+__libc_start_main=func
+func.__libc_start_main.args=7
+func.__libc_start_main.arg.0=func,main
+func.__libc_start_main.arg.1=int,argc
+func.__libc_start_main.arg.2=char **,ubp_av
+func.__libc_start_main.arg.3=func,init
+func.__libc_start_main.arg.4=func,fini
+func.__libc_start_main.arg.5=func,rtld_fini
+func.__libc_start_main.arg.6=void *,stack_end
+func.__libc_start_main.noreturn=true
+func.__libc_start_main.ret=int
+
 libc_start_main=func
 func.libc_start_main.args=7
 func.libc_start_main.arg.0=func,main

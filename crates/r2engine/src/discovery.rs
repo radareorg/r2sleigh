@@ -37,6 +37,15 @@ pub enum Confidence {
     /// A walked body calls it. One decoded call instruction with a constant
     /// target, which is a reading of bytes this engine did itself.
     Called,
+    /// A walked body hands it to a function whose declaration says that
+    /// parameter is a function.
+    ///
+    /// `entry0` never calls `main`: it passes it to `__libc_start_main`, whose
+    /// prototype spells the first parameter `func`. The address is a function
+    /// on the declaration's authority plus a constant this engine folded, so
+    /// it is weaker than a call the machine makes and stronger than a
+    /// transfer that may be a jump inside one function.
+    Handed,
     /// A walked body leaves for it without returning. The same reading, over
     /// an instruction that is a jump: whether the target is a function of its
     /// own or a continuation of this one is exactly what a tail call makes
@@ -96,6 +105,9 @@ pub fn functions(
         for target in transfers.calls {
             offer(&mut believed, &mut pending, target, Confidence::Called);
         }
+        for target in transfers.handed {
+            offer(&mut believed, &mut pending, target, Confidence::Handed);
+        }
         for target in transfers.tail_calls {
             offer(&mut believed, &mut pending, target, Confidence::Reached);
         }
@@ -116,6 +128,10 @@ pub fn functions(
 pub struct Transfers {
     pub calls: Vec<u64>,
     pub tail_calls: Vec<u64>,
+    /// Addresses this body passed to a parameter a declaration calls a
+    /// function. The walk cannot see these: they are constants in argument
+    /// slots, not targets of any instruction.
+    pub handed: Vec<u64>,
 }
 
 impl From<&r2ssa::body::Body> for Transfers {
@@ -123,6 +139,7 @@ impl From<&r2ssa::body::Body> for Transfers {
         Self {
             calls: body.calls.clone(),
             tail_calls: body.tail_calls.clone(),
+            handed: Vec::new(),
         }
     }
 }
@@ -163,6 +180,7 @@ mod tests {
             (address == 0x1000).then(|| Transfers {
                 calls: vec![0x2000],
                 tail_calls: vec![0x3000],
+                handed: Vec::new(),
             })
         });
         let seen = found
@@ -191,6 +209,7 @@ mod tests {
                 (address == 0x1000).then(|| Transfers {
                     calls: Vec::new(),
                     tail_calls: vec![0x2000],
+                    handed: Vec::new(),
                 })
             },
         );
@@ -204,6 +223,46 @@ mod tests {
     }
 
     #[test]
+    fn an_address_handed_to_a_declared_function_parameter_is_believed() {
+        // Nothing transfers to it: it was put in an argument register and the
+        // callee's declaration says that parameter is a function.
+        let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
+            (address == 0x1000).then(|| Transfers {
+                calls: Vec::new(),
+                tail_calls: Vec::new(),
+                handed: vec![0x4000],
+            })
+        });
+        let seen = found
+            .iter()
+            .map(|one| (one.address, one.confidence))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            seen,
+            vec![(0x1000, Confidence::Stated), (0x4000, Confidence::Handed)]
+        );
+    }
+
+    #[test]
+    fn a_call_outranks_a_handoff_for_the_same_address() {
+        // Both are true; the stronger reason is the one the machine makes.
+        let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
+            (address == 0x1000).then(|| Transfers {
+                calls: vec![0x4000],
+                tail_calls: Vec::new(),
+                handed: vec![0x4000],
+            })
+        });
+        assert_eq!(
+            found
+                .iter()
+                .find(|one| one.address == 0x4000)
+                .map(|one| one.confidence),
+            Some(Confidence::Called)
+        );
+    }
+
+    #[test]
     fn a_cycle_of_calls_terminates() {
         let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
             Some(Transfers {
@@ -212,6 +271,7 @@ mod tests {
                     _ => 0x1000,
                 }],
                 tail_calls: Vec::new(),
+                handed: Vec::new(),
             })
         });
         assert_eq!(found.len(), 2);

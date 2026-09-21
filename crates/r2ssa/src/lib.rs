@@ -180,7 +180,7 @@ pub use semantic::{
     StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind, StructuredMemoryAccessFact,
     StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact,
     TwoWaySelectionCertificate, ValueOwner, VariadicCallsiteArgumentCountEvidence,
-    VariadicCallsiteArgumentCountRefusal,
+    VariadicCallsiteArgumentCountRefusal, value_reaching,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
