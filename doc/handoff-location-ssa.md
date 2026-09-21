@@ -30373,9 +30373,18 @@ of 878. `cmp` and `sdiff` refuse nothing at all. Functions whose parameters are
 named from the source went from none to 689, and those carrying at least one
 source-named local from none to 389.
 
-What remains there, largest first: five `unprovable_execution_order`, four
-`ConflictingValue`, two `OpLowering`, one each of `RenderedValueRequired`,
-`missing program-variable authorization` and `missing_definition`.
+`unprovable_execution_order` went next, and the new view found it in one
+command. The write sat in one block's region and the reads in the next block's,
+siblings under one sequential parent. The rule asked whether two regions are
+ancestor-related or *exclusive* -- whether both can run -- and nothing asked
+whether their order is stated, which for two blocks in a sequence it is. That
+is the ordinary shape of a rendered function, and the class is gone.
+
+Over the four binaries: 869 of 878 rendered, nine refusals. `cmp` and `sdiff`
+refuse nothing, `diff3` one. What remains, largest first: four
+`ConflictingValue`, two `OpLowering(lowering.rs:168)`, one each of
+`RenderedValueRequired`, `missing program-variable authorization` and
+`missing_definition`.
 
 The `missing_definition` instances are narrowed one step further. In
 `mbsstr_trimmed_wordbounded` the binding is a slot the debug information
@@ -30408,3 +30417,17 @@ nothing for the whole sweep.
 A test in `r2plugin` now reads the C header and requires its magic and format
 version to equal the Rust crate's. It is the cheapest possible check and it
 would have caught this the moment it was introduced.
+
+
+## Two tools this session leaves behind
+
+`pdim` prints what the binding plan decided about every value -- which variable
+it became, which expression it was folded into, or why nothing spells it --
+beside the operations it already printed. Three separate chases this session
+were spent deducing that by rebuilding with a print in it; the fourth took one
+command.
+
+`scripts/diff_capture.py` builds before it measures. Its default binary is the
+debug one, which `cargo build --release` does not touch, so a measurement taken
+after one reported the tree as it was several changes earlier. That cost a
+revert of correct work and a bisect for a regression that was never there.
