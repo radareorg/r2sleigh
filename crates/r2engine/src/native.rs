@@ -22,7 +22,7 @@ use r2source::{
     SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
-use r2ssa::body::{BodyError, WINDOW, lift_body};
+use r2ssa::body::{BodyError, WINDOW};
 use r2ssa::{CalleePreservedCarriers, SummaryArgumentReach, TrustedSsaArtifact};
 
 use crate::{
@@ -1336,8 +1336,14 @@ impl Native<'_> {
         entry: u64,
         dispatched: &BTreeMap<u64, Vec<u64>>,
     ) -> Result<Walked, NativeRefusal> {
-        let body = lift_body(entry, self.target.disasm, self.program, dispatched)
-            .map_err(NativeRefusal::Body)?;
+        let body = r2ssa::body::lift_body_where(
+            entry,
+            self.target.disasm,
+            self.program,
+            dispatched,
+            &|target| self.never_returns(target),
+        )
+        .map_err(NativeRefusal::Body)?;
         let callee_names = body
             .calls
             .iter()
@@ -1351,6 +1357,19 @@ impl Native<'_> {
             body,
             callee_names,
         })
+    }
+
+    /// Whether the declarations say control never comes back from this call.
+    ///
+    /// The address is the call's own target, which for an import is the stub
+    /// the loader fills; the binary says which symbol that stub stands for,
+    /// and the shipped table says whether that symbol returns.
+    fn never_returns(&self, target: u64) -> bool {
+        self.program
+            .import_at(target)
+            .or_else(|| self.program.name_at(target))
+            .and_then(|name| self.target.prototypes.get(&name))
+            .is_some_and(|prototype| prototype.noreturn)
     }
 
     /// The tables the dispatches in a prepared body read, fetched.

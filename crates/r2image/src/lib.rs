@@ -137,6 +137,12 @@ pub enum EntryKind {
     Fini,
     /// Named by a symbol typed as a function.
     Symbol,
+    /// Listed in the Mach-O function-starts table.
+    ///
+    /// The linker writes one entry per function it laid out, so this is the
+    /// binary's own statement of where its functions begin -- including the
+    /// ones no symbol names and nothing calls directly.
+    Declared,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +181,107 @@ fn code_address(arch: &ImageArch, value: u64) -> u64 {
 /// Whether the low bit of a function's address selects Thumb on this machine.
 fn is_arm32(arch: &ImageArch) -> bool {
     arch.name == "ARM" && arch.bits == 32
+}
+
+/// Every function start the Mach-O linker recorded.
+///
+/// `LC_FUNCTION_STARTS` is a ULEB128 delta chain from the first text address,
+/// written by the linker from what it actually laid out. Nothing has to be
+/// inferred from it: a body nothing calls and no symbol names is still stated
+/// here, which is the only thing that finds it once a walk correctly stops at
+/// a call that never returns.
+fn macho_function_starts(file: &object::File<'_>, data: &[u8]) -> Vec<u64> {
+    match file {
+        object::File::MachO64(macho) => function_starts(macho, data),
+        object::File::MachO32(macho) => function_starts(macho, data),
+        _ => Vec::new(),
+    }
+}
+
+fn function_starts<'data, Mach, R>(
+    file: &object::read::macho::MachOFile<'data, Mach, R>,
+    data: &'data [u8],
+) -> Vec<u64>
+where
+    Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
+    R: object::ReadRef<'data>,
+{
+    use object::macho;
+    use object::read::macho::Segment as _;
+
+    let Ok(endian) = file.macho_header().endian() else {
+        return Vec::new();
+    };
+    let Ok(mut commands) = file.macho_header().load_commands(endian, data, 0) else {
+        return Vec::new();
+    };
+    let mut span = None;
+    let mut base = None;
+    while let Ok(Some(command)) = commands.next() {
+        if command.cmd() == macho::LC_FUNCTION_STARTS
+            && let Ok(linkedit) = command.data::<macho::LinkeditDataCommand<Mach::Endian>>()
+        {
+            span = Some((
+                linkedit.dataoff.get(endian) as usize,
+                linkedit.datasize.get(endian) as usize,
+            ));
+        }
+        if base.is_none()
+            && let Ok(variant) = command.variant()
+        {
+            base = match variant {
+                object::read::macho::LoadCommandVariant::Segment32(segment, _)
+                    if segment.name() == b"__TEXT" =>
+                {
+                    Some(u64::from(segment.vmaddr.get(endian)))
+                }
+                object::read::macho::LoadCommandVariant::Segment64(segment, _)
+                    if segment.name() == b"__TEXT" =>
+                {
+                    Some(segment.vmaddr.get(endian))
+                }
+                _ => None,
+            };
+        }
+    }
+    let (Some((offset, size)), Some(base)) = (span, base) else {
+        return Vec::new();
+    };
+    let Some(end) = offset.checked_add(size) else {
+        return Vec::new();
+    };
+    let Some(bytes) = data.get(offset..end) else {
+        return Vec::new();
+    };
+    let mut starts = Vec::new();
+    let mut address = base;
+    let mut cursor = bytes.iter().copied();
+    loop {
+        let mut delta = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let Some(byte) = cursor.next() else {
+                return starts;
+            };
+            if shift >= 64 {
+                return starts;
+            }
+            delta |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        // A zero delta terminates the chain; the table is padded with them.
+        if delta == 0 {
+            return starts;
+        }
+        let Some(next) = address.checked_add(delta) else {
+            return starts;
+        };
+        address = next;
+        starts.push(address);
+    }
 }
 
 /// Which symbol each stub and pointer slot stands for, in a Mach-O.
@@ -560,6 +667,16 @@ impl Image {
                 if vaddr != 0 {
                     entry_points.push(EntryPoint { vaddr, kind });
                 }
+            }
+        }
+        // The linker wrote one entry per function it laid out, so a body no
+        // symbol names and nothing calls is still stated here.
+        for vaddr in macho_function_starts(&file, data.as_slice()) {
+            if executable(vaddr) {
+                entry_points.push(EntryPoint {
+                    vaddr,
+                    kind: EntryKind::Declared,
+                });
             }
         }
         entry_points.sort_by_key(|entry| (entry.vaddr, entry.kind as u8));

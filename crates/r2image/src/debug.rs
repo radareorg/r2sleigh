@@ -194,6 +194,13 @@ fn subprogram<'a>(
     let frame_base = entry
         .attr_value(gimli::DW_AT_frame_base)
         .and_then(frame_base_of);
+    // The source said so, which is stronger than any table: a call to one of
+    // these ends the block, because the bytes after it are the next
+    // function's rather than this one's.
+    let noreturn = matches!(
+        entry.attr_value(gimli::DW_AT_noreturn),
+        Some(AttributeValue::Flag(true))
+    );
     let mut parameters = Vec::new();
     let mut variadic = false;
     let mut locals = Vec::new();
@@ -227,6 +234,7 @@ fn subprogram<'a>(
         parameters,
         returns,
         variadic,
+        noreturn,
         frame_base,
         locals,
     })

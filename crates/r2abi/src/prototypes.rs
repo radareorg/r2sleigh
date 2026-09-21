@@ -23,6 +23,13 @@ pub struct Prototype {
     pub returns: Spelled,
     /// Whether arguments continue past the fixed ones.
     pub variadic: bool,
+    /// Whether control never returns from this function.
+    ///
+    /// `err`, `abort`, `exit` and twenty-four others in the shipped tables say
+    /// so, and a call to one ends the block: the bytes after it belong to
+    /// whatever comes next, not to the caller. Reading it is what stops a body
+    /// walk running through the function that follows.
+    pub noreturn: bool,
     /// What the offsets in `locals` are measured from.
     pub frame_base: Option<FrameBase>,
     /// Each named variable the declaration places in the frame.
@@ -253,6 +260,7 @@ impl Prototypes {
                     declare(&mut by_name, name);
                 }
                 "ret" => declare(&mut by_name, name).returns = Spelled::from(value),
+                "noreturn" => declare(&mut by_name, name).noreturn = value == "true",
                 _ => {}
             }
         }

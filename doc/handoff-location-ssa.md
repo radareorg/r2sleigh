@@ -30712,3 +30712,44 @@ Four things went entirely, each because nothing read it:
 *after* the tests -- the pre-SSA promotion of private stack slots, where nothing
 looking for it would find it. That is now `r2ssa/src/promote.rs`, the tests are
 `function/tests.rs`, and `function/mod.rs` is 6,372.
+
+## No file left that nobody can hold
+
+After the four rewrites the largest files in the tree were still `analysis.rs`
+at 15,256, `function_facts.rs` at 9,325 and `observation_journal.rs` at 8,581.
+They are now directories, split on the same principle: read the boundaries off
+the call graph or off the impl's own method families, never off line ranges.
+
+| was | now, largest piece |
+|---|---|
+| `r2types/analysis.rs` 15,256 | `analysis/mod.rs` 2,196, then structs 1,901 and arrays 1,569 |
+| `r2types/function_facts.rs` 9,325 | `mod.rs` 3,101, `prepared.rs` 2,498 |
+| `r2dec/observation_journal.rs` 8,581 | `mod.rs` 3,767, recording 1,323, sealing 1,282 |
+| `r2ssa/machine.rs` 8,053 | `mod.rs` 4,487, lowering 866 |
+| `r2ssa/function.rs` 14,912 | `mod.rs` 4,682, rewrite 963, build 720 |
+| `r2dec/placement.rs` 5,837 | `mod.rs` 4,799 |
+
+Three mechanisms did all of it, and each is worth knowing about.
+
+**Reachability from the entry points.** For a module that is a pipeline, each
+phase's entry seeds a walk: an item exactly one phase reaches belongs to that
+phase, an item several reach is shared, an item nothing reaches is dead. That
+is how `semantic.rs` and `analysis.rs` split, and it is a derivation rather
+than a filing decision.
+
+**Method families inside one `impl`.** Rust allows several inherent `impl`
+blocks for one type in one crate, so an `impl` of 3,882 lines splits into
+`recording` and `sealing` with no indirection introduced -- the methods keep
+their names, their bodies and their receiver. `LegacyObservationJournal`,
+`SSAFunction` and `MachineBuilder` went that way.
+
+**What a test's name says it asserts.** Most of these test modules are
+end-to-end: they drive the whole collector, so neither the call graph nor the
+helper set separates them. Their names do, because on this project a test is
+named for the fact it holds. `analysis/tests` split into signature, structs,
+stack, arrays, assumptions and bindings on that basis alone.
+
+The visibility work is the part to watch. Moving a private item into a sibling
+module makes it invisible; the fix is to promote exactly what the compiler asks
+for and nothing else, which is a loop of build-and-promote rather than a blanket
+`pub(crate)`. Every promotion in this pass was named by an error.

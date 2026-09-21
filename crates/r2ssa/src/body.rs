@@ -127,7 +127,27 @@ pub fn lift_body(
     program: &dyn Program,
     dispatched: &BTreeMap<u64, Vec<u64>>,
 ) -> Result<Body, BodyError> {
-    Walk::run(entry, disasm, program, dispatched).map(Walk::into_body)
+    lift_body_where(entry, disasm, program, dispatched, &|_| false)
+}
+
+/// The same lift, told which call targets control never comes back from.
+///
+/// A call is otherwise assumed to return, and where it does not the walk runs
+/// straight into whatever follows. On `/bin/ls` five adjacent `err(1, ...)`
+/// stubs became one 260-byte function that claimed the four after it, and the
+/// interprocedural summary then refused all six for overlapping ranges.
+///
+/// Whether a call returns is a fact about the callee, which the walk of one
+/// body cannot establish -- but the caller can, from the declarations, and
+/// that is what this takes.
+pub fn lift_body_where(
+    entry: u64,
+    disasm: &Disassembler,
+    program: &dyn Program,
+    dispatched: &BTreeMap<u64, Vec<u64>>,
+    never_returns: &dyn Fn(u64) -> bool,
+) -> Result<Body, BodyError> {
+    Walk::run(entry, disasm, program, dispatched, never_returns).map(Walk::into_body)
 }
 
 /// One instruction the walk decoded, and where control goes after it.
@@ -169,6 +189,8 @@ struct Walk<'a> {
     /// The address the last decoded instruction ended at, so the next one can
     /// keep the decoder's context where it follows on.
     continuing_from: Option<u64>,
+    /// Whether control comes back from a call to this address.
+    never_returns: &'a dyn Fn(u64) -> bool,
 }
 
 impl<'a> Walk<'a> {
@@ -177,6 +199,7 @@ impl<'a> Walk<'a> {
         disasm: &Disassembler,
         program: &'a dyn Program,
         dispatched: &'a BTreeMap<u64, Vec<u64>>,
+        never_returns: &'a dyn Fn(u64) -> bool,
     ) -> Result<Self, BodyError> {
         let mut walk = Self {
             entry,
@@ -188,6 +211,7 @@ impl<'a> Walk<'a> {
             tail_calls: BTreeSet::new(),
             unresolved: Vec::new(),
             continuing_from: None,
+            never_returns,
         };
 
         let mut pending = vec![entry];
@@ -339,7 +363,11 @@ impl<'a> Walk<'a> {
                 fallthrough,
             } => {
                 self.calls.insert(target);
-                self.continues(fallthrough, &mut successors);
+                // A call the declarations say never returns ends the walk
+                // here: the bytes after it are the next function's.
+                if !(self.never_returns)(target) {
+                    self.continues(fallthrough, &mut successors);
+                }
             }
             BlockTerminator::IndirectCall { fallthrough } => {
                 self.continues(fallthrough, &mut successors)

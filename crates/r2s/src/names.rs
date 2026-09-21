@@ -74,7 +74,9 @@ pub fn of(image: &Image) -> NameDb {
                 finis += 1;
                 format!("entry.fini{}", finis - 1)
             }
-            EntryKind::Symbol => continue,
+            // The symbol table names one of these already, and a stated
+            // function start is a position rather than a name.
+            EntryKind::Symbol | EntryKind::Declared => continue,
         };
         db.insert(
             entry.vaddr,
