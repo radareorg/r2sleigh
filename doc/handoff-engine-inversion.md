@@ -5,6 +5,47 @@
 > `doc/handoff-location-ssa.md`; this one does not touch it.
 > `doc/engine-vision.md` holds the design and the order.
 
+## Where `engine/inversion` stands
+
+Verified at `007ff29b`, by running each gate rather than by recollection.
+
+    cargo test --workspace --all-features --no-fail-fast
+        every target green except two, both named below
+    scripts/diff_capture.py --bins <radare2>/test/bins/elf --limit 24
+                            --functions 8 --native-only
+        98 rendered, 0 refused, 0 undefined reads
+    make -C tests/r2r run
+        102 OK, 14 BR, 4 XX -- all four in db/wip/r2sleigh_regression_watch
+    cmp, sdiff, diff3, diff built -O0 -g
+        869 of 878 rendered, 9 refusals
+
+**Pass `--no-fail-fast`.** Without it `cargo test` stops at the first failing
+target, so one crate's known failure hides every failure after it. Two `r2ssa`
+tests were red for a day behind the plugin's two, and a session reported the
+suite as green apart from the plugin eight or nine times.
+
+**The two standing failures, with their causes**, because a failure count with
+no cause is a lens that filters out everything not already in it -- which is how
+the forty-seven `r2r` failures survived as a "baseline" while being a one-line
+format-version mismatch that had killed the whole plugin route:
+
+  * `plain_o2_check_secret_has_exact_offline_lift` and
+    `plain_o2_sum_array_has_exact_vectorized_offline_lift` pin an SSA hash of
+    the offline lift. Both drifted at `9a9df9f6a934275a` and
+    `6ac396ef9837c6bd`. The hash is the fixture's, not a correctness claim; the
+    renderings were read and are right, and the fixtures need re-blessing after
+    someone reads the new lift rather than because it differs.
+
+**This branch has diverged from `origin/engine/inversion` deliberately.** Every
+commit from the branch point carried a `Co-Authored-By: Claude` trailer and a
+`Claude-Session:` URL, which the standing rule forbids on anything feeding a
+pull request. All 154 were rewritten locally to drop them; the trees are
+byte-identical and the gates were re-run after. `origin` still holds the 93
+attributed commits it had, by choice -- rewriting published history is a
+force-push and was not taken. The divergence has to be resolved before this
+branch pushes again, and the pre-rewrite tip is kept at
+`refs/original/refs/heads/engine/inversion`.
+
 ## Where the milestone stands
 
 `r2s -c 'pdd @ <addr>' <binary>` emits C with no radare2 present, on x86-64 and
@@ -18,19 +59,36 @@ Checked by hand on a three-function binary built at `-O0` for both machines:
 recovers the conditional, and `main` renders `_add_two(1, 2)` with the callee's
 recovered prototype declared above it.
 
-Sequencing items one to four of `doc/engine-vision.md` are done. `main` in an
+Sequencing items one to four of `doc/engine-vision.md` are done: a `main` in an
 ELF hello world renders its string literals as text, names its imports, and
-calls them with the arguments their declared prototypes state:
+calls them with the arguments their declared prototypes state.
+
+The route also reads the binary's own debug information, so a function with one
+states its source signature and names its locals. `count_newlines` out of
+`diffutils`' `cmp`, built `-O0 -g`:
 
 ```c
-stack_m32 = (uint64_t)"Hello";
-uint32_t RAX_4 = strlen(tmp_11f80_1);
-uint64_t RAX_11 = malloc((uint64_t)(int32_t)(tmp_11f00_2 + stack_m40 + 1));
-strcpy(tmp_11f80_3, tmp_11f80_1);
+uint64_t count_newlines(int8_t* buf, uint64_t bufsize)
+{
+    count = 0;
+    lim_2 = (int8_t*)((uint64_t)tmp_11f80_1 + tmp_11f80_2);
+    int8_t ch = (int8_t)*lim;
 ```
 
-Against radare2 over its ELF corpus, `pd` agreement went from six of thirty to
-thirteen of the twenty-four `r2s` opens.
+`buf`, `bufsize`, `count`, `lim`, `ch` are the source's names, read from DWARF
+by `crates/r2image/src/debug.rs`; six of this function's locals are.
+
+Against radare2 over its ELF corpus,
+`scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30` agrees on
+
+    px 64   21 of 24        ie   24 of 24
+    pd  8   14 of 24        iS   24 of 24
+                            is   23 of 24
+
+of the twenty-four it opens; six of the thirty are not opened, four for an
+unrecognised magic and two for an architecture with no mapping. Quote a figure
+from a run, not from this paragraph: every number in this document that was
+inherited rather than measured has been wrong by the time someone read it.
 
 ## What grades the capture
 
@@ -242,7 +300,9 @@ the proof step.
 
 The gate is `scripts/diff_capture.py --bins <radare2>/test/bins/elf --limit 24
 --functions 8 --native-only`. It went from `rendered 82 / refused 16 /
-undefined reads 3` to `rendered 95 / refused 3 / undefined reads 4` across:
+undefined reads 3` to `rendered 95 / refused 3 / undefined reads 4` across the
+work below. It now reads **98 rendered, 0 refused, 0 undefined reads**; the
+figures in this paragraph are the ones that were true when it was written:
 
 - The capture emitting `TailSlot` for a stub's jump through its slot, so a
   walked import stub no longer looks like a body that returns nothing.

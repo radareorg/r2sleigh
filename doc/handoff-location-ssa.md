@@ -8,48 +8,7 @@ the primary checkout stays on its own branch so a bad day here costs nothing.
 Read `doc/adr-location-ssa.md` first for the original design. This document
 records what changed once the design met the code.
 
-## Where `engine/inversion` stands
-
-Everything under "Where this stands now" and below it is the `arch/location-ssa`
-arc. This branch is the inversion, and these are its numbers, verified at
-`3a60e3ac`.
-
-    cargo test --workspace --all-features --no-fail-fast
-        every target green except two, both named below
-    scripts/diff_capture.py --bins <radare2>/test/bins/elf --limit 24
-                            --functions 8 --native-only
-        98 rendered, 0 refused, 0 undefined reads
-    make -C tests/r2r run
-        102 OK, 14 BR, 4 XX -- all four in db/wip/r2sleigh_regression_watch
-    cmp, sdiff, diff3, diff built -O0 -g
-        869 of 878 rendered, 9 refusals
-
-**Pass `--no-fail-fast`.** Without it `cargo test` stops at the first failing
-target, so one crate's known failure hides every failure after it. Two `r2ssa`
-tests were red for a day behind the plugin's two, and a session reported the
-suite as green apart from the plugin eight or nine times.
-
-**The two standing failures, with their causes**, because a failure count with
-no cause is a lens that filters out everything not already in it -- which is how
-the forty-seven `r2r` failures survived as a "baseline" while being a one-line
-format-version mismatch that had killed the whole plugin route:
-
-  * `plain_o2_check_secret_has_exact_offline_lift` and
-    `plain_o2_sum_array_has_exact_vectorized_offline_lift` pin an SSA hash of
-    the offline lift. Both drifted at `9a9df9f6a934275a` and
-    `6ac396ef9837c6bd`. The hash is the fixture's, not a correctness claim; the
-    renderings were read and are right, and the fixtures need re-blessing after
-    someone reads the new lift rather than because it differs.
-
-**This branch has diverged from `origin/engine/inversion` deliberately.** Every
-commit from the branch point carried a `Co-Authored-By: Claude` trailer and a
-`Claude-Session:` URL, which the standing rule forbids on anything feeding a
-pull request. All 154 were rewritten locally to drop them; the trees are
-byte-identical and the gates were re-run after. `origin` still holds the 93
-attributed commits it had, by choice -- rewriting published history is a
-force-push and was not taken. The divergence has to be resolved before this
-branch pushes again, and the pre-rewrite tip is kept at
-`refs/original/refs/heads/engine/inversion`.
+## Where this stands now
 
 This document is chronological and contains claims that later entries withdraw.
 Read the rest for the evidence, and note that several entries are corrections of
