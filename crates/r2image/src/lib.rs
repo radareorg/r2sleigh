@@ -156,6 +156,13 @@ pub enum EntryKind {
 pub struct EntryPoint {
     pub vaddr: u64,
     pub kind: EntryKind,
+    /// Whether the address selected Thumb, on a machine where bit 0 does.
+    ///
+    /// The bit is not part of the address and is masked out of `vaddr`; what
+    /// it said about the instruction set is kept here, exactly as it is for a
+    /// symbol. A static ARM binary whose `e_entry` is odd starts in Thumb, and
+    /// decoding it as ARM produces plausible instructions that are not there.
+    pub thumb: bool,
 }
 
 /// One slot the loader fills with the address of a symbol.
@@ -687,7 +694,8 @@ impl Image {
         };
 
         let mut entry_points = Vec::new();
-        let entry = code_address(&arch, file.entry());
+        let declared_entry = file.entry();
+        let entry = code_address(&arch, declared_entry);
         if entry != 0 {
             // Mach-O states the entry as a file offset, so translate when unmapped.
             let vaddr = if executable(entry) {
@@ -699,6 +707,7 @@ impl Image {
                 entry_points.push(EntryPoint {
                     vaddr,
                     kind: EntryKind::Main,
+                    thumb: is_arm32(&arch) && declared_entry & 1 == 1,
                 });
             }
         }
@@ -707,6 +716,7 @@ impl Image {
                 entry_points.push(EntryPoint {
                     vaddr: symbol.vaddr,
                     kind: EntryKind::Symbol,
+                    thumb: symbol.thumb,
                 });
             }
         }
@@ -722,9 +732,14 @@ impl Image {
                 continue;
             };
             for slot in bytes.chunks_exact(pointer_bytes) {
-                let vaddr = code_address(&arch, read_pointer(slot, arch.endian));
+                let raw = read_pointer(slot, arch.endian);
+                let vaddr = code_address(&arch, raw);
                 if vaddr != 0 {
-                    entry_points.push(EntryPoint { vaddr, kind });
+                    entry_points.push(EntryPoint {
+                        vaddr,
+                        kind,
+                        thumb: is_arm32(&arch) && raw & 1 == 1,
+                    });
                 }
             }
         }
@@ -734,6 +749,7 @@ impl Image {
             entry_points.push(EntryPoint {
                 vaddr,
                 kind: EntryKind::CMain,
+                thumb: false,
             });
         }
         // The linker wrote one entry per function it laid out, so a body no
@@ -743,6 +759,7 @@ impl Image {
                 entry_points.push(EntryPoint {
                     vaddr,
                     kind: EntryKind::Declared,
+                    thumb: false,
                 });
             }
         }

@@ -158,6 +158,14 @@ pub struct Definition {
 #[cfg(feature = "sleigh")]
 fn definitions(image: &Image) -> std::collections::BTreeMap<u64, Definition> {
     let mut defined = std::collections::BTreeMap::new();
+    // The format's own entry first: a stripped ARM binary has no symbol there,
+    // and `e_entry`'s low bit is the only thing that says the entry is Thumb.
+    for entry in image.entry_points() {
+        defined.entry(entry.vaddr).or_insert_with(|| Definition {
+            function: true,
+            thumb: entry.thumb,
+        });
+    }
     for symbol in image.symbols() {
         if !symbol.defined || symbol.name.is_empty() {
             continue;

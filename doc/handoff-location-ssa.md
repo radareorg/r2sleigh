@@ -30806,3 +30806,40 @@ start routine -- so the address is named `main`, the shipped table's
 `wcwidth` is absent from the shipped prototype tables, which is why its arity
 had to be reconciled from call sites at all. That is a missing declaration in
 radare2's data and belongs upstream rather than here.
+
+## The ARM entry's low bit selects Thumb, and we were dropping it
+
+`code_address` masked bit 0 off an ARM address, which is right -- the bit is
+not part of the address -- but what it *said* went nowhere. The Thumb
+machinery already existed: `Session::thumb_at`, a second embedded machine, and
+`Definition { function, thumb }` fed from symbols. A stripped ARM binary has no
+symbol at its entry, so nothing ever told it.
+
+`EntryPoint` now carries `thumb` the way `Symbol` does, and the session's
+definitions take the format's own entry before the symbols.
+
+On `test/bins/elf/armeb_hello_static`, whose `e_entry` is `0x10825`:
+
+| | before | after |
+|---|---|---|
+| `0x10824` | `4ff0000b  bleq 0x4c968` | `4ff0000b  mov.w fp, 0x0` |
+| `0x10828` | `4ff0000e  cdpeq p0, ...` | `4ff0000e  mov.w lr, 0x0` |
+| `0x1082c` | `02bc6a46  strbtmi fp, ...` | `02bc  pop {r1}` |
+
+The second column is the standard ARM `_start` prologue. The first is four
+bytes of Thumb-2 read as one ARM instruction, which decodes to something
+plausible and wrong -- the worst kind of disassembly defect, because nothing
+about it looks like a failure.
+
+**radare2 is wrong here too, differently.** It reports `bits 16` for this
+binary, so it knows the entry is Thumb, but it decodes `4ff0` as a *16-bit*
+`ldr r7, [0x10be8]` where the instruction is the 32-bit `mov.w`. The file sets
+`EF_ARM_BE8`, meaning instructions are little-endian while data is big-endian,
+and that is the likely cause. This is worth an upstream report with the
+by-hand decode above; `diff_r2`'s `pd` count does not move, because agreeing
+with radare2 is not the same as being right.
+
+The other `pd` differences on that corpus are presentation, not decoding:
+radare2 substitutes a flag name into an operand (`movups xmm0, xmmword
+[loc.v1]` against our `[0x60013c]`) and prints the `pop` alias for
+`ldr r1, [sp], 0x4`. r2s has the names to do the first; it does not do it yet.
