@@ -118,6 +118,24 @@ fn a_function_renders_as_c_with_its_proof() {
 }
 
 #[test]
+fn the_ledger_says_what_the_function_owes_and_whether_it_paid() {
+    // The counts behind `pdd`'s proof line, which used to reach only a file
+    // behind an environment variable.
+    let run = r2s(&format!("s {FNV1A32}; pddo"));
+    assert!(run.ok, "{}", run.out);
+    for column in ["total=", "rendered=", "elided=", "refused=", "unaccounted="] {
+        assert!(
+            run.out.contains(column),
+            "{column} missing from {}",
+            run.out
+        );
+    }
+    assert!(run.out.contains("refused=0"), "{}", run.out);
+    // A breakdown, not just columns: this function elides something and says why.
+    assert!(run.out.contains("| elided: "), "{}", run.out);
+}
+
+#[test]
 fn each_tier_answers_for_itself() {
     // One lowering per tier, so a defect belongs to exactly one of them.
     let low = r2s(&format!("s {FNV1A32}; pdil"));

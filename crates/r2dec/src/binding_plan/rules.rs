@@ -40,7 +40,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding_plan::BindingCertificateSource;
-use r2ssa::ledger::ElisionReason;
+use crate::ledger::ElisionReason;
 use r2ssa::{InstId, SsaGraph, UseSite, ValueId};
 use r2types::SourceOwnedFunctionFacts;
 
@@ -773,8 +773,8 @@ pub(super) fn unread_defined_values(facts: PlanFacts<'_>) -> BTreeSet<ValueId> {
         .filter(|(_, reason)| {
             matches!(
                 reason,
-                r2ssa::ledger::ElisionReason::CallBoundaryCarrier
-                    | r2ssa::ledger::ElisionReason::UnobservedMerge
+                crate::ledger::ElisionReason::CallBoundaryCarrier
+                    | crate::ledger::ElisionReason::UnobservedMerge
             )
         })
         .map(|(site, _)| site)

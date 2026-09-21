@@ -47,7 +47,7 @@ pub(crate) enum LegacyValueObservation {
     InlineConstant,
     /// A surviving expression that is not a source-backed literal proof.
     InlineNonLiteral,
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(ValueRefusal),
     /// Covered by the marked gap anchored here; unproven and said so.
     Gap(GapAnchor),
@@ -67,7 +67,7 @@ pub(crate) enum LegacyUseObservation {
     /// one of a function's use slots, and `MachineValueUse` is large enough
     /// that the copy set the width of the whole dense array.
     MemoryAddress,
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(MachineUseRefusal),
     /// Covered by the marked gap anchored here; unproven and said so.
     Gap(GapAnchor),
@@ -80,7 +80,7 @@ pub(crate) enum LegacyUseObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyWriteObservation {
     Exact(MachineWriteProjection),
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(MachineWriteRefusal),
     /// Covered by the marked gap anchored here; unproven and said so.
     Gap(GapAnchor),

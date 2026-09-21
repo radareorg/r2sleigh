@@ -62,6 +62,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "pdil" => low_tier(session, argument),
         "pdim" => medium_tier(session, argument),
         "pdih" => high_tier(session, argument),
+        "pddo" => obligations(session, argument),
         other => Err(format!("unknown command '{}'", other)),
     }
 }
@@ -615,6 +616,29 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
             .map(|response| response.output)
             .map_err(|refusal| refusal.to_string())
     })
+}
+
+/// `pddo`: what became of every obligation the function's source imposes.
+///
+/// `pdd` says what the C is; this says what the C owes and whether it paid.
+/// Until now the breakdown existed only behind an environment variable, so a
+/// refusal could be counted but not explained.
+#[cfg(feature = "sleigh")]
+fn obligations(session: &mut Session, argument: &str) -> Result<String, String> {
+    let addr = parse_number(session, argument)?;
+    with_native(session, addr, |target, program| {
+        let response = r2engine::native::decompile(target, program, addr)
+            .map_err(|refusal| refusal.to_string())?;
+        response.obligation_ledger.as_ref().map_or_else(
+            || Ok("no obligation ledger: the function did not reach native rendering\n".to_owned()),
+            |ledger| Ok(format!("{}\n", ledger.report())),
+        )
+    })
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn obligations(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature".to_owned())
 }
 
 /// Open the binary the way the engine wants it, and ask one question.

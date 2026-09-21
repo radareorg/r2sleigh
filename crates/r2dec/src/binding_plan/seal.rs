@@ -152,61 +152,61 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
     for graph_value in &graph.values {
         if return_controls.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::ReturnControl,
+                crate::ledger::ElisionReason::ReturnControl,
             ));
             continue;
         }
         if direct_control_targets.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::DirectControlTarget,
+                crate::ledger::ElisionReason::DirectControlTarget,
             ));
             continue;
         }
         if direct_call_targets.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::DirectCallTarget,
+                crate::ledger::ElisionReason::DirectCallTarget,
             ));
             continue;
         }
         if call_return_addresses.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::CallReturnAddress,
+                crate::ledger::ElisionReason::CallReturnAddress,
             ));
             continue;
         }
         if stack_frame_values.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::StackFrame,
+                crate::ledger::ElisionReason::StackFrame,
             ));
             continue;
         }
         if stack_geometry_values.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::DeadStackBase,
+                crate::ledger::ElisionReason::DeadStackBase,
             ));
             continue;
         }
         if source.unobserved_merges().contains(graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::UnobservedMerge,
+                crate::ledger::ElisionReason::UnobservedMerge,
             ));
             continue;
         }
         if unobserved_values.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::UnobservedValue,
+                crate::ledger::ElisionReason::UnobservedValue,
             ));
             continue;
         }
         if structural_unused.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::UnusedStructuralValue,
+                crate::ledger::ElisionReason::UnusedStructuralValue,
             ));
             continue;
         }
         if unread.contains(&graph_value.id) || unrendered.contains(&graph_value.id) {
             values[graph_value.id.0 as usize] = Some(UpstreamValueDisposition::Elided(
-                r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+                crate::ledger::ElisionReason::DeadUnusedTemporary,
             ));
             continue;
         }
@@ -495,53 +495,53 @@ impl BindingPlan {
                         && !unread.contains(&value)
                         && !unrendered.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::UnobservedMerge
+                    if *reason == crate::ledger::ElisionReason::UnobservedMerge
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && unobserved_merges.contains(value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::UnobservedValue
+                    if *reason == crate::ledger::ElisionReason::UnobservedValue
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && unobserved_values.contains(&value)
                         && !unobserved_merges.contains(value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::ReturnControl
+                    if *reason == crate::ledger::ElisionReason::ReturnControl
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && return_controls.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::DirectControlTarget
+                    if *reason == crate::ledger::ElisionReason::DirectControlTarget
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && direct_control_targets.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::DirectCallTarget
+                    if *reason == crate::ledger::ElisionReason::DirectCallTarget
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && direct_call_targets.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::CallReturnAddress
+                    if *reason == crate::ledger::ElisionReason::CallReturnAddress
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && call_return_addresses.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::StackFrame
+                    if *reason == crate::ledger::ElisionReason::StackFrame
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && stack_frame_values.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::DeadStackBase
+                    if *reason == crate::ledger::ElisionReason::DeadStackBase
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && stack_geometry_values.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::UnusedStructuralValue
+                    if *reason == crate::ledger::ElisionReason::UnusedStructuralValue
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && structural_unused.contains(&value) => {}
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                    if *reason == crate::ledger::ElisionReason::DeadUnusedTemporary
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && (unread.contains(&value) || unrendered.contains(&value)) => {}
@@ -549,7 +549,7 @@ impl BindingPlan {
                 // both halves: the value is dead by one of the ordinary
                 // measures, and its definition owns a memory effect.
                 ValueDisposition::Elided { reason, proof }
-                    if *reason == r2ssa::ledger::ElisionReason::UnreadEffectfulValue
+                    if *reason == crate::ledger::ElisionReason::UnreadEffectfulValue
                         && proof.authority == *source.authority()
                         && proof.value == value
                         && effectful.contains(&value)
@@ -901,7 +901,7 @@ impl BindingPlan {
                 || super::certified_return_control_stack_objects(source).contains(&object)
             {
                 let expected = StackObjectDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::StackFrame,
+                    reason: crate::ledger::ElisionReason::StackFrame,
                 };
                 if self.stack_object_disposition(object) != Some(expected) {
                     r2il::refusal_evidence!(

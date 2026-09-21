@@ -1304,7 +1304,7 @@ pub enum CStmt {
     ///
     /// The gap is the honest alternative to refusing the whole function: the
     /// operations it covers are accounted for in the obligation ledger under
-    /// [`r2ssa::ledger::Outcome::Gapped`], the reader and the compiler both
+    /// [`crate::ledger::Outcome::Gapped`], the reader and the compiler both
     /// see that something is missing here, and nothing downstream may treat
     /// the function as fully proven.
     Gap(GapMarker),

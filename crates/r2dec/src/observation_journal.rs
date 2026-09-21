@@ -192,7 +192,7 @@ pub(crate) enum LegacyObservationJournalError {
     },
     PlannedElidedValueRendered {
         value: ValueId,
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
     },
     PlannedRefusedValueRendered {
         value: ValueId,
@@ -960,7 +960,7 @@ pub(crate) struct LegacyObservationJournal {
 /// reads the certificates' elisions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RewriteElisions {
-    pub(crate) cells: Vec<(RenderObservationId, r2ssa::ledger::ElisionReason)>,
+    pub(crate) cells: Vec<(RenderObservationId, crate::ledger::ElisionReason)>,
 }
 
 /// Transaction boundary for render markers allocated by one tentative AST
@@ -1413,7 +1413,7 @@ impl MarkedNativeDraft {
             ready,
             observations: Some(observations),
             fallback_effects: None,
-            effect_audit: crate::EffectObligationAudit::NOT_RUN,
+            ledger: None,
             placement_audit: crate::PlacementAudit::NotRun,
             observation_failure: None,
             plan,
@@ -1499,7 +1499,7 @@ impl MarkedNativeDraft {
             ready,
             observations: Some(observations),
             fallback_effects: None,
-            effect_audit: crate::EffectObligationAudit::NOT_RUN,
+            ledger: None,
             placement_audit: crate::PlacementAudit::Applied,
             observation_failure: None,
             plan,
@@ -1514,7 +1514,7 @@ pub(crate) struct SealedNativeFunction {
     /// Exact effect stream when the independent legacy V/U/W audit failed.
     /// A run owns effects here or inside `observations`, never in both.
     fallback_effects: Option<SurvivingEffectObservations>,
-    effect_audit: crate::EffectObligationAudit,
+    ledger: Option<crate::ledger::ObligationLedger>,
     placement_audit: crate::PlacementAudit,
     observation_failure: Option<BindingShadowAuditFailure>,
     plan: Rc<BindingPlan>,
@@ -1873,20 +1873,19 @@ impl SealedNativeFunction {
     /// would still expose unproven semantics to ordinary decompile callers.
     pub(crate) fn finalize_effect_ledger(
         &mut self,
-        ledger: &r2ssa::ledger::ObligationLedger,
+        ledger: &crate::ledger::ObligationLedger,
         radare2_variadic_format_counts: usize,
         radare2_prototypes: usize,
         radare2_local_names: usize,
         entry_held_values: usize,
     ) {
-        self.effect_audit = crate::EffectObligationAudit::from_ledger(ledger);
-        if !self.effect_audit.is_admitted() {
+        self.ledger = Some(ledger.clone());
+        let audit = self.effect_obligation_audit();
+        if !audit.is_admitted() {
             let function_name = self.ready.function().name.clone();
             let reason = format!(
                 "r2dec residual: source effect closure refused native C ({} refused, {} unaccounted, {} conflicting)",
-                self.effect_audit.refused,
-                self.effect_audit.unaccounted,
-                self.effect_audit.conflicts,
+                audit.refused, audit.unaccounted, audit.conflicts,
             );
             self.ready = prepare_function_for_emission(
                 crate::residual_function_for_render_boundary(&function_name, &reason),
@@ -1904,8 +1903,17 @@ impl SealedNativeFunction {
         self.ready = prepare_function_for_emission(function);
     }
 
-    pub(crate) const fn effect_obligation_audit(&self) -> crate::EffectObligationAudit {
-        self.effect_audit
+    pub(crate) fn effect_obligation_audit(&self) -> crate::EffectObligationAudit {
+        self.ledger
+            .as_ref()
+            .map_or(crate::EffectObligationAudit::NOT_RUN, |ledger| {
+                crate::EffectObligationAudit::from_ledger(ledger)
+            })
+    }
+
+    /// What became of every obligation, for a reader that wants more than counts.
+    pub(crate) fn obligation_ledger(&self) -> Option<&crate::ledger::ObligationLedger> {
+        self.ledger.as_ref()
     }
 
     pub(crate) const fn placement_audit(&self) -> crate::PlacementAudit {
@@ -2705,8 +2713,8 @@ impl LegacyObservationJournal {
         // does with an operand it no longer has.
         for site in origins.noop_sites() {
             if let Some(existing) =
-                elided_uses.insert(site, r2ssa::ledger::ElisionReason::RedundantPhiEdge)
-                && existing != r2ssa::ledger::ElisionReason::RedundantPhiEdge
+                elided_uses.insert(site, crate::ledger::ElisionReason::RedundantPhiEdge)
+                && existing != crate::ledger::ElisionReason::RedundantPhiEdge
             {
                 r2il::refusal_evidence!(
                     "redundant-phi-edge-subsumes",
@@ -2727,8 +2735,8 @@ impl LegacyObservationJournal {
             if elided_uses.contains_key(&site) {
                 continue;
             }
-            match elided_uses.insert(site, r2ssa::ledger::ElisionReason::CoalescedCopy) {
-                Some(r2ssa::ledger::ElisionReason::CoalescedCopy) | None => {}
+            match elided_uses.insert(site, crate::ledger::ElisionReason::CoalescedCopy) {
+                Some(crate::ledger::ElisionReason::CoalescedCopy) | None => {}
                 Some(existing) => {
                     if r2il::refusal_evidence::tracing() {
                         eprintln!(
@@ -2740,8 +2748,8 @@ impl LegacyObservationJournal {
             }
         }
         for inst in self.coalesced_carrier_phi_writes.iter().copied() {
-            match elided_writes.insert(inst, r2ssa::ledger::ElisionReason::CoalescedIdentityPhi) {
-                Some(r2ssa::ledger::ElisionReason::CoalescedIdentityPhi) | None => {}
+            match elided_writes.insert(inst, crate::ledger::ElisionReason::CoalescedIdentityPhi) {
+                Some(crate::ledger::ElisionReason::CoalescedIdentityPhi) | None => {}
                 Some(_) => return Err(conflicting_write(inst)),
             }
         }
@@ -2750,8 +2758,8 @@ impl LegacyObservationJournal {
         // the value it copies, which is the same fact that let the statement
         // go.
         for inst in self.coalesced_copy_writes.iter().copied() {
-            match elided_writes.insert(inst, r2ssa::ledger::ElisionReason::CoalescedCopy) {
-                Some(r2ssa::ledger::ElisionReason::CoalescedCopy) | None => {}
+            match elided_writes.insert(inst, crate::ledger::ElisionReason::CoalescedCopy) {
+                Some(crate::ledger::ElisionReason::CoalescedCopy) | None => {}
                 Some(_) => return Err(conflicting_write(inst)),
             }
         }
@@ -2783,9 +2791,9 @@ impl LegacyObservationJournal {
                     inst: inst.id,
                     input_idx,
                 };
-                match elided_uses.insert(site, r2ssa::ledger::ElisionReason::CoalescedImmutablePhi)
+                match elided_uses.insert(site, crate::ledger::ElisionReason::CoalescedImmutablePhi)
                 {
-                    Some(r2ssa::ledger::ElisionReason::CoalescedImmutablePhi) | None => {}
+                    Some(crate::ledger::ElisionReason::CoalescedImmutablePhi) | None => {}
                     Some(existing) => {
                         if r2il::refusal_evidence::tracing() {
                             eprintln!(
@@ -2796,9 +2804,9 @@ impl LegacyObservationJournal {
                     }
                 }
             }
-            match elided_writes.insert(inst.id, r2ssa::ledger::ElisionReason::CoalescedImmutablePhi)
+            match elided_writes.insert(inst.id, crate::ledger::ElisionReason::CoalescedImmutablePhi)
             {
-                Some(r2ssa::ledger::ElisionReason::CoalescedImmutablePhi) | None => {}
+                Some(crate::ledger::ElisionReason::CoalescedImmutablePhi) | None => {}
                 Some(_) => {
                     return Err(conflicting_write(inst.id));
                 }
@@ -2849,8 +2857,8 @@ impl LegacyObservationJournal {
             };
             if !matches!(
                 reason,
-                r2ssa::ledger::ElisionReason::UnusedStructuralValue
-                    | r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                crate::ledger::ElisionReason::UnusedStructuralValue
+                    | crate::ledger::ElisionReason::DeadUnusedTemporary
             ) {
                 continue;
             }
@@ -2872,7 +2880,7 @@ impl LegacyObservationJournal {
                     _ => {}
                 }
             }
-            if *reason == r2ssa::ledger::ElisionReason::DeadUnusedTemporary {
+            if *reason == crate::ledger::ElisionReason::DeadUnusedTemporary {
                 self.dead_unused_value_effects.extend(
                     source
                         .source()
@@ -2956,11 +2964,11 @@ impl LegacyObservationJournal {
                             inst: definition,
                             input_idx,
                         })
-                        .or_insert(r2ssa::ledger::ElisionReason::DeadUnusedTemporary);
+                        .or_insert(crate::ledger::ElisionReason::DeadUnusedTemporary);
                 }
                 elided_writes
                     .entry(definition)
-                    .or_insert(r2ssa::ledger::ElisionReason::DeadUnusedTemporary);
+                    .or_insert(crate::ledger::ElisionReason::DeadUnusedTemporary);
                 // The statement renders nothing, so the value it owed the
                 // ledger is closed the same way a plan-elided one is.
                 self.dead_unused_value_effects.extend(
@@ -2979,7 +2987,7 @@ impl LegacyObservationJournal {
             let slot = self.value_slot_mut(value)?;
             record_same(
                 slot,
-                LegacyValueObservation::Elided(r2ssa::ledger::ElisionReason::DeadUnusedTemporary),
+                LegacyValueObservation::Elided(crate::ledger::ElisionReason::DeadUnusedTemporary),
             )
             .map_err(|()| LegacyObservationJournalError::ConflictingValue(value))?;
         }
@@ -3421,7 +3429,7 @@ impl LegacyObservationJournal {
                     targets.push(ObservationTarget::Use {
                         site,
                         observation: LegacyUseObservation::Elided(
-                            r2ssa::ledger::ElisionReason::DeadStackBase,
+                            crate::ledger::ElisionReason::DeadStackBase,
                         ),
                         block,
                     });
@@ -3444,7 +3452,7 @@ impl LegacyObservationJournal {
                     targets.push(ObservationTarget::Use {
                         site,
                         observation: LegacyUseObservation::Elided(
-                            r2ssa::ledger::ElisionReason::DeadStackBase,
+                            crate::ledger::ElisionReason::DeadStackBase,
                         ),
                         block,
                     });
@@ -3859,7 +3867,7 @@ impl LegacyObservationJournal {
             .collect::<Vec<_>>();
         for value in elided_bases {
             let slot = self.value_slot_mut(value)?;
-            Self::record_removed_value(slot, r2ssa::ledger::ElisionReason::DeadStackBase);
+            Self::record_removed_value(slot, crate::ledger::ElisionReason::DeadStackBase);
         }
         targets.extend(self.discharged_instruction_targets_with(
             &spelled_by_the_object,
@@ -4040,7 +4048,7 @@ impl LegacyObservationJournal {
             });
             if every_use_is_accounted {
                 self.values[value.0 as usize] = Some(LegacyValueObservation::Elided(
-                    r2ssa::ledger::ElisionReason::CoalescedImmutablePhi,
+                    crate::ledger::ElisionReason::CoalescedImmutablePhi,
                 ));
             }
         }
@@ -4086,7 +4094,7 @@ impl LegacyObservationJournal {
             });
             if every_use_is_elided {
                 self.values[slot] = Some(LegacyValueObservation::Elided(
-                    r2ssa::ledger::ElisionReason::CoalescedCopy,
+                    crate::ledger::ElisionReason::CoalescedCopy,
                 ));
                 continue;
             }
@@ -4127,7 +4135,7 @@ impl LegacyObservationJournal {
 
     fn record_removed_value(
         slot: &mut Option<LegacyValueObservation>,
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
     ) {
         if slot.is_none() {
             *slot = Some(LegacyValueObservation::Elided(reason));
@@ -4136,7 +4144,7 @@ impl LegacyObservationJournal {
 
     fn record_removed_use(
         slot: &mut Option<LegacyUseObservation>,
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
     ) {
         if slot.is_none() {
             *slot = Some(LegacyUseObservation::Elided(reason));
@@ -4145,7 +4153,7 @@ impl LegacyObservationJournal {
 
     fn record_removed_write(
         slot: &mut Option<LegacyWriteObservation>,
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
     ) {
         if slot.is_none() {
             *slot = Some(LegacyWriteObservation::Elided(reason));
@@ -4155,7 +4163,7 @@ impl LegacyObservationJournal {
     fn account_removed_occurrences(&mut self) {
         let graph = self.source.graph();
         for inst in self.materialized_removed_phis.clone() {
-            let reason = r2ssa::ledger::ElisionReason::MaterializedPhiEdges;
+            let reason = crate::ledger::ElisionReason::MaterializedPhiEdges;
             if let Some(slot) = self.writes.get_mut(inst.0 as usize) {
                 Self::record_removed_write(slot, reason);
             }
@@ -4174,7 +4182,7 @@ impl LegacyObservationJournal {
         // the effect ledger, which is why removing the statement does not lose
         // an obligation; here only the value, use and write cells they carried
         // are closed out.
-        let reason = r2ssa::ledger::ElisionReason::DeadUnusedTemporary;
+        let reason = crate::ledger::ElisionReason::DeadUnusedTemporary;
         for inst in self.placement_elided_writes.clone() {
             if let Some(slot) = self.writes.get_mut(inst.0 as usize) {
                 Self::record_removed_write(slot, reason);
@@ -4206,7 +4214,7 @@ impl LegacyObservationJournal {
         // that happen to be empty. Filling in whatever is empty would satisfy
         // the seal by silencing it, and the seal is the only thing that catches
         // a value the renderer was supposed to emit and did not.
-        let reason = r2ssa::ledger::ElisionReason::DeadUnreadBinding;
+        let reason = crate::ledger::ElisionReason::DeadUnreadBinding;
         for id in self.placement_elided_observations.clone() {
             let Some(target) = self.targets.get(id.index() as usize).copied() else {
                 continue;
@@ -4260,9 +4268,9 @@ impl LegacyObservationJournal {
             // A call clobber is supplied from outside this function too, by the
             // callee rather than the caller, and the plan is what says so.
             let supplied_from_outside = if graph.caller_supplied(value) {
-                r2ssa::ledger::ElisionReason::CallerSuppliedEntryValue
+                crate::ledger::ElisionReason::CallerSuppliedEntryValue
             } else if self.plan.value_is_call_clobber(value) {
-                r2ssa::ledger::ElisionReason::UnclaimedCallClobber
+                crate::ledger::ElisionReason::UnclaimedCallClobber
             } else {
                 continue;
             };
@@ -4578,7 +4586,7 @@ impl LegacyObservationJournal {
             // `[esp + 4]` into the object, and the base is read nowhere in
             // either.
             let observation = if self.stack_base_absorbed_by(input.value, &rendered_symbols) {
-                LegacyUseObservation::Elided(r2ssa::ledger::ElisionReason::DeadStackBase)
+                LegacyUseObservation::Elided(crate::ledger::ElisionReason::DeadStackBase)
             } else {
                 self.rendered_use_observation(use_site)?
             };
@@ -4888,7 +4896,7 @@ impl LegacyObservationJournal {
         matches!(
             self.plan.disposition(value),
             Some(ValueDisposition::Elided {
-                reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                reason: crate::ledger::ElisionReason::DeadStackBase,
                 ..
             })
         )
@@ -5148,7 +5156,7 @@ impl LegacyObservationJournal {
                             // read. The statement spells the read, not the
                             // value, so there is no name to disagree about.
                             Some(ValueDisposition::Elided {
-                                reason: r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+                                reason: crate::ledger::ElisionReason::UnreadEffectfulValue,
                                 ..
                             }) => {}
                             Some(ValueDisposition::Elided { reason, .. }) => {
@@ -5854,7 +5862,7 @@ fn record_same<T: Copy + Eq>(slot: &mut Option<T>, observation: T) -> Result<(),
 
 fn retain_only_unanswered_refusals<T: Ord>(
     refused: &mut Vec<T>,
-    elided: &BTreeMap<T, r2ssa::ledger::ElisionReason>,
+    elided: &BTreeMap<T, crate::ledger::ElisionReason>,
 ) {
     refused.retain(|cell| !elided.contains_key(cell));
 }
@@ -5889,12 +5897,12 @@ fn classify_value_node(
     if matches!(
         disposition,
         Some(ValueDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+            reason: crate::ledger::ElisionReason::UnreadEffectfulValue,
             ..
         })
     ) {
         return Ok(LegacyValueObservation::Elided(
-            r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+            crate::ledger::ElisionReason::UnreadEffectfulValue,
         ));
     }
     let (expr, statement_level) = match node {
@@ -6431,7 +6439,7 @@ mod tests {
             input_idx: 1,
         };
         let mut refused = vec![elided, still_refused];
-        let elisions = BTreeMap::from([(elided, r2ssa::ledger::ElisionReason::StackFrame)]);
+        let elisions = BTreeMap::from([(elided, crate::ledger::ElisionReason::StackFrame)]);
 
         retain_only_unanswered_refusals(&mut refused, &elisions);
 
@@ -6655,7 +6663,7 @@ mod tests {
         assert!(matches!(
             plan.disposition(output),
             Some(ValueDisposition::Elided {
-                reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                reason: crate::ledger::ElisionReason::DeadStackBase,
                 ..
             })
         ));
@@ -6666,7 +6674,7 @@ mod tests {
         assert_eq!(
             journal.uses[restore.0 as usize][0],
             Some(LegacyUseObservation::Elided(
-                r2ssa::ledger::ElisionReason::DeadStackBase
+                crate::ledger::ElisionReason::DeadStackBase
             ))
         );
         assert!(!journal.coalesced_carrier_uses.contains(&use_site));
@@ -6727,7 +6735,7 @@ mod tests {
             matches!(
                 plan.disposition(dead),
                 Some(ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+                    reason: crate::ledger::ElisionReason::DeadUnusedTemporary,
                     ..
                 })
             ),
@@ -6737,13 +6745,13 @@ mod tests {
         assert_eq!(
             journal.values[dead.0 as usize],
             Some(LegacyValueObservation::Elided(
-                r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                crate::ledger::ElisionReason::DeadUnusedTemporary
             ))
         );
         assert_eq!(
             journal.writes[definition.0 as usize],
             Some(LegacyWriteObservation::Elided(
-                r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                crate::ledger::ElisionReason::DeadUnusedTemporary
             ))
         );
         assert!(
@@ -6757,7 +6765,7 @@ mod tests {
         assert_eq!(
             journal.values[dead_literal.0 as usize],
             Some(LegacyValueObservation::Elided(
-                r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                crate::ledger::ElisionReason::DeadUnusedTemporary
             ))
         );
         let input_count = source
@@ -6771,7 +6779,7 @@ mod tests {
             assert_eq!(
                 journal.uses[definition.0 as usize][input_idx],
                 Some(LegacyUseObservation::Elided(
-                    r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                    crate::ledger::ElisionReason::DeadUnusedTemporary
                 ))
             );
         }
@@ -6841,7 +6849,7 @@ mod tests {
         assert_eq!(
             journal.uses[control_site.inst.0 as usize][control_site.input_idx],
             Some(LegacyUseObservation::Elided(
-                r2ssa::ledger::ElisionReason::ReturnControl
+                crate::ledger::ElisionReason::ReturnControl
             ))
         );
         let ordinary_site = graph
@@ -6853,7 +6861,7 @@ mod tests {
         assert_ne!(
             journal.uses[ordinary_site.inst.0 as usize][ordinary_site.input_idx],
             Some(LegacyUseObservation::Elided(
-                r2ssa::ledger::ElisionReason::ReturnControl
+                crate::ledger::ElisionReason::ReturnControl
             ))
         );
     }
@@ -7094,13 +7102,13 @@ mod tests {
         let mut slot = None;
         record_same(
             &mut slot,
-            LegacyUseObservation::Elided(r2ssa::ledger::ElisionReason::CoalescedCopy),
+            LegacyUseObservation::Elided(crate::ledger::ElisionReason::CoalescedCopy),
         )
         .expect("the first proof owns the empty use cell");
         assert_eq!(
             record_same(
                 &mut slot,
-                LegacyUseObservation::Elided(r2ssa::ledger::ElisionReason::RedundantPhiEdge),
+                LegacyUseObservation::Elided(crate::ledger::ElisionReason::RedundantPhiEdge),
             ),
             Err(()),
             "a second, different elision proof may not replace the first"
@@ -7143,7 +7151,7 @@ mod tests {
             crate::effect_ledger::build_obligation_ledger(source.source(), &origins, &effects);
         assert!(matches!(
             ledger.outcome(&obligation),
-            r2ssa::ledger::Outcome::Rendered { .. }
+            crate::ledger::Outcome::Rendered { .. }
         ));
     }
 
@@ -7194,7 +7202,7 @@ mod tests {
             crate::effect_ledger::build_obligation_ledger(source.source(), &origins, &effects);
         assert_eq!(
             ledger.outcome(&obligation),
-            r2ssa::ledger::Outcome::Unattributed
+            crate::ledger::Outcome::Unattributed
         );
         assert!(ledger.unattributed().any(|id| *id == obligation));
     }
@@ -7231,7 +7239,7 @@ mod tests {
             crate::effect_ledger::build_obligation_ledger(source.source(), &origins, &effects);
         assert!(matches!(
             ledger.outcome(&obligation),
-            r2ssa::ledger::Outcome::Rendered { .. }
+            crate::ledger::Outcome::Rendered { .. }
         ));
         assert_eq!(
             ledger.conflicts().collect::<Vec<_>>(),
@@ -7364,14 +7372,14 @@ mod tests {
         assert_eq!(
             journal.values[dead.0 as usize],
             Some(LegacyValueObservation::Elided(
-                r2ssa::ledger::ElisionReason::UnobservedMerge
+                crate::ledger::ElisionReason::UnobservedMerge
             ))
         );
         for support in support_values {
             assert_eq!(
                 journal.values[support.0 as usize],
                 Some(LegacyValueObservation::Elided(
-                    r2ssa::ledger::ElisionReason::UnobservedValue
+                    crate::ledger::ElisionReason::UnobservedValue
                 )),
                 "a pure value used only by the dead merge is certified non-rendered"
             );
@@ -7380,14 +7388,14 @@ mod tests {
             assert_eq!(
                 journal.uses[definition.0 as usize][input_idx],
                 Some(LegacyUseObservation::Elided(
-                    r2ssa::ledger::ElisionReason::UnobservedMerge
+                    crate::ledger::ElisionReason::UnobservedMerge
                 ))
             );
         }
         assert_eq!(
             journal.writes[definition.0 as usize],
             Some(LegacyWriteObservation::Elided(
-                r2ssa::ledger::ElisionReason::UnobservedMerge
+                crate::ledger::ElisionReason::UnobservedMerge
             ))
         );
         let coverage = journal.final_coverage();
@@ -7491,14 +7499,14 @@ mod tests {
             assert_eq!(
                 journal.uses[definition.id.0 as usize][input_idx],
                 Some(LegacyUseObservation::Elided(
-                    r2ssa::ledger::ElisionReason::CoalescedImmutablePhi
+                    crate::ledger::ElisionReason::CoalescedImmutablePhi
                 ))
             );
         }
         assert_eq!(
             journal.writes[definition.id.0 as usize],
             Some(LegacyWriteObservation::Elided(
-                r2ssa::ledger::ElisionReason::CoalescedImmutablePhi
+                crate::ledger::ElisionReason::CoalescedImmutablePhi
             ))
         );
     }
@@ -7577,7 +7585,7 @@ mod tests {
         assert_eq!(
             journal.uses[noop_sites[0].inst.0 as usize][noop_sites[0].input_idx],
             Some(LegacyUseObservation::Elided(
-                r2ssa::ledger::ElisionReason::RedundantPhiEdge
+                crate::ledger::ElisionReason::RedundantPhiEdge
             ))
         );
         assert!(
@@ -7595,7 +7603,7 @@ mod tests {
                 assert_eq!(
                     journal.uses[source_use.inst.0 as usize][source_use.input_idx],
                     Some(LegacyUseObservation::Elided(
-                        r2ssa::ledger::ElisionReason::CoalescedCopy
+                        crate::ledger::ElisionReason::CoalescedCopy
                     ))
                 );
             }
@@ -7608,7 +7616,7 @@ mod tests {
             assert_eq!(
                 journal.writes[inst.0 as usize],
                 Some(LegacyWriteObservation::Elided(
-                    r2ssa::ledger::ElisionReason::CoalescedIdentityPhi
+                    crate::ledger::ElisionReason::CoalescedIdentityPhi
                 ))
             );
         }
@@ -7849,7 +7857,7 @@ mod tests {
             (
                 LegacyObservationJournalError::PlannedElidedValueRendered {
                     value: ValueId(32),
-                    reason: r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+                    reason: crate::ledger::ElisionReason::DeadUnusedTemporary,
                 },
                 BindingObservationJournalFailure::PlannedElidedValueRendered { value: ValueId(32) },
             ),

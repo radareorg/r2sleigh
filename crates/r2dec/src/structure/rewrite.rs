@@ -730,7 +730,7 @@ impl ControlFlowStructurer<'_, '_> {
         extra: &[crate::observation_journal::RenderObservationId],
         stated: &mut Vec<(
             crate::observation_journal::RenderObservationId,
-            r2ssa::ledger::ElisionReason,
+            crate::ledger::ElisionReason,
         )>,
     ) -> Option<CStmt> {
         let (semantic, observations) = stmt.clone().into_semantic_with_observations();
@@ -752,7 +752,7 @@ impl ControlFlowStructurer<'_, '_> {
                 let returned = Self::substitute_returned_var(symbols, &returned, value, &mut read)?;
                 stated.extend(
                     read.into_iter()
-                        .map(|id| (id, r2ssa::ledger::ElisionReason::SpecialisedMergeCarrier)),
+                        .map(|id| (id, crate::ledger::ElisionReason::SpecialisedMergeCarrier)),
                 );
                 let mut rebuilt = CStmt::Return(Some(returned));
                 for id in extra.iter().copied().rev() {
@@ -889,12 +889,12 @@ impl ControlFlowStructurer<'_, '_> {
                         written: Vec<crate::observation_journal::RenderObservationId>,
                         stated: &mut Vec<(
             crate::observation_journal::RenderObservationId,
-            r2ssa::ledger::ElisionReason,
+            crate::ledger::ElisionReason,
         )>| {
             let mut kept = Vec::new();
             for id in marks.into_ids().into_iter().chain(carried).chain(written) {
                 if is_write(id) {
-                    stated.push((id, r2ssa::ledger::ElisionReason::SpecialisedMergeCarrier));
+                    stated.push((id, crate::ledger::ElisionReason::SpecialisedMergeCarrier));
                 } else {
                     kept.push(id);
                 }

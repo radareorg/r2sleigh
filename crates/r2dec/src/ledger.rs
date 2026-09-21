@@ -18,31 +18,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::obligation::{
-    SemanticObligationId, SemanticObligationInventory, SemanticObligationKind,
-};
-
-/// Which layer decided an obligation's fate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum LedgerLayer {
-    Ssa,
-    Types,
-    Structure,
-    Fold,
-    Codegen,
-}
-
-impl std::fmt::Display for LedgerLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Ssa => "ssa",
-            Self::Types => "types",
-            Self::Structure => "structure",
-            Self::Fold => "fold",
-            Self::Codegen => "codegen",
-        })
-    }
-}
+use r2ssa::{SemanticObligationId, SemanticObligationInventory, SemanticObligationKind};
 
 /// Why an obligation needed no output for the rendering to be complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -131,16 +107,8 @@ pub enum ElisionReason {
     /// the carrier is then written nowhere and read nowhere, and no C statement
     /// has to carry it.
     SpecialisedMergeCarrier,
-    /// A condition-code write no rendered predicate reads.
-    DeadCpuFlag,
-    /// A value only ever read to compute a flag that is itself elided.
-    DeadFlagOnly,
     /// A lifted temporary or constant carrier nothing outside its definition reads.
     DeadUnusedTemporary,
-    /// A caller-saved register write no callee-crossing read observes.
-    DeadCallerSaved,
-    /// A register write consumed entirely by a rendered call's argument list.
-    DeadCallArgument,
     /// A native instruction the lifter decoded to no semantics at all.
     ///
     /// There is nothing for the rendering to emit because the instruction does
@@ -228,8 +196,6 @@ pub enum ElisionReason {
     /// rendered as one assignment per member and each carries its own slice of
     /// the constant. The operand itself therefore has no occurrence.
     DecomposedWideStore,
-    /// Proven dead, with no rule yet naming which kind of dead it is.
-    DeadUnclassified,
 }
 
 impl std::fmt::Display for ElisionReason {
@@ -246,11 +212,7 @@ impl std::fmt::Display for ElisionReason {
             Self::CoalescedCopy => "coalesced-copy",
             Self::CoalescedIdentityPhi => "coalesced-identity-phi",
             Self::SpecialisedMergeCarrier => "specialised-merge-carrier",
-            Self::DeadCpuFlag => "dead-cpu-flag",
-            Self::DeadFlagOnly => "dead-flag-only",
             Self::DeadUnusedTemporary => "dead-unused-temp",
-            Self::DeadCallerSaved => "dead-caller-saved",
-            Self::DeadCallArgument => "dead-call-arg",
             Self::CallBoundaryCarrier => "call-boundary-carrier",
             Self::NoNativeSemantics => "no-native-semantics",
             Self::DeadUnreadBinding => "dead-unread-binding",
@@ -266,45 +228,6 @@ impl std::fmt::Display for ElisionReason {
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
             Self::DecomposedWideStore => "decomposed-wide-store",
-            Self::DeadUnclassified => "dead-unclassified",
-        })
-    }
-}
-
-/// Why an obligation could not be discharged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum RefusalReason {
-    /// The admission rule asks this effect to residualize rather than be owned.
-    UnsupportedEffect,
-    /// Final emission retained no occurrence that owns this obligation.
-    ///
-    /// This deliberately does not guess which earlier phase removed it. The
-    /// absence of an occurrence proves the coverage failure, but it does not
-    /// prove that the containing block was omitted.
-    NoRenderedOccurrence,
-    /// The value this obligation needs was never bound to anything the output names.
-    ValueUnbound,
-    /// A phase ran out of its budget before reaching this obligation.
-    BudgetExhausted,
-    /// More than one final output occurrence claimed the same source effect.
-    ///
-    /// One source obligation is one semantic event. Rendering it twice is not
-    /// successful coverage: it changes program behavior and must therefore be
-    /// scored as a refusal at the final emission boundary.
-    DuplicateRenderedOccurrence,
-    /// The layer refused and the reason is not yet one this enum distinguishes.
-    Unclassified,
-}
-
-impl std::fmt::Display for RefusalReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::UnsupportedEffect => "unsupported-effect",
-            Self::NoRenderedOccurrence => "no-rendered-occurrence",
-            Self::ValueUnbound => "value-unbound",
-            Self::BudgetExhausted => "budget-exhausted",
-            Self::DuplicateRenderedOccurrence => "duplicate-rendered-occurrence",
-            Self::Unclassified => "unclassified",
         })
     }
 }
@@ -316,11 +239,8 @@ pub enum Outcome {
     Rendered { block_addr: u64, op_idx: usize },
     /// Proven to need no output.
     Elided(ElisionReason),
-    /// Could not be discharged, and which layer said so.
-    Refused {
-        layer: LedgerLayer,
-        reason: RefusalReason,
-    },
+    /// Could not be discharged. The obligation's own kind says what it was.
+    Refused,
     /// Covered by a marked gap in the output at this operation site.
     ///
     /// A gap is not a discharge and not a refusal. The renderer could not
@@ -355,7 +275,7 @@ pub enum Record {
 }
 
 /// How the ledger stands, with every obligation in exactly one column.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerClosure {
     pub total: usize,
     pub rendered: usize,
@@ -388,7 +308,7 @@ impl LedgerClosure {
 }
 
 /// Every obligation the inventory recorded, and what became of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObligationLedger {
     outcomes: BTreeMap<SemanticObligationId, Outcome>,
     conflicts: BTreeMap<SemanticObligationId, usize>,
@@ -397,11 +317,15 @@ pub struct ObligationLedger {
 impl ObligationLedger {
     /// Open a ledger over an inventory, with every obligation present and undecided.
     pub fn open(inventory: &SemanticObligationInventory) -> Self {
+        Self::over(inventory.obligations().keys().copied())
+    }
+
+    /// Open a ledger over a set of obligations, each undecided.
+    pub fn over(ids: impl IntoIterator<Item = SemanticObligationId>) -> Self {
         Self {
-            outcomes: inventory
-                .obligations()
-                .keys()
-                .map(|id| (*id, Outcome::Unattributed))
+            outcomes: ids
+                .into_iter()
+                .map(|id| (id, Outcome::Unattributed))
                 .collect(),
             conflicts: BTreeMap::new(),
         }
@@ -485,12 +409,12 @@ impl ObligationLedger {
         self.conflicts.iter().map(|(id, count)| (id, *count))
     }
 
-    /// How many refusals there are, by the layer that made them and why.
-    pub fn refusals_by_layer(&self) -> BTreeMap<(LedgerLayer, RefusalReason), usize> {
+    /// How many refusals there are, by the kind of obligation refused.
+    pub fn refusals_by_kind(&self) -> BTreeMap<SemanticObligationKind, usize> {
         let mut counts = BTreeMap::new();
-        for (_, outcome) in self.entries() {
-            if let Outcome::Refused { layer, reason } = outcome {
-                *counts.entry((layer, reason)).or_insert(0usize) += 1;
+        for (id, outcome) in self.entries() {
+            if outcome == Outcome::Refused {
+                *counts.entry(id.kind).or_insert(0usize) += 1;
             }
         }
         counts
@@ -507,6 +431,73 @@ impl ObligationLedger {
         counts
     }
 
+    /// The whole ledger in one line: the columns, then what is behind each.
+    ///
+    /// One formatter, so the debug log and whatever asks the engine read the
+    /// same breakdown rather than each inventing its own spelling.
+    pub fn report(&self) -> String {
+        fn ranked<K: std::fmt::Display>(counts: BTreeMap<K, usize>) -> String {
+            let mut entries = counts.into_iter().collect::<Vec<_>>();
+            // Largest first, and by name where two tie, so the same binary
+            // reports the same way twice.
+            entries.sort_by(|(left_key, left), (right_key, right)| {
+                right
+                    .cmp(left)
+                    .then_with(|| left_key.to_string().cmp(&right_key.to_string()))
+            });
+            entries
+                .into_iter()
+                .map(|(key, count)| format!("{key}={count}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        let closure = self.close();
+        let mut line = format!(
+            "total={} rendered={} elided={} refused={} unaccounted={} conflicts={}",
+            closure.total,
+            closure.rendered,
+            closure.elided,
+            closure.refused,
+            closure.unattributed,
+            closure.conflicts,
+        );
+        // Only the columns that have something behind them, so a fully proven
+        // function reads as one line rather than as a row of empty headings.
+        let mut section = |name: &str, body: String| {
+            if !body.is_empty() {
+                line.push_str(&format!(" | {name}: {body}"));
+            }
+        };
+        section("elided", ranked(self.elisions_by_reason()));
+        section(
+            "unaccounted-kinds",
+            ranked(
+                self.unattributed_by_kind()
+                    .into_iter()
+                    .map(|(kind, count)| (format!("{kind:?}"), count))
+                    .collect(),
+            ),
+        );
+        section(
+            "refused-kinds",
+            ranked(
+                self.refusals_by_kind()
+                    .into_iter()
+                    .map(|(kind, count)| (format!("{kind:?}"), count))
+                    .collect(),
+            ),
+        );
+        section(
+            "refused-ids",
+            self.entries()
+                .filter(|&(_, outcome)| outcome == Outcome::Refused)
+                .map(|(id, _)| id.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        line
+    }
+
     /// Count the ledger into its columns.
     pub fn close(&self) -> LedgerClosure {
         let mut closure = LedgerClosure {
@@ -519,7 +510,7 @@ impl ObligationLedger {
             match outcome {
                 Outcome::Rendered { .. } => closure.rendered += 1,
                 Outcome::Elided(_) => closure.elided += 1,
-                Outcome::Refused { .. } => {
+                Outcome::Refused => {
                     closure.refused += 1;
                     if trace {
                         eprintln!("obligation refused {id:?} {outcome:?}");
@@ -546,9 +537,7 @@ impl ObligationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obligation::{
-        CanonicalInstructionId, CanonicalInstructionSite, SemanticObligationComponent,
-    };
+    use r2ssa::{CanonicalInstructionId, CanonicalInstructionSite, SemanticObligationComponent};
 
     fn obligation(op_index: u64, kind: SemanticObligationKind) -> SemanticObligationId {
         SemanticObligationId {
@@ -562,10 +551,7 @@ mod tests {
     }
 
     fn ledger_of(ids: &[SemanticObligationId]) -> ObligationLedger {
-        ObligationLedger {
-            outcomes: ids.iter().map(|id| (*id, Outcome::Unattributed)).collect(),
-            conflicts: BTreeMap::new(),
-        }
+        ObligationLedger::over(ids.iter().copied())
     }
 
     #[test]
@@ -608,13 +594,7 @@ mod tests {
             },
         );
         ledger.record(ids[1], Outcome::Elided(ElisionReason::StackFrame));
-        ledger.record(
-            ids[2],
-            Outcome::Refused {
-                layer: LedgerLayer::Ssa,
-                reason: RefusalReason::UnsupportedEffect,
-            },
-        );
+        ledger.record(ids[2], Outcome::Refused);
 
         let closure = ledger.close();
         assert_eq!(closure.accounted(), closure.total);
@@ -677,7 +657,7 @@ mod tests {
         assert_eq!(ledger.record(id, rendered), Record::Accepted);
         assert_eq!(ledger.record(id, rendered), Record::Redundant);
         assert_eq!(
-            ledger.record(id, Outcome::Elided(ElisionReason::DeadCpuFlag)),
+            ledger.record(id, Outcome::Elided(ElisionReason::DeadUnusedTemporary)),
             Record::Conflict(rendered)
         );
 
@@ -697,10 +677,7 @@ mod tests {
             },
         );
 
-        let refused = Outcome::Refused {
-            layer: LedgerLayer::Structure,
-            reason: RefusalReason::NoRenderedOccurrence,
-        };
+        let refused = Outcome::Refused;
         assert_eq!(ledger.overwrite(id, refused), Record::Accepted);
 
         assert_eq!(ledger.outcome(&id), refused);
@@ -725,13 +702,5 @@ mod tests {
             Record::Unknown
         );
         assert_eq!(ledger.close().total, 1);
-    }
-
-    #[test]
-    fn duplicate_render_refusal_has_a_stable_diagnostic_name() {
-        assert_eq!(
-            RefusalReason::DuplicateRenderedOccurrence.to_string(),
-            "duplicate-rendered-occurrence"
-        );
     }
 }

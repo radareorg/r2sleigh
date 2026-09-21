@@ -57,7 +57,7 @@ enum NormalizedValueObservation {
     Bound(ValueClassId),
     InlineConstant,
     InlineNonLiteral,
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(ValueRefusal),
     Gap(GapAnchor),
     LegacyAbsent,
@@ -67,7 +67,7 @@ enum NormalizedValueObservation {
 enum NormalizedUseObservation {
     Exact(MachineUseSlice),
     MemoryAddress(r2ssa::MachineValueUse),
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(MachineUseRefusal),
     Gap(GapAnchor),
     LegacyAbsent,
@@ -76,7 +76,7 @@ enum NormalizedUseObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NormalizedWriteObservation {
     Exact(MachineWriteProjection),
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(MachineWriteRefusal),
     Gap(GapAnchor),
     LegacyAbsent,

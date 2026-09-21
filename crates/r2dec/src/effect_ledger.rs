@@ -5,9 +5,9 @@
 //! block-visited side table: an obligation is rendered exactly when one marker
 //! for that exact source cell survived emission preparation.
 
+use crate::ledger::{ElisionReason, ObligationLedger, Outcome};
 use crate::normalize::NormalizationOrigins;
 use crate::observation_journal::SurvivingEffectObservations;
-use r2ssa::ledger::{ElisionReason, LedgerLayer, ObligationLedger, Outcome, RefusalReason};
 use r2ssa::{
     CanonicalInstructionSite, SemanticObligationComponent, SemanticObligationId,
     SemanticObligationKind, SsaArtifact,
@@ -79,10 +79,7 @@ fn upstream_zero_occurrence_outcome(
         id.kind,
         SemanticObligationKind::VolatileOrUnknownEffect | SemanticObligationKind::Trap
     ) {
-        return Some(Outcome::Refused {
-            layer: LedgerLayer::Ssa,
-            reason: RefusalReason::UnsupportedEffect,
-        });
+        return Some(Outcome::Refused);
     }
 
     let graph = prepared.graph();

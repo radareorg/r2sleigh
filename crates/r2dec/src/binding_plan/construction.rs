@@ -942,10 +942,10 @@ impl BindingPlan {
         let unobserved_values = source.unobserved_values();
         let effectful = super::rules::effectful_definition_values(source);
         let elision_for =
-            |value: r2ssa::ValueId, dead: r2ssa::ledger::ElisionReason| match effectful
+            |value: r2ssa::ValueId, dead: crate::ledger::ElisionReason| match effectful
                 .contains(&value)
             {
-                true => r2ssa::ledger::ElisionReason::UnreadEffectfulValue,
+                true => crate::ledger::ElisionReason::UnreadEffectfulValue,
                 false => dead,
             };
         let structural_unused = source
@@ -1000,7 +1000,7 @@ impl BindingPlan {
             }
             if return_controls.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::ReturnControl,
+                    reason: crate::ledger::ElisionReason::ReturnControl,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1008,7 +1008,7 @@ impl BindingPlan {
                 };
             } else if direct_control_targets.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::DirectControlTarget,
+                    reason: crate::ledger::ElisionReason::DirectControlTarget,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1016,7 +1016,7 @@ impl BindingPlan {
                 };
             } else if direct_call_targets.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::DirectCallTarget,
+                    reason: crate::ledger::ElisionReason::DirectCallTarget,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1024,7 +1024,7 @@ impl BindingPlan {
                 };
             } else if stack_frame_values.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::StackFrame,
+                    reason: crate::ledger::ElisionReason::StackFrame,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1032,7 +1032,7 @@ impl BindingPlan {
                 };
             } else if stack_geometry_values.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                    reason: crate::ledger::ElisionReason::DeadStackBase,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1042,7 +1042,7 @@ impl BindingPlan {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,
-                        r2ssa::ledger::ElisionReason::UnobservedMerge,
+                        crate::ledger::ElisionReason::UnobservedMerge,
                     ),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
@@ -1053,7 +1053,7 @@ impl BindingPlan {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,
-                        r2ssa::ledger::ElisionReason::UnobservedValue,
+                        crate::ledger::ElisionReason::UnobservedValue,
                     ),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
@@ -1064,7 +1064,7 @@ impl BindingPlan {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,
-                        r2ssa::ledger::ElisionReason::UnusedStructuralValue,
+                        crate::ledger::ElisionReason::UnusedStructuralValue,
                     ),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
@@ -1073,7 +1073,7 @@ impl BindingPlan {
                 };
             } else if call_return_addresses.contains(&graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::CallReturnAddress,
+                    reason: crate::ledger::ElisionReason::CallReturnAddress,
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
                         value: graph_value.id,
@@ -1083,7 +1083,7 @@ impl BindingPlan {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,
-                        r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+                        crate::ledger::ElisionReason::DeadUnusedTemporary,
                     ),
                     proof: ValueElisionProof {
                         authority: source.authority().clone(),
@@ -1397,7 +1397,7 @@ impl BindingPlan {
                     stack_objects.insert(
                         *object,
                         StackObjectDisposition::Elided {
-                            reason: r2ssa::ledger::ElisionReason::StackFrame,
+                            reason: crate::ledger::ElisionReason::StackFrame,
                         },
                     );
                     continue;

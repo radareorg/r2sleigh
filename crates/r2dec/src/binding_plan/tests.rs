@@ -628,7 +628,7 @@ fn unread_defined_value_is_elided_before_it_can_become_a_binding() {
     assert!(matches!(
         plan.disposition(dead),
         Some(ValueDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+            reason: crate::ledger::ElisionReason::DeadUnusedTemporary,
             proof,
         }) if proof.authority == *source.authority() && proof.value == dead
     ));
@@ -657,7 +657,7 @@ fn unread_defined_value_is_elided_before_it_can_become_a_binding() {
         .expect("upstream oracle")
         .value_disposition(dead),
         Some(UpstreamValueDisposition::Elided(
-            r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+            crate::ledger::ElisionReason::DeadUnusedTemporary
         ))
     );
     assert!(plan.validate_seal(&source_owned).is_ok());
@@ -691,7 +691,7 @@ fn exact_source_return_address_fact_alone_authorizes_control_target_elision() {
     assert!(matches!(
         plan.disposition(return_control),
         Some(ValueDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::ReturnControl,
+            reason: crate::ledger::ElisionReason::ReturnControl,
             proof,
         }) if proof.authority == *source.authority() && proof.value == return_control
     ));
@@ -720,7 +720,7 @@ fn exact_source_return_address_fact_alone_authorizes_control_target_elision() {
         .expect("upstream oracle")
         .value_disposition(return_control),
         Some(UpstreamValueDisposition::Elided(
-            r2ssa::ledger::ElisionReason::ReturnControl
+            crate::ledger::ElisionReason::ReturnControl
         ))
     );
 
@@ -749,7 +749,7 @@ fn exact_source_return_address_fact_alone_authorizes_control_target_elision() {
     );
     let mut forged = plan;
     forged.dispositions[semantic_return.0 as usize] = ValueDisposition::Elided {
-        reason: r2ssa::ledger::ElisionReason::ReturnControl,
+        reason: crate::ledger::ElisionReason::ReturnControl,
         proof: ValueElisionProof {
             authority: source.authority().clone(),
             value: semantic_return,
@@ -810,7 +810,7 @@ fn direct_cfg_target_is_elided_only_when_every_use_is_control_topology() {
     assert!(matches!(
         plan.disposition(target_value),
         Some(ValueDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::DirectControlTarget,
+            reason: crate::ledger::ElisionReason::DirectControlTarget,
             proof,
         }) if proof.authority == *source.authority() && proof.value == target_value
     ));
@@ -827,7 +827,7 @@ fn direct_cfg_target_is_elided_only_when_every_use_is_control_topology() {
         .expect("independent direct-control oracle")
         .value_disposition(target_value),
         Some(UpstreamValueDisposition::Elided(
-            r2ssa::ledger::ElisionReason::DirectControlTarget
+            crate::ledger::ElisionReason::DirectControlTarget
         ))
     );
 
@@ -950,7 +950,7 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
     assert!(matches!(
         plan.disposition(dead),
         Some(ValueDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::UnobservedMerge,
+            reason: crate::ledger::ElisionReason::UnobservedMerge,
             proof,
         }) if proof.authority == *source.authority() && proof.value == dead
     ));
@@ -961,7 +961,7 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
     assert!(matches!(
         plan.disposition(dead_support),
         Some(ValueDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::UnobservedValue,
+            reason: crate::ledger::ElisionReason::UnobservedValue,
             proof,
         }) if proof.authority == *source.authority() && proof.value == dead_support
     ));
@@ -985,13 +985,13 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
     assert_eq!(
         oracle.value_disposition(dead),
         Some(UpstreamValueDisposition::Elided(
-            r2ssa::ledger::ElisionReason::UnobservedMerge
+            crate::ledger::ElisionReason::UnobservedMerge
         ))
     );
 
     let mut forged = plan;
     forged.dispositions[dead.0 as usize] = ValueDisposition::Elided {
-        reason: r2ssa::ledger::ElisionReason::UnobservedMerge,
+        reason: crate::ledger::ElisionReason::UnobservedMerge,
         proof: ValueElisionProof {
             authority: source.authority().clone(),
             value: live,
@@ -1923,14 +1923,14 @@ fn exact_frame_round_trip_is_elided_without_a_program_binding() {
     assert_eq!(
         plan.stack_object_disposition(object),
         Some(StackObjectDisposition::Elided {
-            reason: r2ssa::ledger::ElisionReason::StackFrame,
+            reason: crate::ledger::ElisionReason::StackFrame,
         })
     );
     assert!(certificate.values.iter().all(|value| {
         matches!(
             plan.disposition(*value),
             Some(ValueDisposition::Elided {
-                reason: r2ssa::ledger::ElisionReason::StackFrame,
+                reason: crate::ledger::ElisionReason::StackFrame,
                 ..
             })
         )
@@ -1945,7 +1945,7 @@ fn exact_frame_round_trip_is_elided_without_a_program_binding() {
             .all(|value| matches!(
                 plan.disposition(*value),
                 Some(ValueDisposition::Elided {
-                    reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                    reason: crate::ledger::ElisionReason::DeadStackBase,
                     ..
                 })
             ))
@@ -1960,7 +1960,7 @@ fn exact_frame_round_trip_is_elided_without_a_program_binding() {
         resolution.require_stack(object),
         Err(RenderedIdentityRefusal::StackObjectElided {
             object,
-            reason: r2ssa::ledger::ElisionReason::StackFrame,
+            reason: crate::ledger::ElisionReason::StackFrame,
         })
     );
     assert!(plan.validate_seal(&source_owned).is_ok());

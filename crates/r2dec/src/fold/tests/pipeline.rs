@@ -1615,7 +1615,7 @@ mod tests {
         assert!(matches!(
             names.require_value(address.binding().value()),
             Ok(crate::binding_plan::PlannedValueSymbol::Elided(
-                r2ssa::ledger::ElisionReason::DeadStackBase
+                crate::ledger::ElisionReason::DeadStackBase
             ))
         ));
         let memory = ctx
@@ -1845,7 +1845,7 @@ mod tests {
                 Some(exact_legacy_use(&plan, target_site))
             } else {
                 Some(crate::shadow_report::LegacyUseObservation::Elided(
-                    r2ssa::ledger::ElisionReason::DirectCallTarget,
+                    crate::ledger::ElisionReason::DirectCallTarget,
                 ))
             }
         );

@@ -2105,17 +2105,34 @@ impl EngineTypeAnalysisResponse {
     }
 }
 
+/// The counts of a ledger, or the not-run verdict when there is none.
+fn effect_obligations_of(
+    ledger: Option<&r2dec::ledger::ObligationLedger>,
+) -> EffectObligationAudit {
+    ledger.map_or(
+        EffectObligationAudit::NOT_RUN,
+        EffectObligationAudit::from_ledger,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineDecompileResponse {
     pub output: String,
     pub binding_audit: BindingShadowAuditOutcome,
-    pub effect_obligations: EffectObligationAudit,
+    pub obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     pub placement_audit: PlacementAudit,
     pub render_refusal: Option<DecompileRenderRefusal>,
     pub function_facts: FunctionFacts,
     pub input_quality: Option<r2types::FunctionInputQualityFacts>,
     pub metrics: EngineMetrics,
     pub diagnostics: EngineDiagnostics,
+}
+
+impl EngineDecompileResponse {
+    /// What the ledger counts to, which is the verdict on this rendering.
+    pub fn effect_obligations(&self) -> EffectObligationAudit {
+        effect_obligations_of(self.obligation_ledger.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2405,7 +2422,7 @@ impl EngineSession {
                 analyze_diagnostics,
                 Some(analyzed_function_facts),
                 BindingShadowAuditOutcome::NotRun,
-                EffectObligationAudit::NOT_RUN,
+                None,
                 PlacementAudit::NotRun,
                 None,
             );
@@ -2420,7 +2437,7 @@ impl EngineSession {
                 analyze_diagnostics,
                 Some(analyzed_function_facts),
                 BindingShadowAuditOutcome::NotRun,
-                EffectObligationAudit::NOT_RUN,
+                None,
                 PlacementAudit::NotRun,
                 None,
             );
@@ -2437,7 +2454,7 @@ impl EngineSession {
                 *refusal.diagnostics,
                 Some(analyzed_function_facts),
                 BindingShadowAuditOutcome::NotRun,
-                EffectObligationAudit::NOT_RUN,
+                None,
                 PlacementAudit::NotRun,
                 None,
             );
@@ -2476,7 +2493,7 @@ impl EngineSession {
                     analyze_diagnostics,
                     Some(analyzed_function_facts),
                     BindingShadowAuditOutcome::NotRun,
-                    EffectObligationAudit::NOT_RUN,
+                    None,
                     PlacementAudit::NotRun,
                     None,
                 );
@@ -2549,7 +2566,7 @@ impl EngineSession {
                 EngineDiagnostics::default(),
                 Some(response_function_facts),
                 BindingShadowAuditOutcome::NotRun,
-                EffectObligationAudit::NOT_RUN,
+                None,
                 PlacementAudit::NotRun,
                 None,
             );
@@ -2570,7 +2587,7 @@ impl EngineSession {
                 *refusal.diagnostics,
                 Some(response_function_facts),
                 BindingShadowAuditOutcome::NotRun,
-                EffectObligationAudit::NOT_RUN,
+                None,
                 PlacementAudit::NotRun,
                 None,
             );
@@ -2588,7 +2605,7 @@ impl EngineSession {
                     render_time,
                 );
                 let binding_audit = *stop.binding_audit;
-                let effect_obligations = *stop.effect_obligations;
+                let obligation_ledger = *stop.obligation_ledger;
                 let placement_audit = stop.placement_audit;
                 let render_refusal = stop.render_refusal.map(|refusal| *refusal);
                 let refusal = engine_render_execution_refusal(stop.reason, stop.phase, metrics);
@@ -2600,7 +2617,7 @@ impl EngineSession {
                     *refusal.diagnostics,
                     Some(response_function_facts),
                     binding_audit,
-                    effect_obligations,
+                    obligation_ledger,
                     placement_audit,
                     render_refusal,
                 );
@@ -2651,7 +2668,7 @@ impl EngineSession {
         metrics.planning_time += planning_time;
         metrics.render_time = render_time;
         let rendering_stopped = rendered.stopped.is_some();
-        let (output, binding_audit, effect_obligations, placement_audit, render_refusal) =
+        let (output, binding_audit, obligation_ledger, placement_audit, render_refusal) =
             rendered.product.finalize();
         if !rendering_stopped && let Some(reason) = placement_refusal_reason(placement_audit) {
             metrics.record_phase(
@@ -2667,7 +2684,7 @@ impl EngineSession {
                 diagnostics,
                 Some(response_function_facts),
                 binding_audit,
-                effect_obligations,
+                obligation_ledger,
                 placement_audit,
                 render_refusal,
             );
@@ -2687,13 +2704,14 @@ impl EngineSession {
                 diagnostics,
                 Some(response_function_facts),
                 binding_audit,
-                effect_obligations,
+                obligation_ledger,
                 placement_audit,
                 Some(refusal),
             );
         }
         if !rendering_stopped
-            && let Some(reason) = effect_obligation_refusal_reason(effect_obligations)
+            && let Some(reason) =
+                effect_obligation_refusal_reason(effect_obligations_of(obligation_ledger.as_ref()))
         {
             metrics.record_phase(
                 EnginePhase::Rendering,
@@ -2708,7 +2726,7 @@ impl EngineSession {
                 diagnostics,
                 Some(response_function_facts),
                 binding_audit,
-                effect_obligations,
+                obligation_ledger,
                 placement_audit,
                 None,
             );
@@ -2724,7 +2742,7 @@ impl EngineSession {
                 *refusal.diagnostics,
                 Some(response_function_facts),
                 binding_audit,
-                effect_obligations,
+                obligation_ledger,
                 placement_audit,
                 None,
             );
@@ -2734,7 +2752,7 @@ impl EngineSession {
         EngineDecompileResponse {
             output,
             binding_audit,
-            effect_obligations,
+            obligation_ledger,
             placement_audit,
             render_refusal,
             function_facts: response_function_facts,
@@ -2892,7 +2910,7 @@ impl EngineRenderedDecompile {
             product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
                 output,
                 binding_audit: BindingShadowAuditOutcome::NotRun,
-                effect_obligations: EffectObligationAudit::NOT_RUN,
+                obligation_ledger: None,
                 placement_audit: PlacementAudit::NotRun,
                 render_refusal: None,
             })),
@@ -2906,7 +2924,7 @@ impl EngineRenderedDecompile {
 struct ReadyEngineRenderedProduct {
     output: String,
     binding_audit: BindingShadowAuditOutcome,
-    effect_obligations: EffectObligationAudit,
+    obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
 }
@@ -2922,7 +2940,7 @@ impl EngineRenderedProduct {
     ) -> (
         String,
         BindingShadowAuditOutcome,
-        EffectObligationAudit,
+        Option<r2dec::ledger::ObligationLedger>,
         PlacementAudit,
         Option<DecompileRenderRefusal>,
     ) {
@@ -2931,14 +2949,14 @@ impl EngineRenderedProduct {
                 let ReadyEngineRenderedProduct {
                     output,
                     binding_audit,
-                    effect_obligations,
+                    obligation_ledger,
                     placement_audit,
                     render_refusal,
                 } = *ready;
                 (
                     output,
                     binding_audit,
-                    effect_obligations,
+                    obligation_ledger,
                     placement_audit,
                     render_refusal,
                 )
@@ -2946,13 +2964,13 @@ impl EngineRenderedProduct {
             Self::Pending(pending) => {
                 let audited = (*pending).finalize();
                 let binding_audit = audited.binding_shadow();
-                let effect_obligations = audited.effect_obligations();
+                let obligation_ledger = audited.obligation_ledger().cloned();
                 let placement_audit = audited.placement_audit();
                 let render_refusal = audited.render_refusal();
                 (
                     audited.into_output(),
                     binding_audit,
-                    effect_obligations,
+                    obligation_ledger,
                     placement_audit,
                     render_refusal,
                 )
@@ -2966,7 +2984,7 @@ struct EngineRenderExecutionStop {
     reason: String,
     phase: EnginePhase,
     binding_audit: Box<BindingShadowAuditOutcome>,
-    effect_obligations: Box<EffectObligationAudit>,
+    obligation_ledger: Box<Option<r2dec::ledger::ObligationLedger>>,
     placement_audit: PlacementAudit,
     render_refusal: Option<Box<DecompileRenderRefusal>>,
     certification_completed: bool,
@@ -3012,7 +3030,7 @@ fn engine_render_stop_reason(
         reason,
         phase,
         binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
-        effect_obligations: Box::new(EffectObligationAudit::NOT_RUN),
+        obligation_ledger: Box::new(None),
         placement_audit: PlacementAudit::NotRun,
         render_refusal: None,
         certification_completed: false,
@@ -3045,7 +3063,7 @@ fn poll_engine_render_control_with_completion<C: r2ssa::SsaWorkControl + ?Sized>
 fn engine_render_stop_from_decompiler(
     stop: r2dec::DecompileExecutionStop,
     binding_audit: BindingShadowAuditOutcome,
-    effect_obligations: EffectObligationAudit,
+    obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
 ) -> EngineRenderExecutionStop {
@@ -3056,7 +3074,7 @@ fn engine_render_stop_from_decompiler(
     };
     let mut mapped = engine_render_stop_reason(stop.reason(), phase);
     mapped.binding_audit = Box::new(binding_audit);
-    mapped.effect_obligations = Box::new(effect_obligations);
+    mapped.obligation_ledger = Box::new(obligation_ledger);
     mapped.placement_audit = placement_audit;
     mapped.render_refusal = render_refusal.map(Box::new);
     match stop.phase() {
@@ -3094,7 +3112,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
                 reason: format!("{stop:?}"),
                 phase: EnginePhase::Rendering,
                 binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
-                effect_obligations: Box::new(EffectObligationAudit::NOT_RUN),
+                obligation_ledger: Box::new(None),
                 placement_audit: PlacementAudit::NotRun,
                 render_refusal: None,
                 certification_completed: false,
@@ -3110,7 +3128,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
                 reason: format!("{stop:?}"),
                 phase: EnginePhase::Rendering,
                 binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
-                effect_obligations: Box::new(EffectObligationAudit::NOT_RUN),
+                obligation_ledger: Box::new(None),
                 placement_audit: PlacementAudit::NotRun,
                 render_refusal: None,
                 certification_completed: false,
@@ -3126,7 +3144,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
         Err((stop, Some(partial))) if !partial.output().trim().is_empty() => {
             let audited = partial.finalize();
             let binding_audit = audited.binding_shadow();
-            let effect_obligations = audited.effect_obligations();
+            let obligation_ledger = audited.obligation_ledger().cloned();
             let placement_audit = audited.placement_audit();
             let render_refusal = audited.render_refusal();
             let output = audited.into_output();
@@ -3134,7 +3152,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
                 product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
                     output,
                     binding_audit,
-                    effect_obligations,
+                    obligation_ledger: obligation_ledger.clone(),
                     placement_audit,
                     render_refusal,
                 })),
@@ -3147,26 +3165,26 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
                 stopped: Some(engine_render_stop_from_decompiler(
                     stop,
                     binding_audit,
-                    effect_obligations,
+                    obligation_ledger,
                     placement_audit,
                     render_refusal,
                 )),
             });
         }
         Err((stop, partial)) => {
-            let (binding_audit, effect_obligations, placement_audit, render_refusal) = partial
+            let (binding_audit, obligation_ledger, placement_audit, render_refusal) = partial
                 .map(r2dec::PendingDecompileBindingAudit::finalize)
                 .map_or(
                     (
                         BindingShadowAuditOutcome::NotRun,
-                        EffectObligationAudit::NOT_RUN,
+                        None,
                         PlacementAudit::NotRun,
                         None,
                     ),
                     |audit| {
                         (
                             audit.binding_shadow(),
-                            audit.effect_obligations(),
+                            audit.obligation_ledger().cloned(),
                             audit.placement_audit(),
                             audit.render_refusal(),
                         )
@@ -3175,7 +3193,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
             return Err(engine_render_stop_from_decompiler(
                 stop,
                 binding_audit,
-                effect_obligations,
+                obligation_ledger,
                 placement_audit,
                 render_refusal,
             ));
@@ -3192,7 +3210,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
 
     let audited = audited.finalize();
     let binding_audit = audited.binding_shadow();
-    let effect_obligations = audited.effect_obligations();
+    let obligation_ledger = audited.obligation_ledger().cloned();
     let placement_audit = audited.placement_audit();
     let render_refusal = audited.render_refusal();
     Ok(EngineRenderedDecompile {
@@ -3203,7 +3221,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
             )
             .unwrap_or_default(),
             binding_audit,
-            effect_obligations,
+            obligation_ledger,
             placement_audit,
             render_refusal,
         })),
@@ -3314,7 +3332,7 @@ fn refused_decompile_response_with_metrics(
         diagnostics,
         None,
         BindingShadowAuditOutcome::NotRun,
-        EffectObligationAudit::NOT_RUN,
+        None,
         PlacementAudit::NotRun,
         None,
     )
@@ -3332,7 +3350,7 @@ fn refused_decompile_response_with_metrics_and_audits(
     mut diagnostics: EngineDiagnostics,
     existing_function_facts: Option<FunctionFacts>,
     binding_audit: BindingShadowAuditOutcome,
-    effect_obligations: EffectObligationAudit,
+    obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
 ) -> EngineDecompileResponse {
@@ -3351,7 +3369,7 @@ fn refused_decompile_response_with_metrics_and_audits(
     EngineDecompileResponse {
         output,
         binding_audit,
-        effect_obligations,
+        obligation_ledger,
         placement_audit,
         render_refusal,
         function_facts,
@@ -4713,7 +4731,7 @@ mod tests {
             controlled.output
         );
         assert_ne!(
-            controlled.effect_obligations,
+            controlled.effect_obligations(),
             EffectObligationAudit::NOT_RUN,
             "the completed native render must retain its exact effect audit"
         );
@@ -4722,7 +4740,7 @@ mod tests {
             "the exact fixture must not cross a renderer refusal boundary"
         );
         let completed_binding_audit = controlled.binding_audit;
-        let completed_effect_obligations = controlled.effect_obligations;
+        let completed_effect_obligations = controlled.effect_obligations();
         let total_polls = counting.polls.get();
         assert!(total_polls > 3, "r2dec pipeline must expose inner polls");
 
@@ -4812,7 +4830,7 @@ mod tests {
             );
             if phase == EnginePhase::Rendering {
                 assert_eq!(response.binding_audit, completed_binding_audit);
-                assert_eq!(response.effect_obligations, completed_effect_obligations);
+                assert_eq!(response.effect_obligations(), completed_effect_obligations);
                 assert!(
                     !response.output.trim().is_empty(),
                     "the stopped render retains the partial output it reached"
@@ -4828,7 +4846,10 @@ mod tests {
                 );
             } else {
                 assert_eq!(response.binding_audit, BindingShadowAuditOutcome::NotRun);
-                assert_eq!(response.effect_obligations, EffectObligationAudit::NOT_RUN);
+                assert_eq!(
+                    response.effect_obligations(),
+                    EffectObligationAudit::NOT_RUN
+                );
                 assert!(
                     response
                         .diagnostics
@@ -4874,30 +4895,29 @@ mod tests {
                 let mapped = engine_render_stop_from_decompiler(
                     r2dec::DecompileExecutionStop::new(decompile_phase, reason),
                     BindingShadowAuditOutcome::NotRun,
-                    EffectObligationAudit {
-                        disposition: EffectObligationDisposition::Refused,
-                        total: 11,
-                        rendered: 5,
-                        justified_elision: 2,
-                        refused: 1,
-                        gapped: 0,
-                        unaccounted: 2,
-                        conflicts: 1,
-                        refused_obligation: None,
-                        unaccounted_obligation: None,
-                        conflicting_obligation: None,
-                    },
+                    Some(stop_test_ledger()),
                     PlacementAudit::NotRun,
                     Some(DecompileRenderRefusal::UnrepresentableOperation),
                 );
+                let counted = effect_obligations_of((*mapped.obligation_ledger).as_ref());
                 assert_eq!(mapped.phase, engine_phase);
                 assert_eq!(*mapped.binding_audit, BindingShadowAuditOutcome::NotRun);
-                assert_eq!(mapped.effect_obligations.total, 11);
-                assert_eq!(mapped.effect_obligations.rendered, 5);
-                assert_eq!(mapped.effect_obligations.justified_elision, 2);
-                assert_eq!(mapped.effect_obligations.refused, 1);
-                assert_eq!(mapped.effect_obligations.unaccounted, 2);
-                assert_eq!(mapped.effect_obligations.conflicts, 1);
+                assert_eq!(counted.total, 11);
+                assert_eq!(counted.rendered, 6);
+                assert_eq!(counted.justified_elision, 2);
+                assert_eq!(counted.refused, 1);
+                assert_eq!(counted.unaccounted, 2);
+                assert_eq!(counted.conflicts, 1);
+                // The columns account for every obligation, which a hand-written
+                // audit could get wrong and a ledger cannot.
+                assert_eq!(
+                    counted.total,
+                    counted.rendered
+                        + counted.justified_elision
+                        + counted.refused
+                        + counted.gapped
+                        + counted.unaccounted
+                );
                 assert_eq!(mapped.placement_audit, PlacementAudit::NotRun);
                 assert_eq!(
                     mapped.render_refusal.as_deref(),
@@ -4935,6 +4955,38 @@ mod tests {
         }
     }
 
+    /// Eleven obligations: six rendered, two elided, one refused, one of the
+    /// rendered with a conflicting second answer, and two nothing spoke about.
+    fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
+        let at = |op: u64| r2ssa::SemanticObligationId {
+            instruction: r2ssa::CanonicalInstructionId {
+                block_addr: 0x401000,
+                site: r2ssa::CanonicalInstructionSite::Op(op),
+            },
+            kind: r2ssa::SemanticObligationKind::ObservableMemoryWrite,
+            component: r2ssa::SemanticObligationComponent::Whole,
+        };
+        let ids = (0..11).map(at).collect::<Vec<_>>();
+        let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied());
+        let rendered = r2dec::ledger::Outcome::Rendered {
+            block_addr: 0x401000,
+            op_idx: 0,
+        };
+        for id in &ids[..5] {
+            ledger.record(*id, rendered);
+        }
+        for id in &ids[5..7] {
+            ledger.record(
+                *id,
+                r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::StackFrame),
+            );
+        }
+        ledger.record(ids[7], r2dec::ledger::Outcome::Refused);
+        ledger.record(ids[8], rendered);
+        ledger.record_conflict(ids[8]);
+        ledger
+    }
+
     #[test]
     fn refused_effect_obligations_produce_a_typed_engine_refusal() {
         let obligation = r2ssa::SemanticObligationId {
@@ -4945,24 +4997,47 @@ mod tests {
             kind: r2ssa::SemanticObligationKind::ObservableMemoryWrite,
             component: r2ssa::SemanticObligationComponent::Whole,
         };
-        let effect_obligations = EffectObligationAudit {
-            disposition: EffectObligationDisposition::Refused,
-            total: 9,
-            rendered: 4,
-            justified_elision: 1,
-            refused: 2,
-            gapped: 0,
-            unaccounted: 1,
-            conflicts: 1,
-            refused_obligation: Some(obligation),
-            unaccounted_obligation: Some(obligation),
-            conflicting_obligation: Some(obligation),
+        // The ledger is the fact the refusal is read from, so the test builds
+        // one that closes to two refusals, one unaccounted and one conflict.
+        let sibling = |op: u64| r2ssa::SemanticObligationId {
+            instruction: r2ssa::CanonicalInstructionId {
+                block_addr: 0x401000,
+                site: r2ssa::CanonicalInstructionSite::Op(op),
+            },
+            ..obligation
         };
+        let ids = (7..16).map(sibling).collect::<Vec<_>>();
+        let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied());
+        ledger.record(ids[0], r2dec::ledger::Outcome::Refused);
+        ledger.record(ids[1], r2dec::ledger::Outcome::Refused);
+        ledger.record(
+            ids[2],
+            r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::StackFrame),
+        );
+        for id in &ids[3..7] {
+            ledger.record(
+                *id,
+                r2dec::ledger::Outcome::Rendered {
+                    block_addr: 0x401000,
+                    op_idx: 0,
+                },
+            );
+        }
+        ledger.record(
+            ids[7],
+            r2dec::ledger::Outcome::Rendered {
+                block_addr: 0x401000,
+                op_idx: 1,
+            },
+        );
+        ledger.record_conflict(ids[7]);
+        let obligation_ledger = Some(ledger);
+        let effect_obligations = effect_obligations_of(obligation_ledger.as_ref());
         let reason = effect_obligation_refusal_reason(effect_obligations)
             .expect("refused effects must refuse the native engine outcome");
         assert_eq!(
             reason,
-            "native effect obligations refused: 2 refused (memory-write at 0x401000:op:7), 1 unaccounted (memory-write at 0x401000:op:7), 1 conflicts (memory-write at 0x401000:op:7)"
+            "native effect obligations refused: 2 refused (memory-write at 0x401000:op:7), 1 unaccounted (memory-write at 0x401000:op:15), 1 conflicts (memory-write at 0x401000:op:14)"
         );
         let render_time = Duration::from_micros(17);
         let mut metrics = EngineMetrics::default();
@@ -4989,12 +5064,12 @@ mod tests {
             EngineDiagnostics::default(),
             Some(FunctionFacts::default().with_input_quality(sentinel_quality.clone())),
             BindingShadowAuditOutcome::NotRun,
-            effect_obligations,
+            obligation_ledger,
             PlacementAudit::NotRun,
             None,
         );
 
-        assert_eq!(response.effect_obligations, effect_obligations);
+        assert_eq!(response.effect_obligations(), effect_obligations);
         assert_eq!(
             response.metrics.phase_timings[EnginePhase::Rendering as usize].status,
             EnginePhaseStatus::Refused
@@ -5060,7 +5135,7 @@ mod tests {
             EngineDiagnostics::default(),
             None,
             BindingShadowAuditOutcome::NotRun,
-            EffectObligationAudit::NOT_RUN,
+            None,
             placement_audit,
             None,
         );
@@ -5107,13 +5182,16 @@ mod tests {
             EngineDiagnostics::default(),
             None,
             BindingShadowAuditOutcome::NotRun,
-            EffectObligationAudit::NOT_RUN,
+            None,
             PlacementAudit::NotRun,
             Some(render_refusal),
         );
 
         assert_eq!(response.render_refusal, Some(render_refusal));
-        assert_eq!(response.effect_obligations, EffectObligationAudit::NOT_RUN);
+        assert_eq!(
+            response.effect_obligations(),
+            EffectObligationAudit::NOT_RUN
+        );
         assert_eq!(
             response.metrics.phase_timings[EnginePhase::Rendering as usize].status,
             EnginePhaseStatus::Refused

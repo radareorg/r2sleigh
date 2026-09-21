@@ -22,7 +22,7 @@ use crate::symbol::{SymbolId, SymbolRole, SymbolTable};
 pub(crate) enum PlannedValueSymbol {
     Bound(SymbolId),
     Inline(r2rewrite::TermId),
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(ValueRefusal),
     Absent,
 }
@@ -75,7 +75,7 @@ pub(crate) enum RenderedIdentityRefusal {
     },
     StackObjectElided {
         object: ObjectId,
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
     },
     MachineUse {
         site: UseSite,
@@ -1037,7 +1037,7 @@ mod tests {
         elided_plan.replace_value_disposition_for_shadow_test(
             bound.0,
             ValueDisposition::Elided {
-                reason: r2ssa::ledger::ElisionReason::DeadUnusedTemporary,
+                reason: crate::ledger::ElisionReason::DeadUnusedTemporary,
                 proof: crate::binding_plan::ValueElisionProof {
                     authority: source.source().authority().clone(),
                     value: bound.0,
@@ -1052,12 +1052,12 @@ mod tests {
         .expect("elided resolution");
         assert_eq!(
             elided.resolve_value(bound.0),
-            PlannedValueSymbol::Elided(r2ssa::ledger::ElisionReason::DeadUnusedTemporary)
+            PlannedValueSymbol::Elided(crate::ledger::ElisionReason::DeadUnusedTemporary)
         );
         assert_eq!(
             elided.require_value(bound.0),
             Ok(PlannedValueSymbol::Elided(
-                r2ssa::ledger::ElisionReason::DeadUnusedTemporary
+                crate::ledger::ElisionReason::DeadUnusedTemporary
             ))
         );
 

@@ -37,6 +37,7 @@ pub(crate) mod debug;
 mod effect_ledger;
 pub(crate) mod fold;
 pub mod highlight;
+pub mod ledger;
 pub(crate) mod normalize;
 mod observation_journal;
 mod placement;
@@ -348,7 +349,7 @@ fn count_residual_markers(stmts: &[CStmt]) -> usize {
 /// was reached by a rule that named its fate.
 fn note_unproven_constructs(
     func: &mut CFunction,
-    ledger: Option<&r2ssa::ledger::ObligationLedger>,
+    ledger: Option<&crate::ledger::ObligationLedger>,
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
@@ -365,7 +366,7 @@ fn note_unproven_constructs(
             n => format!("{n} constructs are marked below"),
         }
     };
-    let mut detail = match ledger.map(r2ssa::ledger::ObligationLedger::close) {
+    let mut detail = match ledger.map(crate::ledger::ObligationLedger::close) {
         Some(closure) if closure.total > 0 => {
             let mut line = format!(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
@@ -534,56 +535,14 @@ fn debug_log_slice(prepared: &r2ssa::SsaArtifact) {
     }
 }
 
-fn debug_log_ledger(prepared: &r2ssa::SsaArtifact, ledger: &r2ssa::ledger::ObligationLedger) {
+fn debug_log_ledger(prepared: &r2ssa::SsaArtifact, ledger: &crate::ledger::ObligationLedger) {
     if !unowned_report_requested() {
         return;
     }
-    let closure = ledger.close();
-    // Largest first, and by name where two entries tie, so the report reads the
-    // same way twice over the same binary.
-    fn ranked<K: std::fmt::Display>(counts: std::collections::BTreeMap<K, usize>) -> String {
-        let mut entries = counts.into_iter().collect::<Vec<_>>();
-        entries.sort_by(|(left_key, left), (right_key, right)| {
-            right
-                .cmp(left)
-                .then_with(|| left_key.to_string().cmp(&right_key.to_string()))
-        });
-        entries
-            .into_iter()
-            .map(|(key, count)| format!("{key}={count}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-    let refusals = ranked(
-        ledger
-            .refusals_by_layer()
-            .into_iter()
-            .map(|((layer, reason), count)| (format!("{layer}/{reason}"), count))
-            .collect(),
-    );
-    let refused_ids = ledger
-        .entries()
-        .filter_map(|(id, outcome)| match outcome {
-            r2ssa::ledger::Outcome::Refused { layer, reason } => {
-                Some(format!("{id}={layer}/{reason}"))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
     let message = format!(
-        "LEDGER fn={:#x} total={} rendered={} elided={} refused={} unaccounted={} conflicts={} | unaccounted-kinds: {} | elided: {} | refused: {} | refused-ids: {}",
+        "LEDGER fn={:#x} {}",
         prepared.function().entry,
-        closure.total,
-        closure.rendered,
-        closure.elided,
-        closure.refused,
-        closure.unattributed,
-        closure.conflicts,
-        ranked(ledger.unattributed_by_kind()),
-        ranked(ledger.elisions_by_reason()),
-        refusals,
-        refused_ids,
+        ledger.report()
     );
     let path = crate::debug::unowned_log_path().unwrap_or("/tmp/r2sleigh_unowned.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -1791,7 +1750,7 @@ impl EffectObligationAudit {
         conflicting_obligation: None,
     };
 
-    fn from_ledger(ledger: &r2ssa::ledger::ObligationLedger) -> Self {
+    pub fn from_ledger(ledger: &crate::ledger::ObligationLedger) -> Self {
         let closure = ledger.close();
         let admitted = closure.refused == 0
             && closure.unattributed == 0
@@ -1811,7 +1770,7 @@ impl EffectObligationAudit {
             unaccounted: closure.unattributed,
             conflicts: closure.conflicts,
             refused_obligation: ledger.entries().find_map(|(id, outcome)| {
-                matches!(outcome, r2ssa::ledger::Outcome::Refused { .. }).then_some(*id)
+                matches!(outcome, crate::ledger::Outcome::Refused).then_some(*id)
             }),
             unaccounted_obligation: ledger.unattributed().next().copied(),
             conflicting_obligation: ledger.conflicts().next().map(|(id, _)| *id),
@@ -2378,7 +2337,7 @@ fn rendered_identity_refusal_category(
 pub struct DecompileBindingAudit {
     output: String,
     binding_shadow: BindingShadowAuditOutcome,
-    effect_obligations: EffectObligationAudit,
+    ledger: Option<crate::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
 }
@@ -2396,8 +2355,16 @@ impl DecompileBindingAudit {
         self.binding_shadow
     }
 
-    pub const fn effect_obligations(&self) -> EffectObligationAudit {
-        self.effect_obligations
+    pub fn effect_obligations(&self) -> EffectObligationAudit {
+        self.ledger.as_ref().map_or(
+            EffectObligationAudit::NOT_RUN,
+            EffectObligationAudit::from_ledger,
+        )
+    }
+
+    /// What became of every obligation, which is what the counts are counting.
+    pub fn obligation_ledger(&self) -> Option<&crate::ledger::ObligationLedger> {
+        self.ledger.as_ref()
     }
 
     pub const fn placement_audit(&self) -> PlacementAudit {
@@ -2422,7 +2389,7 @@ pub struct PendingDecompileBindingAudit {
         r2types::function_facts::SourceOwnedFunctionFacts,
     )>,
     ready: BindingShadowAuditOutcome,
-    ready_effects: EffectObligationAudit,
+    ready_ledger: Option<crate::ledger::ObligationLedger>,
     ready_placement: PlacementAudit,
     ready_refusal: Option<DecompileRenderRefusal>,
 }
@@ -2437,7 +2404,7 @@ impl PendingDecompileBindingAudit {
             output,
             product: Some((product, source)),
             ready: BindingShadowAuditOutcome::NotRun,
-            ready_effects: EffectObligationAudit::NOT_RUN,
+            ready_ledger: None,
             ready_placement: PlacementAudit::NotRun,
             ready_refusal: None,
         }
@@ -2452,27 +2419,26 @@ impl PendingDecompileBindingAudit {
     }
 
     pub fn finalize(self) -> DecompileBindingAudit {
-        let (binding_shadow, effect_obligations, placement_audit, render_refusal) =
-            self.product.map_or(
+        let (binding_shadow, ledger, placement_audit, render_refusal) = self.product.map_or(
+            (
+                self.ready,
+                self.ready_ledger,
+                self.ready_placement,
+                self.ready_refusal,
+            ),
+            |(product, source)| {
                 (
-                    self.ready,
-                    self.ready_effects,
-                    self.ready_placement,
-                    self.ready_refusal,
-                ),
-                |(product, source)| {
-                    (
-                        product.binding_shadow(&source),
-                        product.effect_obligations(),
-                        product.placement_audit(),
-                        product.render_refusal(),
-                    )
-                },
-            );
+                    product.binding_shadow(&source),
+                    product.obligation_ledger().cloned(),
+                    product.placement_audit(),
+                    product.render_refusal(),
+                )
+            },
+        );
         DecompileBindingAudit {
             output: self.output,
             binding_shadow,
-            effect_obligations,
+            ledger,
             placement_audit,
             render_refusal,
         }
@@ -2577,10 +2543,10 @@ impl InternalBuildProduct {
         }
     }
 
-    fn effect_obligations(&self) -> EffectObligationAudit {
+    fn obligation_ledger(&self) -> Option<&crate::ledger::ObligationLedger> {
         match self {
-            Self::Native(native) => native.effect_obligation_audit(),
-            Self::Residual(_) | Self::Refused { .. } => EffectObligationAudit::NOT_RUN,
+            Self::Native(native) => native.obligation_ledger(),
+            Self::Residual(_) | Self::Refused { .. } => None,
         }
     }
 
@@ -2716,12 +2682,12 @@ impl Decompiler {
         // Everything below classifies the already sealed observation journal.
         render_work.poll()?;
         let binding_shadow = product.binding_shadow(input.source_owned_facts());
-        let effect_obligations = product.effect_obligations();
+        let ledger = product.obligation_ledger().cloned();
         let placement_audit = product.placement_audit();
         Ok(DecompileBindingAudit {
             output,
             binding_shadow,
-            effect_obligations,
+            ledger,
             placement_audit,
             render_refusal: product.render_refusal(),
         })

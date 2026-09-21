@@ -175,7 +175,7 @@ pub(crate) enum ValueDisposition {
         proof: InlineProof,
     },
     Elided {
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
         proof: ValueElisionProof,
     },
     Refused {
@@ -1020,7 +1020,7 @@ pub(crate) enum StackObjectDisposition {
         binding: BindingId,
     },
     Elided {
-        reason: r2ssa::ledger::ElisionReason,
+        reason: crate::ledger::ElisionReason,
     },
     Refused {
         reason: StackObjectRefusal,
@@ -1255,7 +1255,7 @@ pub(crate) enum UpstreamValueDisposition {
     Bound { component: CanonicalComponentId },
     InlineConstant,
     InlineExpression,
-    Elided(r2ssa::ledger::ElisionReason),
+    Elided(crate::ledger::ElisionReason),
     Refused(ValueRefusal),
 }
 
