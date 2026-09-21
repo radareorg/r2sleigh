@@ -740,12 +740,20 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
 }
 
 #[test]
-fn a_leaf_that_only_orders_memory_still_proves_it_left_the_stack_alone() {
-    // No prologue, no epilogue: this function never touches the stack
-    // pointer, so it plainly returns the one it was entered with. The walk
-    // that proves that treated a user operation as a call, and a call
-    // clobbers everything, so a barrier standing before the return made the
-    // proof impossible and the function refused for a frame it never had.
+fn a_leaf_whose_barrier_is_only_a_user_operation_cannot_prove_its_frame() {
+    // No prologue, no epilogue: this function never touches the stack pointer,
+    // and it still cannot prove it. The barrier before the return is a
+    // `CALLOTHER` -- an operation the specification could not express in p-code
+    // -- so what it writes is not limited to the output it names, and the walk
+    // that proves the stack pointer survived has to stop at it. `dmb` writes
+    // nothing and `cpuid` writes four registers it never mentions; nothing
+    // here tells them apart, and assuming the first cost this walk its
+    // soundness.
+    //
+    // What recovers this function is modelling the barrier in the lift, so it
+    // stops being a `CALLOTHER` at all. That is the same route the exclusive
+    // pair below took, and it is blocked on stating the ordering the
+    // specification gives rather than one chosen to make this pass.
     const BARRIER_LEAF: &[u8] = &[
         0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
         0x1e, 0xff, 0x2f, 0xe1, // bx lr
@@ -770,14 +778,8 @@ fn a_leaf_that_only_orders_memory_still_proves_it_left_the_stack_alone() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
-    assert!(
-        response.output.contains("DataMemoryBarrier("),
-        "{}",
+        response.render_refusal.is_some(),
+        "a user operation before the return proves nothing about the frame:\n{}",
         response.output
     );
 }
