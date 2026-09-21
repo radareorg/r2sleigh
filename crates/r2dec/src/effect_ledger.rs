@@ -57,64 +57,15 @@ fn traced_zero_occurrence_outcome(
     outcome
 }
 
-/// Exact upstream disposition for a source effect that has no final occurrence.
+/// The elisions the object's own observations answer.
 ///
-/// These are not renderer guesses. Unsupported native effects are inventory
-/// policy, unobserved merges are canonical SSA facts, and redundant phi edges
-/// are certified by the sealed normalization sidecar. Every other zero is a
-/// typed codegen refusal so deletion cannot be relabelled as successful elision.
-fn upstream_zero_occurrence_outcome(
+/// A dead frame slot store and a round trip are facts about what the memory
+/// ends up holding, not about the instruction that wrote it, so they are asked
+/// of the effect stream rather than of a certificate.
+fn observed_object_elision(
     prepared: &SsaArtifact,
-    origins: &NormalizationOrigins,
-    effects: &SurvivingEffectObservations,
     id: SemanticObligationId,
-) -> Option<Outcome> {
-    // The instruction does nothing, so there is nothing to render for it and
-    // nothing left unaccounted when the rendering omits it.
-    if id.kind == SemanticObligationKind::NoNativeSemantics {
-        return Some(Outcome::Elided(ElisionReason::NoNativeSemantics));
-    }
-
-    if matches!(
-        id.kind,
-        SemanticObligationKind::VolatileOrUnknownEffect | SemanticObligationKind::Trap
-    ) {
-        return Some(Outcome::Refused);
-    }
-
-    let graph = prepared.graph();
-    // The obligation carries its instruction's own source site, so the
-    // instruction table need not be searched for the same answer.
-    let source_inst = prepared
-        .obligations()
-        .obligations()
-        .get(&id)
-        .and_then(|obligation| obligation.source.graph_inst());
-    if source_inst.is_some_and(|inst| {
-        prepared
-            .certificates()
-            .stack_frame_round_trip_by_inst
-            .contains_key(&inst)
-    }) {
-        return Some(Outcome::Elided(ElisionReason::StackFrame));
-    }
-    if source_inst.is_some_and(|inst| {
-        prepared
-            .certificates()
-            .machine_return_control_by_inst
-            .contains_key(&inst)
-    }) {
-        return Some(Outcome::Elided(ElisionReason::ReturnControl));
-    }
-    // The copies a return address reaches its return through. AArch64's `ret`
-    // is a copy of the link register into the program counter followed by a
-    // return on that, and the copy carries an obligation of its own that no
-    // statement answers, because the structured form says `return`.
-    if source_inst.is_some_and(|inst| {
-        crate::binding_plan::certified_return_control_insts(prepared).contains(&inst)
-    }) {
-        return Some(Outcome::Elided(ElisionReason::ReturnControl));
-    }
+) -> Option<ElisionReason> {
     // A store into a frame slot this function owns and never reads. The
     // obligation is real -- writing memory is an effect -- and it is answered
     // by the certificate that nothing can observe the result.
@@ -124,7 +75,7 @@ fn upstream_zero_occurrence_outcome(
         && crate::binding_plan::certified_dead_frame_slot_accesses(prepared)
             .contains(&(id.instruction.block_addr, op_index))
     {
-        return Some(Outcome::Elided(ElisionReason::DeadFrameSlotStore));
+        return Some(ElisionReason::DeadFrameSlotStore);
     }
     // A store that puts back what it read, and the read it puts back. The
     // certificate says the object ends holding what it held, so neither is a
@@ -147,7 +98,49 @@ fn upstream_zero_occurrence_outcome(
                         || certificate.redundant_read_op_indexes.contains(&op_index))
             })
     {
-        return Some(Outcome::Elided(ElisionReason::MemoryRoundTrip));
+        return Some(ElisionReason::MemoryRoundTrip);
+    }
+    None
+}
+
+/// The elisions a certificate about the defining instruction already answers.
+///
+/// Every clause asks the same question of the same instruction -- does a
+/// certificate say this operation owes no statement -- so they belong together
+/// and the caller reads one name instead of seven.
+fn certified_instruction_elision(
+    prepared: &SsaArtifact,
+    id: SemanticObligationId,
+    source_inst: Option<r2ssa::InstId>,
+) -> Option<ElisionReason> {
+    let graph = prepared.graph();
+    if source_inst.is_some_and(|inst| {
+        prepared
+            .certificates()
+            .stack_frame_round_trip_by_inst
+            .contains_key(&inst)
+    }) {
+        return Some(ElisionReason::StackFrame);
+    }
+    if source_inst.is_some_and(|inst| {
+        prepared
+            .certificates()
+            .machine_return_control_by_inst
+            .contains_key(&inst)
+    }) {
+        return Some(ElisionReason::ReturnControl);
+    }
+    // The copies a return address reaches its return through. AArch64's `ret`
+    // is a copy of the link register into the program counter followed by a
+    // return on that, and the copy carries an obligation of its own that no
+    // statement answers, because the structured form says `return`.
+    if source_inst.is_some_and(|inst| {
+        crate::binding_plan::certified_return_control_insts(prepared).contains(&inst)
+    }) {
+        return Some(ElisionReason::ReturnControl);
+    }
+    if let Some(reason) = observed_object_elision(prepared, id) {
+        return Some(reason);
     }
     // The lane of an entry register a formal was minted from: its definition
     // is the declaration, so the minting operation owes no statement.
@@ -157,7 +150,7 @@ fn upstream_zero_occurrence_outcome(
             .and_then(|inst| inst.output)
             .is_some_and(|value| graph.formal_projection_storage(value).is_some())
     }) {
-        return Some(Outcome::Elided(ElisionReason::CallerSuppliedEntryValue));
+        return Some(ElisionReason::CallerSuppliedEntryValue);
     }
     // A register a call clobbered that no result certificate claims: the
     // declaration is its definition, because there is nothing in this function
@@ -172,7 +165,7 @@ fn upstream_zero_occurrence_outcome(
                 .is_some_and(|output| !prepared.certificates().call_results.contains_key(&output))
         })
     }) {
-        return Some(Outcome::Elided(ElisionReason::CallClobberedDeclaration));
+        return Some(ElisionReason::CallClobberedDeclaration);
     }
     // The push that records a call's return address. The call statement is the
     // transfer, and no C statement writes the machine's return address.
@@ -182,7 +175,7 @@ fn upstream_zero_occurrence_outcome(
             .call_return_address_stores
             .contains(&inst)
     }) {
-        return Some(Outcome::Elided(ElisionReason::CallReturnAddress));
+        return Some(ElisionReason::CallReturnAddress);
     }
     // The copies a callee's address reaches its call through. The call spells
     // the callee's name, so no statement answers for the copy that put the
@@ -190,54 +183,26 @@ fn upstream_zero_occurrence_outcome(
     if source_inst.is_some_and(|inst| {
         crate::binding_plan::certified_direct_call_target_insts(prepared).contains(&inst)
     }) {
-        return Some(Outcome::Elided(ElisionReason::DirectCallTarget));
+        return Some(ElisionReason::DirectCallTarget);
     }
     if source_inst.is_some_and(|inst| prepared.certificates().stack_geometry.insts.contains(&inst))
     {
-        return Some(Outcome::Elided(ElisionReason::DeadStackBase));
+        return Some(ElisionReason::DeadStackBase);
     }
-    if matches!(id.instruction.site, CanonicalInstructionSite::Phi(_))
-        && source_inst
-            .and_then(|inst| graph.inst(inst))
-            .and_then(|inst| inst.output)
-            .is_some_and(|value| prepared.unobserved_merges().contains(value))
-    {
-        return Some(Outcome::Elided(ElisionReason::UnobservedMerge));
-    }
+    None
+}
 
-    if let Some(inst) = source_inst
-        && effects.is_coalesced_carrier_phi(inst)
-        && matches!(
-            id.kind,
-            SemanticObligationKind::LoopCarriedState | SemanticObligationKind::LiveValueProducer
-        )
-    {
-        return Some(Outcome::Elided(ElisionReason::CoalescedIdentityPhi));
-    }
-    // The same fact for a copy rather than a merge. A copy whose two sides
-    // are one object produces nothing the statement that made the value did
-    // not already produce, so the obligation to produce it is answered by
-    // that statement and not by a copy the rendering was right to drop.
-    if let Some(inst) = source_inst
-        && effects.is_coalesced_copy(inst)
-        && matches!(
-            id.kind,
-            SemanticObligationKind::LoopCarriedState | SemanticObligationKind::LiveValueProducer
-        )
-    {
-        return Some(Outcome::Elided(ElisionReason::CoalescedCopy));
-    }
-    if id.kind == SemanticObligationKind::LiveStateTransition
-        && prepared
-            .obligations()
-            .obligations()
-            .get(&id)
-            .and_then(|obligation| obligation.edge_use)
-            .is_some_and(|site| effects.is_coalesced_carrier_use(site))
-    {
-        return Some(Outcome::Elided(ElisionReason::CoalescedCopy));
-    }
-
+/// The elisions a phi the normalizer removed already answers.
+///
+/// A merge whose every incoming edge is a no-op, or whose edges were each
+/// written by a copy, carries state that is carried elsewhere. Refusing here
+/// reported the merge as unrendered when what it stood for is rendered.
+fn removed_phi_edge_elision(
+    prepared: &SsaArtifact,
+    origins: &NormalizationOrigins,
+    id: SemanticObligationId,
+    source_inst: Option<r2ssa::InstId>,
+) -> Option<ElisionReason> {
     if let Some(inst) = source_inst
         && let Some(removed) = origins
             .removed_phis()
@@ -255,7 +220,7 @@ fn upstream_zero_occurrence_outcome(
                 .and_then(|obligation| obligation.edge_use)
                 .is_some_and(|site| removed.noop_sites().contains(&site)) =>
             {
-                return Some(Outcome::Elided(ElisionReason::RedundantPhiEdge));
+                return Some(ElisionReason::RedundantPhiEdge);
             }
             (SemanticObligationKind::LoopCarriedState, _)
                 if removed
@@ -263,7 +228,7 @@ fn upstream_zero_occurrence_outcome(
                     .iter()
                     .all(|site| removed.noop_sites().contains(site)) =>
             {
-                return Some(Outcome::Elided(ElisionReason::RedundantPhiEdge));
+                return Some(ElisionReason::RedundantPhiEdge);
             }
             // Every input the merge had is written by a copy on its own
             // incoming edge, so the state it carried is carried by those
@@ -282,12 +247,82 @@ fn upstream_zero_occurrence_outcome(
                     .all(|site| removed.noop_sites().contains(site) || materialized.contains(site))
             } =>
             {
-                return Some(Outcome::Elided(ElisionReason::MaterializedPhiEdges));
+                return Some(ElisionReason::MaterializedPhiEdges);
             }
             _ => {}
         }
     }
+    None
+}
 
+/// The elisions a merge or a copy the normalizer removed already answers.
+///
+/// Each clause asks the normalization journal the same question -- did this
+/// merge or copy produce anything the statement that made the value did not
+/// already produce -- so they read as one decision rather than six.
+fn merge_and_copy_elision(
+    prepared: &SsaArtifact,
+    effects: &SurvivingEffectObservations,
+    origins: &NormalizationOrigins,
+    id: SemanticObligationId,
+    source_inst: Option<r2ssa::InstId>,
+) -> Option<ElisionReason> {
+    let graph = prepared.graph();
+    if matches!(id.instruction.site, CanonicalInstructionSite::Phi(_))
+        && source_inst
+            .and_then(|inst| graph.inst(inst))
+            .and_then(|inst| inst.output)
+            .is_some_and(|value| prepared.unobserved_merges().contains(value))
+    {
+        return Some(ElisionReason::UnobservedMerge);
+    }
+
+    if let Some(inst) = source_inst
+        && effects.is_coalesced_carrier_phi(inst)
+        && matches!(
+            id.kind,
+            SemanticObligationKind::LoopCarriedState | SemanticObligationKind::LiveValueProducer
+        )
+    {
+        return Some(ElisionReason::CoalescedIdentityPhi);
+    }
+    // The same fact for a copy rather than a merge. A copy whose two sides
+    // are one object produces nothing the statement that made the value did
+    // not already produce, so the obligation to produce it is answered by
+    // that statement and not by a copy the rendering was right to drop.
+    if let Some(inst) = source_inst
+        && effects.is_coalesced_copy(inst)
+        && matches!(
+            id.kind,
+            SemanticObligationKind::LoopCarriedState | SemanticObligationKind::LiveValueProducer
+        )
+    {
+        return Some(ElisionReason::CoalescedCopy);
+    }
+    if id.kind == SemanticObligationKind::LiveStateTransition
+        && prepared
+            .obligations()
+            .obligations()
+            .get(&id)
+            .and_then(|obligation| obligation.edge_use)
+            .is_some_and(|site| effects.is_coalesced_carrier_use(site))
+    {
+        return Some(ElisionReason::CoalescedCopy);
+    }
+
+    if let Some(reason) = removed_phi_edge_elision(prepared, origins, id, source_inst) {
+        return Some(reason);
+    }
+    None
+}
+
+/// The elision a transfer the structured form expresses by placement answers.
+fn structured_transfer_elision(
+    prepared: &SsaArtifact,
+    id: SemanticObligationId,
+    source_inst: Option<r2ssa::InstId>,
+) -> Option<ElisionReason> {
+    let graph = prepared.graph();
     // An unconditional branch is a transfer the structured form expresses by
     // where the block sits, not by a statement of its own. AArch64 at -O0 emits
     // one wherever x86 would fall through, so six functions were refused for a
@@ -330,7 +365,53 @@ fn upstream_zero_occurrence_outcome(
                 _ => false,
             })
     {
-        return Some(Outcome::Elided(ElisionReason::DirectControlTarget));
+        return Some(ElisionReason::DirectControlTarget);
+    }
+    None
+}
+
+/// Exact upstream disposition for a source effect that has no final occurrence.
+///
+/// These are not renderer guesses. Unsupported native effects are inventory
+/// policy, unobserved merges are canonical SSA facts, and redundant phi edges
+/// are certified by the sealed normalization sidecar. Every other zero is a
+/// typed codegen refusal so deletion cannot be relabelled as successful elision.
+fn upstream_zero_occurrence_outcome(
+    prepared: &SsaArtifact,
+    origins: &NormalizationOrigins,
+    effects: &SurvivingEffectObservations,
+    id: SemanticObligationId,
+) -> Option<Outcome> {
+    // The instruction does nothing, so there is nothing to render for it and
+    // nothing left unaccounted when the rendering omits it.
+    if id.kind == SemanticObligationKind::NoNativeSemantics {
+        return Some(Outcome::Elided(ElisionReason::NoNativeSemantics));
+    }
+
+    if matches!(
+        id.kind,
+        SemanticObligationKind::VolatileOrUnknownEffect | SemanticObligationKind::Trap
+    ) {
+        return Some(Outcome::Refused);
+    }
+
+    let graph = prepared.graph();
+    // The obligation carries its instruction's own source site, so the
+    // instruction table need not be searched for the same answer.
+    let source_inst = prepared
+        .obligations()
+        .obligations()
+        .get(&id)
+        .and_then(|obligation| obligation.source.graph_inst());
+    if let Some(reason) = certified_instruction_elision(prepared, id, source_inst) {
+        return Some(Outcome::Elided(reason));
+    }
+    if let Some(reason) = merge_and_copy_elision(prepared, effects, origins, id, source_inst) {
+        return Some(Outcome::Elided(reason));
+    }
+
+    if let Some(reason) = structured_transfer_elision(prepared, id, source_inst) {
+        return Some(Outcome::Elided(reason));
     }
 
     // The obligation names an instruction in source coordinates and every

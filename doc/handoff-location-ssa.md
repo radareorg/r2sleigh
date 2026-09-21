@@ -30547,3 +30547,84 @@ only two of their six constraint kinds. The capability, field-access and
 call-signature constraints are constructed by the solver's own tests and by
 nothing else, so either the solver is half-wired or those kinds are leftovers.
 That is a question for the type layer rather than for a deletion pass.
+
+## The ledger stopped being a row of counters
+
+`ObligationLedger` lived in `r2ssa` and `r2ssa` never used it. Every reason it
+holds was constructed in `r2dec`, `ObligationLedger::open` had exactly one
+caller there, and the bottom crate owned a vocabulary only the top crate spoke.
+The module now sits in `r2dec`, which removes the back-edge without needing the
+ledger mechanics to be generic over an opaque obligation id: there is one
+consumer, and genericity for one consumer is ceremony.
+
+Eleven of its variants were never constructed. `LedgerLayer` had five and only
+`Ssa` was ever built; `RefusalReason` had six and only `UnsupportedEffect`. Both
+enums are gone and `Outcome::Refused` carries nothing, because the obligation's
+own kind already says what was refused -- the single refusal site fires for
+`VolatileOrUnknownEffect` and `Trap`, which the kind distinguishes and the
+reason did not. `refusals_by_layer` becomes `refusals_by_kind`, which is
+informative where the old one was constant.
+
+Four `ElisionReason` variants went the same way, and this one is worth a note
+rather than a line. `DeadCpuFlag`, `DeadFlagOnly`, `DeadCallerSaved` and
+`DeadCallArgument` name four kinds of dead value, and the classifier assigns
+`DeadUnusedTemporary` to all of them from one site in `effect_ledger.rs`. They
+were designed and never wired. The information to tell them apart is available
+-- the value's storage says whether it is a flag or a caller-saved register --
+so a finer classification is a real improvement someone can make; what was
+there was a vocabulary claiming a distinction the code does not draw.
+
+The ledger is now what travels. `EffectObligationAudit` used to be the boundary
+and collapsed a map of per-cell outcomes into seven `usize` and three first
+offender ids; it is now a projection, computed from the ledger wherever the
+counts are wanted. `EngineDecompileResponse` carries `obligation_ledger`, and
+`r2s` grew `pddo` to print it:
+
+    total=42 rendered=28 elided=14 refused=0 unaccounted=0 conflicts=0
+    | elided: coalesced-identity-phi=4 return-control=4 coalesced-copy=2 ...
+
+One formatter, `ObligationLedger::report`, serves both that command and the
+`R2SLEIGH_UNOWNED` debug log, which used to build the same breakdown inline and
+write it to `/tmp`.
+
+## The C tier hands back its tree
+
+`EngineDecompileResponse.output` was a `String` for every tier. It is now
+`EngineRendering`: `Function` for the C tier, carrying `r2dec::RenderedFunction`
+-- the text and the `CFunction` it was written from, paired at the one point
+where the certified emitter runs -- and `Listing` for the structured and values
+tiers and for every refusal, which have no tree.
+
+The pairing matters more than the convenience. `EmissionReadyFunction` is
+deliberately a one-way door: the emitter accepts no raw `CFunction`, so that a
+private clone cannot be rewritten after the journal has certified a different
+tree. Handing a consumer a detached tree to re-render would have produced text
+the seal does not cover. Pairing them at the emitter keeps one artifact, and
+`Decompiler::build_function_from_input` -- public, with no caller, a second door
+to the same tree -- is deleted.
+
+Two smaller things fell out. The phase-timing comment that `R2SLEIGH_TIMING`
+appended to the rendered C is gone: the timings are already in `EngineMetrics`,
+which the response carries, and prose does not belong in the C. And
+`SymbolTable`'s derived `PartialEq` compared a per-run allocation counter, so
+two structurally identical `CFunction`s were never equal -- including a function
+and a copy of itself built a moment later. Equality is now about the names a
+table declares.
+
+`SemanticObligationInventory::audit_coverage` and `ObligationCoverageReport` are
+deleted. They answered the same question as the ledger -- was every source
+obligation disposed of exactly once -- more weakly, and only their own tests
+called them. The inventory-shape facts those tests held are kept as tests that
+say what they mean: an observable write owes a write obligation, a loop carrier
+owes a latch state transition.
+
+**What the plan asked for here and did not survive contact with the code.** The
+rewrite was to make `Confidence` a projection of a richer shared vocabulary,
+citing nine evidence enums, one ordinal `Confidence` and six `u8` thresholds
+with no trait between them. Reading them, they answer two unrelated questions.
+`r2engine::discovery::Confidence` is a four-level ordinal about how an address
+was found, used in four files, and it is already right. The `u8` confidences
+left in `r2types::analysis` rank two candidate types against each other, which
+wants an ordinal in the type layer rather than a shared trait with discovery.
+Merging them would put one name on two questions, which is the thing the rest of
+this work is undoing.

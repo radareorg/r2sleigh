@@ -116,13 +116,25 @@ impl std::fmt::Display for ExternalKind {
 }
 
 /// Every name one rendered function declares.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SymbolTable {
     /// Which table this is, so an identifier can say where it came from.
     id: TableId,
     symbols: Vec<Symbol>,
     /// Which identifiers are taken, so a second declaration cannot shadow a first.
     by_name: HashMap<String, SymbolId>,
+}
+
+/// Two tables are equal when they declare the same names.
+///
+/// The number a table was issued counts allocations within one run, so two
+/// renderings of the same function always carry different numbers. Comparing
+/// them would make every `CFunction` unequal to every other, including to a
+/// copy of itself built a moment later.
+impl PartialEq for SymbolTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.symbols == other.symbols && self.by_name == other.by_name
+    }
 }
 
 impl SymbolTable {

@@ -2333,9 +2333,41 @@ fn rendered_identity_refusal_category(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A rendering and the tree it was rendered from.
+///
+/// The emitter accepts no raw `CFunction`, so the only way to hold both is to
+/// take them from the one run that produced them. A consumer that wants to
+/// walk the C and a consumer that wants to read it are then looking at the
+/// same function, and the two cannot drift apart.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedFunction {
+    text: String,
+    function: CFunction,
+}
+
+impl RenderedFunction {
+    pub(crate) const fn new(text: String, function: CFunction) -> Self {
+        Self { text, function }
+    }
+
+    /// The C, as the certified emitter wrote it.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
+    /// The tree that C was written from, for a consumer that walks rather than parses.
+    pub const fn function(&self) -> &CFunction {
+        &self.function
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecompileBindingAudit {
-    output: String,
+    rendered: RenderedFunction,
     binding_shadow: BindingShadowAuditOutcome,
     ledger: Option<crate::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
@@ -2344,11 +2376,20 @@ pub struct DecompileBindingAudit {
 
 impl DecompileBindingAudit {
     pub fn output(&self) -> &str {
-        &self.output
+        self.rendered.text()
     }
 
     pub fn into_output(self) -> String {
-        self.output
+        self.rendered.into_text()
+    }
+
+    /// The C and the tree it came from, for a consumer that walks the function.
+    pub fn rendered(&self) -> &RenderedFunction {
+        &self.rendered
+    }
+
+    pub fn into_rendered(self) -> RenderedFunction {
+        self.rendered
     }
 
     pub const fn binding_shadow(&self) -> BindingShadowAuditOutcome {
@@ -2384,14 +2425,8 @@ impl DecompileBindingAudit {
 /// paying for or consulting the audit.
 pub struct PendingDecompileBindingAudit {
     output: String,
-    product: Option<(
-        InternalBuildProduct,
-        r2types::function_facts::SourceOwnedFunctionFacts,
-    )>,
-    ready: BindingShadowAuditOutcome,
-    ready_ledger: Option<crate::ledger::ObligationLedger>,
-    ready_placement: PlacementAudit,
-    ready_refusal: Option<DecompileRenderRefusal>,
+    product: InternalBuildProduct,
+    source: r2types::function_facts::SourceOwnedFunctionFacts,
 }
 
 impl PendingDecompileBindingAudit {
@@ -2402,11 +2437,8 @@ impl PendingDecompileBindingAudit {
     ) -> Self {
         Self {
             output,
-            product: Some((product, source)),
-            ready: BindingShadowAuditOutcome::NotRun,
-            ready_ledger: None,
-            ready_placement: PlacementAudit::NotRun,
-            ready_refusal: None,
+            product,
+            source,
         }
     }
 
@@ -2419,24 +2451,17 @@ impl PendingDecompileBindingAudit {
     }
 
     pub fn finalize(self) -> DecompileBindingAudit {
-        let (binding_shadow, ledger, placement_audit, render_refusal) = self.product.map_or(
-            (
-                self.ready,
-                self.ready_ledger,
-                self.ready_placement,
-                self.ready_refusal,
-            ),
-            |(product, source)| {
-                (
-                    product.binding_shadow(&source),
-                    product.obligation_ledger().cloned(),
-                    product.placement_audit(),
-                    product.render_refusal(),
-                )
-            },
-        );
+        let Self {
+            output,
+            product,
+            source,
+        } = self;
+        let binding_shadow = product.binding_shadow(&source);
+        let ledger = product.obligation_ledger().cloned();
+        let placement_audit = product.placement_audit();
+        let render_refusal = product.render_refusal();
         DecompileBindingAudit {
-            output: self.output,
+            rendered: RenderedFunction::new(output, product.into_function()),
             binding_shadow,
             ledger,
             placement_audit,
@@ -2684,12 +2709,13 @@ impl Decompiler {
         let binding_shadow = product.binding_shadow(input.source_owned_facts());
         let ledger = product.obligation_ledger().cloned();
         let placement_audit = product.placement_audit();
+        let render_refusal = product.render_refusal();
         Ok(DecompileBindingAudit {
-            output,
+            rendered: RenderedFunction::new(output, product.into_function()),
             binding_shadow,
             ledger,
             placement_audit,
-            render_refusal: product.render_refusal(),
+            render_refusal,
         })
     }
 
@@ -2831,23 +2857,6 @@ impl Decompiler {
             product,
             input.source_owned_facts().clone(),
         ))
-    }
-
-    /// Build a C function from a prepared function + typed context payload.
-    pub fn build_function_from_input(&self, input: &DecompilerInput) -> CFunction {
-        let control = r2ssa::SsaExecutionControl::default();
-        self.build_function_from_input_with_control(input, &control)
-            .expect("default decompiler control never stops")
-    }
-
-    /// Build a C AST with cooperative cancellation/deadline polling.
-    pub fn build_function_from_input_with_control<'a>(
-        &self,
-        input: &'a DecompilerInput,
-        control: &'a dyn r2ssa::SsaWorkControl,
-    ) -> Result<CFunction, DecompileExecutionStop> {
-        self.build_product_from_input_with_control(input, control)
-            .map(InternalBuildProduct::into_function)
     }
 
     fn build_product_from_input_with_control<'a>(
@@ -5641,7 +5650,7 @@ mod tests {
     }
 
     #[test]
-    fn build_function_from_input_fallback_route_residualizes_ast() {
+    fn a_fallback_route_residualizes_the_tree_to_comments() {
         let arch = test_arch_for_decompile();
         let prepared = prepared_from_ops(
             vec![R2ILOp::Return {
@@ -5658,7 +5667,9 @@ mod tests {
             ),
         );
 
-        let built = Decompiler::new(DecompilerConfig::x86_64()).build_function_from_input(&input);
+        let audit =
+            Decompiler::new(DecompilerConfig::x86_64()).decompile_input_with_binding_audit(&input);
+        let built = audit.rendered().function();
 
         assert!(
             built

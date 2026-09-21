@@ -577,7 +577,7 @@ fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> 
         // The operations alone never answered the question that cost the most
         // time: which variable a value became, or why nothing spells it.
         let values = r2engine::native::values(target, program, addr)
-            .map(|response| response.output)
+            .map(|response| response.output.into_text())
             .unwrap_or_else(|refusal| format!("values refused: {refusal}\n"));
         Ok(format!("{ssa}\n{values}"))
     })
@@ -597,7 +597,7 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
         r2engine::native::structured(target, program, addr)
-            .map(|response| response.output)
+            .map(|response| response.output.into_text())
             .map_err(|refusal| refusal.to_string())
     })
 }
@@ -613,7 +613,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
         r2engine::native::decompile(target, program, addr)
-            .map(|response| response.output)
+            .map(|response| response.output.into_text())
             .map_err(|refusal| refusal.to_string())
     })
 }

@@ -143,8 +143,8 @@ pub use machine_context::{
     terminal_indirect_loaded_slot,
 };
 pub use obligation::{
-    CanonicalInstructionId, CanonicalInstructionSite, ObligationCoverageReport,
-    ObligationInventoryFailure, ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION,
+    CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,
+    ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION,
     SemanticInstructionDisposition, SemanticInstructionState, SemanticMemoryOrdering,
     SemanticObligation, SemanticObligationComponent, SemanticObligationId,
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite,

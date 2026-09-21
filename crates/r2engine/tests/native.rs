@@ -131,10 +131,26 @@ fn a_function_is_decompiled_from_bytes_alone() {
     );
     // Both arguments arrive in the convention's registers and the sum comes
     // back, which is the whole claim this function makes.
-    assert!(response.output.contains("add_two("), "{}", response.output);
-    assert!(response.output.contains("EDI"), "{}", response.output);
-    assert!(response.output.contains("ESI"), "{}", response.output);
-    assert!(response.output.contains("return"), "{}", response.output);
+    assert!(
+        response.output.text().contains("add_two("),
+        "{}",
+        response.output
+    );
+    assert!(
+        response.output.text().contains("EDI"),
+        "{}",
+        response.output
+    );
+    assert!(
+        response.output.text().contains("ESI"),
+        "{}",
+        response.output
+    );
+    assert!(
+        response.output.text().contains("return"),
+        "{}",
+        response.output
+    );
 }
 
 #[test]
@@ -188,11 +204,16 @@ fn a_call_is_rendered_from_the_callee_body() {
     assert!(
         response
             .output
+            .text()
             .contains("uint32_t fcn_100a(uint32_t, uint32_t)"),
         "{}",
         response.output
     );
-    assert!(response.output.contains("fcn_100a("), "{}", response.output);
+    assert!(
+        response.output.text().contains("fcn_100a("),
+        "{}",
+        response.output
+    );
 }
 
 #[test]
@@ -219,13 +240,13 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
 
     // The pushed address is the one after the call: 0x1005 + 0x10.
     assert!(
-        response.output.contains("0x1015"),
+        response.output.text().contains("0x1015"),
         "the address the thunk's result names is not spelled: {}",
         response.output
     );
     // Spelled at its use, the call's own result binding has no reader left.
     assert!(
-        !response.output.contains("RSI"),
+        !response.output.text().contains("RSI"),
         "the result binding outlived its readers: {}",
         response.output
     );
@@ -264,7 +285,10 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
         response.output
     );
     assert!(
-        response.output.contains("__builtin_return_address(0"),
+        response
+            .output
+            .text()
+            .contains("__builtin_return_address(0"),
         "the return address slot is not spelled: {}",
         response.output
     );
@@ -323,12 +347,15 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     // strlen takes one argument, the convention says it arrives in rdi, and
     // the declaration says what it is.
     assert!(
-        response.output.contains("strlen(const int8_t*)"),
+        response.output.text().contains("strlen(const int8_t*)"),
         "{}",
         response.output
     );
     assert!(
-        response.output.contains("strlen((const int8_t*)RDI_0)"),
+        response
+            .output
+            .text()
+            .contains("strlen((const int8_t*)RDI_0)"),
         "{}",
         response.output
     );
@@ -336,6 +363,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     assert!(
         response
             .output
+            .text()
             .contains("1 callee prototype supplied by the source"),
         "{}",
         response.output
@@ -380,9 +408,21 @@ fn a_function_is_decompiled_on_aarch64_too() {
         response.render_refusal,
         response.output
     );
-    assert!(response.output.contains("add_one("), "{}", response.output);
-    assert!(response.output.contains("X0_0"), "{}", response.output);
-    assert!(response.output.contains("return"), "{}", response.output);
+    assert!(
+        response.output.text().contains("add_one("),
+        "{}",
+        response.output
+    );
+    assert!(
+        response.output.text().contains("X0_0"),
+        "{}",
+        response.output
+    );
+    assert!(
+        response.output.text().contains("return"),
+        "{}",
+        response.output
+    );
 }
 
 /// ldr r0, [pc, 4]; mov r0, 0; bx lr; .word -- the load's value is overwritten.
@@ -427,7 +467,7 @@ fn a_load_nothing_reads_still_reads() {
         response.output
     );
     assert!(
-        response.output.contains("(void)*"),
+        response.output.text().contains("(void)*"),
         "the discarded read is missing:\n{}",
         response.output
     );
@@ -493,7 +533,7 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
         response.output
     );
     assert!(
-        response.output.contains("0xffff0fc0"),
+        response.output.text().contains("0xffff0fc0"),
         "the helper call is missing:\n{}",
         response.output
     );
@@ -559,16 +599,59 @@ fn the_structured_tier_is_the_tree_the_c_comes_from() {
     };
     let tree = r2engine::native::structured(&target, &program, BASE)
         .expect("structured")
-        .output;
+        .output
+        .into_text();
     let c = decompile(&target, &program, BASE)
         .expect("decompile")
-        .output;
+        .output
+        .into_text();
 
     assert!(tree.contains("Function: dead_load"), "{tree}");
     // The statements are spelled by the emitter that writes the C, so the two
     // tiers disagree about their shape and about nothing else.
     assert!(tree.contains("(void)*"), "{tree}");
     assert!(c.contains("(void)*"), "{c}");
+}
+
+/// The C tier hands back the tree it rendered, not only the text.
+///
+/// A consumer that wants to know what the function declares should walk it
+/// rather than parse the C back, and the tree it walks has to be the one the
+/// text was written from or the two can say different things.
+#[test]
+fn the_c_tier_hands_back_the_tree_the_text_came_from() {
+    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
+    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: ARM_DEAD_LOAD,
+        name: "dead_load",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let function = response
+        .output
+        .function()
+        .expect("the C tier renders a function");
+    assert_eq!(function.name, "dead_load");
+    assert!(!function.body.is_empty(), "{:?}", function.body);
+    // The text is what the emitter wrote from this tree, so the tree's name is
+    // in it and nothing had a chance to substitute a different function.
+    assert!(
+        response.output.text().contains("dead_load"),
+        "{}",
+        response.output.text()
+    );
 }
 
 /// The lift tier is what Sleigh produced, with the machine's own names.
@@ -635,7 +718,7 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
         response.render_refusal,
         response.output
     );
-    let output = &response.output;
+    let output = response.output.text();
     assert!(output.contains("switch ("), "{output}");
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
@@ -682,7 +765,7 @@ fn a_machine_operation_the_specification_names_is_called_and_declared() {
         link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
-    let output = &response.output;
+    let output = response.output.text();
     assert!(
         response.render_refusal.is_none(),
         "{:?}\n{output}",
@@ -733,7 +816,8 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
         response.output
     );
     assert!(
-        response.output.contains("store_conditional") || response.output.contains("load_linked"),
+        response.output.text().contains("store_conditional")
+            || response.output.text().contains("load_linked"),
         "{}",
         response.output
     );

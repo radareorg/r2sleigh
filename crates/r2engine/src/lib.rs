@@ -2105,6 +2105,49 @@ impl EngineTypeAnalysisResponse {
     }
 }
 
+/// What one tier produced.
+///
+/// The C tier produces a tree and the text the certified emitter wrote from
+/// it, together, so a consumer can walk the function instead of parsing it and
+/// the two cannot drift. Every other tier, and every refusal, produces a
+/// listing that stands on its own.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineRendering {
+    Function(Box<r2dec::RenderedFunction>),
+    Listing(String),
+}
+
+impl EngineRendering {
+    /// The text this tier prints.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Function(rendered) => rendered.text(),
+            Self::Listing(text) => text,
+        }
+    }
+
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Function(rendered) => rendered.into_text(),
+            Self::Listing(text) => text,
+        }
+    }
+
+    /// The tree behind the C, for a consumer that walks rather than parses.
+    pub fn function(&self) -> Option<&r2dec::CFunction> {
+        match self {
+            Self::Function(rendered) => Some(rendered.function()),
+            Self::Listing(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for EngineRendering {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
 /// The counts of a ledger, or the not-run verdict when there is none.
 fn effect_obligations_of(
     ledger: Option<&r2dec::ledger::ObligationLedger>,
@@ -2117,7 +2160,7 @@ fn effect_obligations_of(
 
 #[derive(Debug, Clone)]
 pub struct EngineDecompileResponse {
-    pub output: String,
+    pub output: EngineRendering,
     pub binding_audit: BindingShadowAuditOutcome,
     pub obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     pub placement_audit: PlacementAudit,
@@ -2748,7 +2791,6 @@ impl EngineSession {
             );
         }
         metrics.work_spent = request.execution.work_spent();
-        let output = with_phase_timing_comment(output, &metrics);
         EngineDecompileResponse {
             output,
             binding_audit,
@@ -2908,7 +2950,7 @@ impl EngineRenderedDecompile {
     fn structured(output: String) -> Self {
         Self {
             product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
-                output,
+                output: EngineRendering::Listing(output),
                 binding_audit: BindingShadowAuditOutcome::NotRun,
                 obligation_ledger: None,
                 placement_audit: PlacementAudit::NotRun,
@@ -2922,7 +2964,7 @@ impl EngineRenderedDecompile {
 }
 
 struct ReadyEngineRenderedProduct {
-    output: String,
+    output: EngineRendering,
     binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
@@ -2938,7 +2980,7 @@ impl EngineRenderedProduct {
     fn finalize(
         self,
     ) -> (
-        String,
+        EngineRendering,
         BindingShadowAuditOutcome,
         Option<r2dec::ledger::ObligationLedger>,
         PlacementAudit,
@@ -2968,7 +3010,7 @@ impl EngineRenderedProduct {
                 let placement_audit = audited.placement_audit();
                 let render_refusal = audited.render_refusal();
                 (
-                    audited.into_output(),
+                    EngineRendering::Function(Box::new(audited.into_rendered())),
                     binding_audit,
                     obligation_ledger,
                     placement_audit,
@@ -3090,6 +3132,72 @@ fn engine_render_stop_from_decompiler(
     mapped
 }
 
+/// The tiers below the C, which print a listing and seal no journal.
+///
+/// `None` when the request is for the C itself. Both listings stop the same
+/// way, so the stop is written once rather than once per tier.
+fn render_listing_tier<C: r2ssa::SsaWorkControl>(
+    request: &EngineDecompileRequest,
+    control: &C,
+    input: &r2dec::DecompilerInput,
+) -> Option<Result<String, EngineRenderExecutionStop>> {
+    let decompiler = r2dec::Decompiler::new(request.render_target.to_decompiler_config());
+    let listing = match request.tier {
+        RenderTier::Values => decompiler.values_input_with_control(input, control),
+        RenderTier::Structured => decompiler.structured_input_with_control(input, control),
+        RenderTier::C => return None,
+    };
+    Some(listing.map_err(|stop| EngineRenderExecutionStop {
+        reason: format!("{stop:?}"),
+        phase: EnginePhase::Rendering,
+        binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
+        obligation_ledger: Box::new(None),
+        placement_audit: PlacementAudit::NotRun,
+        render_refusal: None,
+        certification_completed: false,
+        normalization_completed: false,
+        structuring_completed: false,
+    }))
+}
+
+/// The rendering a stopped run reached, kept rather than discarded.
+///
+/// Discarding it reports a function that ran out of budget as one that produced
+/// nothing, and takes the ledger that would have said so with it.
+fn rendering_reached_before_the_stop(
+    stop: r2dec::DecompileExecutionStop,
+    partial: r2dec::PendingDecompileBindingAudit,
+) -> EngineRenderedDecompile {
+    let audited = partial.finalize();
+    let binding_audit = audited.binding_shadow();
+    let obligation_ledger = audited.obligation_ledger().cloned();
+    let placement_audit = audited.placement_audit();
+    let render_refusal = audited.render_refusal();
+    let output = EngineRendering::Function(Box::new(audited.into_rendered()));
+    EngineRenderedDecompile {
+        product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
+            output,
+            binding_audit,
+            obligation_ledger: obligation_ledger.clone(),
+            placement_audit,
+            render_refusal,
+        })),
+        semantic_kernel_warnings: vec![format!(
+            "rendering stopped in {:?}: {}; the body above is what was reached",
+            stop.phase(),
+            stop.reason()
+        )],
+        structuring_executed: true,
+        stopped: Some(engine_render_stop_from_decompiler(
+            stop,
+            binding_audit,
+            obligation_ledger,
+            placement_audit,
+            render_refusal,
+        )),
+    }
+}
+
 fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     request: &EngineDecompileRequest,
     control: &C,
@@ -3105,71 +3213,15 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     // Keep a rendering the decompiler reached before it stopped. Discarding it
     // reports a function that ran out of budget as one that produced nothing,
     // and takes the ledger that would have said so with it.
-    if request.tier == RenderTier::Values {
-        let values = r2dec::Decompiler::new(request.render_target.to_decompiler_config())
-            .values_input_with_control(&input, control)
-            .map_err(|stop| EngineRenderExecutionStop {
-                reason: format!("{stop:?}"),
-                phase: EnginePhase::Rendering,
-                binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
-                obligation_ledger: Box::new(None),
-                placement_audit: PlacementAudit::NotRun,
-                render_refusal: None,
-                certification_completed: false,
-                normalization_completed: false,
-                structuring_completed: false,
-            })?;
-        return Ok(EngineRenderedDecompile::structured(values));
-    }
-    if request.tier == RenderTier::Structured {
-        let structured = r2dec::Decompiler::new(request.render_target.to_decompiler_config())
-            .structured_input_with_control(&input, control)
-            .map_err(|stop| EngineRenderExecutionStop {
-                reason: format!("{stop:?}"),
-                phase: EnginePhase::Rendering,
-                binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
-                obligation_ledger: Box::new(None),
-                placement_audit: PlacementAudit::NotRun,
-                render_refusal: None,
-                certification_completed: false,
-                normalization_completed: false,
-                structuring_completed: false,
-            })?;
-        return Ok(EngineRenderedDecompile::structured(structured));
+    if let Some(listing) = render_listing_tier(request, control, &input) {
+        return listing.map(EngineRenderedDecompile::structured);
     }
     let audited = match r2dec::Decompiler::new(request.render_target.to_decompiler_config())
         .decompile_input_keeping_partial_with_pending_binding_audit(&input, control)
     {
         Ok(pending) => pending,
         Err((stop, Some(partial))) if !partial.output().trim().is_empty() => {
-            let audited = partial.finalize();
-            let binding_audit = audited.binding_shadow();
-            let obligation_ledger = audited.obligation_ledger().cloned();
-            let placement_audit = audited.placement_audit();
-            let render_refusal = audited.render_refusal();
-            let output = audited.into_output();
-            return Ok(EngineRenderedDecompile {
-                product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
-                    output,
-                    binding_audit,
-                    obligation_ledger: obligation_ledger.clone(),
-                    placement_audit,
-                    render_refusal,
-                })),
-                semantic_kernel_warnings: vec![format!(
-                    "rendering stopped in {:?}: {}; the body above is what was reached",
-                    stop.phase(),
-                    stop.reason()
-                )],
-                structuring_executed: true,
-                stopped: Some(engine_render_stop_from_decompiler(
-                    stop,
-                    binding_audit,
-                    obligation_ledger,
-                    placement_audit,
-                    render_refusal,
-                )),
-            });
+            return Ok(rendering_reached_before_the_stop(stop, partial));
         }
         Err((stop, partial)) => {
             let (binding_audit, obligation_ledger, placement_audit, render_refusal) = partial
@@ -3215,11 +3267,13 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     let render_refusal = audited.render_refusal();
     Ok(EngineRenderedDecompile {
         product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
-            output: decompile_route_output_from_function_facts(
-                &request.function_name,
-                request.function_facts(),
-            )
-            .unwrap_or_default(),
+            output: EngineRendering::Listing(
+                decompile_route_output_from_function_facts(
+                    &request.function_name,
+                    request.function_facts(),
+                )
+                .unwrap_or_default(),
+            ),
             binding_audit,
             obligation_ledger,
             placement_audit,
@@ -3235,26 +3289,17 @@ fn decompiler_input_for_engine_request(request: &EngineDecompileRequest) -> r2de
     r2dec::DecompilerInput::new(request.source_owned_facts.clone())
 }
 
-/// The measured cost of one decompile, per phase, appended to the rendered
-/// output when `R2SLEIGH_TIMING` is set.
+/// The measured cost of one decompile, per phase.
 ///
 /// The engine has recorded a complete phase inventory since it was written and
 /// no reachable command printed it, so a decompile could be timed only from
-/// outside the process, which measures radare2's analysis and the plugin load
-/// along with it. A refusal is timed too: refusing has to be cheaper than
+/// outside the process. A refusal is timed too: refusing has to be cheaper than
 /// rendering, and a four-second refusal is exactly the case that measurement
 /// from outside could not distinguish from a slow render.
 ///
 /// A phase the boundary did not execute is omitted; `folded` says the phase ran
 /// inside another phase's span, which is not the same as free.
-fn phase_timing_comment(metrics: &EngineMetrics) -> Option<String> {
-    std::env::var_os("R2SLEIGH_TIMING")?;
-    Some(format_phase_timing(metrics))
-}
-
-/// The comment's text, separate from the decision to emit it, so the format is
-/// testable without a process-global environment variable.
-fn format_phase_timing(metrics: &EngineMetrics) -> String {
+pub fn format_phase_timing(metrics: &EngineMetrics) -> String {
     let mut measured = String::new();
     let work = metrics.work_spent;
     let mut total_us = 0u64;
@@ -3282,21 +3327,6 @@ fn format_phase_timing(metrics: &EngineMetrics) -> String {
 }
 
 /// Append the timing comment to a rendered body, or leave it exactly as it was.
-fn with_phase_timing_comment(output: String, metrics: &EngineMetrics) -> String {
-    match phase_timing_comment(metrics) {
-        Some(comment) => {
-            let mut output = output;
-            if !output.ends_with('\n') {
-                output.push('\n');
-            }
-            output.push_str(&comment);
-            output.push('\n');
-            output
-        }
-        None => output,
-    }
-}
-
 fn refused_decompile_response(
     function_name: &str,
     reason: &str,
@@ -3359,13 +3389,14 @@ fn refused_decompile_response_with_metrics_and_audits(
         function_name,
         reason,
     );
-    let output = decompile_route_output_from_function_facts(function_name, &function_facts)
-        .expect("refused decompile response must stamp a fallback route");
+    let output = EngineRendering::Listing(
+        decompile_route_output_from_function_facts(function_name, &function_facts)
+            .expect("refused decompile response must stamp a fallback route"),
+    );
     let route_diagnostics = decompile_diagnostics_from_function_facts(&function_facts);
     diagnostics.plan = route_diagnostics.plan;
     diagnostics.route_reason = route_diagnostics.route_reason;
     diagnostics.refusal = route_diagnostics.refusal;
-    let output = with_phase_timing_comment(output, &metrics);
     EngineDecompileResponse {
         output,
         binding_audit,
@@ -4720,7 +4751,7 @@ mod tests {
             "the exact control fixture must reach native rendering: {legacy_output}"
         );
         assert!(
-            controlled.output.contains("return"),
+            controlled.output.text().contains("return"),
             "the engine path must render the same exact fixture: {}",
             controlled.output
         );
@@ -4832,7 +4863,7 @@ mod tests {
                 assert_eq!(response.binding_audit, completed_binding_audit);
                 assert_eq!(response.effect_obligations(), completed_effect_obligations);
                 assert!(
-                    !response.output.trim().is_empty(),
+                    !response.output.text().trim().is_empty(),
                     "the stopped render retains the partial output it reached"
                 );
                 assert!(
@@ -4864,8 +4895,8 @@ mod tests {
                         .map(|route| route.kind),
                     Some(r2types::DecompileRouteKind::FallbackComment)
                 );
-                assert!(response.output.starts_with("/* r2sleigh refused"));
-                assert!(!response.output.contains("() {"));
+                assert!(response.output.text().starts_with("/* r2sleigh refused"));
+                assert!(!response.output.text().contains("() {"));
             }
         }
     }
@@ -5085,7 +5116,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains(reason.as_str()))
         );
-        assert!(response.output.starts_with("/* r2sleigh refused"));
+        assert!(response.output.text().starts_with("/* r2sleigh refused"));
         assert!(effect_obligation_refusal_reason(EffectObligationAudit::NOT_RUN).is_none());
         assert_eq!(
             response.function_facts.input_quality(),
@@ -5156,7 +5187,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains(&reason))
         );
-        assert!(response.output.starts_with("/* r2sleigh refused"));
+        assert!(response.output.text().starts_with("/* r2sleigh refused"));
         assert!(placement_refusal_reason(PlacementAudit::Applied).is_none());
         assert!(placement_refusal_reason(PlacementAudit::NotRun).is_none());
     }
@@ -5207,8 +5238,8 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains(reason.as_str()))
         );
-        assert!(response.output.starts_with("/* r2sleigh refused"));
-        assert!(!response.output.contains("() {"));
+        assert!(response.output.text().starts_with("/* r2sleigh refused"));
+        assert!(!response.output.text().contains("() {"));
     }
 
     #[test]
@@ -5440,9 +5471,10 @@ mod tests {
         assert!(
             response
                 .output
+                .text()
                 .contains("deadline exceeded before snapshot_context")
         );
-        assert!(!response.output.contains("uint64_t sym_expired"));
+        assert!(!response.output.text().contains("uint64_t sym_expired"));
         assert!(
             response
                 .diagnostics
@@ -5488,9 +5520,10 @@ mod tests {
         assert!(
             response
                 .output
+                .text()
                 .contains("cancelled before snapshot_context")
         );
-        assert!(!response.output.contains("uint64_t sym_combined"));
+        assert!(!response.output.text().contains("uint64_t sym_combined"));
     }
 
     #[test]
@@ -5760,7 +5793,7 @@ mod tests {
             },
         });
 
-        assert!(response.output.contains("init_node"));
+        assert!(response.output.text().contains("init_node"));
         let route = response
             .function_facts
             .decompile_route()
@@ -5801,7 +5834,10 @@ mod tests {
         });
 
         assert!(
-            response.output.contains("incomplete lifted function input"),
+            response
+                .output
+                .text()
+                .contains("incomplete lifted function input"),
             "{}",
             response.output
         );
@@ -5866,11 +5902,12 @@ mod tests {
         assert!(
             response
                 .output
+                .text()
                 .contains("inconsistent lifted function input"),
             "{}",
             response.output
         );
-        assert!(response.output.contains("actual_lifted_blocks=1"));
+        assert!(response.output.text().contains("actual_lifted_blocks=1"));
         let route = response
             .function_facts
             .decompile_route()
@@ -5925,11 +5962,14 @@ mod tests {
         });
 
         assert!(
-            response.output.contains("empty lifted function input"),
+            response
+                .output
+                .text()
+                .contains("empty lifted function input"),
             "{}",
             response.output
         );
-        assert!(response.output.contains("null_lift_failures=1"));
+        assert!(response.output.text().contains("null_lift_failures=1"));
         let route = response
             .function_facts
             .decompile_route()
@@ -5978,11 +6018,14 @@ mod tests {
         });
 
         assert!(
-            response.output.contains("empty lifted function input"),
+            response
+                .output
+                .text()
+                .contains("empty lifted function input"),
             "{}",
             response.output
         );
-        assert!(response.output.contains("expected_blocks=0"));
+        assert!(response.output.text().contains("expected_blocks=0"));
         let route = response
             .function_facts
             .decompile_route()
@@ -6077,7 +6120,10 @@ mod tests {
         });
 
         assert!(
-            response.output.contains("incomplete lifted function input"),
+            response
+                .output
+                .text()
+                .contains("incomplete lifted function input"),
             "{}",
             response.output
         );
@@ -6126,12 +6172,12 @@ mod tests {
         });
 
         assert!(
-            !response.output.contains("rendered_name"),
+            !response.output.text().contains("rendered_name"),
             "decompile display identity must come from canonical analysis input: {}",
             response.output
         );
         assert!(
-            response.output.contains("raw_name"),
+            response.output.text().contains("raw_name"),
             "canonical analysis name must remain the r2engine display identity: {}",
             response.output
         );
@@ -6171,7 +6217,7 @@ mod tests {
         });
 
         assert!(
-            !response.output.contains("printf"),
+            !response.output.text().contains("printf"),
             "uncertified raw callee names must not appear in rendered calls: {}",
             response.output
         );
@@ -6214,7 +6260,7 @@ mod tests {
         });
 
         assert!(
-            !response.output.contains("raw string payload"),
+            !response.output.text().contains("raw string payload"),
             "uncertified raw strings must not render as string literals: {}",
             response.output
         );
@@ -6402,14 +6448,5 @@ mod tests {
             "{comment}"
         );
         assert!(comment.contains("lift_normalize=refused"), "{comment}");
-    }
-
-    #[test]
-    fn a_body_without_the_switch_is_returned_byte_for_byte() {
-        // The comment is opt-in, and every corpus gate compares bytes.
-        let body = "uint64_t sym__f(void)\n{\n    return 0;\n}\n".to_string();
-        let metrics = EngineMetrics::default();
-        unsafe { std::env::remove_var("R2SLEIGH_TIMING") };
-        assert_eq!(with_phase_timing_comment(body.clone(), &metrics), body);
     }
 }

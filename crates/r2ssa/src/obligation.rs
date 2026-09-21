@@ -391,40 +391,6 @@ impl SemanticObligationInventory {
     }
 }
 
-/// Exact-once reconciliation result for a downstream transformation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ObligationCoverageReport {
-    source_complete: bool,
-    missing: Vec<SemanticObligationId>,
-    duplicate: Vec<SemanticObligationId>,
-    unexpected: Vec<SemanticObligationId>,
-}
-
-impl ObligationCoverageReport {
-    pub fn is_closed(&self) -> bool {
-        self.source_complete
-            && self.missing.is_empty()
-            && self.duplicate.is_empty()
-            && self.unexpected.is_empty()
-    }
-
-    pub const fn source_complete(&self) -> bool {
-        self.source_complete
-    }
-
-    pub fn missing(&self) -> &[SemanticObligationId] {
-        &self.missing
-    }
-
-    pub fn duplicate(&self) -> &[SemanticObligationId] {
-        &self.duplicate
-    }
-
-    pub fn unexpected(&self) -> &[SemanticObligationId] {
-        &self.unexpected
-    }
-}
-
 impl SemanticObligationInventory {
     pub(crate) fn collect(
         graph: &SsaGraph,
@@ -1203,40 +1169,6 @@ impl SemanticObligationInventory {
             .into_iter()
             .flat_map(|instruction| instruction.obligations.iter())
             .filter_map(|id| self.obligations.get(id))
-    }
-
-    /// Reconcile downstream dispositions against the source inventory.
-    ///
-    /// Every source obligation must occur exactly once. This is independent of
-    /// AST shape and catches both lost and duplicated effects before rendering is
-    /// authorized.
-    pub fn audit_coverage(
-        &self,
-        disposed: impl IntoIterator<Item = SemanticObligationId>,
-    ) -> ObligationCoverageReport {
-        let mut counts = BTreeMap::<SemanticObligationId, usize>::new();
-        for id in disposed {
-            *counts.entry(id).or_default() += 1;
-        }
-        let mut report = ObligationCoverageReport {
-            source_complete: self.is_complete(),
-            missing: Vec::new(),
-            duplicate: Vec::new(),
-            unexpected: Vec::new(),
-        };
-        for id in self.obligations.keys() {
-            match counts.remove(id).unwrap_or_default() {
-                0 => report.missing.push(*id),
-                1 => {}
-                _ => report.duplicate.push(*id),
-            }
-        }
-        for (id, count) in counts {
-            for _ in 0..count {
-                report.unexpected.push(id);
-            }
-        }
-        report
     }
 
     /// Deterministic, human-readable inventory for debug and fixture capture.
@@ -3040,50 +2972,30 @@ mod tests {
     }
 
     #[test]
-    fn coverage_reports_lost_effect_and_duplicated_write() {
+    fn an_observable_write_owes_a_write_obligation() {
         let artifact = SsaArtifact::raw(&observable_write_fixture(), None).expect("SSA artifact");
         let inventory = &artifact.facts().obligations;
-        let all = inventory.obligations.keys().copied().collect::<Vec<_>>();
-        assert!(inventory.audit_coverage(all.clone()).is_closed());
-
-        let write = all
-            .iter()
-            .copied()
-            .find(|id| id.kind == SemanticObligationKind::ObservableMemoryWrite)
-            .expect("write obligation");
-        let without_write = all
-            .iter()
-            .copied()
-            .filter(|id| *id != write)
-            .collect::<Vec<_>>();
-        let missing = inventory.audit_coverage(without_write);
-        assert_eq!(missing.missing, vec![write]);
-
-        let mut duplicated_write = all;
-        duplicated_write.push(write);
-        let duplicate = inventory.audit_coverage(duplicated_write);
-        assert_eq!(duplicate.duplicate, vec![write]);
+        assert!(inventory.is_complete());
+        assert!(
+            inventory
+                .obligations
+                .keys()
+                .any(|id| id.kind == SemanticObligationKind::ObservableMemoryWrite),
+            "an observable write must owe a write obligation"
+        );
     }
 
     #[test]
-    fn coverage_reports_missing_loop_latch_state_transition() {
+    fn a_loop_carrier_owes_a_latch_state_transition() {
         let artifact = SsaArtifact::raw(&loop_carrier_fixture(), None).expect("loop SSA artifact");
-        let inventory = artifact.obligations();
-        let latch = inventory
-            .obligations
-            .keys()
-            .copied()
-            .find(|id| id.kind == SemanticObligationKind::LiveStateTransition)
-            .expect("loop latch state-transition obligation");
-        let without_latch = inventory
-            .obligations
-            .keys()
-            .copied()
-            .filter(|id| *id != latch)
-            .collect::<Vec<_>>();
-        let report = inventory.audit_coverage(without_latch);
-        assert_eq!(report.missing, vec![latch]);
-        assert!(!report.is_closed());
+        assert!(
+            artifact
+                .obligations()
+                .obligations
+                .keys()
+                .any(|id| id.kind == SemanticObligationKind::LiveStateTransition),
+            "a loop carrier must owe a latch state transition"
+        );
     }
 
     proptest! {
