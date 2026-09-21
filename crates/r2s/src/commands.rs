@@ -196,8 +196,16 @@ fn discovered(session: &mut Session) -> Result<String, String> {
     let mut out = String::from("vaddr      confidence name\n");
     out.push_str(&"-".repeat(46));
     for one in &found {
+        // Spelled as a listing spells it, which is how radare2 writes it and
+        // what makes the two comparable. The engine keeps the plain name.
+        let name = session
+            .names
+            .of(one.address)
+            .map(r2engine::names::Name::spelled)
+            .or_else(|| one.name.clone())
+            .unwrap_or_else(|| "-".to_owned());
         out.push_str(&format!(
-            "\n{:#010x} {:<10} {}",
+            "\n{:#010x} {:<10} {name}",
             one.address,
             match one.confidence {
                 r2engine::discovery::Confidence::Stated => "stated",
@@ -205,7 +213,6 @@ fn discovered(session: &mut Session) -> Result<String, String> {
                 r2engine::discovery::Confidence::Handed => "handed",
                 r2engine::discovery::Confidence::Reached => "reached",
             },
-            one.name.as_deref().unwrap_or("-")
         ));
     }
     out.push_str(&format!("\n\n{} functions", found.len()));

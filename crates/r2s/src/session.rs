@@ -106,7 +106,7 @@ impl Session {
                 .iter()
                 .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
                 .collect();
-            crate::names::name_imports(&mut self.names, &self.imports);
+            crate::names::name_imports(&mut self.names, self.image.format(), &self.imports);
             self.machine = Some(machine);
             // Only where a function says it is Thumb, so a machine with no
             // Thumb code pays nothing for the second specification.

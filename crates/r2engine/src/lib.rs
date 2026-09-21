@@ -2290,7 +2290,14 @@ impl EngineAnalyzeRequest {
     /// Trusted authority remains request-local.
     pub fn with_trusted_ssa(mut self, trusted: Arc<r2ssa::TrustedSsaArtifact>) -> Self {
         let function_addr = trusted.source().function().address();
-        self.function_name = r2source::unnamed_function(function_addr);
+        // The capture knows what the program calls this function; taking the
+        // synthesized form unconditionally made a refusal report `fcn.401680`
+        // for a function the symbol table names `murmur3_32`.
+        let captured = trusted.source().presentation().display_name();
+        self.function_name = match captured.is_empty() {
+            true => r2source::unnamed_function(function_addr),
+            false => captured.to_owned(),
+        };
         self.function_addr = function_addr;
         self.blocks = Vec::new();
         self.arch = Some(trusted.arch_spec().clone());

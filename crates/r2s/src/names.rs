@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use r2engine::discovery::Confidence;
 use r2engine::names::{Name, NameDb, Namespace};
 use r2il::R2ILOp;
-use r2image::{EntryKind, Image, SymbolKind};
+use r2image::{EntryKind, Format, Image, SymbolKind};
 use r2sleigh_lift::Disassembler;
 
 /// Sleigh fetches a whole window whatever the instruction needs.
@@ -160,12 +160,22 @@ fn chance_run_length(size: u64) -> usize {
 }
 
 /// Give each import stub the name of the import it stands for.
-pub fn name_imports(db: &mut NameDb, imports: &BTreeMap<u64, String>) {
+///
+/// Mach-O decorates a C name with one leading underscore, so the import the
+/// relocation calls `_printf` is `printf` -- the same decoration the prototype
+/// table already accounts for, and the spelling radare2 writes. ELF carries no
+/// such decoration, so nothing is stripped there.
+pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, String>) {
+    let decorated = format == Format::MachO;
     for (stub, symbol) in imports {
+        let undecorated = match decorated {
+            true => symbol.strip_prefix('_').unwrap_or(symbol),
+            false => symbol.as_str(),
+        };
         db.insert(
             *stub,
             Name {
-                text: symbol.clone(),
+                text: undecorated.to_owned(),
                 namespace: Namespace::Import,
                 size: 0,
                 confidence: Confidence::Stated,
@@ -195,7 +205,7 @@ pub fn spell(db: &NameDb, text: &str) -> String {
         let literal = &rest[start..start + 2 + digits];
         match u64::from_str_radix(&literal[2..], 16)
             .ok()
-            .and_then(|value| db.at(value))
+            .and_then(|value| db.of(value))
         {
             Some(name) => out.push_str(&name.spelled()),
             None => out.push_str(literal),
@@ -383,7 +393,11 @@ mod tests {
                 confidence: Confidence::Stated,
             },
         );
-        name_imports(&mut db, &BTreeMap::from([(0x1030, "printf".to_owned())]));
+        name_imports(
+            &mut db,
+            Format::Elf,
+            &BTreeMap::from([(0x1030, "printf".to_owned())]),
+        );
         db
     }
 

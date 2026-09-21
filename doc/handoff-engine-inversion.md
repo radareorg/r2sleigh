@@ -159,6 +159,46 @@ the bare string `401000`. So a call the engine spelled one way and a call it
 knew only by its target were two identities for one function. Both normalise to
 `addr:401000` now.
 
+### The coverage baseline is re-blessed, and what it says
+
+`tests/coverage/sweep_binary.sh` drives `r2s` now. Two things had to be fixed
+before it could finish at all: the sweep exits non-zero on a refusal, which is
+what it is there to measure, so `set -e` was killing the whole run silently;
+and `afl` printed the plain name where radare2 prints the flag, so four hundred
+baseline keys read as missing when they were only spelled differently.
+
+**519 functions, 509 rendered, 98 per cent.** Ten refusals in four named
+classes: six `OverlappingFunctionBlockRanges` in interprocedural summary
+construction, two missing program-variable authorizations, one
+`RenderedValueRequired`, one `OpLowering(calls.rs)` machine projection.
+
+Sixty-one functions gained and one regressed against the old baseline. The
+regression is `pinned_hashes_gcc_x64_O2::sym.murmur3_32`, which refuses on
+`RenderedValueRequired` -- a long-standing native-route refusal rather than
+anything this work broke, and the old baseline was captured through the plugin,
+so most of the sixty-one are the same difference in the other direction.
+
+### A name outranks a role
+
+`afl` on a Mach-O named the entry `entry0` where the symbol table says `_main`,
+because `Namespace::Entry` outranked `Namespace::Symbol`. It is the other way
+round now: `entry0` says what an address is *for* and a symbol says what it
+*is*, so a listing with both gives the name and a stripped binary still gets the
+role. radare2 agrees on Mach-O (it prints `main`) and disagrees on ELF (it
+prints `entry0` where the symbol is `_start`); the disagreement is judged and
+kept.
+
+Mach-O decorates a C name with one leading underscore, so the import a
+relocation calls `_printf` is stored as `printf` -- the same decoration the
+prototype table already accounts for, and the spelling radare2 writes. ELF
+carries no such decoration and nothing is stripped there.
+
+One more place answered the naming question wrongly. `EngineAnalyzeRequest::with_trusted_ssa`
+overwrote the function name with the synthesized form unconditionally, so a
+refusal reported `fcn.401680` for a function the symbol table names
+`murmur3_32`. The capture knows what the program calls it, and that is what the
+refusal says now.
+
 ### A `hlt` no longer loses its block's terminator
 
 Tracing the above found the defect this handoff recorded as untraced after

@@ -46,20 +46,25 @@ pub fn text_in(bytes: &[u8]) -> Option<&str> {
 /// a linkage stub as surely as it says how to print it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Namespace {
-    /// The program's declared entry points, numbered as radare2 numbers them.
-    Entry,
+    /// A linkage stub standing for an import. The most specific thing the
+    /// container states about an address that has one.
+    Import,
     /// A symbol the container declares.
     Symbol,
-    /// A linkage stub standing for an import.
-    Import,
+    /// A data object the container declares.
+    Object,
+    /// The program's declared entry points, numbered as radare2 numbers them.
+    ///
+    /// Below a symbol on purpose: `entry0` says what an address is *for*, and
+    /// a symbol says what it *is*. A listing that has both should give the
+    /// name, and a stripped binary still gets the role.
+    Entry,
     /// A function the engine found rather than the container declared.
     Function,
     /// A label inside a function.
     Label,
     /// Text the program points at.
     String,
-    /// A data object the container declares.
-    Object,
     Section,
     Segment,
 }
@@ -164,19 +169,23 @@ impl NameDb {
         self.by_address.get(&vaddr).map_or(&[], Vec::as_slice)
     }
 
-    /// The plain name at exactly this address, which is what the engine keys
-    /// prototypes and callee facts by.
+    /// The strongest name for the thing at this address.
     ///
     /// A section or a segment names a region, not the thing at its start, so
     /// neither answers here: `.text` begins where the first function does, and
-    /// calling that function `.text` would key its prototype and spell its
-    /// rendering by the name of the place it lives in.
-    pub fn text_at(&self, vaddr: u64) -> Option<&str> {
+    /// calling that function `.text` would name it after the place it lives
+    /// in. `at` still returns them, because a listing of names lists them.
+    pub fn of(&self, vaddr: u64) -> Option<&Name> {
         self.by_address
             .get(&vaddr)?
             .iter()
             .find(|name| !matches!(name.namespace, Namespace::Section | Namespace::Segment))
-            .map(|name| name.text.as_str())
+    }
+
+    /// The plain name at exactly this address, which is what the engine keys
+    /// prototypes and callee facts by.
+    pub fn text_at(&self, vaddr: u64) -> Option<&str> {
+        self.of(vaddr).map(|name| name.text.as_str())
     }
 
     /// The strongest name covering this address, and where it begins.

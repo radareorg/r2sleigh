@@ -34,7 +34,7 @@ trap 'rm -f "$functions"' EXIT
 # renderings cannot come from different analyses. A discovered function the
 # binary has no name for is keyed by its address, so two of them are two cells
 # rather than one.
-"$r2s_bin" -q -c 'afl' "$binary" 2>/dev/null \
+{ "$r2s_bin" -q -c 'afl' "$binary" 2>/dev/null || true; } \
     | awk '$1 ~ /^0x/ { print $1, ($NF == "-" ? $1 : $NF) }' > "$functions"
 
 command_text=""
@@ -45,5 +45,8 @@ while read -r addr name; do
     command_text+="; ?e R2SLEIGH_COV_END__${name}; "
 done < "$functions"
 
+# A refusal is what this sweep measures, and the shell reports one by exiting
+# non-zero, so a failing command must not end the run: the whole point is to
+# record which functions refused and why.
 echo "R2SLEIGH_COV_BINARY__$binary"
-"$r2s_bin" -q -c "${command_text%; }" "$binary" 2>&1
+"$r2s_bin" -q -c "${command_text%; }" "$binary" 2>&1 || true
