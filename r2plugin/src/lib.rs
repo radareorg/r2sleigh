@@ -20,6 +20,7 @@ mod analysis;
 mod blocks;
 mod context;
 mod decompiler;
+mod dwarf_ffi;
 mod ffi_v2;
 mod helpers;
 #[cfg(test)]

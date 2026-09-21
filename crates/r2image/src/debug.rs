@@ -69,13 +69,53 @@ pub(crate) fn read(file: &object::File<'_>) -> DebugPrototypes {
         object::Endianness::Little => gimli::RunTimeEndian::Little,
         object::Endianness::Big => gimli::RunTimeEndian::Big,
     };
-    let load = |id: gimli::SectionId| -> Result<gimli::EndianSlice<'_, _>, ()> {
+    read_sections(endian, |name| {
         use object::ObjectSection as _;
-        let data = file
-            .section_by_name(id.name())
+        file.section_by_name(name)
             .and_then(|section| section.data().ok())
-            .unwrap_or(&[]);
-        Ok(gimli::EndianSlice::new(data, endian))
+    })
+}
+
+/// The sections this reader asks for, in the spelling the format gives them.
+///
+/// A caller that hands the bytes over has to know which bytes: leaving one out
+/// is not the same as a binary that lacks it, because a unit naming a line
+/// program that is not there fails to parse and the whole unit is lost.
+pub fn sections() -> impl Iterator<Item = &'static str> {
+    [
+        gimli::SectionId::DebugAbbrev,
+        gimli::SectionId::DebugAddr,
+        gimli::SectionId::DebugAranges,
+        gimli::SectionId::DebugInfo,
+        gimli::SectionId::DebugLine,
+        gimli::SectionId::DebugLineStr,
+        gimli::SectionId::DebugLoc,
+        gimli::SectionId::DebugLocLists,
+        gimli::SectionId::DebugRanges,
+        gimli::SectionId::DebugRngLists,
+        gimli::SectionId::DebugStr,
+        gimli::SectionId::DebugStrOffsets,
+        gimli::SectionId::DebugTypes,
+    ]
+    .into_iter()
+    .map(gimli::SectionId::name)
+}
+
+/// The same, from whoever already has the sections.
+///
+/// radare2 has the binary open and parses these sections itself; handing the
+/// bytes over is what stops this project carrying two readers of one format.
+/// A section the caller does not have is empty, which is what a binary without
+/// it looks like.
+pub fn read_sections<'a>(
+    endian: gimli::RunTimeEndian,
+    mut section: impl FnMut(&str) -> Option<&'a [u8]>,
+) -> DebugPrototypes {
+    let load = |id: gimli::SectionId| -> Result<gimli::EndianSlice<'a, _>, ()> {
+        Ok(gimli::EndianSlice::new(
+            section(id.name()).unwrap_or(&[]),
+            endian,
+        ))
     };
     let Ok(dwarf) = gimli::Dwarf::load(load) else {
         return DebugPrototypes::default();
