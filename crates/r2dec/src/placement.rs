@@ -4379,6 +4379,8 @@ fn occurrence_regions_have_proven_order(
                 region_is_ancestor(regions, *left, *right)
                     || region_is_ancestor(regions, *right, *left)
                     || regions.regions_are_exclusive(*left, *right)
+                    // Two blocks in a sequence are ordered by the sequence.
+                    || regions.regions_are_sequenced(*left, *right)
             })
         })
     })

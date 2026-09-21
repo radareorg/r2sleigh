@@ -262,6 +262,54 @@ impl SealedStructuredRegionArtifact {
     ///
     /// Anything the artifact cannot answer for -- an unknown region, a missing
     /// parent, a meeting point that is not a selection -- is not exclusive.
+    /// Whether one region's statements all run before or all after another's.
+    ///
+    /// Two regions that meet at a sequential parent are ordered by it: a block
+    /// states the order of its children, and a loop repeating that block
+    /// repeats the order with it. This is the companion of exclusivity -- that
+    /// asks whether both can run, this asks whether their order is stated --
+    /// and without it a value written in one block and read in the next, which
+    /// is the ordinary shape of a rendered function, had no provable order at
+    /// all.
+    pub(crate) fn regions_are_sequenced(&self, left: RegionId, right: RegionId) -> bool {
+        self.meeting_parent(left, right).is_some_and(|meeting| {
+            matches!(
+                meeting,
+                StructuredRegionKind::FunctionBody
+                    | StructuredRegionKind::Block
+                    | StructuredRegionKind::Loop
+            )
+        })
+    }
+
+    /// The kind of the region where two distinct regions' ancestries meet.
+    ///
+    /// `None` where one contains the other, or where they share no ancestor.
+    fn meeting_parent(&self, left: RegionId, right: RegionId) -> Option<StructuredRegionKind> {
+        let node = |id: RegionId| self.nodes.get(id.index());
+        let (mut left_node, mut right_node) = (node(left)?, node(right)?);
+        let (mut left, mut right) = (left, right);
+        while left_node.depth > right_node.depth {
+            left = left_node.parent?;
+            left_node = node(left)?;
+        }
+        while right_node.depth > left_node.depth {
+            right = right_node.parent?;
+            right_node = node(right)?;
+        }
+        while left != right {
+            let (left_parent, right_parent) = (left_node.parent?, right_node.parent?);
+            if left_parent == right_parent {
+                return node(left_parent).map(|meeting| meeting.kind);
+            }
+            left = left_parent;
+            right = right_parent;
+            left_node = node(left)?;
+            right_node = node(right)?;
+        }
+        None
+    }
+
     pub(crate) fn regions_are_exclusive(&self, left: RegionId, right: RegionId) -> bool {
         let node = |id: RegionId| self.nodes.get(id.index());
         let (Some(mut left_node), Some(mut right_node)) = (node(left), node(right)) else {
