@@ -7,223 +7,122 @@ Prerequisites
 | Dependency | Version | Notes |
 |------------|---------|-------|
 | Rust | 1.85+ | Edition 2024; install via [rustup](https://rustup.rs/) |
-| radare2 | 5.9+ | Required for plugin build and integration tests |
-| pkg-config | any | Used to locate radare2 headers and libraries |
-| GCC / Clang | any | C compiler for the plugin wrapper |
-| Z3 | 4.8+ | Optional; required for symbolic execution (`r2sym`) |
+| radare2 | 5.9+ | Optional; only the differential harnesses run it |
+| Z3 | 4.8+ | Optional |
 
-### Verifying radare2 installation
+Nothing links against `libr`, so no radare2 headers, `pkg-config` entry or C
+compiler is needed to build or test the engine.
+
+Building the shell
+------------------
+
+`r2s` is the tool: it opens a binary, walks and lifts it, and decompiles.
 
 ```bash
-# Confirm radare2 is installed and pkg-config can find it
-pkg-config --cflags r_anal
-r2 -H R2_USER_PLUGINS
+cargo build --release -p r2s --features sleigh
 ```
 
-Building the CLI Tool
----------------------
+`--features sleigh` is what brings the Sleigh decoder in; without it the shell
+builds but refuses to lift. It carries x86 and ARM, which is the whole of what
+`pdd` is admitted for today.
 
-The CLI tool (`r2sleigh-cli`) operates standalone, without radare2.
+Building the Sleigh toolchain
+-----------------------------
+
+`r2sleigh-cli` compiles and inspects Sleigh specifications, standalone.
 
 ```bash
-# Build with x86 support (default)
 cargo build --release -p r2sleigh-cli --features x86
 
-# Build with all supported architectures
-cargo build --release -p r2sleigh-cli --features all-archs
-
-# Verify
 cargo run --release -p r2sleigh-cli --features x86 -- \
   disasm --arch x86-64 --bytes "31c0000000000000000000000000000000"
 ```
 
-### Feature Flags
+### Feature flags
 
 | Flag | Architectures | Notes |
 |------|--------------|-------|
-| `x86` | x86, x86-64 | Most common; includes 16/32/64-bit modes |
-| `arm` | ARM (32-bit) | ARM v7 and earlier |
+| `x86` | x86, x86-64 | Includes 16/32/64-bit modes |
+| `arm` | ARM 32-bit, Thumb, aarch64 | |
 | `mips` | MIPS | Big and little endian |
 | `riscv` | RISC-V (RV32GC, RV64GC) | Little-endian baseline |
 | `all-archs` | All of the above | Larger binary, longer compile |
 
-Building the radare2 Plugin
-----------------------------
-
-The plugin consists of a Rust cdylib (`libr2sleigh_plugin.so`) and a C wrapper
-that implements radare2's `RAnalPlugin` / `RArchPlugin` interfaces.
-
-```bash
-cd r2plugin
-
-# Build release with x86 (default)
-make
-
-# Build a fast debug version for local iteration
-make RUST_TARGET=debug
-
-# Build with all architectures
-make RUST_FEATURES=all-archs
-
-# Build maximum-optimized distributable artifacts
-make RUST_TARGET=dist
-```
-
-### Make Targets
-
-| Target | Description |
-|--------|-------------|
-| `make` | Build both analysis and architecture plugins (release) |
-| `make rust` | Build only the Rust library |
-| `make install` | Copy plugins to `R2_USER_PLUGINS` directory |
-| `make uninstall` | Remove plugins from `R2_USER_PLUGINS` directory |
-| `make clean` | Remove build artifacts |
-| `make distclean` | Remove all artifacts including Rust `target/` |
-
-### Make Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RUST_TARGET` | `release` | `debug`, `release`, or `dist` |
-| `RUST_FEATURES` | `all-archs` | Sleigh feature flags: `x86`, `arm` (ARM32 + AArch64), `mips`, `riscv`, or `all-archs`. Narrow it only when build time matters more than covering the host. |
-
-Installation
-------------
-
-```bash
-cd r2plugin
-make install
-```
-
-This copies three files to `~/.local/share/radare2/plugins/`:
-
-- `anal_sleigh.so` -- analysis plugin
-- `arch_sleigh.so` -- architecture plugin
-- `libr2sleigh_plugin.so` -- Rust shared library
-
-### Verifying installation
-
-```bash
-# Check plugin loads
-r2 -qc 'L' /bin/ls | grep sleigh
-
-# Check architecture detection
-r2 -qc 'a:sla.info' /bin/ls
-```
-
-Uninstallation
---------------
-
-```bash
-cd r2plugin
-make uninstall
-```
-
-Running Tests
+Running tests
 -------------
 
 ```bash
-# Unit tests (all crates)
-cargo test --all-features
-
-# Integration tests (requires radare2 + plugin installed)
-cd tests/e2e
-cargo test
+# --no-fail-fast, always: without it cargo stops at the first failing target,
+# so one crate's known failure hides every failure after it.
+cargo test --workspace --all-features --no-fail-fast
 ```
 
-For advisory semantic metadata/performance checks (non-blocking by default):
+The end-to-end gates run the built shell. Build before measuring: the default
+binary is the debug one, which `cargo build --release` does not touch, and a
+measurement taken after one describes a tree several changes old.
+
+```bash
+# Every named function renders, and reads nothing that was never written
+python3 scripts/certify_render.py --bins <radare2>/test/bins/elf \
+  --limit 24 --functions 8
+
+# The same commands through radare2 and through r2s, diffed
+python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30
+
+# How much of a whole binary renders at all
+./tests/coverage/run_coverage.sh
+```
+
+Advisory, non-blocking:
 
 ```bash
 python3 scripts/bench_semantic_metadata.py --runs 7 --max-overhead-pct 5
 ```
 
-See [doc/testing.md](doc/testing.md) for the full testing guide.
+See [doc/testing.md](doc/testing.md) for the full guide.
 
-Conformance / Compatibility Gate Commands
------------------------------------------
-
-Run the PR8 hardening gate with:
-
-```bash
-cargo test -p r2il
-cargo test -p r2sleigh-export --features x86
-cargo test -p r2sleigh-cli --features x86,arm,riscv
-cargo test -p r2sleigh-plugin --features x86,arm,riscv
-cd tests/e2e && cargo test --test integration ffi::
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-R2IL Format Compatibility
+R2IL format compatibility
 -------------------------
 
-- The sole format identity is `R2PSTC07`; there is no separate format-version authority.
-- The loader accepts exactly `R2PSTC07 || payload_length_u64_le || postcard(ArchSpec)` and rejects truncation or trailing bytes.
-- Older versions and encodings are rejected instead of being migrated through a second semantic path.
+- The sole format identity is `R2PSTC07`; there is no separate format-version
+  authority.
+- The loader accepts exactly
+  `R2PSTC07 || payload_length_u64_le || postcard(ArchSpec)` and rejects
+  truncation or trailing bytes.
+- Older encodings are rejected rather than migrated through a second semantic
+  path.
 
 Troubleshooting
 ---------------
 
-### `pkg-config` cannot find radare2
+### `r2s: built without the sleigh feature`
 
-Set `PKG_CONFIG_PATH` to the directory containing `r_anal.pc`:
+The shell was built without a decoder. Rebuild with `--features sleigh`.
 
-```bash
-export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-```
+### A function refuses where another renders
 
-### Plugin loads but commands fail
-
-Ensure the Rust shared library is in the same directory as the C plugin:
-
-```bash
-ls $(r2 -H R2_USER_PLUGINS)
-# Should show: anal_sleigh.so  arch_sleigh.so  libr2sleigh_plugin.so
-```
-
-### "16 bytes minimum" error
-
-libsla requires at least 16 bytes of input for x86-64 (variable-length
-instructions). Pad shorter inputs with zeros:
-
-```bash
-r2sleigh disasm --arch x86-64 --bytes "31c0000000000000000000000000000000"
-```
-
-### Architecture not detected
-
-The plugin reads `anal.arch` and `anal.bits` from radare2. If auto-detection
-fails, set them explicitly:
-
-```bash
-r2 -qc 'e anal.arch=x86; e anal.bits=64; aaa; s main; pd:s' /bin/ls
-```
-
-Or override with the plugin command:
-
-```bash
-r2 -qc 'a:sla.arch x86-64; aaa; s main; pd:s' /bin/ls
-```
+That is the decompiler working: it prints what it can prove and says what it
+could not. `R2DEC_TRACE_REFUSAL=1` names the predicate and the site that
+refused. `pdil`, `pdim` and `pdih` print the low, medium and high tiers, which
+is how a defect is narrowed to one lowering.
 
 ### Build fails with linker errors
 
-Ensure both radare2 development headers and the C++ standard library are
-available:
+Only Z3 needs a system library, and only when its feature is on. Build without
+it, or install it:
 
 ```bash
-# Debian/Ubuntu
-sudo apt install radare2-dev libstdc++-dev
-
-# Fedora
-sudo dnf install radare2-devel libstdc++-devel
+sudo apt install libz3-dev     # Debian/Ubuntu
+sudo dnf install z3-devel      # Fedora
 ```
 
-Release And Dist Builds
+Release and dist builds
 -----------------------
 
 The workspace `release` profile is tuned for normal local and CI iteration:
-optimized code, parallel codegen, abort-on-panic, and stripped artifacts.
-Use `dist` only when a maximum-optimized distributable artifact is worth the
-extra link time.
+optimized code, parallel codegen, abort-on-panic, stripped artifacts. Use
+`dist` only when a maximum-optimized distributable is worth the link time, and
+`probe` when a profiler has to name a line.
 
 ```toml
 [profile.release]
@@ -238,10 +137,8 @@ lto = true
 codegen-units = 1
 ```
 
-Examples:
-
 ```bash
-cargo build --release -p r2sleigh-plugin --features x86
-cargo build --profile dist -p r2sleigh-plugin --features all-archs
-make -C r2plugin RUST_TARGET=dist RUST_FEATURES=all-archs
+cargo build --release -p r2s --features sleigh
+cargo build --profile dist -p r2s --features sleigh
+cargo build --profile probe -p r2s --features sleigh
 ```

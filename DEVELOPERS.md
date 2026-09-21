@@ -14,14 +14,18 @@ Module Map
 ```
 crates/
 ├── r2il/             Core IL types (Varnode, SpaceId, R2ILOp, R2ILBlock)
+├── r2image/          ELF and Mach-O parsing; DWARF through gimli
+├── r2abi/            Calling conventions and library prototypes
 ├── r2sleigh-lift/    Sleigh/P-code → r2il translation, ESIL formatting
-├── r2sleigh-cli/     CLI tool (compile, disasm, info)
-├── r2ssa/            SSA: CFG, domtree, phi, optimization, taint, defuse
-├── r2sym/            Symbolic execution: Z3, paths, solver, call hooks
+├── r2sleigh-export/  Instruction exporter (lift/ssa/defuse/dec)
+├── r2sleigh-cli/     Sleigh toolchain (compile, disasm, info)
+├── r2ssa/            SSA: CFG, domtree, phi, liveness, taint, value ranges
+├── r2source/         The facts a capture owns, and their contracts
 ├── r2types/          Type inference: constraint solver, arena, signatures
-└── r2dec/            Decompiler: folding, structuring, codegen, symbols
-r2plugin/             radare2 plugin: Rust cdylib + C wrapper
-tests/e2e/            Integration tests against radare2
+├── r2rewrite/        Term rewriting over the medium tier
+├── r2dec/            Structuring, binding, certification, C rendering
+├── r2engine/         Request orchestration, discovery, the native route
+└── r2s/              The shell: a radare2-compatible command surface
 ```
 
 ### Crate Dependency Graph
@@ -30,17 +34,21 @@ tests/e2e/            Integration tests against radare2
 r2il  ←──  r2sleigh-lift  ←──  r2sleigh-cli
   ↑              ↑
   |              |
-r2ssa ←────────┘
+r2ssa ←────────┘ ←──  r2source
   ↑
-  ├──── r2sym (symbolic execution)
   ├──── r2types (type inference)
-  ├──── r2dec (decompiler)
-  └──── r2plugin (radare2 FFI)
+  ├──── r2rewrite (term rewriting)
+  └──── r2dec (structuring and rendering)
+              ↑
+          r2engine  ←──  r2image, r2abi
+              ↑
+            r2s
 ```
 
 All crates depend on `r2il` for the core types. `r2ssa` depends on both `r2il`
-and `r2sleigh-lift` (for register name resolution). The analysis crates
-(`r2sym`, `r2types`, `r2dec`) depend on `r2ssa` for the SSA representation.
+and `r2sleigh-lift` (for register name resolution). `r2engine` orchestrates a
+request and owns the native route; `r2s` is its only production consumer and
+the only implementor of the `Program` trait the engine reads a binary through.
 
 Data Flow: Bytes to C Code
 ---------------------------
@@ -91,10 +99,11 @@ Key Types
 | `FunctionSSABlock` | r2ssa | `function.rs` | Block with phi nodes (used by r2dec) |
 | `BasicBlock` | r2ssa | `cfg.rs` | CFG node with terminator |
 | `TaintPolicy` | r2ssa | `taint.rs` | Trait for taint source/sink/sanitizer rules |
-| `SymValue` | r2sym | `value.rs` | Concrete, symbolic (Z3 BV), or unknown |
-| `SymState` | r2sym | `state.rs` | Registers, memory, constraints, taint masks |
-| `SymExecutor` | r2sym | `executor.rs` | Steps through SSA ops, manages call hooks |
-| `PathExplorer` | r2sym | `path.rs` | DFS/BFS/random path exploration with limits |
+| `ValueRanges` | r2ssa | `values.rs` | Strided interval per value, with widening |
+| `StridedInterval` | r2ssa | `strided.rs` | The value domain itself |
+| `Body` | r2ssa | `body.rs` | A walked function: blocks, calls, what it could not follow |
+| `Program` | r2engine | `native.rs` | Six methods: how the engine reads a binary |
+| `Discovered` | r2engine | `discovery.rs` | An address, and why it is believed to be a function |
 | `TypeArena` | r2types | `model.rs` | Interned type storage |
 | `Constraint` | r2types | `constraint.rs` | Type constraint (SetType, Equal, Subtype, ...) |
 | `TypeSolver` | r2types | `solver.rs` | Fixed-point constraint solver |
@@ -140,7 +149,8 @@ How to Add a New Opcode
    SSAOp::IntFoo { a, b, .. } => self.binary_expr(BinaryOp::Foo, a, b),
    ```
 
-7. **Add integration test** in `tests/e2e/integration_tests.rs`.
+7. **Add a test** beside the lowering, and one in `crates/r2s/tests/` when
+   the change is visible from a command.
 
 How to Add a New Architecture
 -----------------------------
@@ -148,21 +158,24 @@ How to Add a New Architecture
 1. Enable the feature flag in `sleigh-config` (in `Cargo.toml` dependency).
 2. Add the architecture name to the match arm in
    `crates/r2sleigh-cli/src/main.rs` (`get_disassembler()`).
-3. Add the arch-to-bits mapping in `r2plugin/src/lib.rs` (architecture
-   detection).
+3. Add the tuple to `TrustedSleighProfile::from_tuple` in
+   `crates/r2sleigh-lift/src/disasm.rs`. Admitting a tuple there is the
+   statement that it has been verified against the active analyzer, so it is
+   the verification rather than a line of code.
 4. Add the arch to the supported list in error messages.
-5. Add integration tests in `tests/e2e/integration_tests.rs`.
+5. Add tests, and run the certification gate over binaries of that
+   architecture.
 
-How to Add a New Plugin Command
--------------------------------
+How to Add a New `r2s` Command
+------------------------------
 
-1. Add the command string to the dispatch table in
-   `r2plugin/r_anal_sleigh.c` (`sleigh_cmd()`).
-2. Implement the Rust function in `r2plugin/src/lib.rs`, exported with
-   `#[unsafe(no_mangle)] pub extern "C" fn`.
-3. Add the command to the help output.
-4. Add an integration test.
-5. Update [doc/plugin.md](doc/plugin.md) with the new command.
+1. Add one arm to the flat verb `match` in `crates/r2s/src/commands.rs`, and
+   one function beside it. `run` already supplies `~` grep and `@` temporary
+   seek.
+2. Spell the command as radare2 spells it, so the two can be diffed by
+   `scripts/diff_r2.py`.
+3. Add an integration test in `crates/r2s/tests/`.
+4. Update the command list in [README.md](README.md).
 
 How to Add an Optimization Pass
 -------------------------------
@@ -233,47 +246,6 @@ Some code paths have hardcoded x86-64 assumptions (e.g., stack/frame pointer
 names in `fold.rs`, argument registers in `taint.rs`). These should be
 abstracted behind an ABI/calling-convention model in the future.
 
-### Post-Analysis Signature/CC Write-Back
-
-The plugin's `post_analysis` callback (`aaaa`) includes a write-back stage for
-x86/x86-64 functions:
-
-1. Rust FFI `r2sleigh_infer_signature_cc_json()` builds SSA and infers
-   signature + calling convention.
-2. C wrapper applies results with confidence gating:
-   - signature overwrite when confidence `>= 70`
-   - calling convention overwrite when confidence `>= 80`
-3. C write-back is API-first but verified before success:
-   - signature: `r_anal_str_to_fcn()` + type DB verification (`r_type_func_*`),
-     then `afs` fallback only when API apply is unverified
-   - callconv: function callconv field (`r_str_constpool_get`) + function-state
-     verification, then `afc` fallback only when API apply is unverified
-4. Practical consistency checks are performed post-writeback:
-   - `afcfj` return/arg structure should match inferred signature
-   - `afij.calltype` should match inferred call convention
-   - `afij.signature` drift is measured and logged (non-fatal)
-5. Existing function names are preserved by using the current function name in
-   the generated signature.
-6. Large functions are skipped via `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS` to bound
-   post-analysis cost.
-7. After verified signature apply, direct caller propagation runs:
-   - xref scope: direct `CALL/CODE/JUMP` refs only
-   - caller-side reanalysis: type-match + `afva`
-   - bounded by caps:
-     - `SLEIGH_CALLER_PROP_MAX_CALLEES` (128/run)
-     - `SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE` (32/callee)
-     - `SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL` (256/run)
-   - one caller function is updated at most once per run (global dedupe)
-   - propagation is non-fatal and summarized in logs via `prop_*` counters and
-     `sample_callees=`.
-8. Signature write-back summary also reports apply-path telemetry:
-   - signature: `sig_api_apply_ok`, `sig_api_verify_fail`,
-     `sig_cmd_fallback_attempted`, `sig_cmd_apply_ok`, `sig_cmd_apply_fail`
-   - callconv: `cc_api_apply_ok`, `cc_api_verify_fail`,
-     `cc_cmd_fallback_attempted`, `cc_cmd_apply_ok`, `cc_cmd_apply_fail`
-9. The stack assumes radare2 `>= 6.0`, including corrected
-   `r_anal_str_to_fcn()` return semantics (success only on parse/save success).
-
 Per-Topic Documentation
 -----------------------
 
@@ -284,7 +256,7 @@ Per-Topic Documentation
 | Decompiler pipeline | [doc/decompiler.md](doc/decompiler.md) |
 | ESIL generation | [doc/esil.md](doc/esil.md) |
 | Taint analysis | [doc/taint.md](doc/taint.md) |
-| Symbolic execution | [doc/symex.md](doc/symex.md) |
-| radare2 plugin | [doc/plugin.md](doc/plugin.md) |
+| Certification and refusal | [doc/certifying_decompiler.md](doc/certifying_decompiler.md) |
+| Where this is going | [doc/engine-vision.md](doc/engine-vision.md) |
 | Type inference | [doc/types.md](doc/types.md) |
 | Testing | [doc/testing.md](doc/testing.md) |

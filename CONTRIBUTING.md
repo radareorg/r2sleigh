@@ -10,14 +10,16 @@ Reporting Issues
 When reporting a bug, include:
 
 1. **Architecture and binary**: what you were analyzing (e.g., x86-64 ELF)
-2. **Command**: the exact radare2 or CLI command that failed
+2. **Command**: the exact `r2s` command that failed
 3. **Expected vs actual output**: what you expected and what you got
-4. **Version info**: output of `r2 -v` and `cargo --version`
+4. **Version info**: the commit and `cargo --version`
 
-For crashes, include a backtrace if possible:
+For a refusal, include what the evidence channel says; for a crash, a
+backtrace:
 
 ```bash
-RUST_BACKTRACE=1 r2 -qc 'aaa; s main; pd:s' /path/to/binary
+R2DEC_TRACE_REFUSAL=1 r2s -q -c 's main; pdd' /path/to/binary
+RUST_BACKTRACE=1 r2s -q -c 's main; pdd' /path/to/binary
 ```
 
 Getting Started
@@ -29,8 +31,7 @@ Getting Started
 4. Add tests (see Testing Requirements below)
 5. Run the full test suite:
    ```bash
-   cargo test --all-features
-   cd tests/e2e && cargo test
+   cargo test --workspace --all-features --no-fail-fast
    ```
 6. Open a pull request
 
@@ -43,9 +44,9 @@ Use short, descriptive commit messages. Prefix with the affected component:
 r2il: add FloatCompare opcode
 r2ssa: fix phi placement for switch blocks
 r2dec: improve for-loop detection heuristic
-plugin: add a:sla.newcmd command
-tests: add e2e test for taint analysis
-docs: update ESIL translation table
+r2s: add the ax cross-reference command
+tests: cover the narrow-return certificate
+docs: update the testing guide
 ```
 
 - First line: imperative mood, max 72 characters
@@ -97,46 +98,37 @@ Testing Requirements
 
 | Change type | Required test |
 |-------------|---------------|
-| New opcode | Unit test in crate + e2e test via `a:sla.debug.json` |
-| New plugin command | e2e test in `tests/e2e/integration_tests.rs` |
-| New optimization pass | Unit test in `r2ssa` + e2e test via `a:sla.debug.ssa.func.opt` |
+| New opcode | Unit test in the crate that lowers it |
+| New `r2s` command | Integration test in `crates/r2s/tests/` |
+| New optimization pass | Unit test in `r2ssa` with before and after SSA |
 | Bug fix | Regression test reproducing the bug |
-| Decompiler change | e2e test via the `pd:s` decompiler command |
-
-### Adding a test binary pattern
-
-If your change needs a specific binary pattern to exercise:
-
-1. Add a function to `tests/e2e/vuln_test.c`
-2. Add it to the `main()` switch
-3. Recompile: `gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c`
-
-See [doc/testing.md](doc/testing.md) for the full guide.
+| Decompiler change | The certification gate, plus a unit test for the rule |
 
 ### Running tests
 
 ```bash
-# Unit tests
-cargo test --all-features
+# --no-fail-fast, always: without it one crate's failure hides the rest
+cargo test --workspace --all-features --no-fail-fast
 
-# Integration tests
-cd tests/e2e
-cargo test
+# One crate
+cargo test -p r2ssa --all-features
 
-# Specific test
-cd tests/e2e
-cargo test test_taint_analysis
+# The certification gate, which runs the built shell
+python3 scripts/certify_render.py --bins <radare2>/test/bins/elf \
+  --limit 24 --functions 8
 ```
+
+See [doc/testing.md](doc/testing.md) for the full guide.
 
 Pull Request Checklist
 ----------------------
 
 Before submitting a PR, confirm:
 
-- [ ] `cargo build --all-features` succeeds
-- [ ] `cargo test --all-features` passes
-- [ ] `cargo clippy --all-features -- -D warnings` is clean
-- [ ] `cd tests/e2e && cargo test` passes (if plugin-related)
+- [ ] `cargo build --workspace --all-features` succeeds
+- [ ] `cargo test --workspace --all-features --no-fail-fast` passes
+- [ ] `cargo clippy --workspace --all-features -- -D warnings` is clean
+- [ ] `bash scripts/structure-report.sh` does not raise the structural debt
 - [ ] New features have tests
 - [ ] Commit messages follow the style above
 - [ ] Documentation updated if needed (doc/, AGENTS.md)

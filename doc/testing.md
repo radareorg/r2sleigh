@@ -4,15 +4,32 @@ Testing Strategy
 Overview
 --------
 
-r2sleigh has approximately 200 tests across 7 crates plus an end-to-end
-integration test suite. All new features require tests.
+Tests live beside the code they test, as inline `#[cfg(test)]` modules, plus
+per-crate integration tests and a set of end-to-end harnesses that run the
+built `r2s`. All new features require tests, and a fix requires the test that
+reproduces what it fixed.
 
-Test Levels
+The whole suite runs with:
+
+```bash
+cargo test --workspace --all-features --no-fail-fast
+```
+
+**`--no-fail-fast` is not optional.** Without it `cargo test` stops at the first
+failing target, so one crate's known failure hides every failure in every target
+that would have run after it. A whole session once reported the suite green
+apart from two known fixtures while two more were red behind them. When a suite
+is reported, report the count it printed rather than the class that was
+expected, and give every standing failure a recorded cause — a failure count
+with no cause becomes a lens that filters out everything not already in it.
+
+Test levels
 -----------
 
-### Unit Tests
+### Unit tests
 
-Each crate has inline test modules:
+Each crate has inline test modules. This is where a lowering, a predicate or a
+certificate is pinned.
 
 ```rust
 #[cfg(test)]
@@ -20,200 +37,98 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_my_feature() {
+    fn a_narrow_return_certifies_the_full_carrier() {
         // ...
     }
 }
 ```
 
-Run with:
+### Crate integration tests
+
+`crates/<crate>/tests/` holds tests that drive a crate's public surface without
+reaching inside it. `crates/r2engine/tests/native.rs` is the model: it builds an
+in-memory program out of byte literals, implements the six-method `Program`
+trait over it, and asserts on what the engine renders. No binary on disk, no
+external tool, no fixture to regenerate.
+
+### End-to-end gates
+
+These run the built `r2s` over real binaries. **Build before measuring**: the
+harnesses default to `target/debug/r2s`, which `cargo build --release` does not
+touch, and a measurement taken after one describes a tree several changes old.
 
 ```bash
-cargo test --all-features
+# Certification: every named function renders, and reads nothing
+# that was never written. radare2 is not run.
+python3 scripts/certify_render.py --bins <radare2>/test/bins/elf \
+  --limit 24 --functions 8
+
+# Differential: the same commands through radare2 and through r2s.
+python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30
+
+# Coverage: how much of a whole binary renders at all, against a
+# blessed baseline.
+./tests/coverage/run_coverage.sh
 ```
 
-### Integration Tests (tests/e2e/)
+A disagreement with radare2 is not automatically a defect in `r2s`. It may be
+radare2's, in which case the fix goes upstream as its own pull request and the
+expectation is corrected rather than matched.
 
-End-to-end tests run radare2 with the plugin installed and validate output.
-Located in tests/e2e/integration_tests.rs.
+What each kind of change needs
+------------------------------
 
-Run with:
+| Change | Test |
+|---|---|
+| New opcode | Unit test in the crate that lowers it |
+| New lowering or fold | Unit test, plus a tier print that shows it |
+| New `r2s` command | Integration test in `crates/r2s/tests/` |
+| Optimization pass | Unit test in `r2ssa` with before and after SSA |
+| Decompiler change | The certification gate, plus a unit test for the rule |
+| Bug fix | A regression test reproducing the original bug |
+| Discovery or naming change | The differential gate, with the disagreement judged |
+
+Baselines and blessing
+----------------------
+
+The coverage baseline (`tests/coverage/coverage-baseline.json`) records, per
+function, whether it rendered and the typed cause when it did not. A function
+that rendered and now refuses fails the gate. A function that now renders is
+reported and needs `--accept-baseline` to be recorded.
+
+**A baseline is re-blessed only after the new output has been read and judged
+correct**, never because it merely differs. The corpus is a canary, not a
+specification: the verifier rewrites the C it checks, so agreement with a
+recorded output is evidence that nothing moved, not evidence that the output is
+right.
+
+Diagnostics
+-----------
+
+`R2DEC_TRACE_REFUSAL=1` turns on the evidence channel: every `refusal_evidence!`
+site prints its predicate, its file and line, and its operands. It gates the
+body walk, the dispatch-table resolution, the value-range solve, the per-phase
+cost line and the obligation shape.
+
+Use it to find *where*, then attach a debugger to see *what*. Re-running under
+the evidence channel and grepping a different tag each time is print debugging
+with extra steps; one stop on the refusing predicate shows the whole frame at
+once.
+
+The three tier prints narrow a defect to exactly one lowering:
 
 ```bash
-cd tests/e2e
-cargo test
+r2s -q -c 's main; pdil' BINARY   # r2il, as lifted
+r2s -q -c 's main; pdim' BINARY   # r2ssa, with each value's binding disposition
+r2s -q -c 's main; pdih' BINARY   # the r2dec tree, before rendering
 ```
 
-### Snapshot Tests (tests/r2r/)
+Before committing
+-----------------
 
-Fast deterministic regression checks using `r2r` with diffable expectations.
-
-Run with:
-
-```bash
-make -C tests/r2r run
-```
-
-The `tests/r2r` harness installs the plugin with `all-archs` by default so
-running snapshots does not clobber a local ARM/RISC-V capable plugin install.
-Override with `R2R_RUST_FEATURES=...` only when you intentionally want a
-reduced backend set.
-
-`tests/r2r` is preferred for stable command output checks (`a:sla.info/json/regs/mem/vars`)
-and migrated deterministic integration checks from:
-- `plugin_status`
-- `instruction_analysis` (deterministic slice)
-- `function_ssa` / `ssa_opt` (deterministic slice)
-- `cfg`
-- `slicing` (basic deterministic slice)
-- stress regression smoke checks
-- taint/symbolic/path/interactive-symbolic stable slices
-- decompilation guardrail snapshots
-- deep radare2 integration smoke checks
-
-Prefer exact normalized snapshots there for stable user-facing output. Use
-`tests/r2r/normalize_snapshot.py` and `jq -S -c` to canonicalize cross-platform
-noise before snapshotting. Keep structural assertions for high-churn payloads
-such as SSA, symbolic execution, taint, and large CFG/DOM JSON.
-
-`tests/e2e` keeps non-snapshot checks (CLI run behavior, direct FFI, and
-analysis-quality benchmark thresholds).
-
-### Advisory Semantic Metadata Benchmark
-
-Use the benchmark script to compare semantic output and `aaaa` timing with
-semantic metadata enabled vs disabled:
-
-```bash
-python3 scripts/bench_semantic_metadata.py \
-  --runs 7 \
-  --max-overhead-pct 5 \
-  --json-out /tmp/semantic-bench.json
-```
-
-Default behavior is advisory (always exits `0`) and reports PASS/FAIL in the
-output JSON. Use `--strict` to return non-zero on threshold failures.
-
-Test Harness
-------------
-
-The e2e harness (tests/e2e/lib.rs) provides:
-
-### r2_cmd(binary, cmd)
-
-Run a radare2 command on a binary. Returns R2Result.
-
-### r2_at_func(binary, func, cmd)
-
-Seek to a function then run a command:
-
-```rust
-let result = r2_at_func(vuln_test_binary(), "main", "pd:s");
-result.assert_ok();
-assert!(result.contains("int"));
-```
-
-### r2_at_addr(binary, addr, cmd)
-
-Seek to an address then run a command.
-
-### R2Result
-
-```rust
-pub struct R2Result {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
-    pub crashed: bool,
-    pub panicked: bool,
-}
-```
-
-Methods:
-- assert_ok() -- panics if crashed or panicked
-- contains(pattern) -- check stdout/stderr for string
-- contains_all(patterns) -- all patterns present
-- contains_any(patterns) -- any pattern present
-- parse_json::<T>() -- deserialize stdout as JSON
-
-Test Binaries
--------------
-
-### vuln_test.c
-
-Located at tests/e2e/vuln_test.c. Contains test functions exercising
-specific patterns. Each function is a numbered test case selected via
-main()'s switch statement.
-
-Compile:
-
-```bash
-gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c
-```
-
-### Adding a Test Pattern
-
-1. Add a function to vuln_test.c:
-
-```c
-int test_my_pattern(int x) {
-    // Pattern that exercises the feature
-    return x * 2;
-}
-```
-
-2. Add to main() switch:
-
-```c
-case N:
-    result = test_my_pattern(atoi(argv[2]));
-    break;
-```
-
-3. Recompile the binary.
-
-4. Add integration test:
-
-```rust
-#[test]
-fn test_my_pattern() {
-    let result = r2_at_func(vuln_test_binary(), "test_my_pattern", "pd:s");
-    result.assert_ok();
-    assert!(result.contains("expected_output"));
-}
-```
-
-What to Test for Each Feature
------------------------------
-
-New opcode:
-  - Unit test in crate
-  - r2r test via a:sla.debug.json when output is deterministic
-  - e2e semantic assertion if structure/churn requires richer parsing
-
-New plugin command:
-  - r2r exact normalized snapshot for deterministic user-facing output
-  - e2e test for semantic/edge-case behavior where snapshots are brittle
-
-New optimization pass:
-  - Unit test in r2ssa with before/after SSA
-  - e2e test via a:sla.debug.ssa.func.opt
-
-Bug fix:
-  - Regression test reproducing the original bug
-
-Decompiler change:
-  - r2r exact normalized full snapshot via `pd:s` only for an exact source-backed fixture
-  - e2e only when decompiler behavior needs semantic parsing instead of snapshot diffs
-
-Test Coverage Checklist
------------------------
-
-Before committing:
-
-1. cargo build --features x86 succeeds
-2. cargo test --features x86 passes
-3. make -C tests/r2r run passes (for deterministic plugin-output changes)
-4. cd tests/e2e && cargo test passes (for semantic/ffi/high-churn plugin changes)
-5. New feature has at least one test
-6. Edge cases are covered (empty input, large input, error paths)
+1. `cargo fmt --all -- --check`
+2. `cargo clippy --workspace --all-features -- -D warnings`
+3. `cargo test --workspace --all-features --no-fail-fast`
+4. `bash scripts/structure-report.sh` — the structural debt may fall, never rise
+5. The gate that covers what changed, from the table above
+6. New behaviour has at least one test, and edge cases are covered
