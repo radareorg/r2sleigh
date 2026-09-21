@@ -1643,13 +1643,6 @@ impl Native<'_> {
     }
 }
 
-/// The longest text a capture will read out of one address.
-///
-/// Long enough for any format string or message a program renders, and short
-/// enough that a constant landing in a run of printable bytes cannot pull the
-/// whole section in behind it.
-const LITERAL_LIMIT: usize = 4096;
-
 /// Where each direct call is made and what it reaches.
 ///
 /// The walk collects call targets without saying which instruction made each
@@ -1740,18 +1733,8 @@ impl Native<'_> {
 
     /// The text at an address, where there is text there.
     fn text_at(&self, address: u64) -> Option<String> {
-        let bytes = self.program.read(address, LITERAL_LIMIT)?;
-        // A run of printable bytes that never terminates is not text, and
-        // neither is an empty one. One character is: a program that points at
-        // `"x"` points at a string.
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .filter(|end| *end > 0)?;
-        let text = std::str::from_utf8(&bytes[..end]).ok()?;
-        text.chars()
-            .all(|c| !c.is_control() || c == '\n' || c == '\t')
-            .then(|| text.to_owned())
+        let bytes = self.program.read(address, crate::names::LITERAL_LIMIT)?;
+        crate::names::text_in(&bytes).map(str::to_owned)
     }
 }
 

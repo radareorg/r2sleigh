@@ -2,7 +2,7 @@
 
 mod commands;
 #[cfg(feature = "sleigh")]
-mod flags;
+mod names;
 mod session;
 
 use clap::Parser;

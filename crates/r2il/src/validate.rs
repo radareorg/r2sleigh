@@ -796,29 +796,10 @@ pub fn validate_block(block: &R2ILBlock) -> Result<(), ValidationError> {
     }
 
     if let Some(sw) = &block.switch_info {
-        if sw.min_val > sw.max_val {
-            issues.push(ValidationIssue::new(
-                "block.switch.range_invalid",
-                "block.switch_info",
-                format!(
-                    "switch min_val ({}) must be <= max_val ({})",
-                    sw.min_val, sw.max_val
-                ),
-            ));
-        }
-
+        // One case value per arm: two arms labelled the same would make the
+        // selector name two targets, which is not a table.
         let mut seen_case_values = HashSet::new();
         for (i, case) in sw.cases.iter().enumerate() {
-            if case.value < sw.min_val || case.value > sw.max_val {
-                issues.push(ValidationIssue::new(
-                    "block.switch.case_out_of_range",
-                    format!("block.switch_info.cases[{i}].value"),
-                    format!(
-                        "case value {} is outside switch range [{}, {}]",
-                        case.value, sw.min_val, sw.max_val
-                    ),
-                ));
-            }
             if !seen_case_values.insert(case.value) {
                 issues.push(ValidationIssue::new(
                     "block.switch.duplicate_case_value",
@@ -1950,12 +1931,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_switch_metadata_fails() {
+    fn two_arms_labelled_the_same_fail() {
         let mut block = valid_block();
         block.switch_info = Some(SwitchInfo {
             switch_addr: 0x1000,
-            min_val: 10,
-            max_val: 5,
             default_target: Some(0x1200),
             cases: vec![
                 SwitchCase {
@@ -1970,16 +1949,6 @@ mod tests {
         });
 
         let err = validate_block(&block).expect_err("block should fail");
-        assert!(
-            err.issues
-                .iter()
-                .any(|i| i.code == "block.switch.range_invalid")
-        );
-        assert!(
-            err.issues
-                .iter()
-                .any(|i| i.code == "block.switch.case_out_of_range")
-        );
         assert!(
             err.issues
                 .iter()

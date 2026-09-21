@@ -20,37 +20,6 @@ use crate::SSAOp;
 use crate::function::{SSAFunction, SsaArtifact};
 use crate::graph::{GraphInst, InstPayload, SsaGraph, UseSite, ValueId};
 
-/// A call site and the table entries it can reach.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedIndirectCall {
-    pub block_addr: u64,
-    pub op_index: usize,
-    pub table_address: u64,
-    pub targets: Vec<u64>,
-}
-
-/// One table of function pointers as the caller sees it.
-pub trait PointerTable {
-    fn address(&self) -> u64;
-    /// Bytes between consecutive entries, as the table was read.
-    fn entry_size(&self) -> u32;
-    fn targets(&self) -> &[u64];
-}
-
-impl PointerTable for r2source::SourceCodePointerTable {
-    fn address(&self) -> u64 {
-        Self::address(self)
-    }
-
-    fn entry_size(&self) -> u32 {
-        Self::entry_size(self)
-    }
-
-    fn targets(&self) -> &[u64] {
-        Self::targets(self)
-    }
-}
-
 pub(crate) fn exact_input(graph: &SsaGraph, inst: &GraphInst, input_idx: usize) -> Option<ValueId> {
     let value = *inst.inputs.get(input_idx)?;
     graph
@@ -431,45 +400,6 @@ fn dispatch_table_reads_in_graph(
         .collect()
 }
 
-/// The entries one read selects, where a known table holds them.
-fn selected_targets<T: PointerTable>(read: &DispatchTableRead, tables: &[T]) -> Option<Vec<u64>> {
-    let entry = u64::from(read.entry_size);
-    // The base need not be the address the table was read from: a table read
-    // as one run may be indexed from an entry inside it. What it must be is an
-    // entry boundary, or the read steps between entries.
-    let table = tables.iter().find(|table| {
-        table.entry_size() == read.entry_size
-            && read.address >= table.address()
-            && (read.address - table.address()).is_multiple_of(entry)
-    })?;
-    let first = usize::try_from((read.address - table.address()) / entry).ok()?;
-    // A range reaching past the last entry read is not proven: the table may
-    // continue where the read stopped.
-    let last = first.checked_add(read.entries.checked_sub(1)?)?;
-    let selected = table.targets().get(first..=last)?;
-    (!selected.is_empty()).then(|| selected.to_vec())
-}
-
-/// Resolve every indirect transfer whose reachable target set can be proven.
-fn resolve_indirect_calls_in_graph<T: PointerTable>(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    values: &crate::values::ValueRanges,
-    tables: &[T],
-) -> Vec<ResolvedIndirectCall> {
-    dispatch_table_reads_in_graph(function, graph, values)
-        .into_iter()
-        .filter_map(|read| {
-            Some(ResolvedIndirectCall {
-                block_addr: read.block_addr,
-                op_index: read.op_index,
-                table_address: read.address,
-                targets: selected_targets(&read, tables)?,
-            })
-        })
-        .collect()
-}
-
 /// Where every dispatch in one function reads its target.
 ///
 /// Answered without any table in hand, which is how the native route learns
@@ -482,20 +412,6 @@ pub fn dispatch_table_reads(artifact: &SsaArtifact) -> Vec<DispatchTableRead> {
     )
 }
 
-/// Resolve every indirect transfer against the graph retained by the artifact.
-/// The function and graph therefore share one `ValueId`/`InstId` universe.
-pub fn resolve_indirect_calls<T: PointerTable>(
-    artifact: &SsaArtifact,
-    tables: &[T],
-) -> Vec<ResolvedIndirectCall> {
-    resolve_indirect_calls_in_graph(
-        artifact.function(),
-        artifact.graph(),
-        &artifact.facts().values,
-        tables,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,30 +420,12 @@ mod tests {
     use crate::domtree::DomTree;
     use crate::function::SSABlock;
 
-    struct Table {
-        address: u64,
-        entry_size: u32,
-        targets: Vec<u64>,
-    }
-
-    impl PointerTable for Table {
-        fn address(&self) -> u64 {
-            self.address
-        }
-        fn entry_size(&self) -> u32 {
-            self.entry_size
-        }
-        fn targets(&self) -> &[u64] {
-            &self.targets
-        }
-    }
-
-    fn resolve_test_indirect_calls<T: PointerTable>(
-        blocks: &[SSABlock],
-        cfg: &CFG,
-        _domtree: &DomTree,
-        tables: &[T],
-    ) -> Vec<ResolvedIndirectCall> {
+    /// What each dispatch in these blocks says it reads.
+    ///
+    /// Answered without a table in hand, because that is how the engine asks:
+    /// the read states where the table is and how far it runs, and whoever
+    /// owns the bytes proves the rest.
+    fn test_dispatch_reads(blocks: &[SSABlock], cfg: &CFG) -> Vec<DispatchTableRead> {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg.clone());
         let graph = SsaGraph::from_function(&function);
         // The dispatch is resolved from what the address can be, so the test
@@ -535,7 +433,7 @@ mod tests {
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
         let values =
             crate::values::solve_value_ranges(&graph, &function, &predicates, &Default::default());
-        resolve_indirect_calls_in_graph(&function, &graph, &values, tables)
+        dispatch_table_reads_in_graph(&function, &graph, &values)
     }
 
     /// The graph for a straight guard: entry dominates both arms.
@@ -574,7 +472,7 @@ mod tests {
     ///
     /// Block 0 tests the bound and branches away on failure, so arriving at
     /// block 0x20 proves `i < 5`; the unsigned test proves `i >= 0`.
-    fn guarded_dispatch(bound: u64, entries: usize) -> (Vec<SSABlock>, Vec<Table>) {
+    fn guarded_dispatch(bound: u64) -> Vec<SSABlock> {
         let index = input("index", 8);
         let cond = temp("cond", 1);
         let scaled = temp("scaled", 8);
@@ -632,44 +530,31 @@ mod tests {
                 ],
             },
         ];
-        let targets = (0..entries).map(|i| 0x1000 + i as u64 * 0x20).collect();
-        (
-            blocks,
-            vec![Table {
-                address: 0xc000,
-                entry_size: 8,
-                targets,
-            }],
-        )
+        blocks
     }
 
     #[test]
-    fn a_guarded_index_resolves_to_exactly_the_entries_it_can_select() {
-        let (blocks, tables) = guarded_dispatch(5, 5);
-        let (cfg, domtree) = graph_for(&blocks, 0x20, Some(0x10));
-        let resolved = resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].table_address, 0xc000);
-        assert_eq!(resolved[0].targets, tables[0].targets);
+    fn a_guarded_index_reads_exactly_the_entries_it_can_select() {
+        let blocks = guarded_dispatch(5);
+        let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
+        let reads = test_dispatch_reads(&blocks, &cfg);
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].address, 0xc000);
+        assert_eq!(reads[0].entries, 5);
+        assert_eq!(reads[0].entry_size, 8);
     }
 
     #[test]
-    fn a_guard_wider_than_the_table_proves_nothing() {
-        // The index may reach past the entries that were read, so the target
-        // set is unknown and must stay unknown rather than be truncated.
-        let (blocks, tables) = guarded_dispatch(9, 5);
-        let (cfg, domtree) = graph_for(&blocks, 0x20, Some(0x10));
-        assert!(resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables).is_empty());
-    }
-
-    #[test]
-    fn a_stride_the_table_was_not_read_at_proves_nothing() {
-        // Reading 8-byte entries and stepping by 4 lands halfway into each one,
-        // so the target set the read describes is not the set the call reaches.
-        let (blocks, mut tables) = guarded_dispatch(5, 5);
-        tables[0].entry_size = 4;
-        let (cfg, domtree) = graph_for(&blocks, 0x20, Some(0x10));
-        assert!(resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables).is_empty());
+    fn a_guard_wider_than_the_table_reads_wider_than_the_table() {
+        // The index may reach past the entries the table holds, and the read
+        // says so rather than truncating: nine entries is what the guard
+        // permits, and whoever owns the bytes refuses the four that are not
+        // instructions.
+        let blocks = guarded_dispatch(9);
+        let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
+        let reads = test_dispatch_reads(&blocks, &cfg);
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].entries, 9);
     }
 
     /// The shape hardware actually emits, taken from an arm64 -O1 dispatch.
@@ -677,7 +562,7 @@ mod tests {
     /// `cmp w0, 3` lands in a flag, `b.ls` tests its negation, the table base
     /// is built by `adrp`+`add`, and the transfer is a tail-call branch. None
     /// of it is a literal operand, and all of it is exact.
-    fn hardware_dispatch(entries: usize) -> (Vec<SSABlock>, Vec<Table>) {
+    fn hardware_dispatch() -> Vec<SSABlock> {
         let index = input("w0", 4);
         let flag = temp("cy", 1);
         let zero = temp("zr", 1);
@@ -773,35 +658,19 @@ mod tests {
             },
         ];
         // The table was read from 0xc000, but the code indexes from 0xc010.
-        let targets = (0..entries).map(|i| 0x1000 + i as u64 * 0x20).collect();
-        (
-            blocks,
-            vec![Table {
-                address: 0xc000,
-                entry_size: 8,
-                targets,
-            }],
-        )
+        blocks
     }
 
     #[test]
     fn a_flag_tested_by_its_negation_still_bounds_the_index() {
-        // Two entries precede the base the code indexes from, and four follow.
-        let (blocks, tables) = hardware_dispatch(6);
-        let (cfg, domtree) = graph_for(&blocks, 0x20, Some(0x10));
-        let resolved = resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].table_address, 0xc010);
-        assert_eq!(resolved[0].targets, tables[0].targets[2..6]);
-    }
-
-    #[test]
-    fn a_base_inside_a_table_still_has_to_fit_the_entries_that_were_read() {
-        // Indexing from entry two of a five-entry table can select four, and
-        // the read only describes three of them.
-        let (blocks, tables) = hardware_dispatch(5);
-        let (cfg, domtree) = graph_for(&blocks, 0x20, Some(0x10));
-        assert!(resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables).is_empty());
+        // Two entries precede the base the code indexes from, and four follow,
+        // so the read starts at the base rather than at the table.
+        let blocks = hardware_dispatch();
+        let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
+        let reads = test_dispatch_reads(&blocks, &cfg);
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].address, 0xc010);
+        assert_eq!(reads[0].entries, 4);
     }
 
     #[test]
@@ -836,13 +705,8 @@ mod tests {
                 },
             ],
         }];
-        let (cfg, domtree) = graph_for(&blocks, 0, None);
-        let tables = vec![Table {
-            address: 0xc000,
-            entry_size: 8,
-            targets: vec![0x1000, 0x1020],
-        }];
-        assert!(resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables).is_empty());
+        let (cfg, _) = graph_for(&blocks, 0, None);
+        assert!(test_dispatch_reads(&blocks, &cfg).is_empty());
     }
 
     #[test]
@@ -906,13 +770,7 @@ mod tests {
                 ],
             },
         ];
-        let (cfg, domtree) = graph_for(&blocks, 0x20, Some(0x10));
-        let tables = [Table {
-            address: 0xc000,
-            entry_size: 8,
-            targets: vec![0x1000, 0x1020],
-        }];
-
-        assert!(resolve_test_indirect_calls(&blocks, &cfg, &domtree, &tables).is_empty());
+        let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
+        assert!(test_dispatch_reads(&blocks, &cfg).is_empty());
     }
 }

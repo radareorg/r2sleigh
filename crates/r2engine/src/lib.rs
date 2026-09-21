@@ -7,6 +7,7 @@
 //! source snapshot request.
 
 pub mod discovery;
+pub mod names;
 pub mod native;
 
 use std::collections::{BTreeSet, HashMap};
@@ -5454,8 +5455,6 @@ mod tests {
         let mut switch = R2ILBlock::new(0x1004, 4);
         switch.switch_info = Some(r2il::SwitchInfo {
             switch_addr: 0x1004,
-            min_val: 0,
-            max_val: 1,
             default_target: Some(0x1008),
             cases: vec![r2il::SwitchCase {
                 value: 0,

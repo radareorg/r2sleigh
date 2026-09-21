@@ -46,9 +46,6 @@ use crate::span::StorageSpans;
 use crate::var::{SSAVar, SSAVarNameKind};
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 
-/// Switch case information: Vec of (case_value, target_address) pairs and optional default target.
-pub type SwitchInfo = (Vec<(u64, u64)>, Option<u64>);
-
 /// Query-only CFG risk summary for decompilation preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CFGRiskSummary {
@@ -2256,15 +2253,6 @@ impl TrustedSsaArtifact {
         &self.arch
     }
 
-    /// Everything this function proves about itself.
-    ///
-    /// The pointer tables come from the source, which can read memory; the
-    /// range of each index comes from the branches that had to be taken to
-    /// reach the call. Both are needed, and only here are both in hand.
-    pub fn proven_facts(&self) -> crate::proven::ProvenFacts {
-        crate::proven::prove(self.artifact(), self.source().image().code_pointer_tables())
-    }
-
     pub fn source(&self) -> &OwnedFunctionSnapshot {
         match &self.artifact.provenance {
             SsaArtifactProvenance::TrustedSource(source) => source,
@@ -2630,10 +2618,6 @@ impl<'a> RewrittenFunction<'a> {
 
     pub fn successors(&self, addr: u64) -> Vec<u64> {
         self.source.successors(addr)
-    }
-
-    pub fn switch_info(&self, addr: u64) -> Option<SwitchInfo> {
-        self.source.switch_info(addr)
     }
 
     pub fn dominates(&self, a: u64, b: u64) -> bool {
@@ -4025,17 +4009,6 @@ impl SSAFunction {
         self.cfg.successors(addr)
     }
 
-    /// Get switch info for a block, if it's a switch terminator.
-    /// Returns Some((cases, default)) where cases is Vec<(value, target)>.
-    pub fn switch_info(&self, addr: u64) -> Option<SwitchInfo> {
-        let block = self.cfg.get_block(addr)?;
-        if let crate::cfg::BlockTerminator::Switch { cases, default } = &block.terminator {
-            Some((cases.clone(), *default))
-        } else {
-            None
-        }
-    }
-
     /// Check if block A dominates block B.
     pub fn dominates(&self, a: u64, b: u64) -> bool {
         self.domtree.dominates(a, b)
@@ -4053,7 +4026,11 @@ impl SSAFunction {
         let mut max_switch_cases = 0usize;
 
         for block in self.blocks() {
-            if let Some((cases, default)) = self.switch_info(block.addr) {
+            if let Some(crate::cfg::BlockTerminator::Switch { cases, default }) = self
+                .cfg
+                .get_block(block.addr)
+                .map(|block| &block.terminator)
+            {
                 switch_block_count += 1;
                 let case_count = cases.len() + usize::from(default.is_some());
                 max_switch_cases = max_switch_cases.max(case_count);
@@ -11495,8 +11472,6 @@ mod tests {
                 ops: vec![],
                 switch_info: Some(R2ILSwitchInfo {
                     switch_addr: 0x1020,
-                    min_val: 0,
-                    max_val: 2,
                     default_target: Some(0x1040),
                     cases: vec![
                         SwitchCase {
@@ -11563,8 +11538,6 @@ mod tests {
         });
         selector.set_switch_info(R2ILSwitchInfo {
             switch_addr: 0x1080,
-            min_val: 1,
-            max_val: 2,
             default_target: Some(0x10b0),
             cases: vec![
                 SwitchCase {

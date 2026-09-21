@@ -1080,8 +1080,6 @@ mod tests {
             }],
             switch_info: Some(r2il::SwitchInfo {
                 switch_addr: 0x4000,
-                min_val: 0,
-                max_val: 7,
                 default_target: Some(0x4020),
                 cases,
             }),

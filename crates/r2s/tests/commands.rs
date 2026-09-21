@@ -142,6 +142,58 @@ fn an_unmapped_address_is_refused_rather_than_invented() {
 }
 
 #[test]
+fn every_named_address_is_spelled_in_one_vocabulary() {
+    let run = r2s("f");
+    assert!(run.ok, "{}", run.out);
+    // One table, one spelling per kind: what the container declared, what the
+    // loader runs, what the linker stubs, what the data holds.
+    for expected in [
+        "sym.fnv1a32",
+        "entry0",
+        "entry.init0",
+        "entry.fini0",
+        "sym.imp.__printf_chk",
+        "section..text",
+    ] {
+        assert!(
+            run.out.contains(expected),
+            "{expected} missing:\n{}",
+            run.out
+        );
+    }
+    // A function symbol is not also an entry: the symbol table already named
+    // it, and two names for one address is the defect this table replaced.
+    assert!(!run.out.contains("entry1"), "{}", run.out);
+}
+
+#[test]
+fn a_string_is_named_only_where_it_is_terminated() {
+    let run = r2s("f~str.");
+    assert!(run.ok, "{}", run.out);
+    let rows: Vec<&str> = run.out.lines().filter(|l| l.contains("str.")).collect();
+    assert!(!rows.is_empty(), "{}", run.out);
+    for row in &rows {
+        // Size counts the terminator, so a named string is at least two bytes
+        // and never zero-width.
+        let size: u64 = row.split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert!(size >= 2, "{row}");
+    }
+}
+
+#[test]
+fn the_engine_and_the_listing_read_one_entry() {
+    // `pdd` spells a call by the import's own name and `pd` writes the flag,
+    // and both come from the same row rather than from two tables that can
+    // drift apart.
+    let listed = r2s("f~sym.imp.__printf_chk");
+    assert!(listed.ok && !listed.out.trim().is_empty(), "{}", listed.out);
+    let rendered = r2s("s 0x401050; pdd");
+    assert!(rendered.ok, "{}", rendered.out);
+    assert!(rendered.out.contains("__printf_chk"), "{}", rendered.out);
+    assert!(!rendered.out.contains("sym_imp"), "{}", rendered.out);
+}
+
+#[test]
 fn the_image_reports_what_the_container_states() {
     let run = r2s("i");
     assert!(run.ok, "{}", run.out);

@@ -1815,8 +1815,6 @@ pub fn stable_ssa_semantic_fingerprint(artifact: &SsaArtifact) -> u64 {
                 Some(switch) => {
                     writer.tag(1);
                     writer.u64(switch.switch_addr);
-                    writer.u64(switch.min_val);
-                    writer.u64(switch.max_val);
                     writer.option_u64(switch.default_target);
                     let mut cases = switch
                         .cases
@@ -2289,8 +2287,6 @@ mod tests {
             }],
             switch_info: Some(SwitchInfo {
                 switch_addr: 0x4000,
-                min_val: 0,
-                max_val: 1,
                 default_target: Some(0x4030),
                 cases,
             }),

@@ -1,0 +1,445 @@
+//! What this binary calls each address, filled from what the container states.
+//!
+//! The table itself is `r2engine::names::NameDb`: one name per address, stored
+//! plain beside the namespace it belongs to, so the engine can key a prototype
+//! by `printf` while a listing writes `sym.imp.printf`. This module is the
+//! half that only the host can do -- reading the container and decoding the
+//! linkage stubs -- plus the substitution that puts a name where a listing
+//! would otherwise print a number.
+
+use std::collections::BTreeMap;
+
+use r2engine::discovery::Confidence;
+use r2engine::names::{Name, NameDb, Namespace};
+use r2il::R2ILOp;
+use r2image::{EntryKind, Image, SymbolKind};
+use r2sleigh_lift::Disassembler;
+
+/// Sleigh fetches a whole window whatever the instruction needs.
+const DECODE_WINDOW: usize = 16;
+
+/// Every address this binary names, as the container states it.
+pub fn of(image: &Image) -> NameDb {
+    let mut db = NameDb::new();
+    for section in image.sections() {
+        // A section the loader does not map occupies no address, and a
+        // section at zero names nothing -- the same rule a symbol is held to.
+        // Naming one made every literal `0x0` in a listing read
+        // `section..comment`.
+        if section.name.is_empty() || !section.loaded || section.vaddr == 0 {
+            continue;
+        }
+        db.insert(
+            section.vaddr,
+            Name {
+                text: section.name.clone(),
+                namespace: Namespace::Section,
+                size: section.vsize,
+                confidence: Confidence::Stated,
+            },
+        );
+    }
+    for symbol in image.symbols() {
+        if !names_an_address(symbol) {
+            continue;
+        }
+        db.insert(
+            symbol.vaddr,
+            Name {
+                text: symbol.name.clone(),
+                namespace: match symbol.kind {
+                    SymbolKind::Section => Namespace::Section,
+                    SymbolKind::Function => Namespace::Symbol,
+                    _ => Namespace::Object,
+                },
+                size: symbol.size,
+                confidence: Confidence::Stated,
+            },
+        );
+    }
+    // An entry the loader runs is named for the list it came from, and the
+    // declared one is `entry0` whatever else names that address. A symbol
+    // typed as a function is an entry too, but the symbol table already names
+    // it, so it gets no second name here.
+    let mut inits = 0;
+    let mut finis = 0;
+    for entry in image.entry_points() {
+        let text = match entry.kind {
+            EntryKind::Main => "entry0".to_owned(),
+            EntryKind::Init => {
+                inits += 1;
+                format!("entry.init{}", inits - 1)
+            }
+            EntryKind::Fini => {
+                finis += 1;
+                format!("entry.fini{}", finis - 1)
+            }
+            EntryKind::Symbol => continue,
+        };
+        db.insert(
+            entry.vaddr,
+            Name {
+                text,
+                namespace: Namespace::Entry,
+                size: 0,
+                confidence: Confidence::Stated,
+            },
+        );
+    }
+    db
+}
+
+/// Name every string the data sections hold.
+///
+/// radare2 names a run of printable bytes however it ends, which turns four
+/// bytes of a hash table into `str._E7_`. A string this names is terminated,
+/// because that is what makes it a string a program could pass to anything,
+/// and it is long enough that finding one by chance is not expected.
+pub fn name_strings(db: &mut NameDb, image: &Image) {
+    let scanned: u64 = image
+        .sections()
+        .iter()
+        .filter(|section| holds_text(section))
+        .map(|section| section.vsize)
+        .sum();
+    // One bar for the whole listing, because that is what a reader reads: a
+    // short section must not get a lower bar than the binary it is part of.
+    let floor = chance_run_length(scanned);
+    for section in image.sections() {
+        if !holds_text(section) {
+            continue;
+        }
+        let Some(bytes) = image.read_upto(section.vaddr, section.vsize as usize) else {
+            continue;
+        };
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let Some(text) = r2engine::names::text_in(&bytes[at..]) else {
+                at += 1;
+                continue;
+            };
+            let run = text.len();
+            if run >= floor {
+                db.insert(
+                    section.vaddr + at as u64,
+                    Name {
+                        text: sanitised(text),
+                        namespace: Namespace::String,
+                        // The terminator belongs to the string: it is what a
+                        // reader has to step over to reach the next one.
+                        size: run as u64 + 1,
+                        confidence: Confidence::Stated,
+                    },
+                );
+            }
+            at += run + 1;
+        }
+    }
+}
+
+/// Which sections a string can live in.
+fn holds_text(section: &r2image::Section) -> bool {
+    section.loaded && !section.is_code && section.vsize > 0
+}
+
+/// The shortest run this binary is not expected to contain by chance.
+///
+/// A printable byte is one of ninety-five values in two hundred and fifty-six,
+/// so a run of `n` of them followed by a terminator has probability
+/// `(95/256)^n / 256` at any offset. Over `size` offsets the expected number of
+/// such runs is `size` times that, and this returns the smallest `n` that puts
+/// it at or below one. The bound is derived from the bytes being scanned
+/// rather than picked, so a larger binary asks for a longer run by itself.
+fn chance_run_length(size: u64) -> usize {
+    const PRINTABLE: f64 = 95.0 / 256.0;
+    let expected = (size.max(1) as f64) / 256.0;
+    if expected <= 1.0 {
+        return 1;
+    }
+    (expected.ln() / -PRINTABLE.ln()).ceil() as usize
+}
+
+/// The name radare2 writes for a string: its text, with everything that is not
+/// an identifier character replaced.
+fn sanitised(text: &str) -> String {
+    text.chars()
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c,
+            false => '_',
+        })
+        .collect()
+}
+
+/// Give each import stub the name of the import it stands for.
+pub fn name_imports(db: &mut NameDb, imports: &BTreeMap<u64, String>) {
+    for (stub, symbol) in imports {
+        db.insert(
+            *stub,
+            Name {
+                text: symbol.clone(),
+                namespace: Namespace::Import,
+                size: 0,
+                confidence: Confidence::Stated,
+            },
+        );
+    }
+}
+
+/// Replace every literal that names something.
+///
+/// radare2 substitutes on the value alone: an immediate equal to an address it
+/// has a name for is spelled by the name, whether the instruction branches
+/// there or merely computes it. What keeps that from renaming ordinary
+/// arithmetic is the table, not the operand: a symbol that names no place in
+/// the program never enters it.
+pub fn spell(db: &NameDb, text: &str) -> String {
+    if db.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("0x") {
+        out.push_str(&rest[..start]);
+        let digits = rest[start + 2..]
+            .find(|c: char| !c.is_ascii_hexdigit())
+            .map_or(rest.len() - start - 2, |end| end);
+        let literal = &rest[start..start + 2 + digits];
+        match u64::from_str_radix(&literal[2..], 16)
+            .ok()
+            .and_then(|value| db.at(value))
+        {
+            Some(name) => out.push_str(&name.spelled()),
+            None => out.push_str(literal),
+        }
+        rest = &rest[start + 2 + digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Which stub stands for which import, by its own name.
+///
+/// A call to an import reaches a stub, and the stub reads the slot the loader
+/// fills. Following that read back to the relocation names the stub, which is
+/// the address the call names. Reading the stubs rather than assuming an entry
+/// size is what keeps this exact across formats and architectures.
+pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
+    let slots: BTreeMap<u64, &str> = image
+        .relocations()
+        .iter()
+        .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
+        .collect();
+    let mut named = BTreeMap::new();
+    if slots.is_empty() {
+        return named;
+    }
+
+    // Mach-O names the stub itself rather than a slot the stub reads, so a
+    // relocation landing inside a stub section already is the answer.
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| stubs(&section.name))
+    {
+        let end = section.vaddr + section.vsize;
+        for (vaddr, symbol) in slots.range(section.vaddr..end) {
+            named.insert(*vaddr, (*symbol).to_owned());
+        }
+    }
+
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| stubs(&section.name))
+    {
+        for (start, symbol) in section_stubs(image, decoder, section, &slots) {
+            named.entry(start).or_insert(symbol);
+        }
+    }
+
+    named
+}
+
+/// Where each stub in one section begins, and which import it stands for.
+///
+/// A stub ends at the transfer it makes, and every stub in a section is the
+/// same size, so the distance between two consecutive ends is the size the
+/// linker gave them. Measuring it from the stubs themselves is what keeps a
+/// landing pad at a stub's head inside the stub: nothing has to decide whether
+/// an instruction that writes nothing is padding before a stub or the first
+/// instruction of one.
+fn section_stubs(
+    image: &Image,
+    decoder: &Disassembler,
+    section: &r2image::Section,
+    slots: &BTreeMap<u64, &str>,
+) -> Vec<(u64, String)> {
+    // Where each stub reads the slot the loader fills. A stub is a run of
+    // instructions ending in its transfer, and which slot that transfer reads
+    // is one question with one answer: the reaching-origin pass the engine
+    // asks when it correlates the site. x86 loads the slot directly and ARM
+    // computes its address across three instructions; both answer here.
+    // Each reader: where its transfer is, where its run began, and the import.
+    let mut readers: Vec<(u64, u64, String)> = Vec::new();
+    let mut run = r2il::R2ILBlock {
+        addr: section.vaddr,
+        size: 0,
+        ops: Vec::new(),
+        switch_info: None,
+        op_metadata: BTreeMap::new(),
+    };
+    let mut pc = section.vaddr;
+    let end = section.vaddr + section.vsize;
+    while pc < end {
+        let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
+            break;
+        };
+        let mut fetch = window.into_owned();
+        fetch.resize(DECODE_WINDOW, 0);
+        // Zero bytes are not an instruction, so nothing reads a slot in them.
+        if fetch[0] == 0 {
+            pc += 1;
+            run.addr = pc;
+            continue;
+        }
+        let Ok(lifted) = decoder.lift(&fetch, pc) else {
+            break;
+        };
+        if lifted.size == 0 {
+            break;
+        }
+        let leaves = lifted
+            .ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
+        run.ops.extend(lifted.ops);
+        run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
+        let leaving_at = pc;
+        pc += u64::from(lifted.size);
+        if !leaves {
+            continue;
+        }
+        let terminal = run.ops.len().saturating_sub(1);
+        if let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
+            && let Some(found) = slots.get(&slot.offset)
+        {
+            readers.push((leaving_at, run.addr, (*found).to_owned()));
+        }
+        run = r2il::R2ILBlock {
+            addr: pc,
+            size: 0,
+            ops: Vec::new(),
+            switch_info: None,
+            op_metadata: BTreeMap::new(),
+        };
+    }
+
+    // The stubs are uniform cells filling the section's tail: whatever header
+    // the linker put first, the last cell ends where the section ends. That
+    // anchors every cell without deciding what a landing pad or an alignment
+    // nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
+    // twenty-byte header alike.
+    let stride = match readers.as_slice() {
+        [first, second, ..] => second.0.saturating_sub(first.0),
+        // One stub has no neighbour to measure against; its run is the cell,
+        // because nothing but a zero-byte pad can precede it in its section.
+        [(_, start, symbol)] => return vec![(*start, symbol.clone())],
+        [] => return Vec::new(),
+    };
+    if stride == 0 {
+        return Vec::new();
+    }
+    let count = readers.len() as u64;
+    readers
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, symbol))| {
+            let from_end = count.checked_sub(index as u64)?.checked_mul(stride)?;
+            Some((end.checked_sub(from_end)?, symbol))
+        })
+        .collect()
+}
+
+/// The sections a format puts import stubs in.
+fn stubs(name: &str) -> bool {
+    name.starts_with(".plt") || name == "__stubs" || name == "__symbol_stub"
+}
+
+/// Whether a symbol names a place in the program.
+///
+/// An undefined symbol names an import and lives at no address; a symbol at
+/// zero names nothing; ARM's `$a`, `$d` and `$t` mark where code becomes data
+/// and back; and a symbol carrying a path is the object file a section came
+/// from. radare2 keeps none of them as a flag on an instruction operand.
+fn names_an_address(symbol: &r2image::Symbol) -> bool {
+    symbol.defined
+        && symbol.vaddr != 0
+        && !symbol.name.is_empty()
+        && !symbol.name.starts_with('$')
+        && !symbol.name.contains('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> NameDb {
+        let mut db = NameDb::new();
+        db.insert(
+            0x100000340,
+            Name {
+                text: "_add_two".to_owned(),
+                namespace: Namespace::Symbol,
+                size: 0x20,
+                confidence: Confidence::Stated,
+            },
+        );
+        name_imports(&mut db, &BTreeMap::from([(0x1030, "printf".to_owned())]));
+        db
+    }
+
+    #[test]
+    fn a_named_address_is_spelled_by_its_name() {
+        assert_eq!(spell(&db(), "call 0x100000340"), "call sym._add_two");
+        assert_eq!(spell(&db(), "lea r8, [0x1030]"), "lea r8, [sym.imp.printf]");
+    }
+
+    #[test]
+    fn an_address_with_no_name_stays_a_number() {
+        assert_eq!(spell(&db(), "call 0x100000341"), "call 0x100000341");
+        assert_eq!(spell(&db(), "sub rsp, 0x10"), "sub rsp, 0x10");
+    }
+
+    #[test]
+    fn the_engine_reads_a_name_without_its_namespace() {
+        // A prototype table is keyed by what the import is called, not by how
+        // a listing writes it, so both answers come from one entry.
+        assert_eq!(db().text_at(0x1030), Some("printf"));
+        assert_eq!(
+            db().at(0x1030).map(Name::spelled).as_deref(),
+            Some("sym.imp.printf")
+        );
+    }
+
+    #[test]
+    fn a_symbol_that_names_no_place_is_not_in_the_table() {
+        // ARM's mapping symbols, an object file's own name, and anything at
+        // address zero: radare2 puts none of them on an operand.
+        for (name, vaddr) in [("$d", 0x1000), ("a/b.c", 0x1000), ("zero", 0)] {
+            let symbol = r2image::Symbol {
+                name: name.to_owned(),
+                vaddr,
+                size: 0,
+                kind: SymbolKind::Function,
+                defined: true,
+                thumb: false,
+            };
+            assert!(!names_an_address(&symbol), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_binary_with_no_names_changes_nothing() {
+        assert_eq!(spell(&NameDb::new(), "call 0x1030"), "call 0x1030");
+    }
+}

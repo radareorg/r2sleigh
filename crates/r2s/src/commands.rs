@@ -51,6 +51,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "pd" => disassemble(session, argument),
         "pdd" => decompile(session, argument),
         "afl" => discovered(session),
+        "f" => flags(session),
         "pdil" => low_tier(session, argument),
         "pdim" => medium_tier(session, argument),
         "pdih" => high_tier(session, argument),
@@ -201,6 +202,31 @@ fn discovered(session: &mut Session) -> Result<String, String> {
     }
     out.push_str(&format!("\n\n{} functions", found.len()));
     Ok(out)
+}
+
+/// Every address this binary has a name for, spelled as radare2 spells it.
+#[cfg(feature = "sleigh")]
+fn flags(session: &mut Session) -> Result<String, String> {
+    // The linkage stubs are named once there is a decoder to read them with,
+    // so asking for the machine first is what makes the listing complete.
+    session.ensure_machine()?;
+    let mut out = String::from("vaddr       size name\n");
+    out.push_str(&"-".repeat(46));
+    for (vaddr, name) in session.names.iter() {
+        out.push_str(&format!(
+            "\n{:#010x} {:>6} {}",
+            vaddr,
+            name.size,
+            name.spelled()
+        ));
+    }
+    out.push_str(&format!("\n\n{} flags", session.names.len()));
+    Ok(out)
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn flags(_session: &mut Session) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature, so the stubs cannot be read".to_owned())
 }
 
 #[cfg(not(feature = "sleigh"))]
@@ -486,6 +512,7 @@ fn with_native<T>(
         imports: &session.imports,
         slots: &session.slots,
         defined: &session.defined,
+        names: &session.names,
     };
     ask(&target, &program)
 }
@@ -500,6 +527,7 @@ struct OpenImage<'a> {
     imports: &'a std::collections::BTreeMap<u64, String>,
     slots: &'a std::collections::BTreeMap<u64, String>,
     defined: &'a std::collections::BTreeMap<u64, crate::session::Definition>,
+    names: &'a r2engine::names::NameDb,
 }
 
 #[cfg(feature = "sleigh")]
@@ -528,13 +556,15 @@ impl r2ssa::body::Program for OpenImage<'_> {
 #[cfg(feature = "sleigh")]
 impl r2engine::native::Program for OpenImage<'_> {
     fn name_at(&self, vaddr: u64) -> Option<String> {
-        // An import's stub is what a call names, and the import's own name is
-        // what a reader expects to see there.
-        self.imports
-            .get(&vaddr)
-            .or_else(|| self.slots.get(&vaddr))
-            .or_else(|| self.defined.get(&vaddr).map(|defined| &defined.name))
-            .cloned()
+        // The plain name, with no namespace on it: this keys the prototype
+        // table and spells a call, where a listing asks the same entry for
+        // `sym.imp.printf`. A slot the loader fills is not in the table --
+        // only a stub is an address the program transfers to -- so it is
+        // asked for separately.
+        self.names
+            .text_at(vaddr)
+            .map(str::to_owned)
+            .or_else(|| self.slots.get(&vaddr).cloned())
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
@@ -617,9 +647,10 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
             "            {:#010x}      {:<14} {}\n",
             pc,
             hex,
-            session
-                .flags
-                .spell(&r2_mnemonic(&mnemonic, session.image.arch().name))
+            crate::names::spell(
+                &session.names,
+                &r2_mnemonic(&mnemonic, session.image.arch().name),
+            )
         ));
         pc += size as u64;
     }

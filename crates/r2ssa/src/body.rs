@@ -344,13 +344,13 @@ impl<'a> Walk<'a> {
             BlockTerminator::IndirectCall { fallthrough } => {
                 self.continues(fallthrough, &mut successors)
             }
-            BlockTerminator::IndirectBranch => {
+            // A switch is an indirect branch through a table, so it is one
+            // case rather than two: both go wherever a previous pass proved
+            // the dispatch reads, and both stop where nothing did.
+            BlockTerminator::IndirectBranch | BlockTerminator::Switch { .. } => {
                 // A machine with no indirect call instruction spells one by
                 // leaving the return address in the link register and then
                 // branching. Control comes back, so the walk does too.
-                //
-                // Otherwise the walk goes wherever a previous pass proved this
-                // dispatch reads, and stops only where nothing did.
                 match self.dispatched.get(&addr) {
                     _ if self.returns_after(addr, next) => {
                         self.continues(Some(next), &mut successors)
@@ -365,10 +365,8 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
-            // A return and a terminal block have nowhere to go, and a switch
-            // is an indirect branch until something reads the table it goes
-            // through.
-            BlockTerminator::Switch { .. } | BlockTerminator::Return | BlockTerminator::None => {}
+            // A return and a terminal block have nowhere to go.
+            BlockTerminator::Return | BlockTerminator::None => {}
         }
 
         if instruction.ends_block() {

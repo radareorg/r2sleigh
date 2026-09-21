@@ -50,7 +50,6 @@ pub(crate) mod op;
 pub(crate) mod optimize;
 pub(crate) mod phi;
 pub(crate) mod printf;
-pub mod proven;
 pub(crate) mod reaching_rules;
 pub mod recover_interface;
 pub(crate) mod rename;
@@ -99,7 +98,7 @@ pub use function::{
     FunctionPrepareMode, GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo,
     RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
     SSAFunction, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
-    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, SwitchInfo, TrustedSsaArtifact,
+    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedSsaArtifact,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

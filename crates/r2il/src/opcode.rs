@@ -1284,15 +1284,15 @@ pub struct SwitchCase {
     pub target: u64,
 }
 
-/// Information about a switch statement (jump table).
+/// The table a dispatch goes through, as the engine derived it.
+///
+/// One owner: `r2sleigh-lift` builds this from the selector's own value range
+/// and the table the engine read, and nothing imports it from another tool.
+/// The case values bound themselves, so no range is carried beside them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwitchInfo {
     /// Address of the switch instruction.
     pub switch_addr: u64,
-    /// Minimum case value.
-    pub min_val: u64,
-    /// Maximum case value.
-    pub max_val: u64,
     /// Default case target (if any).
     pub default_target: Option<u64>,
     /// All switch cases.

@@ -5,14 +5,14 @@
 //! shell is a client of it rather than a layer inside it.
 
 #[cfg(feature = "sleigh")]
-use crate::flags::Flags;
+use r2engine::names::NameDb;
 use r2image::Image;
 
 pub struct Session {
     pub image: Image,
     /// What this binary calls each address it names.
     #[cfg(feature = "sleigh")]
-    pub flags: Flags,
+    pub names: NameDb,
     /// Which stub stands for which import, by the import's own name.
     #[cfg(feature = "sleigh")]
     pub imports: std::collections::BTreeMap<u64, String>,
@@ -67,7 +67,11 @@ impl Session {
             .unwrap_or(0);
         Ok(Self {
             #[cfg(feature = "sleigh")]
-            flags: Flags::of(&image),
+            names: {
+                let mut db = crate::names::of(&image);
+                crate::names::name_strings(&mut db, &image);
+                db
+            },
             #[cfg(feature = "sleigh")]
             imports: std::collections::BTreeMap::new(),
             #[cfg(feature = "sleigh")]
@@ -95,14 +99,14 @@ impl Session {
             let machine = r2sleigh_lift::embedded_machine(self.image.arch().name)
                 .map_err(|error| error.to_string())?;
             // The import stubs can only be read once there is a decoder.
-            self.imports = crate::flags::imports(&self.image, &machine.disasm);
+            self.imports = crate::names::imports(&self.image, &machine.disasm);
             self.slots = self
                 .image
                 .relocations()
                 .iter()
                 .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
                 .collect();
-            self.flags.name_imports(&self.imports);
+            crate::names::name_imports(&mut self.names, &self.imports);
             self.machine = Some(machine);
             // Only where a function says it is Thumb, so a machine with no
             // Thumb code pays nothing for the second specification.
@@ -139,17 +143,18 @@ impl Session {
 #[cfg(feature = "sleigh")]
 #[derive(Debug, Clone)]
 pub struct Definition {
-    pub name: String,
     /// Whether a function begins here, which is what bounds a body.
     pub function: bool,
     /// Whether this function's code is Thumb rather than ARM.
     pub thumb: bool,
 }
 
-/// Everything the binary names, indexed by where it is.
+/// What the binary defines at each address, indexed by where it is.
 ///
-/// The first symbol at an address wins, so the index answers the same way
-/// twice over.
+/// Names live in the name table; this answers the two questions a walk asks
+/// of an address and a name cannot: whether a function begins here, and which
+/// instruction set it is written in. The first symbol at an address wins, so
+/// the index answers the same way twice over.
 #[cfg(feature = "sleigh")]
 fn definitions(image: &Image) -> std::collections::BTreeMap<u64, Definition> {
     let mut defined = std::collections::BTreeMap::new();
@@ -158,7 +163,6 @@ fn definitions(image: &Image) -> std::collections::BTreeMap<u64, Definition> {
             continue;
         }
         defined.entry(symbol.vaddr).or_insert_with(|| Definition {
-            name: symbol.name.clone(),
             function: symbol.kind == r2image::SymbolKind::Function,
             thumb: symbol.thumb,
         });

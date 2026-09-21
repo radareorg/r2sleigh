@@ -404,7 +404,6 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             r2ssa::cfg::BlockTerminator::IndirectBranch
         ) && !certified_terminal_call
             && self.func.successors(addr).is_empty()
-            && self.func.switch_info(addr).is_none()
     }
 
     fn exact_control_obligations(

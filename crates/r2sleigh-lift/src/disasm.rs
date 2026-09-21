@@ -1824,12 +1824,8 @@ impl Disassembler {
                             successor.kind() == r2source::AdvisorySuccessorKind::SwitchDefault
                         })
                         .map(|successor| successor.target());
-                    let min_val = cases.iter().map(|case| case.value).min().unwrap_or(0);
-                    let max_val = cases.iter().map(|case| case.value).max().unwrap_or(0);
                     lifted_block.block.switch_info = Some(r2il::SwitchInfo {
                         switch_addr,
-                        min_val,
-                        max_val,
                         default_target,
                         cases,
                     });
