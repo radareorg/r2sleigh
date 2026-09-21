@@ -1,7 +1,7 @@
 too_many_arguments 155
 too_many_lines 437
 cognitive_complexity 53
-excessive_nesting 1018
+excessive_nesting 1011
 redundant_clone 0
 assigning_clones 17
 needless_pass_by_ref_mut 16

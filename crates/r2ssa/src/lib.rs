@@ -49,6 +49,7 @@ pub(crate) mod op;
 pub(crate) mod optimize;
 pub(crate) mod phi;
 pub(crate) mod printf;
+pub(crate) mod promote;
 pub(crate) mod reaching_rules;
 pub mod recover_interface;
 pub(crate) mod rename;
@@ -94,10 +95,10 @@ pub use execution::{
 pub use fingerprint::{SSA_SEMANTIC_FINGERPRINT_SCHEMA_VERSION, stable_ssa_semantic_fingerprint};
 pub use function::{
     CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
-    FunctionPrepareMode, GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo,
-    RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
-    SSAFunction, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
-    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedSsaArtifact,
+    GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
+    RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction,
+    SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
+    StackAddressBase, StackAddressRoot, TrustedSsaArtifact,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

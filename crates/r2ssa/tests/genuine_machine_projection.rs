@@ -2,9 +2,8 @@
 
 use r2sleigh_lift::{Disassembler, TrustedSleighProfile};
 use r2ssa::{
-    CanonicalStorageId, CanonicalStorageSpace, FunctionPrepareMode, MachineProjection,
-    MachineUseDisposition, MachineUseSlice, MachineWriteDisposition, MachineWriteProjection,
-    SsaArtifact, UseSite,
+    CanonicalStorageId, CanonicalStorageSpace, MachineProjection, MachineUseDisposition,
+    MachineUseSlice, MachineWriteDisposition, MachineWriteProjection, SsaArtifact, UseSite,
 };
 
 fn declared_register_storage(arch: &r2il::ArchSpec, name: &str) -> CanonicalStorageId {
@@ -34,7 +33,6 @@ fn genuine_optimized_projection(
     let blocks = [lifted.block().clone()];
     let artifact = SsaArtifact::for_decompile(&blocks, Some(&arch))
         .expect("decompiler-optimized SSA artifact");
-    assert_eq!(artifact.mode(), FunctionPrepareMode::Decompile);
     let projection = MachineProjection::from_artifact(&artifact).expect("typed machine projection");
     assert!(
         projection.failures().is_empty(),

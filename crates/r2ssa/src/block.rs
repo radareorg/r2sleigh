@@ -186,7 +186,7 @@ fn varnode_to_name(vn: &Varnode, disasm: &Disassembler) -> &'static InternedName
         SpaceId::Unique => intern_fmt(format_args!("tmp:{:x}", vn.offset)),
         SpaceId::Const => intern_fmt(format_args!("const:{:x}", vn.offset)),
         SpaceId::Ram => intern_fmt(format_args!("ram:{:x}", vn.offset)),
-        SpaceId::Custom(id) if id == crate::function::PROMOTED_SLOT_SPACE => intern_fmt(
+        SpaceId::Custom(id) if id == crate::promote::PROMOTED_SLOT_SPACE => intern_fmt(
             format_args!("{}", crate::naming::frame_slot_name(vn.offset as i64)),
         ),
         SpaceId::Custom(id) => intern_fmt(format_args!("space{}:{:x}", id, vn.offset)),

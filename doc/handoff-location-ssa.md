@@ -30679,3 +30679,36 @@ objects, certificates, predicates, boundaries -- leaving 2,547 lines of
 fixtures and end-to-end tests of the collector as a whole. Those genuinely test
 the collector rather than a phase, and splitting them further would be a
 filing decision rather than a structural one.
+
+## The artifact's sixteen fields became eleven, and function.rs halved
+
+`SsaArtifact` carried sixteen fields and every consumer took the whole thing.
+Two of the clusters the read counts name are now types of their own.
+
+`ArtifactLiveness` holds `storage_spans`, `live_out`, the value liveness,
+`same_content_pairs` and `ignored_reads`. Every one of them answers the same
+question -- can these two values share a name -- and only the binding plan asks
+it. It also owns the question: `with_relocations` is the computation
+`binding_plan/rules.rs` used to assemble by threading four of the five facts
+into `ValueLiveness::compute_with_relocations` by hand.
+
+`ArtifactSpellings` holds `display_names` and the user-operation table. Neither
+is a dataflow, ABI or typing fact; they are retained because the lift and the
+snapshot are the only things that ever saw them.
+
+Four things went entirely, each because nothing read it:
+
+- `SsaArtifact::mode` and `FunctionPrepareMode` with it. Six variants recording
+  which of six constructors ran, read back by four tests and nothing else. The
+  constructors still differ -- each calls a different `SSAFunction::from_blocks_*`
+  -- so the label was recording a choice the caller had already made.
+- `user_operation_name`, a second door: `FunctionFacts` takes the table through
+  `user_operations()` and does its own lookup, which is the one production uses.
+- `genuine_lift_authority`, and the authority payload
+  `SsaArtifactProvenance::GenuineLiftOnly` carried for it. The variant is the
+  whole fact; a genuine lift alone certifies nothing.
+
+`function.rs` was 14,912 lines, of which 7,636 were `mod tests` and 905 sat
+*after* the tests -- the pre-SSA promotion of private stack slots, where nothing
+looking for it would find it. That is now `r2ssa/src/promote.rs`, the tests are
+`function/tests.rs`, and `function/mod.rs` is 6,372.

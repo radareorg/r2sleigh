@@ -1523,21 +1523,11 @@ pub(super) fn rewrite_inlining_partition(
     let mut round = 0_usize;
     loop {
         round += 1;
-        let liveness = if inlined.is_empty() {
-            source.value_liveness().clone()
-        } else {
-            let relocations = inlined
-                .iter()
-                .filter_map(|value| Some((graph.def_inst(*value)?, *readers.get(value)?)))
-                .collect::<BTreeMap<_, _>>();
-            r2ssa::liveness::ValueLiveness::compute_with_relocations(
-                graph,
-                source.live_out(),
-                &relocations,
-                source.same_content_pairs(),
-                source.ignored_reads(),
-            )
-        };
+        let relocations = inlined
+            .iter()
+            .filter_map(|value| Some((graph.def_inst(*value)?, *readers.get(value)?)))
+            .collect::<BTreeMap<_, _>>();
+        let liveness = source.liveness().with_relocations(graph, &relocations);
         let round_eligible = eligible
             .iter()
             .enumerate()

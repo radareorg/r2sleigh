@@ -117,7 +117,7 @@ pub fn varnode_to_name(vn: &Varnode, reg_names: Option<&RegisterNameMap>) -> Str
         SpaceId::Unique => format!("tmp:{:x}", vn.offset),
         SpaceId::Const => format!("const:{:x}", vn.offset),
         SpaceId::Ram => format!("ram:{:x}", vn.offset),
-        SpaceId::Custom(id) if id == crate::function::PROMOTED_SLOT_SPACE => {
+        SpaceId::Custom(id) if id == crate::promote::PROMOTED_SLOT_SPACE => {
             frame_slot_name(vn.offset as i64)
         }
         SpaceId::Custom(id) => format!("space{}:{:x}", id, vn.offset),
