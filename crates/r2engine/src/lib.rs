@@ -2456,6 +2456,9 @@ pub enum RenderTier {
     C,
     /// The structured tree the C is generated from.
     Structured,
+    /// What the binding plan decided about each value: which variable it
+    /// became, which expression it was folded into, or why nothing spells it.
+    Values,
 }
 
 #[derive(Debug, Clone)]
@@ -3841,6 +3844,22 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     // Keep a rendering the decompiler reached before it stopped. Discarding it
     // reports a function that ran out of budget as one that produced nothing,
     // and takes the ledger that would have said so with it.
+    if request.tier == RenderTier::Values {
+        let values = r2dec::Decompiler::new(request.render_target.to_decompiler_config())
+            .values_input_with_control(&input, control)
+            .map_err(|stop| EngineRenderExecutionStop {
+                reason: format!("{stop:?}"),
+                phase: EnginePhase::Rendering,
+                binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
+                effect_obligations: Box::new(EffectObligationAudit::NOT_RUN),
+                placement_audit: PlacementAudit::NotRun,
+                render_refusal: None,
+                certification_completed: false,
+                normalization_completed: false,
+                structuring_completed: false,
+            })?;
+        return Ok(EngineRenderedDecompile::structured(values));
+    }
     if request.tier == RenderTier::Structured {
         let structured = r2dec::Decompiler::new(request.render_target.to_decompiler_config())
             .structured_input_with_control(&input, control)

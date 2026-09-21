@@ -1634,3 +1634,67 @@ impl BindingPlan {
 
 #[cfg(test)]
 mod tests;
+
+/// The value tier's dispositions, as text.
+///
+/// The engine has three tiers and only the last could be read from a command,
+/// so every question about which variable a value became, or why one was
+/// elided, cost a rebuild with a print in it. This answers that question: one
+/// line per value that the plan decided anything about, and one per binding it
+/// minted.
+pub(crate) fn dump(source: &r2ssa::SsaArtifact, plan: &BindingPlan) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "Bindings: {}", plan.binding_count());
+    for index in 0..plan.binding_count() {
+        let Some(id) = BindingId::from_dense_index(index) else {
+            continue;
+        };
+        let Some(binding) = plan.binding(id) else {
+            continue;
+        };
+        let members = (0..source.graph().values.len())
+            .filter_map(|value| {
+                let value = ValueId(value as u32);
+                matches!(
+                    plan.disposition(value),
+                    Some(ValueDisposition::Bound { binding }) if *binding == id
+                )
+                .then(|| format!("{}", value.0))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(
+            &mut out,
+            "  b{index} {} {:?}{}{} [{members}]",
+            binding.presentation_name_hint().unwrap_or("-"),
+            binding.declaration_type(),
+            match plan.binding_role(id) {
+                Some(role) => format!(" {role:?}"),
+                None => String::new(),
+            },
+            match plan.binding_is_entry_declared(id) {
+                Some(true) => " entry-declared",
+                _ => "",
+            }
+        );
+    }
+    let _ = writeln!(&mut out, "Values:");
+    for index in 0..source.graph().values.len() {
+        let value = ValueId(index as u32);
+        let Some(disposition) = plan.disposition(value) else {
+            continue;
+        };
+        let spelling = source
+            .value_var(value)
+            .map_or_else(|| format!("v{index}"), |var| format!("{var}"));
+        let said = match disposition {
+            ValueDisposition::Bound { binding } => format!("bound b{}", binding.index()),
+            ValueDisposition::Inline { term, .. } => format!("inline {term:?}"),
+            ValueDisposition::Elided { reason, .. } => format!("elided {reason:?}"),
+            ValueDisposition::Refused { reason } => format!("refused {reason:?}"),
+        };
+        let _ = writeln!(&mut out, "  {spelling} {said}");
+    }
+    out
+}

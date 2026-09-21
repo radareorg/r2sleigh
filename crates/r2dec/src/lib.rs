@@ -2744,6 +2744,28 @@ impl Decompiler {
         ))
     }
 
+    /// The value tier's dispositions, printed.
+    ///
+    /// Read against `pdd`, this says which variable a value became, which
+    /// expression it was folded into, or why nothing spells it -- the question
+    /// that otherwise costs a rebuild with a print in it.
+    pub fn values_input_with_control<'a>(
+        &self,
+        input: &'a DecompilerInput,
+        control: &'a dyn r2ssa::SsaWorkControl,
+    ) -> Result<String, DecompileExecutionStop> {
+        let facts = input.source_owned_facts();
+        // A plan that refuses is the answer, not an absence of one: the
+        // refusal names the value or the object it could not decide, which is
+        // exactly what the reader is here to see.
+        Ok(
+            match crate::binding_plan::BindingPlan::build_shadow_with_control(facts, control) {
+                Ok(plan) => crate::binding_plan::dump(facts.source(), &plan),
+                Err(error) => format!("the binding plan refused: {error:?}\n"),
+            },
+        )
+    }
+
     /// Render, keeping whatever was produced when a phase stopped.
     ///
     /// `decompile_input_with_control` returns only the stop, so a caller has to

@@ -302,9 +302,16 @@ fn low_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
 fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
-        r2engine::native::prepared(target, program, addr)
+        let ssa = r2engine::native::prepared(target, program, addr)
             .map(|artifact| artifact.artifact().function().dump())
-            .map_err(|refusal: r2engine::native::NativeRefusal| refusal.to_string())
+            .map_err(|refusal: r2engine::native::NativeRefusal| refusal.to_string())?;
+        // Beside the operations, what the renderer decided about each value.
+        // The operations alone never answered the question that cost the most
+        // time: which variable a value became, or why nothing spells it.
+        let values = r2engine::native::values(target, program, addr)
+            .map(|response| response.output)
+            .unwrap_or_else(|refusal| format!("values refused: {refusal}\n"));
+        Ok(format!("{ssa}\n{values}"))
     })
 }
 

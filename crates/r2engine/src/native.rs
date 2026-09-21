@@ -236,6 +236,15 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
+/// What the binding plan decided about each value.
+pub fn values(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<EngineDecompileResponse, NativeRefusal> {
+    render(target, program, entry, crate::RenderTier::Values)
+}
+
 fn render(
     target: &NativeTarget<'_>,
     program: &dyn Program,
