@@ -5,6 +5,148 @@
 > `doc/handoff-location-ssa.md`; this one does not touch it.
 > `doc/engine-vision.md` holds the design and the order.
 
+## Where the four tracks stand
+
+Gates, run rather than recalled, at `25027b8e`:
+
+    cargo test --workspace --all-features --no-fail-fast   1770 passed, 0 failed
+    cargo clippy --workspace --all-features                 no warnings
+    scripts/certify_render.py --limit 24 --functions 8      98 rendered, 0 refused, 0 undefined
+    scripts/diff_r2.py --limit 30    px 21/24  pd 14/24  ie 24/24  iS 24/24  is 23/24
+
+### The switch import has one owner
+
+`r2il::SwitchInfo` is built at exactly one place now,
+`crates/r2sleigh-lift/src/disasm.rs:1829`, from the advisory successors the
+native route derived through `values.rs` and `indirect.rs`. Nothing imports a
+jump table from another tool: the plugin's injector went with the plugin, and
+what remained was a pile of rivals rather than a second source.
+
+The rival projection went first. `r2ssa::function::SwitchInfo` was a type alias
+for `(Vec<(u64, u64)>, Option<u64>)` with two accessors that pattern-matched
+`BlockTerminator::Switch` and cloned it. Its only consumer outside
+`cfg_risk_summary` was one clause in `r2dec` that could never be false: the
+block's terminator had just been matched as `IndirectBranch`, and a terminator
+is one value, so asking whether the same block was also a `Switch` always
+answered no.
+
+`min_val` and `max_val` went too. They were computed at the one construction
+site as the minimum and maximum of `cases`, read in exactly one place -- the
+function fingerprint, which already hashes `cases` -- and validated against the
+field they were derived from. A projection carried as state, with a validator
+checking it against its own source.
+
+`crates/r2ssa/src/proven.rs`, 377 lines, had no consumer at all: `prove` was
+reached only through `SsaArtifact::proven_facts`, which nothing called. Deleting
+it made `resolve_indirect_calls`, `resolve_indirect_calls_in_graph`,
+`selected_targets`, `ResolvedIndirectCall` and the `PointerTable` trait dead,
+because `native.rs` reads a table's bytes itself and proves every entry decodes,
+which is a stronger proof than slicing a table someone handed over. The seven
+tests that exercised the dead half moved onto `dispatch_table_reads_in_graph`,
+the live one, keeping the facts that still mean something there.
+
+**One claim in the plan was wrong and is corrected here.** It said
+`dispatch_table_read` was "mostly redundant" with `values.rs`. Reading it, it is
+already the thin consumer it should be: three lines take bounds and stride from
+`values.get(address)`, and everything else -- the entry-size proof, the selector
+identification, the case-label inversion, the evidence -- is its own job. Nothing
+to delete.
+
+### One table for what an address is called
+
+`r2engine::names::NameDb` holds, per address, one name per namespace, each with
+its text, its size and the confidence it carries. `crates/r2s/src/flags.rs` is
+gone; `crates/r2s/src/names.rs` fills the table from the container and spells
+listings out of it.
+
+The two questions that used to be answered by two tables are answered by one
+row. `NameDb::text_at` gives the plain name, which keys a prototype and spells a
+call; `Name::spelled` gives `sym.imp.printf`, which is what a listing writes.
+They cannot drift because they are the same entry.
+
+An address holds more than one name because more than one thing is true of it:
+`.text` begins where the first linkage stub does, and both are the container's
+own statements. `at` returns the strongest, `all_at` returns every one, and `f`
+lists them.
+
+Three things were measured against radare2 and corrected:
+
+  * **Entry points.** Naming every `EntryKind` produced `entry1` through
+    `entry24`, because a symbol typed as a function is an entry too. radare2
+    names the declared one `entry0` and the loader's arrays `entry.init0` and
+    `entry.fini0`, and leaves the rest to the symbol table. Ours now matches.
+  * **A section at zero.** `.comment` is not loaded and lives at address zero,
+    so naming it made every literal `0x0` in a listing read
+    `section..comment` -- `svc 0x0` became `svc section..comment`. A section the
+    loader does not map occupies no address, which is the rule symbols were
+    already held to.
+  * **A region does not name what starts inside it.** `.text` begins where the
+    first function does, so `name_at` answered `.text` for that function and
+    would have keyed its prototype by it. Sections and segments are excluded
+    from the plain-name answer and kept in the listing.
+
+`pd` agreement is 14 of 24 before and after, so the table is neutral on the
+differential while carrying kind, size, confidence and strings that the old one
+did not.
+
+**Strings are named from a derived bound, not a picked one.** radare2 flags any
+run of printable bytes however it ends, which turns four bytes of a hash table
+into `str._E7_`. A string here is terminated, and long enough that finding one by
+chance is not expected: a printable byte is one of ninety-five values in two
+hundred and fifty-six, so a run of `n` followed by a terminator has probability
+`(95/256)^n / 256` at any offset, and the floor is the smallest `n` for which the
+expected count over all the scanned bytes is at most one. One bar for the whole
+listing rather than per section, because the listing is read as a whole.
+
+One predicate decides what text is, `r2engine::names::text_in`, so the constant
+harvest and the image-wide scan cannot disagree.
+
+### Discovery crosses the handoff, only where a type says so
+
+On a stripped binary discovery went from **5 functions to 20**, which is the
+whole program: `entry0` never calls `main`, it puts `main` in an argument
+register and calls `__libc_start_main`, whose declaration spells that parameter
+`func`. `Confidence::Handed` is the reason, between `Called` and `Reached`,
+because the address is a function on a declaration's authority plus a constant
+this engine folded rather than on an instruction it decoded.
+
+Four things had to be true and three of them were not:
+
+  * **The declaration had to exist under the name the linker writes.**
+    `types-linux.sdb.txt` carried `libc_start_main`; glibc exports
+    `__libc_start_main`, and prototype lookup drops at most one leading
+    underscore by a deliberate rule -- dropping them until something matched had
+    turned `__memcpy_chk` into `memcpy`. The exported spelling is now declared.
+  * **The callee had to be nameable through a slot.** An import is reached by a
+    load from a relocation the loader fills, so the call operation names no
+    function at all. `called_name` resolves a `CallInd` by folding its load
+    address and asking `Program::import_at`, which is what the relocation says.
+  * **The argument had to be readable.** `r2ssa::value_reaching` is the walk
+    `semantic.rs` already did for a call's own arguments, named and made public;
+    a second walk would have been a second answer to one question.
+  * Preparation is demand-driven: a body is prepared only when one of its
+    callees is declared to take a function, which on an ordinary binary is
+    `entry0` and whoever registers a handler.
+
+### A `hlt` no longer loses its block's terminator
+
+Tracing the above found the defect this handoff recorded as untraced after
+`/bin/ls` refused with *machine-derived CFG contradicts the owned advisory
+source CFG*. It is not Mach-O-shaped. Every function ending in `hlt` refused.
+
+`hlt` lifts to a branch to its own address, which
+`control_op_is_intra_instruction` classified as internal iteration -- the rule
+written for a repeating string instruction, whose branch back to its own start
+is a step of the instruction rather than a way out of the block. With its only
+control operation read as internal, the block had no terminator, so the machine
+graph named no successor while the walk named the self-edge, and the two were
+compared and found to contradict.
+
+The distinction is that a repeating instruction has something to repeat. A
+self-branch is internal iteration only where the instruction has more than one
+operation; `hlt` has exactly one, and that branch is the whole of what it does.
+`entry0` of every glibc binary renders now, with nothing refused.
+
 ## The plugin is deleted, and `r2s` is the tool
 
 The user reversed two of `doc/engine-vision.md`'s non-goals: *"ditch the plugin
