@@ -30448,3 +30448,18 @@ derived check. So the defect is at the site that inlined a bound value, not in
 the journal that noticed. Planning a gap and rendering again does not help --
 the second pass reports the same conflict -- which says the gap mechanism does
 not cover a value whose two answers are both about spelling.
+
+One layer further, and then stopped deliberately. The classification does
+defer to the plan for a bound value -- but only where the occurrence's
+expression *mentions* the planned symbol. Here the marked node is
+`Cast { uint64, Call { strcmp, .. } }`, the right-hand side of the assignment
+that defines the value, which mentions no name at all: it is the definition,
+not a read. So the rule falls through to `InlineNonLiteral` and contradicts the
+recorded `Bound`.
+
+The question that remains is one layer below: whether a value's own defining
+expression should carry a value marker at all, or whether the marker belongs on
+the statement, where the assignment's left-hand side names the binding and the
+existing rule would classify it correctly. That is the marker-placement layer,
+and it is the input to the layer that refuses -- which is where to look rather
+than adding a third case to the classification.
