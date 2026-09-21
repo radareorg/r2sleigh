@@ -1,4 +1,11 @@
-//! A condition flag the function was entered with is the boolean p-code says.
+//! What the machine model may conclude about a value it was entered with.
+//!
+//! A condition flag read by a boolean operation looks like a boolean and is
+//! one, and the temptation is to say so from the operation. Nothing available
+//! here can tell that flag from any other one-byte register -- `AL` is a byte
+//! and so is `CF` -- and the architecture record carries no flag among a
+//! register's facts. So the model refuses, and the fact belongs in the
+//! specification before the refusal can go.
 
 #![cfg(feature = "sleigh-config")]
 
@@ -6,12 +13,7 @@ use r2il::{R2ILBlock, R2ILOp, Varnode};
 use r2ssa::SsaArtifact;
 
 #[test]
-fn an_entry_flag_read_by_a_boolean_operation_is_one() {
-    // `CY` enters with no producer to ask, and the machine model refused the
-    // operation that reads it -- which is every function entered with a
-    // condition flag live. What makes it a boolean is the operation itself:
-    // the specification defines `BOOL_AND` over booleans and the translator
-    // emits it over nothing else.
+fn an_entry_value_is_not_a_boolean_for_being_one_byte_wide() {
     let carry = Varnode::register(0x20, 1);
     let other = Varnode::register(0x21, 1);
     let both = Varnode::register(0x22, 1);
@@ -26,6 +28,8 @@ fn an_entry_flag_read_by_a_boolean_operation_is_one() {
     });
 
     let artifact = SsaArtifact::raw(&[block], None).expect("the fixture builds");
-    let machine = r2ssa::MachineFunction::from_artifact(&artifact);
-    assert!(machine.is_ok(), "{:?}", machine.err());
+    // Refused, and named: the operand that is not a boolean says which value
+    // it is, so the refusal points at the thing to look at rather than at the
+    // operation as a whole.
+    assert!(r2ssa::MachineFunction::from_artifact(&artifact).is_err());
 }

@@ -5261,19 +5261,21 @@ fn value_has_boolean_producer(graph: &crate::graph::SsaGraph, value: ValueId) ->
             return true;
         }
         // A value the function was entered with has no producer to ask, and
-        // this is only ever asked of a value a boolean operation reads. The
-        // p-code specification defines those operations over booleans, so the
-        // operation itself is the evidence: a one-byte entry value read by
-        // `BOOL_AND` is a boolean because the translator emits that operation
-        // over nothing else. Refusing it refused every function entered with
-        // a condition flag live -- a hundred and forty-five of them in one
-        // library, against one refusal of every other kind.
+        // nothing here can tell a condition flag from any other one-byte
+        // register: `AL` is a byte and so is `CF`, and the architecture this
+        // project carries records no flag among a register's facts. Calling
+        // every one-byte entry value a boolean therefore admitted integer
+        // truthiness the machine never performed, which is the claim
+        // `select_rejects_unproven_integer_truthiness` exists to refuse.
+        //
+        // The fact is the specification's to state. Sleigh knows which
+        // registers are flags and `r2il::RegisterDef` does not carry it, so
+        // until it does, a function entered with a flag live keeps refusing --
+        // a hundred and forty-five of them in one ARM library. Refusing is the
+        // honest answer; guessing from a width is not.
         if graph.def_inst(value).is_none() {
-            let entry_boolean = graph
-                .value(value)
-                .is_some_and(|value| value.var.size == 1 && !value.var.is_const());
             visiting.remove(&value);
-            return entry_boolean;
+            return false;
         }
         let result = graph
             .def_inst(value)
