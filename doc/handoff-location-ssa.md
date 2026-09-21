@@ -30431,3 +30431,20 @@ command.
 debug one, which `cargo build --release` does not touch, so a measurement taken
 after one reported the tree as it was several changes earlier. That cost a
 revert of correct work and a bisect for a regression that was never there.
+
+### Where `ConflictingValue` stands
+
+Four of the nine, and the new view names the shape in one command. In
+`fnmatch_no_wildcards` the journal reports `ValueId(134)` recorded as
+`Bound { binding: 6 }` and rendered `InlineNonLiteral`, over the node
+`Cast { uint64, Call { strcmp, .. } }`. Binding 6 is `RAX_6` holding five
+values -- `[110 134 293 492 496]`, the results of several calls coalesced into
+one variable -- and at one of those sites the lowering spelled the call
+expression where the plan had said to spell the name.
+
+That is one question with two answers, and the standing rule is that the plan
+decides: the renderer consumes it for every value and the journal is the
+derived check. So the defect is at the site that inlined a bound value, not in
+the journal that noticed. Planning a gap and rendering again does not help --
+the second pass reports the same conflict -- which says the gap mechanism does
+not cover a value whose two answers are both about spelling.
