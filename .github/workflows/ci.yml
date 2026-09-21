@@ -92,6 +92,50 @@ jobs:
             --r2s target/release/r2s \
             --limit 12 --functions 8
 
+  # ── Source-gold: graded against the source, not against another tool ──
+  #
+  # The same source compiled twice is exact ground truth for free. The debug
+  # build says what every function really is and the stripped build is what the
+  # engine has to work from, so recovery and soundness are measured rather than
+  # asserted. Soundness is the number that matters: a decompiler that guesses
+  # confidently is worse than one that says it does not know.
+  source-gold:
+    name: Source-Gold Correctness Gate
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust PATH
+        run: |
+          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
+            if [ -d "$p" ]; then
+              echo "$p" >> "$GITHUB_PATH"
+              export PATH="$p:$PATH"
+            fi
+          done
+          command -v cargo >/dev/null
+      - name: Build the shell
+        run: cargo build --release -p r2s --features sleigh
+      - name: Grade the stripped build against the debug build
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          cc -g -O0 -o target/source-gold/debug tests/corpus/hashes.c
+          strip -o target/source-gold/stripped target/source-gold/debug 2>/dev/null \
+            || llvm-strip -o target/source-gold/stripped target/source-gold/debug
+          python3 scripts/differential_truth.py \
+            --debug-build target/source-gold/debug \
+            --stripped-build target/source-gold/stripped \
+            --r2s target/release/r2s \
+            --baseline tests/gold/source_gold_baseline.json \
+            --json target/source-gold/report.json
+      - name: Archive the source-gold report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-gold-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/source-gold/report.json
+          if-no-files-found: warn
+
   # ── Whole-binary render coverage ────────────────────────────────────
   #
   # The other gates score nine hand-picked functions and check that what they
@@ -130,7 +174,7 @@ jobs:
   release:
     name: Release Build
     runs-on: self-hosted
-    needs: [quality, capture-gate, coverage]
+    needs: [quality, capture-gate, source-gold, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6

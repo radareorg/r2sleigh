@@ -3,11 +3,11 @@
 
 The same source compiled twice gives exact ground truth for free: the build
 that kept its debug info says what every function really is, and the stripped
-build is what the plugin has to work from. Every fact the plugin recovers from
+build is what the engine has to work from. Every fact the engine recovers from
 the stripped build lands in one of four buckets.
 
     correct          recovered and it matches the debug build
-    missing          the debug build has it and the plugin does not
+    missing          the debug build has it and the engine does not
     marked-wrong     recovered wrongly, but the function carries a residual
                      marker, so a reader was told not to trust it
     silently-wrong   recovered wrongly and asserted as if proven
@@ -35,12 +35,15 @@ from pathlib import Path
 PROTOTYPE = re.compile(r"^(?P<ret>[\w \*]+?)\s+(?P<name>[\w.]+)\s*\((?P<args>.*)\);?\s*$")
 
 
-def r2(binary: Path, commands: str, r2_bin: str, plugin: bool) -> str:
-    prelude = "a:sla > /dev/null\n" if plugin else ""
+def r2s(binary: Path, commands: str, r2s_bin: str) -> str:
+    """Ask the shell, and let a refusal answer.
+
+    A refused function is a fact this harness scores rather than an error, so a
+    non-zero exit is read for its output like any other.
+    """
     proc = subprocess.run(
-        [r2_bin, "-e", "scr.color=false", "-e", "log.level=0",
-         "-e", "bin.relocs.apply=true", "-Qc", prelude + commands, str(binary)],
-        capture_output=True, text=True, timeout=1800,
+        [r2s_bin, "-q", "-c", commands, str(binary)],
+        capture_output=True, text=True, timeout=1800, check=False,
     )
     return proc.stdout
 
@@ -103,48 +106,78 @@ def truth_is_real(truth: dict[int, Prototype]) -> bool:
     return concrete * 4 >= len(truth)
 
 
-def truth_from_debug_build(binary: Path, r2_bin: str) -> dict[int, Prototype]:
-    """What every function actually is, read out of the debug build."""
-    out = r2(binary, "aaa\nafl~[0]", r2_bin, plugin=False)
-    truth: dict[int, Prototype] = {}
-    for addr_text in out.split():
-        try:
-            addr = int(addr_text, 16)
-        except ValueError:
-            continue
-        signature = r2(binary, f"aaa\ns {addr}\nafs", r2_bin, plugin=False).strip().splitlines()
-        if not signature:
-            continue
-        proto = parse_prototype(signature[-1])
-        if proto:
-            truth[addr] = proto
-    return truth
+def addresses(binary: Path, r2s_bin: str) -> list[int]:
+    """Every function the engine believes this binary has."""
+    found = []
+    for line in r2s(binary, "afl", r2s_bin).splitlines():
+        head = line.split(None, 1)[0] if line.split() else ""
+        if head.startswith("0x"):
+            try:
+                found.append(int(head, 16))
+            except ValueError:
+                continue
+    return found
 
 
-def recovered_from_stripped(binary: Path, r2_bin: str) -> dict[int, tuple[Prototype, bool]]:
-    """What the plugin recovers, and whether it marked the function."""
-    out = r2(binary, "aaa\nafl~[0]", r2_bin, plugin=True)
-    recovered: dict[int, tuple[Prototype, bool]] = {}
-    for addr_text in out.split():
-        try:
-            addr = int(addr_text, 16)
-        except ValueError:
-            continue
-        body = r2(binary, f"aaa\ns {addr}\npd:s", r2_bin, plugin=True)
+def signatures(binary: Path, r2s_bin: str) -> dict[int, tuple[Prototype, bool]]:
+    """What each function renders as, and whether it carries a marker.
+
+    One command per function rather than one per binary, because a refusal is
+    per function and a batch that stops at the first one would score the rest
+    as missing.
+    """
+    out: dict[int, tuple[Prototype, bool]] = {}
+    for addr in addresses(binary, r2s_bin):
+        body = r2s(binary, f"s {addr:#x}; pdd", r2s_bin)
         lines = [line for line in body.splitlines() if line.strip()]
         if not lines:
             continue
         proto = parse_prototype(lines[0])
         if proto:
-            recovered[addr] = (proto, "residual" in body)
-    return recovered
+            out[addr] = (proto, "residual" in body or "r2sleigh refused" in body)
+    return out
+
+
+def names(binary: Path, r2s_bin: str) -> dict[int, str]:
+    """What the binary calls each function it believes it has.
+
+    A recorded fact has to be keyed by something that survives a rebuild, and
+    an address does not: the same source compiled on another machine puts the
+    same function somewhere else.
+    """
+    found = {}
+    for line in r2s(binary, "afl", r2s_bin).splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].startswith("0x"):
+            try:
+                found[int(parts[0], 16)] = parts[-1]
+            except ValueError:
+                continue
+    return found
+
+
+def truth_from_debug_build(binary: Path, r2s_bin: str) -> dict[int, Prototype]:
+    """What every function actually is, read out of the debug build.
+
+    The debug build's DWARF is the source's own statement about a function, and
+    the engine reads it, so the truth and the recovery come from one tool and
+    differ only in what the binary carries.
+    """
+    return {addr: proto for addr, (proto, _) in signatures(binary, r2s_bin).items()}
+
+
+def recovered_from_stripped(binary: Path, r2s_bin: str) -> dict[int, tuple[Prototype, bool]]:
+    """What the engine recovers, and whether it marked the function."""
+    return signatures(binary, r2s_bin)
 
 
 def score(truth: dict[int, Prototype],
-          recovered: dict[int, tuple[Prototype, bool]]) -> dict[str, int]:
+          recovered: dict[int, tuple[Prototype, bool]],
+          silent: list[str] | None = None,
+          called: dict[int, str] | None = None) -> dict[str, int]:
     buckets = {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 0}
 
-    def judge(expected: str, actual: str | None, marked: bool) -> None:
+    def judge(where: str, expected: str, actual: str | None, marked: bool) -> None:
         if actual is None:
             buckets["missing"] += 1
         elif actual == expected:
@@ -153,6 +186,10 @@ def score(truth: dict[int, Prototype],
             buckets["marked_wrong"] += 1
         else:
             buckets["silently_wrong"] += 1
+            # A silent error has to be nameable, or a gate that catches one
+            # tells nobody which fact to go and look at.
+            if silent is not None:
+                silent.append(f"{where}: expected {expected!r}, said {actual!r}")
 
     for addr, expected in truth.items():
         entry = recovered.get(addr)
@@ -160,10 +197,11 @@ def score(truth: dict[int, Prototype],
             buckets["missing"] += 1 + len(expected.params)
             continue
         actual, marked = entry
-        judge(expected.ret, actual.ret, marked)
+        where = (called or {}).get(addr) or f"{addr:#x}"
+        judge(f"{where} return", expected.ret, actual.ret, marked)
         for index, param in enumerate(expected.params):
             got = actual.params[index] if index < len(actual.params) else None
-            judge(param, got, marked)
+            judge(f"{where} parameter {index}", param, got, marked)
     return buckets
 
 
@@ -172,20 +210,25 @@ def main() -> int:
     parser.add_argument("--debug-build", type=Path, required=True,
                         help="build that kept its debug info; the ground truth")
     parser.add_argument("--stripped-build", type=Path, required=True,
-                        help="same source, stripped; what the plugin is given")
-    parser.add_argument("--radare2", default="radare2")
+                        help="same source, stripped; what the engine is given")
+    parser.add_argument("--r2s", default="target/release/r2s")
     parser.add_argument("--json", type=Path, help="write the report here")
+    parser.add_argument("--baseline", type=Path,
+                        help="the silent errors already recorded, each with a cause")
+    parser.add_argument("--accept-baseline", action="store_true",
+                        help="record this run's silent errors, after reading them")
     args = parser.parse_args()
 
-    truth = truth_from_debug_build(args.debug_build, args.radare2)
+    truth = truth_from_debug_build(args.debug_build, args.r2s)
     if not truth_is_real(truth):
         print("refusing to score: the debug build yields generic prototypes, so its "
               "debug info did not load. Check that the dSYM or DWARF sits where "
-              "radare2 looks for it; a copied binary usually leaves it behind.",
+              "the reader looks for it; a copied binary usually leaves it behind.",
               file=sys.stderr)
         return 2
-    recovered = recovered_from_stripped(args.stripped_build, args.radare2)
-    buckets = score(truth, recovered)
+    recovered = recovered_from_stripped(args.stripped_build, args.r2s)
+    silent: list[str] = []
+    buckets = score(truth, recovered, silent, names(args.debug_build, args.r2s))
 
     asserted = buckets["correct"] + buckets["silently_wrong"]
     facts = sum(buckets.values())
@@ -195,10 +238,30 @@ def main() -> int:
         "facts": buckets,
         "recovery_rate": round(buckets["correct"] / facts, 4) if facts else 0.0,
         "soundness_rate": round(1 - buckets["silently_wrong"] / asserted, 4) if asserted else 1.0,
+        "silent": silent,
     }
     print(json.dumps(report, indent=2))
     if args.json:
         args.json.write_text(json.dumps(report, indent=2) + "\n")
+
+    # A recorded silent error has a recorded cause; an unrecorded one is the
+    # failure this harness exists to catch. Gating on the set rather than on
+    # zero is what lets a known defect be carried without hiding a new one.
+    if args.baseline and args.baseline.exists():
+        known = set(json.loads(args.baseline.read_text()).get("silent", []))
+        new_silent = [fact for fact in silent if fact not in known]
+        fixed = sorted(known - set(silent))
+        for fact in fixed:
+            print(f"no longer silent: {fact}", file=sys.stderr)
+        for fact in new_silent:
+            print(f"SILENT ERROR: {fact}", file=sys.stderr)
+        if fixed and not new_silent:
+            print("re-record the baseline with --accept-baseline", file=sys.stderr)
+        return 1 if new_silent else 0
+    if args.accept_baseline and args.baseline:
+        args.baseline.write_text(json.dumps(report, indent=2) + "\n")
+        print(f"baseline accepted: {args.baseline}", file=sys.stderr)
+        return 0
     # A silent error is the one failure this harness exists to catch.
     return 1 if buckets["silently_wrong"] else 0
 
