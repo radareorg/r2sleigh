@@ -30463,3 +30463,29 @@ the statement, where the assignment's left-hand side names the binding and the
 existing rule would classify it correctly. That is the marker-placement layer,
 and it is the input to the layer that refuses -- which is where to look rather
 than adding a third case to the classification.
+
+## What DecBench says the declarations bought
+
+Two sweeps of the five comparable projects at `O0` and `O2`, paired over the
+1,645 functions both graded, with the same 1,639 rendered on each side. The
+trees are `56a6f7bb`, from before any of this, and `9959cb4c`, after the
+overlapping-declaration fix -- so the comparison is the declaration work alone,
+without the wire fix, the reader unification, the value view or the sequence
+ordering that followed it.
+
+| metric | before | after | moved |
+|---|---|---|---|
+| `type_match` | 0.1956 | 0.5455 | 959 better, 85 worse |
+| `byte_match` | 0.2317 | 0.2532 | 934 better, 537 worse |
+| `ged`, `vj_ged` | 13.7928 | 13.8168 | 4 better, 7 worse |
+
+`type_match` is what reading the debug information was for and it nearly
+tripled. `ged` is a distance and it did not move: 322 of 333 gradings are
+unchanged, which is what a change that touches declarations and not structuring
+should look like.
+
+`byte_match` is the one to read carefully. It rose, but 537 functions got
+worse against 934 better: spelling a parameter `size_t bufsize` instead of
+`uint64_t arg1` moves the text toward the source in most functions and away
+from it wherever the source used the other spelling. The 85 `type_match`
+regressions are the population worth reading by eye first.
