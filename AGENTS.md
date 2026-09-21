@@ -4,32 +4,35 @@
 
 ## North Star
 
-`r2sleigh`, `r2ssa`, `r2source`, `r2rewrite`, `r2types`, `r2engine`, `r2dec`,
-`r2plugin`, and `../radare2` are one subsystem.
+`r2image`, `r2abi`, `r2il`, `r2sleigh-lift`, `r2ssa`, `r2source`, `r2rewrite`,
+`r2types`, `r2engine`, `r2dec` and `r2s` are one subsystem.
+
+`r2s` is the tool. The radare2 plugin has been deleted, and `../radare2` is now
+the differential target this engine is graded against plus a stream of upstream
+fixes, not a host to live inside.
 
 The goal is not "more commands" or "more crates doing similar work." The goal
-is a gold-standard radare2 analysis engine where:
+is a binary analysis engine where:
 
 - one canonical fact has one canonical owner
 - facts flow through typed contracts, not JSON reparsing
-- decompiler, types, symbolic execution, and radare2 core views agree
+- decompiler, types and analysis views agree
 - expensive work is summarized and reused only when real session traces prove value
 - output is deterministic
 - architecture and API seams may be rewritten whenever the rewrite is cleaner
 
-The plugin should feel like radare2 itself got smarter, not like radare2 grew a
-second shell.
-
 ## Where A Fix Belongs
 
-If a fix starts in `r2plugin` or `r2dec`, first prove the missing fact really
-belongs there. Most semantic/type/cache/route fixes should move upstream.
+If a fix starts in `r2s` or `r2dec`, first prove the missing fact really
+belongs there. Most semantic, type, cost and route fixes belong further up: in
+`r2ssa` where the evidence is, or in `r2engine` where the request is built.
 
 ## Non-Negotiables
 
 1. One fact, one owner.
-2. Treat this repo and `../radare2` as one component boundary.
-3. `r2plugin` is orchestration/FFI glue only.
+2. `r2s` is a command surface only: it opens the binary and spells the answer.
+3. Every fact the engine reads about a program arrives through the `Program`
+   trait. Nothing below `r2s` knows what a file is.
 4. Do not reconstruct missing semantics downstream.
 5. Prefer typed contracts over JSON blobs and stringly maps.
 6. `r2types::FunctionFacts` is the advisory combined type+semantic report;
@@ -146,15 +149,15 @@ that requires invasive refactors.
 - It is acceptable to redesign contracts, move logic across crates, or change
   FFI and `../radare2` seams when the result is cleaner.
 - Do not preserve a bad abstraction because it already exists.
-- Do not add end-stage hacks in `r2plugin` or `r2dec` to hide missing upstream
-  semantics.
+- Do not add end-stage hacks in `r2s` or `r2dec` to hide a fact that was never
+  derived.
 - If hacky behavior is found anywhere in the pipeline, remove or rewrite it
   before building more behavior on top of it.
 - If a crate is carrying policy it should not own, move that policy.
 - Keep the next major direction as a spine rewrite, not a blank-slate rewrite:
   move orchestration to `r2engine`, dataflow facts and evidence to `r2ssa`,
   type constraints to `r2types`, term rewriting to `r2rewrite`, rendering to
-  `r2dec`, and command integration to `r2plugin`.
+  `r2dec`, and command integration to `r2s`.
 
 The right question is not "what is the smallest diff?" It is "what is the
 cleanest owner and the cheapest long-term design?"
@@ -263,12 +266,15 @@ Use this map by default:
   - no global route ownership
 - `crates/r2sleigh-export` / `crates/r2sleigh-cli`
   - shared export/CLI plumbing
-- `r2plugin`
+- `crates/r2image` / `crates/r2abi`
+  - what the container states: bytes, sections, symbols, relocations, entries,
+    debug information, conventions, library prototypes
+  - no inference, and no opinion about what a function is
+- `crates/r2s`
   - command dispatch
-  - JSON shaping
-  - FFI
-  - radare2 integration glue
-  - no semantic, type, cache, or route policy ownership
+  - the only implementor of `Program`
+  - spelling an answer for a human
+  - no semantic, type, cache or route policy ownership
 
 Do not let the same policy exist in two crates "for now."
 
@@ -297,24 +303,19 @@ These are the preferred subsystem seams:
 If a caller needs more information, extend these contracts instead of creating
 parallel wrappers.
 
-## Typed `radare2` Seam
+## The `../radare2` Relationship
 
-The plugin must not parse `afcfj`, `afvj`, `tsj`, or similar command output as
-an internal data source.
+radare2 is the differential validation target for discovery, naming, decoding
+and cross-references, and nothing more. The engine links nothing from `libr`.
 
 Rules:
 
-- use the typed function/base-type collector APIs in `../radare2`, especially
-  `r_anal_function_context_collect`, `r_anal_function_context_free`,
-  `r_anal_function_get_signature`, `r_anal_function_set_signature`,
-  `r_anal_function_list_assumptions`, `r_anal_types_snapshot`,
-  `r_anal_types_context_hash`, and `r_anal_get_base_type`
-- keep user-visible commands, but do not use them as plugin internals
-- if a typed field is missing, add it in `../radare2`
-- prefer one consolidated typed context payload over multiple overlapping JSON
-  blobs
-
-If the right fix belongs in `../radare2`, implement it there.
+- a disagreement with radare2 may be radare2's defect; judge which side is
+  right rather than matching it
+- a radare2 correctness fix unrelated to Sleigh is raised as its own upstream
+  pull request, one idea per pull request
+- upstream commits are one line, with no assistant attribution
+- do not add anything to the fork that radare2 itself does not need
 
 ## Evidence-First Summaries
 
@@ -337,24 +338,23 @@ Rules:
 - tests must distinguish summary-driven rendering from true reconstructed
   native control flow
 
-## Plugin Philosophy
+## Command Surface Philosophy
 
-The public product should be workflow-oriented, not command-oriented.
+`r2s` spells its commands as radare2 spells them, so the two can be diffed by
+`scripts/diff_r2.py`. That compatibility is the point, not an accident: it is
+what makes radare2 usable as an oracle and what lets a radare2 user move.
 
-The plugin should:
+The surface should be workflow-oriented, not command-oriented:
 
-- improve `aa`, `af`, `pdfj`, `pd:s`, type views, and existing radare2 analysis
-  surfaces
-- keep a small public command surface
-- treat engine-inspection commands as debug/maintainer tools
-- move knobs to config (`e anal.sleigh.*`) where that is cleaner than inventing
-  verbs
+- keep a small public surface, and make the common path automatic
+- treat engine-inspection commands (`pdil`, `pdim`, `pdih`) as maintainer tools
+- prefer configuration over inventing a verb
 
-If you are about to add a new command, stop and ask:
+If you are about to add a command, stop and ask:
 
-1. should this be automatic?
-2. should this enrich an existing radare2 view instead?
-3. should this be config rather than a verb?
+1. does radare2 already have a name for this? use that name
+2. should this be automatic?
+3. should this enrich an existing view instead?
 4. is this just a debug surface?
 
 ## Rewrite Bias
@@ -389,8 +389,8 @@ Before landing any non-trivial change, check these explicitly:
 6. Did I move policy downstream instead of upstream?
 7. Did I preserve a bad seam instead of rewriting it?
 8. Did I add name-first semantic ownership instead of evidence-first classification?
-9. Did I make `r2dec` or `r2plugin` repair facts that `r2ssa`, `r2source`,
-   `r2types`, or `r2engine` should own?
+9. Did I make `r2dec` or `r2s` repair facts that `r2ssa`, `r2source`,
+   `r2types` or `r2engine` should own?
 10. Did I render fake C/control/type information instead of an explicit
     residual or summary route?
 11. Did I leave a repeated bad pattern as a reminder instead of encoding it in
@@ -464,29 +464,28 @@ change.
 Use these commands from the workspace root unless noted otherwise.
 
 ```bash
-# Build the workspace with x86 support
-cargo build --workspace --features x86
+# Build the shell
+cargo build --release -p r2s --features sleigh
 
-# Run the Rust test suite
-cargo test --workspace --features x86
+# Run the whole test suite. --no-fail-fast, always.
+cargo test --workspace --all-features --no-fail-fast
 
-# Run the CLI explicitly
+# Run the Sleigh toolchain explicitly
 cargo run -p r2sleigh-cli --bin r2sleigh --features x86 -- \
   disasm --arch x86-64 --bytes "31c00000000000000000000000000000" --format json
 
-# Install the plugin via the workspace alias
-cargo install-plugin -- --features x86
+# The certification gate: every named function renders and reads nothing
+# that was never written
+python3 scripts/certify_render.py --bins <radare2>/test/bins/elf \
+  --limit 24 --functions 8
 
-# Or install all plugin architectures through the Makefile helper
-make -C r2plugin RUST_FEATURES=all-archs install
+# The differential gate
+python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30
 
-# Run the preferred plugin regression suite
-make -C tests/r2r run
+# Whole-binary render coverage against a blessed baseline
+./tests/coverage/run_coverage.sh
 
-# Run the Rust e2e suite when needed
-cargo e2e-test
-
-# Run rewrite/architecture quality gates when the change warrants it
+# Rewrite/architecture quality gates when the change warrants it
 scripts/quality-gate.sh --dry-run
 scripts/quality-gate.sh
 ```
@@ -495,9 +494,9 @@ Notes:
 
 - `cargo run --features x86 -- ...` at the workspace root is stale; use
   `-p r2sleigh-cli --bin r2sleigh`
-- `cargo install-plugin` is defined in `.cargo/config.toml`
+- **build before measuring**: the harnesses default to `target/debug/r2s`,
+  which `cargo build --release` does not touch
 - x86/x86-64 lifting still expects 16 bytes minimum
-- if you touch the typed `../radare2` seam, build and test `../radare2` too
 
 ## Testing Policy
 
@@ -559,84 +558,46 @@ Do not replace manual inspection with a new benchmark script. Write scripts to
 reproduce and track what manual testing found, then keep using manual checks to
 audit whether the metric is still measuring the right thing.
 
-### Default: `tests/r2r`
+### Where a new test goes
 
-Use `tests/r2r` for new regressions involving:
+| What changed | Where the test goes |
+|---|---|
+| A lowering, predicate, certificate or fold | Inline `#[cfg(test)]` beside it |
+| A crate's public surface | `crates/<crate>/tests/` |
+| A command's output | `crates/r2s/tests/` |
+| What a whole function renders | The certification gate, plus a unit test for the rule |
+| Discovery, naming or decoding | The differential gate, with the disagreement judged |
 
-- plugin commands such as `a:sla.*`, `pd:s`
-- stable JSON/text/ESIL output
-- CFG / SSA / def-use / type payload shape
-- command UX and error text
-- radare2 integration behavior
-
-Why:
-
-- faster feedback
-- better diffs
-- already normalized around real radare2 command execution
-
-### Use `tests/e2e` only when `r2r` is the wrong tool
-
-Keep Rust E2E tests for:
-
-- FFI / ABI checks
-- CLI export semantics
-- benchmark-style assertions
-- direct Rust orchestration cases that `r2r` cannot express cleanly
+`crates/r2engine/tests/native.rs` is the model for an integration test: an
+in-memory program built from byte literals, the six-method `Program` trait
+implemented over it, and an assertion on what the engine renders. No binary on
+disk, no external tool, no fixture to regenerate.
 
 ## Required Validation Bar
 
-If you touch `r2ssa`, `r2source`, `r2rewrite`, `r2types`, `r2engine`, `r2dec`,
-`r2plugin`, or the typed `../radare2` seam, the minimum validation bar is:
+If you touch `r2ssa`, `r2source`, `r2rewrite`, `r2types`, `r2engine`, `r2dec`
+or `r2s`, the minimum bar is:
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p r2ssa
-cargo test -p r2source
-cargo test -p r2rewrite
-cargo test -p r2types
-cargo test -p r2engine
-cargo test -p r2dec
-cargo test -p r2sleigh-plugin
-cargo clippy -p r2ssa --all-targets -- -D warnings
-cargo clippy -p r2source --all-targets -- -D warnings
-cargo clippy -p r2rewrite --all-targets -- -D warnings
-cargo clippy -p r2types --all-targets -- -D warnings
-cargo clippy -p r2engine --all-targets -- -D warnings
-cargo clippy -p r2dec --all-targets -- -D warnings
-cargo clippy -p r2sleigh-plugin --features all-archs -- -D warnings
-make -C r2plugin RUST_FEATURES=all-archs install
-make -C tests/r2r run
+cargo clippy --workspace --all-features -- -D warnings
+cargo test --workspace --all-features --no-fail-fast
+bash scripts/structure-report.sh
 ```
 
-If you also changed `../radare2`, add:
+**`--no-fail-fast` is not optional.** Without it `cargo test` stops at the first
+failing target, so one crate's known failure hides every failure after it. A
+gate reported selectively is worse than a gate not run: report the count the
+suite printed rather than the class you expected, and give every standing
+failure a recorded cause.
+
+If the change can move rendered output, add the certification gate and the
+coverage sweep. If you also changed `../radare2`, add:
 
 ```bash
 make -C ../radare2 -j4
 cd ../radare2/test && r2r -L -o results.json db/cmd/cmd_af db/json/json1
 ```
-
-Do not claim the seam is fixed without both sides being green.
-
-## `r2r` Placement Guide
-
-`tests/r2r/db/extras/r2sleigh_core`
-- small deterministic instruction-level checks
-
-`tests/r2r/db/extras/r2sleigh_integration_fast`
-- function-level behavior that should stay quick
-
-`tests/r2r/db/extras/r2sleigh_integration_extended`
-- heavier decompilation and larger-CFG coverage
-
-`tests/r2r/db/extras/r2sleigh_decompiler_snapshots`
-- rendered-output snapshots for the decompiler
-
-`tests/r2r/db/extras/r2sleigh_signature_snapshots`
-- recovered-signature snapshots
-
-`tests/r2r/db/extras/r2sleigh_plain_o2_fixtures`
-- unoptimized-fixture coverage at `-O2`
 
 ## Common Change Workflows
 
@@ -646,10 +607,10 @@ Do not claim the seam is fixed without both sides being green.
 2. Extend `r2types` first for signatures, layouts, and type facts.
 3. Keep route policy in `r2engine`; keep `r2dec` on semantic interpretation
    and rendering only.
-4. If the plugin needs more context, extend `../radare2` instead of parsing
-   more command JSON.
-5. If the seam is wrong, redesign it across repos instead of layering adapters.
-6. Add or update `r2r` before broad snapshot churn.
+4. If the engine needs a fact it does not have, add it where it is derived,
+   not where it is missed.
+5. If the seam is wrong, redesign it instead of layering adapters.
+6. Add the test before the broad snapshot churn.
 
 ### Change symbolic / query behavior
 
@@ -670,25 +631,24 @@ Do not claim the seam is fixed without both sides being green.
 6. Put rendering only in `r2dec`.
 7. Add a negative test for the fake-output class you are preventing.
 
-### Add or change a plugin command
+### Add or change an `r2s` command
 
-1. Decide whether the feature should really be automatic or radare2-native.
-2. Rust-side data shaping usually lives in `r2plugin/src/lib.rs`.
-3. C dispatch/help lives in `r2plugin/r_anal_sleigh.c`.
-4. Add `r2r` coverage for help, happy path, and failure path.
+1. Decide whether the feature should really be automatic.
+2. Use radare2's name for it, so the two can be diffed.
+3. One arm in the flat verb `match` in `crates/r2s/src/commands.rs`, and one
+   function beside it. `run` already supplies `~` grep and `@` temporary seek.
+4. Add coverage for the happy path and the failure path in
+   `crates/r2s/tests/`.
 
-## Plugin Command Surface
+## Command Surface
 
-Treat this as two tiers:
+Two tiers:
 
-- public / user-facing
-  - `a:sla`, `a:sla.arch`, `a:sla.profilej`
-  - `pd:s`
-- debug / engine inspection
-  - low-level IL / SSA / facts / plan / replay / path listing commands
+- public: `q ?e s i ie iS is ir px pd pdd afl`
+- maintainer: `pdil`, `pdim`, `pdih` — the three IL tiers
 
 Do not expand the public surface casually. Prefer deeper integration over more
-verbs.
+verbs, and radare2's spelling over an invented one.
 
 ## Two SSA Block Types
 
@@ -710,15 +670,17 @@ There are two different block types in `r2ssa`:
 | `crates/r2sleigh-lift/src/esil.rs` | changing text or ESIL rendering |
 | `crates/r2ssa/src/` | changing SSA construction, def-use, prepared facts |
 | `crates/r2ssa/src/semantic.rs` | changing prepared facts, certificates, or refusal evidence |
-| `crates/r2source/src/` | changing the trusted snapshot or its wire decoding |
+| `crates/r2source/src/` | changing the facts a capture owns, or their contracts |
 | `crates/r2rewrite/src/` | changing term rewriting or its rule proofs |
 | `crates/r2types/src/` | changing type inference, layouts, canonical function facts |
 | `crates/r2engine/src/` | changing request orchestration, route selection, or engine metrics |
 | `crates/r2dec/src/` | changing lowering, structuring, rendering |
-| `r2plugin/src/lib.rs` | changing plugin-side Rust logic and JSON payloads |
-| `r2plugin/r_anal_sleigh.c` | changing command dispatch/help or C-side integration |
-| `../radare2/libr/include/r_anal.h` | changing typed collector APIs used by the plugin |
-| `tests/r2r/db/extras/` | adding or updating regression snapshots |
+| `crates/r2image/src/` | changing container parsing or DWARF reading |
+| `crates/r2abi/src/` | changing conventions, prototypes or the sdb data |
+| `crates/r2engine/src/native.rs` | changing the walk, the capture or the two-pass preparation |
+| `crates/r2engine/src/discovery.rs` | changing which addresses are believed to be functions |
+| `crates/r2s/src/commands.rs` | adding or changing a command |
+| `tests/coverage/coverage-baseline.json` | re-blessing coverage, after reading it |
 
 ## Benchmark Triage
 
@@ -758,8 +720,9 @@ control flow, fix the benchmark gate before using it to guide more work.
 
 - `README.md` for current build and testing quick-start
 - `ROADMAP.md` for current system direction and priority order
+- `doc/engine-vision.md` for where this is going and why
 - `doc/rewrite_quality_gates.md` for the local rewrite quality gate and tooling
-- `tests/e2e/README.md` for the split between Rust E2E and `r2r`
-- `doc/` for IL, SSA, ESIL, decompiler, taint, symex, and type-system notes
+- `doc/testing.md` for where a new test goes
+- `doc/` for IL, SSA, ESIL, decompiler, taint and type-system notes
 - radare2 ESIL docs: <https://book.rada.re/disassembling/esil.html>
 - Ghidra P-code reference: <https://ghidra.re/courses/languages/html/pcoderef.html>
