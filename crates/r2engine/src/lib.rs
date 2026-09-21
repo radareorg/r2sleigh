@@ -2290,7 +2290,7 @@ impl EngineAnalyzeRequest {
     /// Trusted authority remains request-local.
     pub fn with_trusted_ssa(mut self, trusted: Arc<r2ssa::TrustedSsaArtifact>) -> Self {
         let function_addr = trusted.source().function().address();
-        self.function_name = format!("fcn_{function_addr:x}");
+        self.function_name = r2source::unnamed_function(function_addr);
         self.function_addr = function_addr;
         self.blocks = Vec::new();
         self.arch = Some(trusted.arch_spec().clone());

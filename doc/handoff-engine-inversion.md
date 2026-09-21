@@ -7,9 +7,9 @@
 
 ## Where the four tracks stand
 
-Gates, run rather than recalled, at `25027b8e`:
+Gates, run rather than recalled:
 
-    cargo test --workspace --all-features --no-fail-fast   1770 passed, 0 failed
+    cargo test --workspace --all-features --no-fail-fast   1783 passed, 0 failed
     cargo clippy --workspace --all-features                 no warnings
     scripts/certify_render.py --limit 24 --functions 8      98 rendered, 0 refused, 0 undefined
     scripts/diff_r2.py --limit 30    px 21/24  pd 14/24  ie 24/24  iS 24/24  is 23/24
@@ -127,6 +127,37 @@ Four things had to be true and three of them were not:
   * Preparation is demand-driven: a body is prepared only when one of its
     callees is declared to take a function, which on an ordinary binary is
     `entry0` and whoever registers a handler.
+
+### Write and patch mode, and what makes it invalidate
+
+`r2image` carries a patch layer: one byte per address, applied by every read,
+with the file on disk untouched. `w`, `wx`, `wc` and `wcr` write text, write
+hex, list what was written and take it all back.
+
+Nothing had to be built for invalidation. A prepared function is keyed by the
+bytes it was captured from -- the key is the input byte for byte, not a hash of
+it -- so a patched byte is a different key and the analysis is done again rather
+than answered from before. Patching the constant in `fnv1a32` and decompiling
+gives `RAX_1 = 0xdeadbeef`, and the next session reads the file.
+
+There is no `wa`. Sleigh decodes and lifts; it does not assemble, and inventing
+an assembler to fill a verb is the wrong shape.
+
+### One spelling for a function with no name
+
+`fcn.{x}`, `fcn_{x}` and `sub_{x}` answered that question in seven places across
+four crates, so the same function was one thing to the engine, another to the
+type solver and a third to the renderer. `r2source::unnamed_function` and
+`unnamed_identifier` are the two forms that remain, and they differ only where C
+forces it: an identifier cannot hold the dot a flag carries. `r2source` was a
+development dependency of `r2dec` and is now a real one, which is what the
+dependency graph already said.
+
+One thing the collapse exposed. `normalize_callee_name` recovered an address
+from `sub_401000` and not from `fcn.401000`, which the prefix loop reduced to
+the bare string `401000`. So a call the engine spelled one way and a call it
+knew only by its target were two identities for one function. Both normalise to
+`addr:401000` now.
 
 ### A `hlt` no longer loses its block's terminator
 

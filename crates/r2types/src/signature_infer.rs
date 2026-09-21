@@ -70,7 +70,7 @@ pub fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSign
         .function()
         .name
         .clone()
-        .unwrap_or_else(|| format!("fcn.{:x}", prepared.function().entry));
+        .unwrap_or_else(|| r2source::unnamed_function(prepared.function().entry));
     let ptr_bits = prepared
         .machine_context()
         .memory_model()

@@ -188,11 +188,11 @@ fn a_call_is_rendered_from_the_callee_body() {
     assert!(
         response
             .output
-            .contains("uint32_t sub_100a(uint32_t, uint32_t)"),
+            .contains("uint32_t fcn_100a(uint32_t, uint32_t)"),
         "{}",
         response.output
     );
-    assert!(response.output.contains("sub_100a("), "{}", response.output);
+    assert!(response.output.contains("fcn_100a("), "{}", response.output);
 }
 
 #[test]

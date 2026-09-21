@@ -1224,7 +1224,7 @@ impl TypeWritebackAnalysis {
             .name
             .as_deref()
             .map(str::to_string)
-            .unwrap_or_else(|| format!("fcn.{:x}", source.function().entry));
+            .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
         let mut plan = self.plan.clone();
         let prior_confidence = plan.signature.confidence;
         let prior_callconv_confidence = plan.signature.callconv_confidence;
@@ -3442,7 +3442,7 @@ pub fn build_source_owned_type_writeback_analysis(
         .function()
         .name
         .clone()
-        .unwrap_or_else(|| format!("fcn.{:x}", source.function().entry));
+        .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
     let ssa_blocks = source.local_ssa_blocks();
     let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);

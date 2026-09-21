@@ -11,6 +11,7 @@ r2ssa = { path = "../r2ssa" }
 r2rewrite = { path = "../r2rewrite" }
 r2types = { path = "../r2types" }
 postcard.workspace = true
+r2source = { path = "../r2source" }
 serde.workspace = true
 
 [features]
@@ -18,7 +19,6 @@ default = []
 
 [dev-dependencies]
 r2sleigh-lift = { path = "../r2sleigh-lift", features = ["arm", "x86"] }
-r2source = { path = "../r2source" }
 serde_json.workspace = true
 
 [lints]

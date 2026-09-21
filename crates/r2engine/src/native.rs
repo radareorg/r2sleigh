@@ -1347,7 +1347,7 @@ impl Native<'_> {
             name: self
                 .program
                 .name_at(entry)
-                .unwrap_or_else(|| format!("fcn.{entry:x}")),
+                .unwrap_or_else(|| r2source::unnamed_function(entry)),
             body,
             callee_names,
         })

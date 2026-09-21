@@ -558,7 +558,7 @@ impl CalleeIdentity {
         };
 
         let mut identity = if name.is_empty() {
-            let display_name = format!("sub_{addr:x}");
+            let display_name = r2source::unnamed_identifier(addr);
             let mut aliases = BTreeSet::from([format!("addr:{addr:x}"), display_name.clone()]);
             aliases.insert(format!("0x{addr:x}"));
             CalleeIdentity {
@@ -768,7 +768,7 @@ impl CalleeIdentity {
 
     fn insert_direct_target_aliases(&mut self, addr: u64) {
         self.aliases.insert(format!("addr:{addr:x}"));
-        self.aliases.insert(format!("sub_{addr:x}"));
+        self.aliases.insert(r2source::unnamed_identifier(addr));
         self.aliases.insert(format!("0x{addr:x}"));
     }
 
@@ -872,16 +872,20 @@ pub fn normalize_callee_name(name: &str) -> String {
     if let Some(addr) = parse_raw_address_name(raw) {
         return format!("addr:{addr:x}");
     }
-    if let Some(addr) = raw
-        .to_ascii_lowercase()
-        .strip_prefix("sub_")
+    // A name that restates the entry address says nothing more than the
+    // address does. This engine writes `fcn.` and `fcn_`; `sub_` is what a
+    // binary carries when another tool named it.
+    let lowered = raw.to_ascii_lowercase();
+    if let Some(addr) = ["sub_", "fcn_", "fcn."]
+        .iter()
+        .find_map(|prefix| lowered.strip_prefix(prefix))
         .and_then(|suffix| suffix.split('_').next())
         .and_then(|suffix| u64::from_str_radix(suffix, 16).ok())
     {
         return format!("addr:{addr:x}");
     }
 
-    let mut normalized = raw.to_ascii_lowercase();
+    let mut normalized = lowered;
     loop {
         let mut stripped = false;
         for prefix in CALLEE_NAMESPACE_PREFIXES {
@@ -1044,7 +1048,10 @@ mod tests {
             ("imp.printf", CalleeClass::Imported, "printf"),
             ("reloc.memcpy", CalleeClass::Imported, "memcpy"),
             ("sym.helper", CalleeClass::Internal, "helper"),
-            ("fcn.401000", CalleeClass::Internal, "401000"),
+            // A name that restates the entry address normalises to the
+            // address, so a call the engine spelled `fcn.401000` and one it
+            // knew only by its target are one identity rather than two.
+            ("fcn.401000", CalleeClass::Internal, "addr:401000"),
             ("helper", CalleeClass::Unknown, "helper"),
         ];
 
@@ -1080,6 +1087,10 @@ mod tests {
     #[test]
     fn callee_identity_normalizes_address_and_plt_aliases() {
         assert_eq!(normalize_callee_name("sub_00401000"), "addr:401000");
+        // The engine's own spelling normalises the same way, or a call to an
+        // unnamed function would stop matching its own identity.
+        assert_eq!(normalize_callee_name("fcn_00401000"), "addr:401000");
+        assert_eq!(normalize_callee_name("fcn.00401000"), "addr:401000");
         assert_eq!(normalize_callee_name("sym.imp.printf@plt"), "printf");
         assert_eq!(normalize_callee_name("sym.imp.printf.plt"), "printf");
         assert_eq!(normalize_callee_name("reloc.sym.imp.memcpy"), "memcpy");
@@ -2075,14 +2086,14 @@ mod tests {
 
         assert_eq!(identity.target_addr, Some(0x401050));
         assert_eq!(identity.primary_key(), "addr:401050");
-        assert_eq!(identity.display_name.as_deref(), Some("sub_401050"));
+        assert_eq!(identity.display_name.as_deref(), Some("fcn_401050"));
         assert!(
             identity
                 .evidence
                 .contains(&CalleeIdentityEvidence::DirectTarget)
         );
         assert!(identity.aliases.contains("addr:401050"));
-        assert!(identity.aliases.contains("sub_401050"));
+        assert!(identity.aliases.contains("fcn_401050"));
     }
 
     #[test]

@@ -14,7 +14,7 @@
 
 pub mod display_names;
 pub mod native;
-pub use display_names::DisplayNames;
+pub use display_names::{DisplayNames, unnamed_function, unnamed_identifier};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

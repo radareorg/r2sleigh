@@ -648,7 +648,7 @@ pub(crate) fn rendered_function_name(func: &SSAFunction) -> String {
 /// it starts.
 pub(crate) fn rendered_name_of(name: Option<&str>, entry: u64) -> String {
     name.and_then(r2types::sanitize_c_identifier)
-        .unwrap_or_else(|| format!("sub_{entry:x}"))
+        .unwrap_or_else(|| r2source::unnamed_identifier(entry))
 }
 
 /// The same name, for operations that were rewritten over a function.

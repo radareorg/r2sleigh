@@ -308,3 +308,40 @@ mod tests {
         assert_eq!(names.name_for(0x4008), Some("sym.imp.memcpy"));
     }
 }
+
+/// What a function with no name is called.
+///
+/// Three spellings answered this once -- `fcn.{x}`, `fcn_{x}` and `sub_{x}` --
+/// in seven places across four crates, so the same function was one thing to
+/// the engine, another to the type solver and a third to the renderer. There
+/// is one form now, and one identifier form beside it, because a C identifier
+/// cannot hold the dot a flag carries.
+pub fn unnamed_function(entry: u64) -> String {
+    format!("fcn.{entry:x}")
+}
+
+/// The same name, spelled so a C identifier can hold it.
+pub fn unnamed_identifier(entry: u64) -> String {
+    format!("fcn_{entry:x}")
+}
+
+#[cfg(test)]
+mod unnamed_tests {
+    use super::*;
+
+    #[test]
+    fn the_two_forms_differ_only_where_c_forces_it() {
+        assert_eq!(unnamed_function(0x401330), "fcn.401330");
+        assert_eq!(unnamed_identifier(0x401330), "fcn_401330");
+        assert_eq!(
+            unnamed_function(0x401330).replace('.', "_"),
+            unnamed_identifier(0x401330)
+        );
+    }
+
+    #[test]
+    fn both_forms_are_recognised_as_generated() {
+        assert!(is_generated_function_name(&unnamed_function(1)));
+        assert!(is_generated_function_name(&unnamed_identifier(1)));
+    }
+}
