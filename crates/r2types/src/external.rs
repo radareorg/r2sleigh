@@ -167,7 +167,7 @@ fn strip_type_qualifiers(spelling: &str) -> String {
 /// that an opaque placeholder *is* `void *`, which is a judgement about what to
 /// do with an unknown type rather than a fact about how it is spelled. Parsing
 /// must not make that judgement: a `struct type_0x123 *` has to survive as
-/// itself so the writeback can require its materialization and fail closed.
+/// itself so the caller can require its materialization and fail closed.
 pub fn normalize_type_spelling(ty: &str) -> String {
     let mut normalized = strip_type_qualifiers(ty.trim()).trim().to_string();
 

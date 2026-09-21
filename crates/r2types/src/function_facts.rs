@@ -913,7 +913,7 @@ pub fn aggregate_is_definable(graph: &r2ssa::SourceTypeGraph, name: &str) -> boo
     for member in layout.members() {
         let mut visiting = std::collections::BTreeSet::<u32>::new();
         let Some(member_ty) =
-            crate::writeback::source_type_like(graph, member.type_id(), &mut visiting)
+            crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)
         else {
             return false;
         };
@@ -1714,7 +1714,7 @@ pub struct FunctionFacts {
 ///
 /// The exact prepared SSA allocation is retained alongside its advisory
 /// report. There is deliberately no public promotion or parts constructor:
-/// authoritative instances are sealed only by source-owned writeback after
+/// authoritative instances are sealed only by source-owned analysis after
 /// all semantic, interprocedural, assumption, and machine-context checks pass.
 #[derive(Debug, Clone)]
 pub struct SourceOwnedFunctionFacts {
@@ -2129,7 +2129,7 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
         return None;
     }
 
-    crate::writeback::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
+    crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
 }
 
 fn exact_return_certificate_matches(
@@ -2872,7 +2872,7 @@ impl FunctionFacts {
                 is_write: memory.is_write,
                 field_offset: offset_bits / 8,
                 field_name: member.name().to_string(),
-                field_type: crate::writeback::source_type_like(
+                field_type: crate::analysis::source_type_like(
                     graph,
                     member.type_id(),
                     &mut BTreeSet::new(),
@@ -3396,7 +3396,7 @@ impl FunctionFacts {
                 .and_then(|interface| {
                     let graph = interface.type_graph()?;
                     let logical = interface.parameter_logical_value(slot as usize)?;
-                    let ty = crate::writeback::source_type_like(
+                    let ty = crate::analysis::source_type_like(
                         graph,
                         logical.type_id(),
                         &mut BTreeSet::new(),
@@ -3416,7 +3416,7 @@ impl FunctionFacts {
                             )
                         });
                     Some(match spelled {
-                        Some(spelled) => crate::writeback::requalify(ty, &spelled),
+                        Some(spelled) => crate::analysis::requalify(ty, &spelled),
                         None => ty,
                     })
                 });
@@ -3632,7 +3632,7 @@ impl FunctionFacts {
             }
         }
 
-        let protects_existing = self.types.writeback_authorized_signature().is_some();
+        let protects_existing = self.types.certified_signature().is_some();
         let Some(signature) = self.types.merged_signature.as_mut() else {
             return 0;
         };
@@ -3762,7 +3762,7 @@ impl FunctionFacts {
                 return false;
             };
             let Some(ty) =
-                crate::writeback::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
+                crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
             else {
                 r2il::refusal_evidence!(
                     "exact-source-signature",
@@ -3775,7 +3775,7 @@ impl FunctionFacts {
                 .and_then(|types| types.get(index))
                 .and_then(Option::as_ref)
             {
-                Some(spelled) => crate::writeback::requalify(ty, spelled),
+                Some(spelled) => crate::analysis::requalify(ty, spelled),
                 None => ty,
             };
             let name = names
@@ -3789,7 +3789,7 @@ impl FunctionFacts {
             r2ssa::SourceFunctionReturn::Void => Some(CTypeLike::Void),
             r2ssa::SourceFunctionReturn::Register { .. } => {
                 interface.return_logical_value().and_then(|value| {
-                    crate::writeback::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
+                    crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
                 })
             }
             // Nothing proved a result, so no return type can be spelled.
@@ -3862,7 +3862,7 @@ impl FunctionFacts {
             .unwrap_or_default();
         // This evidence proves only the return type. Treating it as general
         // ExternalContext evidence would also certify unrelated parameter
-        // types and could incorrectly authorize full-signature writeback.
+        // types and could incorrectly certify a full signature.
         sources.push(SignatureCertificateSource::SourceReturnType);
         sources.sort();
         sources.dedup();
@@ -5028,7 +5028,7 @@ fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRenderFacts {
                                 .machine_context()
                                 .function_interface()?
                                 .type_graph()?;
-                            crate::writeback::source_type_like(graph, type_id, &mut BTreeSet::new())
+                            crate::analysis::source_type_like(graph, type_id, &mut BTreeSet::new())
                         }),
                 },
             )
@@ -6443,12 +6443,11 @@ mod tests {
         );
     }
 
-    /// A name is transparent: what the type *is* is asked through it.
     #[test]
     fn a_named_aggregate_is_still_an_aggregate() {
         let named = CTypeLike::named("bz_stream", CTypeLike::Struct("type_0x5e55".to_string()));
         assert!(matches!(named.unaliased(), CTypeLike::Struct(tag) if tag == "type_0x5e55"));
-        assert_eq!(crate::render_c_type_like(&named), "bz_stream");
+        assert_eq!(crate::convert::render_c_type_like(&named), "bz_stream");
     }
 
     #[test]
@@ -9209,7 +9208,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_rollup_out_params_require_writeback_evidence() {
+    fn summary_rollup_out_params_require_evidence() {
         let root = r2ssa::InterprocFunctionId(0x401000);
         let helper = r2ssa::InterprocFunctionId(0x402000);
         let set = r2ssa::InterprocSummarySet {

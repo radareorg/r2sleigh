@@ -823,7 +823,7 @@ rustc_session::declare_lint!(
     ///
     /// ### Why is this bad?
     ///
-    /// The decompile spine is one consuming `TypeWritebackAnalysis` finalization
+    /// The decompile spine is one consuming `TypeAnalysis` finalization
     /// into immutable `SourceOwnedFunctionFacts`. Side-channel fields can diverge
     /// from the exact prepared SSA owner later retained by `DecompilerInput`.
     ///
@@ -860,7 +860,7 @@ rustc_session::declare_lint!(
     /// r2dec::render_semantic_worker_summary(name, facts, &route.to_decompiler_route(), config)
     /// ```
     ///
-    /// Consume `TypeWritebackAnalysis::finalize_for_decompile`, construct one
+    /// Consume `TypeAnalysis::finalize_for_decompile`, construct one
     /// `DecompilerInput`, and pass only that exact owner to r2dec.
     pub R2ENGINE_R2DEC_SUMMARY_RENDER_ROUTE_SIDE_CHANNEL,
     Warn,
@@ -886,7 +886,7 @@ rustc_session::declare_lint!(
     /// function_facts.set_control(...);
     /// ```
     ///
-    /// Build `TypeWritebackAnalysis` from the exact source owner in `r2types`.
+    /// Build `TypeAnalysis` from the exact source owner in `r2types`.
     pub R2ENGINE_DECOMPILE_FACTS_SPINE_OWNERSHIP,
     Warn,
     "r2engine must not mutate detached FunctionFacts authority"
@@ -914,7 +914,7 @@ rustc_session::declare_lint!(
     /// }
     /// ```
     ///
-    /// Consume `TypeWritebackAnalysis::finalize_for_decompile`, then render only
+    /// Consume `TypeAnalysis::finalize_for_decompile`, then render only
     /// through the resulting `DecompilerInput`.
     pub R2ENGINE_SUMMARY_DECOMPILE_ROUTE_SIDE_CHANNEL,
     Warn,
@@ -1043,7 +1043,7 @@ rustc_session::declare_lint!(
     ///
     /// Decompile refusal and fallback output are route decisions. A request
     /// field such as `fallback_comment` can disagree with the route sealed by
-    /// consuming `TypeWritebackAnalysis`, letting render output be controlled
+    /// consuming `TypeAnalysis`, letting render output be controlled
     /// by a side channel that the exact source owner does not retain.
     ///
     /// ### Example
@@ -1056,7 +1056,7 @@ rustc_session::declare_lint!(
     /// ```
     ///
     /// Put the comment in `DecompileFinalization` before consuming
-    /// `TypeWritebackAnalysis::finalize_for_decompile`.
+    /// `TypeAnalysis::finalize_for_decompile`.
     pub R2ENGINE_DECOMPILE_FALLBACK_COMMENT_SIDE_CHANNEL,
     Warn,
     "r2engine fallback comments must be sealed by source-owned finalization"
@@ -1144,22 +1144,22 @@ rustc_session::declare_lint!(
     /// ### What it does
     ///
     /// Warns when `r2engine` reconstructs decompile authority from raw facts or
-    /// legacy route-stamping helpers instead of consuming `TypeWritebackAnalysis`.
+    /// legacy route-stamping helpers instead of consuming `TypeAnalysis`.
     ///
     /// ### Why is this bad?
     ///
-    /// Only `TypeWritebackAnalysis::finalize_for_decompile(self, ...)` may seal
+    /// Only `TypeAnalysis::finalize_for_decompile(self, ...)` may seal
     /// immutable `SourceOwnedFunctionFacts`. A detached builder can pair a plan,
     /// report, or route with an unrelated prepared SSA allocation.
     ///
     /// ### Example
     ///
     /// ```rust
-    /// writeback.stamp_decompile_route(route);
-    /// let facts = writeback.into_source_owned_facts();
+    /// analysis.stamp_decompile_route(route);
+    /// let facts = analysis.into_source_owned_facts();
     /// ```
     ///
-    /// Consume `writeback.finalize_for_decompile(finalization)` exactly once.
+    /// Consume `analysis.finalize_for_decompile(finalization)` exactly once.
     pub R2ENGINE_DECOMPILER_INPUT_REQUIRES_SOURCE_OWNER,
     Warn,
     "r2engine decompiler input must consume exact source-owned type analysis"
@@ -1187,7 +1187,7 @@ rustc_session::declare_lint!(
     /// function_facts.set_render(decompile_render_facts(prepared));
     /// ```
     ///
-    /// Let `build_source_owned_type_writeback_analysis(...)` derive and retain
+    /// Let `build_source_owned_type_analysis(...)` derive and retain
     /// prepared evidence from its exact `Arc<SsaArtifact>`.
     pub R2ENGINE_PREPARED_DECOMPILE_EVIDENCE_SIDE_CHANNEL,
     Warn,
@@ -1298,8 +1298,8 @@ rustc_session::declare_lint!(
     /// );
     /// ```
     ///
-    /// Build one `TypeWritebackAnalysis` with
-    /// `build_source_owned_type_writeback_analysis(...)`, finalize it for the
+    /// Build one `TypeAnalysis` with
+    /// `build_source_owned_type_analysis(...)`, finalize it for the
     /// engine-selected decompile route, and pass the sealed
     /// `SourceOwnedFunctionFacts` through `DecompilerInput::new(...)`.
     pub R2DEC_LOCAL_SIGNATURE_ENRICHMENT,
@@ -2760,7 +2760,7 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 cx,
                 R2ENGINE_DECOMPILER_INPUT_REQUIRES_SOURCE_OWNER,
                 item.span,
-                "r2engine must consume TypeWritebackAnalysis::finalize_for_decompile before constructing DecompilerInput",
+                "r2engine must consume TypeAnalysis::finalize_for_decompile before constructing DecompilerInput",
             );
         }
 
@@ -7582,7 +7582,7 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
     let engine_path = root.join("crates/r2engine/src/lib.rs");
     let types_lib_path = root.join("crates/r2types/src/lib.rs");
     let types_function_facts_path = root.join("crates/r2types/src/function_facts.rs");
-    let types_writeback_path = root.join("crates/r2types/src/writeback.rs");
+    let types_analysis_path = root.join("crates/r2types/src/analysis.rs");
     let dec_lib_path = root.join("crates/r2dec/src/lib.rs");
     let dec_variable_path = root.join("crates/r2dec/src/variable.rs");
     let sym_compiler_path = root.join("crates/r2sym/src/semantics/compiler.rs");
@@ -7598,8 +7598,8 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
                 types_function_facts_path.display()
             )
         });
-    let types_writeback = std::fs::read_to_string(&types_writeback_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", types_writeback_path.display()));
+    let types_analysis = std::fs::read_to_string(&types_analysis_path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", types_analysis_path.display()));
     let dec_lib = std::fs::read_to_string(&dec_lib_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", dec_lib_path.display()));
     let dec_variable = std::fs::read_to_string(&dec_variable_path)
@@ -7616,10 +7616,10 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
         .split("\n#[cfg(test)]\nmod tests {")
         .next()
         .expect("r2types FunctionFacts production source prefix");
-    let types_writeback_production = types_writeback
+    let types_analysis_production = types_analysis
         .split("\n#[cfg(test)]\nmod tests {")
         .next()
-        .expect("r2types writeback production source prefix");
+        .expect("r2types analysis production source prefix");
     let source_owned_struct = source_between(
         types_function_facts_production,
         "pub struct SourceOwnedFunctionFacts",
@@ -7631,14 +7631,14 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
         "impl FunctionFacts",
     );
     let type_analysis_struct = source_between(
-        types_writeback_production,
-        "pub struct TypeWritebackAnalysis",
+        types_analysis_production,
+        "pub struct TypeAnalysis",
         "pub struct DecompileFinalization",
     );
     let type_analysis_impl = source_between(
-        types_writeback_production,
-        "impl TypeWritebackAnalysis",
-        "pub enum TypeWritebackAnalysisError",
+        types_analysis_production,
+        "impl TypeAnalysis",
+        "pub enum TypeAnalysisError",
     );
     let engine_artifact_struct = source_between(
         engine_production,
@@ -7662,10 +7662,10 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
     );
 
     for required in [
-        "r2types::TypeWritebackAnalysisRequest::new(",
+        "r2types::TypeAnalysisRequest::new(",
         ".with_semantic_artifact(semantic_artifact)",
         ".with_interproc_summary(interproc_summary_set)",
-        "r2types::build_source_owned_type_writeback_analysis(writeback_request)",
+        "r2types::build_source_owned_type_analysis(type_request)",
         "r2ssa::solve_prepared_interproc_summary_set(",
     ] {
         assert!(
@@ -7675,13 +7675,13 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
     }
     assert_eq!(
         engine_production
-            .matches("r2types::build_source_owned_type_writeback_analysis(")
+            .matches("r2types::build_source_owned_type_analysis(")
             .count(),
         1,
         "r2engine must have exactly one authoritative source-owned type-analysis builder call"
     );
     assert!(
-        types_lib.contains("build_source_owned_type_writeback_analysis,"),
+        types_lib.contains("build_source_owned_type_analysis,"),
         "r2types must export the source-owned type-analysis builder"
     );
     assert!(
@@ -7759,27 +7759,27 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
     }
     for call in [".set_semantics(", ".with_prepared_interproc_summary("] {
         assert_eq!(
-            types_writeback.matches(call).count(),
+            types_analysis.matches(call).count(),
             1,
             "semantic/interproc owner attachment must remain confined to the source-owned builder: {call:?}"
         );
     }
     assert!(
-        types_writeback.contains("pub fn build_source_owned_type_writeback_analysis(")
-            && types_writeback.contains("source: Arc<SsaArtifact>")
-            && types_writeback.contains("semantic_artifact: Option<r2sym::SemanticArtifact>")
-            && types_writeback
+        types_analysis.contains("pub fn build_source_owned_type_analysis(")
+            && types_analysis.contains("source: Arc<SsaArtifact>")
+            && types_analysis.contains("semantic_artifact: Option<r2sym::SemanticArtifact>")
+            && types_analysis
                 .contains("interproc_summary: Option<r2ssa::PreparedInterprocSummarySet>"),
         "the canonical r2types request must retain exact SSA, semantic, and interproc owners"
     );
     assert!(
         type_analysis_struct.contains("source: Arc<SsaArtifact>")
             && type_analysis_struct.contains("function_facts: FunctionFacts")
-            && type_analysis_struct.contains("plan: TypeWritebackPlan")
+            && type_analysis_struct.contains("plan: TypePlan")
             && !type_analysis_struct.contains("pub source:")
             && !type_analysis_struct.contains("pub function_facts:")
             && !type_analysis_struct.contains("pub plan:"),
-        "TypeWritebackAnalysis must retain one private source+facts+plan owner"
+        "TypeAnalysis must retain one private source+facts+plan owner"
     );
     assert!(
         type_analysis_impl.contains("pub fn finalize_for_decompile(")
@@ -7787,7 +7787,7 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
             && !type_analysis_impl.contains("pub fn finalize_for_decompile(\n        &mut self")
             && type_analysis_impl
                 .contains("SourceOwnedFunctionFacts::seal(self.source, self.function_facts)"),
-        "decompile finalization must consume TypeWritebackAnalysis and seal its exact owner"
+        "decompile finalization must consume TypeAnalysis and seal its exact owner"
     );
     for forbidden in [
         "pub fn function_facts_mut(",
@@ -7799,25 +7799,25 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
     ] {
         assert!(
             !type_analysis_impl.contains(forbidden),
-            "TypeWritebackAnalysis must not expose detached or post-analysis mutation: {forbidden:?}"
+            "TypeAnalysis must not expose detached or post-analysis mutation: {forbidden:?}"
         );
     }
     assert!(
-        engine_artifact_struct.contains("type_analysis: r2types::TypeWritebackAnalysis")
+        engine_artifact_struct.contains("type_analysis: r2types::TypeAnalysis")
             && !engine_artifact_struct.contains("pub type_analysis:")
             && !engine_artifact_struct.contains("function_facts: FunctionFacts")
-            && !engine_artifact_struct.contains("writeback_plan: TypeWritebackPlan"),
+            && !engine_artifact_struct.contains("type_plan: TypePlan"),
         "EngineAnalysisArtifact must retain the private inseparable type-analysis owner"
     );
     assert!(
         engine_artifact_impl.contains("fn new(")
             && !engine_artifact_impl.contains("pub fn new(")
             && engine_artifact_impl.contains("pub fn type_analysis(&self)")
-            && engine_artifact_impl.contains("-> &r2types::TypeWritebackAnalysis"),
+            && engine_artifact_impl.contains("-> &r2types::TypeAnalysis"),
         "EngineAnalysisArtifact construction must stay private with read-only owner access"
     );
     assert!(
-        engine_type_response_struct.contains("type_analysis: r2types::TypeWritebackAnalysis")
+        engine_type_response_struct.contains("type_analysis: r2types::TypeAnalysis")
             && engine_type_response_struct
                 .lines()
                 .filter(|line| line.trim_start().starts_with("pub "))
@@ -7852,7 +7852,7 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
         "fn decompiler_input_from_prepared_facts",
         "pub fn function_facts_for_decompile",
         "pub fn build_engine_analysis_from_parts",
-        "pub fn type_writeback_payload_from_parts",
+        "pub fn type_payload_from_parts",
         ".stamp_decompile_route(",
         ".into_source_owned_facts(",
         "response_function_facts.set_",
@@ -7867,8 +7867,8 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
         ".apply_decompile_type_override(",
         ".attach_prepared_decompile_evidence(",
         ".populate_certified_",
-        "EngineBoundedCfgTypeWriteback",
-        "bounded_cfg_type_writeback",
+        "EngineBoundedCfgTypePlan",
+        "bounded_cfg_type_plan",
     ] {
         assert!(
             !engine_production.contains(forbidden),
@@ -7917,8 +7917,8 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
     }
 
     for forbidden in [
-        "build_type_writeback_analysis,",
-        "build_type_writeback_analysis_with_semantics,",
+        "build_type_analysis,",
+        "build_type_analysis_with_semantics,",
         "build_semantic_type_fallback_plan,",
         "signature_projection_for_semantic_artifact,",
         "field_access_certificates_from_struct_artifacts,",
@@ -7929,7 +7929,7 @@ fn source_owned_type_analysis_is_the_only_authoritative_builder() {
         );
     }
     for forbidden in [
-        "semantic_fallback_type_writeback_plan",
+        "semantic_fallback_type_plan",
         "type_facts_with_summary_projection",
         "build_semantic_type_fallback_plan",
         "signature_projection_for_semantic_artifact",

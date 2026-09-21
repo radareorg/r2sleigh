@@ -942,7 +942,7 @@ fn declared_interface(
             machine.slots.calling_convention(),
             parameters,
             returns,
-            slots_declared.clone(),
+            slots_declared,
             parameter_values,
             return_value,
             type_graph,

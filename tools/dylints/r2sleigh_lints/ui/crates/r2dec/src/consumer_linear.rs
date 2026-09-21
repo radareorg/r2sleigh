@@ -9,12 +9,12 @@ struct StructDecl {
     decl: String,
 }
 
-struct TypeWritebackPlan {
+struct TypePlan {
     signature: InferredSignature,
     struct_decls: Vec<StructDecl>,
 }
 
-fn render_semantic_worker_linearization(plan: &TypeWritebackPlan) -> String {
+fn render_semantic_worker_linearization(plan: &TypePlan) -> String {
     let mut out = String::new();
     let _ = writeln!(&mut out, "{} {{", plan.signature.signature);
     for decl in &plan.struct_decls {
@@ -23,19 +23,19 @@ fn render_semantic_worker_linearization(plan: &TypeWritebackPlan) -> String {
     out
 }
 
-fn allowed_summary_fact_comments(plan: &TypeWritebackPlan) -> String {
+fn allowed_summary_fact_comments(plan: &TypePlan) -> String {
     let mut out = String::new();
     let _ = writeln!(&mut out, "/* function: {} */", plan.signature.function_name);
     let _ = writeln!(
         &mut out,
-        "/* type writeback declarations suppressed: {} */",
+        "/* type declarations suppressed: {} */",
         plan.struct_decls.len()
     );
     out
 }
 
 fn main() {
-    let plan = TypeWritebackPlan {
+    let plan = TypePlan {
         signature: InferredSignature {
             function_name: "sym.worker".to_string(),
             signature: "int sym.worker(int argc)".to_string(),

@@ -19,16 +19,13 @@ use r2ssa::{CFGRiskSummary, SsaArtifact};
 #[cfg(test)]
 use r2types::FunctionTypeFacts;
 use r2types::{
-    FunctionFacts, MetadataScalarKind, TypeHint, TypeWritebackPlan, merge_type_hint,
-    type_hint_from_value_metadata,
+    FunctionFacts, MetadataScalarKind, TypeHint, merge_type_hint, type_hint_from_value_metadata,
 };
 use serde::{Deserialize, Serialize};
 
 mod json;
-mod policy;
 mod program_cache;
-pub use json::*;
-pub use policy::*;
+use json::*;
 pub use program_cache::{
     PreparedRole, ProgramCacheStats, cache_callee_facts, cache_program_data_object_types,
     cache_root_artifact, cached_callee_facts, cached_root_artifact, cached_root_fingerprint,
@@ -173,62 +170,6 @@ pub fn direct_block_ast_residual_json(block_addr: u64) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn type_writeback_mutation_kind_id(kind: r2types::TypeWritebackMutationKind) -> u32 {
-    match kind {
-        r2types::TypeWritebackMutationKind::Signature => TYPE_WRITEBACK_MUTATION_SIGNATURE_ID,
-        r2types::TypeWritebackMutationKind::Callconv => TYPE_WRITEBACK_MUTATION_CALLCONV_ID,
-        r2types::TypeWritebackMutationKind::Var => TYPE_WRITEBACK_MUTATION_VAR_ID,
-        r2types::TypeWritebackMutationKind::VarRename => TYPE_WRITEBACK_MUTATION_VAR_RENAME_ID,
-        r2types::TypeWritebackMutationKind::VarType => TYPE_WRITEBACK_MUTATION_VAR_TYPE_ID,
-        r2types::TypeWritebackMutationKind::Xref => TYPE_WRITEBACK_MUTATION_XREF_ID,
-        r2types::TypeWritebackMutationKind::Comment => TYPE_WRITEBACK_MUTATION_COMMENT_ID,
-        r2types::TypeWritebackMutationKind::Flag => TYPE_WRITEBACK_MUTATION_FLAG_ID,
-        r2types::TypeWritebackMutationKind::TypeDecl => TYPE_WRITEBACK_MUTATION_TYPE_DECL_ID,
-        r2types::TypeWritebackMutationKind::TypeLink => TYPE_WRITEBACK_MUTATION_TYPE_LINK_ID,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineAnalysisDepth {
-    Basic,
-    Default,
-    Aggressive,
-}
-
-impl EngineAnalysisDepth {
-    pub fn from_radare2_depth(depth: u32) -> Self {
-        match depth {
-            RADARE2_ANALYSIS_DEPTH_BASIC => Self::Basic,
-            RADARE2_ANALYSIS_DEPTH_AGGRESSIVE => Self::Aggressive,
-            _ => Self::Default,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineAnalysisMode {
-    Fast,
-    Balanced,
-    Full,
-}
-
-impl EngineAnalysisMode {
-    pub const fn level(self) -> u8 {
-        match self {
-            Self::Fast => 0,
-            Self::Balanced => 1,
-            Self::Full => 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineTypeWritebackMode {
-    Off,
-    Balanced,
-    Aggressive,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineAutoCallbackKind {
     AnalyzeFunction,
@@ -258,123 +199,6 @@ pub struct EngineAutoCallbackPlan {
     pub allowed: bool,
     pub kind: EngineAutoCallbackKind,
     pub reason: EngineAutoCallbackRefusalReason,
-}
-
-impl EngineTypeWritebackMode {
-    pub const fn level(self) -> u8 {
-        match self {
-            Self::Off => 0,
-            Self::Balanced => 1,
-            Self::Aggressive => 2,
-        }
-    }
-}
-
-pub fn type_writeback_apply_policy_for_mode(
-    mode: EngineTypeWritebackMode,
-) -> r2types::TypeWritebackApplyPolicy {
-    match mode {
-        EngineTypeWritebackMode::Off => r2types::TypeWritebackApplyPolicy::off(),
-        EngineTypeWritebackMode::Balanced => r2types::TypeWritebackApplyPolicy::balanced(),
-        EngineTypeWritebackMode::Aggressive => r2types::TypeWritebackApplyPolicy::aggressive(),
-    }
-}
-
-fn type_writeback_authority_report_for_policy(
-    analysis: &r2types::TypeWritebackAnalysis,
-    budget: r2types::TypeWritebackMutationBudget,
-    apply_policy: r2types::TypeWritebackApplyPolicy,
-) -> r2types::TypeWritebackAuthorityReport {
-    analysis.authority_report(budget, apply_policy)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct EngineTypeWritebackPlanReport {
-    plan: TypeWritebackPlan,
-    authority_report: r2types::TypeWritebackAuthorityReport,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineTypeWritebackPayload {
-    /// The target's pointer width, carried so the JSON edge can spell the
-    /// plan's types without guessing which target they were recovered for.
-    pub ptr_bits: u32,
-    pub signature: r2types::InferredSignature,
-    pub signature_render_authorized: bool,
-    pub signature_writeback_authorized: bool,
-    pub signature_action_decision: r2types::SignatureWritebackActionDecision,
-    pub callconv_action_decision: r2types::SignatureWritebackActionDecision,
-    pub signature_certificate_sources: Vec<String>,
-    pub signature_writeback_refusal: Option<String>,
-    pub var_type_candidates: Vec<r2types::VarTypeCandidate>,
-    pub var_rename_candidates: Vec<r2types::VarRenameCandidate>,
-    pub external_struct_names: Vec<String>,
-    pub field_access_certificate_names: Vec<String>,
-    pub fact_counts: EngineTypeWritebackFactCounts,
-    pub param_home_stack_slot_offsets: Vec<i64>,
-    pub certified_stack_slot_offsets: Vec<i64>,
-    pub struct_decls: Vec<r2types::StructDeclCandidate>,
-    pub global_type_links: Vec<r2types::GlobalTypeLinkCandidate>,
-    pub assumptions: r2ssa::AssumptionSet,
-    pub assumption_usage: r2types::AssumptionUsageReport,
-    pub mutation_plan: r2types::TypeWritebackMutationPlan,
-    pub diagnostics: r2types::TypeWritebackDiagnostics,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EngineTypeWritebackFactCounts {
-    pub register_params: usize,
-    pub stack_slots: usize,
-    pub param_home_stack_slots: usize,
-    pub hidden_home_bindings: usize,
-    pub field_access_certificates: usize,
-    pub array_index_certificates: usize,
-    pub scalar_array_render_candidates: usize,
-    pub render_member_accesses: usize,
-    pub render_array_accesses: usize,
-    pub certified_expressions: usize,
-    pub certified_parameters: usize,
-    pub certified_stack_slots: usize,
-    pub certified_memory_accesses: usize,
-    pub certified_returns: usize,
-    pub certified_control_domains: usize,
-    pub incomplete_control_domains: usize,
-}
-
-impl EngineTypeWritebackFactCountsJson {
-    pub fn is_empty(&self) -> bool {
-        self.register_params == 0
-            && self.stack_slots == 0
-            && self.param_home_stack_slots == 0
-            && self.hidden_home_bindings == 0
-            && self.field_access_certificates == 0
-            && self.array_index_certificates == 0
-            && self.scalar_array_render_candidates == 0
-            && self.render_member_accesses == 0
-            && self.render_array_accesses == 0
-            && self.certified_expressions == 0
-            && self.certified_parameters == 0
-            && self.certified_stack_slots == 0
-            && self.certified_memory_accesses == 0
-            && self.certified_returns == 0
-            && self.certified_control_domains == 0
-            && self.incomplete_control_domains == 0
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineFunctionAnalysisReportPayload {
-    pub function_name: String,
-    pub function_addr: u64,
-    pub cfg_summary: CFGRiskSummary,
-    pub assumptions: r2ssa::AssumptionSet,
-    pub assumption_usage: r2types::AssumptionUsageReport,
-    pub semantic_route: Option<r2types::DecompileRouteFacts>,
-    pub summary_diagnostics: Option<r2ssa::InterprocSummaryDiagnostics>,
-    pub type_writeback: EngineTypeWritebackPayload,
-    pub prefer_bounded_type_plan: bool,
-    pub callsite_count: usize,
-    pub current_summary: Option<r2ssa::FunctionSemanticSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -451,430 +275,6 @@ fn empty_engine_phase_timings() -> Vec<EnginePhaseTimingJson> {
         .into_iter()
         .map(EnginePhaseTimingJson::not_executed)
         .collect()
-}
-
-fn normalize_engine_phase_timings(
-    timings: Vec<EnginePhaseTimingJson>,
-) -> Vec<EnginePhaseTimingJson> {
-    let mut normalized = empty_engine_phase_timings();
-    for timing in timings {
-        if let Some(slot) = normalized
-            .iter_mut()
-            .find(|slot| slot.phase == timing.phase)
-        {
-            *slot = timing;
-        }
-    }
-    normalized
-}
-
-impl std::ops::Deref for EngineInferredTypeWritebackJson {
-    type Target = EngineTypeWritebackJsonCore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-fn type_writeback_plan_report_for_policy(
-    analysis: &r2types::TypeWritebackAnalysis,
-    budget: r2types::TypeWritebackMutationBudget,
-    apply_policy: r2types::TypeWritebackApplyPolicy,
-) -> EngineTypeWritebackPlanReport {
-    let authority_report =
-        type_writeback_authority_report_for_policy(analysis, budget, apply_policy);
-    EngineTypeWritebackPlanReport {
-        plan: analysis.plan().clone(),
-        authority_report,
-    }
-}
-
-fn type_writeback_payload_from_plan_report(
-    plan_report: EngineTypeWritebackPlanReport,
-    function_facts: &FunctionFacts,
-    budget: r2types::TypeWritebackMutationBudget,
-) -> EngineTypeWritebackPayload {
-    let EngineTypeWritebackPlanReport {
-        plan,
-        authority_report,
-    } = plan_report;
-    let r2types::TypeWritebackAuthorityReport {
-        mutation_plan,
-        signature_render_authorized,
-        signature_writeback,
-        signature_action_decision,
-        callconv_action_decision,
-        warnings,
-    } = authority_report;
-    let diagnostics = r2types::TypeWritebackDiagnostics {
-        conflicts: plan.diagnostics.conflicts,
-        warnings,
-        solver_warnings: plan.diagnostics.solver_warnings,
-    };
-    EngineTypeWritebackPayload {
-        ptr_bits: plan.ptr_bits,
-        signature: plan.signature,
-        signature_render_authorized,
-        signature_writeback_authorized: signature_writeback.authorized,
-        signature_action_decision,
-        callconv_action_decision,
-        signature_certificate_sources: signature_writeback.sources,
-        signature_writeback_refusal: signature_writeback.refusal,
-        var_type_candidates: plan.var_type_candidates,
-        var_rename_candidates: plan.var_rename_candidates,
-        external_struct_names: type_writeback_external_struct_names(function_facts),
-        field_access_certificate_names: type_writeback_field_access_certificate_names(
-            function_facts,
-        ),
-        fact_counts: type_writeback_fact_counts(function_facts),
-        param_home_stack_slot_offsets: type_writeback_param_home_stack_slot_offsets(function_facts),
-        certified_stack_slot_offsets: type_writeback_certified_stack_slot_offsets(function_facts),
-        struct_decls: plan
-            .struct_decls
-            .into_iter()
-            .take(budget.max_type_decls)
-            .collect(),
-        global_type_links: plan
-            .global_type_links
-            .into_iter()
-            .take(budget.global_max_links)
-            .collect(),
-        assumptions: function_facts.assumptions().clone(),
-        assumption_usage: function_facts.assumption_usage().clone(),
-        mutation_plan,
-        diagnostics,
-    }
-}
-
-fn type_writeback_payload_for_policy(
-    analysis: &r2types::TypeWritebackAnalysis,
-    budget: r2types::TypeWritebackMutationBudget,
-    apply_policy: r2types::TypeWritebackApplyPolicy,
-) -> EngineTypeWritebackPayload {
-    let plan_report = type_writeback_plan_report_for_policy(analysis, budget, apply_policy);
-    type_writeback_payload_from_plan_report(plan_report, analysis.function_facts(), budget)
-}
-
-pub fn type_writeback_payload_from_analysis_response(
-    response: &EngineTypeAnalysisResponse,
-    budget: r2types::TypeWritebackMutationBudget,
-    apply_policy: r2types::TypeWritebackApplyPolicy,
-) -> EngineTypeWritebackPayload {
-    type_writeback_payload_for_policy(response.type_analysis(), budget, apply_policy)
-}
-
-pub fn function_analysis_report_payload_from_type_response(
-    function_name: String,
-    function_addr: u64,
-    response: EngineTypeAnalysisResponse,
-    budget: r2types::TypeWritebackMutationBudget,
-    apply_policy: r2types::TypeWritebackApplyPolicy,
-) -> EngineFunctionAnalysisReportPayload {
-    let type_writeback =
-        type_writeback_payload_from_analysis_response(&response, budget, apply_policy);
-    let function_facts = response.function_facts();
-    let semantic_route = Some(response.decompile_route().clone());
-    let summary_diagnostics = function_facts.summary_view().diagnostics().cloned();
-    EngineFunctionAnalysisReportPayload {
-        function_name,
-        function_addr,
-        cfg_summary: *response.cfg_summary(),
-        assumptions: function_facts.assumptions().clone(),
-        assumption_usage: function_facts.assumption_usage().clone(),
-        semantic_route,
-        summary_diagnostics,
-        type_writeback,
-        prefer_bounded_type_plan: response.route_decision().prefer_bounded_type_plan,
-        callsite_count: response.callsite_count(),
-        current_summary: response.current_summary().cloned(),
-    }
-}
-
-pub fn type_writeback_fact_counts(function_facts: &FunctionFacts) -> EngineTypeWritebackFactCounts {
-    let type_facts = function_facts.type_facts();
-    let render = function_facts.render();
-    EngineTypeWritebackFactCounts {
-        register_params: type_facts.register_params.len(),
-        stack_slots: type_facts.stack_slots.len(),
-        param_home_stack_slots: type_facts
-            .stack_slots
-            .values()
-            .filter(|slot| matches!(slot.role, r2types::ExternalStackSlotRole::ParamHome))
-            .count(),
-        hidden_home_bindings: type_facts
-            .visible_bindings
-            .iter()
-            .filter(|binding| matches!(binding.kind, r2types::VisibleBindingKind::HiddenHome))
-            .count(),
-        field_access_certificates: type_facts.field_access_certificates.len(),
-        array_index_certificates: type_facts.array_index_certificates.len(),
-        scalar_array_render_candidates: type_facts.scalar_array_render_candidates.len(),
-        render_member_accesses: render
-            .map(|facts| facts.member_accesses_by_op.values().map(Vec::len).sum())
-            .unwrap_or(0),
-        render_array_accesses: render
-            .map(|facts| facts.array_accesses_by_op.values().map(Vec::len).sum())
-            .unwrap_or(0),
-        certified_expressions: render.map(|facts| facts.certified_exprs.len()).unwrap_or(0),
-        certified_parameters: render
-            .map(|facts| {
-                facts
-                    .certified_entities
-                    .values()
-                    .filter(|entity| matches!(entity, r2types::CertifiedEntity::Parameter { .. }))
-                    .count()
-            })
-            .unwrap_or(0),
-        certified_stack_slots: render
-            .map(|facts| {
-                facts
-                    .certified_entities
-                    .values()
-                    .filter(|entity| matches!(entity, r2types::CertifiedEntity::StackSlot { .. }))
-                    .count()
-            })
-            .unwrap_or(0),
-        certified_memory_accesses: render
-            .map(|facts| {
-                facts
-                    .certified_effects
-                    .values()
-                    .filter(|effect| {
-                        matches!(
-                            effect.kind(),
-                            r2types::CertifiedEffectKind::MemoryRead
-                                | r2types::CertifiedEffectKind::MemoryWrite
-                        )
-                    })
-                    .count()
-            })
-            .unwrap_or(0),
-        certified_returns: render
-            .map(|facts| {
-                facts
-                    .certified_effects
-                    .values()
-                    .filter(|effect| effect.kind() == r2types::CertifiedEffectKind::Return)
-                    .count()
-            })
-            .unwrap_or(0),
-        certified_control_domains: function_facts
-            .control()
-            .map_or(0, |facts| facts.control_domains.domains.len()),
-        incomplete_control_domains: function_facts.control().map_or(0, |facts| {
-            facts
-                .control_domains
-                .domains
-                .values()
-                .filter(|domain| !domain.complete)
-                .count()
-        }),
-    }
-}
-
-pub fn type_writeback_param_home_stack_slot_offsets(function_facts: &FunctionFacts) -> Vec<i64> {
-    let mut offsets = function_facts
-        .type_facts()
-        .stack_slots
-        .iter()
-        .filter_map(|(slot_key, slot)| {
-            matches!(slot.role, r2types::ExternalStackSlotRole::ParamHome)
-                .then_some(slot_key.offset)
-        })
-        .collect::<Vec<_>>();
-    offsets.sort_unstable();
-    offsets.dedup();
-    offsets
-}
-
-pub fn type_writeback_certified_stack_slot_offsets(function_facts: &FunctionFacts) -> Vec<i64> {
-    let mut offsets = function_facts
-        .render()
-        .map(|render| {
-            render
-                .stack_slots()
-                .map(|(_, _, offset, _)| offset)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    offsets.sort_unstable();
-    offsets.dedup();
-    offsets
-}
-
-pub fn type_writeback_external_struct_names(function_facts: &FunctionFacts) -> Vec<String> {
-    let mut names = function_facts
-        .type_facts()
-        .external_type_db
-        .structs
-        .values()
-        .map(|st| st.name.clone())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-pub fn type_writeback_field_access_certificate_names(
-    function_facts: &FunctionFacts,
-) -> Vec<String> {
-    let mut names = function_facts
-        .type_facts()
-        .field_access_certificates
-        .iter()
-        .map(|cert| {
-            format!(
-                "arg{}+0x{:x}:{}",
-                cert.slot, cert.field_offset, cert.field_name
-            )
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineAnalysisPolicy {
-    pub mode: EngineAnalysisMode,
-    pub type_writeback_mode: EngineTypeWritebackMode,
-    pub type_interproc_max_iters: usize,
-    pub type_max_blocks: usize,
-    pub type_global_max_links: usize,
-    pub type_max_decls: usize,
-    pub type_max_mutations: usize,
-}
-
-pub fn analysis_policy_for_depth(depth: EngineAnalysisDepth) -> EngineAnalysisPolicy {
-    match depth {
-        EngineAnalysisDepth::Basic => EngineAnalysisPolicy {
-            mode: EngineAnalysisMode::Fast,
-            type_writeback_mode: EngineTypeWritebackMode::Off,
-            type_interproc_max_iters: 1,
-            type_max_blocks: 96,
-            type_global_max_links: 8,
-            type_max_decls: 8,
-            type_max_mutations: 32,
-        },
-        EngineAnalysisDepth::Default => EngineAnalysisPolicy {
-            mode: EngineAnalysisMode::Balanced,
-            type_writeback_mode: EngineTypeWritebackMode::Balanced,
-            type_interproc_max_iters: 4,
-            type_max_blocks: 200,
-            type_global_max_links: 32,
-            type_max_decls: 32,
-            type_max_mutations: 128,
-        },
-        EngineAnalysisDepth::Aggressive => EngineAnalysisPolicy {
-            mode: EngineAnalysisMode::Full,
-            type_writeback_mode: EngineTypeWritebackMode::Aggressive,
-            type_interproc_max_iters: 12,
-            type_max_blocks: 500,
-            type_global_max_links: 128,
-            type_max_decls: 64,
-            type_max_mutations: 512,
-        },
-    }
-}
-
-pub fn analysis_policy_for_radare2_depth(depth: u32) -> EngineAnalysisPolicy {
-    analysis_policy_for_depth(EngineAnalysisDepth::from_radare2_depth(depth))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnginePostAnalysisPlan {
-    pub policy: EngineAnalysisPolicy,
-    pub function_count: usize,
-    pub post_budget_us: u64,
-    pub xref_enabled: bool,
-    pub taint_enabled: bool,
-    pub signature_writeback_enabled: bool,
-    pub type_writeback_enabled: bool,
-    pub semantic_comments_enabled: bool,
-    pub signature_verify_enabled: bool,
-    pub balanced_focus_only: bool,
-    pub taint_focus_only: bool,
-    pub signature_writeback_focus_only: bool,
-    pub type_writeback_focus_only: bool,
-}
-
-pub fn post_analysis_plan_for_policy(
-    policy: EngineAnalysisPolicy,
-    function_count: usize,
-) -> EnginePostAnalysisPlan {
-    // Derived from the work in front of the sweep rather than fixed per mode;
-    // see `post_analysis_budget_usec` for why one whole-program constant could
-    // not be right for both a 38-function binary and a 154-function one.
-    let post_budget_us = post_analysis_budget_usec(function_count);
-    let xref_enabled = policy.mode.level() >= EngineAnalysisMode::Balanced.level();
-    let taint_enabled = policy.mode == EngineAnalysisMode::Full;
-    let signature_writeback_enabled = policy.mode.level() >= EngineAnalysisMode::Balanced.level();
-    let type_writeback_enabled =
-        signature_writeback_enabled && policy.type_writeback_mode != EngineTypeWritebackMode::Off;
-    let balanced_focus_only = policy.mode == EngineAnalysisMode::Balanced;
-
-    EnginePostAnalysisPlan {
-        policy,
-        function_count,
-        post_budget_us,
-        xref_enabled,
-        taint_enabled,
-        signature_writeback_enabled,
-        type_writeback_enabled,
-        semantic_comments_enabled: false,
-        signature_verify_enabled: false,
-        balanced_focus_only,
-        taint_focus_only: taint_enabled && function_count > TAINT_GLOBAL_MAX_FUNCTIONS,
-        signature_writeback_focus_only: signature_writeback_enabled
-            && (balanced_focus_only || function_count > SIGNATURE_WRITEBACK_GLOBAL_MAX_FUNCTIONS),
-        type_writeback_focus_only: type_writeback_enabled
-            && (balanced_focus_only || function_count > TYPE_WRITEBACK_GLOBAL_MAX_FUNCTIONS),
-    }
-}
-
-pub fn post_analysis_plan_for_radare2_depth(
-    depth: u32,
-    function_count: usize,
-) -> EnginePostAnalysisPlan {
-    post_analysis_plan_for_policy(analysis_policy_for_radare2_depth(depth), function_count)
-}
-
-pub fn auto_callback_plan_for_policy(
-    policy: EngineAnalysisPolicy,
-    kind: EngineAutoCallbackKind,
-    metrics: EngineAutoCallbackMetrics,
-) -> EngineAutoCallbackPlan {
-    let min_mode = match kind {
-        EngineAutoCallbackKind::PostAnalysisXref => EngineAnalysisMode::Balanced,
-        EngineAutoCallbackKind::AnalyzeFunction
-        | EngineAutoCallbackKind::DataRefs
-        | EngineAutoCallbackKind::PostAnalysisTaint => EngineAnalysisMode::Full,
-    };
-    let reason = if policy.mode.level() < min_mode.level() {
-        EngineAutoCallbackRefusalReason::ModeNotFull
-    } else if metrics.basic_block_count > AUTO_CALLBACK_MAX_BLOCKS {
-        EngineAutoCallbackRefusalReason::TooManyBlocks
-    } else if metrics.linear_size > AUTO_CALLBACK_MAX_LINEAR_SIZE {
-        EngineAutoCallbackRefusalReason::TooLarge
-    } else if metrics.cost > AUTO_CALLBACK_MAX_COST {
-        EngineAutoCallbackRefusalReason::TooCostly
-    } else {
-        EngineAutoCallbackRefusalReason::Allowed
-    };
-
-    EngineAutoCallbackPlan {
-        allowed: reason == EngineAutoCallbackRefusalReason::Allowed,
-        kind,
-        reason,
-    }
-}
-
-pub fn auto_callback_plan_for_radare2_depth(
-    depth: u32,
-    kind: EngineAutoCallbackKind,
-    metrics: EngineAutoCallbackMetrics,
-) -> EngineAutoCallbackPlan {
-    auto_callback_plan_for_policy(analysis_policy_for_radare2_depth(depth), kind, metrics)
 }
 
 pub fn engine_normalized_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
@@ -1170,81 +570,6 @@ mod kani_proofs {
     use super::*;
 
     #[kani::proof]
-    fn analysis_policy_depths_have_nonzero_monotonic_budgets() {
-        let depth = kani::any::<u32>();
-        let selected = analysis_policy_for_radare2_depth(depth);
-        assert!(selected.type_interproc_max_iters > 0);
-        assert!(selected.type_max_blocks > 0);
-        assert!(selected.type_global_max_links > 0);
-        assert!(selected.type_max_decls > 0);
-        assert!(selected.type_max_mutations > 0);
-
-        let basic = analysis_policy_for_depth(EngineAnalysisDepth::Basic);
-        let balanced = analysis_policy_for_depth(EngineAnalysisDepth::Default);
-        let aggressive = analysis_policy_for_depth(EngineAnalysisDepth::Aggressive);
-
-        assert!(basic.mode.level() < balanced.mode.level());
-        assert!(balanced.mode.level() < aggressive.mode.level());
-        assert!(basic.type_writeback_mode.level() < balanced.type_writeback_mode.level());
-        assert!(balanced.type_writeback_mode.level() < aggressive.type_writeback_mode.level());
-        assert!(basic.type_interproc_max_iters < balanced.type_interproc_max_iters);
-        assert!(balanced.type_interproc_max_iters < aggressive.type_interproc_max_iters);
-        assert!(basic.type_max_blocks < balanced.type_max_blocks);
-        assert!(balanced.type_max_blocks < aggressive.type_max_blocks);
-        assert!(basic.type_global_max_links < balanced.type_global_max_links);
-        assert!(balanced.type_global_max_links < aggressive.type_global_max_links);
-        assert!(basic.type_max_decls < balanced.type_max_decls);
-        assert!(balanced.type_max_decls < aggressive.type_max_decls);
-        assert!(basic.type_max_mutations < balanced.type_max_mutations);
-        assert!(balanced.type_max_mutations < aggressive.type_max_mutations);
-    }
-
-    #[kani::proof]
-    fn post_analysis_plan_focus_policy_matches_engine_thresholds() {
-        let depth = kani::any::<u32>();
-        let function_count = usize::from(kani::any::<u16>());
-        let plan = post_analysis_plan_for_radare2_depth(depth, function_count);
-
-        assert_eq!(
-            plan.xref_enabled,
-            plan.policy.mode.level() >= EngineAnalysisMode::Balanced.level()
-        );
-        assert_eq!(
-            plan.taint_enabled,
-            plan.policy.mode == EngineAnalysisMode::Full
-        );
-        assert_eq!(
-            plan.signature_writeback_enabled,
-            plan.policy.mode.level() >= EngineAnalysisMode::Balanced.level()
-        );
-        assert_eq!(
-            plan.type_writeback_enabled,
-            plan.signature_writeback_enabled
-                && plan.policy.type_writeback_mode != EngineTypeWritebackMode::Off
-        );
-        assert_eq!(
-            plan.balanced_focus_only,
-            plan.policy.mode == EngineAnalysisMode::Balanced
-        );
-        assert_eq!(
-            plan.taint_focus_only,
-            plan.taint_enabled && function_count > TAINT_GLOBAL_MAX_FUNCTIONS
-        );
-        assert_eq!(
-            plan.signature_writeback_focus_only,
-            plan.signature_writeback_enabled
-                && (plan.balanced_focus_only
-                    || function_count > SIGNATURE_WRITEBACK_GLOBAL_MAX_FUNCTIONS)
-        );
-        assert_eq!(
-            plan.type_writeback_focus_only,
-            plan.type_writeback_enabled
-                && (plan.balanced_focus_only
-                    || function_count > TYPE_WRITEBACK_GLOBAL_MAX_FUNCTIONS)
-        );
-    }
-
-    #[kani::proof]
     fn bounded_type_plan_budget_policy_is_fail_closed() {
         let interproc_max_iters = kani::any::<usize>();
         let interproc_converged: bool = kani::any();
@@ -1263,7 +588,7 @@ mod kani_proofs {
 
 #[derive(Debug)]
 pub struct EngineAnalysisArtifact {
-    type_analysis: r2types::TypeWritebackAnalysis,
+    type_analysis: r2types::TypeAnalysis,
     /// Certifying view of the retained source, available only for the unmodified
     /// source-retaining trusted preparation path.
     trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
@@ -1271,7 +596,7 @@ pub struct EngineAnalysisArtifact {
 
 impl EngineAnalysisArtifact {
     fn new(
-        type_analysis: r2types::TypeWritebackAnalysis,
+        type_analysis: r2types::TypeAnalysis,
         trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
     ) -> Option<Self> {
         let source = type_analysis.shared_source();
@@ -1298,13 +623,8 @@ impl EngineAnalysisArtifact {
     }
 
     /// Borrow the inseparable source-owned type analysis.
-    pub fn type_analysis(&self) -> &r2types::TypeWritebackAnalysis {
+    pub fn type_analysis(&self) -> &r2types::TypeAnalysis {
         &self.type_analysis
-    }
-
-    /// Borrow the writeback plan derived from the same exact source owner.
-    pub fn writeback_plan(&self) -> &TypeWritebackPlan {
-        self.type_analysis.plan()
     }
 
     /// Borrow request-local certification authority when this artifact retains it.
@@ -2083,8 +1403,8 @@ impl CalleeFacts {
             &external_type_db,
         );
         let context = trusted_parsed_context(callee, ptr_bits);
-        let signature = r2types::build_source_owned_type_writeback_analysis(
-            r2types::TypeWritebackAnalysisRequest::new(Arc::clone(&shared), context).ok()?,
+        let signature = r2types::build_source_owned_type_analysis(
+            r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?,
         )
         .ok()
         .and_then(|analysis| analysis.source_owned_callee_signature());
@@ -2604,15 +1924,6 @@ pub struct EngineTypeAnalysisRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct EngineFunctionAnalysisReportRequest {
-    pub analysis: EngineAnalyzeRequest,
-    pub interproc_max_iters: usize,
-    pub interproc_converged: bool,
-    pub writeback_budget: r2types::TypeWritebackMutationBudget,
-    pub writeback_apply_policy: r2types::TypeWritebackApplyPolicy,
-}
-
-#[derive(Debug, Clone)]
 pub struct EngineFunctionAnalysisArtifactRequest {
     pub analysis: EngineAnalyzeRequest,
 }
@@ -2638,17 +1949,6 @@ pub struct EngineFunctionAnalysisArtifactRequestInput {
     pub function: EngineFunctionInput,
     pub ptr_bits: Option<u32>,
     pub parsed_context: r2types::ParsedExternalContext,
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineFunctionAnalysisReportRequestInput {
-    pub function: EngineFunctionInput,
-    pub ptr_bits: Option<u32>,
-    pub parsed_context: r2types::ParsedExternalContext,
-    pub interproc_max_iters: usize,
-    pub interproc_converged: bool,
-    pub writeback_budget: r2types::TypeWritebackMutationBudget,
-    pub writeback_apply_policy: r2types::TypeWritebackApplyPolicy,
 }
 
 impl EngineFunctionAnalysisArtifactRequest {
@@ -2732,51 +2032,6 @@ impl EngineInterprocSummaryReportRequest {
     }
 }
 
-impl EngineFunctionAnalysisReportRequest {
-    pub fn full_semantics_for_function(input: EngineFunctionAnalysisReportRequestInput) -> Self {
-        Self {
-            analysis: EngineAnalyzeRequest::full_semantics_for_function(
-                EngineAnalyzeFunctionRequestInput {
-                    function: input.function,
-                    ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
-                    parsed_context: input.parsed_context,
-                    include_interproc_summary_set: true,
-                },
-            ),
-            interproc_max_iters: input.interproc_max_iters,
-            interproc_converged: input.interproc_converged,
-            writeback_budget: input.writeback_budget,
-            writeback_apply_policy: input.writeback_apply_policy,
-        }
-    }
-
-    pub fn full_semantics_for_function_with_register_names<F>(
-        input: EngineFunctionAnalysisReportRequestInput,
-        register_name: F,
-    ) -> Self
-    where
-        F: FnMut(&r2il::Varnode) -> Option<String>,
-    {
-        Self {
-            analysis: EngineAnalyzeRequest::full_semantics_for_function_with_register_names(
-                EngineAnalyzeFunctionRequestInput {
-                    function: input.function,
-                    ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
-                    parsed_context: input.parsed_context,
-                    include_interproc_summary_set: true,
-                },
-                register_name,
-            ),
-            interproc_max_iters: input.interproc_max_iters,
-            interproc_converged: input.interproc_converged,
-            writeback_budget: input.writeback_budget,
-            writeback_apply_policy: input.writeback_apply_policy,
-        }
-    }
-}
-
 impl EngineTypeAnalysisRequest {
     pub fn from_interproc_budget(
         analysis: EngineAnalyzeRequest,
@@ -2802,7 +2057,7 @@ pub fn type_analysis_interproc_prefers_bounded_plan(
 
 #[derive(Debug)]
 pub struct EngineTypeAnalysisResponse {
-    type_analysis: r2types::TypeWritebackAnalysis,
+    type_analysis: r2types::TypeAnalysis,
     cfg_summary: CFGRiskSummary,
     route_decision: EngineTypeRouteDecision,
     decompile_route: r2types::DecompileRouteFacts,
@@ -2813,7 +2068,7 @@ pub struct EngineTypeAnalysisResponse {
 }
 
 impl EngineTypeAnalysisResponse {
-    pub fn type_analysis(&self) -> &r2types::TypeWritebackAnalysis {
+    pub fn type_analysis(&self) -> &r2types::TypeAnalysis {
         &self.type_analysis
     }
 
@@ -3040,10 +2295,10 @@ impl EngineSession {
             &cfg_summary,
             request.caller_prefers_bounded_type_plan,
         );
-        if !matches!(route_decision.kind, EngineTypeRouteKind::FullWriteback) {
+        if !matches!(route_decision.kind, EngineTypeRouteKind::FullTypeEvidence) {
             return Err(engine_execution_refusal(
                 route_decision.reason.unwrap_or_else(|| {
-                    "bounded or summary-only type evidence cannot authorize writeback".to_string()
+                    "bounded or summary-only type evidence cannot authorize full types".to_string()
                 }),
                 EnginePhase::Types,
                 analyze_response.metrics,
@@ -3075,27 +2330,6 @@ impl EngineSession {
             },
             diagnostics: analyze_response.diagnostics,
         })
-    }
-
-    pub fn type_function_report_payload(
-        &self,
-        mut request: EngineFunctionAnalysisReportRequest,
-    ) -> Option<EngineFunctionAnalysisReportPayload> {
-        request.analysis = request.analysis.canonicalize_trusted();
-        let function_name = request.analysis.function_name.clone();
-        let function_addr = request.analysis.function_addr;
-        let response = self.type_function(EngineTypeAnalysisRequest::from_interproc_budget(
-            request.analysis,
-            request.interproc_max_iters,
-            request.interproc_converged,
-        ))?;
-        Some(function_analysis_report_payload_from_type_response(
-            function_name,
-            function_addr,
-            response,
-            request.writeback_budget,
-            request.writeback_apply_policy,
-        ))
     }
 
     pub(crate) fn decompile_function(
@@ -4246,12 +3480,6 @@ fn build_source_owned_callee_signatures(
         .collect()
 }
 
-pub fn infer_signature_from_analysis(
-    request: EngineSignatureInferenceRequest<'_>,
-) -> r2types::InferredSignature {
-    r2types::infer_signature_from_prepared_ssa(request.analysis.ssa_func())
-}
-
 pub fn block_guard_fallback_comment(
     function_name: &str,
     blocks: usize,
@@ -4324,30 +3552,30 @@ fn build_engine_analysis_artifact(
     if let Some(reason) = request.execution.refusal_reason(EnginePhase::Types) {
         return Err(format!("type analysis stopped: {reason}"));
     }
-    let mut writeback_request = r2types::TypeWritebackAnalysisRequest::new(
+    let mut type_request = r2types::TypeAnalysisRequest::new(
         Arc::clone(&semantic_analysis.ssa_func),
         request.parsed_context.clone(),
     )
-    .map_err(|error| format!("type writeback request rejected the source: {error:?}"))?;
-    writeback_request = writeback_request
+    .map_err(|error| format!("type analysis request rejected the source: {error:?}"))?;
+    type_request = type_request
         .with_source_owned_callee_signatures(build_source_owned_callee_signatures(request))
         .map_err(|error| {
-            format!("type writeback request rejected the captured callees: {error:?}")
+            format!("type analysis request rejected the captured callees: {error:?}")
         })?;
     if let Some(interproc_summary_set) = interproc_summary_set {
-        writeback_request = writeback_request
+        type_request = type_request
             .with_interproc_summary(interproc_summary_set)
             .map_err(|error| {
-                format!("type writeback request rejected the interprocedural summary: {error:?}")
+                format!("type analysis request rejected the interprocedural summary: {error:?}")
             })?;
     }
-    let writeback = r2types::build_source_owned_type_writeback_analysis(writeback_request)
-        .map_err(|error| format!("type writeback analysis failed: {error:?}"))?;
+    let type_analysis = r2types::build_source_owned_type_analysis(type_request)
+        .map_err(|error| format!("type analysis failed: {error:?}"))?;
     if let Some(reason) = request.execution.refusal_reason(EnginePhase::Certification) {
         return Err(format!("certification stopped: {reason}"));
     }
     EngineAnalysisArtifact::new(
-        writeback,
+        type_analysis,
         // Trusted capture authority is deliberately request-local and may
         // only accompany its exact retained SSA allocation.
         trusted_ssa,
@@ -4863,130 +4091,6 @@ mod tests {
     }
 
     #[test]
-    fn analysis_policy_tracks_radare2_analysis_depths() {
-        let basic = analysis_policy_for_radare2_depth(RADARE2_ANALYSIS_DEPTH_BASIC);
-        assert_eq!(basic.mode, EngineAnalysisMode::Fast);
-        assert_eq!(basic.type_writeback_mode, EngineTypeWritebackMode::Off);
-        assert_eq!(basic.type_interproc_max_iters, 1);
-        assert_eq!(basic.type_max_blocks, 96);
-        assert_eq!(basic.type_global_max_links, 8);
-        assert_eq!(basic.type_max_decls, 8);
-        assert_eq!(basic.type_max_mutations, 32);
-
-        let balanced = analysis_policy_for_radare2_depth(0);
-        assert_eq!(balanced.mode, EngineAnalysisMode::Balanced);
-        assert_eq!(
-            balanced.type_writeback_mode,
-            EngineTypeWritebackMode::Balanced
-        );
-        assert_eq!(balanced.type_interproc_max_iters, 4);
-        assert_eq!(balanced.type_max_blocks, 200);
-        assert_eq!(balanced.type_global_max_links, 32);
-        assert_eq!(balanced.type_max_decls, 32);
-        assert_eq!(balanced.type_max_mutations, 128);
-
-        let aggressive = analysis_policy_for_radare2_depth(RADARE2_ANALYSIS_DEPTH_AGGRESSIVE);
-        assert_eq!(aggressive.mode, EngineAnalysisMode::Full);
-        assert_eq!(
-            aggressive.type_writeback_mode,
-            EngineTypeWritebackMode::Aggressive
-        );
-        assert_eq!(aggressive.type_interproc_max_iters, 12);
-        assert_eq!(aggressive.type_max_blocks, 500);
-        assert_eq!(aggressive.type_global_max_links, 128);
-        assert_eq!(aggressive.type_max_decls, 64);
-        assert_eq!(aggressive.type_max_mutations, 512);
-    }
-
-    #[test]
-    fn analysis_policy_is_monotonic_from_basic_to_aggressive() {
-        let basic = analysis_policy_for_depth(EngineAnalysisDepth::Basic);
-        let balanced = analysis_policy_for_depth(EngineAnalysisDepth::Default);
-        let aggressive = analysis_policy_for_depth(EngineAnalysisDepth::Aggressive);
-
-        assert!(basic.mode.level() < balanced.mode.level());
-        assert!(balanced.mode.level() < aggressive.mode.level());
-        assert!(basic.type_writeback_mode.level() < balanced.type_writeback_mode.level());
-        assert!(balanced.type_writeback_mode.level() < aggressive.type_writeback_mode.level());
-        assert!(basic.type_interproc_max_iters < balanced.type_interproc_max_iters);
-        assert!(balanced.type_interproc_max_iters < aggressive.type_interproc_max_iters);
-        assert!(basic.type_max_blocks < balanced.type_max_blocks);
-        assert!(balanced.type_max_blocks < aggressive.type_max_blocks);
-        assert!(basic.type_global_max_links < balanced.type_global_max_links);
-        assert!(balanced.type_global_max_links < aggressive.type_global_max_links);
-        assert!(basic.type_max_decls < balanced.type_max_decls);
-        assert!(balanced.type_max_decls < aggressive.type_max_decls);
-        assert!(basic.type_max_mutations < balanced.type_max_mutations);
-        assert!(balanced.type_max_mutations < aggressive.type_max_mutations);
-    }
-
-    #[test]
-    fn engine_owns_type_writeback_apply_policy_mapping() {
-        assert_eq!(
-            type_writeback_apply_policy_for_mode(EngineTypeWritebackMode::Off).mode,
-            r2types::TypeWritebackApplyMode::Off
-        );
-        assert_eq!(
-            type_writeback_apply_policy_for_mode(EngineTypeWritebackMode::Balanced).mode,
-            r2types::TypeWritebackApplyMode::Balanced
-        );
-        assert_eq!(
-            type_writeback_apply_policy_for_mode(EngineTypeWritebackMode::Aggressive).mode,
-            r2types::TypeWritebackApplyMode::Aggressive
-        );
-    }
-
-    #[test]
-    fn engine_type_writeback_mutation_kind_ids_are_stable() {
-        let cases = [
-            (
-                r2types::TypeWritebackMutationKind::Signature,
-                TYPE_WRITEBACK_MUTATION_SIGNATURE_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::Callconv,
-                TYPE_WRITEBACK_MUTATION_CALLCONV_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::Var,
-                TYPE_WRITEBACK_MUTATION_VAR_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::VarRename,
-                TYPE_WRITEBACK_MUTATION_VAR_RENAME_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::VarType,
-                TYPE_WRITEBACK_MUTATION_VAR_TYPE_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::Xref,
-                TYPE_WRITEBACK_MUTATION_XREF_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::Comment,
-                TYPE_WRITEBACK_MUTATION_COMMENT_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::Flag,
-                TYPE_WRITEBACK_MUTATION_FLAG_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::TypeDecl,
-                TYPE_WRITEBACK_MUTATION_TYPE_DECL_ID,
-            ),
-            (
-                r2types::TypeWritebackMutationKind::TypeLink,
-                TYPE_WRITEBACK_MUTATION_TYPE_LINK_ID,
-            ),
-        ];
-
-        for (kind, expected) in cases {
-            assert_eq!(type_writeback_mutation_kind_id(kind), expected);
-        }
-    }
-
-    #[test]
     fn engine_interproc_summary_json_preserves_supplied_scope_report() {
         let existing_scope = serde_json::json!({
             "payloads": [{ "function_addr": 0x403000u64, "function_name": "seeded" }],
@@ -5005,168 +4109,6 @@ mod tests {
         assert_eq!(interproc.iterations, 1);
         assert_eq!(interproc.max_iterations, 1);
         assert_eq!(interproc.scope, Some(existing_scope));
-    }
-
-    #[test]
-    fn engine_owns_type_writeback_function_facts_projection() {
-        let mut type_facts = FunctionTypeFacts::default();
-        type_facts.external_type_db.structs.insert(
-            "type.Foo".to_string(),
-            r2types::ExternalStruct {
-                name: "Foo".to_string(),
-                fields: BTreeMap::new(),
-            },
-        );
-        type_facts.external_type_db.structs.insert(
-            "type.Foo.alias".to_string(),
-            r2types::ExternalStruct {
-                name: "Foo".to_string(),
-                fields: BTreeMap::new(),
-            },
-        );
-        type_facts
-            .field_access_certificates
-            .push(r2types::FieldAccessCertificate {
-                slot: 1,
-                field_offset: 0x10,
-                field_name: "len".to_string(),
-                field_type: None,
-            });
-        type_facts
-            .field_access_certificates
-            .push(r2types::FieldAccessCertificate {
-                slot: 1,
-                field_offset: 0x10,
-                field_name: "len".to_string(),
-                field_type: None,
-            });
-        let function_facts = FunctionFacts::new(type_facts);
-
-        assert_eq!(
-            type_writeback_external_struct_names(&function_facts),
-            vec!["Foo".to_string()]
-        );
-        assert_eq!(
-            type_writeback_field_access_certificate_names(&function_facts),
-            vec!["arg1+0x10:len".to_string()]
-        );
-    }
-
-    #[test]
-    fn post_analysis_plan_owns_mode_budgets_and_focus_thresholds() {
-        let fast = post_analysis_plan_for_radare2_depth(RADARE2_ANALYSIS_DEPTH_BASIC, 512);
-        assert_eq!(fast.policy.mode, EngineAnalysisMode::Fast);
-        assert_eq!(fast.post_budget_us, post_analysis_budget_usec(512));
-        assert!(!fast.xref_enabled);
-        assert!(!fast.taint_enabled);
-        assert!(!fast.signature_writeback_enabled);
-        assert!(!fast.type_writeback_enabled);
-        assert!(!fast.balanced_focus_only);
-        assert!(!fast.taint_focus_only);
-        assert!(!fast.signature_writeback_focus_only);
-        assert!(!fast.type_writeback_focus_only);
-
-        let balanced = post_analysis_plan_for_radare2_depth(0, 1);
-        assert_eq!(balanced.policy.mode, EngineAnalysisMode::Balanced);
-        assert_eq!(balanced.post_budget_us, post_analysis_budget_usec(1));
-        assert!(balanced.xref_enabled);
-        assert!(!balanced.taint_enabled);
-        assert!(balanced.signature_writeback_enabled);
-        assert!(balanced.type_writeback_enabled);
-        assert!(balanced.balanced_focus_only);
-        assert!(!balanced.taint_focus_only);
-        assert!(balanced.signature_writeback_focus_only);
-        assert!(balanced.type_writeback_focus_only);
-
-        let full = post_analysis_plan_for_radare2_depth(RADARE2_ANALYSIS_DEPTH_AGGRESSIVE, 129);
-        assert_eq!(full.policy.mode, EngineAnalysisMode::Full);
-        assert_eq!(full.post_budget_us, post_analysis_budget_usec(129));
-        assert!(full.xref_enabled);
-        assert!(full.taint_enabled);
-        assert!(full.signature_writeback_enabled);
-        assert!(full.type_writeback_enabled);
-        assert!(!full.balanced_focus_only);
-        assert!(full.taint_focus_only);
-        assert!(full.signature_writeback_focus_only);
-        assert!(full.type_writeback_focus_only);
-    }
-
-    #[test]
-    fn auto_callback_plan_owns_mode_gate_and_scalar_thresholds() {
-        let ok_metrics = EngineAutoCallbackMetrics {
-            basic_block_count: AUTO_CALLBACK_MAX_BLOCKS,
-            cost: AUTO_CALLBACK_MAX_COST,
-            linear_size: AUTO_CALLBACK_MAX_LINEAR_SIZE,
-        };
-        let full = auto_callback_plan_for_radare2_depth(
-            RADARE2_ANALYSIS_DEPTH_AGGRESSIVE,
-            EngineAutoCallbackKind::AnalyzeFunction,
-            ok_metrics,
-        );
-        assert!(full.allowed);
-        assert_eq!(full.kind, EngineAutoCallbackKind::AnalyzeFunction);
-        assert_eq!(full.reason, EngineAutoCallbackRefusalReason::Allowed);
-
-        let balanced_deep_callback = auto_callback_plan_for_radare2_depth(
-            0,
-            EngineAutoCallbackKind::AnalyzeFunction,
-            ok_metrics,
-        );
-        assert!(!balanced_deep_callback.allowed);
-        assert_eq!(
-            balanced_deep_callback.reason,
-            EngineAutoCallbackRefusalReason::ModeNotFull
-        );
-
-        let balanced_xref = auto_callback_plan_for_radare2_depth(
-            0,
-            EngineAutoCallbackKind::PostAnalysisXref,
-            ok_metrics,
-        );
-        assert!(balanced_xref.allowed);
-        assert_eq!(
-            balanced_xref.reason,
-            EngineAutoCallbackRefusalReason::Allowed
-        );
-
-        let too_many_blocks = auto_callback_plan_for_radare2_depth(
-            RADARE2_ANALYSIS_DEPTH_AGGRESSIVE,
-            EngineAutoCallbackKind::DataRefs,
-            EngineAutoCallbackMetrics {
-                basic_block_count: AUTO_CALLBACK_MAX_BLOCKS + 1,
-                ..ok_metrics
-            },
-        );
-        assert!(!too_many_blocks.allowed);
-        assert_eq!(
-            too_many_blocks.reason,
-            EngineAutoCallbackRefusalReason::TooManyBlocks
-        );
-
-        let too_large = auto_callback_plan_for_radare2_depth(
-            RADARE2_ANALYSIS_DEPTH_AGGRESSIVE,
-            EngineAutoCallbackKind::PostAnalysisTaint,
-            EngineAutoCallbackMetrics {
-                linear_size: AUTO_CALLBACK_MAX_LINEAR_SIZE + 1,
-                ..ok_metrics
-            },
-        );
-        assert!(!too_large.allowed);
-        assert_eq!(too_large.reason, EngineAutoCallbackRefusalReason::TooLarge);
-
-        let too_costly = auto_callback_plan_for_radare2_depth(
-            RADARE2_ANALYSIS_DEPTH_AGGRESSIVE,
-            EngineAutoCallbackKind::PostAnalysisXref,
-            EngineAutoCallbackMetrics {
-                cost: AUTO_CALLBACK_MAX_COST + 1,
-                ..ok_metrics
-            },
-        );
-        assert!(!too_costly.allowed);
-        assert_eq!(
-            too_costly.reason,
-            EngineAutoCallbackRefusalReason::TooCostly
-        );
     }
 
     #[test]
@@ -5262,24 +4204,6 @@ mod tests {
         assert_eq!(grouped.function_name, "sym.grouped");
         assert_eq!(grouped.ptr_bits, 32);
         assert!(matches!(grouped.semantic_mode, EngineSemanticMode::Full));
-    }
-
-    #[test]
-    fn signature_inference_is_engine_owned_and_uses_prepared_arch() {
-        let mut arch = r2il::ArchSpec::new("amd64");
-        arch.addr_size = 8;
-        let blocks = const_return_blocks(0x401000, 0);
-        let snapshot = test_source_snapshot("sym.owner/rev1");
-        let analysis =
-            build_engine_analysis_from_parts("sym.owner", &blocks, Some(&arch), &snapshot)
-                .expect("analysis");
-
-        let signature = infer_signature_from_analysis(EngineSignatureInferenceRequest {
-            analysis: &analysis,
-        });
-
-        assert_eq!(signature.function_name, "sym.owner");
-        assert_eq!(signature.arch, "x86-64");
     }
 
     #[test]
@@ -5687,15 +4611,12 @@ mod tests {
             .expect("prepared render SSA")
             .with_name("sym.r2dec_controlled"),
         );
-        let writeback = r2types::build_source_owned_type_writeback_analysis(
-            r2types::TypeWritebackAnalysisRequest::new(
-                prepared,
-                r2types::ParsedExternalContext::default(),
-            )
-            .expect("coherent test owner request"),
+        let type_analysis = r2types::build_source_owned_type_analysis(
+            r2types::TypeAnalysisRequest::new(prepared, r2types::ParsedExternalContext::default())
+                .expect("coherent test owner request"),
         )
         .expect("source-owned test facts");
-        let source_owned_facts = writeback
+        let source_owned_facts = type_analysis
             .finalize_for_decompile(r2types::DecompileFinalization {
                 kind: r2types::DecompileRouteKind::Standard,
                 reason: "controlled r2dec residual test".to_string(),
@@ -6571,7 +5492,7 @@ mod tests {
         assert!(type_cfg_allows_semantic_plan(&cfg_summary));
         assert_eq!(
             type_route_decision(&function_facts, &cfg_summary, false).kind,
-            EngineTypeRouteKind::FullWriteback
+            EngineTypeRouteKind::FullTypeEvidence
         );
     }
 
@@ -6611,7 +5532,7 @@ mod tests {
 
         assert_eq!(
             type_route_decision(&function_facts, &cfg_summary, false).kind,
-            EngineTypeRouteKind::FullWriteback
+            EngineTypeRouteKind::FullTypeEvidence
         );
     }
 
@@ -6703,82 +5624,6 @@ mod tests {
             response.is_none(),
             "a large name-only fixture has no prepared semantic owner to authorize a summary route"
         );
-    }
-
-    #[test]
-    fn type_function_report_payload_refuses_name_only_summary_projection() {
-        let mut blocks = const_return_blocks(0x55a0, 0);
-        for idx in 0..210 {
-            blocks.push(R2ILBlock::new(0x5600 + idx, 1));
-        }
-        let parsed_context = r2types::parse_external_context_json("{}", 64);
-        let session = EngineSession::new();
-
-        let payload = session.type_function_report_payload(EngineFunctionAnalysisReportRequest {
-            analysis: EngineAnalyzeRequest {
-                function_name: "dbg.main".to_string(),
-                function_addr: 0x55a0,
-                blocks,
-                arch: None,
-                source_snapshot: Some(test_source_snapshot("dbg.main/report/rev1")),
-                trusted_ssa: None,
-                callee_facts: Vec::new(),
-                declared_signatures: Vec::new(),
-                ptr_bits: 64,
-                semantic_metadata_enabled: false,
-                reg_type_hints: HashMap::new(),
-                parsed_context,
-                semantic_mode: EngineSemanticMode::Full,
-                include_interproc_summary_set: true,
-                execution: EngineExecutionControl::default(),
-            },
-            interproc_max_iters: 1,
-            interproc_converged: false,
-            writeback_budget: r2types::TypeWritebackMutationBudget::new(1, 1, 1),
-            writeback_apply_policy: type_writeback_apply_policy_for_mode(
-                EngineTypeWritebackMode::Off,
-            ),
-        });
-
-        assert!(
-            payload.is_none(),
-            "report projection cannot promote a name-only preprobe into semantic authority"
-        );
-    }
-
-    #[test]
-    fn function_analysis_report_request_builder_owns_analysis_policy() {
-        let request = EngineFunctionAnalysisReportRequest::full_semantics_for_function(
-            EngineFunctionAnalysisReportRequestInput {
-                function: EngineFunctionInput {
-                    function_name: "dbg.session".to_string(),
-                    function_addr: 0x55a0,
-                    blocks: Vec::new(),
-                    arch: None,
-                    source_snapshot: Some(test_source_snapshot("dbg.session/rev1")),
-                    semantic_metadata_enabled: false,
-                },
-                ptr_bits: Some(64),
-                parsed_context: r2types::ParsedExternalContext::default(),
-                interproc_max_iters: 5,
-                interproc_converged: true,
-                writeback_budget: r2types::TypeWritebackMutationBudget::new(7, 11, 13),
-                writeback_apply_policy: type_writeback_apply_policy_for_mode(
-                    EngineTypeWritebackMode::Balanced,
-                ),
-            },
-        );
-
-        assert_eq!(request.analysis.function_name, "dbg.session");
-        assert_eq!(request.analysis.function_addr, 0x55a0);
-        assert_eq!(request.analysis.ptr_bits, 64);
-        assert_eq!(request.analysis.semantic_mode, EngineSemanticMode::Full);
-        assert!(request.analysis.include_interproc_summary_set);
-        assert_eq!(request.interproc_max_iters, 5);
-        assert!(request.interproc_converged);
-        assert_eq!(request.writeback_budget.global_max_links, 7);
-        assert_eq!(request.writeback_budget.max_type_decls, 11);
-        assert_eq!(request.writeback_budget.max_mutations, 13);
     }
 
     #[test]

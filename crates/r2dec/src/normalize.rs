@@ -2933,8 +2933,8 @@ mod tests {
             .value_var(carrier.dominating_initializers[0].value)
             .expect("carrier initializer")
             .clone();
-        let analysis = r2types::build_source_owned_type_writeback_analysis(
-            r2types::TypeWritebackAnalysisRequest::new(
+        let analysis = r2types::build_source_owned_type_analysis(
+            r2types::TypeAnalysisRequest::new(
                 std::sync::Arc::clone(&prepared),
                 r2types::ParsedExternalContext::default(),
             )
@@ -3173,8 +3173,8 @@ mod tests {
             .graph()
             .value_id_for_var(&loop_phi.dst)
             .expect("loop header phi has a stable value identity");
-        let analysis = r2types::build_source_owned_type_writeback_analysis(
-            r2types::TypeWritebackAnalysisRequest::new(
+        let analysis = r2types::build_source_owned_type_analysis(
+            r2types::TypeAnalysisRequest::new(
                 std::sync::Arc::clone(&prepared),
                 r2types::ParsedExternalContext::default(),
             )

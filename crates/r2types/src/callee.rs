@@ -10,8 +10,6 @@ use crate::{
 
 const CALLEE_IMPORT_PREFIXES: [&str; 3] = ["sym.imp.", "imp.", "reloc."];
 const CALLEE_NAMESPACE_PREFIXES: [&str; 6] = ["sym.imp.", "sym.", "imp.", "reloc.", "dbg.", "fcn."];
-const WINDOWS_RUNTIME_REGISTRATION_SUFFIX: &str = "addvectoredexceptionhandler";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CallsiteKey {
     pub block_addr: u64,
@@ -823,24 +821,6 @@ fn callee_lower_name_is_import_like(normalized: &str) -> bool {
             .any(|prefix| normalized.starts_with(prefix))
 }
 
-pub fn callee_name_is_windows_runtime_registration(name: &str) -> bool {
-    let normalized = normalize_callee_name(name);
-    callee_normalized_name_is_windows_runtime_registration(&normalized)
-}
-
-fn callee_normalized_name_is_windows_runtime_registration(normalized: &str) -> bool {
-    !normalized.is_empty() && normalized.ends_with(WINDOWS_RUNTIME_REGISTRATION_SUFFIX)
-}
-
-pub fn callee_name_is_runtime_copy(name: &str) -> bool {
-    let normalized = normalize_callee_name(name);
-    callee_normalized_name_is_runtime_copy(&normalized)
-}
-
-fn callee_normalized_name_is_runtime_copy(normalized: &str) -> bool {
-    normalized == "memcpy" || normalized == "__memcpy_chk" || normalized.starts_with("memcpy")
-}
-
 fn classify_callee_name(
     storage_kind: SSAVarNameKind,
     imported_hint: bool,
@@ -1095,30 +1075,6 @@ mod tests {
         assert_eq!(normalize_callee_name("sym.imp.printf.plt"), "printf");
         assert_eq!(normalize_callee_name("reloc.sym.imp.memcpy"), "memcpy");
         assert_eq!(normalize_callee_name("sym.helper_2"), "helper");
-    }
-
-    #[test]
-    fn callee_scope_name_predicates_preserve_runtime_helper_contract() {
-        assert!(callee_name_is_import_like("sym.imp.printf"));
-        assert!(callee_name_is_import_like("imp.printf"));
-        assert!(callee_name_is_import_like("reloc.memcpy"));
-        assert!(!callee_name_is_import_like("sym.printf"));
-        assert!(!callee_name_is_import_like("memcpy"));
-
-        assert!(callee_name_is_windows_runtime_registration(
-            "sym.imp.KERNEL32_AddVectoredExceptionHandler",
-        ));
-        assert!(callee_name_is_windows_runtime_registration(
-            "reloc.AddVectoredExceptionHandler",
-        ));
-        assert!(!callee_name_is_windows_runtime_registration(
-            "AddVectoredContinueHandler"
-        ));
-
-        assert!(callee_name_is_runtime_copy("memcpy"));
-        assert!(callee_name_is_runtime_copy("__memcpy_chk"));
-        assert!(callee_name_is_runtime_copy("reloc.memcpy_s"));
-        assert!(!callee_name_is_runtime_copy("not_memcpy"));
     }
 
     #[test]

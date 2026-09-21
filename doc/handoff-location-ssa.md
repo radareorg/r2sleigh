@@ -30489,3 +30489,61 @@ worse against 934 better: spelling a parameter `size_t bufsize` instead of
 `uint64_t arg1` moves the text toward the source in most functions and away
 from it wherever the source used the other spelling. The 85 `type_match`
 regressions are the population worth reading by eye first.
+
+## The type layer stopped writing back
+
+`crates/r2types/src/writeback.rs` was named after radare2: it inferred a
+function's types and then built a plan of mutations to apply to the host's
+database. The plugin is gone, so the second half had no destination. It is now
+`crates/r2types/src/analysis.rs`, and the vocabulary says what the module does.
+
+What came out, and why the compiler could not see most of it at first:
+
+The apply chain stayed reachable through one `pub fn` --
+`TypeWritebackAnalysis::authority_report` -- which nothing called. A `pub` item
+in a library is never reported as dead, so the whole island below it looked
+live. Cutting that single method made 47 items unreachable in one round, and
+the rounds after that took the mutation plan, the authority report, the
+`TypeWritebackApplyPolicy` thresholds, five `#[repr(u32)]` decision enums and
+the seven `*_apply_decision` / `*_delete_required` helpers.
+
+The same trick was hiding a second island. `r2engine/src/policy.rs` was 116
+lines of budgets and caps; every constant in it had zero readers outside the
+file, and the only function with a caller reached it through `pub use
+policy::*`. The module is deleted. `EngineAnalysisPolicy` went with it: of its
+seven fields only `mode` was ever read, and the six caps were asserted
+monotonic by a test and used by nothing. So did the auto-callback chain, which
+decided whether radare2's analysis hook should run.
+
+Two smaller things were removed for the same reason rather than for size.
+`compute_signature_confidence` started at 48 and added hand-tuned terms to
+produce `InferredSignature::confidence`, which was only ever maxed with a prior
+value and asserted in one test -- it decided nothing, and the field is gone with
+it. `r2types::inference` was 712 lines, all of them a test module for code that
+had already been deleted.
+
+Two doors into the same room were closed. `infer_local_struct_artifacts_from_ssa`
+and `recover_vars_from_ssa` were the plugin-era entry points that scanned raw
+SSA blocks; the live path uses the prepared variants, which recover from
+certificates instead. Their tests went with them because the facts were about
+the heuristic scan, not about what the prepared path proves.
+
+A note on method: the compiler is the oracle, but only for the production
+build. Asking `cargo build --tests` reports nothing, because every item in a
+dead island is still referenced by its own tests. The sequence that works is to
+build the library alone, delete what it names, and only then let the test build
+fail and take the tests whose subject no longer exists.
+
+One caution that cost two recoveries. A pruner that matches items by name alone
+will delete `RecoveredVarKey::new` when the compiler meant a different `new`.
+Match top-level items only; methods inside an `impl` need the owning type.
+
+Gates after: structural counts all fell -- `too_many_lines` 481 to 438,
+`excessive_nesting` 1125 to 1019, `cognitive_complexity` 65 to 53,
+`too_many_arguments` 160 to 156.
+
+Left standing deliberately: `r2types::constraint` and `r2types::solver` build
+only two of their six constraint kinds. The capability, field-access and
+call-signature constraints are constructed by the solver's own tests and by
+nothing else, so either the solver is half-wired or those kinds are leftovers.
+That is a question for the type layer rather than for a deletion pass.

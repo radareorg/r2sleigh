@@ -19,7 +19,7 @@ fn an_entry_value_is_not_a_boolean_for_being_one_byte_wide() {
     let both = Varnode::register(0x22, 1);
     let mut block = R2ILBlock::new(0x1000, 4);
     block.push(R2ILOp::BoolAnd {
-        dst: both.clone(),
+        dst: both,
         a: carry,
         b: other,
     });

@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use r2ssa::{
-    DecompilePrepFacts, SSABlock, SSAOp, SSAVar, SSAVarNameKind, SsaArtifact, StackAddressBase,
-};
+use r2ssa::{SSABlock, SSAOp, SSAVar, SSAVarNameKind, SsaArtifact};
 
+use crate::analysis::RecoveredVariable;
 use crate::parse_c_type_like;
 use crate::signature_infer::RecoveredSignatureParam;
-use crate::writeback::RecoveredVariable;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignatureTypeEvidenceContext {
@@ -29,11 +27,6 @@ pub enum TypeHintRank {
 pub struct TypeHint {
     pub rank: TypeHintRank,
     pub ty: String,
-}
-
-struct StackVarRecoveryHint {
-    type_override: Option<String>,
-    stack_arg_index: Option<usize>,
 }
 
 impl TypeHint {
@@ -377,15 +370,6 @@ pub fn merge_type_hint(hints: &mut HashMap<String, TypeHint>, key: String, incom
             hints.insert(key, incoming);
         }
     }
-}
-
-pub fn collect_signature_type_evidence_context(
-    ssa_blocks: &[SSABlock],
-) -> SignatureTypeEvidenceContext {
-    collect_signature_type_evidence_context_with_arch(
-        ssa_blocks,
-        r2ssa::MachineArchitectureFamily::Unknown,
-    )
 }
 
 pub fn collect_signature_type_evidence_context_with_arch(
@@ -743,177 +727,6 @@ pub(crate) fn recover_vars_from_prepared_ssa(
     vars
 }
 
-pub fn recover_vars_from_ssa(
-    ssa_blocks: &[SSABlock],
-    architecture: r2ssa::MachineArchitectureFamily,
-    metadata_reg_type_hints: &HashMap<String, TypeHint>,
-    semantic_metadata_enabled: bool,
-) -> Vec<RecoveredVariable> {
-    recover_vars_from_ssa_with_prep_facts(
-        ssa_blocks,
-        None,
-        architecture,
-        metadata_reg_type_hints,
-        semantic_metadata_enabled,
-    )
-}
-
-pub fn recover_vars_from_ssa_with_prep_facts(
-    ssa_blocks: &[SSABlock],
-    prep_facts: Option<&DecompilePrepFacts>,
-    architecture: r2ssa::MachineArchitectureFamily,
-    metadata_reg_type_hints: &HashMap<String, TypeHint>,
-    semantic_metadata_enabled: bool,
-) -> Vec<RecoveredVariable> {
-    let mut vars = Vec::new();
-    let mut seen_slots: HashMap<(bool, i64), usize> = HashMap::new();
-    let mut seen_arg_regs: HashSet<String> = HashSet::new();
-    let (arg_regs, stack_bases, frame_bases) = recover_vars_arch_profile(architecture);
-    let ptr_bits = if arch_is_x86_64_sysv_like(architecture) {
-        64
-    } else {
-        0
-    };
-    let signature_evidence =
-        collect_signature_type_evidence_context_with_arch(ssa_blocks, architecture);
-    let (usage_reg_type_hints, pointer_var_keys) =
-        infer_usage_register_type_hints(ssa_blocks, architecture);
-    let empty_metadata_hints = HashMap::new();
-    let enabled_metadata_hints = if semantic_metadata_enabled {
-        metadata_reg_type_hints
-    } else {
-        &empty_metadata_hints
-    };
-    let reg_type_hints =
-        merge_register_type_hints(enabled_metadata_hints, &usage_reg_type_hints, arg_regs);
-
-    let mut stack_addr_temps: HashMap<String, (SSAVar, i64, bool)> = HashMap::new();
-    let control_return_targets = collect_control_return_targets(ssa_blocks);
-
-    for block in ssa_blocks {
-        for op in &block.ops {
-            match op {
-                SSAOp::IntAdd { dst, .. } | SSAOp::IntSub { dst, .. } => {
-                    if let Some((_, base, raw_offset)) = stack_addr_temp(op, stack_bases) {
-                        let canonical_root = prep_facts
-                            .and_then(|facts| facts.stack_address_root_of(dst))
-                            .copied();
-                        let offset = canonical_root.map(|root| root.offset).unwrap_or(raw_offset);
-                        let is_frame_base = canonical_root
-                            .map(|root| matches!(root.base, StackAddressBase::FramePointer))
-                            .unwrap_or_else(|| {
-                                frame_bases.contains(&base.name().to_ascii_lowercase().as_str())
-                            });
-                        let dst_key = ssa_var_block_key(block.addr, dst);
-                        stack_addr_temps.insert(dst_key, (base.clone(), offset, is_frame_base));
-                    }
-                }
-                SSAOp::Store {
-                    space: r2il::SpaceId::Ram,
-                    addr,
-                    val,
-                } => {
-                    let addr_key = ssa_var_block_key(block.addr, addr);
-                    if let Some((base, offset, is_frame_base)) = stack_addr_temps.get(&addr_key) {
-                        let type_override = if pointer_var_keys.contains(&ssa_var_key(val)) {
-                            Some("void *".to_string())
-                        } else {
-                            None
-                        };
-                        add_stack_var(
-                            &mut vars,
-                            &mut seen_slots,
-                            *is_frame_base,
-                            *offset,
-                            val.size,
-                            StackVarRecoveryHint {
-                                type_override,
-                                stack_arg_index: incoming_stack_arg_index(
-                                    architecture,
-                                    base,
-                                    *offset,
-                                    ptr_bits,
-                                    arg_regs.len(),
-                                ),
-                            },
-                        );
-                    }
-                }
-                SSAOp::Load {
-                    dst,
-                    space: r2il::SpaceId::Ram,
-                    addr,
-                } => {
-                    let addr_key = ssa_var_block_key(block.addr, addr);
-                    if !control_return_targets.contains(&ssa_var_key(dst))
-                        && let Some((base, offset, is_frame_base)) = stack_addr_temps.get(&addr_key)
-                    {
-                        let type_override = if pointer_var_keys.contains(&ssa_var_key(dst)) {
-                            Some("void *".to_string())
-                        } else {
-                            None
-                        };
-                        add_stack_var(
-                            &mut vars,
-                            &mut seen_slots,
-                            *is_frame_base,
-                            *offset,
-                            dst.size,
-                            StackVarRecoveryHint {
-                                type_override,
-                                stack_arg_index: incoming_stack_arg_index(
-                                    architecture,
-                                    base,
-                                    *offset,
-                                    ptr_bits,
-                                    arg_regs.len(),
-                                ),
-                            },
-                        );
-                    }
-                }
-                _ => {}
-            }
-
-            for src in op.sources() {
-                let base_name = src.name().to_lowercase();
-                if src.version == 0 {
-                    for (i, (canonical, aliases)) in arg_regs.iter().enumerate() {
-                        if aliases.contains(&base_name.as_str())
-                            && !seen_arg_regs.contains(*canonical)
-                        {
-                            seen_arg_regs.insert(canonical.to_string());
-                            let hinted_type = recovered_arg_type_hint(
-                                &reg_type_hints,
-                                enabled_metadata_hints,
-                                canonical,
-                                aliases,
-                                src,
-                                Some(&signature_evidence),
-                                ptr_bits,
-                            );
-                            vars.push(RecoveredVariable {
-                                name: format!("arg{i}"),
-                                kind: "r".to_string(),
-                                delta: 0,
-                                var_type: hinted_type
-                                    .map(|hint| hint.display)
-                                    .unwrap_or_else(|| size_to_type(src.size)),
-                                isarg: true,
-                                reg: Some(canonical.to_string()),
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    vars.sort_by_key(|v| v.delta);
-    vars
-}
-
 fn collect_control_return_targets(ssa_blocks: &[SSABlock]) -> HashSet<String> {
     ssa_blocks
         .iter()
@@ -1004,7 +817,6 @@ fn recovered_arg_family_width_hint(
 
 struct RecoveredArgTypeHint {
     ty: crate::CTypeLike,
-    display: String,
 }
 
 fn recovered_arg_type_hint(
@@ -1032,20 +844,13 @@ fn recovered_arg_type_hint(
                 crate::CTypeLike::Pointer(ref inner)
                     if !matches!(inner.as_ref(), crate::CTypeLike::Void | crate::CTypeLike::Unknown)
             ) {
-                return Some(RecoveredArgTypeHint {
-                    ty: parsed,
-                    display: hint.ty.clone(),
-                });
+                return Some(RecoveredArgTypeHint { ty: parsed });
             }
             return Some(RecoveredArgTypeHint {
                 ty: crate::CTypeLike::Pointer(Box::new(size_to_neutral_int_type_like(width))),
-                display: format!("{} *", size_to_type(width)),
             });
         }
-        return Some(RecoveredArgTypeHint {
-            ty: parsed,
-            display: hint.ty.clone(),
-        });
+        return Some(RecoveredArgTypeHint { ty: parsed });
     }
     if let Some(hint) = strongest_hint_for_aliases(metadata_reg_type_hints, canonical, aliases) {
         return explicit_arg_type_hint(&hint.ty, src, ptr_bits);
@@ -1055,7 +860,6 @@ fn recovered_arg_type_hint(
     let width = bits.div_ceil(8).min(src.size);
     Some(RecoveredArgTypeHint {
         ty: size_to_neutral_int_type_like(width),
-        display: size_to_type(width),
     })
 }
 
@@ -1068,12 +872,8 @@ fn explicit_arg_type_hint(hint: &str, src: &SSAVar, ptr_bits: u32) -> Option<Rec
                 bits: src.size.saturating_mul(8),
                 signedness,
             },
-            display: size_to_type(src.size),
         }),
-        Some(ty) => Some(RecoveredArgTypeHint {
-            ty,
-            display: hint.to_string(),
-        }),
+        Some(ty) => Some(RecoveredArgTypeHint { ty }),
         None => None,
     }
 }
@@ -1102,55 +902,6 @@ fn merge_register_type_hints(
     }
 
     merged
-}
-
-fn add_stack_var(
-    vars: &mut Vec<RecoveredVariable>,
-    seen_slots: &mut HashMap<(bool, i64), usize>,
-    is_frame_base: bool,
-    offset: i64,
-    size: u32,
-    hint: StackVarRecoveryHint,
-) {
-    let StackVarRecoveryHint {
-        type_override,
-        stack_arg_index,
-    } = hint;
-    let slot_key = (is_frame_base, offset);
-    if let Some(existing_idx) = seen_slots.get(&slot_key).copied() {
-        // A second hint for a slot that is already typed demotes it to the
-        // opaque pointer, because the two disagree and neither is proven. The
-        // comparison is on the types rather than on the spellings, so radare2
-        // writing `void*` reaches the same conclusion as `void *`.
-        if let Some(override_ty) = type_override
-            && crate::parse_c_type_like(&override_ty, 64).is_some_and(|ty| ty.is_void_pointer())
-            && let Some(existing) = vars.get_mut(existing_idx)
-            && !existing.recovered_type_is_void_pointer()
-        {
-            existing.var_type = override_ty;
-        }
-        return;
-    }
-
-    let is_arg = stack_arg_index.is_some() || if is_frame_base { offset > 0 } else { false };
-    let var_name = if let Some(index) = stack_arg_index {
-        format!("arg{index}")
-    } else if is_arg && offset > 8 {
-        format!("arg_{:x}h", offset.unsigned_abs())
-    } else {
-        format!("var_{:x}h", offset.unsigned_abs())
-    };
-    let kind = if is_frame_base { "b" } else { "s" };
-
-    vars.push(RecoveredVariable {
-        name: var_name,
-        kind: kind.to_string(),
-        delta: offset,
-        var_type: type_override.unwrap_or_else(|| size_to_type(size)),
-        isarg: stack_arg_index.is_some() || (is_arg && offset > 8),
-        reg: None,
-    });
-    seen_slots.insert(slot_key, vars.len().saturating_sub(1));
 }
 
 fn collect_register_version_keys(ssa_blocks: &[SSABlock]) -> HashMap<String, Vec<String>> {
@@ -2460,61 +2211,6 @@ mod tests {
     }
 
     #[test]
-    fn recovered_argument_keeps_version_zero_subregister_width() {
-        let block = SSABlock {
-            addr: 0x401000,
-            size: 8,
-            ops: vec![
-                SSAOp::Copy {
-                    dst: SSAVar::new("tmp:value", 1, 4),
-                    src: SSAVar::new("EDX", 0, 4),
-                },
-                SSAOp::IntSExt {
-                    dst: SSAVar::new("RDX", 1, 8),
-                    src: SSAVar::new("tmp:value", 1, 4),
-                },
-                SSAOp::IntMult {
-                    dst: SSAVar::new("RDX", 2, 8),
-                    a: SSAVar::new("RDX", 1, 8),
-                    b: SSAVar::constant(0x38, 8),
-                },
-            ],
-            phis: Vec::new(),
-        };
-
-        let params = recover_signature_params_from_ssa(
-            std::slice::from_ref(&block),
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-            64,
-        );
-        let param = params
-            .iter()
-            .find(|param| param.name == "arg2")
-            .expect("third parameter");
-        assert_eq!(
-            param.initial_ty,
-            crate::CTypeLike::Int {
-                bits: 32,
-                signedness: crate::Signedness::Unknown,
-            }
-        );
-
-        let vars = recover_vars_from_ssa(
-            &[block],
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-        );
-        let var = vars
-            .iter()
-            .find(|var| var.name == "arg2")
-            .expect("third recovered variable");
-        assert_eq!(var.var_type, "int32_t");
-    }
-
-    #[test]
     fn x86_scalar_register_families_cover_legacy_and_extended_gprs() {
         let families: &[&[&str]] = &[
             &["RAX", "eax", "ax", "al", "ah"],
@@ -2676,80 +2372,6 @@ mod tests {
                 bits: 64,
                 signedness: crate::Signedness::Unknown,
             }
-        );
-    }
-
-    #[test]
-    fn only_ram_accesses_recover_stack_params_and_locals() {
-        let block_for_space = |space| SSABlock {
-            addr: 0x401000,
-            size: 16,
-            ops: vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:incoming", 1, 8),
-                    a: SSAVar::new("rsp", 0, 8),
-                    b: SSAVar::constant(8, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("tmp:stack_arg", 1, 8),
-                    space,
-                    addr: SSAVar::new("tmp:incoming", 1, 8),
-                },
-                SSAOp::IntSub {
-                    dst: SSAVar::new("tmp:local", 1, 8),
-                    a: SSAVar::new("rbp", 1, 8),
-                    b: SSAVar::constant(8, 8),
-                },
-                SSAOp::Store {
-                    space,
-                    addr: SSAVar::new("tmp:local", 1, 8),
-                    val: SSAVar::new("tmp:value", 1, 4),
-                },
-            ],
-            phis: Vec::new(),
-        };
-
-        let ram = block_for_space(r2il::SpaceId::Ram);
-        let custom = block_for_space(r2il::SpaceId::Custom(7));
-        let ram_params = recover_signature_params_from_ssa(
-            std::slice::from_ref(&ram),
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-            64,
-        );
-        let custom_params = recover_signature_params_from_ssa(
-            std::slice::from_ref(&custom),
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-            64,
-        );
-        assert!(ram_params.iter().any(|param| param.arg_index == 6));
-        assert!(!custom_params.iter().any(|param| param.arg_index == 6));
-
-        let ram_vars = recover_vars_from_ssa(
-            &[ram],
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-        );
-        let custom_vars = recover_vars_from_ssa(
-            &[custom],
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-        );
-        assert!(ram_vars.iter().any(|var| var.kind == "s" && var.delta == 8));
-        assert!(
-            ram_vars
-                .iter()
-                .any(|var| var.kind == "b" && var.delta == -8)
-        );
-        assert!(
-            !custom_vars
-                .iter()
-                .any(|var| matches!(var.kind.as_str(), "s" | "b"))
         );
     }
 
@@ -3081,156 +2703,6 @@ mod tests {
             evidence.pointer_vars,
             evidence.pointer_pointee_width_bytes
         );
-    }
-
-    #[test]
-    fn recover_vars_from_ssa_marks_x86_64_stack_pointer_arg_slot() {
-        let block = SSABlock {
-            addr: 0x401000,
-            size: 8,
-            ops: vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:sp8", 1, 8),
-                    a: SSAVar::new("rsp", 0, 8),
-                    b: SSAVar::constant(8, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("tmp:stack_arg", 1, 8),
-                    addr: SSAVar::new("tmp:sp8", 1, 8),
-                    space: r2il::SpaceId::Ram,
-                },
-            ],
-            phis: Vec::new(),
-        };
-
-        let vars = recover_vars_from_ssa(
-            &[block],
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-        );
-        let stack_arg = vars
-            .iter()
-            .find(|var| var.kind == "s" && var.delta == 8)
-            .expect("rsp+8 should be recovered as an incoming stack argument");
-
-        assert_eq!(stack_arg.name, "arg6");
-        assert!(stack_arg.isarg);
-        assert_eq!(stack_arg.var_type, "int64_t");
-    }
-
-    #[test]
-    fn prepared_stack_roots_recover_entry_relative_arm64_locals() {
-        let slot_addr = SSAVar::new("tmp:slot", 1, 8);
-        let block = SSABlock {
-            addr: 0x1000,
-            size: 8,
-            ops: vec![
-                SSAOp::IntAdd {
-                    dst: slot_addr.clone(),
-                    a: SSAVar::new("sp", 1, 8),
-                    b: SSAVar::constant(12, 8),
-                },
-                SSAOp::Store {
-                    space: r2il::SpaceId::Ram,
-                    addr: slot_addr.clone(),
-                    val: SSAVar::constant(1, 4),
-                },
-            ],
-            phis: Vec::new(),
-        };
-        let prep_facts = DecompilePrepFacts {
-            stack_address_roots: [(
-                slot_addr,
-                r2ssa::StackAddressRoot {
-                    base: StackAddressBase::StackPointer,
-                    offset: -4,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            ..DecompilePrepFacts::default()
-        };
-
-        let vars = recover_vars_from_ssa_with_prep_facts(
-            &[block],
-            Some(&prep_facts),
-            r2ssa::MachineArchitectureFamily::AArch64,
-            &HashMap::new(),
-            true,
-        );
-        let local = vars
-            .iter()
-            .find(|var| var.kind == "s")
-            .expect("canonical stack local");
-
-        assert_eq!(local.delta, -4);
-        assert_eq!(local.name, "var_4h");
-        assert!(!local.isarg);
-    }
-
-    #[test]
-    fn recover_vars_from_ssa_does_not_treat_epilogue_stack_as_incoming_args() {
-        let block = SSABlock {
-            addr: 0x401000,
-            size: 8,
-            ops: vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("rsp", 2, 8),
-                    a: SSAVar::new("rsp", 1, 8),
-                    b: SSAVar::constant(8, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("rip", 1, 8),
-                    addr: SSAVar::new("rsp", 2, 8),
-                    space: r2il::SpaceId::Ram,
-                },
-                SSAOp::Return {
-                    target: SSAVar::new("rip", 1, 8),
-                },
-            ],
-            phis: Vec::new(),
-        };
-
-        let vars = recover_vars_from_ssa(
-            &[block],
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-        );
-
-        assert!(vars.iter().all(|var| !var.isarg));
-        assert!(vars.iter().all(|var| var.delta != 8));
-    }
-
-    #[test]
-    fn recover_vars_from_ssa_rejects_constant_minus_stack_pointer_as_an_address() {
-        let block = SSABlock {
-            addr: 0x401000,
-            size: 8,
-            ops: vec![
-                SSAOp::IntSub {
-                    dst: SSAVar::new("tmp:not_stack", 1, 8),
-                    a: SSAVar::constant(0x20, 8),
-                    b: SSAVar::new("rsp", 0, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("tmp:value", 1, 8),
-                    addr: SSAVar::new("tmp:not_stack", 1, 8),
-                    space: r2il::SpaceId::Ram,
-                },
-            ],
-            phis: Vec::new(),
-        };
-
-        let vars = recover_vars_from_ssa(
-            &[block],
-            r2ssa::MachineArchitectureFamily::X86_64,
-            &HashMap::new(),
-            true,
-        );
-
-        assert!(vars.is_empty());
     }
 
     #[test]

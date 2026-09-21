@@ -38,7 +38,7 @@ use crate::prepare::ssa_var_block_key;
 use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WritebackSource {
+pub(crate) enum TypeFactSource {
     LocalInferred,
     CalleeSignature,
     SignatureRegistry,
@@ -47,21 +47,8 @@ pub enum WritebackSource {
     DataflowRanked,
 }
 
-impl WritebackSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalInferred => "local_inferred",
-            Self::CalleeSignature => "callee_signature",
-            Self::SignatureRegistry => "signature_registry",
-            Self::ExistingState => "existing_state",
-            Self::ExternalTypeDb => "external_type_db",
-            Self::DataflowRanked => "dataflow_ranked",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WritebackEvidence {
+pub(crate) enum TypeEvidence {
     SsaVarRecovery,
     CertifiedCallArgument,
     CanonicalStackAccessWidth,
@@ -75,59 +62,30 @@ pub enum WritebackEvidence {
     ExternalParamName,
 }
 
-impl WritebackEvidence {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SsaVarRecovery => "ssa-var-recovery",
-            Self::CertifiedCallArgument => "certified-call-argument",
-            Self::CanonicalStackAccessWidth => "canonical-stack-access-width",
-            Self::CanonicalStackSignedness => "canonical-stack-signedness",
-            Self::ExternalSignatureCurrent => "afcfj-current",
-            Self::CanonicalMainSignature => "canonical-main-signature",
-            Self::SsaFieldOffsetPattern => "ssa-field-offset-pattern",
-            Self::ExistingStackType => "afvj-existing-type",
-            Self::ExternalStackAnnotation => "afvj-stack-annotation",
-            Self::ExternalStackName => "stack-var-name-from-afvj",
-            Self::ExternalParamName => "afcfj-param-name",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StructDeclSource {
+pub(crate) enum StructDeclSource {
     LocalInferred,
     ExternalTypeDb,
 }
 
-impl StructDeclSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalInferred => "local_inferred",
-            Self::ExternalTypeDb => "external_type_db",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct InferredSignatureParam {
+pub(crate) struct InferredSignatureParam {
     pub name: String,
     pub param_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InferredSignature {
+pub(crate) struct InferredSignature {
     pub function_name: String,
     pub signature: String,
     pub ret_type: String,
     pub params: Vec<InferredSignatureParam>,
     pub callconv: String,
     pub arch: String,
-    pub confidence: u8,
-    pub callconv_confidence: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RecoveredVariable {
+pub(crate) struct RecoveredVariable {
     pub name: String,
     pub kind: String,
     pub delta: i64,
@@ -148,20 +106,10 @@ impl RecoveredVariable {
     pub fn recovered_type(&self, ptr_bits: u32) -> Option<CTypeLike> {
         parse_c_type_like(&self.var_type, ptr_bits)
     }
-
-    /// Whether the recovered spelling is `void *`, however it was spaced.
-    ///
-    /// No target width is needed: `parse_c_type_like` consults `ptr_bits` only
-    /// for the integer names whose width is a property of the target, and the
-    /// shape of a pointer is not one of them.
-    pub fn recovered_type_is_void_pointer(&self) -> bool {
-        self.recovered_type(64)
-            .is_some_and(|ty| ty.is_void_pointer())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructFieldCandidate {
+pub(crate) struct StructFieldCandidate {
     pub name: String,
     pub offset: u64,
     /// The field's type, as a type.
@@ -170,7 +118,7 @@ pub struct StructFieldCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructDeclCandidate {
+pub(crate) struct StructDeclCandidate {
     pub name: String,
     pub decl: String,
     pub confidence: u8,
@@ -179,7 +127,7 @@ pub struct StructDeclCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlobalTypeLinkCandidate {
+pub(crate) struct GlobalTypeLinkCandidate {
     pub addr: u64,
     /// The type this address is linked to, as a type.
     ///
@@ -189,11 +137,11 @@ pub struct GlobalTypeLinkCandidate {
     /// pointer's spacing something three components each had an opinion about.
     pub target_type: CTypeLike,
     pub confidence: u8,
-    pub source: WritebackSource,
+    pub source: TypeFactSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VarTypeCandidate {
+pub(crate) struct VarTypeCandidate {
     pub name: String,
     pub kind: String,
     pub delta: i64,
@@ -205,21 +153,21 @@ pub struct VarTypeCandidate {
     pub reg: Option<String>,
     pub size: u32,
     pub confidence: u8,
-    pub source: WritebackSource,
-    pub evidence: Vec<WritebackEvidence>,
+    pub source: TypeFactSource,
+    pub evidence: Vec<TypeEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VarRenameCandidate {
+pub(crate) struct VarRenameCandidate {
     pub name: String,
     pub target_name: String,
     pub confidence: u8,
-    pub source: WritebackSource,
-    pub evidence: Vec<WritebackEvidence>,
+    pub source: TypeFactSource,
+    pub evidence: Vec<TypeEvidence>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TypeWritebackDiagnostics {
+pub(crate) struct TypeAnalysisDiagnostics {
     pub conflicts: Vec<String>,
     pub warnings: Vec<String>,
     pub solver_warnings: Vec<String>,
@@ -229,8 +177,8 @@ pub struct TypeWritebackDiagnostics {
 /// Advisory local-inference report.
 ///
 /// This detached projection is not certificate authority. Authoritative
-/// writeback derives it internally from a retained [`SsaArtifact`] owner.
-pub struct LocalStructArtifacts {
+/// the analysis derives it internally from a retained [`SsaArtifact`] owner.
+pub(crate) struct LocalStructArtifacts {
     pub struct_decls: Vec<StructDeclCandidate>,
     pub slot_type_overrides: HashMap<usize, String>,
     pub slot_field_profiles: HashMap<usize, BTreeMap<u64, String>>,
@@ -239,7 +187,7 @@ pub struct LocalStructArtifacts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeWritebackPlan {
+pub(crate) struct TypePlan {
     /// The target's pointer width.
     ///
     /// The plan carries types now, and a type only becomes a C spelling
@@ -252,742 +200,14 @@ pub struct TypeWritebackPlan {
     pub var_rename_candidates: Vec<VarRenameCandidate>,
     pub struct_decls: Vec<StructDeclCandidate>,
     pub global_type_links: Vec<GlobalTypeLinkCandidate>,
-    pub diagnostics: TypeWritebackDiagnostics,
-}
-
-pub const MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE: u8 = 95;
-pub const TYPE_WRITEBACK_TYPE_MIN_CONFIDENCE_DEFAULT: u8 = 85;
-pub const TYPE_WRITEBACK_RENAME_MIN_CONFIDENCE_DEFAULT: u8 = 93;
-pub const TYPE_WRITEBACK_STRUCT_MIN_CONFIDENCE_DEFAULT: u8 = 85;
-pub const SIGNATURE_WRITEBACK_MAX_BLOCKS: usize = 200;
-pub const SIGNATURE_WRITEBACK_MIN_CONFIDENCE: u8 = 70;
-pub const CALLCONV_WRITEBACK_MIN_CONFIDENCE: u8 = 80;
-const TYPE_WRITEBACK_AGGRESSIVE_TYPE_DELTA: u8 = 10;
-const TYPE_WRITEBACK_AGGRESSIVE_RENAME_DELTA: u8 = 8;
-const TYPE_WRITEBACK_OFF_THRESHOLD: u8 = 101;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TypeWritebackMutationBudget {
-    pub global_max_links: usize,
-    pub max_type_decls: usize,
-    pub max_mutations: usize,
-}
-
-impl TypeWritebackMutationBudget {
-    pub fn new(global_max_links: usize, max_type_decls: usize, max_mutations: usize) -> Self {
-        Self {
-            global_max_links: global_max_links.max(1),
-            max_type_decls: max_type_decls.max(1),
-            max_mutations: max_mutations.max(1),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TypeWritebackApplyMode {
-    Off,
-    #[default]
-    Balanced,
-    Aggressive,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct TypeWritebackApplyPolicy {
-    pub mode: TypeWritebackApplyMode,
-    pub type_min_confidence: u8,
-    pub rename_min_confidence: u8,
-    pub struct_min_confidence: u8,
-}
-
-impl Default for TypeWritebackApplyPolicy {
-    fn default() -> Self {
-        Self::balanced()
-    }
-}
-
-impl TypeWritebackApplyPolicy {
-    pub fn balanced() -> Self {
-        Self {
-            mode: TypeWritebackApplyMode::Balanced,
-            type_min_confidence: TYPE_WRITEBACK_TYPE_MIN_CONFIDENCE_DEFAULT,
-            rename_min_confidence: TYPE_WRITEBACK_RENAME_MIN_CONFIDENCE_DEFAULT,
-            struct_min_confidence: TYPE_WRITEBACK_STRUCT_MIN_CONFIDENCE_DEFAULT,
-        }
-    }
-
-    pub fn aggressive() -> Self {
-        Self {
-            mode: TypeWritebackApplyMode::Aggressive,
-            ..Self::balanced()
-        }
-    }
-
-    pub fn off() -> Self {
-        Self {
-            mode: TypeWritebackApplyMode::Off,
-            ..Self::balanced()
-        }
-    }
-
-    pub fn effective_threshold(self, base: u8, aggressive_delta: u8) -> u8 {
-        match self.mode {
-            TypeWritebackApplyMode::Off => TYPE_WRITEBACK_OFF_THRESHOLD,
-            TypeWritebackApplyMode::Balanced => base.clamp(1, 100),
-            TypeWritebackApplyMode::Aggressive => {
-                base.saturating_sub(aggressive_delta).clamp(1, 100)
-            }
-        }
-    }
-
-    pub fn mutation_min_confidence(self, kind: TypeWritebackMutationKind) -> u8 {
-        match kind {
-            TypeWritebackMutationKind::TypeDecl => self.effective_threshold(
-                self.struct_min_confidence,
-                TYPE_WRITEBACK_AGGRESSIVE_TYPE_DELTA,
-            ),
-            TypeWritebackMutationKind::VarRename => self.effective_threshold(
-                self.rename_min_confidence,
-                TYPE_WRITEBACK_AGGRESSIVE_RENAME_DELTA,
-            ),
-            TypeWritebackMutationKind::Var
-            | TypeWritebackMutationKind::VarType
-            | TypeWritebackMutationKind::TypeLink => self.effective_threshold(
-                self.type_min_confidence,
-                TYPE_WRITEBACK_AGGRESSIVE_TYPE_DELTA,
-            ),
-            TypeWritebackMutationKind::Signature
-            | TypeWritebackMutationKind::Callconv
-            | TypeWritebackMutationKind::Xref
-            | TypeWritebackMutationKind::Comment
-            | TypeWritebackMutationKind::Flag => 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TypeWritebackMutationKind {
-    Signature,
-    Callconv,
-    Var,
-    VarRename,
-    VarType,
-    Xref,
-    Comment,
-    Flag,
-    TypeDecl,
-    TypeLink,
-}
-
-impl TypeWritebackMutationKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Signature => "signature",
-            Self::Callconv => "callconv",
-            Self::Var => "var",
-            Self::VarRename => "var_rename",
-            Self::VarType => "var_type",
-            Self::Xref => "xref",
-            Self::Comment => "comment",
-            Self::Flag => "flag",
-            Self::TypeDecl => "type_decl",
-            Self::TypeLink => "type_link",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct TypeWritebackMutation {
-    pub kind: TypeWritebackMutationKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ret_type: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub params: Vec<InferredSignatureParam>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub callconv: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub old_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "type")]
-    pub type_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_materialization_key: Option<String>,
-    #[serde(skip_serializing_if = "bool_is_false")]
-    pub type_materialization_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub addr: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub var_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_arg: Option<bool>,
-    pub confidence: u8,
-    pub source: String,
-    pub evidence: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-pub struct TypeWritebackMutationPlan {
-    pub apply_policy: TypeWritebackApplyPolicy,
-    pub mutations: Vec<TypeWritebackMutation>,
-    pub diagnostics: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeWritebackAuthorityReport {
-    pub mutation_plan: TypeWritebackMutationPlan,
-    pub signature_render_authorized: bool,
-    pub signature_writeback: SignatureWritebackDecision,
-    pub signature_action_decision: SignatureWritebackActionDecision,
-    pub callconv_action_decision: SignatureWritebackActionDecision,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum TypeWritebackApplyDecision {
-    Apply = 0,
-    SkipConcreteExisting = 1,
-    SkipMissingMaterialization = 2,
-    SkipInvalid = 3,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum TypeWritebackRenameApplyDecision {
-    Apply = 0,
-    SkipInvalid = 1,
-    SkipCurrentNameNotGenerated = 2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureWritebackActionKind {
-    Signature,
-    Callconv,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum SignatureWritebackActionDecision {
-    Apply = 0,
-    SkipMissingPayload = 1,
-    SkipUnsupportedArch = 2,
-    SkipTooLarge = 3,
-    SkipLowConfidence = 4,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum SignatureRegisterArgRenameDecision {
-    Apply = 0,
-    SkipInvalid = 1,
-    SkipCurrentNameNotGenerated = 2,
-    SkipAlreadyMatches = 3,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SignatureWritebackDecision {
-    pub authorized: bool,
-    pub refusal: Option<String>,
-    pub sources: Vec<String>,
-}
-
-pub fn signature_certificate_source_names(
-    certificate: Option<&SignatureCertificate>,
-) -> Vec<String> {
-    certificate
-        .map(|certificate| {
-            certificate
-                .sources
-                .iter()
-                .map(|source| source.as_str().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn signature_writeback_decision(type_facts: &FunctionTypeFacts) -> SignatureWritebackDecision {
-    let Some(certificate) = type_facts.signature_certificate.as_ref() else {
-        return SignatureWritebackDecision {
-            authorized: false,
-            refusal: Some(
-                "signature mutation refused: missing exact SignatureCertificate".to_string(),
-            ),
-            sources: Vec::new(),
-        };
-    };
-    let sources = signature_certificate_source_names(Some(certificate));
-    let Some(signature) = type_facts.merged_signature.as_ref() else {
-        return SignatureWritebackDecision {
-            authorized: false,
-            refusal: Some(
-                "signature mutation refused: missing current merged signature".to_string(),
-            ),
-            sources,
-        };
-    };
-    if certificate.signature != *signature {
-        return SignatureWritebackDecision {
-            authorized: false,
-            refusal: Some(
-                "signature mutation refused: SignatureCertificate does not match current merged signature"
-                    .to_string(),
-            ),
-            sources,
-        };
-    }
-    if !certificate.authorizes_signature_writeback() {
-        return SignatureWritebackDecision {
-            authorized: false,
-            refusal: Some(format!(
-                "signature mutation refused: certificate sources are not authoritative for writeback ({})",
-                sources.join(",")
-            )),
-            sources,
-        };
-    }
-    SignatureWritebackDecision {
-        authorized: true,
-        refusal: None,
-        sources,
-    }
-}
-
-fn push_budgeted_type_mutation(
-    mutations: &mut Vec<TypeWritebackMutation>,
-    diagnostics: &mut Vec<String>,
-    emitted: &mut usize,
-    skipped: &mut usize,
-    budget: TypeWritebackMutationBudget,
-    mutation: TypeWritebackMutation,
-) {
-    if *emitted < budget.max_mutations {
-        mutations.push(mutation);
-        *emitted += 1;
-    } else {
-        *skipped += 1;
-        if *skipped == 1 {
-            diagnostics.push(format!(
-                "non-signature mutation plan truncated to {} item(s)",
-                budget.max_mutations
-            ));
-        }
-    }
-}
-
-struct TypeMutationPushContext<'a> {
-    mutations: &'a mut Vec<TypeWritebackMutation>,
-    diagnostics: &'a mut Vec<String>,
-    emitted: &'a mut usize,
-    skipped_budgeted: &'a mut usize,
-    skipped_low_conf: &'a mut BTreeMap<&'static str, usize>,
-    budget: TypeWritebackMutationBudget,
-    apply_policy: TypeWritebackApplyPolicy,
-}
-
-fn bool_is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn push_apply_authorized_type_mutation(
-    ctx: &mut TypeMutationPushContext<'_>,
-    mutation: TypeWritebackMutation,
-) {
-    let min_confidence = ctx.apply_policy.mutation_min_confidence(mutation.kind);
-    if mutation.confidence < min_confidence {
-        *ctx.skipped_low_conf
-            .entry(mutation.kind.as_str())
-            .or_default() += 1;
-        return;
-    }
-    push_budgeted_type_mutation(
-        ctx.mutations,
-        ctx.diagnostics,
-        ctx.emitted,
-        ctx.skipped_budgeted,
-        ctx.budget,
-        mutation,
-    );
-}
-
-fn evidence_names(evidence: &[WritebackEvidence]) -> Vec<String> {
-    evidence
-        .iter()
-        .map(|tag| tag.as_str().to_string())
-        .collect()
-}
-
-#[cfg(test)]
-fn type_writeback_mutation_plan(
-    plan: &TypeWritebackPlan,
-    budget: TypeWritebackMutationBudget,
-    type_facts: &FunctionTypeFacts,
-) -> TypeWritebackMutationPlan {
-    type_writeback_mutation_plan_with_policy(
-        plan,
-        budget,
-        type_facts,
-        TypeWritebackApplyPolicy::balanced(),
-    )
-}
-
-fn type_writeback_mutation_plan_with_policy(
-    plan: &TypeWritebackPlan,
-    budget: TypeWritebackMutationBudget,
-    type_facts: &FunctionTypeFacts,
-    apply_policy: TypeWritebackApplyPolicy,
-) -> TypeWritebackMutationPlan {
-    let mut mutations = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut emitted_budgeted = 0usize;
-    let mut skipped_budgeted = 0usize;
-    let mut skipped_low_conf = BTreeMap::new();
-
-    let signature_decision = signature_writeback_decision(type_facts);
-    if let Some(refusal) = signature_decision.refusal.clone() {
-        diagnostics.push(refusal);
-    } else {
-        let signature_evidence = signature_decision
-            .sources
-            .iter()
-            .map(|source| format!("signature-certificate:{source}"))
-            .collect::<Vec<_>>();
-        mutations.push(TypeWritebackMutation {
-            kind: TypeWritebackMutationKind::Signature,
-            signature: Some(plan.signature.signature.clone()),
-            ret_type: Some(plan.signature.ret_type.clone()),
-            params: plan.signature.params.clone(),
-            callconv: Some(plan.signature.callconv.clone()),
-            old_name: None,
-            name: Some(plan.signature.function_name.clone()),
-            reg: None,
-            type_name: None,
-            type_materialization_key: None,
-            type_materialization_required: false,
-            text: None,
-            addr: None,
-            size: None,
-            delta: None,
-            var_kind: None,
-            is_arg: None,
-            confidence: plan.signature.confidence,
-            source: "function_facts".to_string(),
-            evidence: signature_evidence.clone(),
-        });
-
-        mutations.push(TypeWritebackMutation {
-            kind: TypeWritebackMutationKind::Callconv,
-            signature: None,
-            ret_type: None,
-            params: Vec::new(),
-            callconv: Some(plan.signature.callconv.clone()),
-            old_name: None,
-            name: Some(plan.signature.function_name.clone()),
-            reg: None,
-            type_name: None,
-            type_materialization_key: None,
-            type_materialization_required: false,
-            text: None,
-            addr: None,
-            size: None,
-            delta: None,
-            var_kind: None,
-            is_arg: None,
-            confidence: plan.signature.callconv_confidence,
-            source: "function_facts".to_string(),
-            evidence: signature_evidence,
-        });
-    }
-
-    {
-        let mut mutation_ctx = TypeMutationPushContext {
-            mutations: &mut mutations,
-            diagnostics: &mut diagnostics,
-            emitted: &mut emitted_budgeted,
-            skipped_budgeted: &mut skipped_budgeted,
-            skipped_low_conf: &mut skipped_low_conf,
-            budget,
-            apply_policy,
-        };
-
-        for decl in plan.struct_decls.iter().take(budget.max_type_decls) {
-            push_apply_authorized_type_mutation(
-                &mut mutation_ctx,
-                TypeWritebackMutation {
-                    kind: TypeWritebackMutationKind::TypeDecl,
-                    signature: None,
-                    ret_type: None,
-                    params: Vec::new(),
-                    callconv: None,
-                    old_name: None,
-                    name: Some(decl.name.clone()),
-                    reg: None,
-                    type_name: None,
-                    type_materialization_key: None,
-                    type_materialization_required: false,
-                    text: Some(decl.decl.clone()),
-                    addr: None,
-                    size: None,
-                    delta: None,
-                    var_kind: None,
-                    is_arg: None,
-                    confidence: decl.confidence,
-                    source: decl.source.as_str().to_string(),
-                    evidence: vec!["struct-declaration".to_string()],
-                },
-            );
-        }
-    }
-    if plan.struct_decls.len() > budget.max_type_decls {
-        diagnostics.push(format!(
-            "type declaration mutation plan truncated from {} to {} item(s)",
-            plan.struct_decls.len(),
-            budget.max_type_decls
-        ));
-    }
-
-    {
-        let mut mutation_ctx = TypeMutationPushContext {
-            mutations: &mut mutations,
-            diagnostics: &mut diagnostics,
-            emitted: &mut emitted_budgeted,
-            skipped_budgeted: &mut skipped_budgeted,
-            skipped_low_conf: &mut skipped_low_conf,
-            budget,
-            apply_policy,
-        };
-
-        for candidate in &plan.var_type_candidates {
-            let apply_type = crate::signature_infer::render_writeback_apply_type(
-                &candidate.var_type,
-                plan.ptr_bits,
-            );
-            let type_materialization_key = writeback_type_materialization_key(&apply_type);
-            let type_materialization_required = type_materialization_required_for_type(
-                &apply_type,
-                type_materialization_key.as_deref(),
-            );
-            if candidate.confidence >= MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE {
-                push_apply_authorized_type_mutation(
-                    &mut mutation_ctx,
-                    TypeWritebackMutation {
-                        kind: TypeWritebackMutationKind::Var,
-                        signature: None,
-                        ret_type: None,
-                        params: Vec::new(),
-                        callconv: None,
-                        old_name: None,
-                        name: Some(candidate.name.clone()),
-                        reg: candidate.reg.clone(),
-                        type_name: Some(apply_type.clone()),
-                        type_materialization_key: type_materialization_key.clone(),
-                        type_materialization_required,
-                        text: None,
-                        addr: None,
-                        size: Some(candidate.size as u64),
-                        delta: Some(candidate.delta),
-                        var_kind: Some(candidate.kind.clone()),
-                        is_arg: Some(candidate.isarg),
-                        confidence: candidate.confidence,
-                        source: candidate.source.as_str().to_string(),
-                        evidence: evidence_names(&candidate.evidence),
-                    },
-                );
-            }
-            push_apply_authorized_type_mutation(
-                &mut mutation_ctx,
-                TypeWritebackMutation {
-                    kind: TypeWritebackMutationKind::VarType,
-                    signature: None,
-                    ret_type: None,
-                    params: Vec::new(),
-                    callconv: None,
-                    old_name: Some(candidate.name.clone()),
-                    name: Some(candidate.name.clone()),
-                    reg: candidate.reg.clone(),
-                    type_name: Some(apply_type.clone()),
-                    type_materialization_key: type_materialization_key.clone(),
-                    type_materialization_required,
-                    text: None,
-                    addr: None,
-                    size: Some(candidate.size as u64),
-                    delta: Some(candidate.delta),
-                    var_kind: Some(candidate.kind.clone()),
-                    is_arg: Some(candidate.isarg),
-                    confidence: candidate.confidence,
-                    source: candidate.source.as_str().to_string(),
-                    evidence: evidence_names(&candidate.evidence),
-                },
-            );
-        }
-
-        for candidate in &plan.var_rename_candidates {
-            push_apply_authorized_type_mutation(
-                &mut mutation_ctx,
-                TypeWritebackMutation {
-                    kind: TypeWritebackMutationKind::VarRename,
-                    signature: None,
-                    ret_type: None,
-                    params: Vec::new(),
-                    callconv: None,
-                    old_name: Some(candidate.name.clone()),
-                    name: Some(candidate.target_name.clone()),
-                    reg: None,
-                    type_name: None,
-                    type_materialization_key: None,
-                    type_materialization_required: false,
-                    text: None,
-                    addr: None,
-                    size: None,
-                    delta: None,
-                    var_kind: None,
-                    is_arg: None,
-                    confidence: candidate.confidence,
-                    source: candidate.source.as_str().to_string(),
-                    evidence: evidence_names(&candidate.evidence),
-                },
-            );
-        }
-
-        for candidate in plan.global_type_links.iter().take(budget.global_max_links) {
-            let apply_type = crate::signature_infer::render_writeback_apply_type(
-                &candidate.target_type,
-                plan.ptr_bits,
-            );
-            let type_materialization_key = writeback_type_materialization_key(&apply_type);
-            let type_materialization_required = type_materialization_required_for_type(
-                &apply_type,
-                type_materialization_key.as_deref(),
-            );
-            push_apply_authorized_type_mutation(
-                &mut mutation_ctx,
-                TypeWritebackMutation {
-                    kind: TypeWritebackMutationKind::TypeLink,
-                    signature: None,
-                    ret_type: None,
-                    params: Vec::new(),
-                    callconv: None,
-                    old_name: None,
-                    name: None,
-                    reg: None,
-                    type_name: Some(apply_type.clone()),
-                    type_materialization_key,
-                    type_materialization_required,
-                    text: None,
-                    addr: Some(candidate.addr),
-                    size: None,
-                    delta: None,
-                    var_kind: None,
-                    is_arg: None,
-                    confidence: candidate.confidence,
-                    source: candidate.source.as_str().to_string(),
-                    evidence: vec!["global-type-link".to_string()],
-                },
-            );
-        }
-    }
-    if plan.global_type_links.len() > budget.global_max_links {
-        diagnostics.push(format!(
-            "global type-link mutation plan truncated from {} to {} item(s)",
-            plan.global_type_links.len(),
-            budget.global_max_links
-        ));
-    }
-    for (kind, count) in skipped_low_conf {
-        diagnostics.push(format!(
-            "{kind} mutation plan withheld {count} low-confidence candidate(s)"
-        ));
-    }
-
-    TypeWritebackMutationPlan {
-        apply_policy,
-        mutations,
-        diagnostics,
-    }
-}
-
-fn type_writeback_authority_report_with_policy(
-    plan: &TypeWritebackPlan,
-    budget: TypeWritebackMutationBudget,
-    type_facts: &FunctionTypeFacts,
-    apply_policy: TypeWritebackApplyPolicy,
-    basic_block_count: usize,
-) -> TypeWritebackAuthorityReport {
-    let mutation_plan =
-        type_writeback_mutation_plan_with_policy(plan, budget, type_facts, apply_policy);
-    let signature_writeback = signature_writeback_decision(type_facts);
-    let signature_action_decision = signature_writeback_action_decision(
-        SignatureWritebackActionKind::Signature,
-        &plan.signature.arch,
-        basic_block_count,
-        !plan.signature.signature.is_empty(),
-        plan.signature.confidence,
-    );
-    let callconv_action_decision = signature_writeback_action_decision(
-        SignatureWritebackActionKind::Callconv,
-        &plan.signature.arch,
-        basic_block_count,
-        !plan.signature.callconv.is_empty(),
-        plan.signature.callconv_confidence,
-    );
-    let mut warnings = plan.diagnostics.warnings.clone();
-    if plan.struct_decls.len() > budget.max_type_decls {
-        warnings.push(format!(
-            "type declaration report truncated from {} to {} item(s)",
-            plan.struct_decls.len(),
-            budget.max_type_decls
-        ));
-    }
-    if plan.global_type_links.len() > budget.global_max_links {
-        warnings.push(format!(
-            "global type-link report truncated from {} to {} item(s)",
-            plan.global_type_links.len(),
-            budget.global_max_links
-        ));
-    }
-
-    TypeWritebackAuthorityReport {
-        mutation_plan,
-        signature_render_authorized: type_facts.render_authorized_signature().is_some(),
-        signature_writeback,
-        signature_action_decision,
-        callconv_action_decision,
-        warnings,
-    }
-}
-
-#[cfg(test)]
-fn type_writeback_authority_report(
-    plan: &TypeWritebackPlan,
-    budget: TypeWritebackMutationBudget,
-    type_facts: &FunctionTypeFacts,
-    basic_block_count: usize,
-) -> TypeWritebackAuthorityReport {
-    type_writeback_authority_report_with_policy(
-        plan,
-        budget,
-        type_facts,
-        TypeWritebackApplyPolicy::balanced(),
-        basic_block_count,
-    )
+    pub diagnostics: TypeAnalysisDiagnostics,
 }
 
 #[derive(Debug)]
-pub struct TypeWritebackAnalysis {
+pub struct TypeAnalysis {
     source: Arc<SsaArtifact>,
     function_facts: FunctionFacts,
-    plan: TypeWritebackPlan,
+    plan: TypePlan,
     callee_signatures: BTreeMap<u64, crate::SourceOwnedCalleeSignature>,
 }
 
@@ -998,7 +218,7 @@ pub struct DecompileFinalization {
     pub fallback_comment: Option<String>,
 }
 
-impl TypeWritebackAnalysis {
+impl TypeAnalysis {
     pub fn source(&self) -> &SsaArtifact {
         self.source.as_ref()
     }
@@ -1119,13 +339,13 @@ impl TypeWritebackAnalysis {
         if (!changed_parameters.is_empty() || return_type_changed)
             && !self.refresh_plan_after_source_constraints(&changed_parameters)
         {
-            // The plan is the writeback's projection of the facts, and it is
+            // The plan is the analysis's projection of the facts, and it is
             // refreshed atomically: a plan that binds one argument twice, or
             // to a register that is no slot, would write conflicting types
             // back, so such a plan is left as it was. That is a fact about the
-            // writeback, not about the decompilation. The enriched facts are
+            // the analysis, not about the decompilation. The enriched facts are
             // what the rendering reads, and they stand; only the plan keeps
-            // its prior signature, which the writeback authority sees.
+            // its prior signature, which the certificate check sees.
             // Failing the whole function here had cost every function whose
             // plan carried one such binding its decompilation.
             r2il::refusal_evidence!(
@@ -1137,53 +357,31 @@ impl TypeWritebackAnalysis {
         true
     }
 
-    pub fn signature(&self) -> &InferredSignature {
-        &self.plan.signature
-    }
-
     pub fn type_facts(&self) -> &FunctionTypeFacts {
         self.function_facts.type_facts()
-    }
-
-    pub fn plan(&self) -> &TypeWritebackPlan {
-        &self.plan
-    }
-
-    pub fn authority_report(
-        &self,
-        budget: TypeWritebackMutationBudget,
-        apply_policy: TypeWritebackApplyPolicy,
-    ) -> TypeWritebackAuthorityReport {
-        type_writeback_authority_report_with_policy(
-            &self.plan,
-            budget,
-            self.function_facts.type_facts(),
-            apply_policy,
-            self.source.function().cfg_risk_summary().block_count,
-        )
     }
 
     pub fn finalize_for_decompile(
         mut self,
         finalization: DecompileFinalization,
-    ) -> Result<SourceOwnedFunctionFacts, TypeWritebackAnalysisError> {
+    ) -> Result<SourceOwnedFunctionFacts, TypeAnalysisError> {
         if !SourceOwnedFunctionFacts::stamp_report_decompile_route(
             &mut self.function_facts,
             finalization.kind,
             finalization.reason,
             finalization.fallback_comment,
         ) {
-            return Err(TypeWritebackAnalysisError::IncompatibleDecompileRoute);
+            return Err(TypeAnalysisError::IncompatibleDecompileRoute);
         }
         SourceOwnedFunctionFacts::seal_with_callee_signatures(
             self.source,
             self.function_facts,
             self.callee_signatures,
         )
-        .ok_or(TypeWritebackAnalysisError::FunctionFactsSourceMismatch)
+        .ok_or(TypeAnalysisError::FunctionFactsSourceMismatch)
     }
 
-    /// Project the enriched signature into the writeback plan.
+    /// Project the enriched signature into the type plan.
     ///
     /// `changed_slots` is the enrichment's own account of which parameter
     /// declarations changed; nothing is recounted here, and the return type
@@ -1226,8 +424,6 @@ impl TypeWritebackAnalysis {
             .map(str::to_string)
             .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
         let mut plan = self.plan.clone();
-        let prior_confidence = plan.signature.confidence;
-        let prior_callconv_confidence = plan.signature.callconv_confidence;
         plan.signature = inferred_signature_from_signature_spec(
             &function_name,
             arch_name,
@@ -1235,11 +431,6 @@ impl TypeWritebackAnalysis {
             self.function_facts.type_facts().callconv.as_deref(),
             &signature,
         );
-        plan.signature.confidence = plan.signature.confidence.max(prior_confidence);
-        plan.signature.callconv_confidence = plan
-            .signature
-            .callconv_confidence
-            .max(prior_callconv_confidence);
         let mut refreshed_slots = BTreeSet::new();
         for candidate in plan
             .var_type_candidates
@@ -1271,21 +462,19 @@ impl TypeWritebackAnalysis {
                 estimate_c_type_size_bytes(&render_signature_type(ty, ptr_bits), ptr_bits) as u32;
             candidate.var_type = ty.clone();
             candidate.size = size;
-            candidate.source = WritebackSource::CalleeSignature;
+            candidate.source = TypeFactSource::CalleeSignature;
             if !candidate
                 .evidence
-                .contains(&WritebackEvidence::CertifiedCallArgument)
+                .contains(&TypeEvidence::CertifiedCallArgument)
             {
-                candidate
-                    .evidence
-                    .push(WritebackEvidence::CertifiedCallArgument);
+                candidate.evidence.push(TypeEvidence::CertifiedCallArgument);
             }
         }
         // A changed slot with no argument candidate is not an inconsistency:
         // the plan carries no variable for that parameter, so there is nothing
         // to refresh for it. Demanding one made every function whose declared
         // parameter types the source interface supplies -- but whose plan names
-        // no register variable for one of them -- fail its whole writeback, and
+        // no register variable for one of them -- fail its whole analysis, and
         // with it the decompilation, once the interface began supplying every
         // parameter's type rather than only the return's.
         let unrefreshed = changed_slots
@@ -1343,7 +532,7 @@ fn exact_source_argument_slot_for_register(source: &SsaArtifact, register: &str)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypeWritebackAnalysisError {
+pub enum TypeAnalysisError {
     ForeignSemanticArtifact,
     ForeignInterprocSummary,
     InterprocSummarySchema(r2ssa::interproc::InterprocSummarySchemaError),
@@ -1359,20 +548,20 @@ pub enum TypeWritebackAnalysisError {
 }
 
 #[derive(Debug, Clone)]
-pub struct TypeWritebackAnalysisRequest {
+pub struct TypeAnalysisRequest {
     source: Arc<SsaArtifact>,
     parsed_context: ParsedExternalContext,
     interproc_summary: Option<r2ssa::PreparedInterprocSummarySet>,
     callee_signatures: BTreeMap<u64, crate::SourceOwnedCalleeSignature>,
 }
 
-impl TypeWritebackAnalysisRequest {
+impl TypeAnalysisRequest {
     pub fn new(
         source: Arc<SsaArtifact>,
         parsed_context: ParsedExternalContext,
-    ) -> Result<Self, TypeWritebackAnalysisError> {
+    ) -> Result<Self, TypeAnalysisError> {
         if source.facts().assumptions != parsed_context.assumptions {
-            return Err(TypeWritebackAnalysisError::AssumptionSetMismatch);
+            return Err(TypeAnalysisError::AssumptionSetMismatch);
         }
         Ok(Self {
             source,
@@ -1385,9 +574,9 @@ impl TypeWritebackAnalysisRequest {
     pub fn with_interproc_summary(
         mut self,
         interproc_summary: r2ssa::PreparedInterprocSummarySet,
-    ) -> Result<Self, TypeWritebackAnalysisError> {
+    ) -> Result<Self, TypeAnalysisError> {
         if !interproc_summary.matches_root(&self.source) {
-            return Err(TypeWritebackAnalysisError::ForeignInterprocSummary);
+            return Err(TypeAnalysisError::ForeignInterprocSummary);
         }
         self.interproc_summary = Some(interproc_summary);
         Ok(self)
@@ -1396,14 +585,14 @@ impl TypeWritebackAnalysisRequest {
     pub fn with_source_owned_callee_signatures(
         mut self,
         signatures: impl IntoIterator<Item = crate::SourceOwnedCalleeSignature>,
-    ) -> Result<Self, TypeWritebackAnalysisError> {
+    ) -> Result<Self, TypeAnalysisError> {
         for signature in signatures {
             if self
                 .callee_signatures
                 .insert(signature.address(), signature)
                 .is_some()
             {
-                return Err(TypeWritebackAnalysisError::DuplicateCalleeAddress);
+                return Err(TypeAnalysisError::DuplicateCalleeAddress);
             }
         }
         Ok(self)
@@ -1418,14 +607,14 @@ impl TypeWritebackAnalysisRequest {
     }
 }
 
-struct DerivedTypeWritebackAnalysis {
+struct DerivedTypeAnalysis {
     signature: InferredSignature,
     function_facts: FunctionFacts,
     type_facts: FunctionTypeFacts,
-    plan: TypeWritebackPlan,
+    plan: TypePlan,
 }
 
-struct DerivedTypeWritebackAnalysisInput<'a> {
+struct DerivedTypeAnalysisInput<'a> {
     function_name: &'a str,
     ptr_bits: u32,
     inferred_signature: InferredSignature,
@@ -1434,10 +623,10 @@ struct DerivedTypeWritebackAnalysisInput<'a> {
     parsed_context: ParsedExternalContext,
     local_structs: LocalStructArtifacts,
     interproc_summary_set: Option<InterprocSummarySet>,
-    diagnostics: TypeWritebackDiagnostics,
+    diagnostics: TypeAnalysisDiagnostics,
 }
 
-struct DerivedTypeWritebackSemanticInputs<'a> {
+struct DerivedTypeAnalysisSemanticInputs<'a> {
     local_field_accesses: &'a [LocalFieldAccessFact],
 }
 
@@ -1453,7 +642,7 @@ struct ScalarArrayMachineProfile<'a> {
 }
 
 #[cfg(test)]
-type TypeWritebackAnalysisInput<'a> = DerivedTypeWritebackAnalysisInput<'a>;
+type TypeAnalysisInput<'a> = DerivedTypeAnalysisInput<'a>;
 #[derive(Debug, Clone, Default)]
 struct SignatureContextMaps {
     param_types: HashMap<usize, String>,
@@ -2142,7 +1331,7 @@ fn maybe_upgrade_param_to_pointer(
         });
 
         let inferred_is_generic = inferred_param.as_ref().is_some_and(|param| {
-            is_generic_type_string(&param.param_type)
+            type_name_is_generic(&param.param_type)
                 || matches!(
                     parse_c_type_like(&param.param_type, ptr_bits),
                     Some(CTypeLike::Int {
@@ -2208,7 +1397,7 @@ fn upgrade_param_indices_to_pointer(
         });
 
         let inferred_is_generic = inferred_param.as_ref().is_some_and(|param| {
-            is_generic_type_string(&param.param_type)
+            type_name_is_generic(&param.param_type)
                 || matches!(
                     parse_c_type_like(&param.param_type, ptr_bits),
                     Some(CTypeLike::Int {
@@ -2305,7 +1494,7 @@ fn upgrade_param_type_hints(
     for (idx, hint) in hints {
         if let Some(param) = inferred_signature.params.get_mut(*idx) {
             let existing_ty = parse_c_type_like(&param.param_type, ptr_bits);
-            let should_replace = is_generic_type_string(&param.param_type)
+            let should_replace = type_name_is_generic(&param.param_type)
                 || existing_ty.as_ref().is_some_and(|existing| {
                     summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
                 });
@@ -2349,7 +1538,7 @@ fn upgrade_return_type_hint(
     }
 
     let existing_ty = parse_c_type_like(&inferred_signature.ret_type, ptr_bits);
-    let should_replace = is_generic_type_string(&inferred_signature.ret_type)
+    let should_replace = type_name_is_generic(&inferred_signature.ret_type)
         || existing_ty.as_ref().is_some_and(|existing| {
             summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
                 || matches!(hint, CTypeLike::Void)
@@ -2563,7 +1752,7 @@ fn apply_interproc_summary_to_signature(
         signature.ret_type = Some(ret_ty.clone());
     }
 
-    if is_generic_type_string(&inferred_signature.ret_type)
+    if type_name_is_generic(&inferred_signature.ret_type)
         || parse_c_type_like(&inferred_signature.ret_type, ptr_bits).is_some_and(|ty| {
             summary_hint_can_replace_weak_existing(&ty, &ret_ty, ptr_bits, type_db)
         })
@@ -2690,7 +1879,7 @@ fn apply_type_hint_to_signature_param(
 
     if let Some(param) = inferred_signature.params.get_mut(index) {
         let existing_ty = parse_c_type_like(&param.param_type, ptr_bits);
-        let can_replace = is_generic_type_string(&param.param_type)
+        let can_replace = type_name_is_generic(&param.param_type)
             || existing_ty.as_ref().is_some_and(|existing| {
                 type_hint_can_replace_weak_existing(
                     assumption,
@@ -2928,13 +2117,13 @@ fn applied_type_assumption_parameter_slots(
         .collect()
 }
 
-fn build_type_writeback_analysis_inner(
-    mut input: DerivedTypeWritebackAnalysisInput<'_>,
-    semantic_inputs: Option<DerivedTypeWritebackSemanticInputs<'_>>,
+fn build_type_analysis_inner(
+    mut input: DerivedTypeAnalysisInput<'_>,
+    semantic_inputs: Option<DerivedTypeAnalysisSemanticInputs<'_>>,
     prep_facts: Option<&r2ssa::DecompilePrepFacts>,
     machine_profile: Option<&PreparedMachineVarProfile>,
     registers: &crate::RegisterIdentity,
-) -> DerivedTypeWritebackAnalysis {
+) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
     // tests. Invalid advisory reports lose all interprocedural evidence here;
     // the source-owned entrypoint validates and propagates the exact schema
@@ -3278,7 +2467,7 @@ fn build_type_writeback_analysis_inner(
         input.ptr_bits,
     );
 
-    let plan = TypeWritebackPlan {
+    let plan = TypePlan {
         ptr_bits: input.ptr_bits,
         signature: input.inferred_signature.clone(),
         var_type_candidates,
@@ -3288,7 +2477,7 @@ fn build_type_writeback_analysis_inner(
         diagnostics: diagnostics.clone(),
     };
 
-    DerivedTypeWritebackAnalysis {
+    DerivedTypeAnalysis {
         signature: input.inferred_signature,
         function_facts: FunctionFacts::new(type_facts.clone())
             .with_assumptions(input.parsed_context.assumptions.clone())
@@ -3368,11 +2557,9 @@ fn aarch64_register_identity() -> crate::RegisterIdentity {
 }
 
 #[cfg(test)]
-fn build_type_writeback_analysis(
-    input: DerivedTypeWritebackAnalysisInput<'_>,
-) -> DerivedTypeWritebackAnalysis {
+fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalysis {
     let machine = detached_x86_64_test_machine_profile();
-    build_type_writeback_analysis_inner(
+    build_type_analysis_inner(
         input,
         None,
         None,
@@ -3382,12 +2569,12 @@ fn build_type_writeback_analysis(
 }
 
 #[cfg(test)]
-fn build_type_writeback_analysis_with_prep_facts(
-    input: DerivedTypeWritebackAnalysisInput<'_>,
+fn build_type_analysis_with_prep_facts(
+    input: DerivedTypeAnalysisInput<'_>,
     prep_facts: &r2ssa::DecompilePrepFacts,
-) -> DerivedTypeWritebackAnalysis {
+) -> DerivedTypeAnalysis {
     let machine = detached_x86_64_test_machine_profile();
-    build_type_writeback_analysis_inner(
+    build_type_analysis_inner(
         input,
         None,
         Some(prep_facts),
@@ -3418,25 +2605,25 @@ fn void_pointer_type() -> CTypeLike {
     CTypeLike::Pointer(Box::new(CTypeLike::Void))
 }
 
-pub fn build_source_owned_type_writeback_analysis(
-    request: TypeWritebackAnalysisRequest,
-) -> Result<TypeWritebackAnalysis, TypeWritebackAnalysisError> {
-    let TypeWritebackAnalysisRequest {
+pub fn build_source_owned_type_analysis(
+    request: TypeAnalysisRequest,
+) -> Result<TypeAnalysis, TypeAnalysisError> {
+    let TypeAnalysisRequest {
         source,
         parsed_context,
         interproc_summary,
         callee_signatures,
     } = request;
     if source.facts().assumptions != parsed_context.assumptions {
-        return Err(TypeWritebackAnalysisError::AssumptionSetMismatch);
+        return Err(TypeAnalysisError::AssumptionSetMismatch);
     }
     let memory_model = source.machine_context().memory_model();
     if !memory_model.is_available() || !memory_model.is_coherent() {
-        return Err(TypeWritebackAnalysisError::IncoherentMachineMemoryModel);
+        return Err(TypeAnalysisError::IncoherentMachineMemoryModel);
     }
     let ptr_bits = memory_model.default_address_bits();
     if ptr_bits == 0 {
-        return Err(TypeWritebackAnalysisError::MissingMachinePointerWidth);
+        return Err(TypeAnalysisError::MissingMachinePointerWidth);
     }
     let function_name = source
         .function()
@@ -3446,7 +2633,7 @@ pub fn build_source_owned_type_writeback_analysis(
     let ssa_blocks = source.local_ssa_blocks();
     let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
-    let mut diagnostics = TypeWritebackDiagnostics::default();
+    let mut diagnostics = TypeAnalysisDiagnostics::default();
     let arch_name = crate::prepare::prepared_arch_display_name(source.as_ref());
     let machine_profile = PreparedMachineVarProfile {
         architecture: source.machine_context().architecture_family(),
@@ -3466,7 +2653,7 @@ pub fn build_source_owned_type_writeback_analysis(
         .as_ref()
         .map(|summary| summary.report().clone());
     require_current_interproc_report_for_source_owned(interproc_report.as_ref())?;
-    let derived_input = DerivedTypeWritebackAnalysisInput {
+    let derived_input = DerivedTypeAnalysisInput {
         function_name: &function_name,
         ptr_bits,
         inferred_signature,
@@ -3477,10 +2664,10 @@ pub fn build_source_owned_type_writeback_analysis(
         interproc_summary_set: interproc_report,
         diagnostics,
     };
-    let semantic_inputs = Some(DerivedTypeWritebackSemanticInputs {
+    let semantic_inputs = Some(DerivedTypeAnalysisSemanticInputs {
         local_field_accesses: &local_field_accesses,
     });
-    let derived = build_type_writeback_analysis_inner(
+    let derived = build_type_analysis_inner(
         derived_input,
         semantic_inputs,
         source.decompile_prep_facts(),
@@ -3492,10 +2679,10 @@ pub fn build_source_owned_type_writeback_analysis(
         function_facts = function_facts.with_prepared_interproc_summary(interproc_summary);
     }
     if derived.signature != derived.plan.signature {
-        return Err(TypeWritebackAnalysisError::DerivedSignatureMismatch);
+        return Err(TypeAnalysisError::DerivedSignatureMismatch);
     }
     if derived.type_facts != *function_facts.type_facts() {
-        return Err(TypeWritebackAnalysisError::DerivedTypeFactsMismatch);
+        return Err(TypeAnalysisError::DerivedTypeFactsMismatch);
     }
     let exact_source_fields = field_access_certificates_from_source_aggregate_accesses(&source);
     if !exact_source_fields.is_empty() {
@@ -3509,26 +2696,26 @@ pub fn build_source_owned_type_writeback_analysis(
         }
         function_facts.replace_type_facts(type_facts);
     }
-    let mut analysis = TypeWritebackAnalysis {
+    let mut analysis = TypeAnalysis {
         source,
         function_facts,
         plan: derived.plan,
         callee_signatures,
     };
     if !analysis.enrich_from_source_for_decompile() {
-        return Err(TypeWritebackAnalysisError::SourceEnrichmentFailed);
+        return Err(TypeAnalysisError::SourceEnrichmentFailed);
     }
     Ok(analysis)
 }
 
 fn require_current_interproc_report_for_source_owned(
     report: Option<&InterprocSummarySet>,
-) -> Result<(), TypeWritebackAnalysisError> {
+) -> Result<(), TypeAnalysisError> {
     report
         .map(InterprocSummarySet::validate_current_schema)
         .transpose()
         .map(|_| ())
-        .map_err(TypeWritebackAnalysisError::InterprocSummarySchema)
+        .map_err(TypeAnalysisError::InterprocSummarySchema)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4166,7 +3353,7 @@ fn record_local_index_stride(
     expr: &LocalAddrExpr,
     access_size: u32,
     evidence: &mut HashMap<usize, BTreeSet<u64>>,
-    diagnostics: &mut TypeWritebackDiagnostics,
+    diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> bool {
     let Some(index) = &expr.index else {
         return true;
@@ -4260,30 +3447,11 @@ fn local_expr_for_memory_versions(
     selected
 }
 
-pub fn infer_local_struct_artifacts_from_ssa(
-    ssa_blocks: &[SSABlock],
-    architecture: r2ssa::MachineArchitectureFamily,
-    ptr_bits: u32,
-    diagnostics: &mut TypeWritebackDiagnostics,
-) -> LocalStructArtifacts {
-    let arch_name = crate::prepare::architecture_family_name(architecture);
-    let pointer_arg_slots = collect_pointer_arg_slot_map(architecture, ptr_bits);
-    infer_local_struct_artifacts_from_blocks(
-        ssa_blocks,
-        None,
-        arch_name,
-        architecture,
-        &pointer_arg_slots,
-        ptr_bits,
-        diagnostics,
-    )
-}
-
 fn infer_local_struct_artifacts_from_prepared_ssa(
     prepared: &SsaArtifact,
     arch_name: Option<&str>,
     ptr_bits: u32,
-    diagnostics: &mut TypeWritebackDiagnostics,
+    diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
     let blocks = prepared.function().blocks();
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
@@ -4354,7 +3522,7 @@ fn infer_local_struct_artifacts_from_blocks(
     architecture: r2ssa::MachineArchitectureFamily,
     pointer_arg_slot_map: &HashMap<String, usize>,
     ptr_bits: u32,
-    diagnostics: &mut TypeWritebackDiagnostics,
+    diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
     let type_slots = local_struct_type_slots(ssa_blocks, pointer_arg_slot_map, ptr_bits);
     let scalar_signedness = infer_scalar_signedness(
@@ -5011,10 +4179,7 @@ fn infer_local_struct_artifacts_from_blocks(
             .map(|field| {
                 (
                     field.offset,
-                    crate::signature_infer::render_writeback_apply_type(
-                        &field.field_type,
-                        ptr_bits,
-                    ),
+                    crate::signature_infer::render_type_spelling(&field.field_type, ptr_bits),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -5062,7 +4227,7 @@ fn local_field_accesses_from_struct_artifacts(
 /// Naming a field after its offset is what you do when nothing told you its
 /// name. When debug info did tell you, using the offset anyway throws the
 /// answer away.
-pub fn local_field_accesses_named(
+pub(crate) fn local_field_accesses_named(
     local_structs: &LocalStructArtifacts,
     source_field_names: &HashMap<u64, String>,
 ) -> Vec<LocalFieldAccessFact> {
@@ -5108,7 +4273,7 @@ fn field_access_certificates_from_struct_artifacts(
 /// The graph carries structure and no qualifier; the prototype text carries
 /// both. Where the two agree on shape, a `const` the text puts on a pointee
 /// goes onto the graph's pointee, and nothing else moves.
-pub fn requalify(graph: CTypeLike, spelled: &CTypeLike) -> CTypeLike {
+pub(crate) fn requalify(graph: CTypeLike, spelled: &CTypeLike) -> CTypeLike {
     match (graph, spelled) {
         (CTypeLike::Const(inner), spelled) => {
             CTypeLike::Const(Box::new(requalify(*inner, spelled)))
@@ -5997,7 +5162,7 @@ fn external_layout_field_access_for_offset(
     access_width: u64,
     ptr_bits: u32,
 ) -> Option<ExternalLayoutFieldAccess> {
-    for key in aggregate_lookup_keys_for_writeback(type_name) {
+    for key in aggregate_lookup_keys(type_name) {
         if let Some(st) = type_db.structs.get(&key)
             && let Some(field) =
                 external_struct_field_access_for_offset(st, offset, access_width, ptr_bits)
@@ -6922,7 +6087,7 @@ fn push_unique_type_name(out: &mut Vec<String>, name: &str) {
 }
 
 fn external_aggregate_size(type_db: &ExternalTypeDb, name: &str, ptr_bits: u32) -> Option<u64> {
-    for key in aggregate_lookup_keys_for_writeback(name) {
+    for key in aggregate_lookup_keys(name) {
         if let Some(st) = type_db.structs.get(&key)
             && let Some(size) = external_struct_size(st, ptr_bits)
         {
@@ -6946,7 +6111,7 @@ fn external_aggregate_size(type_db: &ExternalTypeDb, name: &str, ptr_bits: u32) 
     None
 }
 
-fn aggregate_lookup_keys_for_writeback(name: &str) -> Vec<String> {
+fn aggregate_lookup_keys(name: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut push = |candidate: &str| {
         let key = candidate.trim().to_ascii_lowercase();
@@ -7441,16 +6606,6 @@ fn inferred_signature_to_spec(
     Some(FunctionSignatureSpec { ret_type, params })
 }
 
-pub fn inferred_signature_to_function_type_facts(
-    signature: &InferredSignature,
-    ptr_bits: u32,
-) -> FunctionTypeFacts {
-    FunctionTypeFacts {
-        merged_signature: inferred_signature_to_spec(signature, ptr_bits),
-        ..FunctionTypeFacts::default()
-    }
-}
-
 fn merge_local_signature_into_merged_signature(
     external: Option<FunctionSignatureSpec>,
     local: Option<FunctionSignatureSpec>,
@@ -7933,7 +7088,7 @@ fn apply_canonical_stack_width_types(
         .filter(|candidate| {
             candidate
                 .evidence
-                .contains(&WritebackEvidence::CanonicalStackAccessWidth)
+                .contains(&TypeEvidence::CanonicalStackAccessWidth)
         })
         .map(|candidate| (RecoveredVarKey::for_type_candidate(candidate), candidate))
         .collect::<BTreeMap<_, _>>();
@@ -7964,7 +7119,7 @@ fn apply_canonical_stack_width_types(
         };
         let has_exact_signedness = candidate
             .evidence
-            .contains(&WritebackEvidence::CanonicalStackSignedness);
+            .contains(&TypeEvidence::CanonicalStackSignedness);
         if existing_bits != candidate_bits
             || (has_exact_signedness && slot.ty.as_ref() != Some(&candidate_ty))
         {
@@ -7976,7 +7131,7 @@ fn apply_canonical_stack_width_types(
 fn build_var_type_candidates(
     vars: &[RecoveredVariable],
     ctx: &VarTypeCandidateContext<'_>,
-    diagnostics: &mut TypeWritebackDiagnostics,
+    diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> Vec<VarTypeCandidate> {
     let mut out = Vec::with_capacity(vars.len());
     for var in vars {
@@ -7985,7 +7140,7 @@ fn build_var_type_candidates(
             continue;
         }
 
-        let mut source = WritebackSource::LocalInferred;
+        let mut source = TypeFactSource::LocalInferred;
         let mut confidence = if var
             .recovered_type(ctx.ptr_bits)
             .is_some_and(|ty| ty.is_pointer())
@@ -7996,7 +7151,7 @@ fn build_var_type_candidates(
         } else {
             84
         };
-        let mut evidence = vec![WritebackEvidence::SsaVarRecovery];
+        let mut evidence = vec![TypeEvidence::SsaVarRecovery];
         let mut chosen_type = var.var_type.clone();
         let arg_slot = var
             .name
@@ -8005,46 +7160,46 @@ fn build_var_type_candidates(
 
         if let Some(slot) = arg_slot
             && let Some(sig_ty) = ctx.current_context_maps.param_types.get(&slot)
-            && !is_generic_type_string(sig_ty)
+            && !type_name_is_generic(sig_ty)
         {
             chosen_type = sig_ty.clone();
             confidence = 96;
-            source = WritebackSource::SignatureRegistry;
-            evidence.push(WritebackEvidence::ExternalSignatureCurrent);
+            source = TypeFactSource::SignatureRegistry;
+            evidence.push(TypeEvidence::ExternalSignatureCurrent);
         } else if let Some(slot) = arg_slot
             && let Some(sig_ty) = ctx
                 .merged_signature
                 .and_then(|sig| sig.params.get(slot))
                 .and_then(|param| param.ty.as_ref())
                 .map(|ty| render_signature_type(ty, ctx.ptr_bits))
-            && !is_generic_type_string(&sig_ty)
+            && !type_name_is_generic(&sig_ty)
         {
             chosen_type = sig_ty;
             confidence = 96;
-            source = WritebackSource::SignatureRegistry;
+            source = TypeFactSource::SignatureRegistry;
             if ctx.is_main_signature {
-                evidence.push(WritebackEvidence::CanonicalMainSignature);
+                evidence.push(TypeEvidence::CanonicalMainSignature);
             } else {
-                evidence.push(WritebackEvidence::ExternalSignatureCurrent);
+                evidence.push(TypeEvidence::ExternalSignatureCurrent);
             }
         } else if let Some(slot) = arg_slot
             && let Some(struct_ty) = ctx.slot_type_overrides.get(&slot)
-            && is_generic_type_string(&chosen_type)
+            && type_name_is_generic(&chosen_type)
         {
             chosen_type = struct_ty.clone();
             confidence = 90;
-            source = WritebackSource::LocalInferred;
-            evidence.push(WritebackEvidence::SsaFieldOffsetPattern);
+            source = TypeFactSource::LocalInferred;
+            evidence.push(TypeEvidence::SsaFieldOffsetPattern);
         }
 
         if let Some(existing_ty) = ctx.existing_types.get(&var.name)
-            && !is_generic_type_string(existing_ty)
+            && !type_name_is_generic(existing_ty)
         {
-            if is_generic_type_string(&chosen_type) {
+            if type_name_is_generic(&chosen_type) {
                 chosen_type = existing_ty.clone();
                 confidence = 98;
-                source = WritebackSource::ExistingState;
-                evidence.push(WritebackEvidence::ExistingStackType);
+                source = TypeFactSource::ExistingState;
+                evidence.push(TypeEvidence::ExistingStackType);
             } else if !existing_ty.eq_ignore_ascii_case(&chosen_type) {
                 diagnostics.conflicts.push(format!(
                     "var `{}` existing type `{}` conflicts with inferred `{}`",
@@ -8058,8 +7213,8 @@ fn build_var_type_candidates(
             .is_some_and(|bits| integer_type_bits(&chosen_type, ctx.ptr_bits) == Some(bits))
         {
             confidence = confidence.max(96);
-            source = WritebackSource::DataflowRanked;
-            evidence.push(WritebackEvidence::CanonicalStackAccessWidth);
+            source = TypeFactSource::DataflowRanked;
+            evidence.push(TypeEvidence::CanonicalStackAccessWidth);
         }
         if let Some(signedness) = exact_stack_access_signedness(var, ctx.stack_access_signedness)
             && let Some(bits) = exact_access_bits
@@ -8070,8 +7225,8 @@ fn build_var_type_candidates(
                 ScalarSignednessEvidence::Unsigned => size_to_unsigned_type(bits / 8),
             };
             confidence = confidence.max(97);
-            source = WritebackSource::DataflowRanked;
-            evidence.push(WritebackEvidence::CanonicalStackSignedness);
+            source = TypeFactSource::DataflowRanked;
+            evidence.push(TypeEvidence::CanonicalStackSignedness);
         }
 
         if let Some(ext) = slot_spec
@@ -8085,10 +7240,10 @@ fn build_var_type_candidates(
                         && integer_type_bits(&ext_ty_str, ctx.ptr_bits)
                             .is_some_and(|external_bits| external_bits != bits)
                 });
-            let external_should_override = !is_generic_type_string(&ext_ty_str)
+            let external_should_override = !type_name_is_generic(&ext_ty_str)
                 && !external_conflicts_with_exact_integer_width
-                && (is_generic_type_string(&chosen_type)
-                    || (matches!(source, WritebackSource::LocalInferred)
+                && (type_name_is_generic(&chosen_type)
+                    || (matches!(source, TypeFactSource::LocalInferred)
                         && is_low_signal_storage_scalar_type(&chosen_type, ctx.ptr_bits)));
             if external_conflicts_with_exact_integer_width {
                 diagnostics.conflicts.push(format!(
@@ -8101,8 +7256,8 @@ fn build_var_type_candidates(
             if external_should_override {
                 chosen_type = ext_ty_str;
                 confidence = 97;
-                source = WritebackSource::ExternalTypeDb;
-                evidence.push(WritebackEvidence::ExternalStackAnnotation);
+                source = TypeFactSource::ExternalTypeDb;
+                evidence.push(TypeEvidence::ExternalStackAnnotation);
             }
         }
 
@@ -8155,8 +7310,8 @@ fn build_var_rename_candidates(
                     name: var.name.clone(),
                     target_name,
                     confidence: 94,
-                    source: WritebackSource::ExternalTypeDb,
-                    evidence: vec![WritebackEvidence::ExternalStackName],
+                    source: TypeFactSource::ExternalTypeDb,
+                    evidence: vec![TypeEvidence::ExternalStackName],
                 });
             }
         }
@@ -8174,8 +7329,8 @@ fn build_var_rename_candidates(
                     name: var.name.clone(),
                     target_name,
                     confidence: 95,
-                    source: WritebackSource::SignatureRegistry,
-                    evidence: vec![WritebackEvidence::ExternalParamName],
+                    source: TypeFactSource::SignatureRegistry,
+                    evidence: vec![TypeEvidence::ExternalParamName],
                 });
             }
         }
@@ -8196,8 +7351,8 @@ fn build_var_rename_candidates(
                     name: var.name.clone(),
                     target_name,
                     confidence: 95,
-                    source: WritebackSource::SignatureRegistry,
-                    evidence: vec![WritebackEvidence::ExternalParamName],
+                    source: TypeFactSource::SignatureRegistry,
+                    evidence: vec![TypeEvidence::ExternalParamName],
                 });
             }
         }
@@ -8218,7 +7373,7 @@ fn signature_context_maps(
     for (idx, param) in signature.params.iter().enumerate() {
         if let Some(ty) = param.ty.as_ref() {
             let ty_str = render_signature_type(ty, ptr_bits);
-            if !is_generic_type_string(&ty_str)
+            if !type_name_is_generic(&ty_str)
                 || param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
             {
                 maps.param_types.insert(idx, ty_str);
@@ -8271,7 +7426,7 @@ fn apply_signature_context_overrides(
     for (idx, param) in signature.params.iter().enumerate() {
         if let Some(ty) = param.ty.as_ref() {
             let ty_str = render_signature_type(ty, ptr_bits);
-            if (!is_generic_type_string(&ty_str)
+            if (!type_name_is_generic(&ty_str)
                 || param_has_authoritative_named_scalar_role(param, ptr_bits, type_db))
                 && let Some(inferred_param) = signature_out.params.get_mut(idx)
             {
@@ -8290,7 +7445,6 @@ fn apply_signature_context_overrides(
         &signature_out.ret_type,
         &signature_out.params,
     );
-    signature_out.confidence = signature_out.confidence.max(signature_strength(signature));
 }
 
 fn signature_strength(signature: &FunctionSignatureSpec) -> u8 {
@@ -8445,7 +7599,11 @@ fn generated_local_struct_name_from_override(raw_ty: &str, ptr_bits: u32) -> Opt
 /// it; or if the database holds a typedef entry that eventually names one.
 /// Unlike the list, that says the same thing about a coreutils typedef and
 /// about anybody else's, and it says it from what the binary carries.
-pub fn type_db_resolves_type_name(type_db: &ExternalTypeDb, name: &str, ptr_bits: u32) -> bool {
+pub(crate) fn type_db_resolves_type_name(
+    type_db: &ExternalTypeDb,
+    name: &str,
+    ptr_bits: u32,
+) -> bool {
     // Typedefs this decompiler mints itself. These are resolvable because we
     // define them in the emitted prelude, not because some binary declared
     // them, so no evidence from the binary is required or possible.
@@ -8459,13 +7617,13 @@ pub fn type_db_resolves_type_name(type_db: &ExternalTypeDb, name: &str, ptr_bits
     if external_named_aggregate_has_real_layout(type_db, name) {
         return true;
     }
-    aggregate_lookup_keys_for_writeback(name)
+    aggregate_lookup_keys(name)
         .iter()
         .any(|key| type_db.typedefs.contains_key(key))
 }
 
 fn external_named_aggregate_has_real_layout(type_db: &ExternalTypeDb, name: &str) -> bool {
-    let mut keys = aggregate_lookup_keys_for_writeback(name);
+    let mut keys = aggregate_lookup_keys(name);
     let mut seen = BTreeSet::new();
     for _ in 0..16 {
         for key in &keys {
@@ -8499,7 +7657,7 @@ fn external_named_aggregate_has_real_layout(type_db: &ExternalTypeDb, name: &str
         if !seen.insert(typedef_key) {
             return false;
         }
-        keys = aggregate_lookup_keys_for_writeback(&typedef.target);
+        keys = aggregate_lookup_keys(&typedef.target);
     }
     false
 }
@@ -8735,7 +7893,7 @@ fn collect_external_struct_candidates_from_db(
         let Some(st) = db.structs.get(&key) else {
             continue;
         };
-        if is_opaque_placeholder_type_name(&st.name)
+        if type_name_is_opaque_placeholder(&st.name)
             || st.fields.is_empty()
             || db.is_aggregate_typedef(&st.name)
         {
@@ -9046,7 +8204,7 @@ fn score_global_type_links(
         // Genericity here is a property of the struct's own name, which is what
         // the placeholder test actually inspects once it has stripped the
         // `struct` keyword and the star back off a rendered spelling.
-        if writeback_type_name_is_opaque_placeholder(&decl.name) {
+        if type_name_is_opaque_placeholder(&decl.name) {
             continue;
         }
         let key = CTypeLike::Pointer(Box::new(CTypeLike::Struct(decl.name.clone())));
@@ -9074,7 +8232,7 @@ fn score_global_type_links(
     }
     for var in var_type_candidates {
         let parsed = var.var_type.clone();
-        if matches!(&parsed, CTypeLike::Pointer(inner) if matches!(inner.as_ref(), CTypeLike::Struct(name) if !writeback_type_name_is_opaque_placeholder(name)))
+        if matches!(&parsed, CTypeLike::Pointer(inner) if matches!(inner.as_ref(), CTypeLike::Struct(name) if !type_name_is_opaque_placeholder(name)))
         {
             *per_type_weight.entry(parsed).or_insert(30) += 4 + (var.confidence as i32 / 12);
         }
@@ -9140,7 +8298,7 @@ fn score_global_type_links(
             addr,
             target_type,
             confidence: score.clamp(1, 99) as u8,
-            source: WritebackSource::DataflowRanked,
+            source: TypeFactSource::DataflowRanked,
         })
         .collect()
 }
@@ -9465,7 +8623,7 @@ fn format_signature(
     ret_type: &str,
     params: &[InferredSignatureParam],
 ) -> String {
-    crate::format_afs_signature(function_name, ret_type, params)
+    crate::format_signature_prototype(function_name, ret_type, params)
 }
 
 fn build_struct_decl(
@@ -9515,7 +8673,7 @@ fn build_struct_decl_with_size(
     Some(format!("struct {struct_name} {{\n{body}\n}};"))
 }
 
-pub fn writeback_type_name_is_opaque_placeholder(name: &str) -> bool {
+pub(crate) fn type_name_is_opaque_placeholder(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     let stripped = lower
         .trim_start_matches("struct ")
@@ -9533,7 +8691,7 @@ fn is_generated_local_struct_name(name: &str) -> bool {
         .starts_with("sla_struct_")
 }
 
-pub fn writeback_type_name_is_generic(ty: &str) -> bool {
+pub(crate) fn type_name_is_generic(ty: &str) -> bool {
     let normalized = normalize_external_type_name(ty);
     let lower = normalized.trim().to_ascii_lowercase();
     if lower.is_empty() {
@@ -9542,7 +8700,7 @@ pub fn writeback_type_name_is_generic(ty: &str) -> bool {
     if lower.starts_with("byte[") {
         return true;
     }
-    if writeback_type_name_is_opaque_placeholder(&lower) {
+    if type_name_is_opaque_placeholder(&lower) {
         return true;
     }
     matches!(
@@ -9563,440 +8721,6 @@ pub fn writeback_type_name_is_generic(ty: &str) -> bool {
             | "long"
             | "unsigned long"
     )
-}
-
-pub fn writeback_apply_type_name_is_opaque_placeholder(type_name: &str) -> bool {
-    if type_name.is_empty() {
-        return false;
-    }
-    normalize_writeback_apply_compare_string(type_name).contains("type_0x")
-}
-
-/// Whether a spelling is a plain scalar or an opaque placeholder.
-///
-/// This is *not* the same question as `writeback_type_name_is_generic`, and the
-/// two disagree on every fixed-width integer. That is deliberate, and the names
-/// hid it: this one is asked at apply time, where the guard is "do not let a
-/// plain scalar displace a type that already has structure". A `uint32_t` is
-/// informative -- it is a width -- and so it is not *generic*; but it is still
-/// weaker than `struct real_type *`, and writing it over one would lose the
-/// aggregate. `writeback_type_name_is_generic` asks the narrower question of
-/// whether a spelling says anything at all, and gates whether a hint may
-/// replace a recovered signature type.
-///
-/// A test pins the difference so that neither drifts into the other again.
-pub fn writeback_apply_type_name_is_plain_scalar_or_opaque(type_name: &str) -> bool {
-    if type_name.is_empty() {
-        return true;
-    }
-    if writeback_apply_type_name_is_opaque_placeholder(type_name) {
-        return true;
-    }
-    let normalized = normalize_writeback_apply_compare_string(type_name);
-    normalized == "void*"
-        || normalized == "char*"
-        || normalized == "int"
-        || normalized == "unsigned"
-        || normalized == "long"
-        || normalized == "unsignedlong"
-        || normalized == "unknown"
-        || normalized.starts_with("int")
-        || normalized.starts_with("uint")
-        || normalized.starts_with("byte[")
-}
-
-pub fn signature_writeback_arch_supported(arch_name: &str) -> bool {
-    !arch_name.trim().is_empty()
-}
-
-pub fn callconv_writeback_arch_supported(arch_name: &str) -> bool {
-    matches!(
-        arch_name.trim().to_ascii_lowercase().as_str(),
-        "x86" | "x86-64" | "x86_64" | "x64" | "amd64"
-    )
-}
-
-pub fn signature_writeback_size_eligible(basic_block_count: usize) -> bool {
-    basic_block_count <= SIGNATURE_WRITEBACK_MAX_BLOCKS
-}
-
-pub fn signature_writeback_action_decision(
-    kind: SignatureWritebackActionKind,
-    arch_name: &str,
-    basic_block_count: usize,
-    payload_present: bool,
-    confidence: u8,
-) -> SignatureWritebackActionDecision {
-    if !payload_present {
-        return SignatureWritebackActionDecision::SkipMissingPayload;
-    }
-    if !signature_writeback_size_eligible(basic_block_count) {
-        return SignatureWritebackActionDecision::SkipTooLarge;
-    }
-    let (arch_supported, min_confidence) = match kind {
-        SignatureWritebackActionKind::Signature => (
-            signature_writeback_arch_supported(arch_name),
-            SIGNATURE_WRITEBACK_MIN_CONFIDENCE,
-        ),
-        SignatureWritebackActionKind::Callconv => (
-            callconv_writeback_arch_supported(arch_name),
-            CALLCONV_WRITEBACK_MIN_CONFIDENCE,
-        ),
-    };
-    if !arch_supported {
-        return SignatureWritebackActionDecision::SkipUnsupportedArch;
-    }
-    if confidence < min_confidence {
-        return SignatureWritebackActionDecision::SkipLowConfidence;
-    }
-    SignatureWritebackActionDecision::Apply
-}
-
-pub fn signature_register_arg_var_score(
-    current_name: Option<&str>,
-    expected_name: Option<&str>,
-) -> i32 {
-    let Some(current_name) = current_name else {
-        return 10;
-    };
-    if let Some(expected_name) = expected_name.filter(|name| !name.trim().is_empty())
-        && writeback_compare_strings_equivalent(current_name, expected_name)
-    {
-        return 100;
-    }
-    if !current_name.trim().is_empty() && !writeback_var_name_is_generated(current_name) {
-        return 50;
-    }
-    10
-}
-
-pub fn signature_register_arg_rename_decision(
-    current_name: Option<&str>,
-    expected_name: Option<&str>,
-) -> SignatureRegisterArgRenameDecision {
-    let Some(expected_name) = expected_name.filter(|name| !name.trim().is_empty()) else {
-        return SignatureRegisterArgRenameDecision::SkipInvalid;
-    };
-    if let Some(current_name) = current_name.filter(|name| !name.trim().is_empty()) {
-        if writeback_compare_strings_equivalent(current_name, expected_name) {
-            return SignatureRegisterArgRenameDecision::SkipAlreadyMatches;
-        }
-        if !writeback_var_name_is_generated(current_name) {
-            return SignatureRegisterArgRenameDecision::SkipCurrentNameNotGenerated;
-        }
-    }
-    SignatureRegisterArgRenameDecision::Apply
-}
-
-pub fn signature_register_arg_type_apply_required(
-    current_type: Option<&str>,
-    expected_type: Option<&str>,
-) -> bool {
-    let Some(expected_type) = expected_type.filter(|ty| !ty.trim().is_empty()) else {
-        return false;
-    };
-    let Some(current_type) = current_type.filter(|ty| !ty.trim().is_empty()) else {
-        return true;
-    };
-    !writeback_compare_strings_equivalent(current_type, expected_type)
-}
-
-pub fn type_writeback_stack_arg_name_conflict_delete_required(
-    conflict_name: Option<&str>,
-    target_name: Option<&str>,
-    conflict_is_selected_var: bool,
-    conflict_is_arg: bool,
-    conflict_is_stack_arg: bool,
-) -> bool {
-    if conflict_is_selected_var || !conflict_is_arg || !conflict_is_stack_arg {
-        return false;
-    }
-    let Some(conflict_name) = conflict_name.filter(|name| !name.trim().is_empty()) else {
-        return false;
-    };
-    let Some(target_name) = target_name.filter(|name| !name.trim().is_empty()) else {
-        return false;
-    };
-    writeback_compare_strings_equivalent(conflict_name, target_name)
-}
-
-pub fn signature_register_arg_stack_conflict_delete_required(
-    conflict_name: Option<&str>,
-    expected_name: Option<&str>,
-    conflict_is_selected_var: bool,
-    conflict_is_arg: bool,
-    conflict_is_stack_arg: bool,
-) -> bool {
-    type_writeback_stack_arg_name_conflict_delete_required(
-        conflict_name,
-        expected_name,
-        conflict_is_selected_var,
-        conflict_is_arg,
-        conflict_is_stack_arg,
-    )
-}
-
-pub fn signature_register_arg_duplicate_delete_required(
-    candidate_is_selected_var: bool,
-    candidate_is_arg: bool,
-    candidate_is_register_arg: bool,
-    candidate_arg_index: usize,
-    expected_arg_index: usize,
-) -> bool {
-    !candidate_is_selected_var
-        && candidate_is_arg
-        && candidate_is_register_arg
-        && candidate_arg_index == expected_arg_index
-}
-
-pub fn type_writeback_var_type_apply_decision(
-    existing_type: Option<&str>,
-    candidate_type: &str,
-    type_materialization_required: bool,
-    type_materialization_available: bool,
-) -> TypeWritebackApplyDecision {
-    if candidate_type.trim().is_empty() {
-        return TypeWritebackApplyDecision::SkipInvalid;
-    }
-    if type_materialization_required && !type_materialization_available {
-        return TypeWritebackApplyDecision::SkipMissingMaterialization;
-    }
-    if let Some(existing_type) = existing_type.filter(|ty| !ty.trim().is_empty())
-        && !writeback_apply_type_name_is_plain_scalar_or_opaque(existing_type)
-        && writeback_apply_type_name_is_plain_scalar_or_opaque(candidate_type)
-    {
-        return TypeWritebackApplyDecision::SkipConcreteExisting;
-    }
-    TypeWritebackApplyDecision::Apply
-}
-
-pub fn type_writeback_global_type_link_apply_decision(
-    existing_type: Option<&str>,
-    candidate_type: &str,
-    type_materialization_required: bool,
-    type_materialization_available: bool,
-) -> TypeWritebackApplyDecision {
-    if candidate_type.trim().is_empty() {
-        return TypeWritebackApplyDecision::SkipInvalid;
-    }
-    if type_materialization_required && !type_materialization_available {
-        return TypeWritebackApplyDecision::SkipMissingMaterialization;
-    }
-    if let Some(existing_type) = existing_type.filter(|ty| !ty.trim().is_empty())
-        && !writeback_apply_types_equivalent(existing_type, candidate_type)
-        && !writeback_apply_type_name_is_plain_scalar_or_opaque(existing_type)
-    {
-        return TypeWritebackApplyDecision::SkipConcreteExisting;
-    }
-    TypeWritebackApplyDecision::Apply
-}
-
-pub fn type_writeback_var_rename_apply_decision(
-    current_name: Option<&str>,
-    old_name: &str,
-    new_name: &str,
-) -> TypeWritebackRenameApplyDecision {
-    if old_name.trim().is_empty() || new_name.trim().is_empty() {
-        return TypeWritebackRenameApplyDecision::SkipInvalid;
-    }
-    if let Some(current_name) = current_name.filter(|name| !name.trim().is_empty())
-        && !writeback_var_name_is_generated(current_name)
-    {
-        return TypeWritebackRenameApplyDecision::SkipCurrentNameNotGenerated;
-    }
-    TypeWritebackRenameApplyDecision::Apply
-}
-
-pub fn canonicalize_writeback_apply_type_name(type_name: &str) -> Option<String> {
-    let mut canonical = type_name.trim().to_string();
-    if canonical.is_empty() {
-        None
-    } else {
-        while canonical.starts_with("type.") {
-            canonical.drain(..5);
-        }
-        for (dotted, spaced) in [
-            ("struct.", "struct "),
-            ("union.", "union "),
-            ("enum.", "enum "),
-            ("struct type.", "struct "),
-            ("union type.", "union "),
-            ("enum type.", "enum "),
-        ] {
-            if let Some(rest) = canonical.strip_prefix(dotted) {
-                canonical = format!("{spaced}{rest}");
-                break;
-            }
-        }
-        if let Some(star_idx) = canonical.find('*')
-            && star_idx > 0
-            && canonical.as_bytes()[star_idx - 1] != b' '
-        {
-            canonical.insert(star_idx, ' ');
-        }
-        Some(canonical)
-    }
-}
-
-pub fn writeback_type_materialization_key(type_name: &str) -> Option<String> {
-    if writeback_apply_type_name_is_plain_scalar_or_opaque(type_name) {
-        return None;
-    }
-    let canonical = canonicalize_writeback_apply_type_name(type_name)?;
-    aggregate_type_materialization_key(&canonical)
-        .or_else(|| named_type_materialization_key(&canonical))
-}
-
-pub fn writeback_type_materialization_required(type_name: &str) -> bool {
-    type_materialization_required_for_type(
-        type_name,
-        writeback_type_materialization_key(type_name).as_deref(),
-    )
-}
-
-fn type_materialization_required_for_type(
-    type_name: &str,
-    type_materialization_key: Option<&str>,
-) -> bool {
-    type_materialization_required_from_key(type_materialization_key)
-        || writeback_apply_type_name_is_opaque_placeholder(type_name)
-}
-
-fn type_materialization_required_from_key(type_materialization_key: Option<&str>) -> bool {
-    type_materialization_key.is_some_and(|key| !key.is_empty())
-}
-
-pub fn writeback_var_name_is_generated(name: &str) -> bool {
-    if name.is_empty() {
-        return true;
-    }
-    if let Some(suffix) = name.strip_prefix("arg")
-        && ascii_suffix_is_nonempty_decimal(suffix.as_bytes())
-    {
-        return true;
-    }
-    name.starts_with("var_")
-        || name.starts_with("local_")
-        || name.starts_with("stack_")
-        || name.starts_with("arg_")
-}
-
-fn normalize_writeback_apply_compare_string(type_name: &str) -> String {
-    type_name
-        .chars()
-        .filter(|ch| !ch.is_whitespace() && *ch != ';')
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect()
-}
-
-fn writeback_compare_strings_equivalent(a: &str, b: &str) -> bool {
-    normalize_writeback_apply_compare_string(a) == normalize_writeback_apply_compare_string(b)
-}
-
-fn writeback_apply_types_equivalent(a: &str, b: &str) -> bool {
-    let a = normalize_external_type_name(a);
-    let b = normalize_external_type_name(b);
-    writeback_compare_strings_equivalent(&a, &b)
-}
-
-fn aggregate_type_materialization_key(type_name: &str) -> Option<String> {
-    for prefix in ["struct ", "struct.", "union ", "union.", "enum ", "enum."] {
-        let Some(mut rest) = type_name.trim().strip_prefix(prefix) else {
-            continue;
-        };
-        rest = rest.trim_start();
-        if let Some(stripped) = rest.strip_prefix("type.") {
-            rest = stripped;
-        }
-        let name = rest
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .collect::<String>();
-        if !name.is_empty() {
-            return Some(name);
-        }
-    }
-    None
-}
-
-fn named_type_materialization_key(type_name: &str) -> Option<String> {
-    let normalized = normalized_materialization_compare_key(type_name);
-    if normalized.is_empty() || writeback_apply_normalized_type_is_builtin(&normalized) {
-        None
-    } else {
-        exact_materialization_type_key(type_name)
-    }
-}
-
-fn normalized_materialization_compare_key(type_name: &str) -> String {
-    let mut normalized =
-        normalize_writeback_apply_compare_string(strip_leading_c_qualifiers(type_name));
-    while normalized.ends_with('*') {
-        normalized.pop();
-    }
-    normalized
-}
-
-fn exact_materialization_type_key(type_name: &str) -> Option<String> {
-    let mut exact = strip_leading_c_qualifiers(type_name).trim().to_string();
-    while exact.ends_with('*') {
-        exact.pop();
-        exact = exact.trim_end().to_string();
-    }
-    if exact.is_empty() { None } else { Some(exact) }
-}
-
-fn strip_leading_c_qualifiers(mut type_name: &str) -> &str {
-    loop {
-        let trimmed = type_name.trim_start();
-        let Some((token, rest)) = trimmed
-            .split_once(char::is_whitespace)
-            .map(|(token, rest)| (token, rest.trim_start()))
-        else {
-            return trimmed;
-        };
-        if matches!(token, "const" | "volatile" | "restrict" | "register") {
-            type_name = rest;
-        } else {
-            return trimmed;
-        }
-    }
-}
-
-fn writeback_apply_normalized_type_is_builtin(normalized: &str) -> bool {
-    matches!(
-        normalized,
-        "void"
-            | "bool"
-            | "char"
-            | "signedchar"
-            | "unsignedchar"
-            | "short"
-            | "unsignedshort"
-            | "int"
-            | "unsigned"
-            | "unsignedint"
-            | "long"
-            | "unsignedlong"
-            | "longlong"
-            | "unsignedlonglong"
-            | "float"
-            | "double"
-            | "size_t"
-    ) || normalized.starts_with("int")
-        || normalized.starts_with("uint")
-}
-
-fn ascii_suffix_is_nonempty_decimal(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit)
-}
-
-fn is_opaque_placeholder_type_name(name: &str) -> bool {
-    writeback_type_name_is_opaque_placeholder(name)
-}
-
-fn is_generic_type_string(ty: &str) -> bool {
-    writeback_type_name_is_generic(ty)
 }
 
 fn is_low_signal_storage_scalar_type(ty: &str, ptr_bits: u32) -> bool {
@@ -10051,61 +8775,6 @@ fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
 mod tests {
     use r2ssa::PhiNode;
 
-    /// The two type-strength questions, and where they deliberately differ.
-    ///
-    /// They were named `..._is_generic` and `..._apply_type_name_is_generic`,
-    /// which reads as one question asked twice; they are two questions, and
-    /// merging them lets a `uint32_t` overwrite a `struct real_type *`. This
-    /// pins the boundary so neither drifts into the other.
-    #[test]
-    fn the_two_type_strength_questions_differ_only_on_bare_widths() {
-        // Says nothing at all, on both counts.
-        for name in ["void *", "void*", "char *", "int", ""] {
-            assert!(
-                super::writeback_type_name_is_generic(name),
-                "generic: {name}"
-            );
-            assert!(
-                super::writeback_apply_type_name_is_plain_scalar_or_opaque(name),
-                "plain: {name}"
-            );
-        }
-        // A width is information, so it is not generic -- but it is still a
-        // plain scalar, and must not displace an aggregate at apply time. The
-        // literal spelling `unknown` sits here too, which is worth noticing:
-        // the narrower predicate does not treat it as generic, because its
-        // placeholder test looks for `anon_` and `type_0x` rather than for a
-        // type that says in words that it is not known.
-        for name in [
-            "int64_t",
-            "uint32_t",
-            "int8_t",
-            "int32_t",
-            "uintptr_t",
-            "unknown",
-        ] {
-            assert!(
-                !super::writeback_type_name_is_generic(name),
-                "generic: {name}"
-            );
-            assert!(
-                super::writeback_apply_type_name_is_plain_scalar_or_opaque(name),
-                "plain: {name}"
-            );
-        }
-        // Structure is informative on both counts.
-        for name in ["struct real_type *", "struct Foo *"] {
-            assert!(
-                !super::writeback_type_name_is_generic(name),
-                "generic: {name}"
-            );
-            assert!(
-                !super::writeback_apply_type_name_is_plain_scalar_or_opaque(name),
-                "plain: {name}"
-            );
-        }
-    }
-
     #[test]
     fn abi_register_params_cover_aarch64_as_well_as_sysv64() {
         // radare2 reports `arch="aarch64"` with the calling-convention field
@@ -10134,8 +8803,6 @@ mod tests {
             ],
             callconv: callconv.to_string(),
             arch: arch.to_string(),
-            confidence: 90,
-            callconv_confidence: 90,
         };
         let regs = |arch: &str, callconv: &str| {
             super::inferred_signature_abi_register_params(&signature(arch, callconv), 64)
@@ -10160,7 +8827,7 @@ mod tests {
     }
 
     #[test]
-    fn unplaceable_recovered_type_produces_no_writeback_candidate() {
+    fn unplaceable_recovered_type_produces_no_candidate() {
         let vars = [RecoveredVariable {
             name: "var_8h".to_string(),
             kind: "b".to_string(),
@@ -10186,7 +8853,7 @@ mod tests {
             ptr_bits: 64,
             is_main_signature: false,
         };
-        let mut diagnostics = TypeWritebackDiagnostics::default();
+        let mut diagnostics = TypeAnalysisDiagnostics::default();
 
         let candidates = build_var_type_candidates(&vars, &context, &mut diagnostics);
 
@@ -10233,221 +8900,6 @@ mod tests {
         );
     }
 
-    fn source_owned_worker_fixture(entry: u64) -> (Arc<SsaArtifact>, r2il::ArchSpec) {
-        let mut arch = r2il::ArchSpec::new("x86-64");
-        arch.add_register(r2il::RegisterDef::new("rax", 0x00, 8));
-        arch.add_register(r2il::RegisterDef::new("rip", 0x08, 8));
-        arch.add_register(r2il::RegisterDef::new("rsp", 0x10, 8));
-        arch.add_register(r2il::RegisterDef::new("rdi", 0x20, 8));
-        arch.add_register(r2il::RegisterDef::new("edi", 0x20, 4));
-        let loaded = r2il::Varnode::unique(0x10, 1);
-        let predicate = r2il::Varnode::unique(0x11, 1);
-        let block = r2il::R2ILBlock {
-            addr: entry,
-            size: 4,
-            ops: vec![
-                r2il::R2ILOp::Load {
-                    dst: loaded.clone(),
-                    space: r2il::SpaceId::Ram,
-                    addr: r2il::Varnode::register(0x20, 8),
-                },
-                r2il::R2ILOp::IntEqual {
-                    dst: predicate.clone(),
-                    a: loaded,
-                    b: r2il::Varnode::constant(0, 1),
-                },
-                r2il::R2ILOp::CBranch {
-                    target: r2il::Varnode::constant(entry, 8),
-                    cond: predicate,
-                },
-            ],
-            switch_info: None,
-            op_metadata: Default::default(),
-        };
-        let storage = |offset| r2ssa::CanonicalStorageId {
-            space: r2ssa::CanonicalStorageSpace::Register,
-            offset,
-            size: 8,
-        };
-        let interface = r2ssa::SourceFunctionInterface::new_exact(
-            b"source-owned-writeback".to_vec(),
-            "sysv64",
-            [r2ssa::SourceAbiParameterSpec::new(0, storage(0x20))],
-            r2ssa::SourceFunctionReturn::Void,
-            [],
-        )
-        .and_then(|interface| interface.with_return_address_storage(storage(0x08)))
-        .and_then(|interface| interface.with_stack_pointer_storage(storage(0x10)))
-        .expect("exact source-owned writeback interface");
-        let source = Arc::new(
-            SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-                .expect("prepared source owner"),
-        );
-        (source, arch)
-    }
-
-    #[test]
-    fn source_owned_writeback_without_semantics_retains_exact_allocation() {
-        let (source, _) = source_owned_worker_fixture(0x401100);
-        let (foreign, _) = source_owned_worker_fixture(0x401100);
-        let weak = Arc::downgrade(&source);
-        let request = TypeWritebackAnalysisRequest::new(
-            Arc::clone(&source),
-            ParsedExternalContext::default(),
-        )
-        .expect("matching source assumptions");
-
-        let analysis = build_source_owned_type_writeback_analysis(request)
-            .expect("semantics-free source-owned writeback");
-
-        assert!(analysis.matches_source(&source));
-        assert!(!analysis.matches_source(&foreign));
-        assert!(
-            analysis
-                .function_facts()
-                .prepared_interproc_summary()
-                .is_none()
-        );
-        let shared = analysis.shared_source();
-        assert!(Arc::ptr_eq(&shared, &source));
-        drop(source);
-        assert!(weak.upgrade().is_some());
-        assert!(analysis.function_facts().render().is_some());
-        let owned = analysis
-            .finalize_for_decompile(DecompileFinalization {
-                kind: crate::DecompileRouteKind::Standard,
-                reason: "test route".to_string(),
-                fallback_comment: Some("ignored executable-looking payload".to_string()),
-            })
-            .expect("compatible route finalizes exact owner");
-        assert!(owned.report().input_quality().is_none());
-        let route = owned
-            .report()
-            .decompile_route()
-            .expect("source-owned route");
-        assert_eq!(route.kind, crate::DecompileRouteKind::Standard);
-        assert_eq!(route.reason.as_deref(), Some("test route"));
-        assert!(route.use_prepared_semantic_view);
-        assert!(route.fallback_comment.is_none());
-        drop(shared);
-        assert!(weak.upgrade().is_some());
-        drop(owned);
-        assert!(weak.upgrade().is_none());
-    }
-
-    fn constrained_refresh_test_analysis(
-        source: Arc<SsaArtifact>,
-        current_param_bits: u32,
-        candidates: Vec<VarTypeCandidate>,
-    ) -> TypeWritebackAnalysis {
-        TypeWritebackAnalysis {
-            source,
-            function_facts: FunctionFacts::new(certified_signature_facts(
-                "renamed_parameter",
-                current_param_bits,
-            )),
-            plan: TypeWritebackPlan {
-                ptr_bits: 64,
-                signature: inferred_test_signature("fcn.refresh", "presentation_only"),
-                var_type_candidates: candidates,
-                var_rename_candidates: Vec::new(),
-                struct_decls: Vec::new(),
-                global_type_links: Vec::new(),
-                diagnostics: TypeWritebackDiagnostics::default(),
-            },
-            callee_signatures: BTreeMap::new(),
-        }
-    }
-
-    fn constrained_refresh_candidate(register: Option<&str>, name: &str) -> VarTypeCandidate {
-        VarTypeCandidate {
-            name: name.to_string(),
-            kind: "r".to_string(),
-            delta: 0,
-            var_type: parse_test_type("int64_t", 64),
-            isarg: true,
-            reg: register.map(str::to_string),
-            size: 8,
-            confidence: 80,
-            source: WritebackSource::LocalInferred,
-            evidence: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn constrained_plan_refresh_uses_exact_storage_alias_and_updates_size() {
-        let (source, _) = source_owned_worker_fixture(0x401200);
-        let mut analysis = constrained_refresh_test_analysis(
-            source,
-            8,
-            vec![constrained_refresh_candidate(
-                Some("edi"),
-                "does_not_match_signature",
-            )],
-        );
-
-        assert!(analysis.refresh_plan_after_source_constraints(&BTreeSet::from([0])));
-        let candidate = &analysis.plan().var_type_candidates[0];
-        assert_eq!(candidate.var_type, parse_test_type("int8_t", 64));
-        assert_eq!(candidate.size, 1);
-        assert_eq!(candidate.source, WritebackSource::CalleeSignature);
-        assert!(
-            candidate
-                .evidence
-                .contains(&WritebackEvidence::CertifiedCallArgument)
-        );
-    }
-
-    #[test]
-    fn constrained_plan_refresh_refuses_name_only_foreign_and_duplicate_bindings_atomically() {
-        let (source, _) = source_owned_worker_fixture(0x401300);
-        let mutations = [
-            vec![constrained_refresh_candidate(None, "renamed_parameter")],
-            vec![constrained_refresh_candidate(
-                Some("rax"),
-                "renamed_parameter",
-            )],
-            vec![
-                constrained_refresh_candidate(Some("rdi"), "first"),
-                constrained_refresh_candidate(Some("edi"), "second"),
-            ],
-        ];
-
-        for candidates in mutations {
-            let mut analysis =
-                constrained_refresh_test_analysis(Arc::clone(&source), 8, candidates);
-            let prior_plan = analysis.plan().clone();
-            assert!(!analysis.refresh_plan_after_source_constraints(&BTreeSet::from([0])));
-            assert_eq!(analysis.plan(), &prior_plan);
-        }
-    }
-
-    #[test]
-    fn source_owned_authority_report_uses_retained_cfg_block_count() {
-        let (source, _) = source_owned_worker_fixture(0x401400);
-        let function_facts = FunctionFacts::new(certified_signature_facts("value", 32));
-        let plan = empty_writeback_plan("fcn.authority");
-        let analysis = TypeWritebackAnalysis {
-            source: Arc::clone(&source),
-            function_facts: function_facts.clone(),
-            plan: plan.clone(),
-            callee_signatures: BTreeMap::new(),
-        };
-        let budget = TypeWritebackMutationBudget::new(64, usize::MAX, usize::MAX);
-        let policy = TypeWritebackApplyPolicy::balanced();
-
-        assert_eq!(
-            analysis.authority_report(budget, policy),
-            type_writeback_authority_report_with_policy(
-                &plan,
-                budget,
-                function_facts.type_facts(),
-                policy,
-                source.function().cfg_risk_summary().block_count,
-            )
-        );
-    }
-
     #[test]
     fn source_owned_function_facts_has_no_serde_contract() {
         trait AmbiguousIfSerialize<Marker> {
@@ -10474,25 +8926,25 @@ mod tests {
             SsaArtifact::for_decompile(&[r2il::R2ILBlock::new(0x401800, 1)], Some(&arch))
                 .expect("prepared source without interface"),
         );
-        let request = TypeWritebackAnalysisRequest::new(source, ParsedExternalContext::default())
+        let request = TypeAnalysisRequest::new(source, ParsedExternalContext::default())
             .expect("matching assumptions");
         // A source without an exact interface still yields an analysis: the
         // absence of an ABI is a fact about the source, not a failure. What it
         // must never do is invent the parameters it could not resolve.
-        let analysis = build_source_owned_type_writeback_analysis(request)
+        let analysis = build_source_owned_type_analysis(request)
             .expect("a source without an exact interface still yields an analysis");
         assert!(
-            analysis.signature().params.is_empty(),
+            analysis
+                .type_facts()
+                .merged_signature
+                .as_ref()
+                .is_none_or(|signature| signature.params.is_empty()),
             "no interface must not produce parameters"
-        );
-        assert!(
-            analysis.plan().signature.params.is_empty(),
-            "no interface must not produce a parameterised writeback plan"
         );
     }
 
     #[test]
-    fn source_owned_writeback_propagates_interproc_schema_error() {
+    fn source_owned_analysis_propagates_interproc_schema_error() {
         let stale = InterprocSummarySet {
             schema_version: 1,
             ..InterprocSummarySet::default()
@@ -10500,14 +8952,14 @@ mod tests {
 
         assert_eq!(
             require_current_interproc_report_for_source_owned(Some(&stale)),
-            Err(TypeWritebackAnalysisError::InterprocSummarySchema(
+            Err(TypeAnalysisError::InterprocSummarySchema(
                 r2ssa::interproc::InterprocSummarySchemaError::ReportSchemaVersion { found: 1 },
             ))
         );
     }
 
     #[test]
-    fn detached_advisory_writeback_drops_invalid_interproc_schema() {
+    fn detached_advisory_analysis_drops_invalid_interproc_schema() {
         let stale = InterprocSummarySet {
             schema_version: 1,
             ..InterprocSummarySet::default()
@@ -10517,32 +8969,6 @@ mod tests {
         assert!(view.as_set().is_none());
         assert!(view.root_summary().is_none());
         assert!(view.pointer_param_indices().is_empty());
-    }
-
-    #[test]
-    fn source_owned_writeback_refuses_incoherent_nonzero_memory_model() {
-        let mut arch = r2il::ArchSpec::new("x86-64");
-        arch.add_space(r2il::AddressSpace::ram(8));
-        arch.add_space(r2il::AddressSpace::ram(8));
-        let block = r2il::R2ILBlock::new(0x403000, 1);
-        let source = Arc::new(
-            SsaArtifact::for_decompile(&[block], Some(&arch)).expect("prepared incoherent source"),
-        );
-        assert_eq!(
-            source
-                .machine_context()
-                .memory_model()
-                .default_address_bits(),
-            64
-        );
-        assert!(!source.machine_context().memory_model().is_coherent());
-        let request = TypeWritebackAnalysisRequest::new(source, ParsedExternalContext::default())
-            .expect("empty assumptions match");
-        assert_eq!(
-            build_source_owned_type_writeback_analysis(request)
-                .expect_err("incoherent memory model must refuse"),
-            TypeWritebackAnalysisError::IncoherentMachineMemoryModel
-        );
     }
 
     #[test]
@@ -10841,8 +9267,8 @@ mod tests {
             reg: None,
         }];
 
-        let analysis = build_type_writeback_analysis_with_prep_facts(
-            TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis_with_prep_facts(
+            TypeAnalysisInput {
                 function_name: "sym._sum_array",
                 ptr_bits: 64,
                 inferred_signature: InferredSignature {
@@ -10852,26 +9278,24 @@ mod tests {
                     params: Vec::new(),
                     callconv: String::new(),
                     arch: "aarch64".to_string(),
-                    confidence: 0,
-                    callconv_confidence: 0,
                 },
                 recovered_vars: &vars,
                 ssa_blocks: &blocks,
                 parsed_context,
                 local_structs: LocalStructArtifacts::default(),
                 interproc_summary_set: None,
-                diagnostics: TypeWritebackDiagnostics::default(),
+                diagnostics: TypeAnalysisDiagnostics::default(),
             },
             &prep_facts,
         );
 
         let candidate = &analysis.plan.var_type_candidates[0];
         assert_eq!(candidate.var_type, parse_test_type("int32_t", 64));
-        assert_eq!(candidate.source, WritebackSource::DataflowRanked);
+        assert_eq!(candidate.source, TypeFactSource::DataflowRanked);
         assert!(
             candidate
                 .evidence
-                .contains(&WritebackEvidence::CanonicalStackAccessWidth)
+                .contains(&TypeEvidence::CanonicalStackAccessWidth)
         );
         let slot = analysis
             .type_facts
@@ -10959,8 +9383,8 @@ mod tests {
             reg: None,
         }];
 
-        let analysis = build_type_writeback_analysis_with_prep_facts(
-            TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis_with_prep_facts(
+            TypeAnalysisInput {
                 function_name: "sym._fnv_fold",
                 ptr_bits: 64,
                 inferred_signature: InferredSignature {
@@ -10970,15 +9394,13 @@ mod tests {
                     params: Vec::new(),
                     callconv: String::new(),
                     arch: "aarch64".to_string(),
-                    confidence: 0,
-                    callconv_confidence: 0,
                 },
                 recovered_vars: &vars,
                 ssa_blocks: &blocks,
                 parsed_context,
                 local_structs: LocalStructArtifacts::default(),
                 interproc_summary_set: None,
-                diagnostics: TypeWritebackDiagnostics::default(),
+                diagnostics: TypeAnalysisDiagnostics::default(),
             },
             &prep_facts,
         );
@@ -10988,7 +9410,7 @@ mod tests {
         assert!(
             candidate
                 .evidence
-                .contains(&WritebackEvidence::CanonicalStackSignedness)
+                .contains(&TypeEvidence::CanonicalStackSignedness)
         );
         assert_eq!(
             analysis
@@ -11128,699 +9550,19 @@ mod tests {
         }
     }
 
-    fn inferred_test_signature(function_name: &str, param_name: &str) -> InferredSignature {
-        InferredSignature {
-            function_name: function_name.to_string(),
-            signature: format!("int32_t {function_name}(int32_t {param_name});"),
-            ret_type: "int32_t".to_string(),
-            params: vec![InferredSignatureParam {
-                name: param_name.to_string(),
-                param_type: "int32_t".to_string(),
-            }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
-            confidence: 96,
-            callconv_confidence: 90,
-        }
-    }
-
-    fn empty_writeback_plan(function_name: &str) -> TypeWritebackPlan {
-        TypeWritebackPlan {
-            ptr_bits: 64,
-            signature: inferred_test_signature(function_name, "value"),
-            var_type_candidates: Vec::new(),
-            var_rename_candidates: Vec::new(),
-            struct_decls: Vec::new(),
-            global_type_links: Vec::new(),
-            diagnostics: TypeWritebackDiagnostics::default(),
-        }
-    }
-
     #[test]
-    fn writeback_generated_var_name_policy_matches_apply_guard() {
-        for generated in [
-            "", "arg0", "arg12", "arg_8", "var_10h", "local_20", "stack_18",
-        ] {
-            assert!(
-                writeback_var_name_is_generated(generated),
-                "{generated:?} should be replaceable generated storage"
-            );
-        }
-
-        for user_name in ["arg", "argc", "value", "count", "user_var_10"] {
-            assert!(
-                !writeback_var_name_is_generated(user_name),
-                "{user_name:?} should be preserved as user/current identity"
-            );
-        }
-    }
-
-    #[test]
-    fn var_rename_apply_decision_allows_generated_current_names() {
-        for current_name in [
-            None,
-            Some(""),
-            Some("arg0"),
-            Some("var_10h"),
-            Some("local_20"),
-        ] {
-            assert_eq!(
-                type_writeback_var_rename_apply_decision(current_name, "arg0", "count"),
-                TypeWritebackRenameApplyDecision::Apply,
-                "{current_name:?} should be replaceable"
-            );
-        }
-    }
-
-    #[test]
-    fn var_rename_apply_decision_preserves_user_current_names() {
-        for current_name in ["arg", "argc", "value", "count", "user_var_10"] {
-            assert_eq!(
-                type_writeback_var_rename_apply_decision(Some(current_name), "arg0", "count"),
-                TypeWritebackRenameApplyDecision::SkipCurrentNameNotGenerated,
-                "{current_name:?} should be preserved"
-            );
-        }
-    }
-
-    #[test]
-    fn var_rename_apply_decision_rejects_invalid_payload() {
-        assert_eq!(
-            type_writeback_var_rename_apply_decision(Some("arg0"), "", "count"),
-            TypeWritebackRenameApplyDecision::SkipInvalid
-        );
-        assert_eq!(
-            type_writeback_var_rename_apply_decision(Some("arg0"), "arg0", ""),
-            TypeWritebackRenameApplyDecision::SkipInvalid
-        );
-    }
-
-    #[test]
-    fn signature_register_arg_var_score_prefers_exact_then_user_named_args() {
-        assert_eq!(
-            signature_register_arg_var_score(Some(" argc "), Some("argc")),
-            100
-        );
-        assert_eq!(
-            signature_register_arg_var_score(Some("ARGC;"), Some("argc")),
-            100
-        );
-        assert_eq!(
-            signature_register_arg_var_score(Some("user_count"), Some("argc")),
-            50
-        );
-        assert_eq!(
-            signature_register_arg_var_score(Some("arg0"), Some("argc")),
-            10
-        );
-        assert_eq!(signature_register_arg_var_score(None, Some("argc")), 10);
-    }
-
-    #[test]
-    fn signature_register_arg_rename_decision_preserves_user_names() {
-        assert_eq!(
-            signature_register_arg_rename_decision(Some("arg0"), Some("argc")),
-            SignatureRegisterArgRenameDecision::Apply
-        );
-        assert_eq!(
-            signature_register_arg_rename_decision(Some("argc"), Some("argc")),
-            SignatureRegisterArgRenameDecision::SkipAlreadyMatches
-        );
-        assert_eq!(
-            signature_register_arg_rename_decision(Some("user_count"), Some("argc")),
-            SignatureRegisterArgRenameDecision::SkipCurrentNameNotGenerated
-        );
-        assert_eq!(
-            signature_register_arg_rename_decision(Some("arg0"), Some("")),
-            SignatureRegisterArgRenameDecision::SkipInvalid
-        );
-    }
-
-    #[test]
-    fn signature_register_arg_type_apply_required_matches_legacy_compare() {
-        assert!(!signature_register_arg_type_apply_required(
-            Some(" int32_t ;"),
-            Some("int32_t")
-        ));
-        assert!(signature_register_arg_type_apply_required(
-            None,
-            Some("int32_t")
-        ));
-        assert!(signature_register_arg_type_apply_required(
-            Some("int32_t"),
-            Some("uint32_t")
-        ));
-        assert!(!signature_register_arg_type_apply_required(
-            Some("int32_t"),
-            None
-        ));
-    }
-
-    #[test]
-    fn signature_register_arg_stack_conflict_delete_requires_stack_arg_name_match() {
-        assert!(type_writeback_stack_arg_name_conflict_delete_required(
-            Some(" argc ;"),
-            Some("argc"),
-            false,
-            true,
-            true,
-        ));
-        assert!(signature_register_arg_stack_conflict_delete_required(
-            Some(" argc ;"),
-            Some("argc"),
-            false,
-            true,
-            true,
-        ));
-        assert!(!signature_register_arg_stack_conflict_delete_required(
-            Some("argc"),
-            Some("argc"),
-            true,
-            true,
-            true,
-        ));
-        assert!(!signature_register_arg_stack_conflict_delete_required(
-            Some("argc"),
-            Some("argc"),
-            false,
-            false,
-            true,
-        ));
-        assert!(!signature_register_arg_stack_conflict_delete_required(
-            Some("argc"),
-            Some("argc"),
-            false,
-            true,
-            false,
-        ));
-        assert!(!signature_register_arg_stack_conflict_delete_required(
-            Some("other"),
-            Some("argc"),
-            false,
-            true,
-            true,
-        ));
-    }
-
-    #[test]
-    fn signature_register_arg_duplicate_delete_requires_same_register_arg_index() {
-        assert!(signature_register_arg_duplicate_delete_required(
-            false, true, true, 2, 2,
-        ));
-        assert!(!signature_register_arg_duplicate_delete_required(
-            true, true, true, 2, 2,
-        ));
-        assert!(!signature_register_arg_duplicate_delete_required(
-            false, false, true, 2, 2,
-        ));
-        assert!(!signature_register_arg_duplicate_delete_required(
-            false, true, false, 2, 2,
-        ));
-        assert!(!signature_register_arg_duplicate_delete_required(
-            false, true, true, 1, 2,
-        ));
-    }
-
-    #[test]
-    fn writeback_apply_type_name_policy_matches_executor_guard() {
-        for generic in [
-            "",
-            "void *",
-            "char*",
-            "int",
-            "unsigned",
-            "long",
-            "unsigned long",
-            "uint32_t",
-            "unknown",
-            "byte[16]",
-            "struct type_0x1234 *",
-        ] {
-            assert!(
-                writeback_apply_type_name_is_plain_scalar_or_opaque(generic),
-                "{generic:?} should remain a weak apply-time type"
-            );
-        }
-
-        assert!(writeback_apply_type_name_is_opaque_placeholder(
-            "struct type_0x1234 *"
-        ));
-        assert!(!writeback_apply_type_name_is_opaque_placeholder(
-            "struct real_type *"
-        ));
-        assert!(!writeback_apply_type_name_is_plain_scalar_or_opaque(
-            "struct real_type *"
-        ));
-    }
-
-    #[test]
-    fn var_type_apply_decision_preserves_concrete_existing_type() {
-        assert_eq!(
-            type_writeback_var_type_apply_decision(
-                Some("struct real_type *"),
-                "uint32_t",
-                false,
-                true,
-            ),
-            TypeWritebackApplyDecision::SkipConcreteExisting
-        );
-        assert_eq!(
-            type_writeback_var_type_apply_decision(
-                Some("uint32_t"),
-                "struct real_type *",
-                false,
-                true
-            ),
-            TypeWritebackApplyDecision::Apply
-        );
-        assert_eq!(
-            type_writeback_var_type_apply_decision(
-                Some("struct real_type *"),
-                "struct better_type *",
-                false,
-                true,
-            ),
-            TypeWritebackApplyDecision::Apply
-        );
-    }
-
-    #[test]
-    fn var_type_apply_decision_fails_closed_on_invalid_or_missing_materialization() {
-        assert_eq!(
-            type_writeback_var_type_apply_decision(None, "", false, true),
-            TypeWritebackApplyDecision::SkipInvalid
-        );
-        assert_eq!(
-            type_writeback_var_type_apply_decision(None, "struct Foo *", true, false),
-            TypeWritebackApplyDecision::SkipMissingMaterialization
-        );
-        assert_eq!(
-            type_writeback_var_type_apply_decision(None, "struct Foo *", true, true),
-            TypeWritebackApplyDecision::Apply
-        );
-    }
-
-    #[test]
-    fn global_type_link_apply_decision_preserves_concrete_existing_type() {
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(
-                Some("struct real_type *"),
-                "uint32_t",
-                false,
-                true,
-            ),
-            TypeWritebackApplyDecision::SkipConcreteExisting
-        );
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(
-                Some("struct real_type *"),
-                "struct better_type *",
-                false,
-                true,
-            ),
-            TypeWritebackApplyDecision::SkipConcreteExisting
-        );
-    }
-
-    #[test]
-    fn global_type_link_apply_decision_allows_same_or_generic_existing_type() {
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(
-                Some("struct real_type *"),
-                "struct.real_type*",
-                false,
-                true,
-            ),
-            TypeWritebackApplyDecision::Apply
-        );
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(
-                Some("uint32_t"),
-                "struct real_type *",
-                false,
-                true,
-            ),
-            TypeWritebackApplyDecision::Apply
-        );
-    }
-
-    #[test]
-    fn global_type_link_apply_decision_fails_closed_on_invalid_or_missing_materialization() {
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(None, "", false, true),
-            TypeWritebackApplyDecision::SkipInvalid
-        );
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(None, "struct Foo *", true, false),
-            TypeWritebackApplyDecision::SkipMissingMaterialization
-        );
-    }
-
-    #[test]
-    fn global_type_link_apply_decision_requires_materialization_only_when_required() {
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(None, "uint32_t", false, false),
-            TypeWritebackApplyDecision::Apply
-        );
-        assert_eq!(
-            type_writeback_global_type_link_apply_decision(None, "struct Foo *", true, true),
-            TypeWritebackApplyDecision::Apply
-        );
-    }
-
-    #[test]
-    fn signature_action_decision_filters_payload_arch_size_and_confidence() {
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Signature,
-                "x86-64",
-                1,
-                false,
-                SIGNATURE_WRITEBACK_MIN_CONFIDENCE,
-            ),
-            SignatureWritebackActionDecision::SkipMissingPayload
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Signature,
-                "x86-64",
-                SIGNATURE_WRITEBACK_MAX_BLOCKS + 1,
-                true,
-                100,
-            ),
-            SignatureWritebackActionDecision::SkipTooLarge
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Signature,
-                "",
-                SIGNATURE_WRITEBACK_MAX_BLOCKS,
-                true,
-                100,
-            ),
-            SignatureWritebackActionDecision::SkipUnsupportedArch
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Signature,
-                "x86-64",
-                SIGNATURE_WRITEBACK_MAX_BLOCKS,
-                true,
-                SIGNATURE_WRITEBACK_MIN_CONFIDENCE - 1,
-            ),
-            SignatureWritebackActionDecision::SkipLowConfidence
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Signature,
-                "x86-64",
-                SIGNATURE_WRITEBACK_MAX_BLOCKS,
-                true,
-                SIGNATURE_WRITEBACK_MIN_CONFIDENCE,
-            ),
-            SignatureWritebackActionDecision::Apply
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Callconv,
-                "arm64",
-                1,
-                true,
-                100,
-            ),
-            SignatureWritebackActionDecision::SkipUnsupportedArch
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Callconv,
-                "amd64",
-                1,
-                true,
-                CALLCONV_WRITEBACK_MIN_CONFIDENCE - 1,
-            ),
-            SignatureWritebackActionDecision::SkipLowConfidence
-        );
-        assert_eq!(
-            signature_writeback_action_decision(
-                SignatureWritebackActionKind::Callconv,
-                "amd64",
-                1,
-                true,
-                CALLCONV_WRITEBACK_MIN_CONFIDENCE,
-            ),
-            SignatureWritebackActionDecision::Apply
-        );
-    }
-
-    #[test]
-    fn writeback_type_name_policy_matches_planner_guard() {
-        assert!(writeback_type_name_is_opaque_placeholder(
-            "struct type_0x1234 *"
-        ));
-        assert!(writeback_type_name_is_opaque_placeholder(
-            "struct anon_field"
-        ));
-        assert!(!writeback_type_name_is_opaque_placeholder(
-            "struct real_type *"
-        ));
+    fn type_name_policy_matches_planner_guard() {
+        assert!(type_name_is_opaque_placeholder("struct type_0x1234 *"));
+        assert!(type_name_is_opaque_placeholder("struct anon_field"));
+        assert!(!type_name_is_opaque_placeholder("struct real_type *"));
 
         for generic in ["void *", "const char *", "unsigned char*", "unsigned long"] {
             assert!(
-                writeback_type_name_is_generic(generic),
+                type_name_is_generic(generic),
                 "{generic:?} should stay a weak planner type"
             );
         }
-        assert!(!writeback_type_name_is_generic("struct real_type *"));
-    }
-
-    #[test]
-    fn writeback_private_compat_wrappers_route_to_public_policy() {
-        assert!(is_opaque_placeholder_type_name("union type_0xabcd"));
-        assert!(!is_opaque_placeholder_type_name("union concrete"));
-        assert!(is_generic_type_string("char *"));
-        assert!(!is_generic_type_string("struct concrete *"));
-    }
-
-    #[test]
-    fn writeback_apply_type_name_canonicalization_matches_legacy_executor_spelling() {
-        assert_eq!(
-            canonicalize_writeback_apply_type_name(" type.int* "),
-            Some("int *".to_string())
-        );
-        assert_eq!(
-            canonicalize_writeback_apply_type_name("struct.sla_example *"),
-            Some("struct sla_example *".to_string())
-        );
-        assert_eq!(
-            canonicalize_writeback_apply_type_name("struct type.foo_bar*"),
-            Some("struct foo_bar *".to_string())
-        );
-        assert_eq!(
-            canonicalize_writeback_apply_type_name("type.IOCPU_VTable.setCPUNumber"),
-            Some("IOCPU_VTable.setCPUNumber".to_string())
-        );
-        assert_eq!(
-            canonicalize_writeback_apply_type_name("*already_pointer"),
-            Some("*already_pointer".to_string())
-        );
-        assert_eq!(canonicalize_writeback_apply_type_name("   "), None);
-    }
-
-    #[test]
-    fn writeback_type_materialization_key_extracts_live_type_db_keys() {
-        for (raw, expected) in [
-            ("struct.Foo*", "Foo"),
-            ("struct type.Foo *", "Foo"),
-            ("union.Bar *", "Bar"),
-            ("enum Baz", "Baz"),
-            ("IOCPU_VTable *", "IOCPU_VTable"),
-            ("const MyAlias *", "MyAlias"),
-            ("constant_t *", "constant_t"),
-        ] {
-            assert_eq!(
-                writeback_type_materialization_key(raw).as_deref(),
-                Some(expected),
-                "{raw:?} should derive the exact radare2 materialization key"
-            );
-            assert!(
-                writeback_type_materialization_required(raw),
-                "{raw:?} should require live type-db verification"
-            );
-        }
-    }
-
-    #[test]
-    fn writeback_type_materialization_key_omits_builtin_generic_and_opaque_types() {
-        for raw in [
-            "int *",
-            "int32_t *",
-            "uint64_t *",
-            "const uint64_t *",
-            "size_t *",
-            "unsigned long *",
-            "int32_t",
-            "uint64_t",
-            "void *",
-            "char *",
-            "byte[8]",
-        ] {
-            assert_eq!(writeback_type_materialization_key(raw), None);
-            assert!(
-                !writeback_type_materialization_required(raw),
-                "{raw:?} should not require a radare2 type-db key"
-            );
-        }
-
-        let opaque = "struct type_0x123 *";
-        assert_eq!(writeback_type_materialization_key(opaque), None);
-        assert!(
-            writeback_type_materialization_required(opaque),
-            "opaque placeholders should fail closed when no materialization key exists"
-        );
-    }
-
-    #[test]
-    fn type_writeback_mutation_serializes_materialization_required_only_when_true() {
-        let mut mutation = TypeWritebackMutation {
-            kind: TypeWritebackMutationKind::VarType,
-            signature: None,
-            ret_type: None,
-            params: Vec::new(),
-            callconv: None,
-            old_name: None,
-            name: Some("var_8h".to_string()),
-            reg: None,
-            type_name: Some("int32_t".to_string()),
-            type_materialization_key: None,
-            type_materialization_required: false,
-            text: None,
-            addr: None,
-            size: Some(4),
-            delta: Some(-8),
-            var_kind: Some("b".to_string()),
-            is_arg: Some(false),
-            confidence: 90,
-            source: WritebackSource::ExternalTypeDb.as_str().to_string(),
-            evidence: vec!["unit-test".to_string()],
-        };
-        let value = serde_json::to_value(&mutation).expect("mutation should serialize");
-        assert!(
-            value.get("type_materialization_required").is_none(),
-            "false materialization requirement should be omitted from JSON"
-        );
-        assert!(
-            value.get("type_materialization_key").is_none(),
-            "absent materialization key should be omitted from JSON"
-        );
-
-        mutation.type_name = Some("struct Foo *".to_string());
-        mutation.type_materialization_key = Some("Foo".to_string());
-        mutation.type_materialization_required = true;
-        let value = serde_json::to_value(&mutation).expect("mutation should serialize");
-        assert_eq!(
-            value
-                .get("type_materialization_required")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            value
-                .get("type_materialization_key")
-                .and_then(serde_json::Value::as_str),
-            Some("Foo")
-        );
-    }
-
-    fn certified_signature_facts(param_name: &str, param_bits: u32) -> FunctionTypeFacts {
-        let signature_spec = test_signature_spec(param_name, param_bits);
-        let signature_certificate = SignatureCertificate::from_signature(
-            &signature_spec,
-            [SignatureCertificateSource::ExternalContext],
-        )
-        .expect("external signature should be certifiable");
-        FunctionTypeFacts {
-            merged_signature: Some(signature_spec),
-            signature_certificate: Some(signature_certificate),
-            ..FunctionTypeFacts::default()
-        }
-    }
-
-    fn policy_test_plan(
-        function_name: &str,
-        confidence: u8,
-        rename_confidence: u8,
-    ) -> TypeWritebackPlan {
-        TypeWritebackPlan {
-            ptr_bits: 64,
-            signature: inferred_test_signature(function_name, "value"),
-            var_type_candidates: vec![VarTypeCandidate {
-                name: "var_8h".to_string(),
-                kind: "b".to_string(),
-                delta: -8,
-                var_type: parse_test_type("int32_t", 64),
-                isarg: false,
-                reg: None,
-                size: 4,
-                confidence,
-                source: WritebackSource::ExternalTypeDb,
-                evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-            }],
-            var_rename_candidates: vec![VarRenameCandidate {
-                name: "arg1".to_string(),
-                target_name: "value".to_string(),
-                confidence: rename_confidence,
-                source: WritebackSource::ExistingState,
-                evidence: vec![WritebackEvidence::ExternalParamName],
-            }],
-            struct_decls: vec![StructDeclCandidate {
-                name: "struct policy_item".to_string(),
-                decl: "typedef struct policy_item { int x; } policy_item;".to_string(),
-                confidence,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            }],
-            global_type_links: vec![GlobalTypeLinkCandidate {
-                addr: 0x404000,
-                target_type: CTypeLike::Pointer(Box::new(CTypeLike::Struct(
-                    "policy_item".to_string(),
-                ))),
-                confidence,
-                source: WritebackSource::ExternalTypeDb,
-            }],
-            diagnostics: TypeWritebackDiagnostics::default(),
-        }
-    }
-
-    fn mutation_kind_count(
-        mutation_plan: &TypeWritebackMutationPlan,
-        kind: TypeWritebackMutationKind,
-    ) -> usize {
-        mutation_plan
-            .mutations
-            .iter()
-            .filter(|mutation| mutation.kind == kind)
-            .count()
-    }
-
-    #[test]
-    fn inferred_signature_to_type_facts_preserves_merged_signature() {
-        let inferred = inferred_test_signature("dbg.typed", "value");
-
-        let type_facts = inferred_signature_to_function_type_facts(&inferred, 64);
-        let merged = type_facts
-            .merged_signature
-            .as_ref()
-            .expect("inferred signature should materialize merged signature");
-
-        assert_eq!(merged.params.len(), 1);
-        assert_eq!(merged.params[0].name, "value");
-        assert!(matches!(
-            merged.ret_type,
-            Some(CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed
-            })
-        ));
+        assert!(!type_name_is_generic("struct real_type *"));
     }
 
     #[test]
@@ -11913,753 +9655,6 @@ mod tests {
     }
 
     #[test]
-    fn mutation_plan_materializes_typed_writeback_kinds_in_order() {
-        let type_facts = certified_signature_facts("a", 32);
-        let mut plan = empty_writeback_plan("dbg.sum");
-        plan.signature = inferred_test_signature("dbg.sum", "a");
-        plan.var_type_candidates.push(VarTypeCandidate {
-            name: "var_8h".to_string(),
-            kind: "b".to_string(),
-            delta: -8,
-            var_type: parse_test_type("int32_t", 64),
-            isarg: false,
-            reg: None,
-            size: 4,
-            confidence: MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE,
-            source: WritebackSource::ExternalTypeDb,
-            evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-        });
-        plan.var_rename_candidates.push(VarRenameCandidate {
-            name: "arg1".to_string(),
-            target_name: "a".to_string(),
-            confidence: 96,
-            source: WritebackSource::ExistingState,
-            evidence: vec![WritebackEvidence::ExternalParamName],
-        });
-
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(usize::MAX, usize::MAX, usize::MAX),
-            &type_facts,
-        );
-        let kinds = mutation_plan
-            .mutations
-            .iter()
-            .map(|mutation| mutation.kind)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            kinds,
-            vec![
-                TypeWritebackMutationKind::Signature,
-                TypeWritebackMutationKind::Callconv,
-                TypeWritebackMutationKind::Var,
-                TypeWritebackMutationKind::VarType,
-                TypeWritebackMutationKind::VarRename,
-            ]
-        );
-        assert_eq!(
-            mutation_plan.mutations[0].signature.as_deref(),
-            Some("int32_t dbg.sum(int32_t a);")
-        );
-        assert_eq!(
-            mutation_plan.mutations[3].type_name.as_deref(),
-            Some("int32_t")
-        );
-        assert_eq!(mutation_plan.mutations[4].old_name.as_deref(), Some("arg1"));
-        assert_eq!(
-            mutation_plan.mutations[0].evidence,
-            vec!["signature-certificate:external_context".to_string()]
-        );
-    }
-
-    #[test]
-    fn mutation_plan_propagates_type_materialization_keys() {
-        let mut plan = empty_writeback_plan("dbg.types");
-        plan.var_type_candidates.push(VarTypeCandidate {
-            name: "var_8h".to_string(),
-            kind: "b".to_string(),
-            delta: -8,
-            var_type: parse_test_type("struct type.Foo*", 64),
-            isarg: false,
-            reg: None,
-            size: 8,
-            confidence: MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE,
-            source: WritebackSource::ExternalTypeDb,
-            evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-        });
-        plan.global_type_links.push(GlobalTypeLinkCandidate {
-            addr: 0x404000,
-            target_type: CTypeLike::Pointer(Box::new(CTypeLike::Struct("Foo".to_string()))),
-            confidence: 95,
-            source: WritebackSource::ExternalTypeDb,
-        });
-        plan.var_type_candidates.push(VarTypeCandidate {
-            name: "var_ch".to_string(),
-            kind: "b".to_string(),
-            delta: -12,
-            var_type: parse_test_type("int32_t", 64),
-            isarg: false,
-            reg: None,
-            size: 4,
-            confidence: 90,
-            source: WritebackSource::ExternalTypeDb,
-            evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-        });
-        plan.var_type_candidates.push(VarTypeCandidate {
-            name: "var_10h".to_string(),
-            kind: "b".to_string(),
-            delta: -16,
-            var_type: parse_test_type("struct type_0x123 *", 64),
-            isarg: false,
-            reg: None,
-            size: 8,
-            confidence: 90,
-            source: WritebackSource::ExternalTypeDb,
-            evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-        });
-
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(usize::MAX, usize::MAX, usize::MAX),
-            &FunctionTypeFacts::default(),
-        );
-        let type_mutations = mutation_plan
-            .mutations
-            .iter()
-            .filter(|mutation| {
-                matches!(
-                    mutation.kind,
-                    TypeWritebackMutationKind::Var
-                        | TypeWritebackMutationKind::VarType
-                        | TypeWritebackMutationKind::TypeLink
-                )
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(type_mutations.len(), 5);
-        let foo_mutations = type_mutations
-            .iter()
-            .filter(|mutation| mutation.type_name.as_deref() == Some("struct Foo *"))
-            .collect::<Vec<_>>();
-        assert_eq!(foo_mutations.len(), 3);
-        for mutation in foo_mutations {
-            assert_eq!(mutation.type_materialization_key.as_deref(), Some("Foo"));
-            assert!(mutation.type_materialization_required);
-        }
-        let builtin_var_type = type_mutations
-            .iter()
-            .find(|mutation| mutation.type_name.as_deref() == Some("int32_t"))
-            .expect("builtin var type mutation should be emitted");
-        assert_eq!(builtin_var_type.type_materialization_key, None);
-        assert!(!builtin_var_type.type_materialization_required);
-        let opaque_var_type = type_mutations
-            .iter()
-            .find(|mutation| mutation.type_name.as_deref() == Some("struct type_0x123 *"))
-            .expect("opaque var type mutation should be emitted fail-closed");
-        assert_eq!(opaque_var_type.type_materialization_key, None);
-        assert!(opaque_var_type.type_materialization_required);
-    }
-
-    #[test]
-    fn mutation_apply_policy_balanced_filters_by_kind_thresholds() {
-        let type_facts = FunctionTypeFacts::default();
-        let budget = TypeWritebackMutationBudget::new(64, 64, 64);
-        let below = policy_test_plan("dbg.policy_low", 84, 92);
-        let at_threshold = policy_test_plan("dbg.policy_ok", 85, 93);
-
-        let below_plan = type_writeback_mutation_plan_with_policy(
-            &below,
-            budget,
-            &type_facts,
-            TypeWritebackApplyPolicy::balanced(),
-        );
-        let threshold_plan = type_writeback_mutation_plan_with_policy(
-            &at_threshold,
-            budget,
-            &type_facts,
-            TypeWritebackApplyPolicy::balanced(),
-        );
-
-        assert_eq!(
-            mutation_kind_count(&below_plan, TypeWritebackMutationKind::TypeDecl),
-            0
-        );
-        assert_eq!(
-            mutation_kind_count(&below_plan, TypeWritebackMutationKind::VarType),
-            0
-        );
-        assert_eq!(
-            mutation_kind_count(&below_plan, TypeWritebackMutationKind::VarRename),
-            0
-        );
-        assert_eq!(
-            mutation_kind_count(&below_plan, TypeWritebackMutationKind::TypeLink),
-            0
-        );
-        assert_eq!(
-            mutation_kind_count(&threshold_plan, TypeWritebackMutationKind::TypeDecl),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&threshold_plan, TypeWritebackMutationKind::VarType),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&threshold_plan, TypeWritebackMutationKind::VarRename),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&threshold_plan, TypeWritebackMutationKind::TypeLink),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&threshold_plan, TypeWritebackMutationKind::Var),
-            0,
-            "materialized vars require their stronger confidence threshold"
-        );
-        assert!(below_plan.diagnostics.iter().any(|diagnostic| {
-            diagnostic == "var_type mutation plan withheld 1 low-confidence candidate(s)"
-        }));
-    }
-
-    #[test]
-    fn mutation_apply_policy_aggressive_lowers_expected_thresholds() {
-        let type_facts = FunctionTypeFacts::default();
-        let budget = TypeWritebackMutationBudget::new(64, 64, 64);
-        let plan = policy_test_plan("dbg.policy_aggressive", 75, 85);
-
-        let balanced = type_writeback_mutation_plan_with_policy(
-            &plan,
-            budget,
-            &type_facts,
-            TypeWritebackApplyPolicy::balanced(),
-        );
-        let aggressive = type_writeback_mutation_plan_with_policy(
-            &plan,
-            budget,
-            &type_facts,
-            TypeWritebackApplyPolicy::aggressive(),
-        );
-
-        assert_eq!(
-            mutation_kind_count(&balanced, TypeWritebackMutationKind::TypeDecl),
-            0
-        );
-        assert_eq!(
-            mutation_kind_count(&balanced, TypeWritebackMutationKind::VarRename),
-            0
-        );
-        assert_eq!(
-            mutation_kind_count(&aggressive, TypeWritebackMutationKind::TypeDecl),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&aggressive, TypeWritebackMutationKind::VarType),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&aggressive, TypeWritebackMutationKind::VarRename),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&aggressive, TypeWritebackMutationKind::TypeLink),
-            1
-        );
-    }
-
-    #[test]
-    fn mutation_apply_policy_off_keeps_certified_signature_only() {
-        let type_facts = certified_signature_facts("value", 32);
-        let budget = TypeWritebackMutationBudget::new(64, 64, 64);
-        let plan = policy_test_plan("dbg.policy_off", 100, 100);
-
-        let mutation_plan = type_writeback_mutation_plan_with_policy(
-            &plan,
-            budget,
-            &type_facts,
-            TypeWritebackApplyPolicy::off(),
-        );
-        let kinds = mutation_plan
-            .mutations
-            .iter()
-            .map(|mutation| mutation.kind)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            kinds,
-            vec![
-                TypeWritebackMutationKind::Signature,
-                TypeWritebackMutationKind::Callconv,
-            ]
-        );
-    }
-
-    #[test]
-    fn mutation_apply_policy_preserves_materialized_var_threshold() {
-        let type_facts = FunctionTypeFacts::default();
-        let budget = TypeWritebackMutationBudget::new(64, 64, 64);
-        let below_materialized = policy_test_plan(
-            "dbg.policy_materialized_var",
-            MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE - 1,
-            100,
-        );
-
-        let mutation_plan = type_writeback_mutation_plan_with_policy(
-            &below_materialized,
-            budget,
-            &type_facts,
-            TypeWritebackApplyPolicy::aggressive(),
-        );
-
-        assert_eq!(
-            mutation_kind_count(&mutation_plan, TypeWritebackMutationKind::VarType),
-            1
-        );
-        assert_eq!(
-            mutation_kind_count(&mutation_plan, TypeWritebackMutationKind::Var),
-            0
-        );
-    }
-
-    #[test]
-    fn render_only_signature_certificate_is_not_writeback_authority() {
-        let signature_spec = test_signature_spec("value", 32);
-        let signature_certificate = SignatureCertificate::from_signature(
-            &signature_spec,
-            [SignatureCertificateSource::LocalInference],
-        )
-        .expect("exact local signature should be recorded");
-        let type_facts = FunctionTypeFacts {
-            merged_signature: Some(signature_spec),
-            signature_certificate: Some(signature_certificate),
-            ..FunctionTypeFacts::default()
-        };
-        let plan = empty_writeback_plan("dbg.local");
-
-        let decision = signature_writeback_decision(&type_facts);
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(64, usize::MAX, usize::MAX),
-            &type_facts,
-        );
-
-        assert!(!decision.authorized);
-        assert_eq!(decision.sources, vec!["local_inference".to_string()]);
-        assert!(
-            decision
-                .refusal
-                .as_deref()
-                .is_some_and(|reason| reason.contains("certificate sources are not authoritative"))
-        );
-        assert!(
-            mutation_plan.mutations.iter().all(|mutation| {
-                !matches!(
-                    mutation.kind,
-                    TypeWritebackMutationKind::Signature | TypeWritebackMutationKind::Callconv
-                )
-            }),
-            "{:?}",
-            mutation_plan.mutations
-        );
-        assert!(
-            mutation_plan
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("certificate sources are not authoritative"))
-        );
-    }
-
-    #[test]
-    fn stale_signature_certificate_is_not_writeback_authority() {
-        let current_signature = test_signature_spec("value", 32);
-        let stale_signature = test_signature_spec("old_value", 64);
-        let signature_certificate = SignatureCertificate::from_signature(
-            &stale_signature,
-            [SignatureCertificateSource::ExternalContext],
-        )
-        .expect("external signature should be certifiable");
-        let type_facts = FunctionTypeFacts {
-            merged_signature: Some(current_signature),
-            signature_certificate: Some(signature_certificate),
-            ..FunctionTypeFacts::default()
-        };
-        let plan = empty_writeback_plan("dbg.stale");
-
-        let decision = signature_writeback_decision(&type_facts);
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(64, usize::MAX, usize::MAX),
-            &type_facts,
-        );
-
-        assert!(!decision.authorized);
-        assert!(decision.refusal.as_deref().is_some_and(|reason| {
-            reason.contains("SignatureCertificate does not match current merged signature")
-        }));
-        assert!(
-            mutation_plan.mutations.iter().all(|mutation| {
-                !matches!(
-                    mutation.kind,
-                    TypeWritebackMutationKind::Signature | TypeWritebackMutationKind::Callconv
-                )
-            }),
-            "{:?}",
-            mutation_plan.mutations
-        );
-        assert!(
-            mutation_plan.diagnostics.iter().any(|diagnostic| {
-                diagnostic.contains("does not match current merged signature")
-            })
-        );
-    }
-
-    #[test]
-    fn authority_report_owns_signature_and_mutation_policy() {
-        let type_facts = certified_signature_facts("value", 32);
-        let plan = empty_writeback_plan("dbg.authorized");
-
-        let report = type_writeback_authority_report(
-            &plan,
-            TypeWritebackMutationBudget::new(64, usize::MAX, usize::MAX),
-            &type_facts,
-            1,
-        );
-
-        assert!(report.signature_render_authorized);
-        assert!(report.signature_writeback.authorized);
-        assert_eq!(
-            report.signature_writeback.sources,
-            vec![
-                SignatureCertificateSource::ExternalContext
-                    .as_str()
-                    .to_string()
-            ]
-        );
-        assert!(
-            report
-                .mutation_plan
-                .mutations
-                .iter()
-                .any(|mutation| { mutation.kind == TypeWritebackMutationKind::Signature }),
-            "{:?}",
-            report.mutation_plan.mutations
-        );
-        assert!(
-            report
-                .mutation_plan
-                .mutations
-                .iter()
-                .any(|mutation| { mutation.kind == TypeWritebackMutationKind::Callconv }),
-            "{:?}",
-            report.mutation_plan.mutations
-        );
-    }
-
-    #[test]
-    fn authority_report_owns_display_truncation_warnings() {
-        let type_facts = certified_signature_facts("value", 32);
-        let mut plan = empty_writeback_plan("dbg.report_budget");
-        plan.diagnostics.warnings.push("seed warning".to_string());
-        plan.struct_decls = vec![
-            StructDeclCandidate {
-                name: "struct a".to_string(),
-                decl: "typedef struct a { int x; } a;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-            StructDeclCandidate {
-                name: "struct b".to_string(),
-                decl: "typedef struct b { int x; } b;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-        ];
-        plan.global_type_links = vec![
-            GlobalTypeLinkCandidate {
-                addr: 0x404000,
-                target_type: CTypeLike::Pointer(Box::new(CTypeLike::Struct("a".to_string()))),
-                confidence: 90,
-                source: WritebackSource::ExternalTypeDb,
-            },
-            GlobalTypeLinkCandidate {
-                addr: 0x404008,
-                target_type: CTypeLike::Pointer(Box::new(CTypeLike::Struct("b".to_string()))),
-                confidence: 90,
-                source: WritebackSource::ExternalTypeDb,
-            },
-        ];
-
-        let report = type_writeback_authority_report(
-            &plan,
-            TypeWritebackMutationBudget::new(1, 1, usize::MAX),
-            &type_facts,
-            1,
-        );
-
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning == "seed warning")
-        );
-        assert!(
-            report.warnings.iter().any(|warning| {
-                warning.contains("type declaration report truncated from 2 to 1")
-            })
-        );
-        assert!(
-            report.warnings.iter().any(|warning| {
-                warning.contains("global type-link report truncated from 2 to 1")
-            })
-        );
-    }
-
-    #[test]
-    fn mutation_plan_respects_global_type_link_budget() {
-        let mut plan = empty_writeback_plan("dbg.links");
-        plan.global_type_links = vec![
-            GlobalTypeLinkCandidate {
-                addr: 0x404000,
-                target_type: CTypeLike::Pointer(Box::new(CTypeLike::Struct("a".to_string()))),
-                confidence: 90,
-                source: WritebackSource::ExternalTypeDb,
-            },
-            GlobalTypeLinkCandidate {
-                addr: 0x404008,
-                target_type: CTypeLike::Pointer(Box::new(CTypeLike::Struct("b".to_string()))),
-                confidence: 90,
-                source: WritebackSource::ExternalTypeDb,
-            },
-        ];
-
-        let limited = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(1, usize::MAX, usize::MAX),
-            &FunctionTypeFacts::default(),
-        );
-        let all = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(2, usize::MAX, usize::MAX),
-            &FunctionTypeFacts::default(),
-        );
-
-        assert_eq!(
-            limited
-                .mutations
-                .iter()
-                .filter(|mutation| mutation.kind == TypeWritebackMutationKind::TypeLink)
-                .count(),
-            1
-        );
-        assert_eq!(
-            all.mutations
-                .iter()
-                .filter(|mutation| mutation.kind == TypeWritebackMutationKind::TypeLink)
-                .count(),
-            2
-        );
-        assert!(
-            all.diagnostics
-                .iter()
-                .all(|diagnostic| !diagnostic.contains("global type-link mutation plan truncated")),
-            "{:?}",
-            all.diagnostics
-        );
-        assert!(limited.diagnostics.iter().any(|diagnostic| {
-            diagnostic == "global type-link mutation plan truncated from 2 to 1 item(s)"
-        }));
-    }
-
-    #[test]
-    fn mutation_plan_exact_type_decl_budget_does_not_report_truncation() {
-        let mut plan = empty_writeback_plan("dbg.types_exact");
-        plan.struct_decls = vec![
-            StructDeclCandidate {
-                name: "struct a".to_string(),
-                decl: "typedef struct a { int x; } a;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-            StructDeclCandidate {
-                name: "struct b".to_string(),
-                decl: "typedef struct b { int y; } b;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-        ];
-
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(64, 2, usize::MAX),
-            &FunctionTypeFacts::default(),
-        );
-
-        assert_eq!(
-            mutation_plan
-                .mutations
-                .iter()
-                .filter(|mutation| mutation.kind == TypeWritebackMutationKind::TypeDecl)
-                .count(),
-            2
-        );
-        assert!(
-            mutation_plan
-                .diagnostics
-                .iter()
-                .all(|diagnostic| !diagnostic.contains("type declaration mutation plan truncated")),
-            "{:?}",
-            mutation_plan.diagnostics
-        );
-    }
-
-    #[test]
-    fn mutation_plan_truncates_declarations_and_budgeted_mutations() {
-        let mut plan = empty_writeback_plan("dbg.types");
-        plan.struct_decls = vec![
-            StructDeclCandidate {
-                name: "struct a".to_string(),
-                decl: "typedef struct a { int x; } a;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-            StructDeclCandidate {
-                name: "struct b".to_string(),
-                decl: "typedef struct b { int y; } b;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-        ];
-        plan.var_type_candidates.push(VarTypeCandidate {
-            name: "var_8h".to_string(),
-            kind: "b".to_string(),
-            delta: -8,
-            var_type: parse_test_type("int32_t", 64),
-            isarg: false,
-            reg: None,
-            size: 4,
-            confidence: MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE,
-            source: WritebackSource::ExternalTypeDb,
-            evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-        });
-
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(64, 1, 1),
-            &FunctionTypeFacts::default(),
-        );
-
-        assert_eq!(
-            mutation_plan
-                .mutations
-                .iter()
-                .filter(|mutation| mutation.kind == TypeWritebackMutationKind::TypeDecl)
-                .count(),
-            1
-        );
-        assert!(mutation_plan.diagnostics.iter().any(|diagnostic| {
-            diagnostic == "type declaration mutation plan truncated from 2 to 1 item(s)"
-        }));
-        assert!(mutation_plan.diagnostics.iter().any(|diagnostic| {
-            diagnostic == "non-signature mutation plan truncated to 1 item(s)"
-        }));
-    }
-
-    #[test]
-    fn mutation_plan_first_budget_overflow_reports_single_skip() {
-        let mut plan = empty_writeback_plan("dbg.one_skip");
-        plan.struct_decls = vec![
-            StructDeclCandidate {
-                name: "struct a".to_string(),
-                decl: "typedef struct a { int x; } a;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-            StructDeclCandidate {
-                name: "struct b".to_string(),
-                decl: "typedef struct b { int y; } b;".to_string(),
-                confidence: 90,
-                source: StructDeclSource::ExternalTypeDb,
-                fields: Vec::new(),
-            },
-        ];
-
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(64, 2, 1),
-            &FunctionTypeFacts::default(),
-        );
-
-        assert_eq!(
-            mutation_plan
-                .mutations
-                .iter()
-                .filter(|mutation| mutation.kind == TypeWritebackMutationKind::TypeDecl)
-                .count(),
-            1
-        );
-        assert_eq!(
-            mutation_plan
-                .diagnostics
-                .iter()
-                .filter(|diagnostic| {
-                    diagnostic.as_str() == "non-signature mutation plan truncated to 1 item(s)"
-                })
-                .count(),
-            1,
-            "{:?}",
-            mutation_plan.diagnostics
-        );
-    }
-
-    #[test]
-    fn materialized_var_mutation_requires_high_confidence() {
-        let mut plan = empty_writeback_plan("dbg.var");
-        plan.var_type_candidates.push(VarTypeCandidate {
-            name: "var_8h".to_string(),
-            kind: "b".to_string(),
-            delta: -8,
-            var_type: parse_test_type("int32_t", 64),
-            isarg: false,
-            reg: None,
-            size: 4,
-            confidence: MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE - 1,
-            source: WritebackSource::ExternalTypeDb,
-            evidence: vec![WritebackEvidence::ExternalStackAnnotation],
-        });
-
-        let mutation_plan = type_writeback_mutation_plan(
-            &plan,
-            TypeWritebackMutationBudget::new(64, usize::MAX, usize::MAX),
-            &FunctionTypeFacts::default(),
-        );
-
-        assert!(
-            mutation_plan
-                .mutations
-                .iter()
-                .all(|mutation| mutation.kind != TypeWritebackMutationKind::Var),
-            "{:?}",
-            mutation_plan.mutations
-        );
-        assert!(
-            mutation_plan
-                .mutations
-                .iter()
-                .any(|mutation| mutation.kind == TypeWritebackMutationKind::VarType),
-            "{:?}",
-            mutation_plan.mutations
-        );
-    }
-
-    #[test]
     fn signature_type_parser_preserves_source_width_typedefs() {
         assert_eq!(
             parse_signature_type_preserving_c_typedefs("long", 64),
@@ -12730,7 +9725,7 @@ mod tests {
             summaries: BTreeMap::from([(root, summary)]),
             diagnostics: Default::default(),
         };
-        let input = TypeWritebackAnalysisInput {
+        let input = TypeAnalysisInput {
             function_name: "sym.main",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -12740,17 +9735,15 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         };
-        let analysis = build_type_writeback_analysis(input);
+        let analysis = build_type_analysis(input);
         assert_eq!(analysis.signature.ret_type, "void");
         assert!(
             analysis.signature.params.is_empty(),
@@ -12792,8 +9785,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 80,
-            callconv_confidence: 80,
         };
 
         let usage = apply_type_hint_assumptions_to_context(
@@ -12848,8 +9839,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 80,
-            callconv_confidence: 80,
         };
 
         let usage = apply_type_hint_assumptions_to_context(
@@ -12901,8 +9890,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 80,
-            callconv_confidence: 80,
         };
 
         let usage = apply_type_hint_assumptions_to_context(
@@ -12967,8 +9954,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 96,
-            callconv_confidence: 92,
         };
 
         let usage = apply_type_hint_assumptions_to_context(
@@ -13016,8 +10001,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 80,
-            callconv_confidence: 80,
         };
         let root = r2ssa::InterprocFunctionId(0x401000);
         let summary_set = InterprocSummarySet {
@@ -13121,7 +10104,7 @@ mod tests {
             )]),
             diagnostics: Default::default(),
         };
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.alloc_wrapper",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13131,15 +10114,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "allocation_ptr");
@@ -13220,7 +10201,7 @@ mod tests {
             ]),
             diagnostics: Default::default(),
         };
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.identity",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13233,15 +10214,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "int8_t*");
@@ -13285,7 +10264,7 @@ mod tests {
             reg: Some("x0".to_string()),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym._check_secret",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13298,15 +10277,13 @@ mod tests {
                 }],
                 callconv: String::new(),
                 arch: "aarch64".to_string(),
-                confidence: 90,
-                callconv_confidence: 0,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.params[0].param_type, "int32_t");
@@ -13368,7 +10345,7 @@ mod tests {
             },
         ];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.stack_arg",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13383,15 +10360,13 @@ mod tests {
                     .collect(),
                 callconv: String::new(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 0,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let merged = analysis
@@ -13478,7 +10453,7 @@ mod tests {
             reg: Some("rsi".to_string()),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "dbg.scan_example",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13507,15 +10482,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "size_t");
@@ -13562,7 +10535,7 @@ mod tests {
             ..ParsedExternalContext::default()
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.alloc_and_copy",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13589,15 +10562,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.params.len(), 2);
@@ -13748,7 +10719,7 @@ mod tests {
             isarg: false,
             reg: None,
         }];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f".to_string().as_str(),
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13758,15 +10729,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: String::new(),
                 arch: String::new(),
-                confidence: 0,
-                callconv_confidence: 0,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
         assert_eq!(
             analysis.plan.var_type_candidates[0].var_type,
@@ -13840,7 +10809,7 @@ mod tests {
                 reg: None,
             },
         ];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f".to_string().as_str(),
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13850,15 +10819,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: String::new(),
                 arch: String::new(),
-                confidence: 0,
-                callconv_confidence: 0,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let binding = analysis
@@ -13879,7 +10846,7 @@ mod tests {
     }
 
     #[test]
-    fn param_home_slots_do_not_surface_as_visible_local_writeback_candidates() {
+    fn param_home_slots_do_not_surface_as_visible_local_candidates() {
         let mut parsed_context = ParsedExternalContext::default();
         let spec = ExternalStackVarSpec {
             name: "arr_home".to_string(),
@@ -13905,7 +10872,7 @@ mod tests {
             isarg: false,
             reg: None,
         }];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -13915,15 +10882,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -13990,7 +10955,7 @@ mod tests {
             isarg: false,
             reg: None,
         }];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.test_struct_array_index",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14015,15 +10980,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let slot = analysis
@@ -14179,8 +11142,8 @@ mod tests {
         }];
 
         let prep_facts = three_prepared_frame_slot_roots();
-        let analysis = build_type_writeback_analysis_with_prep_facts(
-            TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis_with_prep_facts(
+            TypeAnalysisInput {
                 function_name: "sym.test_struct_array_index",
                 ptr_bits: 64,
                 inferred_signature: InferredSignature {
@@ -14205,15 +11168,13 @@ mod tests {
                     ],
                     callconv: "amd64".to_string(),
                     arch: "x86-64".to_string(),
-                    confidence: 90,
-                    callconv_confidence: 90,
                 },
                 recovered_vars: &[],
                 ssa_blocks: &ssa_blocks,
                 parsed_context,
                 local_structs: LocalStructArtifacts::default(),
                 interproc_summary_set: None,
-                diagnostics: TypeWritebackDiagnostics::default(),
+                diagnostics: TypeAnalysisDiagnostics::default(),
             },
             &prep_facts,
         );
@@ -14350,7 +11311,7 @@ mod tests {
         ];
 
         let prep_facts = three_prepared_frame_slot_roots();
-        let analysis = build_type_writeback_analysis_with_prep_facts(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis_with_prep_facts(TypeAnalysisInput {
             function_name: "sym.test_struct_array_index",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14375,15 +11336,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &recovered_vars,
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         }, &prep_facts);
 
         for (offset, expected_name, expected_idx) in
@@ -14535,8 +11494,8 @@ mod tests {
         }];
 
         let prep_facts = three_prepared_frame_slot_roots();
-        let analysis = build_type_writeback_analysis_with_prep_facts(
-            TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis_with_prep_facts(
+            TypeAnalysisInput {
                 function_name: "sym.test_struct_array_index",
                 ptr_bits: 64,
                 inferred_signature: InferredSignature {
@@ -14561,15 +11520,13 @@ mod tests {
                     ],
                     callconv: "amd64".to_string(),
                     arch: "x86-64".to_string(),
-                    confidence: 90,
-                    callconv_confidence: 90,
                 },
                 recovered_vars: &[],
                 ssa_blocks: &ssa_blocks,
                 parsed_context,
                 local_structs: LocalStructArtifacts::default(),
                 interproc_summary_set: None,
-                diagnostics: TypeWritebackDiagnostics::default(),
+                diagnostics: TypeAnalysisDiagnostics::default(),
             },
             &prep_facts,
         );
@@ -14592,7 +11549,7 @@ mod tests {
     }
 
     #[test]
-    fn writeback_does_not_cross_apply_frame_slots_to_stack_pointer_temps() {
+    fn frame_slots_do_not_cross_apply_to_stack_pointer_temps() {
         let mut parsed_context = ParsedExternalContext::default();
         let spec = ExternalStackVarSpec {
             name: "len".to_string(),
@@ -14621,7 +11578,7 @@ mod tests {
             isarg: false,
             reg: None,
         }];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14631,15 +11588,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.plan.var_type_candidates.len(), 1);
@@ -14649,7 +11604,7 @@ mod tests {
         );
         assert_eq!(
             analysis.plan.var_type_candidates[0].source,
-            WritebackSource::LocalInferred
+            TypeFactSource::LocalInferred
         );
         assert!(
             analysis.plan.var_rename_candidates.is_empty(),
@@ -14659,7 +11614,7 @@ mod tests {
     }
 
     #[test]
-    fn writeback_does_not_apply_structural_slots_to_unrooted_variables() {
+    fn structural_slots_do_not_apply_to_unrooted_variables() {
         let mut parsed_context = ParsedExternalContext::default();
         let spec = ExternalStackVarSpec {
             name: "len".to_string(),
@@ -14688,7 +11643,7 @@ mod tests {
             isarg: false,
             reg: None,
         }];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14698,15 +11653,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.plan.var_type_candidates.len(), 1);
@@ -14716,7 +11669,7 @@ mod tests {
         );
         assert_eq!(
             analysis.plan.var_type_candidates[0].source,
-            WritebackSource::LocalInferred
+            TypeFactSource::LocalInferred
         );
         assert!(
             analysis.plan.var_rename_candidates.is_empty(),
@@ -14726,7 +11679,7 @@ mod tests {
     }
 
     #[test]
-    fn writeback_refuses_external_stack_identity_without_a_structural_root() {
+    fn external_stack_identity_refuses_without_a_structural_root() {
         let vars = [RecoveredVariable {
             name: "var_10h".to_string(),
             kind: "b".to_string(),
@@ -14735,7 +11688,7 @@ mod tests {
             isarg: false,
             reg: None,
         }];
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14745,22 +11698,20 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &vars,
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(analysis.type_facts.stack_slots.is_empty());
         assert!(analysis.plan.var_rename_candidates.is_empty());
         assert_eq!(
             analysis.plan.var_type_candidates[0].source,
-            WritebackSource::LocalInferred
+            TypeFactSource::LocalInferred
         );
     }
 
@@ -14826,7 +11777,7 @@ mod tests {
             slot_element_strides: HashMap::new(),
             indexed_accesses: Vec::new(),
         };
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.f",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14836,15 +11787,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: String::new(),
                 arch: String::new(),
-                confidence: 0,
-                callconv_confidence: 0,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context,
             local_structs,
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
         assert_eq!(
             analysis
@@ -14974,7 +11923,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.test_struct_array_index",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -14987,15 +11936,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs,
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let struct_entry = analysis
@@ -15104,7 +12051,7 @@ mod tests {
             indexed_accesses: Vec::new(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.test_struct_array_index",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15117,15 +12064,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context,
             local_structs,
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.params[0].param_type, "DemoStruct*");
@@ -15248,7 +12193,7 @@ mod tests {
             indexed_accesses: Vec::new(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.test_demo_struct",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15261,15 +12206,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context,
             local_structs,
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.params[0].param_type, "DemoStruct*");
@@ -15325,7 +12268,7 @@ mod tests {
 
     #[test]
     fn inferred_signature_certificate_records_local_source() {
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.local_exact",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15338,15 +12281,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let signature_certificate = analysis
@@ -15417,7 +12358,7 @@ mod tests {
             indexed_accesses: Vec::new(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.test_struct_array_index",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15430,15 +12371,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context,
             local_structs,
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(
@@ -15572,8 +12511,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 96,
-            callconv_confidence: 92,
         };
 
         let usage = apply_type_hint_assumptions_to_context(
@@ -15670,7 +12607,7 @@ mod tests {
             max_scc_size: 1,
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.alloc_wrapper",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15683,15 +12620,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(
@@ -15735,7 +12670,7 @@ mod tests {
             },
         );
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.side_effect_worker",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15748,15 +12683,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 70,
-                callconv_confidence: 70,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "void");
@@ -15864,7 +12797,7 @@ mod tests {
         assert!(!projection.out_param_indices.contains(&0));
         assert!(!projection.out_param_evidence.contains_key(&0));
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.escape_user",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15877,20 +12810,18 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 70,
-                callconv_confidence: 70,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
             analysis.type_facts.out_param_certificates.is_empty(),
-            "escape proves pointer flow, not writeback"
+            "escape proves pointer flow, not a type fact"
         );
     }
 
@@ -15914,7 +12845,7 @@ mod tests {
             diagnostics: Default::default(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.write_user",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15927,15 +12858,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.type_facts.out_param_certificates.len(), 1);
@@ -15983,7 +12912,7 @@ mod tests {
             diagnostics: Default::default(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.write_user",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -15996,15 +12925,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.type_facts.out_param_certificates.len(), 1);
@@ -16028,7 +12955,7 @@ mod tests {
 
     #[test]
     fn interproc_summary_name_does_not_project_role_signature() {
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.limfield.isra.0",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16044,15 +12971,13 @@ mod tests {
                     .collect(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(semantic_role_summary_set("limfield", Some(3))),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "int64_t");
@@ -16064,7 +12989,7 @@ mod tests {
 
     #[test]
     fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature() {
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.printf_fetchargs",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16088,8 +13013,6 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
@@ -16125,7 +13048,7 @@ mod tests {
             },
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(semantic_role_summary_set("sym.printf_fetchargs", None)),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.params.len(), 3);
@@ -16136,7 +13059,7 @@ mod tests {
 
     #[test]
     fn interproc_summary_name_does_not_truncate_weak_entry_signature() {
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "entry.init0",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16149,15 +13072,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 40,
-                callconv_confidence: 40,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(semantic_role_summary_set("entry.init0", Some(1))),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "int64_t");
@@ -16187,7 +13108,7 @@ mod tests {
 
     #[test]
     fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "dbg.or",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16206,8 +13127,6 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 40,
-                callconv_confidence: 40,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
@@ -16220,7 +13139,7 @@ mod tests {
                 ..Default::default()
             },
             interproc_summary_set: Some(semantic_role_summary_set("dbg.or", Some(2))),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "bool");
@@ -16229,7 +13148,7 @@ mod tests {
 
     #[test]
     fn interproc_summary_name_does_not_replace_weak_scalar_return() {
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "dbg.verror_at_line",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16266,15 +13185,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(semantic_role_summary_set("dbg.verror_at_line", Some(6))),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.ret_type, "int64_t");
@@ -16359,8 +13276,6 @@ mod tests {
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
-            confidence: 96,
-            callconv_confidence: 92,
         };
         let mut merged = inferred_signature_to_spec(&signature, 64);
 
@@ -16562,7 +13477,7 @@ mod tests {
             },
         );
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.wrapper_user",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16581,15 +13496,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 85,
-                callconv_confidence: 85,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let helper_fact = analysis
@@ -16676,7 +13589,7 @@ mod tests {
             diagnostics: Default::default(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.sort_driver",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16686,15 +13599,13 @@ mod tests {
                 params: Vec::new(),
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 80,
-                callconv_confidence: 80,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         let helper_fact = analysis
@@ -16798,7 +13709,7 @@ mod tests {
             diagnostics: Default::default(),
         };
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.ptr_user",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -16811,15 +13722,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 70,
-                callconv_confidence: 70,
             },
             recovered_vars: &[],
             ssa_blocks: &[],
             parsed_context: ParsedExternalContext::default(),
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: Some(summary_set),
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert_eq!(analysis.signature.params[0].param_type, "void*");
@@ -16913,7 +13822,7 @@ mod tests {
             ],
             size: 0,
         }];
-        let mut diagnostics = TypeWritebackDiagnostics::default();
+        let mut diagnostics = TypeAnalysisDiagnostics::default();
 
         let artifacts = infer_local_struct_artifacts_from_blocks(
             &blocks,
@@ -16983,7 +13892,7 @@ mod tests {
             ],
             size: 0,
         }];
-        let mut diagnostics = TypeWritebackDiagnostics::default();
+        let mut diagnostics = TypeAnalysisDiagnostics::default();
 
         let artifacts = infer_local_struct_artifacts_from_blocks(
             &blocks,
@@ -16997,317 +13906,6 @@ mod tests {
 
         assert!(artifacts.slot_field_profiles.is_empty());
         assert!(artifacts.slot_type_overrides.is_empty());
-    }
-
-    #[test]
-    fn local_struct_inference_handles_x86_strength_reduced_index_scale() {
-        let ssa_blocks = [SSABlock {
-            addr: 0x40182f,
-            size: 124,
-            ops: vec![
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:slot_arr", 1, 8),
-                    a: SSAVar::new("RBP", 1, 8),
-                    b: SSAVar::constant(0xffff_ffff_ffff_fff8, 8),
-                },
-                SSAOp::Copy {
-                    dst: SSAVar::new("tmp:spill_arr", 1, 8),
-                    src: SSAVar::new("RDI", 0, 8),
-                },
-                SSAOp::Store {
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("tmp:slot_arr", 1, 8),
-                    val: SSAVar::new("tmp:spill_arr", 1, 8),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:slot_idx", 1, 8),
-                    a: SSAVar::new("RBP", 1, 8),
-                    b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
-                },
-                SSAOp::Copy {
-                    dst: SSAVar::new("tmp:spill_idx", 1, 4),
-                    src: SSAVar::new("ESI", 0, 4),
-                },
-                SSAOp::Store {
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("tmp:slot_idx", 1, 8),
-                    val: SSAVar::new("tmp:spill_idx", 1, 4),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:slot_idx", 2, 8),
-                    a: SSAVar::new("RBP", 1, 8),
-                    b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("idx32", 1, 4),
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("tmp:slot_idx", 2, 8),
-                },
-                SSAOp::IntSExt {
-                    dst: SSAVar::new("idx64", 1, 8),
-                    src: SSAVar::new("idx32", 1, 4),
-                },
-                SSAOp::IntLeft {
-                    dst: SSAVar::new("idx8", 1, 8),
-                    a: SSAVar::new("idx64", 1, 8),
-                    b: SSAVar::constant(3, 4),
-                },
-                SSAOp::IntSub {
-                    dst: SSAVar::new("idx7", 1, 8),
-                    a: SSAVar::new("idx8", 1, 8),
-                    b: SSAVar::new("idx64", 1, 8),
-                },
-                SSAOp::IntLeft {
-                    dst: SSAVar::new("idx56", 1, 8),
-                    a: SSAVar::new("idx7", 1, 8),
-                    b: SSAVar::constant(3, 4),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("tmp:slot_arr", 2, 8),
-                    a: SSAVar::new("RBP", 1, 8),
-                    b: SSAVar::constant(0xffff_ffff_ffff_fff8, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("arr", 1, 8),
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("tmp:slot_arr", 2, 8),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("elem", 1, 8),
-                    a: SSAVar::new("idx56", 1, 8),
-                    b: SSAVar::new("arr", 1, 8),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("field8", 1, 8),
-                    a: SSAVar::new("elem", 1, 8),
-                    b: SSAVar::constant(8, 8),
-                },
-                SSAOp::Store {
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("field8", 1, 8),
-                    val: SSAVar::new("EDX", 0, 4),
-                },
-                SSAOp::IntAdd {
-                    dst: SSAVar::new("field34", 1, 8),
-                    a: SSAVar::new("elem", 1, 8),
-                    b: SSAVar::constant(0x34, 8),
-                },
-                SSAOp::Load {
-                    dst: SSAVar::new("field34_val", 1, 4),
-                    space: r2il::SpaceId::Ram,
-                    addr: SSAVar::new("field34", 1, 8),
-                },
-            ],
-            phis: Vec::new(),
-        }];
-        let mut diagnostics = TypeWritebackDiagnostics::default();
-
-        let local_structs = infer_local_struct_artifacts_from_ssa(
-            &ssa_blocks,
-            r2ssa::MachineArchitectureFamily::X86_64,
-            64,
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            local_structs
-                .slot_field_profiles
-                .get(&0)
-                .cloned()
-                .unwrap_or_default(),
-            BTreeMap::from([(8, "int32_t".to_string()), (0x34, "int32_t".to_string())]),
-            "diagnostics={diagnostics:?}"
-        );
-        let override_ty = local_structs
-            .slot_type_overrides
-            .get(&0)
-            .expect("indexed aggregate type override");
-        assert!(
-            override_ty.starts_with("struct sla_struct_") && override_ty.ends_with(" *"),
-            "{override_ty}"
-        );
-        assert_eq!(local_structs.slot_element_strides.get(&0), Some(&56));
-    }
-
-    #[test]
-    fn local_struct_inference_preserves_aarch64_index_stride_across_blocks() {
-        let element = SSAVar::new("X8", 2, 8);
-        let score_addr = SSAVar::new("score_addr", 1, 8);
-        let ssa_blocks = [
-            SSABlock {
-                addr: 0x1000004a8,
-                size: 28,
-                ops: vec![
-                    SSAOp::IntSExt {
-                        dst: SSAVar::new("idx64", 1, 8),
-                        src: SSAVar::new("W1", 0, 4),
-                    },
-                    SSAOp::IntMult {
-                        dst: SSAVar::new("scaled", 1, 8),
-                        a: SSAVar::new("idx64", 1, 8),
-                        b: SSAVar::constant(0x28, 8),
-                    },
-                    SSAOp::IntAdd {
-                        dst: element.clone(),
-                        a: SSAVar::new("X0", 0, 8),
-                        b: SSAVar::new("scaled", 1, 8),
-                    },
-                    SSAOp::IntAdd {
-                        dst: score_addr.clone(),
-                        a: element.clone(),
-                        b: SSAVar::constant(0x10, 8),
-                    },
-                    SSAOp::Load {
-                        dst: SSAVar::new("score", 1, 4),
-                        space: r2il::SpaceId::Ram,
-                        addr: score_addr.clone(),
-                    },
-                    SSAOp::Store {
-                        space: r2il::SpaceId::Ram,
-                        addr: score_addr,
-                        val: SSAVar::new("W2", 0, 4),
-                    },
-                    SSAOp::IntAdd {
-                        dst: SSAVar::new("flags_addr", 1, 8),
-                        a: element.clone(),
-                        b: SSAVar::constant(4, 8),
-                    },
-                    SSAOp::Load {
-                        dst: SSAVar::new("flags", 1, 2),
-                        space: r2il::SpaceId::Ram,
-                        addr: SSAVar::new("flags_addr", 1, 8),
-                    },
-                ],
-                phis: Vec::new(),
-            },
-            SSABlock {
-                addr: 0x1000004c4,
-                size: 16,
-                ops: vec![
-                    SSAOp::IntAdd {
-                        dst: SSAVar::new("scores0_addr", 1, 8),
-                        a: element.clone(),
-                        b: SSAVar::constant(8, 8),
-                    },
-                    SSAOp::Load {
-                        dst: SSAVar::new("scores0", 1, 4),
-                        space: r2il::SpaceId::Ram,
-                        addr: SSAVar::new("scores0_addr", 1, 8),
-                    },
-                    SSAOp::IntAdd {
-                        dst: SSAVar::new("len_addr", 1, 8),
-                        a: element.clone(),
-                        b: SSAVar::constant(6, 8),
-                    },
-                    SSAOp::Load {
-                        dst: SSAVar::new("len", 1, 2),
-                        space: r2il::SpaceId::Ram,
-                        addr: SSAVar::new("len_addr", 1, 8),
-                    },
-                ],
-                phis: Vec::new(),
-            },
-            SSABlock {
-                addr: 0x1000004d4,
-                size: 4,
-                ops: vec![SSAOp::Load {
-                    dst: SSAVar::new("id", 1, 4),
-                    space: r2il::SpaceId::Ram,
-                    addr: element,
-                }],
-                phis: Vec::new(),
-            },
-        ];
-        let mut diagnostics = TypeWritebackDiagnostics::default();
-
-        let local_structs = infer_local_struct_artifacts_from_ssa(
-            &ssa_blocks,
-            r2ssa::MachineArchitectureFamily::AArch64,
-            64,
-            &mut diagnostics,
-        );
-
-        let profile = local_structs
-            .slot_field_profiles
-            .get(&0)
-            .expect("indexed Item profile");
-        assert_eq!(
-            profile.keys().copied().collect::<BTreeSet<_>>(),
-            BTreeSet::from([0, 4, 6, 8, 0x10]),
-            "diagnostics={diagnostics:?}"
-        );
-        assert_eq!(local_structs.slot_element_strides.get(&0), Some(&40));
-        assert!(
-            local_structs
-                .struct_decls
-                .iter()
-                .any(|decl| decl.decl.contains("uint8_t _pad_14[20];")),
-            "generated Item declaration must preserve sizeof(Item)=40"
-        );
-
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
-            function_name: "sym.struct_nested_array",
-            ptr_bits: 64,
-            inferred_signature: InferredSignature {
-                function_name: "sym.struct_nested_array".to_string(),
-                signature:
-                    "int32_t sym.struct_nested_array(int32_t *arg0, int32_t arg1, int32_t arg2)"
-                        .to_string(),
-                ret_type: "int32_t".to_string(),
-                params: vec![
-                    InferredSignatureParam {
-                        name: "arg0".to_string(),
-                        param_type: "int32_t *".to_string(),
-                    },
-                    InferredSignatureParam {
-                        name: "arg1".to_string(),
-                        param_type: "int32_t".to_string(),
-                    },
-                    InferredSignatureParam {
-                        name: "arg2".to_string(),
-                        param_type: "int32_t".to_string(),
-                    },
-                ],
-                callconv: "aarch64".to_string(),
-                arch: "aarch64".to_string(),
-                confidence: 90,
-                callconv_confidence: 90,
-            },
-            recovered_vars: &[],
-            ssa_blocks: &ssa_blocks,
-            parsed_context: ParsedExternalContext::default(),
-            local_structs,
-            interproc_summary_set: None,
-            diagnostics,
-        });
-
-        assert!(
-            analysis.signature.params[0]
-                .param_type
-                .starts_with("struct sla_struct_"),
-            "locally inferred int32_t* must refine to the certified indexed aggregate: {}",
-            analysis.signature.params[0].param_type
-        );
-        assert!(
-            analysis
-                .type_facts
-                .array_index_certificates
-                .iter()
-                .any(|cert| cert.element_stride == 40 && cert.field_offset == 0x10),
-            "{:?}",
-            analysis.type_facts.array_index_certificates
-        );
-        assert!(
-            analysis
-                .type_facts
-                .scalar_array_render_candidates
-                .iter()
-                .any(|candidate| {
-                    candidate.element_stride == 40 && candidate.field_offset == 0x10
-                }),
-            "{:?}",
-            analysis.type_facts.scalar_array_render_candidates
-        );
     }
 
     #[test]
@@ -17441,7 +14039,7 @@ mod tests {
             phi_inputs: HashMap::new(),
             value_ids: HashMap::from([(SSAVar::new("W1", 0, 4), r2ssa::ValueId(1))]),
         };
-        let mut diagnostics = TypeWritebackDiagnostics::default();
+        let mut diagnostics = TypeAnalysisDiagnostics::default();
 
         let artifacts = infer_local_struct_artifacts_from_blocks(
             &blocks,
@@ -17558,7 +14156,7 @@ mod tests {
             interface,
         )
         .expect("prepared SSA");
-        let mut diagnostics = TypeWritebackDiagnostics::default();
+        let mut diagnostics = TypeAnalysisDiagnostics::default();
 
         let artifacts = infer_local_struct_artifacts_from_prepared_ssa(
             &prepared,
@@ -17692,7 +14290,7 @@ mod tests {
             prepared
                 .memory_certificate_for_op_site(0x401000, custom_index, false)
                 .is_some(),
-            "the Custom-space access must exist before writeback filtering"
+            "the Custom-space access must exist before type filtering"
         );
 
         let candidates = prepared_parameter_indexed_accesses(&prepared);
@@ -17788,7 +14386,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.alloc_and_copy",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -17807,15 +14405,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -17911,7 +14507,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.pointer_induction",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -17930,15 +14526,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -17993,7 +14587,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.pointer_livein",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -18006,15 +14600,13 @@ mod tests {
                 }],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -18118,7 +14710,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym._main",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -18137,15 +14729,13 @@ mod tests {
                 ],
                 callconv: "aarch64".to_string(),
                 arch: "aarch64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -18257,7 +14847,7 @@ mod tests {
             },
         ];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.sum_array",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -18276,15 +14866,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -18424,7 +15012,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.struct_nested_array",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -18449,15 +15037,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(
@@ -18595,7 +15181,7 @@ mod tests {
             phis: Vec::new(),
         }];
 
-        let analysis = build_type_writeback_analysis(TypeWritebackAnalysisInput {
+        let analysis = build_type_analysis(TypeAnalysisInput {
             function_name: "sym.test_struct_array_index",
             ptr_bits: 64,
             inferred_signature: InferredSignature {
@@ -18620,15 +15206,13 @@ mod tests {
                 ],
                 callconv: "amd64".to_string(),
                 arch: "x86-64".to_string(),
-                confidence: 96,
-                callconv_confidence: 92,
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
-            diagnostics: TypeWritebackDiagnostics::default(),
+            diagnostics: TypeAnalysisDiagnostics::default(),
         });
 
         assert!(

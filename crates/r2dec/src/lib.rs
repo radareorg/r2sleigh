@@ -4519,15 +4519,14 @@ mod tests {
 
     fn source_owned_type_analysis(
         prepared: impl Into<Arc<r2ssa::SsaArtifact>>,
-    ) -> r2types::TypeWritebackAnalysis {
+    ) -> r2types::TypeAnalysis {
         let prepared = prepared.into();
-        let request = r2types::TypeWritebackAnalysisRequest::new(
+        let request = r2types::TypeAnalysisRequest::new(
             Arc::clone(&prepared),
             r2types::ParsedExternalContext::default(),
         )
         .expect("test source assumptions");
-        r2types::build_source_owned_type_writeback_analysis(request)
-            .expect("source-owned test analysis")
+        r2types::build_source_owned_type_analysis(request).expect("source-owned test analysis")
     }
 
     fn source_owned_decompiler_input(
@@ -5550,17 +5549,15 @@ mod tests {
             }],
         )
         .expect("foreign prepared summary");
-        let request = r2types::TypeWritebackAnalysisRequest::new(
-            requested,
-            r2types::ParsedExternalContext::default(),
-        )
-        .expect("source-owned request");
+        let request =
+            r2types::TypeAnalysisRequest::new(requested, r2types::ParsedExternalContext::default())
+                .expect("source-owned request");
 
         assert_eq!(
             request
                 .with_interproc_summary(summary)
                 .expect_err("foreign interprocedural evidence must be rejected before r2dec"),
-            r2types::TypeWritebackAnalysisError::ForeignInterprocSummary
+            r2types::TypeAnalysisError::ForeignInterprocSummary
         );
     }
 
@@ -5918,9 +5915,9 @@ mod tests {
                 merged_signature: Some(signature),
                 ..r2types::ParsedExternalContext::default()
             };
-            let request = r2types::TypeWritebackAnalysisRequest::new(prepared, parsed_context)
+            let request = r2types::TypeAnalysisRequest::new(prepared, parsed_context)
                 .expect("source-owned shuffled diamond request");
-            let source_owned_facts = r2types::build_source_owned_type_writeback_analysis(request)
+            let source_owned_facts = r2types::build_source_owned_type_analysis(request)
                 .expect("source-owned shuffled diamond analysis")
                 .finalize_for_decompile(r2types::DecompileFinalization {
                     kind: r2types::DecompileRouteKind::Standard,

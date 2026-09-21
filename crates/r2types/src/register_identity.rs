@@ -11,17 +11,15 @@
 //! This asks the prepared function's own machine context instead. Every
 //! register it declares carries a `CanonicalStorageId`, and that is the
 //! identity the rest of the pipeline already keys on.
+use r2ssa::{CanonicalStorageId, CanonicalStorageSpace};
 
 use std::collections::BTreeMap;
-
-use r2ssa::{CanonicalStorageId, CanonicalStorageSpace, RegisterFamilyInfo, RegisterFamilySlot};
 
 /// Register identity for one prepared function, derived from its machine
 /// context. Empty when the machine context declares no registers, in which
 /// case every question falls back to comparing the names as given.
 #[derive(Debug, Clone, Default)]
 pub struct RegisterIdentity {
-    families: RegisterFamilyInfo,
     storage_by_name: BTreeMap<String, CanonicalStorageId>,
 }
 
@@ -36,33 +34,13 @@ impl RegisterIdentity {
             .filter(|(_, storage)| storage.space == CanonicalStorageSpace::Register)
             .map(|(name, storage)| (name.trim().to_ascii_lowercase(), *storage))
             .collect();
-        let families = RegisterFamilyInfo::from_register_storages(
-            storage_by_name
-                .iter()
-                .map(|(name, storage)| (name.as_str(), storage.offset, storage.size)),
-        );
-        Self {
-            families,
-            storage_by_name,
-        }
-    }
-
-    /// Whether the machine context named any register at all.
-    pub fn is_empty(&self) -> bool {
-        self.storage_by_name.is_empty()
+        Self { storage_by_name }
     }
 
     pub fn storage_of(&self, name: &str) -> Option<CanonicalStorageId> {
         self.storage_by_name
             .get(name.trim().to_ascii_lowercase().as_str())
             .copied()
-    }
-
-    /// The canonical identity of the register a name belongs to: the widest
-    /// storage containing it, which every alias of it shares.
-    pub fn family_slot(&self, name: &str) -> Option<RegisterFamilySlot> {
-        self.families
-            .widest_slot_for_name(name.trim().to_ascii_lowercase().as_str())
     }
 
     /// Whether two register names carry the same ABI parameter.

@@ -128,9 +128,7 @@ impl SignatureCertificate {
         sources.dedup();
 
         let source_authorizes_empty_arity = signature.params.is_empty()
-            && sources
-                .iter()
-                .any(|source| source.authorizes_signature_writeback());
+            && sources.iter().any(|source| source.certifies_signature());
         let local_evidence_authorizes_inferred_arity = !signature.params.is_empty()
             && sources.iter().any(|source| {
                 matches!(
@@ -158,12 +156,12 @@ impl SignatureCertificate {
         })
     }
 
-    pub fn authorizes_signature_writeback(&self) -> bool {
+    pub fn certifies_signature(&self) -> bool {
         self.confidence >= SIGNATURE_PROJECTION_STRONG_CONFIDENCE
             && self
                 .sources
                 .iter()
-                .any(|source| source.authorizes_signature_writeback())
+                .any(|source| source.certifies_signature())
             && !self.signature.params.iter().any(|param| {
                 signature_param_type_uncertified(
                     param.ty.as_ref(),
@@ -208,7 +206,7 @@ pub enum SignatureCertificateSource {
     InterprocSummary,
     /// The return type alone is projected from the immutable source function
     /// interface and matched to exact native return-value certificates. This
-    /// does not certify parameter types or authorize signature writeback by
+    /// does not certify parameter types or certify a full signature by
     /// itself.
     SourceReturnType,
     /// The whole signature is projected from the immutable source function
@@ -235,7 +233,7 @@ impl SignatureCertificateSource {
         }
     }
 
-    pub fn authorizes_signature_writeback(self) -> bool {
+    pub fn certifies_signature(self) -> bool {
         matches!(
             self,
             Self::ExternalContext
@@ -833,9 +831,9 @@ impl FunctionTypeFacts {
         (certificate.signature == *signature).then_some(signature)
     }
 
-    pub fn writeback_authorized_signature(&self) -> Option<&FunctionSignatureSpec> {
+    pub fn certified_signature(&self) -> Option<&FunctionSignatureSpec> {
         let certificate = self.signature_certificate.as_ref()?;
-        if !certificate.authorizes_signature_writeback() {
+        if !certificate.certifies_signature() {
             return None;
         }
         let signature = self.merged_signature.as_ref()?;
@@ -949,7 +947,7 @@ pub fn signature_hint_can_replace_existing(
             CTypeLike::Typedef { name, .. },
         ) => {
             let normalized = name.trim().to_ascii_lowercase();
-            crate::writeback::type_db_resolves_type_name(type_db, &normalized, ptr_bits)
+            crate::analysis::type_db_resolves_type_name(type_db, &normalized, ptr_bits)
                 || matches!(normalized.as_str(), "int" | "unsigned int")
                 || (normalized == "uintptr_t" && *bits == ptr_bits)
         }
@@ -1022,7 +1020,7 @@ pub fn signature_hint_can_replace_existing(
             },
         ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::writeback::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
+                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
         }
         (
             CTypeLike::Typedef {
@@ -1088,7 +1086,7 @@ pub fn summary_hint_can_replace_weak_existing(
             },
         ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::writeback::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
+                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
         }
         (
             CTypeLike::Typedef {
@@ -1352,7 +1350,7 @@ fn pointer_hint_is_authoritative(
         | CTypeLike::Enum(_)
         | CTypeLike::Pointer(_) => true,
         CTypeLike::Typedef { name, .. } => {
-            crate::writeback::type_db_resolves_type_name(type_db, name, ptr_bits)
+            crate::analysis::type_db_resolves_type_name(type_db, name, ptr_bits)
         }
         _ => false,
     }
@@ -1566,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn local_only_signature_certificate_does_not_authorize_writeback() {
+    fn local_only_signature_certificate_does_not_certify_the_signature() {
         let certificate = SignatureCertificate::from_signature(
             &exact_signature(),
             [SignatureCertificateSource::LocalInference],
@@ -1574,13 +1572,13 @@ mod tests {
         .expect("exact local signature should still be recorded as a certificate");
 
         assert!(
-            !certificate.authorizes_signature_writeback(),
+            !certificate.certifies_signature(),
             "local inference alone is not enough evidence to mutate radare2 signature state"
         );
     }
 
     #[test]
-    fn source_return_type_certificate_does_not_certify_parameter_writeback() {
+    fn source_return_type_certificate_does_not_certify_a_parameter() {
         let certificate = SignatureCertificate::from_signature(
             &exact_signature(),
             [SignatureCertificateSource::SourceReturnType],
@@ -1588,7 +1586,7 @@ mod tests {
         .expect("an exact return projection should remain renderable");
 
         assert!(certificate.authorizes_signature_render());
-        assert!(!certificate.authorizes_signature_writeback());
+        assert!(!certificate.certifies_signature());
         assert_eq!(
             SignatureCertificateSource::SourceReturnType.as_str(),
             "source_return_type"
@@ -1611,11 +1609,11 @@ mod tests {
         .expect("SSA-proven typed parameters should certify rendering");
 
         assert!(certificate.authorizes_signature_render());
-        assert!(!certificate.authorizes_signature_writeback());
+        assert!(!certificate.certifies_signature());
     }
 
     #[test]
-    fn external_signature_certificate_authorizes_writeback() {
+    fn external_signature_certificate_certifies_the_signature() {
         let certificate = SignatureCertificate::from_signature(
             &exact_signature(),
             [SignatureCertificateSource::ExternalContext],
@@ -1623,7 +1621,7 @@ mod tests {
         .expect("exact external signature should be certifiable");
 
         assert!(
-            certificate.authorizes_signature_writeback(),
+            certificate.certifies_signature(),
             "external typed context is authoritative signature evidence"
         );
     }
@@ -1640,7 +1638,7 @@ mod tests {
         )
         .expect("external void(void) signature should certify exact empty arity");
 
-        assert!(certificate.authorizes_signature_writeback());
+        assert!(certificate.certifies_signature());
         assert!(certificate.signature.params.is_empty());
     }
 
@@ -1659,11 +1657,11 @@ mod tests {
         )
         .expect("external void pointer parameters are explicit C types");
 
-        assert!(certificate.authorizes_signature_writeback());
+        assert!(certificate.certifies_signature());
     }
 
     #[test]
-    fn external_name_only_signature_authorizes_render_not_writeback() {
+    fn external_name_only_signature_authorizes_render_not_the_signature() {
         let signature = FunctionSignatureSpec {
             ret_type: None,
             params: vec![FunctionParamSpec {
@@ -1679,7 +1677,7 @@ mod tests {
 
         assert!(certificate.authorizes_signature_render());
         assert!(
-            !certificate.authorizes_signature_writeback(),
+            !certificate.certifies_signature(),
             "incomplete parameter types must not mutate radare2 signature state"
         );
     }
@@ -1751,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn writeback_authorized_signature_rejects_render_only_certificate() {
+    fn certified_signature_rejects_render_only_certificate() {
         let signature = FunctionSignatureSpec {
             ret_type: None,
             params: vec![FunctionParamSpec {
@@ -1775,7 +1773,7 @@ mod tests {
         };
 
         assert!(facts.render_authorized_signature().is_some());
-        assert!(facts.writeback_authorized_signature().is_none());
+        assert!(facts.certified_signature().is_none());
     }
 
     #[test]

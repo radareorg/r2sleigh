@@ -1,3 +1,4 @@
+pub(crate) mod analysis;
 pub(crate) mod callee;
 pub(crate) mod constraint;
 pub(crate) mod context;
@@ -6,7 +7,6 @@ pub(crate) mod evidence;
 pub(crate) mod external;
 pub(crate) mod facts;
 pub mod function_facts;
-pub(crate) mod inference;
 pub(crate) mod lattice;
 pub(crate) mod model;
 pub(crate) mod oracle;
@@ -16,134 +16,77 @@ pub(crate) mod signature;
 pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
-pub(crate) mod writeback;
 
 pub fn parse_external_type_like_spec(spec: &str, ptr_bits: u32) -> Option<CTypeLike> {
     convert::parse_c_type_like(spec, ptr_bits)
 }
 
-pub use callee::{
-    CalleeArityDecision, CalleeAritySource, CalleeCallArgPolicy, CalleeClass, CalleeIdentity,
-    CalleeIdentityContext, CalleeIdentityEvidence, CalleeIdentityKey, CalleeResolutionFacts,
-    CalleeTargetIdentityRequest, CalleeTargetPolicyDecision, CalleeTargetPolicySource,
-    CalleeTargetResolutionRequest, CalleeTargetResolutionSource, CallsiteKey,
-    ResolvedCalleeIdentity, ResolvedCalleeTarget, callee_name_is_import_like,
-    callee_name_is_runtime_copy, callee_name_is_windows_runtime_registration,
-    normalize_callee_name,
-};
-pub use constraint::{Constraint, ConstraintSource, MemoryCapability, SolverNode};
-pub use context::{
-    ExternalAssumptionPayloadParseError, ExternalBaseTypeJson, ExternalBaseTypeKind,
-    ExternalBaseTypeMemberJson, ExternalCalleeJson, ExternalCalleeLinkageJson, ExternalContextJson,
-    ExternalContextMetadataJson, ExternalEnumVariantJson, ExternalRegisterParamSpec,
-    ExternalSignatureJson, ExternalSignatureParamJson, ExternalStackBase, ExternalStackSlotRole,
-    ExternalStackSlotSpec, ExternalStackVarSpec, ExternalVarJson, ExternalVarKind,
-    KnownSignatureJson, ParsedExternalContext, StackSlotKey, apply_main_signature_override,
-    canonical_main_signature_spec, function_type_facts_from_parsed_context, is_c_main_function,
-    is_generic_arg_name, merge_signature_with_register_params, normalize_function_basename,
-    parse_external_assumption_payload_json, parse_external_context, parse_external_context_json,
-    sanitize_c_identifier,
-};
-pub use convert::{
-    CTypeLike, c_object_declaration, parse_c_type_like, render_c_type_like, spellable_c_type_like,
-    spelling_names_a_type, to_c_type_like,
-};
-pub use data_object::{
-    DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
-};
-pub use evidence::{EvidenceNode, EvidenceTypes, SourceEvidenceTypeOracle, solve_evidence_types};
-pub use external::{
-    ExternalAggregateKind, ExternalEnum, ExternalField, ExternalStruct, ExternalTypeDb,
-    ExternalTypedef, ExternalUnion, normalize_external_type_name,
-};
-pub use facts::{
-    ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
-    CalleeAtomicEffect, CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect,
-    CalleeLifetimeOp, CalleeLinkage, CalleeMemoryEffect, CalleeMemoryEffectKind,
-    CalleeMemoryLocation, CalleeMemoryRange, CalleeMemoryRegion, CalleeModelPolicyEvidence,
-    CalleeReturnRelation, CalleeSyncEffect, CalleeSyncOp, CalleeTransferEffect,
-    CalleeTransferLength, FieldAccessCertificate, FunctionParamSpec, FunctionSignatureProjection,
-    FunctionSignatureSpec, FunctionType, FunctionTypeFactInputs, FunctionTypeFacts,
-    FunctionTypeFactsBuilder, InterprocFactDiagnostics, LocalFieldAccessFact, OutParamCertificate,
-    OutParamCertificateEvidence, OutParamCertificateSource, ResolvedFieldLayout,
-    SIGNATURE_PROJECTION_STRONG_CONFIDENCE, SIGNATURE_PROJECTION_WEAK_CONFIDENCE,
-    ScalarArrayRenderCandidate, SignatureCertificate, SignatureCertificateSource,
-    SignatureProjectionRejection, SignatureProjectionResult, SignatureProjectionSource,
-    VisibleBinding, VisibleBindingKind, is_generic_signature_type,
+pub(crate) use evidence::solve_evidence_types;
+pub(crate) use external::ExternalAggregateKind;
+pub(crate) use facts::{
+    SIGNATURE_PROJECTION_STRONG_CONFIDENCE, SignatureCertificate, is_generic_signature_type,
     signature_hint_can_replace_existing, signature_param_count_is_authoritative,
     signature_param_name_is_weak, signature_projection_is_exact,
     signature_return_hint_can_replace_existing, signature_strength,
     summary_hint_can_replace_weak_existing,
 };
+
+pub use callee::{
+    CalleeClass, CalleeIdentity, CalleeIdentityContext, CalleeIdentityKey, CalleeResolutionFacts,
+    CalleeTargetIdentityRequest, CalleeTargetResolutionRequest, CallsiteKey, ResolvedCalleeTarget,
+    callee_name_is_import_like, normalize_callee_name,
+};
+pub use constraint::{Constraint, ConstraintSource, MemoryCapability, SolverNode};
+pub(crate) use register_identity::RegisterIdentity;
+pub(crate) use signature::SignatureRegistry;
+pub(crate) use signature_infer::{
+    format_signature_prototype, infer_signature_from_prepared_ssa,
+    inferred_signature_from_signature_spec, render_signature_type,
+};
+pub use solver::{SolvedTypes, SolverConfig, SolverDiagnostics, TypeSolver};
+
+pub use context::{
+    ExternalStackBase, ExternalStackSlotRole, ExternalStackSlotSpec, ParsedExternalContext,
+    StackSlotKey, is_generic_arg_name, parse_external_context_json, sanitize_c_identifier,
+};
+pub use convert::{
+    CTypeLike, c_object_declaration, parse_c_type_like, spellable_c_type_like,
+    spelling_names_a_type,
+};
+pub use data_object::{
+    DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
+};
+pub use evidence::EvidenceTypes;
+pub use external::{ExternalField, ExternalStruct, ExternalTypeDb, normalize_external_type_name};
+pub use facts::{
+    CalleeFact, CalleeLinkage, CalleeModelPolicyEvidence, CalleeReturnRelation,
+    FieldAccessCertificate, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
+    FunctionTypeFacts, SignatureCertificateSource, VisibleBinding, VisibleBindingKind,
+};
 pub use function_facts::{
     ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact, CallResultFact,
-    CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact, CertifiedEffect,
-    CertifiedEffectKind, CertifiedEntity, CertifiedExpr, ControlBlockAssumptionFact,
-    DecompileRouteFacts, DecompileRouteKind, ExpressionRenderFact, FunctionCallRenderFacts,
-    FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts, FunctionFacts,
-    FunctionInputQualityFacts, FunctionRenderFacts, InterprocSummaryView, LoopStructureFact,
-    MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact, MemoryOpSiteKey, OpSiteKey,
-    PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnValueRenderFact,
-    SourceOwnedCalleeSignature, SourceOwnedFunctionFacts, StackCallArgumentLocationFact,
-    StackSlotOwnerRenderAuthorization, SummaryEffectRollup, SummaryHelperView, SummaryOutParamFact,
-    SwitchSelectorFact, admit_declaration_type, aggregate_is_definable,
-    declaration_type_width_bits, exact_source_return_type,
+    CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact, CertifiedEntity,
+    ControlBlockAssumptionFact, DecompileRouteFacts, DecompileRouteKind, ExpressionRenderFact,
+    FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts,
+    FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts, InterprocSummaryView,
+    MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact, PredicateComparisonFact,
+    RegisterCallArgumentLocationFact, ReturnValueRenderFact, SourceOwnedCalleeSignature,
+    SourceOwnedFunctionFacts, StackCallArgumentLocationFact, admit_declaration_type,
+    aggregate_is_definable, declaration_type_width_bits, exact_source_return_type,
 };
-pub use inference::{CombinedTypeOracle, TypeInference, register_alias_names};
-pub use model::{Signedness, StructField, StructShape, Type, TypeArena, TypeId};
-pub use oracle::{LayoutOracle, TypeOracle};
+
+pub use model::{Signedness, Type};
+pub use oracle::TypeOracle;
 pub use prepare::{
-    ArgAliasMap, BaseRegList, MetadataScalarKind, SignatureTypeEvidenceContext, TypeHint,
-    TypeHintRank, X86_ARG_REGS, X86_FRAME_BASES, collect_signature_type_evidence_context,
-    collect_signature_type_evidence_context_with_arch, merge_type_hint,
-    recover_signature_params_from_ssa, recover_vars_arch_profile, recover_vars_from_ssa,
-    recover_vars_from_ssa_with_prep_facts, scalar_metadata_type_hint, scalar_register_family_key,
-    size_to_signed_int_type, size_to_type, size_to_unsigned_int_type, ssa_var_block_key,
-    ssa_var_key, type_hint_from_value_metadata,
+    MetadataScalarKind, TypeHint, merge_type_hint, recover_signature_params_from_ssa,
+    type_hint_from_value_metadata,
 };
 pub use r2source::DisplayNames;
 pub use r2ssa::AssumptionUsageReport;
-pub use register_identity::RegisterIdentity;
-pub use signature::{ResolvedSignature, SignatureRegistry};
-pub use signature_infer::{
-    RecoveredSignatureParam, SignatureParamCandidate, SignatureTypeEvidence,
-    build_inferred_signature, collect_signature_type_evidence_for_var, collect_version0_input_regs,
-    compute_callconv_inference, compute_signature_confidence, format_afs_signature,
-    infer_signature_from_prepared_ssa, infer_signature_return_type,
-    inferred_signature_from_signature_spec, materialize_signature_type_like,
-    merge_initial_signature_type_evidence, render_signature_type, render_writeback_apply_type,
-    resolve_evidence_driven_signature_type,
-};
-pub use solver::{SolvedTypes, SolverConfig, SolverDiagnostics, TypeSolver};
-pub use writeback::{
-    CALLCONV_WRITEBACK_MIN_CONFIDENCE, DecompileFinalization, GlobalTypeLinkCandidate,
-    InferredSignature, InferredSignatureParam, LocalStructArtifacts,
-    MATERIALIZED_VAR_MUTATION_MIN_CONFIDENCE, RecoveredVariable, SIGNATURE_WRITEBACK_MAX_BLOCKS,
-    SIGNATURE_WRITEBACK_MIN_CONFIDENCE, SignatureRegisterArgRenameDecision,
-    SignatureWritebackActionDecision, SignatureWritebackActionKind, SignatureWritebackDecision,
-    StructDeclCandidate, StructDeclSource, StructFieldCandidate,
-    TYPE_WRITEBACK_RENAME_MIN_CONFIDENCE_DEFAULT, TYPE_WRITEBACK_STRUCT_MIN_CONFIDENCE_DEFAULT,
-    TYPE_WRITEBACK_TYPE_MIN_CONFIDENCE_DEFAULT, TypeWritebackAnalysis, TypeWritebackAnalysisError,
-    TypeWritebackAnalysisRequest, TypeWritebackApplyDecision, TypeWritebackApplyMode,
-    TypeWritebackApplyPolicy, TypeWritebackAuthorityReport, TypeWritebackDiagnostics,
-    TypeWritebackMutation, TypeWritebackMutationBudget, TypeWritebackMutationKind,
-    TypeWritebackMutationPlan, TypeWritebackPlan, TypeWritebackRenameApplyDecision,
-    VarRenameCandidate, VarTypeCandidate, WritebackEvidence, WritebackSource,
-    build_source_owned_type_writeback_analysis, callconv_writeback_arch_supported,
-    canonicalize_writeback_apply_type_name, infer_local_struct_artifacts_from_ssa,
-    inferred_signature_to_function_type_facts, local_field_accesses_named,
-    signature_certificate_source_names, signature_register_arg_duplicate_delete_required,
-    signature_register_arg_rename_decision, signature_register_arg_stack_conflict_delete_required,
-    signature_register_arg_type_apply_required, signature_register_arg_var_score,
-    signature_writeback_action_decision, signature_writeback_arch_supported,
-    signature_writeback_size_eligible, source_type_like,
-    type_writeback_global_type_link_apply_decision,
-    type_writeback_stack_arg_name_conflict_delete_required,
-    type_writeback_var_rename_apply_decision, type_writeback_var_type_apply_decision,
-    writeback_apply_type_name_is_opaque_placeholder,
-    writeback_apply_type_name_is_plain_scalar_or_opaque, writeback_type_materialization_key,
-    writeback_type_materialization_required, writeback_type_name_is_generic,
-    writeback_type_name_is_opaque_placeholder, writeback_var_name_is_generated,
+
+pub use analysis::{
+    DecompileFinalization, TypeAnalysis, TypeAnalysisError, TypeAnalysisRequest,
+    build_source_owned_type_analysis, source_type_like,
 };
 
 #[cfg(test)]

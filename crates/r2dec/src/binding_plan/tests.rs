@@ -220,12 +220,12 @@ fn source_owned_blocks_with_stack_slots(
         )
         .expect("test SSA artifact"),
     );
-    let request = r2types::TypeWritebackAnalysisRequest::new(
+    let request = r2types::TypeAnalysisRequest::new(
         Arc::clone(&source),
         r2types::ParsedExternalContext::default(),
     )
     .expect("source-owned request");
-    r2types::build_source_owned_type_writeback_analysis(request)
+    r2types::build_source_owned_type_analysis(request)
         .expect("source-owned analysis")
         .finalize_for_decompile(r2types::DecompileFinalization {
             kind: r2types::DecompileRouteKind::Standard,

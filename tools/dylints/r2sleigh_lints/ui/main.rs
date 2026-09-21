@@ -14,7 +14,7 @@ struct Inputs {
 struct Certificate;
 
 impl Certificate {
-    fn authorizes_signature_writeback(&self) -> bool {
+    fn certifies_signature(&self) -> bool {
         true
     }
 }
@@ -89,7 +89,7 @@ fn main() {
     metadata_type_hint();
 
     let certificate = Certificate;
-    let _ = certificate.authorizes_signature_writeback();
+    let _ = certificate.certifies_signature();
     let _ = "signature mutation refused: stale certificate";
 
     let policy = ApplyPolicy {

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +9,6 @@ use crate::external::{
 };
 use crate::facts::{
     CalleeFact, CalleeLinkage, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
-    FunctionTypeFacts, SignatureCertificate, SignatureCertificateSource,
 };
 use crate::signature_infer::render_signature_type;
 
@@ -240,43 +238,6 @@ pub struct ExternalContextJson {
     pub assumptions: Vec<r2ssa::AnalysisAssumption>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalAssumptionPayloadParseError {
-    InvalidAssumptionArray,
-}
-
-impl ExternalAssumptionPayloadParseError {
-    pub fn message(self) -> &'static str {
-        match self {
-            Self::InvalidAssumptionArray => "assumptions json is invalid",
-        }
-    }
-}
-
-impl fmt::Display for ExternalAssumptionPayloadParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-impl std::error::Error for ExternalAssumptionPayloadParseError {}
-
-pub fn normalize_function_basename(name: &str) -> String {
-    let mut lower = name.trim().to_ascii_lowercase();
-    for prefix in ["sym.imp.", "sym.", "dbg.", "fcn.", "imp."] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            lower = rest.to_string();
-            break;
-        }
-    }
-    if let Some(rest) = lower.strip_prefix('_')
-        && rest == "main"
-    {
-        return "main".to_string();
-    }
-    lower
-}
-
 fn function_signature_lookup_names(name: &str) -> Vec<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -335,7 +296,23 @@ fn compiler_helper_signature_alias(name: &str) -> Option<&str> {
     None
 }
 
-pub fn is_c_main_function(name: &str) -> bool {
+fn normalize_function_basename(name: &str) -> String {
+    let mut lower = name.trim().to_ascii_lowercase();
+    for prefix in ["sym.imp.", "sym.", "dbg.", "fcn.", "imp."] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            lower = rest.to_string();
+            break;
+        }
+    }
+    if let Some(rest) = lower.strip_prefix('_')
+        && rest == "main"
+    {
+        return "main".to_string();
+    }
+    lower
+}
+
+fn is_c_main_function(name: &str) -> bool {
     normalize_function_basename(name) == "main"
 }
 
@@ -447,37 +424,6 @@ pub fn apply_main_signature_override(
     true
 }
 
-pub fn function_type_facts_from_parsed_context(
-    function_name: &str,
-    parsed_context: &ParsedExternalContext,
-) -> FunctionTypeFacts {
-    let mut merged_signature = parsed_context
-        .merged_signature
-        .clone()
-        .or_else(|| parsed_context.current_signature.clone());
-    apply_main_signature_override(function_name, &mut merged_signature);
-    let signature_certificate = merged_signature.as_ref().and_then(|signature| {
-        SignatureCertificate::from_signature(
-            signature,
-            [SignatureCertificateSource::ExternalContext],
-        )
-    });
-    FunctionTypeFacts {
-        merged_signature,
-        callconv: parsed_context.callconv.clone(),
-        noreturn: parsed_context.noreturn,
-        signature_certificate,
-        known_function_signatures: parsed_context.known_function_signatures.clone(),
-        register_params: parsed_context.register_params.clone(),
-        stack_slots: parsed_context.stack_slots.clone(),
-        external_type_db: parsed_context.external_type_db.clone(),
-        program_data_objects: parsed_context.program_data_objects.clone(),
-        callee_facts: parsed_context.callee_facts.clone(),
-        diagnostics: parsed_context.diagnostics.clone(),
-        ..FunctionTypeFacts::default()
-    }
-}
-
 pub fn parse_external_context_json(json_str: &str, ptr_bits: u32) -> ParsedExternalContext {
     let trimmed = json_str.trim();
     if trimmed.is_empty() || trimmed == "{}" || trimmed == "[]" {
@@ -493,38 +439,6 @@ pub fn parse_external_context_json(json_str: &str, ptr_bits: u32) -> ParsedExter
     };
 
     parse_external_context(raw, ptr_bits)
-}
-
-pub fn parse_external_assumption_payload_json(
-    json_str: &str,
-    ptr_bits: u32,
-) -> Result<r2ssa::AssumptionSet, ExternalAssumptionPayloadParseError> {
-    let trimmed = json_str.trim();
-    if trimmed.is_empty() {
-        return Ok(r2ssa::AssumptionSet::default());
-    }
-
-    if trimmed.starts_with('[') {
-        let raw_items = serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
-            .map_err(|_| ExternalAssumptionPayloadParseError::InvalidAssumptionArray)?;
-        let assumptions = raw_items
-            .into_iter()
-            .map(|item| {
-                let has_provenance = item
-                    .as_object()
-                    .is_some_and(|object| object.contains_key("provenance"));
-                let mut assumption = serde_json::from_value::<r2ssa::AnalysisAssumption>(item)
-                    .map_err(|_| ExternalAssumptionPayloadParseError::InvalidAssumptionArray)?;
-                if !has_provenance {
-                    assumption.provenance = r2ssa::AssumptionProvenance::User;
-                }
-                Ok(assumption)
-            })
-            .collect::<Result<Vec<_>, ExternalAssumptionPayloadParseError>>()?;
-        return Ok(r2ssa::AssumptionSet::new(assumptions));
-    }
-
-    Ok(parse_external_context_json(trimmed, ptr_bits).assumptions)
 }
 
 pub fn parse_external_context(raw: ExternalContextJson, ptr_bits: u32) -> ParsedExternalContext {
@@ -1298,7 +1212,7 @@ fn normalize_aggregate_name(name: &str, prefix: &str) -> String {
 /// name survives.
 ///
 /// Every rendered identifier passes through here: parameter and variable
-/// names, the names the writeback declares, and the rendered function's own
+/// names, the names the analysis declares, and the rendered function's own
 /// name. A source name is arbitrary bytes -- a radare2 flag, a DWARF string --
 /// and a name that is not a C identifier makes the whole rendering invalid C,
 /// so the one place that answers "what does this name spell" is this function.
@@ -1608,72 +1522,6 @@ mod tests {
     }
 
     #[test]
-    fn function_type_facts_preserve_current_callconv_and_noreturn() {
-        let ctx = parse_external_context_json(
-            r#"{
-                "signature":{
-                    "name":"sym.imp.__stack_chk_fail",
-                    "ret":"void",
-                    "callconv":"amd64",
-                    "noreturn":true,
-                    "params":[]
-                }
-            }"#,
-            64,
-        );
-
-        let facts = function_type_facts_from_parsed_context("sym.imp.__stack_chk_fail", &ctx);
-        assert_eq!(facts.callconv.as_deref(), Some("amd64"));
-        assert!(facts.noreturn);
-        assert_eq!(
-            facts
-                .render_authorized_signature()
-                .and_then(|signature| signature.ret_type.as_ref()),
-            Some(&CTypeLike::Void)
-        );
-    }
-
-    #[test]
-    fn parse_external_context_requires_typed_callee_linkage_for_import_policy() {
-        let ctx = parse_external_context_json(
-            r#"{
-                "callees":[
-                    {"addr":4198752,"name":"sym.imp.setlocale"},
-                    {"addr":4198760,"name":"setlocale","linkage":"imported"}
-                ]
-            }"#,
-            64,
-        );
-
-        let raw_name_only = ctx
-            .callee_facts
-            .get(&4198752)
-            .expect("name-only callee fact");
-        assert_eq!(raw_name_only.name.as_deref(), Some("sym.imp.setlocale"));
-        assert_eq!(raw_name_only.linkage, CalleeLinkage::Unknown);
-        assert!(!raw_name_only.linkage.authorizes_import_policy());
-        assert!(!raw_name_only.authorizes_model_policy());
-
-        let imported = ctx
-            .callee_facts
-            .get(&4198760)
-            .expect("typed imported callee fact");
-        assert_eq!(imported.name.as_deref(), Some("setlocale"));
-        assert_eq!(imported.linkage, CalleeLinkage::Imported);
-        assert!(imported.linkage.authorizes_import_policy());
-        assert!(
-            !imported.authorizes_model_policy(),
-            "external callee presence/linkage is not modeled-summary evidence"
-        );
-
-        let facts = function_type_facts_from_parsed_context("dbg.wrapper", &ctx);
-        assert_eq!(
-            facts.callee_facts.get(&4198760).map(|fact| fact.linkage),
-            Some(CalleeLinkage::Imported)
-        );
-    }
-
-    #[test]
     fn parse_external_context_counts_distinct_typed_callee_callsites() {
         let ctx = parse_external_context_json(
             r#"{
@@ -1808,168 +1656,6 @@ mod tests {
         assert_eq!(merged.params[0].ty, Some(CTypeLike::typedef("int")));
         assert_eq!(merged.params[1].name, "argv");
         assert_eq!(merged.params[2].name, "envp");
-    }
-
-    #[test]
-    fn function_type_facts_from_context_canonicalizes_main_signature() {
-        let parsed = parse_external_context_json(
-            r#"{
-                "signature":{
-                    "ret":"int",
-                    "params":[
-                        {"name":"argc","type":"char *"},
-                        {"name":"argv","type":"char **"},
-                        {"name":"envp","type":"char **"}
-                    ]
-                }
-            }"#,
-            64,
-        );
-
-        let facts = function_type_facts_from_parsed_context("dbg.main", &parsed);
-        let certificate = facts
-            .signature_certificate
-            .as_ref()
-            .expect("external main signature should carry a certificate");
-        assert_eq!(
-            certificate.sources,
-            vec![SignatureCertificateSource::ExternalContext]
-        );
-        assert!(certificate.authorizes_signature_writeback());
-        let signature = facts.merged_signature.expect("main signature");
-        assert_eq!(signature.ret_type, Some(CTypeLike::typedef("int")));
-        assert_eq!(signature.params[0].name, "argc");
-        assert_eq!(signature.params[0].ty, Some(CTypeLike::typedef("int")));
-        assert_eq!(
-            render_signature_type(signature.params[1].ty.as_ref().unwrap(), 64),
-            "int8_t**"
-        );
-
-        let helper = function_type_facts_from_parsed_context("dbg.helper", &parsed)
-            .merged_signature
-            .expect("helper signature");
-        assert_eq!(
-            render_signature_type(helper.params[0].ty.as_ref().unwrap(), 64),
-            "int8_t*"
-        );
-    }
-
-    #[test]
-    fn parse_external_assumption_payload_reads_external_context_payload() {
-        let assumptions = parse_external_assumption_payload_json(
-            r#"{"assumptions":[{"subject":{"register":{"name":"rdi"}},"value":{"constant":{"value":4660}}}]}"#,
-            64,
-        )
-        .expect("assumptions");
-
-        assert_eq!(assumptions.items.len(), 1);
-        assert_eq!(
-            assumptions.items[0].subject,
-            r2ssa::AssumptionSubject::Register {
-                name: "rdi".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn parse_external_assumption_payload_reads_direct_assumption_array() {
-        let assumptions = parse_external_assumption_payload_json(
-            r#"[{"subject":{"register":{"name":"rdi"}},"value":{"constant":{"value":4660}}}]"#,
-            64,
-        )
-        .expect("assumptions");
-
-        assert_eq!(assumptions.items.len(), 1);
-        assert_eq!(
-            assumptions.items[0].value,
-            r2ssa::AssumptionValue::Constant { value: 4660 }
-        );
-        assert_eq!(
-            assumptions.items[0].provenance,
-            r2ssa::AssumptionProvenance::User
-        );
-    }
-
-    #[test]
-    fn parse_external_assumption_payload_preserves_explicit_direct_provenance() {
-        let assumptions = parse_external_assumption_payload_json(
-            r#"[{"subject":{"register":{"name":"rdi"}},"value":{"constant":{"value":4660}},"provenance":"replay"}]"#,
-            64,
-        )
-        .expect("assumptions");
-
-        assert_eq!(assumptions.items.len(), 1);
-        assert_eq!(
-            assumptions.items[0].provenance,
-            r2ssa::AssumptionProvenance::Replay
-        );
-    }
-
-    #[test]
-    fn parse_external_assumption_payload_rejects_invalid_direct_array() {
-        let err =
-            parse_external_assumption_payload_json(r#"[{"subject":"not an assumption"}]"#, 64)
-                .expect_err("invalid direct assumption arrays should fail");
-
-        assert_eq!(
-            err,
-            ExternalAssumptionPayloadParseError::InvalidAssumptionArray
-        );
-        assert_eq!(err.message(), "assumptions json is invalid");
-        assert_eq!(err.to_string(), "assumptions json is invalid");
-    }
-
-    #[test]
-    fn function_type_facts_preserve_current_signature_when_no_merged_signature() {
-        let parsed = ParsedExternalContext {
-            current_signature: Some(FunctionSignatureSpec {
-                ret_type: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
-                    bits: 8,
-                    signedness: crate::Signedness::Signed,
-                }))),
-                params: vec![
-                    FunctionParamSpec {
-                        name: "name".to_string(),
-                        ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
-                            bits: 8,
-                            signedness: crate::Signedness::Signed,
-                        }))),
-                    },
-                    FunctionParamSpec {
-                        name: "can_mode".to_string(),
-                        ty: Some(CTypeLike::typedef("canonicalize_mode_t")),
-                    },
-                ],
-            }),
-            merged_signature: None,
-            ..ParsedExternalContext::default()
-        };
-
-        let facts =
-            function_type_facts_from_parsed_context("dbg.canonicalize_filename_mode", &parsed);
-        let certificate = facts
-            .signature_certificate
-            .as_ref()
-            .expect("current external signature should seed a certificate");
-        assert_eq!(
-            certificate.sources,
-            vec![SignatureCertificateSource::ExternalContext]
-        );
-        let signature = facts
-            .merged_signature
-            .expect("current signature should seed function facts");
-
-        assert_eq!(
-            signature
-                .ret_type
-                .as_ref()
-                .map(|ty| render_signature_type(ty, 64))
-                .as_deref(),
-            Some("int8_t*")
-        );
-        assert_eq!(signature.params.len(), 2);
-        assert_eq!(signature.params[0].name, "name");
-        assert_eq!(signature.params[1].name, "can_mode");
     }
 
     #[test]

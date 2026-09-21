@@ -727,7 +727,7 @@ mod tests {
         let mut latch_block = SSABlock::new(latch, 16);
         latch_block.ops.push(crate::op::SSAOp::IntAdd {
             dst: stepped,
-            a: counter.clone(),
+            a: counter,
             b: constant(1, 4),
         });
         let exit_block = SSABlock::new(exit, 16);

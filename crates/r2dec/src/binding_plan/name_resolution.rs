@@ -718,12 +718,10 @@ mod tests {
             SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
                 .expect("SSA artifact"),
         );
-        let request = r2types::TypeWritebackAnalysisRequest::new(
-            source,
-            r2types::ParsedExternalContext::default(),
-        )
-        .expect("request");
-        r2types::build_source_owned_type_writeback_analysis(request)
+        let request =
+            r2types::TypeAnalysisRequest::new(source, r2types::ParsedExternalContext::default())
+                .expect("request");
+        r2types::build_source_owned_type_analysis(request)
             .expect("facts")
             .finalize_for_decompile(r2types::DecompileFinalization {
                 kind: r2types::DecompileRouteKind::Standard,

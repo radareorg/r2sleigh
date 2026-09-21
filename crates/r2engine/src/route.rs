@@ -168,7 +168,7 @@ pub struct EngineRouteDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EngineTypeRouteKind {
-    FullWriteback,
+    FullTypeEvidence,
     BoundedCfg,
     SemanticFallback,
 }
@@ -436,7 +436,7 @@ pub fn type_route_decision(
     EngineTypeRouteDecision {
         request: EngineRequestKind::Types,
         plan: select_engine_plan(EngineRequestKind::Types, None, Some(function_facts)),
-        kind: EngineTypeRouteKind::FullWriteback,
+        kind: EngineTypeRouteKind::FullTypeEvidence,
         prefer_bounded_type_plan: false,
         reason: None,
     }

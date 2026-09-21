@@ -1,18 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use r2ssa::{ObjectKind, SSAFunction, SSAOp, SSAVar, SsaArtifact};
+use r2ssa::{ObjectKind, SSAOp, SSAVar, SsaArtifact};
 
 use crate::convert::CTypeLike;
-use crate::facts::{FunctionSignatureSpec, signature_strength};
-use crate::inference::TypeInference;
+use crate::facts::FunctionSignatureSpec;
+
+use crate::analysis::{InferredSignature, InferredSignatureParam};
 use crate::model::Signedness;
-use crate::prepare::{
-    SignatureTypeEvidenceContext, prepared_arch_display_name,
-    recover_signature_params_from_prepared_ssa, scalar_register_family_key,
-    ssa_var_is_register_like,
-};
+use crate::prepare::{prepared_arch_display_name, recover_signature_params_from_prepared_ssa};
 use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
-use crate::writeback::{InferredSignature, InferredSignatureParam};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignatureTypeEvidence {
@@ -65,7 +61,7 @@ pub struct RecoveredSignatureParam {
     pub initial_ty: CTypeLike,
 }
 
-pub fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSignature {
+pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSignature {
     let function_name = prepared
         .function()
         .name
@@ -128,7 +124,7 @@ pub fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSign
         &mut canonical_params,
     );
 
-    let (ret_type, ret_evidence) =
+    let (ret_type, _) =
         infer_signature_return_type_from_prepared(prepared, &evidence_types, ptr_bits);
     let mut inferred = build_inferred_signature(
         &function_name,
@@ -136,15 +132,12 @@ pub fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> InferredSign
         ptr_bits,
         &canonical_params,
         &ret_type,
-        &ret_evidence,
         &HashMap::new(),
     );
     if let Some(interface) = prepared.machine_context().function_interface() {
         inferred.callconv = interface.calling_convention().to_string();
-        inferred.callconv_confidence = 100;
     } else {
         inferred.callconv = "unknown".to_string();
-        inferred.callconv_confidence = 0;
     }
     inferred
 }
@@ -565,26 +558,26 @@ pub fn materialize_signature_type_like(ty: CTypeLike, ptr_bits: u32) -> CTypeLik
 /// writes a pointer with a space before the star, `struct Foo *`, and the
 /// signature renderer writes `struct Foo*`. That difference was previously
 /// applied by byte surgery on an already-rendered string --
-/// `canonicalize_writeback_apply_type_name` searching for the first `*` and
+/// `canonical type spelling` searching for the first `*` and
 /// inserting a space in front of it -- which made three components normalize
 /// the same star three different ways. Rendering from the type instead means
 /// the spelling is decided once, by the code that knows which sink it is for.
-pub fn render_writeback_apply_type(ty: &CTypeLike, _ptr_bits: u32) -> String {
+pub fn render_type_spelling(ty: &CTypeLike, _ptr_bits: u32) -> String {
     match ty {
         CTypeLike::Pointer(inner) => {
-            format!("{} *", render_writeback_apply_type(inner, _ptr_bits))
+            format!("{} *", render_type_spelling(inner, _ptr_bits))
         }
         // `render_c_type_like`, not `render_signature_type`: the latter
         // materializes first, which turns a pointer to an unmaterialized
         // aggregate into `void *`. That is the right answer for a rendered
         // signature and the wrong one here, because radare2 needs the name it
-        // was given so the writeback can require the type be materialized and
+        // was given so the caller can require the type be materialized and
         // fail closed when it is not.
         other => crate::convert::render_c_type_like(other),
     }
 }
 
-/// Whether two signature types are the same type for writeback purposes.
+/// Whether two signature types are the same type for signature purposes.
 ///
 /// Both operands are already `CTypeLike`. This was written at six sites as
 /// `render_signature_type(a) == render_signature_type(b)` -- two structured
@@ -839,162 +832,6 @@ pub fn resolve_evidence_driven_signature_type(
     }
 
     sanitize_signature_type_like(initial_ty, var_size_bytes, ptr_bits)
-}
-
-pub fn collect_signature_type_evidence_for_var(
-    evidence_ctx: &SignatureTypeEvidenceContext,
-    var: &SSAVar,
-    initial_ty: &CTypeLike,
-) -> SignatureTypeEvidence {
-    let key = crate::prepare::ssa_var_key(var);
-    let family = scalar_register_family_key(var.name());
-    let mut evidence = SignatureTypeEvidence::default();
-    if evidence_ctx.pointer_vars.contains(&key) {
-        evidence.pointer_proven = 1;
-    }
-    if evidence_ctx.scalar_proven_vars.contains(&key) {
-        evidence.scalar_proven = 1;
-    }
-    if evidence_ctx.scalar_likely_vars.contains(&key) {
-        evidence.scalar_likely = 1;
-    }
-    if evidence_ctx.bool_like_vars.contains(&key) {
-        evidence.bool_like = 1;
-    }
-    if let Some(bits) = evidence_ctx.width_bits.get(&key) {
-        evidence.width_bits = *bits;
-    }
-    if evidence.pointer_proven == 0
-        && signal_present_for_register_family(&evidence_ctx.pointer_vars, &family, var.version)
-    {
-        evidence.pointer_proven = 1;
-    }
-    if evidence.scalar_proven == 0
-        && signal_present_for_register_family(
-            &evidence_ctx.scalar_proven_vars,
-            &family,
-            var.version,
-        )
-    {
-        evidence.scalar_proven = 1;
-    }
-    if evidence.scalar_likely == 0
-        && signal_present_for_register_family(
-            &evidence_ctx.scalar_likely_vars,
-            &family,
-            var.version,
-        )
-    {
-        evidence.scalar_likely = 1;
-    }
-    if evidence.bool_like == 0
-        && signal_present_for_register_family(&evidence_ctx.bool_like_vars, &family, var.version)
-    {
-        evidence.bool_like = 1;
-    }
-    if evidence.width_bits == 0
-        && let Some(bits) =
-            width_hint_for_register_family(&evidence_ctx.width_bits, &family, var.version)
-    {
-        evidence.width_bits = bits;
-    }
-    merge_initial_signature_type_evidence(initial_ty, &mut evidence);
-    evidence
-}
-
-fn signal_present_for_register_family(keys: &HashSet<String>, family: &str, version: u32) -> bool {
-    keys.iter()
-        .any(|key| key_matches_register_family_version(key, family, version))
-}
-
-fn width_hint_for_register_family(
-    hints: &HashMap<String, u32>,
-    family: &str,
-    version: u32,
-) -> Option<u32> {
-    hints
-        .iter()
-        .filter(|(key, _)| key_matches_register_family_version(key, family, version))
-        .map(|(_, bits)| *bits)
-        .filter(|bits| *bits > 0)
-        .min()
-}
-
-fn key_matches_register_family_version(key: &str, family: &str, version: u32) -> bool {
-    crate::prepare::ssa_var_key_matches_register_family_version(key, family, version)
-}
-
-pub fn infer_signature_return_type(
-    func: &SSAFunction,
-    type_inference: &TypeInference,
-    ptr_bits: u32,
-    evidence_ctx: &SignatureTypeEvidenceContext,
-) -> (CTypeLike, SignatureTypeEvidence) {
-    let mut candidates = Vec::new();
-    let mut candidate_evidence = Vec::new();
-    let mut candidate_constants = Vec::new();
-
-    for block in func.blocks() {
-        for op in &block.ops {
-            let SSAOp::Return { target } = op else {
-                continue;
-            };
-
-            let initial_ty = type_inference.get_type(target);
-            let evidence =
-                collect_signature_type_evidence_for_var(evidence_ctx, target, &initial_ty);
-            let ty = resolve_evidence_driven_signature_type(
-                initial_ty,
-                target.size,
-                ptr_bits,
-                &evidence,
-            );
-            candidates.push(ty);
-            candidate_evidence.push(evidence);
-            candidate_constants.push(target.constant_bits());
-        }
-    }
-
-    if candidates.is_empty() {
-        return (CTypeLike::Void, SignatureTypeEvidence::default());
-    }
-
-    let mut meaningful: Vec<CTypeLike> = candidates
-        .iter()
-        .filter(|ty| !matches!(ty, CTypeLike::Unknown))
-        .cloned()
-        .collect();
-    if meaningful.is_empty() {
-        let fallback_evidence = candidate_evidence.into_iter().next().unwrap_or_default();
-        return (
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &fallback_evidence, ptr_bits),
-            fallback_evidence,
-        );
-    }
-    if meaningful.iter().all(|ty| ty == &meaningful[0]) {
-        return (
-            meaningful.remove(0),
-            candidate_evidence.into_iter().next().unwrap_or_default(),
-        );
-    }
-    if let Some(float_ty) = meaningful
-        .iter()
-        .find(|ty| matches!(ty, CTypeLike::Float(_)))
-        .cloned()
-    {
-        let evidence = candidate_evidence
-            .into_iter()
-            .find(|e| e.width_bits >= 32)
-            .unwrap_or_default();
-        return (float_ty, evidence);
-    }
-    if let Some((ty, evidence)) =
-        scalar_return_type_join(&candidates, &candidate_evidence, &candidate_constants)
-    {
-        return (ty, evidence);
-    }
-    let evidence = candidate_evidence.into_iter().next().unwrap_or_default();
-    (meaningful.remove(0), evidence)
 }
 
 fn infer_signature_return_type_from_prepared(
@@ -1303,25 +1140,6 @@ fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
     }
 }
 
-pub fn collect_version0_input_regs(func: &SSAFunction) -> HashMap<String, u32> {
-    let mut counts = HashMap::new();
-    for block in func.blocks() {
-        for op in &block.ops {
-            for src in op.sources() {
-                if src.version != 0 {
-                    continue;
-                }
-                if !ssa_var_is_register_like(src) {
-                    continue;
-                }
-                let key = src.name().to_ascii_lowercase();
-                *counts.entry(key).or_insert(0) += 1;
-            }
-        }
-    }
-    counts
-}
-
 fn infer_callconv_x86_64_from_counts(counts: &HashMap<String, u32>) -> (&'static str, u8) {
     let mut canonical = std::collections::BTreeMap::new();
     for (reg, count) in counts {
@@ -1376,59 +1194,6 @@ pub fn compute_callconv_inference(
     }
 }
 
-fn is_informative_type(ty: &CTypeLike) -> bool {
-    !matches!(ty, CTypeLike::Void | CTypeLike::Unknown)
-}
-
-pub fn compute_signature_confidence(
-    params: &[SignatureParamCandidate],
-    ret_type: &CTypeLike,
-    ret_evidence: &SignatureTypeEvidence,
-) -> u8 {
-    let mut confidence: i32 = 48;
-    if !params.is_empty() {
-        confidence += 8;
-    }
-
-    for param in params {
-        let evidence = &param.evidence;
-        if evidence.pointer_proven > 0 || evidence.scalar_proven > 0 {
-            confidence += 6;
-        } else if evidence.bool_like > 0
-            || evidence.pointer_likely > 0
-            || evidence.scalar_likely > 0
-        {
-            confidence += 3;
-        } else if is_informative_type(&param.ty) {
-            confidence += 2;
-        } else {
-            confidence -= 2;
-        }
-
-        if evidence.has_conflict() {
-            confidence -= 4;
-        }
-    }
-
-    if is_informative_type(ret_type) {
-        confidence += 4;
-        if ret_evidence.pointer_proven > 0
-            || ret_evidence.scalar_proven > 0
-            || ret_evidence.bool_like > 0
-        {
-            confidence += 2;
-        }
-    } else if ret_evidence.has_pointer_signal() || ret_evidence.has_scalar_signal() {
-        confidence += 2;
-    }
-
-    if ret_evidence.has_conflict() {
-        confidence -= 3;
-    }
-
-    confidence.clamp(0, 100) as u8
-}
-
 use crate::context::sanitize_c_identifier;
 
 fn uniquify_name(base: String, used: &mut HashSet<String>) -> String {
@@ -1456,7 +1221,7 @@ fn normalize_inferred_param_name(
     uniquify_name(clean, used)
 }
 
-pub fn format_afs_signature(
+pub(crate) fn format_signature_prototype(
     function_name: &str,
     ret_type: &str,
     params: &[InferredSignatureParam],
@@ -1473,7 +1238,7 @@ pub fn format_afs_signature(
     format!("{ret_type} {function_name} ({params_str})")
 }
 
-pub fn inferred_signature_from_signature_spec(
+pub(crate) fn inferred_signature_from_signature_spec(
     function_name: &str,
     arch_name: &str,
     ptr_bits: u32,
@@ -1503,26 +1268,22 @@ pub fn inferred_signature_from_signature_spec(
         })
         .collect::<Vec<_>>();
     let callconv = callconv.unwrap_or("unknown").to_string();
-    let callconv_confidence = if callconv == "unknown" { 0 } else { 80 };
     InferredSignature {
         function_name: function_name.to_string(),
-        signature: format_afs_signature(function_name, &ret_type, &params),
+        signature: format_signature_prototype(function_name, &ret_type, &params),
         ret_type,
         params,
         callconv,
         arch: arch_name.to_string(),
-        confidence: signature_strength(signature),
-        callconv_confidence,
     }
 }
 
-pub fn build_inferred_signature(
+pub(crate) fn build_inferred_signature(
     function_name: &str,
     arch_name: &str,
     ptr_bits: u32,
     params: &[SignatureParamCandidate],
     ret_type: &CTypeLike,
-    ret_evidence: &SignatureTypeEvidence,
     input_counts: &HashMap<String, u32>,
 ) -> InferredSignature {
     let mut ordered = params.to_vec();
@@ -1531,7 +1292,6 @@ pub fn build_inferred_signature(
             .cmp(&b.arg_index)
             .then_with(|| a.name.cmp(&b.name))
     });
-    let confidence = compute_signature_confidence(&ordered, ret_type, ret_evidence);
     let mut used_param_names = HashSet::new();
     let mut json_params = Vec::new();
     for param in &ordered {
@@ -1563,16 +1323,14 @@ pub fn build_inferred_signature(
         });
     }
     let rendered_ret = render_signature_type(ret_type, ptr_bits);
-    let (callconv, callconv_confidence) = compute_callconv_inference(arch_name, input_counts);
+    let (callconv, _) = compute_callconv_inference(arch_name, input_counts);
     InferredSignature {
         function_name: function_name.to_string(),
-        signature: format_afs_signature(function_name, &rendered_ret, &json_params),
+        signature: format_signature_prototype(function_name, &rendered_ret, &json_params),
         ret_type: rendered_ret,
         params: json_params,
         callconv,
         arch: arch_name.to_string(),
-        confidence,
-        callconv_confidence,
     }
 }
 
@@ -1970,8 +1728,6 @@ mod tests {
 
         assert_eq!(ordinary.callconv, expected);
         assert_eq!(renamed.callconv, expected);
-        assert_eq!(ordinary.callconv_confidence, 100);
-        assert_eq!(renamed.callconv_confidence, 100);
     }
 
     #[test]
@@ -2088,10 +1844,6 @@ mod tests {
 
         assert_eq!(inferred.signature, "void fcn.401000 (int32_t status)");
         assert_eq!(inferred.callconv, "amd64");
-        assert_eq!(
-            inferred.confidence,
-            crate::SIGNATURE_PROJECTION_STRONG_CONFIDENCE
-        );
     }
 
     #[test]
@@ -2129,7 +1881,6 @@ mod tests {
             64,
             &params,
             &CTypeLike::Void,
-            &SignatureTypeEvidence::default(),
             &HashMap::new(),
         );
 

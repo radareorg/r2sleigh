@@ -742,7 +742,7 @@ mod tests {
 
     /// radare2's own spellings, which arrive dotted and unspaced.
     ///
-    /// These are what `canonicalize_writeback_apply_type_name` was rewriting by
+    /// These are what `canonical type spelling` was rewriting by
     /// hand, searching a rendered string for the first `*` and inserting a
     /// space in front of it. Parsing reaches the same type from every spelling,
     /// so the normalisation belongs at the point the spelling arrives rather
@@ -954,7 +954,7 @@ mod tests {
     /// C has no way to write "thirty-two bits, signedness not established", so
     /// the renderer has to pick one and picks signed. That is not a bug in the
     /// renderer -- it is the reason a type must be carried as a type across the
-    /// writeback boundary rather than as the string it renders to, because the
+    /// type boundary rather than as the string it renders to, because the
     /// boundary is exactly where the distinction is still live.
     #[test]
     fn unknown_signedness_is_the_one_thing_a_spelling_cannot_carry() {

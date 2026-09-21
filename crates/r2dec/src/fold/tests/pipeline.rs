@@ -154,9 +154,9 @@ mod tests {
         ) -> Self {
             let source = Arc::new(prepared);
             let request =
-                r2types::TypeWritebackAnalysisRequest::new(Arc::clone(&source), parsed_context)
+                r2types::TypeAnalysisRequest::new(Arc::clone(&source), parsed_context)
                     .expect("fixture assumptions must match the exact source");
-            let analysis = r2types::build_source_owned_type_writeback_analysis(request)
+            let analysis = r2types::build_source_owned_type_analysis(request)
                 .expect("fixture must produce source-owned analysis");
             let facts = analysis
                 .finalize_for_decompile(r2types::DecompileFinalization {

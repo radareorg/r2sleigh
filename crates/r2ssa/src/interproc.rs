@@ -597,7 +597,7 @@ pub struct InterprocSummaryDiagnostics {
 /// Serializable interprocedural report data.
 ///
 /// This value does not retain an SSA owner and therefore is not authority for
-/// type writeback or certification. Consumers that need source-owned evidence
+/// type facts or certification. Consumers that need source-owned evidence
 /// must use [`PreparedInterprocSummarySet`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterprocSummarySet {
@@ -1057,7 +1057,7 @@ fn summary_arg_count_hint(inputs: SummaryArgCountInputs<'_>) -> Option<usize> {
 /// Solve serializable report data without retaining source authority.
 ///
 /// This entrypoint remains useful for simulation and reporting. Its result
-/// must not authorize type writeback or certification.
+/// must not authorize type facts or certification.
 pub fn solve_interproc_summary_set(
     functions: &[InterprocFunctionInput<'_>],
     arch: Option<&ArchSpec>,
