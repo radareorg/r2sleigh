@@ -41,6 +41,16 @@ format-version mismatch that had killed the whole plugin route:
     renderings were read and are right, and the fixtures need re-blessing after
     someone reads the new lift rather than because it differs.
 
+**This branch has diverged from `origin/engine/inversion` deliberately.** Every
+commit from the branch point carried a `Co-Authored-By: Claude` trailer and a
+`Claude-Session:` URL, which the standing rule forbids on anything feeding a
+pull request. All 154 were rewritten locally to drop them; the trees are
+byte-identical and the gates were re-run after. `origin` still holds the 93
+attributed commits it had, by choice -- rewriting published history is a
+force-push and was not taken. The divergence has to be resolved before this
+branch pushes again, and the pre-rewrite tip is kept at
+`refs/original/refs/heads/engine/inversion`.
+
 This document is chronological and contains claims that later entries withdraw.
 Read the rest for the evidence, and note that several entries are corrections of
 the ones above them. Anything below that disagrees with this section is
