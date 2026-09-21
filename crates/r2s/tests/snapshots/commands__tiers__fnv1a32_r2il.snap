@@ -1,0 +1,91 @@
+---
+source: crates/r2s/tests/commands.rs
+expression: run.out
+---
+Entry: 0x401330
+Blocks: 5
+
+Block 0x401330 (9 bytes, 10 ops)
+    0: CF = COPY 0x0:1
+    1: OF = COPY 0x0:1
+    2: uniq:0x70500[8] = RSI & RSI
+    3: SF = uniq:0x70500[8] s< 0x0:8
+    4: ZF = uniq:0x70500[8] == 0x0:8
+    5: uniq:0x2c200[8] = uniq:0x70500[8] & 0xff:8
+    6: uniq:0x2c280[1] = POPCOUNT(uniq:0x2c200[8])
+    7: uniq:0x2c300[1] = uniq:0x2c280[1] & 0x1:1
+    8: PF = uniq:0x2c300[1] == 0x0:1
+    9: CBRANCH ram:0x401360[8] if ZF
+  -> 0x401360 (Direct)
+  -> 0x401339 (Fallthrough)
+
+Block 0x401339 (15 bytes, 10 ops)
+    0: CF = CARRY(RSI, RDI)
+    1: OF = SCARRY(RSI, RDI)
+    2: RSI = RSI + RDI
+    3: SF = RSI s< 0x0:8
+    4: ZF = RSI == 0x0:8
+    5: uniq:0x2c200[8] = RSI & 0xff:8
+    6: uniq:0x2c280[1] = POPCOUNT(uniq:0x2c200[8])
+    7: uniq:0x2c300[1] = uniq:0x2c280[1] & 0x1:1
+    8: PF = uniq:0x2c300[1] == 0x0:1
+    9: RAX = COPY 0x811c9dc5:8
+  -> 0x401348 (Fallthrough)
+
+Block 0x401348 (20 bytes, 43 ops)
+    0: uniq:0x11e00[1] = LOAD [ram]RDI
+    1: EDX = ZEXT(uniq:0x11e00[1])
+    2: RDX = ZEXT(EDX)
+    3: CF = CARRY(RDI, 0x1:8)
+    4: OF = SCARRY(RDI, 0x1:8)
+    5: RDI = RDI + 0x1:8
+    6: SF = RDI s< 0x0:8
+    7: ZF = RDI == 0x0:8
+    8: uniq:0x2c200[8] = RDI & 0xff:8
+    9: uniq:0x2c280[1] = POPCOUNT(uniq:0x2c200[8])
+   10: uniq:0x2c300[1] = uniq:0x2c280[1] & 0x1:1
+   11: PF = uniq:0x2c300[1] == 0x0:1
+   12: CF = COPY 0x0:1
+   13: OF = COPY 0x0:1
+   14: EAX = EAX ^ EDX
+   15: RAX = ZEXT(EAX)
+   16: SF = EAX s< 0x0:4
+   17: ZF = EAX == 0x0:4
+   18: uniq:0x2c200[4] = EAX & 0xff:4
+   19: uniq:0x2c280[1] = POPCOUNT(uniq:0x2c200[4])
+   20: uniq:0x2c300[1] = uniq:0x2c280[1] & 0x1:1
+   21: PF = uniq:0x2c300[1] == 0x0:1
+   22: uniq:0x4c600[8] = SEXT(EAX)
+   23: uniq:0x4c680[8] = SEXT(0x1000193:4)
+   24: uniq:0x4c780[8] = uniq:0x4c600[8] * uniq:0x4c680[8]
+   25: EAX = SUBPIECE(uniq:0x4c780[8], 0)
+   26: uniq:0x4c900[4] = SUBPIECE(uniq:0x4c780[8], 4)
+   27: uniq:0x2d180[8] = SEXT(EAX)
+   28: CF = uniq:0x2d180[8] != uniq:0x4c780[8]
+   29: OF = COPY CF
+   30: RAX = ZEXT(EAX)
+   31: uniq:0x3f080[8] = COPY RSI
+   32: CF = uniq:0x3f080[8] < RDI
+   33: OF = SBORROW(uniq:0x3f080[8], RDI)
+   34: uniq:0x3f180[8] = uniq:0x3f080[8] - RDI
+   35: SF = uniq:0x3f180[8] s< 0x0:8
+   36: ZF = uniq:0x3f180[8] == 0x0:8
+   37: uniq:0x2c200[8] = uniq:0x3f180[8] & 0xff:8
+   38: uniq:0x2c280[1] = POPCOUNT(uniq:0x2c200[8])
+   39: uniq:0x2c300[1] = uniq:0x2c280[1] & 0x1:1
+   40: PF = uniq:0x2c300[1] == 0x0:1
+   41: uniq:0x12800[1] = !ZF
+   42: CBRANCH ram:0x401348[8] if uniq:0x12800[1]
+  -> 0x401348 (Direct)
+  -> 0x40135c (Fallthrough)
+
+Block 0x40135c (1 bytes, 3 ops)
+    0: RIP = LOAD [ram]RSP
+    1: RSP = RSP + 0x8:8
+    2: RETURN RIP
+
+Block 0x401360 (6 bytes, 4 ops)
+    0: RAX = COPY 0x811c9dc5:8
+    1: RIP = LOAD [ram]RSP
+    2: RSP = RSP + 0x8:8
+    3: RETURN RIP

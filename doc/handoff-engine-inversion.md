@@ -5,6 +5,102 @@
 > `doc/handoff-location-ssa.md`; this one does not touch it.
 > `doc/engine-vision.md` holds the design and the order.
 
+## The plugin is deleted, and `r2s` is the tool
+
+The user reversed two of `doc/engine-vision.md`'s non-goals: *"ditch the plugin
+entirely and just focus on r2 core libs, improve it and make r2s as main r2,
+which would be fast, correct, thread safe, sota."* The document used to say no
+rewrite of radare2 and no native terminal surface, both resting on the plugin
+surviving to carry users. It does not survive. `doc/engine-vision.md` is
+rewritten, and its sequencing renumbered, around that.
+
+**63,176 lines went in one commit.** `r2plugin` entirely — 17,514 lines of C and
+headers, 16,021 of Rust — plus `crates/r2source/src/snapshot_wire.rs` at 3,898,
+`tests/e2e`, `tests/r2r` and its fixtures, the two plugin-only cargo aliases,
+and the wire-only setter on `OwnedFunctionSnapshot`. Three things had to move
+rather than vanish: `AdvisoryCallSite` gained a public `described` constructor,
+because an `r2ssa` test had been building one by encoding it to the wire and
+decoding it back; `r2source` lost three schema constants nothing read; and
+`r2ssa` lost a re-export of one of them.
+
+**Nothing regressed.** The workspace suite is green with *no* failures for the
+first time in this branch — the two standing `plain_o2_lift_fixtures` failures
+were the plugin's and died with it, so they never needed re-blessing. The
+certification gate reports the same 98 rendered, 0 refused, 0 undefined reads
+over the same twenty-four ELF binaries.
+
+### The gate this cost, and what replaced it
+
+All 128 `r2r` tests drove `pd:s` or `a:sla`; **none** drove `r2s`. Deleting the
+plugin therefore deleted the project's largest gate on the same day, which the
+user chose knowingly over freezing the plugin as a reference oracle.
+
+The `r2r` database could not be ported as written: its tests use
+`FILE=malloc://64`, `wx`, `|` pipes, `>` redirection and `a:sla.debug.*` — an IO
+scheme and a command language `r2s` does not have, plus a debug surface that
+died with the plugin. So the replacement is a Rust integration suite, which is
+how the engine's own tests already work.
+
+`crates/r2s/tests/commands.rs` runs the binary through `CARGO_BIN_EXE_r2s`, so a
+test can never measure an older artifact than the code it checks — the structural
+fix for the stale-binary mistake that once had a harness describing a tree
+several changes old. Thirteen tests: symbols, grep suffix, discovery with a
+confidence on every row, temporary seek, disassembly, rendered C with its proof
+line, the three tiers answering differently, an unmapped address refused rather
+than invented, and four `insta` snapshots pinning `pdil`, `pdim`, `pdih` and the
+C for one function. The fixture is `tests/coverage/pinned/hashes_gcc_x64_O2`,
+which the repository ships as bytes, so the same assertion means the same
+program on every machine.
+
+The four snapshots were read against `tests/corpus/hashes.c` before blessing.
+`fnv1a32` renders as a seed return for the empty case and a pointer-bounded loop
+otherwise, which is what GCC's `-O2` makes of `for (i = 0; i < n; i++)`; the
+types are register widths because the pinned binary carries no DWARF. The medium
+tier gives every elided value a named reason. All four are right.
+
+`scripts/diff_capture.py` became `scripts/certify_render.py`: its left column was
+the plugin's capture, and with one column left the name was a lie. It is now the
+native certification gate and nothing else.
+
+`tests/coverage/sweep_binary.sh` drives `r2s -q -c 'afl'` and `pdd` instead of
+radare2 with the plugin installed. **The baseline has not been re-blessed**: the
+function set changes from radare2's `aaa; afl` to this engine's discovery, so
+every cell key moves, and that re-bless needs the new output read rather than
+accepted.
+
+CI lost the `r2r`, `source-gold`, `fixed-performance` and `e2e` jobs. `quality`,
+`capture-gate` (now `certify_render.py`) and `coverage` remain, and `quality`
+gained the `--no-fail-fast` it should always have had.
+
+### Owed, and named so it is not a baseline
+
+- **`source-gold` has no replacement yet.** It ran `scripts/reversing_benchmark.py`
+  with `tests/gold/closure_manifest.json` and `tests/gold/source_oracle.json`
+  through radare2 with the plugin staged. The oracle files survive; the 6,800-line
+  harness around them is plugin-coupled down to fingerprinting the installed
+  `.so` and probing `a:sla?` for help text. Porting it wholesale is not obviously
+  right — extracting the closure gate into a small native harness probably is.
+- **`fixed-performance` likewise**, against `tests/gold/mem_scan2_performance.json`.
+- `scripts/kernel_smoke.py`, `scripts/differential_truth.py`,
+  `scripts/bench_semantic_metadata.py` and `tests/decbench/` all still shell out
+  to radare2 with the plugin.
+- The coverage baseline re-bless, above.
+- `tools/dylints/r2sleigh_lints` carries lints written for plugin-side policy
+  (`type_writeback_policy`, `engine_policy_ownership`, `raw_direct_call_target`
+  and their neighbours) whose UI fixtures live under a `ui/r2plugin/` path. They
+  can no longer fire on real code and need auditing rather than leaving.
+
+### One defect found while checking the README
+
+`r2s -q -c 's <entry>; pdd' /bin/ls` on this machine's Mach-O `/bin/ls` returns
+`Parse error: machine-derived CFG contradicts the owned advisory source CFG at
+0x100001784: machine names [], source names [(Fallthrough, 4294973320, None)]`.
+The advisory successor is `0x100001788`, one instruction on, while the machine
+CFG names nothing — so a terminator is being read as leaving the function where
+the capture says it falls through. The twenty-four ELF binaries in the
+certification gate do not reproduce it, so it is Mach-O-shaped or specific to
+that function. Not traced yet.
+
 ## Where `engine/inversion` stands
 
 Verified at `007ff29b`, by running each gate rather than by recollection.

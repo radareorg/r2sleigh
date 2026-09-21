@@ -19,6 +19,9 @@ r2il = { path = "../r2il" }
 clap.workspace = true
 sleigh-config = { workspace = true, optional = true }
 
+[dev-dependencies]
+insta.workspace = true
+
 [features]
 default = []
 sleigh = ["dep:sleigh-config", "r2sleigh-lift/x86", "r2sleigh-lift/arm", "sleigh-config/x86", "sleigh-config/ARM", "sleigh-config/AARCH64"]

@@ -1,0 +1,248 @@
+---
+source: crates/r2s/tests/commands.rs
+expression: run.out
+---
+Function: fnv1a32
+Entry: 0x401330
+Blocks: 5
+
+Block 0x401330:
+  CF_1 = COPY const:0_0
+  OF_1 = COPY const:0_0
+  tmp:70500_1 = RSI_0 & RSI_0
+  SF_1 = tmp:70500_1 s< const:0_0
+  ZF_1 = tmp:70500_1 == const:0_0
+  tmp:2c200_1 = tmp:70500_1 & const:ff_0
+  tmp:2c280_1 = POPCOUNT(tmp:2c200_1)
+  tmp:2c300_1 = tmp:2c280_1 & const:1_0
+  PF_1 = tmp:2c300_1 == const:0_0
+  CBRANCH ram:401360_0 if ZF_1
+  succs: 0x401360, 0x401339
+
+Block 0x401339:
+  preds: 0x401330
+  CF_2 = CARRY(RSI_0, RDI_0)
+  OF_2 = SCARRY(RSI_0, RDI_0)
+  RSI_1 = RSI_0 + RDI_0
+  SF_2 = RSI_1 s< const:0_0
+  ZF_2 = RSI_1 == const:0_0
+  tmp:2c200_2 = RSI_1 & const:ff_0
+  tmp:2c280_2 = POPCOUNT(tmp:2c200_2)
+  tmp:2c300_2 = tmp:2c280_2 & const:1_0
+  PF_2 = tmp:2c300_2 == const:0_0
+  RAX_1 = COPY const:811c9dc5_0
+  succs: 0x401348
+
+Block 0x401348:
+  preds: 0x401339, 0x401348
+  CF_3 = phi([0x401339]: CF_2, [0x401348]: CF_7)
+  OF_3 = phi([0x401339]: OF_2, [0x401348]: OF_7)
+  PF_3 = phi([0x401339]: PF_2, [0x401348]: PF_6)
+  RAX_2 = phi([0x401339]: RAX_1, [0x401348]: RAX_4)
+  RDI_1 = phi([0x401339]: RDI_0, [0x401348]: RDI_2)
+  RDX_1 = phi([0x401339]: RDX_0, [0x401348]: RDX_2)
+  SF_3 = phi([0x401339]: SF_2, [0x401348]: SF_6)
+  ZF_3 = phi([0x401339]: ZF_2, [0x401348]: ZF_6)
+  tmp:11e00_1 = phi([0x401339]: tmp:11e00_0, [0x401348]: tmp:11e00_2)
+  tmp:12800_1 = phi([0x401339]: tmp:12800_0, [0x401348]: tmp:12800_2)
+  tmp:2c200_1 = phi([0x401339]: tmp:2c200_0, [0x401348]: tmp:2c200_2)
+  tmp:2c200_3 = phi([0x401339]: tmp:2c200_2, [0x401348]: tmp:2c200_5)
+  tmp:2c280_3 = phi([0x401339]: tmp:2c280_2, [0x401348]: tmp:2c280_6)
+  tmp:2c300_3 = phi([0x401339]: tmp:2c300_2, [0x401348]: tmp:2c300_6)
+  tmp:2d180_1 = phi([0x401339]: tmp:2d180_0, [0x401348]: tmp:2d180_2)
+  tmp:3f080_1 = phi([0x401339]: tmp:3f080_0, [0x401348]: tmp:3f080_2)
+  tmp:3f180_1 = phi([0x401339]: tmp:3f180_0, [0x401348]: tmp:3f180_2)
+  tmp:4c600_1 = phi([0x401339]: tmp:4c600_0, [0x401348]: tmp:4c600_2)
+  tmp:4c680_1 = phi([0x401339]: tmp:4c680_0, [0x401348]: tmp:4c680_2)
+  tmp:4c780_1 = phi([0x401339]: tmp:4c780_0, [0x401348]: tmp:4c780_2)
+  tmp:4c900_1 = phi([0x401339]: tmp:4c900_0, [0x401348]: tmp:4c900_2)
+  tmp:11e00_2 = LOAD [ram]RDI_1
+  tmp:lane:401348:1:0_1 = ZEXT(tmp:11e00_2)
+  RDX_2 = ZEXT(tmp:lane:401348:1:0_1)
+  CF_4 = CARRY(RDI_1, const:1_0)
+  OF_4 = SCARRY(RDI_1, const:1_0)
+  RDI_2 = RDI_1 + const:1_0
+  SF_4 = RDI_2 s< const:0_0
+  ZF_4 = RDI_2 == const:0_0
+  tmp:2c200_4 = RDI_2 & const:ff_0
+  tmp:2c280_4 = POPCOUNT(tmp:2c200_4)
+  tmp:2c300_4 = tmp:2c280_4 & const:1_0
+  PF_4 = tmp:2c300_4 == const:0_0
+  CF_5 = COPY const:0_0
+  OF_5 = COPY const:0_0
+  tmp:lane:401348:e:1_1 = SUBPIECE(RAX_2, 0)
+  tmp:lane:401348:e:2_1 = COPY tmp:lane:401348:1:0_1
+  tmp:lane:401348:e:3_1 = tmp:lane:401348:e:1_1 ^ tmp:lane:401348:1:0_1
+  RAX_3 = ZEXT(tmp:lane:401348:e:3_1)
+  tmp:lane:401348:10:4_1 = COPY tmp:lane:401348:e:3_1
+  SF_5 = tmp:lane:401348:e:3_1 s< const:0_0
+  ZF_5 = tmp:lane:401348:e:3_1 == const:0_0
+  tmp:2c200_2 = tmp:lane:401348:e:3_1 & const:ff_0
+  tmp:2c280_5 = POPCOUNT(tmp:2c200_2)
+  tmp:2c300_5 = tmp:2c280_5 & const:1_0
+  PF_5 = tmp:2c300_5 == const:0_0
+  tmp:lane:401348:16:5_1 = COPY tmp:lane:401348:e:3_1
+  tmp:4c600_2 = SEXT(tmp:lane:401348:e:3_1)
+  tmp:4c680_2 = COPY const:1000193_0
+  tmp:4c780_2 = tmp:4c600_2 * tmp:4c680_2
+  tmp:lane:401348:19:6_1 = SUBPIECE(tmp:4c780_2, 0)
+  tmp:4c900_2 = SUBPIECE(tmp:4c780_2, 4)
+  tmp:2d180_2 = SEXT(tmp:lane:401348:19:6_1)
+  CF_6 = tmp:2d180_2 != tmp:4c780_2
+  OF_6 = COPY CF_6
+  RAX_4 = ZEXT(tmp:lane:401348:19:6_1)
+  tmp:3f080_2 = COPY RSI_1
+  CF_7 = tmp:3f080_2 < RDI_2
+  OF_7 = SBORROW(tmp:3f080_2, RDI_2)
+  tmp:3f180_2 = tmp:3f080_2 - RDI_2
+  SF_6 = tmp:3f180_2 s< const:0_0
+  ZF_6 = tmp:3f180_2 == const:0_0
+  tmp:2c200_5 = tmp:3f180_2 & const:ff_0
+  tmp:2c280_6 = POPCOUNT(tmp:2c200_5)
+  tmp:2c300_6 = tmp:2c280_6 & const:1_0
+  PF_6 = tmp:2c300_6 == const:0_0
+  tmp:12800_2 = !ZF_6
+  CBRANCH ram:401348_0 if tmp:12800_2
+  succs: 0x401348, 0x40135c
+
+Block 0x40135c:
+  preds: 0x401348
+  RIP_1 = LOAD [ram]RSP_0
+  RSP_1 = RSP_0 + const:8_0
+  RETURN RIP_1
+
+Block 0x401360:
+  preds: 0x401330
+  RAX_5 = COPY const:811c9dc5_0
+  RIP_2 = LOAD [ram]RSP_0
+  RSP_2 = RSP_0 + const:8_0
+  RETURN RIP_2
+
+
+Bindings: 5
+  b0 RSI_0 Int { bits: 64, signedness: Unsigned } Parameter { slot: 1 } [3 18]
+  b1 RDI_0 Int { bits: 64, signedness: Unsigned } Parameter { slot: 0 } [15 35 36]
+  b2 RAX_1 Int { bits: 64, signedness: Unsigned } Local [26 33 34]
+  b3 tmp:11e00_2 Int { bits: 8, signedness: Unsigned } Local [45]
+  b4 stack_p0 Int { bits: 64, signedness: Unsigned } StackObject { object: ObjectId(1) } entry-declared []
+Values:
+  const:0_0 elided UnobservedValue
+  CF_1 elided UnobservedValue
+  OF_1 elided UnobservedValue
+  RSI_0 bound b0
+  tmp:70500_1 inline TermId(3)
+  const:0_0 inline TermId(6)
+  SF_1 elided UnobservedValue
+  ZF_1 inline TermId(138)
+  const:ff_0 elided UnobservedValue
+  tmp:2c200_1 elided UnobservedValue
+  tmp:2c280_1 elided UnobservedValue
+  const:1_0 elided UnobservedValue
+  tmp:2c300_1 elided UnobservedValue
+  PF_1 elided UnobservedValue
+  ram:401360_0 elided DirectControlTarget
+  RDI_0 bound b1
+  CF_2 elided UnobservedValue
+  OF_2 elided UnobservedValue
+  RSI_1 bound b0
+  SF_2 elided UnobservedValue
+  ZF_2 elided UnobservedValue
+  tmp:2c200_2 elided UnobservedValue
+  tmp:2c280_2 elided UnobservedValue
+  tmp:2c300_2 elided UnobservedValue
+  PF_2 elided UnobservedValue
+  const:811c9dc5_0 inline TermId(37)
+  RAX_1 bound b2
+  CF_7 elided UnobservedValue
+  CF_3 elided UnobservedMerge
+  OF_7 elided UnobservedValue
+  OF_3 elided UnobservedMerge
+  PF_6 elided UnobservedValue
+  PF_3 elided UnobservedMerge
+  RAX_4 bound b2
+  RAX_2 bound b2
+  RDI_2 bound b1
+  RDI_1 bound b1
+  RDX_0 elided UnobservedValue
+  RDX_2 elided UnobservedValue
+  RDX_1 elided UnobservedMerge
+  SF_6 elided UnobservedValue
+  SF_3 elided UnobservedMerge
+  ZF_6 inline TermId(154)
+  ZF_3 elided UnobservedMerge
+  tmp:11e00_0 elided UnobservedValue
+  tmp:11e00_2 bound b3
+  tmp:11e00_1 elided UnobservedMerge
+  tmp:12800_0 elided UnobservedValue
+  tmp:12800_2 inline TermId(156)
+  tmp:12800_1 elided UnobservedMerge
+  tmp:2c200_0 elided UnobservedValue
+  tmp:2c200_2 elided UnobservedValue
+  tmp:2c200_1 elided UnobservedMerge
+  tmp:2c200_5 elided UnobservedValue
+  tmp:2c200_3 elided UnobservedMerge
+  tmp:2c280_6 elided UnobservedValue
+  tmp:2c280_3 elided UnobservedMerge
+  tmp:2c300_6 elided UnobservedValue
+  tmp:2c300_3 elided UnobservedMerge
+  tmp:2d180_0 elided UnobservedValue
+  tmp:2d180_2 elided UnobservedValue
+  tmp:2d180_1 elided UnobservedMerge
+  tmp:3f080_0 elided UnobservedValue
+  tmp:3f080_2 inline TermId(114)
+  tmp:3f080_1 elided UnobservedMerge
+  tmp:3f180_0 elided UnobservedValue
+  tmp:3f180_2 inline TermId(121)
+  tmp:3f180_1 elided UnobservedMerge
+  tmp:4c600_0 elided UnobservedValue
+  tmp:4c600_2 inline TermId(147)
+  tmp:4c600_1 elided UnobservedMerge
+  tmp:4c680_0 elided UnobservedValue
+  tmp:4c680_2 inline TermId(103)
+  tmp:4c680_1 elided UnobservedMerge
+  tmp:4c780_0 elided UnobservedValue
+  tmp:4c780_2 inline TermId(148)
+  tmp:4c780_1 elided UnobservedMerge
+  tmp:4c900_0 elided UnobservedValue
+  tmp:4c900_2 elided UnobservedValue
+  tmp:4c900_1 elided UnobservedMerge
+  tmp:lane:401348:1:0_1 inline TermId(63)
+  const:1_0 inline TermId(66)
+  CF_4 elided UnobservedValue
+  OF_4 elided UnobservedValue
+  SF_4 elided UnobservedValue
+  ZF_4 elided UnobservedValue
+  tmp:2c200_4 elided UnobservedValue
+  tmp:2c280_4 elided UnobservedValue
+  tmp:2c300_4 elided UnobservedValue
+  PF_4 elided UnobservedValue
+  CF_5 elided UnobservedValue
+  OF_5 elided UnobservedValue
+  tmp:lane:401348:e:1_1 inline TermId(86)
+  tmp:lane:401348:e:2_1 elided UnobservedValue
+  tmp:lane:401348:e:3_1 inline TermId(141)
+  RAX_3 elided UnobservedValue
+  tmp:lane:401348:10:4_1 elided UnobservedValue
+  const:0_0 elided UnobservedValue
+  SF_5 elided UnobservedValue
+  ZF_5 elided UnobservedValue
+  const:ff_0 elided UnobservedValue
+  tmp:2c280_5 elided UnobservedValue
+  tmp:2c300_5 elided UnobservedValue
+  PF_5 elided UnobservedValue
+  tmp:lane:401348:16:5_1 elided UnobservedValue
+  const:1000193_0 inline TermId(103)
+  tmp:lane:401348:19:6_1 inline TermId(149)
+  CF_6 elided UnobservedValue
+  OF_6 elided UnobservedValue
+  ram:401348_0 elided DirectControlTarget
+  RSP_0 elided DeadStackBase
+  RIP_1 elided ReturnControl
+  const:8_0 elided DeadStackBase
+  RSP_1 elided DeadStackBase
+  RAX_5 inline TermId(37)
+  RIP_2 elided ReturnControl
+  RSP_2 elided DeadStackBase
+  RCX_0 elided UnobservedValue
+  R8_0 elided UnobservedValue
+  R9_0 elided UnobservedValue
