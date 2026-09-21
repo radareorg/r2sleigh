@@ -30628,3 +30628,54 @@ left in `r2types::analysis` rank two candidate types against each other, which
 wants an ordinal in the type layer rather than a shared trait with discovery.
 Merging them would put one name on two questions, which is the thing the rest of
 this work is undoing.
+
+## semantic.rs became one file per phase
+
+19,892 lines in one file, holding nineteen collection phases and a 5,195-line
+test module. It is now `crates/r2ssa/src/semantic/`, twenty-one files with a
+largest of 2,732.
+
+The boundaries were read off the call graph rather than off line ranges. Each
+phase's entry point seeds a reachability walk; an item exactly one phase reaches
+belongs to that phase, an item several reach is shared, and the shared set
+splits again into the fact types (`facts.rs`) and the helpers (`shared.rs`).
+That produced `certificates` 4,424 lines, `boundaries` 1,796, `objects`,
+`structured`, `predicates`, `loops`, `control_domains`, `private_objects`,
+`assumptions`, `declared_slots` and `call_sites` under 600 each. The
+certificates module was then split the same way by its own five sub-collectors:
+stack, returns, call results, expressions and what more than one of them asks.
+
+Three things the split was for, beyond size.
+
+**The collector can be stopped.** `collect_inner` contained no work-control
+poll, so preparation -- the most expensive thing the engine does -- was the one
+stretch a deadline could not reach, and a cancelled request still paid for every
+phase. It now takes a control and polls between all twelve marked phases.
+
+**A phase's cost is its own.** The trace reported time and bytes as a running
+total from the collector's entry, so a reader had to difference the lines by
+hand, and no ratio against the function's size was computed anywhere. The
+recorder now reports what each phase spent and microseconds per block beside it,
+because a phase that costs a lot is only a defect when it costs more than the
+function it is reading.
+
+**Tracing costs a branch when it is off.** The old closure paid two relaxed
+atomic loads and an `Instant::elapsed` per phase whether or not
+`R2DEC_TRACE_REFUSAL` was set. The recorder reads the flag once when it opens.
+
+The collector's six parameters became one `CollectionOver`, which is what let
+the control be added without crossing the argument limit.
+
+**What the plan asked for here and is not done.** Recomputing a subset of the
+phases. All three call sites -- preparation, assumptions and interface recovery
+-- ask for the whole set today, so a subset mechanism would have no consumer and
+no test that means anything. The one place it would pay is
+`recover_interface.rs`, which runs all nineteen phases and then reads four
+facts; making that cheap is a piece of work with a measurement attached to it,
+and it wants doing when someone has that measurement rather than now.
+
+The test module split by the phase output each test asserts on -- values,
+objects, certificates, predicates, boundaries -- leaving 2,547 lines of
+fixtures and end-to-end tests of the collector as a whole. Those genuinely test
+the collector rather than a phase, and splitting them further would be a
+filing decision rather than a structural one.

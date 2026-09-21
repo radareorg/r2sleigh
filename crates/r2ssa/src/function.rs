@@ -453,14 +453,17 @@ impl SsaArtifact {
         let mut liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         let graph_built_bytes = r2il::allocation::live_bytes();
-        let facts = PreparedFunctionFacts::collect_with_context(
-            &function,
-            &graph,
-            &storage_spans,
-            &AssumptionSet::default(),
-            &machine_context,
-            "prepare",
-        );
+        let facts = PreparedFunctionFacts::collect_with_context_and_control(
+            crate::semantic::CollectionOver {
+                function: &function,
+                graph: &graph,
+                storage_spans: &storage_spans,
+                assumptions: &AssumptionSet::default(),
+                machine_context: Some(&machine_context),
+                site: "prepare",
+            },
+            control,
+        )?;
         // What one prepared function holds is the space every later stage has
         // to work above, so it is reported beside the phases that built it.
         r2il::refusal_evidence!(

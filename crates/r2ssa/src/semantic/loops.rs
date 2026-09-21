@@ -1,0 +1,517 @@
+//! Loops, their carriers and the inductions they run.
+
+use super::*;
+
+/// Every loop-carried value whose motion round the latch is known exactly.
+///
+/// Derived from the carrier facts rather than from a second walk of the CFG:
+/// the carriers already prove which merge carries a value, which edge enters
+/// it and which edge updates it, and this only asks what the update does to
+/// the merge. A carrier with more than one update edge is skipped, because two
+/// latches may step the value differently and one step would not describe
+/// both.
+pub(crate) fn collect_induction_facts(
+    graph: &SsaGraph,
+    loops: &BTreeMap<LoopId, StructuredLoopFact>,
+) -> BTreeMap<ValueId, InductionFact> {
+    let mut inductions = BTreeMap::new();
+    for loop_fact in loops.values() {
+        for carrier in &loop_fact.carriers {
+            let [update] = carrier.updates.as_slice() else {
+                continue;
+            };
+            let [entry] = carrier.entries.as_slice() else {
+                continue;
+            };
+            let width_bits = carrier.width.saturating_mul(8).max(1);
+            let Some(step) =
+                induction_step_for_update(graph, carrier.phi, update.value, width_bits)
+            else {
+                continue;
+            };
+            let fact = InductionFact {
+                loop_id: loop_fact.id,
+                header: loop_fact.header,
+                phi: carrier.phi,
+                init: entry.value,
+                update: update.value,
+                latch: update.predecessor,
+                width_bits,
+                step,
+            };
+            // A fact that does not prove itself against the graph it came from
+            // is a fact nobody should read.
+            if fact.validate(graph) {
+                inductions.insert(carrier.phi, fact);
+            }
+        }
+    }
+    inductions
+}
+
+pub(crate) fn collect_structured_loop_facts(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    predicates: &PredicateFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
+    storage_spans: &StorageSpans,
+    machine_context: Option<&SourceMachineContext>,
+) -> BTreeMap<LoopId, StructuredLoopFact> {
+    let mut latches_by_header = BTreeMap::<u64, BTreeSet<u64>>::new();
+    for &block_addr in function.block_addrs() {
+        for succ in function.successors(block_addr) {
+            if function.dominates(succ, block_addr) {
+                latches_by_header
+                    .entry(succ)
+                    .or_default()
+                    .insert(block_addr);
+            }
+        }
+    }
+
+    let mut loops = BTreeMap::new();
+    for (idx, (header, latches)) in latches_by_header.into_iter().enumerate() {
+        let id = LoopId(idx as u32);
+        let body_set = natural_loop_body(function, header, &latches);
+        let body = body_set.iter().copied().collect::<Vec<_>>();
+        let exits = loop_exits(function, &body_set);
+        let condition = loop_condition(predicates, header, &body_set, &exits);
+        let loop_ = NaturalLoop {
+            id,
+            header,
+            latches: &latches,
+            body: &body_set,
+        };
+        let carriers = loop_carrier_facts(
+            Body {
+                function,
+                graph,
+                machine_context,
+            },
+            loop_,
+            live_out,
+            storage_spans,
+        );
+        let (induction_phi, induction_init, induction_update) =
+            loop_induction_values(graph, predicates, condition, loop_);
+        let bound = loop_bound_value(
+            graph,
+            predicates,
+            condition,
+            induction_phi,
+            induction_update,
+        );
+        loops.insert(
+            id,
+            StructuredLoopFact {
+                id,
+                kind: if latches.contains(&header) {
+                    StructuredLoopKind::SelfLoop
+                } else {
+                    StructuredLoopKind::Natural
+                },
+                header,
+                latches: latches.iter().copied().collect(),
+                body,
+                exits,
+                condition,
+                carriers,
+                induction_phi,
+                induction_init,
+                induction_update,
+                bound,
+            },
+        );
+    }
+    loops
+}
+
+/// One natural loop: which it is, where it begins, the edges back to it and
+/// the blocks it contains.
+///
+/// The four are computed together and every rule that reasons about a loop
+/// takes all four, so they are one thing rather than four parameters each rule
+/// takes apart again.
+#[derive(Clone, Copy)]
+pub(crate) struct NaturalLoop<'a> {
+    pub(crate) id: LoopId,
+    pub(crate) header: u64,
+    pub(crate) latches: &'a BTreeSet<u64>,
+    pub(crate) body: &'a BTreeSet<u64>,
+}
+
+pub(crate) fn loop_carrier_facts(
+    body: Body<'_>,
+    loop_: NaturalLoop<'_>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    storage_spans: &StorageSpans,
+) -> Vec<LoopCarrierFact> {
+    let Body {
+        function,
+        graph,
+        machine_context,
+    } = body;
+    let NaturalLoop {
+        id: loop_id,
+        header,
+        latches,
+        body: loop_body,
+    } = loop_;
+    let Some(header_block) = function.get_block(header) else {
+        return Vec::new();
+    };
+    let mut carriers = header_block
+        .phis
+        .iter()
+        .filter_map(|phi| {
+            let phi_value = graph.value_id_for_var(&phi.dst)?;
+            let phi_inst = graph.def_inst(phi_value)?;
+            // Pruned SSA is not guaranteed at this seam. A loop-local output
+            // can induce a syntactic header phi whose value is never read;
+            // such a dead merge carries no live state and must not acquire a
+            // preservation obligation. Being read includes being read by the
+            // caller, which the use list alone cannot see: a function's result
+            // has no reader anywhere inside it.
+            if !crate::liveout::is_read(graph, live_out, phi_value) {
+                return None;
+            }
+            let mut entries = Vec::new();
+            let mut updates = Vec::new();
+            for (input_idx, (predecessor, source)) in phi.sources.iter().enumerate() {
+                let edge = LoopCarrierEdgeValue {
+                    predecessor: *predecessor,
+                    value: graph.value_id_for_var(source)?,
+                    site: UseSite {
+                        inst: phi_inst,
+                        input_idx,
+                    },
+                };
+                if !edge.validate(graph) {
+                    return None;
+                }
+                if latches.contains(predecessor) {
+                    updates.push(LoopCarrierUpdateFact {
+                        predecessor: edge.predecessor,
+                        value: edge.value,
+                        site: edge.site,
+                        identity_values: exact_copy_identity_values(graph, edge.value),
+                    });
+                } else {
+                    entries.push(edge);
+                }
+            }
+            if entries.is_empty() || updates.is_empty() {
+                return None;
+            }
+            entries.sort_unstable();
+            entries.dedup();
+            updates.sort_unstable();
+            updates.dedup();
+            Some(LoopCarrierFact {
+                id: SemanticId::loop_carrier(phi_value),
+                loop_id,
+                header,
+                phi: phi_value,
+                width: phi.dst.size,
+                identity_values: BTreeSet::from([phi_value]),
+                entries,
+                updates,
+                dominating_initializers: Vec::new(),
+                members: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // A post-loop phi such as `result = phi(init, update)` denotes the same
+    // mutable carrier after structured control flow. Resolve the transitive
+    // relation through a sorted worklist: every phi edge is reconsidered only
+    // when a newly certified output can change its answer.
+    let mut owners_by_value = BTreeMap::<ValueId, BTreeSet<usize>>::new();
+    let mut continuing_owners_by_value = BTreeMap::<ValueId, BTreeSet<usize>>::new();
+    for (carrier_index, carrier) in carriers.iter().enumerate() {
+        for value in carrier
+            .identity_values
+            .iter()
+            .copied()
+            .chain(carrier.entries.iter().map(|edge| edge.value))
+            .chain(carrier.updates.iter().flat_map(|update| {
+                std::iter::once(update.value).chain(update.identity_values.iter().copied())
+            }))
+        {
+            owners_by_value
+                .entry(value)
+                .or_default()
+                .insert(carrier_index);
+        }
+        for value in carrier
+            .identity_values
+            .iter()
+            .copied()
+            .chain(carrier.updates.iter().flat_map(|update| {
+                std::iter::once(update.value).chain(update.identity_values.iter().copied())
+            }))
+        {
+            continuing_owners_by_value
+                .entry(value)
+                .or_default()
+                .insert(carrier_index);
+        }
+    }
+    let mut pending = graph
+        .insts
+        .iter()
+        .filter(|inst| {
+            matches!(inst.payload, InstPayload::Phi { .. })
+                && graph
+                    .block(inst.block)
+                    .is_some_and(|block| block.addr != header)
+        })
+        .map(|inst| inst.id)
+        .collect::<BTreeSet<_>>();
+    while let Some(phi_inst) = pending.pop_first() {
+        let Some(inst) = graph.inst(phi_inst) else {
+            continue;
+        };
+        let InstPayload::Phi { predecessors } = &inst.payload else {
+            continue;
+        };
+        let Some(output) = inst.output else {
+            continue;
+        };
+        if owners_by_value.contains_key(&output)
+            || predecessors.len() != inst.inputs.len()
+            || inst.inputs.is_empty()
+            || inst.inputs.iter().copied().collect::<BTreeSet<_>>().len() != inst.inputs.len()
+        {
+            continue;
+        }
+        let Some(mut candidate_owners) = inst
+            .inputs
+            .first()
+            .and_then(|input| owners_by_value.get(input))
+            .cloned()
+        else {
+            continue;
+        };
+        for input in inst.inputs.iter().skip(1) {
+            let Some(input_owners) = owners_by_value.get(input) else {
+                candidate_owners.clear();
+                break;
+            };
+            candidate_owners.retain(|owner| input_owners.contains(owner));
+        }
+        candidate_owners.retain(|owner| {
+            inst.inputs.iter().any(|input| {
+                continuing_owners_by_value
+                    .get(input)
+                    .is_some_and(|owners| owners.contains(owner))
+            })
+        });
+        if candidate_owners.len() != 1 {
+            continue;
+        }
+        let carrier_index = *candidate_owners
+            .first()
+            .expect("one exact carrier owner remains");
+        let source_edges = predecessors
+            .iter()
+            .copied()
+            .zip(inst.inputs.iter().copied())
+            .enumerate()
+            .filter_map(|(input_idx, (predecessor, value))| {
+                let edge = LoopCarrierEdgeValue {
+                    predecessor: graph.block(predecessor)?.addr,
+                    value,
+                    site: UseSite {
+                        inst: phi_inst,
+                        input_idx,
+                    },
+                };
+                edge.validate(graph).then_some(edge)
+            })
+            .collect::<Vec<_>>();
+        if source_edges.len() != inst.inputs.len()
+            || !carriers[carrier_index].identity_values.insert(output)
+        {
+            continue;
+        }
+        for edge in source_edges {
+            if carriers[carrier_index]
+                .entries
+                .iter()
+                .any(|entry| entry.value == edge.value)
+                && function.dominates(edge.predecessor, header)
+            {
+                carriers[carrier_index].dominating_initializers.push(edge);
+            }
+        }
+        owners_by_value
+            .entry(output)
+            .or_default()
+            .insert(carrier_index);
+        continuing_owners_by_value
+            .entry(output)
+            .or_default()
+            .insert(carrier_index);
+        for site in graph.use_sites(output) {
+            if graph
+                .inst(site.inst)
+                .is_some_and(|use_inst| matches!(use_inst.payload, InstPayload::Phi { .. }))
+            {
+                pending.insert(site.inst);
+            }
+        }
+    }
+
+    for carrier in &mut carriers {
+        carrier.dominating_initializers.sort_unstable();
+        carrier.dominating_initializers.dedup();
+    }
+    carriers.retain(|carrier| carrier.validate(graph));
+    carriers.sort_by_key(|carrier| carrier.phi);
+    let Some(member_rows) = loop_carrier_member_rows(
+        graph,
+        header,
+        latches,
+        loop_body,
+        storage_spans,
+        machine_context,
+        &carriers,
+    ) else {
+        return Vec::new();
+    };
+    for (carrier, members) in carriers.iter_mut().zip(member_rows) {
+        carrier.members = members;
+    }
+    carriers
+}
+
+pub(crate) fn natural_loop_body(
+    function: &SSAFunction,
+    header: u64,
+    latches: &BTreeSet<u64>,
+) -> BTreeSet<u64> {
+    let mut body = BTreeSet::new();
+    body.insert(header);
+    let mut stack = latches.iter().copied().collect::<Vec<_>>();
+    while let Some(addr) = stack.pop() {
+        if !function.dominates(header, addr) {
+            continue;
+        }
+        if !body.insert(addr) {
+            continue;
+        }
+        for pred in function.predecessors(addr) {
+            if !body.contains(&pred) {
+                stack.push(pred);
+            }
+        }
+    }
+    body
+}
+
+pub(crate) fn loop_exits(function: &SSAFunction, body: &BTreeSet<u64>) -> Vec<u64> {
+    let mut exits = BTreeSet::new();
+    for block in body {
+        for succ in function.successors(*block) {
+            if !body.contains(&succ) {
+                exits.insert(succ);
+            }
+        }
+    }
+    exits.into_iter().collect()
+}
+
+pub(crate) fn loop_induction_values(
+    graph: &SsaGraph,
+    predicates: &PredicateFacts,
+    condition: Option<PredicateId>,
+    loop_: NaturalLoop<'_>,
+) -> (Option<ValueId>, Option<ValueId>, Option<ValueId>) {
+    let NaturalLoop {
+        header,
+        latches,
+        body,
+        ..
+    } = loop_;
+    let Some(header_id) = graph.block_id_for_addr(header) else {
+        return (None, None, None);
+    };
+    let Some(header_block) = graph.block(header_id) else {
+        return (None, None, None);
+    };
+
+    let mut best = None;
+    for inst_id in &header_block.insts {
+        let Some(inst) = graph.inst(*inst_id) else {
+            continue;
+        };
+        let InstPayload::Phi { predecessors } = &inst.payload else {
+            continue;
+        };
+        let Some(output) = inst.output else {
+            continue;
+        };
+        let mut init = None;
+        let mut update = None;
+        for (pred_id, input) in predecessors
+            .iter()
+            .copied()
+            .zip(inst.inputs.iter().copied())
+        {
+            let Some(pred_addr) = graph.block(pred_id).map(|block| block.addr) else {
+                continue;
+            };
+            if latches.contains(&pred_addr) {
+                update = Some(input);
+            } else if !body.contains(&pred_addr) {
+                init = Some(input);
+            }
+        }
+        if init.is_none() || update.is_none() {
+            continue;
+        }
+        let condition_dependency_rank = condition
+            .and_then(|condition| predicates.predicates.get(&condition))
+            .and_then(|predicate| predicate.comparison.as_ref())
+            .is_some_and(|comparison| {
+                value_depends_on(graph, comparison.lhs, output)
+                    || value_depends_on(graph, comparison.rhs, output)
+            });
+        let candidate = (
+            usize::from(!condition_dependency_rank),
+            output,
+            init,
+            update,
+        );
+        if best.as_ref().is_none_or(
+            |current: &(usize, ValueId, Option<ValueId>, Option<ValueId>)| candidate < *current,
+        ) {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(_, phi, init, update)| (Some(phi), init, update))
+        .unwrap_or((None, None, None))
+}
+
+pub(crate) fn loop_bound_value(
+    graph: &SsaGraph,
+    predicates: &PredicateFacts,
+    condition: Option<PredicateId>,
+    induction_phi: Option<ValueId>,
+    induction_update: Option<ValueId>,
+) -> Option<ValueId> {
+    let comparison = predicates
+        .predicates
+        .get(&condition?)?
+        .comparison
+        .as_ref()?;
+    let induction = induction_phi.or(induction_update)?;
+    let lhs_depends = value_depends_on(graph, comparison.lhs, induction);
+    let rhs_depends = value_depends_on(graph, comparison.rhs, induction);
+    match (lhs_depends, rhs_depends) {
+        (true, false) => Some(comparison.rhs),
+        (false, true) => Some(comparison.lhs),
+        _ => None,
+    }
+}
