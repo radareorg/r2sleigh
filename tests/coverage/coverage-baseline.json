@@ -447,7 +447,7 @@
     "system_ls_a97c50d3::0x100001564": "rendered",
     "system_ls_a97c50d3::0x1000016d4": "rendered",
     "system_ls_a97c50d3::0x1000019f8": "rendered",
-    "system_ls_a97c50d3::0x100001a78": "native rendering refused: missing machine projection authorization: OpLowering(memory_renderer.rs)",
+    "system_ls_a97c50d3::0x100001a78": "native rendering refused: observation journal: ConflictingValue",
     "system_ls_a97c50d3::0x100002328": "rendered",
     "system_ls_a97c50d3::0x100002400": "rendered",
     "system_ls_a97c50d3::0x100002524": "rendered",
