@@ -448,6 +448,16 @@ mod listing {
         insta::assert_snapshot!("fnv1a32_pd", run.out);
     }
 
+    /// The annotations, on the one pinned binary that has all three shapes:
+    /// a call through a relocated slot, a jump through an unnamed one, and a
+    /// compare against a data byte.
+    #[test]
+    fn what_a_line_reads_is_pinned() {
+        let run = super::r2s("s 0x401000; pd 24");
+        assert!(run.ok, "{}", run.out);
+        insta::assert_snapshot!("reads_pd", run.out);
+    }
+
     #[test]
     fn the_aarch64_listing_is_pinned() {
         let run = at(

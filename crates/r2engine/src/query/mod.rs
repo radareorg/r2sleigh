@@ -15,7 +15,7 @@
 
 pub mod listing;
 
-pub use listing::{Annotation, AnnotationKind, Line, Listing};
+pub use listing::{Annotation, AnnotationKind, Line, Listing, Memory};
 
 /// How much work a request permits.
 ///

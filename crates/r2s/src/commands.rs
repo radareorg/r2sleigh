@@ -788,7 +788,7 @@ impl r2engine::native::Program for OpenImage<'_> {
 
 #[cfg(feature = "sleigh")]
 fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> {
-    use r2engine::query::listing::{Listing, listing};
+    use r2engine::query::listing::{Listing, Memory, listing};
 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
@@ -797,11 +797,21 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
         .machine_at(start)
         .ok_or("no decoder for this architecture")?;
     let program = open_image(session, None);
+    let memory = Memory {
+        program: &program,
+        // The container states how a word in memory reads. ARM BE8 puts
+        // little-endian instructions in a big-endian program, so the decoder's
+        // own specification is the wrong thing to ask.
+        endian: match session.image.arch().endian {
+            r2image::Endian::Little => r2il::Endianness::Little,
+            r2image::Endian::Big => r2il::Endianness::Big,
+        },
+    };
     let answer = listing(
         machine,
-        &program,
+        &memory,
         Listing { start, count },
-        r2engine::query::Work::Decode,
+        r2engine::query::Work::InstructionLocal,
         session.revision(),
     );
     if answer.value.is_empty() {
@@ -825,60 +835,44 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     }
     let text = match &line.syntax {
         None => "invalid".to_owned(),
-        Some(syntax) => {
-            let text = syntax.text();
-            let text = match session.image.arch().name {
-                "ARM" => named_literal_pool(session, &text),
-                _ => text,
-            };
-            crate::names::spell(&session.names, &text)
-        }
+        Some(syntax) => crate::names::spell(&session.names, &syntax.text()),
     };
     format!(
-        "            {:#010x}      {:<14} {}\n",
-        line.address, hex, text
+        "            {:#010x}      {:<14} {}{}\n",
+        line.address,
+        hex,
+        text,
+        held(session, line)
     )
 }
 
-/// An ARM literal-pool load, spelled as the name the pool word holds.
+/// What this revision holds where the instruction reads, as a trailing note.
 ///
-/// `ldr ip, =__libc_csu_fini` is what the source wrote; the assembler put the
-/// address in a pool and the instruction reads it, so Sleigh prints the pool's
-/// address. The name is the source's, and the pool word is in the image, so
-/// the load is spelled by what it will produce where that has a name.
+/// The value is stated beside the read rather than substituted into it. A pool
+/// load used to be spelled `ldr r3, sym.foo`, which says the load returns that
+/// address; all this program states is that the word there is that address
+/// now, and the instruction text stays what the machine encodes.
 #[cfg(feature = "sleigh")]
-fn named_literal_pool(session: &Session, text: &str) -> String {
-    let Some(rest) = text.strip_prefix("ldr ") else {
-        return text.to_owned();
-    };
-    let Some(open) = rest.rfind('[') else {
-        return text.to_owned();
-    };
-    let Some(close) = rest[open..].find(']').map(|end| open + end) else {
-        return text.to_owned();
-    };
-    let Some(pool) = rest[open + 1..close]
-        .strip_prefix("0x")
-        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-    else {
-        return text.to_owned();
-    };
-    let width = usize::try_from(session.image.arch().bits / 8)
-        .unwrap_or(4)
-        .min(8);
-    let Some(word) = session.image.read(pool, width) else {
-        return text.to_owned();
-    };
-    let mut bytes = [0u8; 8];
-    bytes[..width].copy_from_slice(&word);
-    // The pool word is data, so the memory endianness reads it.
-    let held = match session.image.arch().endian {
-        r2image::Endian::Little => u64::from_le_bytes(bytes),
-        r2image::Endian::Big => u64::from_be_bytes(bytes) >> (8 * (8 - width as u32)),
-    };
-    match session.names.of(held) {
-        Some(name) => format!("ldr {}{}", &rest[..open], name.spelled()),
-        None => text.to_owned(),
+fn held(session: &Session, line: &r2engine::query::Line) -> String {
+    let mut notes = Vec::new();
+    for annotation in &line.annotations {
+        let r2engine::query::AnnotationKind::Holds {
+            address,
+            width,
+            value,
+        } = annotation.kind
+        else {
+            continue;
+        };
+        let named = match session.names.of(value) {
+            Some(name) => format!(" {}", name.spelled()),
+            None => String::new(),
+        };
+        notes.push(format!("[{address:#x}:{width}]={value:#x}{named}"));
+    }
+    match notes.is_empty() {
+        true => String::new(),
+        false => format!(" ; {}", notes.join(" ")),
     }
 }
 

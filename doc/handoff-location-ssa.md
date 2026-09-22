@@ -31173,3 +31173,63 @@ The two left are `0x100001a78` (`OpLowering(memory_renderer.rs)`) and
 the bytes there are `udf`, and we render `__builtin_trap()` -- honest about the
 bytes, wrong about it being a function. A declared start whose first
 instruction is undefined is data, which is the rule to add.
+
+## The listing answers from the engine
+
+`pd` used to build each line by rewriting the decoder's prose seven times and
+then substituting a name wherever a hexadecimal run happened to equal an
+address it knew, which is how a `-0x4` displacement once came out as
+`-loc._nl_current_LC_MONETARY`. The decoder now says how the instruction is
+spelled *and* where each number in it is written, the engine says which of
+those numbers the instruction actually uses as an address, and `r2s` lays out
+columns and nothing else.
+
+What that took, in the order it landed, each step green before the next:
+
+1. Three `pd` snapshots, one per architecture, so the listing had a pin before
+   a line of it moved.
+2. `Image::byte_revision`, and a `Session` that derives its tables again when
+   the bytes move. The bug that motivated it was live: `imports` is *decoded*
+   from PLT stub bytes, it decides `is_entry`, and `is_entry` bounds every body
+   walk, so patching a stub left every subsequent walk ending in the wrong
+   place. The test for it has to patch and re-read inside one process, because
+   each `r2s` invocation is a fresh one and derivation happened after the patch
+   either way.
+3. `r2sleigh-lift::syntax`: the five spelling rewrites, moved verbatim, plus
+   `NumberSpan`. Spelling by value alone cannot tell two operands of one
+   instruction apart; a span says which number is being claimed about.
+4. `r2ssa::origin`: the forward reaching-origin fold that was inlined inside
+   `terminal_indirect_loaded_slot`, named and made public, with
+   `encoded_target` beside it for the one question a RAM varnode answers
+   differently -- a branch target *is* its address, where a data operand is
+   what is stored there.
+5. `r2engine::query`: `Work`, `Support`, `Revision`, `Answer`, and the listing
+   provider. `pd` switched over at `Work::Decode` with all three snapshots
+   unchanged, then moved to `Work::InstructionLocal`.
+
+The revision is four axes rather than one counter: `program` (two images of one
+file are two programs), `bytes`, and `names` / `entries`, which move only when
+the rebuilt table actually differs, so a patch that renames nothing invalidates
+nothing that depended on a name. There is no axis for which addresses exist,
+because a write refuses a range the file does not map and so can neither create
+an address nor destroy one.
+
+### What moved in the output, and why
+
+`named_literal_pool` is gone. It spelled an ARM literal-pool load as
+`ldr ip, sym.__libc_csu_fini`, which says the load *returns* that address; all
+the program states is that the word there is that address at this revision. The
+line is now `ldr ip, [0x8f88] ; [0x8f88:4]=0x11160 sym.__libc_csu_fini`, which
+says both and claims neither.
+
+That costs one binary in the `pd` comparison against radare2 -- 19/5 to 18/6 --
+because radare2 makes the substitution. The comparison exists to find defects,
+and this is a claim deliberately not made, so the number is recorded rather than
+chased. The other five disagreements are unrelated and older: an unnamed import
+stub on `_Exit`, an unnamed segment on an `adrp`, and one Thumb-versus-ARM
+decode.
+
+Relocation slots are now named. A call through the global offset table reads a
+word rather than reaching a stub, so the address in the instruction is the slot;
+`reloc.__libc_start_main` is what the container states about it, and the line is
+now identical to radare2's.

@@ -49,6 +49,12 @@ pub enum Namespace {
     /// A linkage stub standing for an import. The most specific thing the
     /// container states about an address that has one.
     Import,
+    /// A slot the loader fills, named by the relocation that fills it.
+    ///
+    /// Below a stub because a stub is code the program transfers to while this
+    /// is a word it reads, and above a symbol because a relocation naming an
+    /// exact address is more specific than the object it sits inside.
+    Reloc,
     /// A symbol the container declares.
     Symbol,
     /// A data object the container declares.
@@ -78,6 +84,7 @@ impl Namespace {
             Self::Symbol => "sym.",
             Self::Object => "obj.",
             Self::Import => "sym.imp.",
+            Self::Reloc => "reloc.",
             Self::Function => "fcn.",
             Self::Label => "loc.",
             Self::String => "str.",

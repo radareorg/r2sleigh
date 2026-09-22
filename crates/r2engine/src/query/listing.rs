@@ -7,7 +7,7 @@
 //! is written, and the lift says which of those numbers the instruction
 //! actually uses as an address. What is left for a caller is column layout.
 
-use r2il::{R2ILOp, SpaceId, Varnode};
+use r2il::{Endianness, R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::{EmbeddedMachine, NumberSpan, Syntax};
 use r2ssa::body::Program;
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
@@ -16,6 +16,38 @@ use super::{Answer, Completion, Revision, Support, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
+
+/// The program's own memory, and how it spells a word in it.
+///
+/// The endianness is the container's and not the decoder's. ARM BE8 is the
+/// case that forces them apart: instructions are little-endian there while
+/// data is big, so asking the Sleigh specification which way a pool word reads
+/// gives the wrong answer on exactly the binaries that have pool words.
+pub struct Memory<'a> {
+    pub program: &'a dyn Program,
+    pub endian: Endianness,
+}
+
+impl Memory<'_> {
+    /// The value this revision holds at an address, where it holds one.
+    fn word(&self, address: u64, width: u32) -> Option<u64> {
+        let width = usize::try_from(width)
+            .ok()
+            .filter(|width| (1..=8).contains(width))?;
+        let read = self
+            .program
+            .read(address, width)
+            .filter(|read| read.len() == width)?;
+        let mut bytes = [0u8; 8];
+        bytes[..width].copy_from_slice(&read);
+        Some(match self.endian {
+            Endianness::Little => u64::from_le_bytes(bytes),
+            Endianness::Big => u64::from_be_bytes(bytes) >> (8 * (8 - width as u32)),
+            // Nothing says which way a word reads here, so nothing is claimed.
+            Endianness::Mixed | Endianness::Custom => return None,
+        })
+    }
+}
 
 /// A run of instructions, asked for by where it starts and how many.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +95,16 @@ pub enum AnnotationKind {
     Reads { address: u64, width: u32 },
     /// The instruction writes this many bytes at this address.
     Writes { address: u64, width: u32 },
+    /// The revision this answer names holds this value at that address.
+    ///
+    /// Not "the load returns it". Nothing here says the bytes will still be
+    /// these when the instruction runs, and saying so would be the one claim
+    /// a listing cannot support.
+    Holds {
+        address: u64,
+        width: u32,
+        value: u64,
+    },
 }
 
 impl AnnotationKind {
@@ -71,7 +113,8 @@ impl AnnotationKind {
         match self {
             Self::Target { address, .. }
             | Self::Reads { address, .. }
-            | Self::Writes { address, .. } => address,
+            | Self::Writes { address, .. }
+            | Self::Holds { address, .. } => address,
         }
     }
 }
@@ -79,7 +122,7 @@ impl AnnotationKind {
 /// Decode a run of instructions, saying as much about each as `work` allows.
 pub fn listing(
     machine: &EmbeddedMachine,
-    program: &dyn Program,
+    memory: &Memory<'_>,
     request: Listing,
     work: Work,
     revision: Revision,
@@ -92,7 +135,7 @@ pub fn listing(
     let mut pc = request.start;
 
     for _ in 0..request.count {
-        let Some(window) = program.read(pc, DECODE_WINDOW) else {
+        let Some(window) = memory.program.read(pc, DECODE_WINDOW) else {
             return Answer {
                 value: lines,
                 revision,
@@ -122,7 +165,7 @@ pub fn listing(
         let size = syntax.size;
         let annotations = match work {
             Work::Decode => Vec::new(),
-            _ => instruction_local(machine, &fetch, pc, &syntax),
+            _ => instruction_local(machine, memory, &fetch, pc, &syntax),
         };
         lines.push(Line {
             address: pc,
@@ -144,6 +187,7 @@ pub fn listing(
 /// instruction occupies fails the decode it just performed.
 fn instruction_local(
     machine: &EmbeddedMachine,
+    memory: &Memory<'_>,
     window: &[u8],
     address: u64,
     syntax: &Syntax,
@@ -160,6 +204,21 @@ fn instruction_local(
             }
         }
         origins.step(op);
+    }
+    // What a read finds there is a fact about this revision, so it is said
+    // beside the read rather than folded into it.
+    for index in 0..kinds.len() {
+        let AnnotationKind::Reads { address, width } = kinds[index] else {
+            continue;
+        };
+        let Some(value) = memory.word(address, width) else {
+            continue;
+        };
+        kinds.push(AnnotationKind::Holds {
+            address,
+            width,
+            value,
+        });
     }
     kinds
         .into_iter()
@@ -252,9 +311,13 @@ mod tests {
             base: BASE,
             bytes: bytes.to_vec(),
         };
+        let memory = Memory {
+            program: &program,
+            endian: Endianness::Little,
+        };
         listing(
             &machine,
-            &program,
+            &memory,
             Listing { start: BASE, count },
             work,
             Revision::default(),
@@ -317,6 +380,38 @@ mod tests {
                 address: 0x1234,
                 width: 8,
             }
+        );
+    }
+
+    #[test]
+    fn what_this_revision_holds_at_a_read_is_said_beside_the_read() {
+        // mov rax, qword [0x1234], with a word actually mapped there.
+        let mut bytes = vec![0x48, 0x8b, 0x04, 0x25, 0x34, 0x12, 0x00, 0x00];
+        bytes.resize(0x234, 0);
+        bytes.extend_from_slice(&0xdead_beefu64.to_le_bytes());
+        let answer = answer(&bytes, 1, Work::InstructionLocal);
+        assert!(answer.value[0].annotations.iter().any(|annotation| {
+            annotation.kind
+                == AnnotationKind::Holds {
+                    address: 0x1234,
+                    width: 8,
+                    value: 0xdead_beef,
+                }
+        }));
+    }
+
+    #[test]
+    fn a_read_of_what_is_not_mapped_claims_no_value() {
+        let answer = answer(
+            &[0x48, 0x8b, 0x04, 0x25, 0x34, 0x12, 0x00, 0x00],
+            1,
+            Work::InstructionLocal,
+        );
+        assert!(
+            !answer.value[0]
+                .annotations
+                .iter()
+                .any(|annotation| matches!(annotation.kind, AnnotationKind::Holds { .. }))
         );
     }
 

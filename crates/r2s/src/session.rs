@@ -151,6 +151,7 @@ impl Session {
             .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
             .collect();
         crate::names::name_imports(&mut names, self.image.format(), &imports);
+        crate::names::name_slots(&mut names, self.image.format(), &self.slots);
         // A patch that changed no name and moved no entry leaves everything
         // derived from those still good, so the counters move only on a
         // difference rather than on every write.

@@ -200,6 +200,34 @@ pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Str
     }
 }
 
+/// Name each slot the loader fills by the relocation that fills it.
+///
+/// A call through the global offset table reads a word rather than reaching a
+/// stub, so the address in the instruction is the slot. Without this the
+/// listing prints the bare number for the one operand whose meaning the
+/// container states outright.
+pub fn name_slots(db: &mut NameDb, format: Format, slots: &BTreeMap<u64, String>) {
+    let decorated = format == Format::MachO;
+    for (slot, symbol) in slots {
+        let undecorated = match decorated {
+            true => symbol.strip_prefix('_').unwrap_or(symbol),
+            false => symbol.as_str(),
+        };
+        if undecorated.is_empty() {
+            continue;
+        }
+        db.insert(
+            *slot,
+            Name {
+                text: undecorated.to_owned(),
+                namespace: Namespace::Reloc,
+                size: 0,
+                confidence: Confidence::Stated,
+            },
+        );
+    }
+}
+
 /// Replace every literal that names something.
 ///
 /// radare2 substitutes on the value alone: an immediate equal to an address it
