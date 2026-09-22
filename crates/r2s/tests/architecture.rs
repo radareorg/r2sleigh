@@ -52,21 +52,36 @@ fn mentions(dir: &Path, wanted: &[&str]) -> Vec<String> {
 
 #[test]
 fn the_shell_depends_on_the_engine_and_nothing_else() {
-    let manifest =
-        fs::read_to_string(root().join("crates/r2s/Cargo.toml")).expect("the shell has a manifest");
-    let dependencies = manifest
-        .split("[dependencies]")
-        .nth(1)
-        .and_then(|rest| rest.split("\n[").next())
-        .expect("the manifest declares dependencies");
-    let others: Vec<&str> = dependencies
-        .lines()
-        .filter(|line| line.starts_with("r2") && !line.starts_with("r2engine"))
+    // Asked of the resolved dependency graph rather than of the manifest text.
+    // Reading the manifest said what was written down; this says what the
+    // shell is actually built against, which is the thing being held to. The
+    // first attempt read the metadata as text and passed while `r2il` was a
+    // declared dependency, which is exactly the failure this replaces.
+    let metadata = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root())
+        .output()
+        .expect("cargo metadata runs");
+    let workspace: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).expect("cargo metadata is JSON");
+    let shell = workspace["packages"]
+        .as_array()
+        .expect("the metadata lists packages")
+        .iter()
+        .find(|package| package["name"] == "r2s")
+        .expect("the workspace holds the shell");
+    let reached: Vec<&str> = shell["dependencies"]
+        .as_array()
+        .expect("the shell declares dependencies")
+        .iter()
+        // A test may reach for anything; this is about what the shell is.
+        .filter(|dependency| dependency["kind"].is_null())
+        .filter_map(|dependency| dependency["name"].as_str())
+        .filter(|name| name.starts_with("r2") && *name != "r2engine")
         .collect();
     assert!(
-        others.is_empty(),
-        "the shell reaches past the engine:\n{}",
-        others.join("\n")
+        reached.is_empty(),
+        "the shell is built against crates the engine owns: {reached:?}"
     );
 }
 

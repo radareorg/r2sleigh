@@ -9,9 +9,13 @@
 
 pub mod naming;
 
-// The container's own vocabulary, which the engine now owns the reading of.
-// A shell prints these words and needs no second dependency to name them.
-pub use r2image::{Endian, EntryKind, Format, Image, Section, Segment, Symbol, SymbolKind};
+// The container's own vocabulary. The engine owns the reading of it, so it
+// publishes the words too: every type `Image`'s public API hands back is
+// nameable here, and a consumer needs no second dependency to write one down.
+pub use r2image::{
+    Endian, EntryKind, EntryPoint, Format, Image, ImageArch, ImageError, Relocation, Section,
+    Segment, Symbol, SymbolKind,
+};
 
 use std::collections::BTreeMap;
 

@@ -699,6 +699,7 @@ dependencies = [
  "clap",
  "insta",
  "r2engine",
+ "serde_json",
 ]
 
 [[package]]
