@@ -527,6 +527,20 @@ pub struct Image {
     /// One byte per entry, because that is what makes a patch reversible at
     /// any granularity and a listing of them a grouping rather than a record.
     patches: BTreeMap<u64, u8>,
+    /// Which state of the image's bytes this is.
+    ///
+    /// A patched byte is a different key to whatever caches a prepared body, so
+    /// analysis keyed on bytes is already correct across a patch. What is not
+    /// keyed on bytes is everything *derived* from them and held beside the
+    /// image -- the import table decoded out of the stub section, the names, the
+    /// relocation slots. This counter is what those are keyed on, so a holder
+    /// can tell that what it derived is no longer about this image.
+    ///
+    /// Only the bytes. Which addresses exist does not move: `write` refuses a
+    /// range the file does not map, so a patch can neither create an address
+    /// nor destroy one, and nothing mutates the segments or sections after the
+    /// file is parsed.
+    byte_revision: u64,
 }
 
 impl Image {
@@ -804,6 +818,7 @@ impl Image {
             entry_points,
             relocations,
             patches: BTreeMap::new(),
+            byte_revision: 0,
         })
     }
 
@@ -945,6 +960,7 @@ impl Image {
         for (offset, byte) in bytes.iter().enumerate() {
             self.patches.insert(vaddr + offset as u64, *byte);
         }
+        self.byte_revision += 1;
         Ok(())
     }
 
@@ -954,8 +970,27 @@ impl Image {
     }
 
     /// Drop every patch, so the image reads as the file does.
+    ///
+    /// A revert that drops nothing changed nothing, so the revision only moves
+    /// where a patch was actually there to drop. Where one was, this does not
+    /// return to the revision the image opened at: what was derived in between
+    /// was derived about a different image, and saying otherwise would let it
+    /// be reused.
     pub fn revert(&mut self) {
+        if self.patches.is_empty() {
+            return;
+        }
         self.patches.clear();
+        self.byte_revision += 1;
+    }
+
+    /// Which state of the image's bytes this is.
+    ///
+    /// Two reads at one revision see the same bytes. Anything derived from the
+    /// bytes and held beside the image records the revision it was derived at,
+    /// and is derived again when they differ.
+    pub const fn byte_revision(&self) -> u64 {
+        self.byte_revision
     }
 
     /// Whether the address is inside a segment marked executable.
@@ -1183,6 +1218,7 @@ mod tests {
             relocations: Vec::new(),
             debug_prototypes: debug::DebugPrototypes::default(),
             patches: BTreeMap::new(),
+            byte_revision: 0,
         }
     }
 

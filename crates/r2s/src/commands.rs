@@ -179,7 +179,7 @@ fn entries(session: &Session) -> Result<String, String> {
 fn discovered(session: &mut Session) -> Result<String, String> {
     // The machine first: the stub table is decoded when it loads, and reading
     // it before then is reading an empty map.
-    session.ensure_machine()?;
+    session.ensure_current()?;
     let mut seeds = stated_seeds(&session.image);
     // A linkage stub is a function the format declares: the loader's own
     // table says where each one begins, which is why they are stated rather
@@ -284,7 +284,7 @@ fn revert(session: &mut Session) -> Result<String, String> {
 /// an address names it in an operation, and every function is asked once.
 #[cfg(feature = "sleigh")]
 fn references(session: &mut Session) -> Result<Vec<r2ssa::DataRefFact>, String> {
-    session.ensure_machine()?;
+    session.ensure_current()?;
     let mut seeds = stated_seeds(&session.image);
     seeds.extend(
         session
@@ -346,6 +346,8 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
 /// Every string the data sections hold.
 #[cfg(feature = "sleigh")]
 fn strings(session: &mut Session) -> Result<String, String> {
+    // The strings are read out of the image, so a patched image has other ones.
+    session.ensure_current()?;
     let mut out = String::from("vaddr       size string\n");
     out.push_str(&"-".repeat(46));
     let mut count = 0usize;
@@ -380,7 +382,7 @@ fn strings(_session: &mut Session) -> Result<String, String> {
 fn flags(session: &mut Session) -> Result<String, String> {
     // The linkage stubs are named once there is a decoder to read them with,
     // so asking for the machine first is what makes the listing complete.
-    session.ensure_machine()?;
+    session.ensure_current()?;
     let mut out = String::from("vaddr       size name\n");
     out.push_str(&"-".repeat(46));
     for (vaddr, name) in session.names.iter() {
@@ -653,7 +655,7 @@ fn with_native<T>(
     addr: u64,
     ask: impl FnOnce(&r2engine::native::NativeTarget<'_>, &OpenImage<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    session.ensure_machine()?;
+    session.ensure_current()?;
     let machine = session
         .machine_at(addr)
         .ok_or("no Sleigh specification for this architecture")?;
@@ -785,7 +787,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
-    session.ensure_machine()?;
+    session.ensure_current()?;
     let machine = session
         .machine_at(start)
         .ok_or("no decoder for this architecture")?;

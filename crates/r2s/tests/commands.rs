@@ -292,6 +292,53 @@ fn a_patch_is_a_layer_the_analysis_reads_through() {
     assert!(!again.out.contains("0xdeadbeef"), "{}", again.out);
 }
 
+/// A patch moves what the image says about itself, not only what it reads as.
+///
+/// The import table is *decoded*: which address is a linkage stub, and which
+/// import it stands for, comes from lifting the stub and following the slot it
+/// reads. So does the set of addresses a body walk may not run past, because
+/// `is_entry` answers from that same table. Deriving it once and holding it
+/// meant a patched stub left the walk bounded by a function that was no longer
+/// there -- a wrong body, reported as a clean one.
+#[test]
+fn patching_a_stub_derives_the_import_table_again() {
+    let stub = "0x401040";
+
+    // The table has to be derived *before* the patch for staleness to be
+    // possible at all: one `f` decodes the stubs, the patch removes one, and
+    // the second `f` is the question. Each of these is one process, so a
+    // sequence that patches before it ever asks would pass either way.
+    let run = r2s(&format!("s {stub}; f~imp; wx 9090909090909090; f~imp"));
+    assert!(run.ok, "{}", run.out);
+    let (before, after) = run
+        .out
+        .split_once("8 bytes at")
+        .expect("the write reports what it wrote");
+    assert!(
+        before.contains("sym.imp.__printf_chk"),
+        "the fixture should name the stub before the patch: {}",
+        run.out
+    );
+    assert!(
+        !after.contains("sym.imp.__printf_chk"),
+        "the import survived a patch that removed the stub it was decoded from: {}",
+        run.out
+    );
+
+    // And taking the patch back takes the import back, in the same session.
+    let restored = r2s(&format!("s {stub}; f~imp; wx 9090909090909090; wcr; f~imp"));
+    assert!(restored.ok, "{}", restored.out);
+    let (_, after) = restored
+        .out
+        .split_once("8 bytes at")
+        .expect("the write reports what it wrote");
+    assert!(
+        after.contains("sym.imp.__printf_chk"),
+        "reverting the patch did not restore the import: {}",
+        restored.out
+    );
+}
+
 #[test]
 fn a_patch_is_listed_and_can_be_taken_back() {
     let run = r2s("s 0x401330; wx 9090; wc");

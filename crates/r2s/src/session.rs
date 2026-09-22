@@ -31,6 +31,15 @@ pub struct Session {
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
+    /// Which revision of the image's bytes the tables above were derived at.
+    ///
+    /// `names`, `imports`, `slots` and `defined` are all read out of the image,
+    /// and one of them is *decoded* from it: the import table comes from lifting
+    /// the stub section. A patch changes what those say, and `imports` decides
+    /// `is_entry`, which is what bounds every body walk -- so a stale table is
+    /// not a stale listing, it is a body that ends in the wrong place.
+    #[cfg(feature = "sleigh")]
+    derived_at: Option<u64>,
     #[cfg(feature = "sleigh")]
     machine: Option<r2sleigh_lift::EmbeddedMachine>,
     /// The same instruction set with TMode set. ARM states the mode per
@@ -78,6 +87,9 @@ impl Session {
             slots: std::collections::BTreeMap::new(),
             #[cfg(feature = "sleigh")]
             defined: definitions(&image),
+            // The import table needs a decoder, so nothing here is derived yet.
+            #[cfg(feature = "sleigh")]
+            derived_at: None,
             image,
             path: path.to_owned(),
             addr,
@@ -88,33 +100,51 @@ impl Session {
         })
     }
 
-    /// Load this image's machine if it is not loaded yet.
+    /// Make everything this session derives from the image current.
     ///
-    /// Separate from reading it so a caller can hold the machine and the image
-    /// at once; one method returning a reference out of `&mut self` would make
-    /// those two borrows conflict.
+    /// The machine is loaded once: which instruction set a file is written in is
+    /// a property of the file and no patch changes it. Everything else is read
+    /// or decoded out of the bytes, so it is derived again whenever the image
+    /// says it is at a different revision.
+    ///
+    /// Separate from reading the machine so a caller can hold the machine and
+    /// the image at once; one method returning a reference out of `&mut self`
+    /// would make those two borrows conflict.
     #[cfg(feature = "sleigh")]
-    pub fn ensure_machine(&mut self) -> Result<(), String> {
+    pub fn ensure_current(&mut self) -> Result<(), String> {
         if self.machine.is_none() {
-            let machine = r2sleigh_lift::embedded_machine(self.image.arch().name)
-                .map_err(|error| error.to_string())?;
-            // The import stubs can only be read once there is a decoder.
-            self.imports =
-                crate::names::imports(&self.image, &machine.disasm, machine.arch.alignment);
-            self.slots = self
-                .image
-                .relocations()
-                .iter()
-                .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
-                .collect();
-            crate::names::name_imports(&mut self.names, self.image.format(), &self.imports);
-            self.machine = Some(machine);
-            // Only where a function says it is Thumb, so a machine with no
-            // Thumb code pays nothing for the second specification.
-            if self.defined.values().any(|definition| definition.thumb) {
-                self.thumb_machine = r2sleigh_lift::embedded_machine("arm-thumb").ok();
-            }
+            self.machine = Some(
+                r2sleigh_lift::embedded_machine(self.image.arch().name)
+                    .map_err(|error| error.to_string())?,
+            );
         }
+        let revision = self.image.byte_revision();
+        if self.derived_at == Some(revision) {
+            return Ok(());
+        }
+        // Taken out and put back so the decoder can be read while the tables it
+        // fills are written.
+        let machine = self.machine.take().expect("the machine is loaded above");
+        self.names = crate::names::of(&self.image);
+        crate::names::name_strings(&mut self.names, &self.image);
+        self.defined = definitions(&self.image);
+        // The import stubs can only be read once there is a decoder.
+        self.imports = crate::names::imports(&self.image, &machine.disasm, machine.arch.alignment);
+        self.slots = self
+            .image
+            .relocations()
+            .iter()
+            .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
+            .collect();
+        crate::names::name_imports(&mut self.names, self.image.format(), &self.imports);
+        self.machine = Some(machine);
+        // Only where a function says it is Thumb, so a machine with no Thumb
+        // code pays nothing for the second specification.
+        self.thumb_machine = match self.defined.values().any(|definition| definition.thumb) {
+            true => r2sleigh_lift::embedded_machine("arm-thumb").ok(),
+            false => None,
+        };
+        self.derived_at = Some(revision);
         Ok(())
     }
 
