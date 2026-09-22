@@ -841,14 +841,60 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
             "            {:#010x}      {:<14} {}\n",
             pc,
             hex,
-            crate::names::spell(
-                &session.names,
-                &r2_mnemonic(&mnemonic, session.image.arch().name),
-            )
+            {
+                let spelled = r2_mnemonic(&mnemonic, session.image.arch().name);
+                let spelled = match session.image.arch().name {
+                    "ARM" => named_literal_pool(session, &spelled),
+                    _ => spelled,
+                };
+                crate::names::spell(&session.names, &spelled)
+            }
         ));
         pc += size as u64;
     }
     Ok(out.trim_end().to_owned())
+}
+
+/// An ARM literal-pool load, spelled as the name the pool word holds.
+///
+/// `ldr ip, =__libc_csu_fini` is what the source wrote; the assembler put the
+/// address in a pool and the instruction reads it, so Sleigh prints the pool's
+/// address. The name is the source's, and the pool word is in the image, so
+/// the load is spelled by what it will produce where that has a name.
+#[cfg(feature = "sleigh")]
+fn named_literal_pool(session: &Session, text: &str) -> String {
+    let Some(rest) = text.strip_prefix("ldr ") else {
+        return text.to_owned();
+    };
+    let Some(open) = rest.rfind('[') else {
+        return text.to_owned();
+    };
+    let Some(close) = rest[open..].find(']').map(|end| open + end) else {
+        return text.to_owned();
+    };
+    let Some(pool) = rest[open + 1..close]
+        .strip_prefix("0x")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+    else {
+        return text.to_owned();
+    };
+    let width = usize::try_from(session.image.arch().bits / 8)
+        .unwrap_or(4)
+        .min(8);
+    let Some(word) = session.image.read(pool, width) else {
+        return text.to_owned();
+    };
+    let mut bytes = [0u8; 8];
+    bytes[..width].copy_from_slice(&word);
+    // The pool word is data, so the memory endianness reads it.
+    let held = match session.image.arch().endian {
+        r2image::Endian::Little => u64::from_le_bytes(bytes),
+        r2image::Endian::Big => u64::from_be_bytes(bytes) >> (8 * (8 - width as u32)),
+    };
+    match session.names.of(held) {
+        Some(name) => format!("ldr {}{}", &rest[..open], name.spelled()),
+        None => text.to_owned(),
+    }
 }
 
 /// Radare2 spells an instruction lowercase, with a space after each comma and
@@ -873,10 +919,51 @@ fn r2_mnemonic(text: &str, arch: &str) -> String {
     let out = out.replace(" ptr [", " [").replace("+ -", "- ");
     let out = bare_effective_address(&out);
     if arch == "ARM" {
-        arm_role_registers(&out)
+        arm_alias(&arm_role_registers(&out))
     } else {
-        out
+        x86_condition_alias(&out)
     }
+}
+
+/// Two ARM spellings Sleigh keeps from before the unified syntax.
+///
+/// `cpy rd, rm` is what `mov rd, rm` was called, and a post-indexed load of one
+/// register from the stack pointer is a `pop` of it. Every other ARM
+/// disassembler prints the later name.
+#[cfg(feature = "sleigh")]
+fn arm_alias(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix("cpy ") {
+        return format!("mov {rest}");
+    }
+    if let Some(register) = text
+        .strip_prefix("ldr ")
+        .and_then(|rest| rest.strip_suffix(", [sp], 0x4"))
+    {
+        return format!("pop {{{register}}}");
+    }
+    text.to_owned()
+}
+
+/// One x86 condition, two names: the flag it tests and the comparison it came from.
+///
+/// `jnz` and `jne` are the same opcode; Sleigh prints the flag and radare2
+/// prints the comparison. Only the four conditions whose two spellings differ
+/// are listed; the rest are already the same word in both.
+#[cfg(feature = "sleigh")]
+fn x86_condition_alias(text: &str) -> String {
+    const CONDITIONS: [(&str, &str); 4] = [("z", "e"), ("nz", "ne"), ("c", "b"), ("nc", "ae")];
+    const VERBS: [&str; 4] = ["j", "set", "cmov", "loop"];
+    let head = text.split_whitespace().next().unwrap_or_default();
+    for verb in VERBS {
+        let Some(condition) = head.strip_prefix(verb) else {
+            continue;
+        };
+        let Some((_, spelled)) = CONDITIONS.iter().find(|(flag, _)| *flag == condition) else {
+            continue;
+        };
+        return format!("{verb}{spelled}{}", &text[head.len()..]);
+    }
+    text.to_owned()
 }
 
 /// radare2 spells the three ARM registers that have a job by that job.

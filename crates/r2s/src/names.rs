@@ -50,7 +50,9 @@ pub fn of(image: &Image) -> NameDb {
                 namespace: match symbol.kind {
                     SymbolKind::Section => Namespace::Section,
                     SymbolKind::Function => Namespace::Symbol,
-                    _ => Namespace::Object,
+                    SymbolKind::Data => Namespace::Object,
+                    // An untyped symbol names a place, not an object, which is the difference `loc.` carries.
+                    SymbolKind::Other => Namespace::Label,
                 },
                 size: symbol.size,
                 confidence: Confidence::Stated,
@@ -236,7 +238,7 @@ pub fn spell(db: &NameDb, text: &str) -> String {
 /// fills. Following that read back to the relocation names the stub, which is
 /// the address the call names. Reading the stubs rather than assuming an entry
 /// size is what keeps this exact across formats and architectures.
-pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
+pub fn imports(image: &Image, decoder: &Disassembler, alignment: u32) -> BTreeMap<u64, String> {
     let slots: BTreeMap<u64, &str> = image
         .relocations()
         .iter()
@@ -265,7 +267,7 @@ pub fn imports(image: &Image, decoder: &Disassembler) -> BTreeMap<u64, String> {
         .iter()
         .filter(|section| stubs(&section.name))
     {
-        for (start, symbol) in section_stubs(image, decoder, section, &slots) {
+        for (start, symbol) in section_stubs(image, decoder, section, &slots, alignment) {
             named.entry(start).or_insert(symbol);
         }
     }
@@ -286,6 +288,7 @@ fn section_stubs(
     decoder: &Disassembler,
     section: &r2image::Section,
     slots: &BTreeMap<u64, &str>,
+    alignment: u32,
 ) -> Vec<(u64, String)> {
     // Where each stub reads the slot the loader fills. A stub is a run of
     // instructions ending in its transfer, and which slot that transfer reads
@@ -294,13 +297,8 @@ fn section_stubs(
     // computes its address across three instructions; both answer here.
     // Each reader: where its transfer is, where its run began, and the import.
     let mut readers: Vec<(u64, u64, String)> = Vec::new();
-    let mut run = r2il::R2ILBlock {
-        addr: section.vaddr,
-        size: 0,
-        ops: Vec::new(),
-        switch_info: None,
-        op_metadata: BTreeMap::new(),
-    };
+    let mut run = fresh_run(section.vaddr);
+    let step = u64::from(alignment.max(1));
     let mut pc = section.vaddr;
     let end = section.vaddr + section.vsize;
     while pc < end {
@@ -309,18 +307,24 @@ fn section_stubs(
         };
         let mut fetch = window.into_owned();
         fetch.resize(DECODE_WINDOW, 0);
-        // Zero bytes are not an instruction, so nothing reads a slot in them.
-        if fetch[0] == 0 {
-            pc += 1;
-            run.addr = pc;
-            continue;
-        }
-        let Ok(lifted) = decoder.lift(&fetch, pc) else {
-            break;
+        // A word in a stub section that is not an instruction is the linker's
+        // own data -- the offset an ARM stub adds, the padding before one --
+        // and not the end of the section. It is stepped over at the width the
+        // machine addresses instructions at, and the run starts again after
+        // it. Giving up here instead ended the scan at the first such word.
+        //
+        // What the first byte is says nothing about that. Rejecting a word
+        // whose first byte is zero is an x86 reading of a fixed-width machine:
+        // `adr ip, 0x2c8` is `00 c6 8f e2`, which is how every ARM import stub
+        // begins, so every one of them went unnamed.
+        let lifted = match decoder.lift(&fetch, pc) {
+            Ok(lifted) if lifted.size != 0 => lifted,
+            _ => {
+                pc += step;
+                run = fresh_run(pc);
+                continue;
+            }
         };
-        if lifted.size == 0 {
-            break;
-        }
         let leaves = lifted
             .ops
             .iter()
@@ -338,13 +342,7 @@ fn section_stubs(
         {
             readers.push((leaving_at, run.addr, (*found).to_owned()));
         }
-        run = r2il::R2ILBlock {
-            addr: pc,
-            size: 0,
-            ops: Vec::new(),
-            switch_info: None,
-            op_metadata: BTreeMap::new(),
-        };
+        run = fresh_run(pc);
     }
 
     // The stubs are uniform cells filling the section's tail: whatever header
@@ -371,6 +369,17 @@ fn section_stubs(
             Some((end.checked_sub(from_end)?, symbol))
         })
         .collect()
+}
+
+/// An empty run beginning here.
+fn fresh_run(addr: u64) -> r2il::R2ILBlock {
+    r2il::R2ILBlock {
+        addr,
+        size: 0,
+        ops: Vec::new(),
+        switch_info: None,
+        op_metadata: BTreeMap::new(),
+    }
 }
 
 /// The sections a format puts import stubs in.

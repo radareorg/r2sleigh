@@ -99,7 +99,8 @@ impl Session {
             let machine = r2sleigh_lift::embedded_machine(self.image.arch().name)
                 .map_err(|error| error.to_string())?;
             // The import stubs can only be read once there is a decoder.
-            self.imports = crate::names::imports(&self.image, &machine.disasm);
+            self.imports =
+                crate::names::imports(&self.image, &machine.disasm, machine.arch.alignment);
             self.slots = self
                 .image
                 .relocations()
