@@ -1,20 +1,16 @@
-//! An open binary, and everything the engine derives from its bytes.
+//! A program someone opened, and everything the engine derives from it.
 //!
-//! The input boundary used to live in the shell: it owned the `Image`, read
-//! the container for names, decoded the linkage stubs, indexed what the
-//! binary defines, and implemented both `Program` traits over the result. That
-//! made every consumer of the engine reimplement the same half-dozen tables,
-//! and it made the shell the only thing that knew when they went stale. They
-//! belong here, beside the analysis that reads them.
+//! Whoever opened the binary hands over its bytes and what its container
+//! states, through `Source`. The engine derives the rest -- the names, the
+//! import stubs decoded out of their bytes, what is defined at each address --
+//! and keeps it current as the bytes move. It never opens anything, so the
+//! whole derivation runs just as well over a program built from byte literals.
 
 pub mod naming;
+pub mod source;
 
-// The container's own vocabulary. The engine owns the reading of it, so it
-// publishes the words too: every type `Image`'s public API hands back is
-// nameable here, and a consumer needs no second dependency to write one down.
-pub use r2image::{
-    Endian, EntryKind, EntryPoint, Format, Image, ImageArch, ImageError, Relocation, Section,
-    Segment, Symbol, SymbolKind,
+pub use source::{
+    Arch, Container, Entry, EntryKind, Format, Relocation, Section, Source, Symbol, SymbolKind,
 };
 
 use std::collections::BTreeMap;
@@ -46,9 +42,9 @@ pub struct Assembled {
     pub link: Option<r2il::Varnode>,
 }
 
-/// One open binary: its bytes, its decoders, and the tables read out of both.
-pub struct OpenProgram {
-    pub image: Image,
+/// One open program: its source, its decoders, and the tables read out of both.
+pub struct OpenProgram<S: Source> {
+    source: S,
     /// What this binary calls each address it names.
     pub names: NameDb,
     /// Which stub stands for which import, by the import's own name.
@@ -100,22 +96,18 @@ pub struct OpenProgram {
     thumb_machine: Option<EmbeddedMachine>,
 }
 
-impl OpenProgram {
-    pub fn open(path: &str) -> Result<Self, String> {
-        Ok(Self::of(Image::open(path).map_err(|e| e.to_string())?))
-    }
-
-    pub fn of(image: Image) -> Self {
+impl<S: Source> OpenProgram<S> {
+    pub fn of(source: S) -> Self {
         Self {
             names: {
-                let mut db = naming::of(&image);
-                naming::name_strings(&mut db, &image);
+                let mut db = naming::of(&source);
+                naming::name_strings(&mut db, &source);
                 db
             },
             imports: BTreeMap::new(),
             slots: BTreeMap::new(),
-            defined: definitions(&image),
-            image,
+            defined: definitions(source.container()),
+            source,
             // The import table needs a decoder, so nothing here is derived yet.
             derived_at: None,
             names_revision: 0,
@@ -129,7 +121,18 @@ impl OpenProgram {
         }
     }
 
-    /// Make everything derived from the image current.
+    /// What was opened.
+    pub const fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// What was opened, to be written to. Everything derived from it is
+    /// derived again the next time it is asked for.
+    pub const fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
+
+    /// Make everything derived from the source current.
     ///
     /// The machine is loaded once: which instruction set a file is written in
     /// is a property of the file and no patch changes it. Everything else is
@@ -142,30 +145,30 @@ impl OpenProgram {
     pub fn ensure_current(&mut self) -> Result<(), String> {
         if self.machine.is_none() {
             self.machine = Some(
-                r2sleigh_lift::embedded_machine(self.image.arch().name)
+                r2sleigh_lift::embedded_machine(&self.source.container().arch.name)
                     .map_err(|error| error.to_string())?,
             );
         }
-        let revision = self.image.byte_revision();
+        let revision = self.source.byte_revision();
         if self.derived_at == Some(revision) {
             return Ok(());
         }
         // Taken out and put back so the decoder can be read while the tables it
         // fills are written.
         let machine = self.machine.take().expect("the machine is loaded above");
-        let mut names = naming::of(&self.image);
-        naming::name_strings(&mut names, &self.image);
-        let defined = definitions(&self.image);
+        let container = self.source.container();
+        let mut names = naming::of(&self.source);
+        naming::name_strings(&mut names, &self.source);
+        let defined = definitions(container);
         // The import stubs can only be read once there is a decoder.
-        let imports = naming::imports(&self.image, &machine.disasm, machine.arch.alignment);
-        self.slots = self
-            .image
-            .relocations()
+        let imports = naming::imports(&self.source, &machine.disasm, machine.arch.alignment);
+        self.slots = container
+            .relocations
             .iter()
             .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
             .collect();
-        naming::name_imports(&mut names, self.image.format(), &imports);
-        naming::name_slots(&mut names, self.image.format(), &self.slots, &imports);
+        naming::name_imports(&mut names, container.format, &imports);
+        naming::name_slots(&mut names, container.format, &self.slots, &imports);
         // A patch that changed no name and moved no entry leaves everything
         // derived from those still good, so the counters move only on a
         // difference rather than on every write.
@@ -203,7 +206,8 @@ impl OpenProgram {
         {
             return Ok(());
         }
-        let bits = self.image.arch().bits;
+        let container = self.source.container();
+        let bits = container.arch.bits;
         let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
             .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
         let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
@@ -224,15 +228,15 @@ impl OpenProgram {
         });
         // The format says which platform's own declarations apply: `_Exit` is
         // declared by the platform, not by the table every target shares.
-        let mut prototypes = r2abi::Prototypes::embedded_for(match self.image.format() {
-            r2image::Format::Elf => r2abi::Platform::Linux,
-            r2image::Format::MachO => r2abi::Platform::Darwin,
-            _ => r2abi::Platform::Unknown,
+        let mut prototypes = r2abi::Prototypes::embedded_for(match container.format {
+            Format::Elf => r2abi::Platform::Linux,
+            Format::MachO => r2abi::Platform::Darwin,
+            Format::Other => r2abi::Platform::Unknown,
         });
         // What the binary's own debug information says beats the shared table:
         // the table describes what a library is expected to look like, and
         // this describes what this one is.
-        prototypes.declare(self.image.debug_prototypes().prototypes());
+        prototypes.declare(container.declared.iter().cloned());
         self.assembled = Some(Assembled {
             machine: key,
             conventions,
@@ -282,7 +286,7 @@ impl OpenProgram {
         let analysis = self.memo.analysed_since(
             self.revision(),
             entry,
-            &|since, range| self.image.written_since(since, range),
+            &|since, range| self.source.written_since(since, range),
             || crate::native::analysed(target, self, entry),
         );
         self.memo
@@ -348,10 +352,10 @@ impl OpenProgram {
     }
 
     /// Which state of this program every answer is about.
-    pub const fn revision(&self) -> Revision {
+    pub fn revision(&self) -> Revision {
         Revision {
-            program: self.image.identity(),
-            bytes: self.image.byte_revision(),
+            program: self.source.identity(),
+            bytes: self.source.byte_revision(),
             names: self.names_revision,
             entries: self.entries_revision,
         }
@@ -383,25 +387,19 @@ impl OpenProgram {
     /// Sleigh specification gives the wrong answer on exactly the binaries
     /// that have literal pools.
     pub fn endian(&self) -> r2il::Endianness {
-        match self.image.arch().endian {
-            r2image::Endian::Little => r2il::Endianness::Little,
-            r2image::Endian::Big => r2il::Endianness::Big,
-        }
+        self.source.container().arch.endian
     }
 }
 
-impl Decoders for OpenProgram {
+impl<S: Source> Decoders for OpenProgram<S> {
     fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
         self.machine_at(vaddr)
     }
 }
 
-impl r2ssa::body::Program for OpenProgram {
+impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let read = self
-            .image
-            .read_upto(vaddr, max)
-            .map(std::borrow::Cow::into_owned)?;
+        let read = self.source.read(vaddr, max)?;
         // Recorded whole, including what was asked for beyond what is mapped:
         // a write that lands in the unmapped tail cannot happen, and one that
         // lands in the rest is a write this answer read.
@@ -426,7 +424,7 @@ impl r2ssa::body::Program for OpenProgram {
     }
 }
 
-impl crate::native::Program for OpenProgram {
+impl<S: Source> crate::native::Program for OpenProgram<S> {
     fn control(&self) -> crate::EngineExecutionControl {
         // The token and the meter are shared, so this is the request's own
         // control rather than a copy that nothing could stop.
@@ -446,7 +444,7 @@ impl crate::native::Program for OpenProgram {
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.image.sections().iter().any(|section| {
+        self.source.container().sections.iter().any(|section| {
             section.loaded
                 && !section.is_code
                 && vaddr >= section.vaddr
@@ -468,22 +466,22 @@ impl crate::native::Program for OpenProgram {
 /// of an address and a name cannot: whether a function begins here, and which
 /// instruction set it is written in. The first symbol at an address wins, so
 /// the index answers the same way twice over.
-fn definitions(image: &Image) -> BTreeMap<u64, Definition> {
+fn definitions(container: &Container) -> BTreeMap<u64, Definition> {
     let mut defined = BTreeMap::new();
     // The format's own entry first: a stripped ARM binary has no symbol there,
     // and `e_entry`'s low bit is the only thing that says the entry is Thumb.
-    for entry in image.entry_points() {
+    for entry in &container.entries {
         defined.entry(entry.vaddr).or_insert_with(|| Definition {
             function: true,
             thumb: entry.thumb,
         });
     }
-    for symbol in image.symbols() {
+    for symbol in &container.symbols {
         if !symbol.defined || symbol.name.is_empty() {
             continue;
         }
         defined.entry(symbol.vaddr).or_insert_with(|| Definition {
-            function: symbol.kind == r2image::SymbolKind::Function,
+            function: symbol.kind == SymbolKind::Function,
             thumb: symbol.thumb,
         });
     }

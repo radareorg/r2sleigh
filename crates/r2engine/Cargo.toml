@@ -8,7 +8,6 @@ description = "Request planner and artifact orchestration for r2sleigh"
 [dependencies]
 r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
-r2image = { path = "../r2image" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
 r2source = { path = "../r2source" }
 r2ssa = { path = "../r2ssa" }

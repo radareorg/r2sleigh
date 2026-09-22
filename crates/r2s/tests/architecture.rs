@@ -1,8 +1,9 @@
 //! The boundaries the shell is held to, checked against the source.
 //!
-//! `r2s` is a client of one typed surface. It lays out columns; it does not
-//! decode, it does not read the container itself, and it does not parse
-//! anything the engine formatted, because the engine formats nothing.
+//! `r2s` opens the binary and spells the answer. It hands the engine the bytes
+//! and what the container states, and reads back records; it does not decode,
+//! it does not derive, and it does not parse anything the engine formatted,
+//! because the engine formats nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,8 +51,13 @@ fn mentions(dir: &Path, wanted: &[&str]) -> Vec<String> {
     found
 }
 
+/// What the shell may be built against: the engine it asks, the container
+/// parser it opens with, and the IL's word for byte order, which the container
+/// states and the engine reads.
+const SHELL_MAY_REACH: [&str; 3] = ["r2engine", "r2image", "r2il"];
+
 #[test]
-fn the_shell_depends_on_the_engine_and_nothing_else() {
+fn the_shell_depends_on_the_engine_and_the_container_only() {
     // Asked of the resolved dependency graph rather than of the manifest text.
     // Reading the manifest said what was written down; this says what the
     // shell is actually built against, which is the thing being held to. The
@@ -77,7 +83,7 @@ fn the_shell_depends_on_the_engine_and_nothing_else() {
         // A test may reach for anything; this is about what the shell is.
         .filter(|dependency| dependency["kind"].is_null())
         .filter_map(|dependency| dependency["name"].as_str())
-        .filter(|name| name.starts_with("r2") && *name != "r2engine")
+        .filter(|name| name.starts_with("r2") && !SHELL_MAY_REACH.contains(name))
         .collect();
     assert!(
         reached.is_empty(),
@@ -86,15 +92,15 @@ fn the_shell_depends_on_the_engine_and_nothing_else() {
 }
 
 #[test]
-fn the_shell_names_no_crate_but_the_engine() {
+fn the_shell_names_no_crate_the_engine_owns() {
     let reaching = mentions(
         &root().join("crates/r2s/src"),
         &[
-            "r2image::",
-            "r2il::",
             "r2ssa::",
             "r2abi::",
             "r2sleigh_lift::",
+            "r2dec::",
+            "r2types::",
         ],
     );
     assert!(

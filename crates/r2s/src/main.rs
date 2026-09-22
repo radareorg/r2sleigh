@@ -40,11 +40,11 @@ fn main() {
     }
 
     if !cli.quiet {
-        let arch = session.program.image.arch();
+        let arch = session.image().arch();
         println!(
             "r2s: {} {:?} {} {}-bit, entry {:#x}",
             cli.file,
-            session.program.image.format(),
+            session.image().format(),
             arch.name,
             arch.bits,
             session.addr

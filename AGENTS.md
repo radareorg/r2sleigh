@@ -31,8 +31,10 @@ belongs there. Most semantic, type, cost and route fixes belong further up: in
 
 1. One fact, one owner.
 2. `r2s` is a command surface only: it opens the binary and spells the answer.
-3. Every fact the engine reads about a program arrives through the `Program`
-   trait. Nothing below `r2s` knows what a file is.
+3. Every fact the engine reads about a program arrives through
+   `r2engine::program::Source`: the bytes and what the container states.
+   Nothing below `r2s` knows what a file is; the engine derives names, import
+   stubs and definitions from what `Source` hands it.
 4. Do not reconstruct missing semantics downstream.
 5. Prefer typed contracts over JSON blobs and stringly maps.
 6. `r2types::FunctionFacts` is the advisory combined type+semantic report;
@@ -272,7 +274,7 @@ Use this map by default:
   - no inference, and no opinion about what a function is
 - `crates/r2s`
   - command dispatch
-  - the only implementor of `Program`
+  - opening the binary, and the only implementor of `Source`
   - spelling an answer for a human
   - no semantic, type, cache or route policy ownership
 

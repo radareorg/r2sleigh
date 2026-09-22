@@ -92,3 +92,60 @@ fn engine_public_api_never_exposes_renderer_config_or_context_types() {
         violations.join("\n")
     );
 }
+
+/// The engine never opens anything. Whoever opened the binary hands it the
+/// bytes and what the container states through `program::Source`, which is
+/// what lets every engine test run over a program built from byte literals.
+#[test]
+fn the_engine_knows_no_file() {
+    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("the engine has a manifest");
+    let dependencies = manifest
+        .split("[dependencies]")
+        .nth(1)
+        .and_then(|rest| rest.split("\n[").next())
+        .expect("the manifest declares dependencies");
+    assert!(
+        !dependencies.lines().any(|line| line.starts_with("r2image")),
+        "the engine depends on the container parser"
+    );
+    let violations: Vec<String> = sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+        .into_iter()
+        .flat_map(|path| {
+            let text = fs::read_to_string(&path).expect("the source is UTF-8");
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| {
+                    ["std::fs", "File::open", "Image::open", "r2image::"]
+                        .iter()
+                        .any(|needle| line.contains(needle))
+                })
+                .map(|(index, line)| format!("{}:{} {}", path.display(), index + 1, line.trim()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "the engine reaches for a file:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Every Rust source under a directory, however deep.
+fn sources(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        for path in fs::read_dir(&at)
+            .expect("the source directory exists")
+            .map(|entry| entry.expect("the entry is readable").path())
+        {
+            match path.is_dir() {
+                true => pending.push(path),
+                false if path.extension().is_some_and(|ext| ext == "rs") => found.push(path),
+                false => {}
+            }
+        }
+    }
+    found
+}

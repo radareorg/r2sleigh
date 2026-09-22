@@ -9,19 +9,20 @@
 
 use std::collections::BTreeMap;
 
+use super::source::{EntryKind, Format, Section, Source, Symbol, SymbolKind};
 use crate::discovery::Confidence;
 use crate::names::{Name, NameDb, Namespace};
 use r2il::R2ILOp;
-use r2image::{EntryKind, Format, Image, SymbolKind};
 use r2sleigh_lift::Disassembler;
 
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
 
 /// Every address this binary names, as the container states it.
-pub fn of(image: &Image) -> NameDb {
+pub fn of(source: &impl Source) -> NameDb {
+    let image = source.container();
     let mut db = NameDb::new();
-    for section in image.sections() {
+    for section in &image.sections {
         // A section the loader does not map occupies no address, and a
         // section at zero names nothing -- the same rule a symbol is held to.
         // Naming one made every literal `0x0` in a listing read
@@ -39,7 +40,7 @@ pub fn of(image: &Image) -> NameDb {
             },
         );
     }
-    for symbol in image.symbols() {
+    for symbol in &image.symbols {
         if !names_an_address(symbol) {
             continue;
         }
@@ -68,12 +69,12 @@ pub fn of(image: &Image) -> NameDb {
     // Where the format names `main` outright, that address is `main` and not
     // also `entry0`: `LC_MAIN` carries the C function, not a start routine.
     let c_main: std::collections::BTreeSet<u64> = image
-        .entry_points()
+        .entries
         .iter()
         .filter(|entry| entry.kind == EntryKind::CMain)
         .map(|entry| entry.vaddr)
         .collect();
-    for entry in image.entry_points() {
+    for entry in &image.entries {
         let text = match entry.kind {
             EntryKind::Main if c_main.contains(&entry.vaddr) => continue,
             EntryKind::Main => "entry0".to_owned(),
@@ -111,9 +112,10 @@ pub fn of(image: &Image) -> NameDb {
 /// bytes of a hash table into `str._E7_`. A string this names is terminated,
 /// because that is what makes it a string a program could pass to anything,
 /// and it is long enough that finding one by chance is not expected.
-pub fn name_strings(db: &mut NameDb, image: &Image) {
+pub fn name_strings(db: &mut NameDb, source: &impl Source) {
+    let image = source.container();
     let scanned: u64 = image
-        .sections()
+        .sections
         .iter()
         .filter(|section| holds_text(section))
         .map(|section| section.vsize)
@@ -121,11 +123,11 @@ pub fn name_strings(db: &mut NameDb, image: &Image) {
     // One bar for the whole listing, because that is what a reader reads: a
     // short section must not get a lower bar than the binary it is part of.
     let floor = chance_run_length(scanned);
-    for section in image.sections() {
+    for section in &image.sections {
         if !holds_text(section) {
             continue;
         }
-        let Some(bytes) = image.read_upto(section.vaddr, section.vsize as usize) else {
+        let Some(bytes) = source.read(section.vaddr, section.vsize as usize) else {
             continue;
         };
         let mut at = 0usize;
@@ -154,7 +156,7 @@ pub fn name_strings(db: &mut NameDb, image: &Image) {
 }
 
 /// Which sections a string can live in.
-fn holds_text(section: &r2image::Section) -> bool {
+fn holds_text(section: &Section) -> bool {
     section.loaded && !section.is_code && section.vsize > 0
 }
 
@@ -246,9 +248,14 @@ pub fn name_slots(
 /// fills. Following that read back to the relocation names the stub, which is
 /// the address the call names. Reading the stubs rather than assuming an entry
 /// size is what keeps this exact across formats and architectures.
-pub fn imports(image: &Image, decoder: &Disassembler, alignment: u32) -> BTreeMap<u64, String> {
+pub fn imports(
+    source: &impl Source,
+    decoder: &Disassembler,
+    alignment: u32,
+) -> BTreeMap<u64, String> {
+    let image = source.container();
     let slots: BTreeMap<u64, &str> = image
-        .relocations()
+        .relocations
         .iter()
         .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
         .collect();
@@ -259,23 +266,15 @@ pub fn imports(image: &Image, decoder: &Disassembler, alignment: u32) -> BTreeMa
 
     // Mach-O names the stub itself rather than a slot the stub reads, so a
     // relocation landing inside a stub section already is the answer.
-    for section in image
-        .sections()
-        .iter()
-        .filter(|section| stubs(&section.name))
-    {
+    for section in image.sections.iter().filter(|section| stubs(&section.name)) {
         let end = section.vaddr + section.vsize;
         for (vaddr, symbol) in slots.range(section.vaddr..end) {
             named.insert(*vaddr, (*symbol).to_owned());
         }
     }
 
-    for section in image
-        .sections()
-        .iter()
-        .filter(|section| stubs(&section.name))
-    {
-        for (start, symbol) in section_stubs(image, decoder, section, &slots, alignment) {
+    for section in image.sections.iter().filter(|section| stubs(&section.name)) {
+        for (start, symbol) in section_stubs(source, decoder, section, &slots, alignment) {
             named.entry(start).or_insert(symbol);
         }
     }
@@ -292,9 +291,9 @@ pub fn imports(image: &Image, decoder: &Disassembler, alignment: u32) -> BTreeMa
 /// an instruction that writes nothing is padding before a stub or the first
 /// instruction of one.
 fn section_stubs(
-    image: &Image,
+    source: &impl Source,
     decoder: &Disassembler,
-    section: &r2image::Section,
+    section: &Section,
     slots: &BTreeMap<u64, &str>,
     alignment: u32,
 ) -> Vec<(u64, String)> {
@@ -310,10 +309,10 @@ fn section_stubs(
     let mut pc = section.vaddr;
     let end = section.vaddr + section.vsize;
     while pc < end {
-        let Some(window) = image.read_upto(pc, DECODE_WINDOW) else {
+        let Some(window) = source.read(pc, DECODE_WINDOW) else {
             break;
         };
-        let mut fetch = window.into_owned();
+        let mut fetch = window;
         fetch.resize(DECODE_WINDOW, 0);
         // A word in a stub section that is not an instruction is the linker's
         // own data -- the offset an ARM stub adds, the padding before one --
@@ -406,7 +405,7 @@ fn stubs(name: &str) -> bool {
 /// zero names nothing; ARM's `$a`, `$d` and `$t` mark where code becomes data
 /// and back; and a symbol carrying a path is the object file a section came
 /// from. radare2 keeps none of them as a flag on an instruction operand.
-fn names_an_address(symbol: &r2image::Symbol) -> bool {
+fn names_an_address(symbol: &Symbol) -> bool {
     symbol.defined
         && symbol.vaddr != 0
         && !symbol.name.is_empty()
@@ -453,7 +452,7 @@ mod tests {
         // ARM's mapping symbols, an object file's own name, and anything at
         // address zero: radare2 puts none of them on an operand.
         for (name, vaddr) in [("$d", 0x1000), ("a/b.c", 0x1000), ("zero", 0)] {
-            let symbol = r2image::Symbol {
+            let symbol = Symbol {
                 name: name.to_owned(),
                 vaddr,
                 size: 0,

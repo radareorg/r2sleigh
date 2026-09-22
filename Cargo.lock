@@ -652,7 +652,6 @@ dependencies = [
  "r2abi",
  "r2dec",
  "r2il",
- "r2image",
  "r2sleigh-lift",
  "r2source",
  "r2ssa",
@@ -699,6 +698,8 @@ dependencies = [
  "clap",
  "insta",
  "r2engine",
+ "r2il",
+ "r2image",
  "serde_json",
 ]
 
