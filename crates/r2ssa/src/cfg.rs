@@ -311,6 +311,12 @@ impl BasicBlock {
                 R2ILOp::Return { .. } => {
                     return BlockTerminator::Return;
                 }
+                // A trap goes to the handler and not back, which is the answer
+                // `R2ILOp::ends_block` already gives; continuing past it named
+                // an edge the machine derivation refused to agree with.
+                R2ILOp::Breakpoint => {
+                    return BlockTerminator::None;
+                }
                 // Skip non-control-flow ops
                 _ => continue,
             }
