@@ -17,8 +17,15 @@ from collections import Counter
 from pathlib import Path
 
 BEGIN = re.compile(r"^R2SLEIGH_COV_BEGIN__(?P<name>.+)$")
+# How many functions the sweep set out to measure, so a run cut short is told
+# apart from a binary that simply holds fewer.
+ASKED = re.compile(r"^R2SLEIGH_COV_ASKED__(?P<count>\d+)$")
 END = re.compile(r"^R2SLEIGH_COV_END__(?P<name>.+)$")
 FALLBACK = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
+# The shell answering with an error instead of a rendering is a refusal too.
+# It was counted as rendered, so a function that stopped before the renderer
+# even ran -- `invalid owned source snapshot` -- raised the score.
+SHELL_ERROR = re.compile(r"^r2s: (?P<cause>.*)$", re.M)
 
 # Numbers inside a cause are counts of refused obligations or conflicting
 # values. They say how much went wrong, not what, and they move with the
@@ -43,7 +50,11 @@ def parse_dump(path: Path) -> list[dict]:
     functions: list[dict] = []
     current: dict | None = None
     body: list[str] = []
+    asked: int | None = None
     for line in path.read_text(errors="replace").splitlines():
+        stated = ASKED.match(line.strip())
+        if stated:
+            asked = int(stated["count"])
         begin = BEGIN.match(line.strip())
         if begin:
             current = {"function": begin["name"]}
@@ -52,7 +63,7 @@ def parse_dump(path: Path) -> list[dict]:
         end = END.match(line.strip())
         if end and current is not None:
             text = "\n".join(body)
-            fallback = FALLBACK.search(text)
+            fallback = FALLBACK.search(text) or SHELL_ERROR.search(text)
             current["rendered"] = fallback is None and bool(text.strip())
             current["cause"] = None if fallback is None else normalise(fallback["cause"])
             if not text.strip():
@@ -62,6 +73,12 @@ def parse_dump(path: Path) -> list[dict]:
             continue
         if current is not None:
             body.append(line)
+    if asked is not None and len(functions) != asked:
+        raise SystemExit(
+            f"{path.name}: the sweep asked for {asked} functions and recorded "
+            f"{len(functions)}; the run was cut short and its numbers are not "
+            "a measurement"
+        )
     return functions
 
 

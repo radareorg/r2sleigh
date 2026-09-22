@@ -49,4 +49,8 @@ done < "$functions"
 # non-zero, so a failing command must not end the run: the whole point is to
 # record which functions refused and why.
 echo "R2SLEIGH_COV_BINARY__$binary"
+# What the sweep set out to measure. A run that is cut short -- the shell
+# killed, the machine loaded, a decoder hanging -- otherwise looks exactly like
+# a binary with fewer functions, and the report believed it.
+echo "R2SLEIGH_COV_ASKED__$(wc -l < "$functions" | tr -d ' ')"
 "$r2s_bin" -q -c "${command_text%; }" "$binary" 2>&1 || true

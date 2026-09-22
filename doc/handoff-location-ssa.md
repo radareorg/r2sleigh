@@ -31088,3 +31088,41 @@ That last one is our own rule rather than a defect: `Namespace::Entry` sorts
 below `Namespace::Symbol` on purpose, because `entry0` says what an address is
 *for* and a symbol says what it *is*, so a symbol table that names `main` wins
 over the role. radare2 makes a bare `main` flag and prefers it.
+
+## The coverage gate was counting failures as renderings
+
+Three defects in the harness, each hiding the next.
+
+**A shell error is a refusal.** The reporter looked only for the renderer's own
+`/* r2sleigh refused ... */` comment. A function that stopped before the
+renderer ran -- `r2s: Parse error: ...`, `r2s: invalid owned source snapshot`,
+`r2s: no instruction decodes at ...` -- produced output, the output was not a
+refusal comment, and the cell was scored as rendered. Seventeen `/bin/ls` cells
+and twelve compiled ones were being counted that way.
+
+**A sweep cut short looked like a smaller binary.** `--accept-baseline` writes
+whatever it measured, and a sweep run while the machine was loaded came back
+with thirteen of `/bin/ls`'s functions instead of a hundred and thirty. It
+would have blessed a baseline missing a hundred and seventeen cells, which is
+the corpus-as-specification mistake this harness exists to prevent. The sweep
+now states how many functions it set out to measure and the reporter refuses a
+dump that recorded fewer, which catches the truncation where it happens rather
+than by comparing against a baseline that may itself be wrong.
+
+**`__mh_execute_header` is not a function.** It is typed as code and sits at
+the Mach-O header, where no instruction begins, so every Mach-O in the corpus
+carried a cell that could only fail. A name is a function when it is *in* code,
+which is what the section table says, so that is the test now.
+
+What the gate says with all three fixed, against 568 of 570 before:
+
+| population | rendered | gates |
+|---|---|---|
+| pinned | **109 / 109** | yes |
+| compiled | **319 / 319** | yes |
+| system (`/bin/ls`) | 119 / 129 | reported |
+
+The two gated populations are exact. Everything left is `/bin/ls`, and the
+causes are named rather than hidden: eight `machine-derived CFG contradicts the
+owned advisory source CFG`, one dispatch table walked as though it were a
+function, one `OpLowering(memory_renderer.rs)`, and `main`.
