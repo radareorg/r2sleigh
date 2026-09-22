@@ -587,15 +587,17 @@ fn low_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
 fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
-        let ssa = r2engine::native::prepared(target, program, addr)
-            .map(|artifact| artifact.artifact().function().dump())
+        let prepared = program
+            .analysed(target, addr)
             .map_err(|refusal: r2engine::native::NativeRefusal| refusal.to_string())?;
+        let ssa = prepared.artifact().artifact().function().dump();
         // Beside the operations, what the renderer decided about each value.
         // The operations alone never answered the question that cost the most
         // time: which variable a value became, or why nothing spells it.
-        let values = r2engine::native::values(target, program, addr)
-            .map(|response| response.output.into_text())
-            .unwrap_or_else(|refusal| format!("values refused: {refusal}\n"));
+        let values =
+            r2engine::native::rendered(target, addr, r2engine::RenderTier::Values, &prepared)
+                .output
+                .into_text();
         Ok(format!("{ssa}\n{values}"))
     })
 }
@@ -613,9 +615,12 @@ fn medium_tier(_session: &mut Session, _argument: &str) -> Result<String, String
 fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
-        r2engine::native::structured(target, program, addr)
-            .map(|response| response.output.into_text())
-            .map_err(|refusal| refusal.to_string())
+        let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
+        Ok(
+            r2engine::native::rendered(target, addr, r2engine::RenderTier::Structured, &prepared)
+                .output
+                .into_text(),
+        )
     })
 }
 
@@ -629,9 +634,12 @@ fn high_tier(_session: &mut Session, _argument: &str) -> Result<String, String> 
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
-        r2engine::native::decompile(target, program, addr)
-            .map(|response| response.output.into_text())
-            .map_err(|refusal| refusal.to_string())
+        let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
+        Ok(
+            r2engine::native::rendered(target, addr, r2engine::RenderTier::C, &prepared)
+                .output
+                .into_text(),
+        )
     })
 }
 
@@ -644,8 +652,8 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 fn obligations(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
-        let response = r2engine::native::decompile(target, program, addr)
-            .map_err(|refusal| refusal.to_string())?;
+        let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
+        let response = r2engine::native::rendered(target, addr, r2engine::RenderTier::C, &prepared);
         response.obligation_ledger.as_ref().map_or_else(
             || Ok("no obligation ledger: the function did not reach native rendering\n".to_owned()),
             |ledger| Ok(format!("{}\n", ledger.report())),
@@ -669,25 +677,8 @@ fn with_native<T>(
     ask: impl FnOnce(&r2engine::native::NativeTarget<'_>, &OpenProgram) -> Result<T, String>,
 ) -> Result<T, String> {
     session.program.ensure_assembled(addr)?;
-    let session: &Session = session;
-    let machine = session
-        .program
-        .machine_at(addr)
-        .ok_or("no Sleigh specification for this architecture")?;
-    let assembled = session.program.assembled().expect("assembled just above");
-    let convention = assembled
-        .conventions
-        .default_convention()
-        .ok_or("the convention data names no default")?;
-    let target = r2engine::native::NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &assembled.compiler,
-        prototypes: &assembled.prototypes,
-    };
-    ask(&target, &session.program)
+    let program = &session.program;
+    ask(&program.target(addr)?, program)
 }
 
 #[cfg(feature = "sleigh")]

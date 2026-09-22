@@ -14,8 +14,10 @@
 //! in one view can describe different programs.
 
 pub mod listing;
+pub mod memo;
 
 pub use listing::{Annotation, AnnotationKind, Line, Listing, Memory};
+pub use memo::{Memo, MemoStats};
 
 /// How much work a request permits.
 ///

@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use r2sleigh_lift::EmbeddedMachine;
 
 use crate::names::NameDb;
-use crate::query::{Revision, listing::Decoders};
+use crate::native::{NativeRefusal, NativeTarget, Prepared};
+use crate::query::{Memo, Revision, listing::Decoders};
 
 /// What the binary defines at one address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +76,8 @@ pub struct OpenProgram {
     /// The same, for what the binary defines at each address.
     entries_revision: u64,
     assembled: Option<Assembled>,
+    /// What this session has already worked out about one function.
+    memo: Memo<Prepared>,
     machine: Option<EmbeddedMachine>,
     /// The same instruction set with TMode set. ARM states the mode per
     /// function in the low bit of its symbol, so both decoders are needed at
@@ -103,6 +106,7 @@ impl OpenProgram {
             names_revision: 0,
             entries_revision: 0,
             assembled: None,
+            memo: Memo::default(),
             machine: None,
             thumb_machine: None,
         }
@@ -220,6 +224,51 @@ impl OpenProgram {
             link,
         });
         Ok(())
+    }
+
+    /// Everything about the machine that does not change between functions.
+    ///
+    /// Assembled once and handed out, so a caller holds one description of the
+    /// program rather than building its own from the parts.
+    pub fn target(&self, addr: u64) -> Result<NativeTarget<'_>, String> {
+        let machine = self
+            .machine_at(addr)
+            .ok_or("no Sleigh specification for this architecture")?;
+        let assembled = self
+            .assembled
+            .as_ref()
+            .ok_or("the program was not assembled for this address")?;
+        Ok(NativeTarget {
+            arch: &machine.arch,
+            disasm: &machine.disasm,
+            cpu: machine.cpu,
+            convention: assembled
+                .conventions
+                .default_convention()
+                .ok_or("the convention data names no default")?,
+            compiler: &assembled.compiler,
+            prototypes: &assembled.prototypes,
+        })
+    }
+
+    /// One function's analysis, done once per state of this program.
+    ///
+    /// Every tier is a rendering of this. Asking for the C and then for the
+    /// ledger behind it, or for the prepared function and then for its values,
+    /// used to walk and prepare the same body twice.
+    pub fn analysed(
+        &self,
+        target: &NativeTarget<'_>,
+        entry: u64,
+    ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
+        self.memo.analysed(self.revision(), entry, || {
+            crate::native::analysed(target, self, entry)
+        })
+    }
+
+    /// What the memo has been asked and what it holds.
+    pub fn memo_stats(&self) -> crate::query::MemoStats {
+        self.memo.stats()
     }
 
     /// What was assembled for the machine at this address.

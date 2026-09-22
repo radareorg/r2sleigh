@@ -32,11 +32,7 @@ use serde::{Deserialize, Serialize};
 mod json;
 mod program_cache;
 use json::*;
-pub use program_cache::{
-    PreparedRole, ProgramCacheStats, cache_callee_facts, cache_program_data_object_types,
-    cache_root_artifact, cached_callee_facts, cached_root_artifact, cached_root_fingerprint,
-    clear_program_cache, program_cache_stats,
-};
+pub use program_cache::cache_program_data_object_types;
 pub use r2ssa::DataRefFact;
 
 mod route;

@@ -207,13 +207,32 @@ pub fn prepared(
     analyse(target, program, entry).map(|prepared| prepared.artifact)
 }
 
+/// Walk and prepare one function, without rendering anything from it.
+pub fn analysed(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<Prepared, NativeRefusal> {
+    analyse(target, program, entry)
+}
+
 /// One function's analysis, before anything is rendered from it.
-struct Prepared {
+///
+/// Every tier is a rendering of this, so it is handed out rather than redone:
+/// asking for the prepared function and then for what the renderer decided
+/// about its values used to walk, lift and prepare the same body twice.
+pub struct Prepared {
     artifact: std::sync::Arc<TrustedSsaArtifact>,
     root: Walked,
     facts: Vec<crate::CalleeFacts>,
     declared: Vec<r2types::SourceOwnedCalleeSignature>,
     ptr_bits: u32,
+}
+
+impl Prepared {
+    pub fn artifact(&self) -> &std::sync::Arc<TrustedSsaArtifact> {
+        &self.artifact
+    }
 }
 
 /// The structured tier for one function: the tree the C is generated from.
@@ -316,18 +335,39 @@ fn render(
     entry: u64,
     tier: crate::RenderTier,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
+    Ok(rendered(
+        target,
+        entry,
+        tier,
+        &analyse(target, program, entry)?,
+    ))
+}
+
+/// Render one tier from an analysis already done.
+pub fn rendered(
+    target: &NativeTarget<'_>,
+    entry: u64,
+    tier: crate::RenderTier,
+    prepared: &Prepared,
+) -> EngineDecompileResponse {
     let Prepared {
         artifact,
         root,
         facts,
         declared,
         ptr_bits,
-    } = analyse(target, program, entry)?;
+    } = prepared;
+    let (artifact, facts, declared, ptr_bits) = (
+        std::sync::Arc::clone(artifact),
+        facts.clone(),
+        declared.clone(),
+        *ptr_bits,
+    );
     let block_count = artifact.source_block_count();
-    let signatures = declared_signatures(target, &root, ptr_bits);
+    let signatures = declared_signatures(target, root, ptr_bits);
     let input = EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
-            function_name: root.name,
+            function_name: root.name.clone(),
             function_addr: entry,
             // The artifact owns the lift and the request reads it from there.
             blocks: Vec::new(),
@@ -344,7 +384,7 @@ fn render(
     .with_declared_signatures(declared)
     .rendering(tier);
 
-    Ok(EngineSession::new().decompile_function_from_input(input))
+    EngineSession::new().decompile_function_from_input(input)
 }
 
 fn analyse(
