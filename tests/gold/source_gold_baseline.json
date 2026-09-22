@@ -2,17 +2,13 @@
   "functions_in_truth": 17,
   "functions_recovered": 17,
   "facts": {
-    "correct": 50,
+    "correct": 51,
     "missing": 0,
     "marked_wrong": 0,
-    "silently_wrong": 1
+    "silently_wrong": 0
   },
-  "recovery_rate": 0.9804,
-  "soundness_rate": 0.9804,
-  "silent": [
-    "sym._main return: expected 'int', said 'uint32_t'"
-  ],
-  "why": {
-    "sym._main return: expected 'int', said 'uint32_t'": "With no debug information nothing proves the signedness of a 32-bit return, and the engine spells it unsigned. C has no spelling that declines to say, so whichever is chosen is a claim; `int` is the language's own default and what an unproven 32-bit return usually is. Changing the default moves rendered output across the whole corpus, so it is a decompiler-quality decision rather than an inversion one."
-  }
+  "recovery_rate": 1.0,
+  "soundness_rate": 1.0,
+  "silent": [],
+  "why": {}
 }

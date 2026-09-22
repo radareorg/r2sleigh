@@ -267,22 +267,9 @@ fn transfer(
         // keeps stays unbounded -- which made a jump table run to the end of
         // the address space rather than over its cases.
         SSAOp::Select(_) => {
-            let arm = |index: usize, truth: bool| match (
-                inst.inputs
-                    .first()
-                    .and_then(|condition| comparison_of(graph, *condition)),
-                inst.inputs.get(index).copied(),
-            ) {
-                (Some(compare), Some(value)) => narrow(
-                    &|value| Some(lookup(value)),
-                    at_width(input(index)),
-                    &compare,
-                    truth,
-                    value,
-                ),
-                _ => at_width(input(index)),
-            };
-            arm(1, true).join(&arm(2, false))
+            let arm =
+                |index: usize| selected_arm(graph, inst, index, at_width(input(index)), lookup);
+            arm(1).join(&arm(2))
         }
         // A comparison is nought or one, whatever it compares.
         SSAOp::IntEqual { .. }
@@ -348,25 +335,7 @@ fn assumptions_by_block(
                 continue;
             };
             for side in [compare.lhs, compare.rhs] {
-                let Some(was) = held
-                    .get(&side)
-                    .copied()
-                    .or_else(|| state.get(side.0 as usize).copied())
-                else {
-                    continue;
-                };
-                let now = narrow(
-                    &|value| {
-                        held.get(&value)
-                            .copied()
-                            .or_else(|| state.get(value.0 as usize).copied())
-                    },
-                    was,
-                    compare,
-                    assumption.truth,
-                    side,
-                );
-                if now != was {
+                if let Some(now) = narrowed_side(&held, state, compare, assumption.truth, side) {
                     held.insert(side, now);
                 }
             }
@@ -384,6 +353,55 @@ fn assumptions_by_block(
 /// A comparison that does not hold is the mirror of the one that does --
 /// `!(a < b)` is `b <= a` -- so the false case is taken by turning the
 /// comparison round rather than by four more arms saying the same thing.
+/// One arm of a select, under what its condition proves on that arm.
+///
+/// A select is the one place a condition bounds a value with no path
+/// sensitivity needed: both arms are taken, and each satisfies the condition
+/// it is guarded by, so the join of the two narrowed arms is sound.
+fn selected_arm(
+    graph: &SsaGraph,
+    inst: &GraphInst,
+    index: usize,
+    range: StridedInterval,
+    lookup: &dyn Fn(ValueId) -> StridedInterval,
+) -> StridedInterval {
+    // The first input is the condition and the second is the arm taken when it
+    // holds, so which arm this is says which way the condition ran; passing
+    // that separately would let the two disagree.
+    let truth = index == 1;
+    let compare = inst
+        .inputs
+        .first()
+        .and_then(|condition| comparison_of(graph, *condition));
+    match (compare, inst.inputs.get(index).copied()) {
+        (Some(compare), Some(value)) => {
+            narrow(&|value| Some(lookup(value)), range, &compare, truth, value)
+        }
+        _ => range,
+    }
+}
+
+/// What a comparison proves about one of its sides, where it proves anything.
+///
+/// `None` where the side has no range yet or where the comparison leaves it
+/// exactly as it was, so the caller inserts only what it has learned.
+fn narrowed_side(
+    held: &std::collections::BTreeMap<ValueId, StridedInterval>,
+    state: &[StridedInterval],
+    compare: &crate::semantic::CompareProvenance,
+    truth: bool,
+    side: ValueId,
+) -> Option<StridedInterval> {
+    let known = |value: ValueId| {
+        held.get(&value)
+            .copied()
+            .or_else(|| state.get(value.0 as usize).copied())
+    };
+    let was = known(side)?;
+    let now = narrow(&known, was, compare, truth, side);
+    (now != was).then_some(now)
+}
+
 fn narrow(
     known: &dyn Fn(ValueId) -> Option<StridedInterval>,
     range: StridedInterval,

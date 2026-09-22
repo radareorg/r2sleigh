@@ -449,43 +449,32 @@ pub fn rendered(
     EngineSession::new().decompile_function_from_input(input)
 }
 
-fn analyse(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Result<Prepared, NativeRefusal> {
-    let native = Native {
-        target,
-        program,
-        machine: machine(target)?,
-        control: program.control().ssa_execution_control(),
-    };
-    let root = native.walk(entry)?;
-    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+/// What the functions this one calls contribute to preparing it.
+struct Read {
+    callees: Callees,
+    facts: Vec<crate::CalleeFacts>,
+    declared: Vec<r2types::SourceOwnedCalleeSignature>,
+    unread: Vec<Unread>,
+}
 
-    // What a call takes and returns is a fact about the callee's body, so the
-    // bodies it calls are walked first and the root is prepared against them.
-    // A callee that cannot be walked leaves its call unproven rather than
-    // failing the root.
-    let mut callees = Callees::default();
-    // An import has no body here to read an interface off, so its declared
-    // prototype is placed in the convention's own slots and stands in for one,
-    // and the same declaration states the C signature the call renders with.
+/// Read every function this one reaches, by declaration or by body.
+///
+/// What a call takes and returns is a fact about the callee, so this runs
+/// before the root is prepared and the root is prepared against it.
+/// Place what the binary declares about each import it calls.
+///
+/// An import has no body here to read an interface off, so its declared
+/// prototype goes in the convention's own slots and stands in for one, and the
+/// same declaration states the C signature the call renders with.
+fn declare_imports(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    targets: &[u64],
+    ptr_bits: u32,
+    callees: &mut Callees,
+) -> Vec<r2types::SourceOwnedCalleeSignature> {
     let mut declared = Vec::new();
-    // A tail jump reaches another function exactly as a call does; the only
-    // difference is that its result is this function's own. One callee reached
-    // both ways is still one callee: declaring it twice makes the type
-    // analysis reject the whole capture as holding a duplicate address.
-    let targets: Vec<u64> = root
-        .body
-        .calls
-        .iter()
-        .chain(root.body.tail_calls.iter())
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    for address in &targets {
+    for address in targets {
         let Some(name) = native.program.import_at(*address) else {
             continue;
         };
@@ -515,6 +504,35 @@ fn analyse(
         }
         callees.interfaces.insert(*address, interface);
     }
+    declared
+}
+
+fn read_callees(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    root: &Walked,
+    entry: u64,
+    ptr_bits: u32,
+) -> Read {
+    // What a call takes and returns is a fact about the callee's body, so the
+    // bodies it calls are walked first and the root is prepared against them.
+    // A callee that cannot be walked leaves its call unproven rather than
+    // failing the root.
+    let mut callees = Callees::default();
+    // A tail jump reaches another function exactly as a call does; the only
+    // difference is that its result is this function's own. One callee reached
+    // both ways is still one callee: declaring it twice makes the type
+    // analysis reject the whole capture as holding a duplicate address.
+    let targets: Vec<u64> = root
+        .body
+        .calls
+        .iter()
+        .chain(root.body.tail_calls.iter())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
     // A stub is not a body: walking one recovers an interface with no
     // parameters, which would displace the declaration that has them.
@@ -536,7 +554,7 @@ fn analyse(
         // prepared: a callee prepared without its declaration proves only what
         // its instructions show, which for a result register is nothing, and
         // then the call site renders it as returning nothing.
-        let declared = declaration_for(&native, target, *address, ptr_bits);
+        let declared = declaration_for(native, target, *address, ptr_bits);
         let Ok(artifact) =
             native.prepare_restated(&walked, &Callees::default(), Vec::new(), declared, &[])
         else {
@@ -566,6 +584,35 @@ fn analyse(
         callees.record(*address, &derived);
         facts.push(derived);
     }
+
+    Read {
+        callees,
+        facts,
+        declared,
+        unread,
+    }
+}
+
+fn analyse(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+) -> Result<Prepared, NativeRefusal> {
+    let native = Native {
+        target,
+        program,
+        machine: machine(target)?,
+        control: program.control().ssa_execution_control(),
+    };
+    let root = native.walk(entry)?;
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+
+    let Read {
+        callees,
+        facts,
+        declared,
+        unread,
+    } = read_callees(&native, target, &root, entry, ptr_bits);
 
     // What the binary's own debug information says this function takes is a
     // declaration, exactly as an import's is, so it is placed in the

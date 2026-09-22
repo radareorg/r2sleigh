@@ -244,11 +244,36 @@ def main() -> int:
     if args.json:
         args.json.write_text(json.dumps(report, indent=2) + "\n")
 
+    recorded = (
+        json.loads(args.baseline.read_text())
+        if args.baseline and args.baseline.exists()
+        else {}
+    )
+
+    # Re-recording comes first. Checked after the comparison instead, the flag
+    # did nothing at all whenever a baseline already existed, which is every
+    # time anyone would reach for it -- and it said so only by leaving the file
+    # unchanged.
+    if args.accept_baseline and args.baseline:
+        # The recorded cause of a silent error outlives the run that found it,
+        # so the explanations for the errors still here are carried forward
+        # rather than thrown away with the counts.
+        why = recorded.get("why", {})
+        args.baseline.write_text(
+            json.dumps(
+                {**report, "why": {fact: why[fact] for fact in silent if fact in why}},
+                indent=2,
+            )
+            + "\n"
+        )
+        print(f"baseline accepted: {args.baseline}", file=sys.stderr)
+        return 0
+
     # A recorded silent error has a recorded cause; an unrecorded one is the
     # failure this harness exists to catch. Gating on the set rather than on
     # zero is what lets a known defect be carried without hiding a new one.
-    if args.baseline and args.baseline.exists():
-        known = set(json.loads(args.baseline.read_text()).get("silent", []))
+    if recorded:
+        known = set(recorded.get("silent", []))
         new_silent = [fact for fact in silent if fact not in known]
         fixed = sorted(known - set(silent))
         for fact in fixed:
@@ -258,10 +283,6 @@ def main() -> int:
         if fixed and not new_silent:
             print("re-record the baseline with --accept-baseline", file=sys.stderr)
         return 1 if new_silent else 0
-    if args.accept_baseline and args.baseline:
-        args.baseline.write_text(json.dumps(report, indent=2) + "\n")
-        print(f"baseline accepted: {args.baseline}", file=sys.stderr)
-        return 0
     # A silent error is the one failure this harness exists to catch.
     return 1 if buckets["silently_wrong"] else 0
 

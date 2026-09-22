@@ -283,96 +283,132 @@ impl<'a> FoldingContext<'a> {
             // declaration between them. Keeping the first, which is what a
             // name-keyed insert does, declares one call's shape and leaves the
             // other contradicting it.
-            std::collections::btree_map::Entry::Occupied(slot) => {
-                // `noreturn` is a fact one terminal call site established for
-                // the callee; a later call site does not contradict it.
-                let mut agreed = declaration.clone();
-                agreed.noreturn = slot.get().declaration.noreturn;
-                if slot.get().declaration == agreed {
-                    return Ok(());
-                }
-                // A prototype states what a callee takes. A call site with
-                // none takes its shape from the registers it happened to
-                // load, which says how many arguments there are and nothing
-                // about what they mean, so it cannot contradict a statement
-                // it agrees with on that count.
-                // An assembled list that observed nothing says nothing: a
-                // tail-call thunk forwards its arguments without touching the
-                // registers they are in, so its site proves no arity at all.
-                let assembled_arity = match from_source_signature {
-                    true => slot.get().declaration.params.as_ref().map(Vec::len),
-                    false => agreed.params.as_ref().map(Vec::len),
-                };
-                let stated_arity = match from_source_signature {
-                    true => agreed.params.as_ref().map(Vec::len),
-                    false => slot.get().declaration.params.as_ref().map(Vec::len),
-                };
-                if slot.get().from_source_signature != from_source_signature
-                    && matches!(assembled_arity, None | Some(0)) | (assembled_arity == stated_arity)
-                {
-                    r2il::refusal_evidence!(
-                        "callee-declaration-stated",
-                        "callsite=({block_addr:#x}, {op_idx}) name={} takes {:?} over {:?}",
-                        declaration.name,
-                        match from_source_signature {
-                            true => &agreed,
-                            false => &slot.get().declaration,
-                        },
-                        match from_source_signature {
-                            true => &slot.get().declaration,
-                            false => &agreed,
-                        }
-                    );
-                    if from_source_signature {
-                        let held = slot.into_mut();
-                        held.declaration = agreed;
-                        held.from_source_signature = true;
-                    }
-                    return Ok(());
-                }
-                // A callee nothing declared takes its arity from each call
-                // site's argument registers, so two sites may prove different
-                // ones without contradicting each other.
-                if !slot.get().from_source_signature
-                    && !from_source_signature
-                    && let Some(reconciled) =
-                        machine_declaration_admitting_both(&slot.get().declaration, &agreed)
-                {
-                    r2il::refusal_evidence!(
-                        "callee-declaration-arity",
-                        "callsite=({block_addr:#x}, {op_idx}) name={} first={:?} this={:?} admitted={reconciled:?}",
-                        declaration.name,
-                        slot.get().declaration,
-                        agreed
-                    );
-                    slot.into_mut().declaration = reconciled;
-                    return Ok(());
-                }
-                r2il::refusal_evidence!(
-                    "callee-declaration-conflict",
-                    "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} registers={:?} stack={:?} disposition={:?} first={:?} this={:?}",
-                    declaration.name,
-                    cert.callee_signature.is_some(),
-                    cert.fixed_argument_count,
-                    cert.argument_values
-                        .iter()
-                        .map(|argument| (argument.index, argument.value))
-                        .collect::<Vec<_>>(),
-                    cert.register_argument_locations
-                        .iter()
-                        .map(|argument| (argument.index, argument.storage))
-                        .collect::<Vec<_>>(),
-                    cert.stack_argument_locations
-                        .iter()
-                        .map(|argument| (argument.index, argument.value))
-                        .collect::<Vec<_>>(),
-                    render_fact.disposition,
-                    slot.get(),
-                    declaration
-                );
-                Err(OpLoweringRefusal::missing_machine_projection())
-            }
+            std::collections::btree_map::Entry::Occupied(slot) => self
+                .reconcile_callee_declaration(
+                    slot,
+                    crate::fold::context::RecordedCalleeDeclaration {
+                        declaration,
+                        from_source_signature,
+                    },
+                    (block_addr, op_idx),
+                    (cert, render_fact),
+                ),
         }
+    }
+
+    /// Reconcile a second call to a name already declared.
+    ///
+    /// Two calls that need different declarations for one name have no
+    /// declaration between them. Keeping the first, which is what a name-keyed
+    /// insert does, declares one call's shape and leaves the other
+    /// contradicting it.
+    fn reconcile_callee_declaration(
+        &self,
+        slot: std::collections::btree_map::OccupiedEntry<
+            '_,
+            String,
+            crate::fold::context::RecordedCalleeDeclaration,
+        >,
+        proposed: crate::fold::context::RecordedCalleeDeclaration,
+        site: (u64, usize),
+        evidence: (
+            &r2types::CallsiteArgumentFacts,
+            &r2types::CallsiteRenderFact,
+        ),
+    ) -> OpLoweringResult<()> {
+        let (block_addr, op_idx) = site;
+        let (cert, render_fact) = evidence;
+        let crate::fold::context::RecordedCalleeDeclaration {
+            declaration,
+            from_source_signature,
+        } = proposed;
+        // `noreturn` is a fact one terminal call site established for
+        // the callee; a later call site does not contradict it.
+        let mut agreed = declaration.clone();
+        agreed.noreturn = slot.get().declaration.noreturn;
+        if slot.get().declaration == agreed {
+            return Ok(());
+        }
+        // A prototype states what a callee takes. A call site with
+        // none takes its shape from the registers it happened to
+        // load, which says how many arguments there are and nothing
+        // about what they mean, so it cannot contradict a statement
+        // it agrees with on that count.
+        // An assembled list that observed nothing says nothing: a
+        // tail-call thunk forwards its arguments without touching the
+        // registers they are in, so its site proves no arity at all.
+        let assembled_arity = match from_source_signature {
+            true => slot.get().declaration.params.as_ref().map(Vec::len),
+            false => agreed.params.as_ref().map(Vec::len),
+        };
+        let stated_arity = match from_source_signature {
+            true => agreed.params.as_ref().map(Vec::len),
+            false => slot.get().declaration.params.as_ref().map(Vec::len),
+        };
+        if slot.get().from_source_signature != from_source_signature
+            && matches!(assembled_arity, None | Some(0)) | (assembled_arity == stated_arity)
+        {
+            r2il::refusal_evidence!(
+                "callee-declaration-stated",
+                "callsite=({block_addr:#x}, {op_idx}) name={} takes {:?} over {:?}",
+                declaration.name,
+                match from_source_signature {
+                    true => &agreed,
+                    false => &slot.get().declaration,
+                },
+                match from_source_signature {
+                    true => &slot.get().declaration,
+                    false => &agreed,
+                }
+            );
+            if from_source_signature {
+                let held = slot.into_mut();
+                held.declaration = agreed;
+                held.from_source_signature = true;
+            }
+            return Ok(());
+        }
+        // A callee nothing declared takes its arity from each call
+        // site's argument registers, so two sites may prove different
+        // ones without contradicting each other.
+        if !slot.get().from_source_signature
+            && !from_source_signature
+            && let Some(reconciled) =
+                machine_declaration_admitting_both(&slot.get().declaration, &agreed)
+        {
+            r2il::refusal_evidence!(
+                "callee-declaration-arity",
+                "callsite=({block_addr:#x}, {op_idx}) name={} first={:?} this={:?} admitted={reconciled:?}",
+                declaration.name,
+                slot.get().declaration,
+                agreed
+            );
+            slot.into_mut().declaration = reconciled;
+            return Ok(());
+        }
+        r2il::refusal_evidence!(
+            "callee-declaration-conflict",
+            "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} registers={:?} stack={:?} disposition={:?} first={:?} this={:?}",
+            declaration.name,
+            cert.callee_signature.is_some(),
+            cert.fixed_argument_count,
+            cert.argument_values
+                .iter()
+                .map(|argument| (argument.index, argument.value))
+                .collect::<Vec<_>>(),
+            cert.register_argument_locations
+                .iter()
+                .map(|argument| (argument.index, argument.storage))
+                .collect::<Vec<_>>(),
+            cert.stack_argument_locations
+                .iter()
+                .map(|argument| (argument.index, argument.value))
+                .collect::<Vec<_>>(),
+            render_fact.disposition,
+            slot.get(),
+            declaration
+        );
+        Err(OpLoweringRefusal::missing_machine_projection())
     }
 
     /// An argument spelled as the type the declaration says it is.

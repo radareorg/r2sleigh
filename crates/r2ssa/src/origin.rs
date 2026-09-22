@@ -216,7 +216,7 @@ mod tests {
             R2ILOp::Load {
                 dst: held.clone(),
                 space: SpaceId::Ram,
-                addr: address.clone(),
+                addr: address,
             },
         ]);
         let slot = BlockOrigins::of_block(&block)
