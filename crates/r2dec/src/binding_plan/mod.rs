@@ -859,6 +859,61 @@ pub(super) fn certified_direct_control_target_values(
         .collect()
 }
 
+/// Whether a certificate already answers for this operation, so it renders
+/// nothing of its own.
+///
+/// Asked by the statement loop, which emits nothing for one, and by the plan,
+/// which must agree about which values then have nowhere to be spelled. It was
+/// a chain of certificate lookups written out inside the statement loop, so
+/// the plan could not ask it and the two could disagree about the same
+/// operation.
+pub(crate) fn certificate_answers_for_inst(
+    source: &r2ssa::SsaArtifact,
+    inst: r2ssa::InstId,
+) -> bool {
+    let graph = source.graph();
+    source
+        .certificates()
+        .stack_frame_round_trip_by_inst
+        .contains_key(&inst)
+        // Every instruction a return-control certificate answers for, not only
+        // the ones it claims exclusively: the prologue's save of the return
+        // address is shared with the frame's own setup and with every other
+        // return, so it is deliberately claimed by none of them, and asking
+        // only about exclusive claims left it to be rendered as a store to a
+        // slot the plan had already elided.
+        || certified_return_control_insts(source).contains(&inst)
+        || source.certificates().stack_geometry.insts.contains(&inst)
+        // The copy that puts a callee's address in a temporary before the
+        // call. The call spells the callee's name, so this assigns an object
+        // the plan has elided and no statement can name.
+        || certified_direct_call_target_insts(source).contains(&inst)
+        // The push that records where the call comes back to. The call
+        // statement is the transfer.
+        || source.certificates().call_return_address_stores.contains(&inst)
+        // The halves of a memory round trip. The object ends holding what it
+        // held, so the store assigns nothing and the read it puts back
+        // produces a value no statement names.
+        || graph.op_site_for_inst(inst).is_some_and(|(block_addr, op_index)| {
+            source
+                .certificates()
+                .memory_round_trips
+                .values()
+                .any(|certificate| {
+                    certificate.block_addr == block_addr
+                        && (certificate.write_op_index == op_index
+                            || certificate.read_op_index == op_index
+                            || certificate.redundant_read_op_indexes.contains(&op_index))
+                })
+        })
+        // The lane of an entry register a formal was minted from: the
+        // declaration is its definition.
+        || graph
+            .inst(inst)
+            .and_then(|inst| inst.output)
+            .is_some_and(|value| graph.formal_projection_storage(value).is_some())
+}
+
 /// Values whose complete use domain belongs to an exact upstream frame
 /// save/reload certificate. The certificate collector already proved the
 /// closure; this is only its renderer-facing projection.

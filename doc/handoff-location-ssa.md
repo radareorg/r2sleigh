@@ -31364,14 +31364,28 @@ three of them were built and shown to work:
 4. The binding plan elides the values they define and the operands only they
    read.
 
+The prerequisite is done and committed: "a certificate already answers for this
+operation, so it renders nothing" was a chain of lookups written out inside the
+statement loop, where the plan could not ask it, and is now
+`binding_plan::certificate_answers_for_inst`. Adding the dispatch to it is one
+arm; the statement loop and the plan then agree by construction.
+
 What is left is one general rule that the fourth exposes rather than creates.
 `const:8` is shared between the dispatch's `imul` and the stack-pointer restore
 in every arm; the restores are elided as stack geometry, so once the dispatch
 stops rendering, that constant has no rendered occurrence anywhere and its cell
 is unobserved at seal. **A value whose every occurrence is elided must be
-elided itself**, and the passes that decide which values nothing renders
-(`unrendered_defined_values`, `structural_unused`) run before the dispatch
-elision is known. Finishing this means computing the dispatch elision first and
-letting those passes see it, which is a build-order change in the binding plan
-rather than another rule. The four pieces above are reverted until that lands,
-so the tree is green and the gap is still there.
+elided itself**. Expressing that directly -- a value every one of whose use
+sites is answered for by a certificate is elided as a dead temporary -- was
+tried and met a fifth refusal, `MissingProgramVariableAuthorization`, which is
+the signal this project reads as being in the wrong layer: five sealed layers
+each accommodating one decision. The dispatch pieces are reverted, so the tree
+is green and the gap is still there.
+
+The next attempt should start from the shape rather than the symptom. Each step
+so far moved the refusal rather than removing it -- `PlannedElidedValueRendered`
+to `RenderedValueRequired` to `MissingProgramVariableAuthorization` -- which
+says the renderer is being told after the fact about operations it should never
+have been given. Consuming the dispatch probably means the structured form
+takes those operations out of the block it renders, rather than every
+downstream pass learning to skip them.

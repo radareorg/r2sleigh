@@ -1379,67 +1379,7 @@ impl<'a> FoldingContext<'a> {
                 .source_inst_for_normalized_op(block.addr, op_idx)
                 .is_some_and(|inst| {
                     self.prepared_ssa().is_some_and(|prepared| {
-                        prepared
-                            .certificates()
-                            .stack_frame_round_trip_by_inst
-                            .contains_key(&inst)
-                            // Every instruction a return-control certificate
-                            // answers for, not only the ones it claims
-                            // exclusively: the prologue's save of the return
-                            // address is shared with the frame's own setup and
-                            // with every other return, so it is deliberately
-                            // claimed by none of them, and asking only about
-                            // exclusive claims left it to be rendered as a
-                            // store to a slot the plan had already elided.
-                            || crate::binding_plan::certified_return_control_insts(prepared)
-                                .contains(&inst)
-                            || prepared
-                                .certificates()
-                                .stack_geometry
-                                .insts
-                                .contains(&inst)
-                            // The copy that puts a callee's address in a
-                            // temporary before the call. The call spells the
-                            // callee's name, so this assigns an object the
-                            // plan has elided and no statement can name.
-                            || crate::binding_plan::certified_direct_call_target_insts(prepared)
-                                .contains(&inst)
-                            // The push that records where the call comes back
-                            // to. The call statement is the transfer.
-                            || prepared
-                                .certificates()
-                                .call_return_address_stores
-                                .contains(&inst)
-                            // The halves of a memory round trip. The object
-                            // ends holding what it held, so the store assigns
-                            // nothing and the read it puts back produces a
-                            // value no statement names.
-                            || prepared
-                                .graph()
-                                .op_site_for_inst(inst)
-                                .is_some_and(|(block_addr, op_index)| {
-                                    prepared
-                                        .certificates()
-                                        .memory_round_trips
-                                        .values()
-                                        .any(|certificate| {
-                                            certificate.block_addr == block_addr
-                                                && (certificate.write_op_index == op_index
-                                                    || certificate.read_op_index == op_index
-                                                    || certificate
-                                                        .redundant_read_op_indexes
-                                                        .contains(&op_index))
-                                        })
-                                })
-                            // The lane of an entry register a formal was
-                            // minted from: the declaration is its definition.
-                            || prepared
-                                .graph()
-                                .inst(inst)
-                                .and_then(|inst| inst.output)
-                                .is_some_and(|value| {
-                                    prepared.graph().formal_projection_storage(value).is_some()
-                                })
+                        crate::binding_plan::certificate_answers_for_inst(prepared, inst)
                     })
                 })
             {
