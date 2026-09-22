@@ -1377,11 +1377,7 @@ impl<'a> FoldingContext<'a> {
 
             if self
                 .source_inst_for_normalized_op(block.addr, op_idx)
-                .is_some_and(|inst| {
-                    self.prepared_ssa().is_some_and(|prepared| {
-                        crate::binding_plan::certificate_answers_for_inst(prepared, inst)
-                    })
-                })
+                .is_some_and(|inst| self.certificate_answers_for(inst))
             {
                 continue;
             }

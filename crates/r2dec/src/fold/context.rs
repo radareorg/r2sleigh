@@ -1,5 +1,4 @@
 use std::cell::Cell;
-#[cfg(test)]
 use std::cell::OnceCell;
 #[cfg(test)]
 use std::collections::HashMap;
@@ -120,6 +119,8 @@ pub(crate) struct FoldState {
 pub(crate) struct FoldingContext<'a> {
     pub(crate) inputs: FoldInputs<'a>,
     pub(crate) state: FoldState,
+    /// Which operations a certificate already answers for, built once.
+    pub(crate) certified_silence: OnceCell<crate::binding_plan::CertifiedSilence>,
     pub(crate) current_block_addr: Cell<Option<u64>>,
     pub(crate) current_block_id: Cell<Option<BlockId>>,
     /// Where each name is defined in the block being walked.
@@ -331,12 +332,24 @@ fn transfer_the_structure_expresses(
         .is_some_and(|block| prepared.certificates().switches.contains_key(&block.addr))
 }
 
+impl FoldingContext<'_> {
+    /// Whether a certificate already answers for this operation.
+    pub(crate) fn certificate_answers_for(&self, inst: r2ssa::InstId) -> bool {
+        self.inputs.prepared_ssa.is_some_and(|prepared| {
+            self.certified_silence
+                .get_or_init(|| crate::binding_plan::CertifiedSilence::for_function(prepared))
+                .contains(inst)
+        })
+    }
+}
+
 impl<'a> FoldingContext<'a> {
     pub(crate) fn from_inputs(inputs: FoldInputs<'a>) -> Self {
         Self {
             symbols: std::rc::Rc::new(std::cell::RefCell::new(crate::symbol::SymbolTable::new())),
             inputs,
             state: FoldState::default(),
+            certified_silence: OnceCell::new(),
             current_block_addr: Cell::new(None),
             current_block_id: Cell::new(None),
             current_op_idx: Cell::new(None),
