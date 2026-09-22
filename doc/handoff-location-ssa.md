@@ -31126,3 +31126,50 @@ The two gated populations are exact. Everything left is `/bin/ls`, and the
 causes are named rather than hidden: eight `machine-derived CFG contradicts the
 owned advisory source CFG`, one dispatch table walked as though it were a
 function, one `OpLowering(memory_renderer.rs)`, and `main`.
+
+## `/bin/ls`'s `main` renders: 470 statements, nothing refused
+
+Four defects between the refusal and the rendering, each found by fixing the
+one above it.
+
+**The jump table ran to the end of the address space.** `clang` clamps a switch
+index twice -- `cmp w16, 0x5b; b.hi default` and then `cmp x16, 0x5b;
+csel x16, x16, xzr, ls` -- and the value-range analysis read the branch but not
+the select: `Select` joined its arms without asking what its condition proves.
+A `csel` is the one place where a condition bounds a value with no path
+sensitivity needed, since both arms satisfy it. With the arm narrowed the table
+bounds to its 92 cases.
+
+**A trap fell through.** `R2ILOp::ends_block` already said a breakpoint ends a
+block and names no successor; `analyze_terminator` had no arm for it, so a block
+ending in `brk` named a fallthrough the machine derivation refused to agree
+with. That alone was eight functions in `/bin/ls`.
+
+**Several cases reaching one arm were several edges.** A jump table names 92
+targets and `/bin/ls`'s `main` has 92 cases over fewer arms, so the successor
+list held the same target twice and the capture's structural contract rejected
+it. Which cases reached an arm is the dispatch's own fact, carried by its table;
+the edge is one edge.
+
+**Two call sites disagreed about one callee.** `_tputs` is called once through
+its source prototype and once from a site with none, which takes its shape from
+the registers it happened to load. The second cannot contradict the first: it
+says how many arguments there are and nothing about what they mean. Where the
+two agree on that count, the stated declaration is the declaration.
+
+`main` now renders 470 statements with 1223 source obligations, 1066 rendered,
+157 elided and **none refused**, with a real `switch` over `w0 - 0x25` and 30
+callee prototypes supplied by the source.
+
+| population | rendered | gates |
+|---|---|---|
+| pinned | **109 / 109** | yes |
+| compiled | **319 / 319** | yes |
+| system (`/bin/ls`) | **127 / 129** | reported |
+
+The two left are `0x100001a78` (`OpLowering(memory_renderer.rs)`) and
+`0x1000038c0` (`OpLowering(calls.rs)`). A third cell, `0x100001564`, is
+`main`'s own jump table: `LC_FUNCTION_STARTS` records it as an atom boundary,
+the bytes there are `udf`, and we render `__builtin_trap()` -- honest about the
+bytes, wrong about it being a function. A declared start whose first
+instruction is undefined is data, which is the rule to add.
