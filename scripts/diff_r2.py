@@ -45,13 +45,26 @@ ANNOTATION = re.compile(r"^\s*;")
 TRAILING = re.compile(r"\s+;.*$")
 
 
+def instruction(line):
+    """One listing line from its address on, or nothing when it has none.
+
+    radare2 draws the control flow in a gutter left of the address -- `,=<`
+    for a jump, `:` for the column it passes through -- and a line that is
+    only gutter carries no instruction at all. The drawing is analysis made
+    visible, not disassembly, so it is dropped for the same reason the
+    trailing annotations are.
+    """
+    start = line.find("0x")
+    return line[start:] if start >= 0 else ""
+
+
 def normalise(text, strip_trailing=False):
     lines = []
     for line in text.splitlines():
         if NOISE.match(line) or ANNOTATION.match(line):
             continue
         if strip_trailing:
-            line = canonical_numbers(TRAILING.sub("", line))
+            line = canonical_numbers(TRAILING.sub("", instruction(line)))
         line = line.rstrip()
         if line:
             lines.append(line)
@@ -65,7 +78,10 @@ def values(lines):
     return found
 
 
-NUMBER = re.compile(r"-0x[0-9a-fA-F]+|0x[0-9a-fA-F]+|\b-?[0-9]+\b")
+# `\b` never matches before a minus, so a negative decimal used to lose its
+# sign: radare2's `[sp, -4]` normalised to `-0x4` while Sleigh's `[sp, -0x4]`
+# normalised to the unsigned word, and the same displacement read as two.
+NUMBER = re.compile(r"-?0x[0-9a-fA-F]+|(?<![0-9A-Za-z_])-?[0-9]+\b")
 
 
 def canonical_numbers(line):
@@ -145,7 +161,22 @@ def main():
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--only", help="run just the commands whose verb matches this")
     parser.add_argument("--verbose", action="store_true", help="show the first differing line")
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="measure whatever binary is already there",
+    )
     args = parser.parse_args()
+
+    # Build before measuring. The default binary is the debug one, which a
+    # plain `cargo build --release` does not touch, so a run taken after one
+    # reported the tree as it was several changes ago.
+    if not args.no_build and args.r2s == str(here / "target/debug/r2s"):
+        subprocess.run(
+            ["cargo", "build", "-p", "r2s", "--features", "sleigh"],
+            cwd=here,
+            check=True,
+        )
 
     r2, r2s = pathlib.Path(args.r2), pathlib.Path(args.r2s)
     for tool in (r2, r2s):

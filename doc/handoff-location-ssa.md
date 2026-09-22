@@ -30843,3 +30843,248 @@ The other `pd` differences on that corpus are presentation, not decoding:
 radare2 substitutes a flag name into an operand (`movups xmm0, xmmword
 [loc.v1]` against our `[0x60013c]`) and prints the `pop` alias for
 `ldr r1, [sp], 0x4`. r2s has the names to do the first; it does not do it yet.
+
+## Where the session left the numbers
+
+| gate | before | after |
+|---|---|---|
+| tests | 1783 passed | 1697 passed, 0 failed |
+| coverage | 509 of 519 rendered | **566 of 570** |
+| refusals | 10 | 4 |
+| source-gold recovery | 98.04% | **100%** |
+| source-gold soundness | 98.04%, one silent error | **100%, none** |
+| `too_many_lines` | 481 | 437 |
+| `excessive_nesting` | 1125 | 994 |
+| `cognitive_complexity` | 65 | 53 |
+| `too_many_arguments` | 160 | 155 |
+| largest file | 19,892 lines | 4,799 |
+| `certify_render` | 98 / 0 / 0 | unchanged |
+| `diff_r2` | px 21, pd 14, ie 24, iS 24, is 23 | unchanged |
+
+The test count fell because 93 tests went with the code they tested: the
+apply-half of the type layer, `r2types::inference`, the engine's policy module
+and the plugin-era payload chain. Every fact worth keeping was either kept
+where it was or re-expressed against the surviving entry point, and that is
+written up per rewrite above.
+
+`diff_r2`'s `pd` is the one number that did not move and should not be read as
+a defect count: three of the ten differences are radare2 substituting a flag
+name into an operand, one is its `pop` alias, one is a base-address
+disagreement, and at least one -- `armeb_hello_static` -- is radare2 being
+wrong where we are now right.
+
+### What is left, with what is known about each
+
+- **Two refusals**, both in `/bin/ls`: one `RenderedValueRequired` and one
+  `OpLowering(memory_renderer.rs)`.
+- **`wcwidth` has no prototype** in radare2's shipped tables, which is why its
+  arity had to be reconciled from call sites. One line of sdb, upstream.
+- **`EF_ARM_BE8`.** We do not distinguish BE8 from BE32, so instruction fetch
+  on a big-endian ARM binary is big-endian where BE8 says it should be little.
+  It did not bite on `armeb_hello_static` because Sleigh's Thumb decoder reads
+  halfwords the way BE8 wants; an ARM-mode BE8 binary would expose it.
+- **Operand flag substitution.** `r2s` has the name database and does not use
+  it when printing an operand's absolute address.
+
+## A shift by an immediate stopped reading the flags it sets
+
+`murmur3_32` refused with `RenderedValueRequired`, and the value it could not
+render was `ZF_0` -- the zero flag as the function was *entered with it*, read
+at `0x40168c` by a function whose first flag-setting instruction is that same
+`shr rax, 2`.
+
+The chain is Sleigh's, and it is correct: an x86 shift leaves the flags alone
+when the count is zero, so the lifted form of every flag write is
+`ZF = (count != 0 & new) | (!(count != 0) & ZF)`. With an immediate count the
+guard is decided and the old value drops out. Ours did not drop out, because
+the count reaches the guard through a temporary -- `tmp = 0x2 & 0x3f`, then
+`tmp != 0` -- and `simplify_op` reads a *literal* operand while
+`fold_through_definition` only knew how to fold a `Select` and a `Subpiece`.
+`constant_through_definitions` could already answer "what constant is this
+temporary", and nothing asked it.
+
+Two rules close it, both in `crates/r2ssa/src/optimize.rs`:
+
+- `substitute_constant_temporaries` rewrites every *temporary* operand that is
+  constant through its definitions as that constant, and the existing rules
+  then decide the guard. Registers and memory are left alone: their writes are
+  effects the rendering owes, and folding one away would leave an obligation
+  with no answerer. Phi arms are left alone because an arm is an edge.
+- `fold_mask_over_boolean` decides `x & c` where `x` is a comparison or a
+  boolean operation. A boolean is `0` or `1`, so the mask keeps it when bit
+  zero is set and kills it otherwise -- which a width alone cannot say, and
+  which is what the flag chain's last `& 1` needs.
+
+One machine-model rule had to give way with them. `validate_arena` refused any
+`Constant` node typed `Bool`, on the reasoning that integer truthiness is not a
+boolean. Folding a comparison is exactly how a boolean constant comes to exist,
+and `value_has_boolean_producer` already said so for the `Source` case, so the
+blanket refusal cost nineteen ARM functions their rendering the moment the
+guards started folding. It now refuses a `Bool` constant whose bits exceed one,
+which is the honest version of the same rule.
+
+What it bought: `murmur3_32` renders (566 of 570), the FNV prime stops being
+routed through a temporary and is spelled at the multiply, and `pdd` on the
+whole certify corpus refuses nothing. What it cost: nothing measurable --
+0.95s against 0.92s of user time over the same sweep.
+
+Two unit tests changed because their fixtures no longer exercised what they
+were named for. `population_count_consumes_the_upstream_machine_projection`
+counted the bits of a literal, so the whole chain now folds and the popcount
+goes dead; it takes a register now. `observed_direct_call_marks_only_graph_target_input`
+staged a direct call's target through a temporary copy, which the call now
+spells directly; its prefix loop skips any definition the plan does not bind
+rather than only the one the target defined.
+
+## An object is as wide as the widest read, and a dead copy reads all of it
+
+`shape_stack_buffer` and `shape_struct_array` refused with `missing
+program-variable authorization`, which the seal raised as
+`DeclarationWidth`: the plan declared a binding `int64_t` while the seal's
+own re-derivation said every member of it read to bit 32.
+
+Both sides call the same `member_read_end_bits`, so the disagreement was inside
+it. A read through a `Copy` or a phi is *forwarded*: rather than counting the
+copy as a read of the whole value, the walk asks what the copy's destination is
+read to, because that is the narrower and truer answer. When the destination is
+read by nothing the recursion returns zero, and zero was taken literally -- the
+copy was counted as reading no bits at all. At the top of the same function
+zero already means the opposite: `member_read_end_bits` maps "no reads" to the
+value's full width, because a value nothing reads is still as wide as it is.
+
+So the rule now reads the same at both ends. A forwarded read that finds no
+narrower witness is a read of the whole value. `ValueId(79)` in
+`shape_stack_buffer` is the case in miniature: `tmp:11f80_4` is eight bytes, is
+copied whole into `RAX_7`, and is also read as a four-byte lane. `RAX_7` is
+read by nothing, so the copy contributed nothing, the lane's 32 won, and a
+64-bit object was declared 32 bits wide -- which the seal correctly refused.
+
+`shapes_gcc_x64_O0` now renders whole: `uint8_t stack_m88[64]`, both loops and
+the FNV finaliser. Coverage is **568 of 570** and the pinned corpus is
+**109 of 109**.
+
+## A symbol is defined by the section it sits in
+
+`r2s -c is` printed nothing at all for `allxmm`, a NASM-assembled ELF whose
+every label is `STT_NOTYPE`. The filter was `object`'s `is_definition()`, which
+counts only `STT_FUNC` and `STT_OBJECT`. A name is defined in this image when
+it sits in a section of it, whatever its type, so that is what the predicate
+says now -- minus `STT_FILE`, which names a source file rather than an address.
+
+radare2 spells such a symbol `loc.`, reserving `obj.` for `STT_OBJECT`, and the
+engine's `Namespace::Label` already carried that prefix and was unused for
+symbols. `movups xmm0, xmmword [0x60013c]` is `movups xmm0, xmmword [loc.v1]`
+now, which is what radare2 prints.
+
+## The listing comparison was measuring a stale binary
+
+`scripts/diff_r2.py` defaults to `target/debug/r2s` and did not build it, so
+every listing number this session reported came from whatever debug binary was
+last built -- the same trap `certify_render.py` carries a comment about and
+already guards against. It builds first now, with `--no-build` to opt out.
+
+## A relocatable object had no addresses, so nothing could be read from it
+
+`pd` on an ELF object file printed `0x0 0x0 invalid` and `is` listed symbols at
+zero. A relocatable object's sections all carry `sh_addr = 0`, which means
+unplaced rather than "at zero", so every section overlapped at address zero,
+`segment_at` answered with whichever came first, and the bytes read back were
+from the wrong section.
+
+A section is placed at its own file offset above one base. That is the only
+placement derivable from the file itself, it gives every section a distinct
+address, and it is what radare2 does, so the two agree on what an address in
+such a file means. Symbols move with their section, since an object file's
+`st_value` is an offset into the section rather than an address.
+
+`aarch64-got-etrel-addend.o` now disassembles byte for byte as radare2 does,
+and the listing comparison moved from `is 22/2, px 21/3` to **`is 24/0`,
+`px 22/2`**.
+
+## Every ARM import stub was unnamed, because its first byte is zero
+
+`b 0x2cc` where radare2 wrote `b sym.imp.__cxa_finalize`. The stub scan walks a
+`.plt` section, lifts each instruction into a run, and asks
+`terminal_indirect_loaded_slot` which slot the run's indirect branch reads.
+That machinery was right; the walk never reached the stubs.
+
+Two rules in the walk were x86 readings of a machine that is not x86. A word
+that did not lift ended the scan, and an ARM `.plt` has a literal between its
+header and its first stub by construction. And a word whose first byte is zero
+was taken for padding -- but `adr ip, 0x2c8` assembles to `00 c6 8f e2`, which
+is how every ARM import stub begins, so the very instruction the scan is
+looking for was the one it skipped.
+
+A word that does not lift is now stepped over at the machine's instruction
+alignment and the run starts again after it; the first byte decides nothing.
+`arm-init` now names all three of its stubs exactly as radare2 does. This was
+never only a listing defect: an unnamed stub is an unnamed callee, so nothing
+could key a prototype by it.
+
+`ArchSpec::alignment` is worth a note while it is fresh. It is `1` for every
+embedded machine, because nothing reads Sleigh's `align` attribute -- the
+specification states it and `libsla` does not pass it through. Stepping by one
+byte is right for x86 and wrong for ARM, and the only reason it does not bite
+here is that the scan's other rule now keeps it from being reached. Reading it
+means a passthrough in the `libsla-sys` and `libsla` forks.
+
+## What the listing comparison compares, and what is left in it
+
+Two changes to what `diff_r2.py` reads, both of the same kind as the trailing
+annotations it already dropped. radare2 draws the control flow in a gutter left
+of the address -- `,=<` at a jump, `:` through the column it passes -- and a
+line that is only gutter carries no instruction at all. That drawing is
+analysis made visible, not disassembly, so each listing line is now read from
+its address on.
+
+Two ARM spellings and four x86 ones are Sleigh keeping the older name for the
+same encoding. `cpy rd, rm` is what `mov rd, rm` used to be called, and a
+post-indexed load of one register through the stack pointer is a `pop` of it.
+On x86, `jz`/`jnz`/`jc`/`jnc` are `je`/`jne`/`jb`/`jae` -- the flag tested
+against the comparison it came from -- and the same four run through `set`,
+`cmov` and `loop`. Every other disassembler prints the later name.
+
+With those, `pd` agrees on 18 of 24 and `is` and `iS` on all 24. What remains
+is radare2 saying more than the instruction does, or being wrong:
+
+- **Padding past the mapped end.** radare2 fills an unmapped byte with `0xff`
+  and prints it; we stop where the mapping stops. Two of the two remaining `px`
+  differences are this, and one `pd` difference is the same thing.
+- **`_Exit (42)`** reads one row past its segment's file extent, which is the
+  same padding.
+- **`segment.ehdr`.** radare2 synthesises a segment name for a relocatable
+  object's header and spells an `adrp` of the base with it.
+- **`armeb_hello_static`.** radare2 decodes `4ff0` as a two-byte Thumb `ldr`
+  where the instruction is the four-byte `mov.w fp, 0`. We are right here and
+  radare2 is not, which is why this one does not move.
+
+## An ARM literal-pool load is spelled by the name in the pool
+
+`ldr ip, =__libc_csu_fini` is what the source wrote. The assembler puts the
+address in a pool beside the code and the instruction reads it, so Sleigh
+prints `ldr ip, [0x817c]` -- the pool's address, which is what the operand
+literally is. The name is the source's, the pool word is in the image, and the
+name database already holds every address the binary names, so the load is now
+spelled by what it will produce wherever that has a name. Only ARM, only `ldr`,
+and only a bare pool address: an x86 `mov eax, [0x1234]` reads a variable's
+value and naming its contents would be wrong.
+
+Two symbol kinds had to stop counting as addresses first, and both were found
+by this: `str r2, [sp, -0x4]!` came out as
+`str r2, [sp, -loc._nl_current_LC_MONETARY]!`.
+
+- **A thread-local symbol's value is an offset into its block.** `STT_TLS`
+  `_nl_current_LC_MONETARY` has `st_value = 4` and a real section index, so
+  widening the definition predicate to "sits in a section" admitted it, and
+  then every `-0x4` displacement in the binary was named after it.
+- **An absolute symbol sits in no section at all**, so its value is a number
+  the linker chose rather than a place. `STT_FILE` is one of those, which is
+  why naming the file kind separately is no longer needed.
+
+`pd` agrees on 19 of 24 with those in. What is left is the padding above, the
+`segment.ehdr` naming, `armeb_hello_static` where radare2 is wrong, and two
+binaries where radare2 writes `ldr r0, main` against our `ldr r0, sym.main`.
+That last one is our own rule rather than a defect: `Namespace::Entry` sorts
+below `Namespace::Symbol` on purpose, because `entry0` says what an address is
+*for* and a symbol says what it *is*, so a symbol table that names `main` wins
+over the role. radare2 makes a bare `main` flag and prefers it.
