@@ -291,6 +291,45 @@ impl<'a> FoldingContext<'a> {
                 if slot.get().declaration == agreed {
                     return Ok(());
                 }
+                // A prototype states what a callee takes. A call site with
+                // none takes its shape from the registers it happened to
+                // load, which says how many arguments there are and nothing
+                // about what they mean, so it cannot contradict a statement
+                // it agrees with on that count.
+                // An assembled list that observed nothing says nothing: a
+                // tail-call thunk forwards its arguments without touching the
+                // registers they are in, so its site proves no arity at all.
+                let assembled_arity = match from_source_signature {
+                    true => slot.get().declaration.params.as_ref().map(Vec::len),
+                    false => agreed.params.as_ref().map(Vec::len),
+                };
+                let stated_arity = match from_source_signature {
+                    true => agreed.params.as_ref().map(Vec::len),
+                    false => slot.get().declaration.params.as_ref().map(Vec::len),
+                };
+                if slot.get().from_source_signature != from_source_signature
+                    && matches!(assembled_arity, None | Some(0)) | (assembled_arity == stated_arity)
+                {
+                    r2il::refusal_evidence!(
+                        "callee-declaration-stated",
+                        "callsite=({block_addr:#x}, {op_idx}) name={} takes {:?} over {:?}",
+                        declaration.name,
+                        match from_source_signature {
+                            true => &agreed,
+                            false => &slot.get().declaration,
+                        },
+                        match from_source_signature {
+                            true => &slot.get().declaration,
+                            false => &agreed,
+                        }
+                    );
+                    if from_source_signature {
+                        let held = slot.into_mut();
+                        held.declaration = agreed;
+                        held.from_source_signature = true;
+                    }
+                    return Ok(());
+                }
                 // A callee nothing declared takes its arity from each call
                 // site's argument registers, so two sites may prove different
                 // ones without contradicting each other.
