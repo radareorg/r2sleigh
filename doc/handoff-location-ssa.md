@@ -31333,7 +31333,8 @@ itself: a certified switch expresses the transfer by which case block the code
 sits in, so the gap need not stand in for it. The gap now covers the
 instruction minus a transfer a certificate already accounts for.
 
-**Still open, and worth a decision.** On the jump-table fixture the rendering is
+**Decided: structuring consumes the dispatch.** On the jump-table fixture the
+rendering is
 
 ```
 /* r2dec gap: planned_elided_value_rendered at 0x1005:5 covering 4 ops */
@@ -31343,9 +31344,34 @@ switch (EDI_0) { ... }
 A fully proved four-case switch carries a marked gap over its own dispatch, and
 five obligations are counted as gapped. The cause is that the table read's value
 is elided as `DirectControlTarget` -- its only reader is the branch, which the
-switch spells -- while the read still renders a statement that names it. Three
-layers can each be made to accommodate that (the switch certificate could name
-the dispatch it subsumes, the effect ledger could discharge the read, the
-renderer could decline to materialise it), which by this project's own rule
-means the work belongs a level up: the structuring should consume the dispatch's
-operations rather than leave them for the renderer to explain.
+switch spells -- while the read still renders a statement that names it.
+
+The decision is that the structured `switch` owns the operations it is made of,
+so they never reach the renderer at all. Four places read that one fact, and
+three of them were built and shown to work:
+
+1. `SwitchCertificate` gains `dispatch: Vec<InstId>`, grown to a fixpoint
+   backwards from the transfer: an operation belongs to the dispatch when
+   everything that reads it is already in the dispatch. The selector stops the
+   walk twice over, since the switch spells it and the guard that bounds the
+   index reads it too. On the fixture this is exactly the zero-extension, the
+   scale, the table address, the load and the branch.
+2. The statement loop in `fold/op_lower/implementation.rs` emits nothing for
+   them, beside the certificates that already work that way -- the call's
+   target copy, the return-address store, the halves of a memory round trip.
+3. The effect ledger discharges their obligations as `DirectControlTarget`,
+   beside the transfer it already discharges.
+4. The binding plan elides the values they define and the operands only they
+   read.
+
+What is left is one general rule that the fourth exposes rather than creates.
+`const:8` is shared between the dispatch's `imul` and the stack-pointer restore
+in every arm; the restores are elided as stack geometry, so once the dispatch
+stops rendering, that constant has no rendered occurrence anywhere and its cell
+is unobserved at seal. **A value whose every occurrence is elided must be
+elided itself**, and the passes that decide which values nothing renders
+(`unrendered_defined_values`, `structural_unused`) run before the dispatch
+elision is known. Finishing this means computing the dispatch elision first and
+letting those passes see it, which is a build-order change in the binding plan
+rather than another rule. The four pieces above are reverted until that lands,
+so the tree is green and the gap is still there.
