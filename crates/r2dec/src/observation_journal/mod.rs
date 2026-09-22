@@ -2654,165 +2654,193 @@ impl LegacyObservationJournal {
         uses.iter().all(|site| silence.contains(site.inst))
     }
 
+    /// Name every cell and reader of an unaccounted value, under the trace
+    /// switch the lowering refusals use.
+    fn trace_unaccounted_value(&self, index: usize, value: ValueId) {
+        if !r2il::refusal_evidence::tracing() {
+            return;
+        }
+        let graph = self.source.graph();
+        let targets = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(id, target)| {
+                matches!(target, ObservationTarget::Value(target) if *target == value).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "unaccounted value {value:?} disposition {:?} def {:?} uses={uses} storage={storage:?} readers={readers:?} targets={targets:?}",
+            self.plan.disposition(value),
+            graph
+                .def_inst(value)
+                .and_then(|inst| graph.inst(inst))
+                .map(|inst| format!("{:?}", inst.payload)
+                    .chars()
+                    .take(130)
+                    .collect::<String>()),
+            uses = graph.use_sites(value).len(),
+            readers = graph
+                .use_sites(value)
+                .iter()
+                .filter_map(|site| graph.inst(site.inst))
+                .map(|inst| format!("{:?}", inst.payload)
+                    .chars()
+                    .take(80)
+                    .collect::<String>())
+                .collect::<Vec<_>>(),
+            storage = graph
+                .value(value)
+                .and_then(|v| v.canonical_storage)
+                .map(|s| (s.space, s.offset, s.size))
+        );
+        for site in graph.use_sites(value) {
+            let reader = graph.inst(site.inst);
+            let output = reader.and_then(|inst| inst.output);
+            eprintln!(
+                "   use {site:?} answer={:?} projection={:?} output={output:?} output_disposition={:?} -> {:?}",
+                self.uses
+                    .get(site.inst.0 as usize)
+                    .and_then(|row| row.get(site.input_idx)),
+                self.plan.use_disposition(*site),
+                output.and_then(|value| self.plan.disposition(value)),
+                reader.map(|inst| format!("{:?}", inst.payload)
+                    .chars()
+                    .take(110)
+                    .collect::<String>())
+            );
+        }
+        self.trace_unaccounted_neighbours(index, value);
+    }
+
+    /// The rest of the picture: the call results that share this value's
+    /// site, every target, every reader, the definition, and what else went
+    /// unaccounted beside it.
+    fn trace_unaccounted_neighbours(&self, index: usize, value: ValueId) {
+        let graph = self.source.graph();
+        let targets = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(id, target)| {
+                matches!(target, ObservationTarget::Value(target) if *target == value).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        if let Some(fact) = self.source.facts().certificates.call_results.get(&value) {
+            let site = fact.call_site;
+            for peer in self
+                .source
+                .facts()
+                .certificates
+                .call_results
+                .values()
+                .filter(|peer| peer.call_site == site)
+            {
+                eprintln!(
+                    "   call result at {site:?}: {:?} at {:?} width {} relation {:?} carrier {:?} owner {:?}",
+                    peer.value, peer.at, peer.width, peer.relation, peer.carrier, peer.owner
+                );
+            }
+        }
+        for (id, target) in self.targets.iter().enumerate() {
+            if matches!(target, ObservationTarget::Value(_)) {
+                eprintln!(
+                    "   any {id} {target:?} from {:?}",
+                    self.target_origins.get(id).map(ToString::to_string)
+                );
+            }
+        }
+        for site in graph.use_sites(value) {
+            eprintln!(
+                "   reader {:?} write={:?} output_obs={:?}",
+                site.inst,
+                self.writes.get(site.inst.0 as usize),
+                graph
+                    .inst(site.inst)
+                    .and_then(|inst| inst.output)
+                    .and_then(|out| self.values.get(out.0 as usize)),
+            );
+        }
+        if let Some(definition) = graph.def_inst(value) {
+            eprintln!(
+                "   def {definition:?} write={:?} placement_elided_write={} block={:?}",
+                self.writes.get(definition.0 as usize),
+                self.placement_elided_writes.contains(&definition),
+                graph.inst(definition).map(|inst| inst.block),
+            );
+        }
+        self.trace_unaccounted_targets(index, &targets);
+    }
+
+    /// Each target the value has, and every other value still without a cell.
+    fn trace_unaccounted_targets(&self, index: usize, targets: &[usize]) {
+        let graph = self.source.graph();
+        for id in targets {
+            eprintln!(
+                "   target {id} from {:?} = {:?}",
+                self.target_origins.get(*id).map(ToString::to_string),
+                self.targets
+                    .get(*id)
+                    .map(|target| format!("{target:?}").chars().take(160).collect::<String>())
+            );
+        }
+        let other_unaccounted = self
+            .values
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .filter(|(_, observation)| observation.is_none())
+            .map(|(index, _)| {
+                let value = ValueId(index as u32);
+                let definition =
+                    graph
+                        .def_inst(value)
+                        .and_then(|inst| graph.inst(inst))
+                        .map(|inst| {
+                            format!("{:?}", inst.payload)
+                                .chars()
+                                .take(70)
+                                .collect::<String>()
+                        });
+                (value, self.plan.disposition(value), definition)
+            })
+            .collect::<Vec<_>>();
+        if !other_unaccounted.is_empty() {
+            eprintln!("other unaccounted values: {other_unaccounted:?}");
+        }
+    }
+
+    /// Why this value went unaccounted, with the evidence to find it by.
+    fn unaccounted_value(&self, index: usize, value: ValueId) -> LegacyObservationJournalError {
+        self.trace_unaccounted_value(index, value);
+        LegacyObservationJournalError::rendered_value_required(
+            value,
+            RenderedValueRequirementCause::UnobservedValueCellAtSeal,
+            self.plan.disposition(value),
+        )
+    }
+
     fn first_unaccounted_render_observation(&self) -> Option<LegacyObservationJournalError> {
         // Each of the three loops below names the exact cell it found empty
         // under `R2DEC_TRACE_REFUSAL`, the same switch the lowering refusals
         // use. A seal failure otherwise reports only that some value, use or
         // write went unaccounted, and finding which one back from that cost
         // four separate investigations.
-        for (index, observation) in self.values.iter().enumerate() {
-            if observation.is_none() {
-                let value = ValueId(index as u32);
-                // A value nothing defines is spelled at its occurrences and
-                // nowhere else, so where a certificate answers for every one
-                // of them it is never spelled and has no cell. `const:8` is
-                // shared between a jump table's scale and the stack-pointer
-                // restore in each arm; both are certified, and demanding a
-                // rendered occurrence of it asked for a statement that would
-                // have been wrong to write.
-                if self.every_occurrence_certified(value) {
-                    continue;
-                }
-                if r2il::refusal_evidence::tracing() {
-                    let graph = self.source.graph();
-                    let targets = self
-                        .targets
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(id, target)| {
-                            matches!(target, ObservationTarget::Value(target) if *target == value)
-                                .then_some(id)
-                        })
-                        .collect::<Vec<_>>();
-                    eprintln!(
-                        "unaccounted value {value:?} disposition {:?} def {:?} uses={uses} storage={storage:?} readers={readers:?} targets={targets:?}",
-                        self.plan.disposition(value),
-                        graph
-                            .def_inst(value)
-                            .and_then(|inst| graph.inst(inst))
-                            .map(|inst| format!("{:?}", inst.payload)
-                                .chars()
-                                .take(130)
-                                .collect::<String>()),
-                        uses = graph.use_sites(value).len(),
-                        readers = graph
-                            .use_sites(value)
-                            .iter()
-                            .filter_map(|site| graph.inst(site.inst))
-                            .map(|inst| format!("{:?}", inst.payload)
-                                .chars()
-                                .take(80)
-                                .collect::<String>())
-                            .collect::<Vec<_>>(),
-                        storage = graph
-                            .value(value)
-                            .and_then(|v| v.canonical_storage)
-                            .map(|s| (s.space, s.offset, s.size))
-                    );
-                    for site in graph.use_sites(value) {
-                        let reader = graph.inst(site.inst);
-                        let output = reader.and_then(|inst| inst.output);
-                        eprintln!(
-                            "   use {site:?} answer={:?} projection={:?} output={output:?} output_disposition={:?} -> {:?}",
-                            self.uses
-                                .get(site.inst.0 as usize)
-                                .and_then(|row| row.get(site.input_idx)),
-                            self.plan.use_disposition(*site),
-                            output.and_then(|value| self.plan.disposition(value)),
-                            reader.map(|inst| format!("{:?}", inst.payload)
-                                .chars()
-                                .take(110)
-                                .collect::<String>())
-                        );
-                    }
-                    if let Some(fact) = self.source.facts().certificates.call_results.get(&value) {
-                        let site = fact.call_site;
-                        for peer in self
-                            .source
-                            .facts()
-                            .certificates
-                            .call_results
-                            .values()
-                            .filter(|peer| peer.call_site == site)
-                        {
-                            eprintln!(
-                                "   call result at {site:?}: {:?} at {:?} width {} relation {:?} carrier {:?} owner {:?}",
-                                peer.value,
-                                peer.at,
-                                peer.width,
-                                peer.relation,
-                                peer.carrier,
-                                peer.owner
-                            );
-                        }
-                    }
-                    for (id, target) in self.targets.iter().enumerate() {
-                        if matches!(target, ObservationTarget::Value(_)) {
-                            eprintln!(
-                                "   any {id} {target:?} from {:?}",
-                                self.target_origins.get(id).map(ToString::to_string)
-                            );
-                        }
-                    }
-                    for site in graph.use_sites(value) {
-                        eprintln!(
-                            "   reader {:?} write={:?} output_obs={:?}",
-                            site.inst,
-                            self.writes.get(site.inst.0 as usize),
-                            graph
-                                .inst(site.inst)
-                                .and_then(|inst| inst.output)
-                                .and_then(|out| self.values.get(out.0 as usize)),
-                        );
-                    }
-                    if let Some(definition) = graph.def_inst(value) {
-                        eprintln!(
-                            "   def {definition:?} write={:?} placement_elided_write={} block={:?}",
-                            self.writes.get(definition.0 as usize),
-                            self.placement_elided_writes.contains(&definition),
-                            graph.inst(definition).map(|inst| inst.block),
-                        );
-                    }
-                    for id in &targets {
-                        eprintln!(
-                            "   target {id} from {:?} = {:?}",
-                            self.target_origins.get(*id).map(ToString::to_string),
-                            self.targets.get(*id).map(|target| format!("{target:?}")
-                                .chars()
-                                .take(160)
-                                .collect::<String>())
-                        );
-                    }
-                    let other_unaccounted = self
-                        .values
-                        .iter()
-                        .enumerate()
-                        .skip(index + 1)
-                        .filter(|(_, observation)| observation.is_none())
-                        .map(|(index, _)| {
-                            let value = ValueId(index as u32);
-                            let definition = graph
-                                .def_inst(value)
-                                .and_then(|inst| graph.inst(inst))
-                                .map(|inst| {
-                                    format!("{:?}", inst.payload)
-                                        .chars()
-                                        .take(70)
-                                        .collect::<String>()
-                                });
-                            (value, self.plan.disposition(value), definition)
-                        })
-                        .collect::<Vec<_>>();
-                    if !other_unaccounted.is_empty() {
-                        eprintln!("other unaccounted values: {other_unaccounted:?}");
-                    }
-                }
-                return Some(LegacyObservationJournalError::rendered_value_required(
-                    value,
-                    RenderedValueRequirementCause::UnobservedValueCellAtSeal,
-                    self.plan.disposition(value),
-                ));
-            }
+        // A value nothing defines is spelled at its occurrences and nowhere
+        // else, so where a certificate answers for every one of them it is
+        // never spelled and has no cell. `const:8` is shared between a jump
+        // table's scale and the stack-pointer restore in each arm; both are
+        // certified, and demanding a rendered occurrence of it asked for a
+        // statement that would have been wrong to write.
+        let mut unaccounted = self
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(_, observation)| observation.is_none())
+            .map(|(index, _)| (index, ValueId(index as u32)))
+            .filter(|(_, value)| !self.every_occurrence_certified(*value));
+        if let Some((index, value)) = unaccounted.next() {
+            return Some(self.unaccounted_value(index, value));
         }
         for (inst, row) in self.uses.iter().enumerate() {
             for (input_idx, observation) in row.iter().enumerate() {

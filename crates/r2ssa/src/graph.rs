@@ -230,6 +230,20 @@ pub struct SsaGraph {
     pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
 }
 
+/// Record which machine instruction one operation came from, both ways round.
+fn record_instruction(
+    by_inst: &mut BTreeMap<InstId, u64>,
+    by_instruction: &mut BTreeMap<u64, Vec<InstId>>,
+    inst: InstId,
+    from: Option<u64>,
+) {
+    let Some(from) = from else {
+        return;
+    };
+    by_inst.insert(inst, from);
+    by_instruction.entry(from).or_default().push(inst);
+}
+
 /// Every value, addressed by its variable's hash.
 pub(crate) fn value_index_of(values: &[GraphValue]) -> Vec<u32> {
     // Half full at most, so a probe walks a slot or two.
@@ -462,10 +476,12 @@ impl SsaGraph {
                 blocks[block_id.0 as usize].insts.push(inst_id);
                 op_inst_by_site.insert((block.addr, op_idx), inst_id);
                 op_site_by_inst.insert(inst_id, (block.addr, op_idx));
-                if let Some(from) = function.instruction_at(block.addr, op_idx) {
-                    instruction_by_inst.insert(inst_id, from);
-                    insts_by_instruction.entry(from).or_default().push(inst_id);
-                }
+                record_instruction(
+                    &mut instruction_by_inst,
+                    &mut insts_by_instruction,
+                    inst_id,
+                    function.instruction_at(block.addr, op_idx),
+                );
             }
         }
 

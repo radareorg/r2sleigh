@@ -719,6 +719,30 @@ impl<'a> PlanFacts<'a> {
     }
 }
 
+/// Elide every cell of one instruction: what it writes, and what it reads.
+///
+/// An operation a certificate answers for renders nothing, so it writes
+/// nothing and reads nothing. Four certificates said that in four identical
+/// loops.
+fn elide_whole_instruction(
+    graph: &r2ssa::SsaGraph,
+    uses: &mut BTreeMap<UseSite, ElisionReason>,
+    writes: &mut BTreeMap<InstId, ElisionReason>,
+    inst: InstId,
+    reason: ElisionReason,
+) -> Result<(), CertificateElidedCellsError> {
+    let definition = graph
+        .inst(inst)
+        .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
+    if definition.output.is_some() {
+        insert_elided_write(writes, inst, reason)?;
+    }
+    for input_idx in 0..definition.inputs.len() {
+        insert_elided_use(uses, UseSite { inst, input_idx }, reason)?;
+    }
+    Ok(())
+}
+
 /// Values whose defining instruction performs a memory effect of its own.
 ///
 /// A load's read of memory happens whether or not anything uses what it
@@ -2945,9 +2969,6 @@ pub(crate) fn certificate_elided_cells(
             }
             continue;
         }
-        if definition.output.is_some() {
-            insert_elided_write(&mut writes, inst, ElisionReason::ReturnControl)?;
-        }
         // The instruction renders nothing, so it reads nothing. Its write was
         // already accounted on that ground and its operands stand on the same
         // one: an occurrence inside a statement no structured form emits is
@@ -2957,13 +2978,13 @@ pub(crate) fn certificate_elided_cells(
         // the return address through the stack pointer, and the stack pointer
         // is read elsewhere for ordinary reasons, so nothing else could ever
         // close that cell.
-        for input_idx in 0..definition.inputs.len() {
-            insert_elided_use(
-                &mut uses,
-                UseSite { inst, input_idx },
-                ElisionReason::ReturnControl,
-            )?;
-        }
+        elide_whole_instruction(
+            graph,
+            &mut uses,
+            &mut writes,
+            inst,
+            ElisionReason::ReturnControl,
+        )?;
     }
     for site in super::certified_direct_control_target_sites(source) {
         insert_elided_use(&mut uses, site, ElisionReason::DirectControlTarget)?;
@@ -2989,19 +3010,13 @@ pub(crate) fn certificate_elided_cells(
             )
         })
     {
-        let definition = graph
-            .inst(inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
-        if definition.output.is_some() {
-            insert_elided_write(&mut writes, inst, ElisionReason::DirectControlTarget)?;
-        }
-        for input_idx in 0..definition.inputs.len() {
-            insert_elided_use(
-                &mut uses,
-                UseSite { inst, input_idx },
-                ElisionReason::DirectControlTarget,
-            )?;
-        }
+        elide_whole_instruction(
+            graph,
+            &mut uses,
+            &mut writes,
+            inst,
+            ElisionReason::DirectControlTarget,
+        )?;
     }
     // A direct call names its callee. The name comes from the symbol table,
     // not from any object the function holds, so the operand's occurrence is
@@ -3010,34 +3025,22 @@ pub(crate) fn certificate_elided_cells(
         insert_elided_use(&mut uses, site, ElisionReason::DirectCallTarget)?;
     }
     for inst in super::certified_call_return_address_insts(source) {
-        let definition = graph
-            .inst(inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
-        if definition.output.is_some() {
-            insert_elided_write(&mut writes, inst, ElisionReason::CallReturnAddress)?;
-        }
-        for input_idx in 0..definition.inputs.len() {
-            insert_elided_use(
-                &mut uses,
-                UseSite { inst, input_idx },
-                ElisionReason::CallReturnAddress,
-            )?;
-        }
+        elide_whole_instruction(
+            graph,
+            &mut uses,
+            &mut writes,
+            inst,
+            ElisionReason::CallReturnAddress,
+        )?;
     }
     for inst in super::certified_direct_call_target_insts(source) {
-        let definition = graph
-            .inst(inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
-        if definition.output.is_some() {
-            insert_elided_write(&mut writes, inst, ElisionReason::DirectCallTarget)?;
-        }
-        for input_idx in 0..definition.inputs.len() {
-            insert_elided_use(
-                &mut uses,
-                UseSite { inst, input_idx },
-                ElisionReason::DirectCallTarget,
-            )?;
-        }
+        elide_whole_instruction(
+            graph,
+            &mut uses,
+            &mut writes,
+            inst,
+            ElisionReason::DirectCallTarget,
+        )?;
     }
     Ok(CertificateElidedCells {
         uses,

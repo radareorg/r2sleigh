@@ -511,16 +511,13 @@ impl SSAFunction {
                 .zip(instruction_addrs)
                 .partition(|(op, _)| matches!(op, SSAOp::Phi { .. }));
             let phi_ops = phi_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
-            let other_ops = other_ops
-                .into_iter()
-                .enumerate()
-                .map(|(op_idx, (op, from))| {
-                    if let Some(from) = from {
-                        op_instruction_addrs.insert((addr, op_idx), from);
-                    }
-                    op
-                })
-                .collect::<Vec<_>>();
+            op_instruction_addrs.extend(
+                other_ops
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(op_idx, (_, from))| Some(((addr, op_idx), (*from)?))),
+            );
+            let other_ops = other_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
 
             // Convert phi ops to PhiNode structs
             let preds = cfg.predecessors(addr);
