@@ -17,6 +17,16 @@ use super::{Answer, Completion, Revision, Support, Work};
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
 
+/// Which decoder the code at an address is written in.
+///
+/// ARM states the instruction set per function, in the low bit of the symbol
+/// that names it, so a program has no one decoder and a listing that crosses a
+/// boundary decodes the rest of itself wrongly unless it asks again at every
+/// line.
+pub trait Decoders {
+    fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine>;
+}
+
 /// The program's own memory, and how it spells a word in it.
 ///
 /// The endianness is the container's and not the decoder's. ARM BE8 is the
@@ -121,27 +131,29 @@ impl AnnotationKind {
 
 /// Decode a run of instructions, saying as much about each as `work` allows.
 pub fn listing(
-    machine: &EmbeddedMachine,
+    decoders: &dyn Decoders,
     memory: &Memory<'_>,
     request: Listing,
     work: Work,
     revision: Revision,
 ) -> Answer<Vec<Line>> {
-    // Bytes that do not decode are stepped over by the width the machine
-    // addresses instructions at. Stepping one byte puts the next instruction
-    // at an odd address on ARM, where none can begin.
-    let step = u64::from(machine.arch.alignment.max(1));
     let mut lines = Vec::with_capacity(request.count);
     let mut pc = request.start;
 
     for _ in 0..request.count {
-        let Some(window) = memory.program.read(pc, DECODE_WINDOW) else {
+        let (Some(machine), Some(window)) =
+            (decoders.at(pc), memory.program.read(pc, DECODE_WINDOW))
+        else {
             return Answer {
                 value: lines,
                 revision,
                 completion: Completion::Unmapped { at: pc },
             };
         };
+        // Bytes that do not decode are stepped over by the width this machine
+        // addresses instructions at. Stepping one byte puts the next
+        // instruction at an odd address on ARM, where none can begin.
+        let step = u64::from(machine.arch.alignment.max(1));
         let available = window.len();
         let mut fetch = window;
         fetch.resize(DECODE_WINDOW, 0);
@@ -303,10 +315,19 @@ mod tests {
         }
     }
 
+    /// One decoder, whatever the address.
+    struct Everywhere(EmbeddedMachine);
+
+    impl Decoders for Everywhere {
+        fn at(&self, _vaddr: u64) -> Option<&EmbeddedMachine> {
+            Some(&self.0)
+        }
+    }
+
     const BASE: u64 = 0x1000;
 
     fn answer(bytes: &[u8], count: usize, work: Work) -> Answer<Vec<Line>> {
-        let machine = embedded_machine("x86-64").expect("x86-64 is compiled in");
+        let machine = Everywhere(embedded_machine("x86-64").expect("x86-64 is compiled in"));
         let program = Mapped {
             base: BASE,
             bytes: bytes.to_vec(),
@@ -322,6 +343,53 @@ mod tests {
             work,
             Revision::default(),
         )
+    }
+
+    /// ARM below the boundary, Thumb at it and above.
+    struct Boundary {
+        arm: EmbeddedMachine,
+        thumb: EmbeddedMachine,
+        at: u64,
+    }
+
+    impl Decoders for Boundary {
+        fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
+            Some(match vaddr < self.at {
+                true => &self.arm,
+                false => &self.thumb,
+            })
+        }
+    }
+
+    #[test]
+    fn a_listing_that_crosses_an_instruction_set_asks_again() {
+        // `mov r0, #0` in ARM, then `movs r0, #0` in Thumb. Decoding the
+        // second with the ARM machine reads four bytes and spells something
+        // else, which is what one decoder chosen at the start would do.
+        let mut bytes = vec![0x00, 0x00, 0xa0, 0xe3, 0x00, 0x20];
+        bytes.resize(32, 0);
+        let decoders = Boundary {
+            arm: embedded_machine("arm").expect("ARM is compiled in"),
+            thumb: embedded_machine("arm-thumb").expect("Thumb is compiled in"),
+            at: BASE + 4,
+        };
+        let memory = Memory {
+            program: &Mapped { base: BASE, bytes },
+            endian: Endianness::Little,
+        };
+        let answer = listing(
+            &decoders,
+            &memory,
+            Listing {
+                start: BASE,
+                count: 2,
+            },
+            Work::Decode,
+            Revision::default(),
+        );
+        assert_eq!(answer.value[0].bytes.len(), 4);
+        assert_eq!(answer.value[1].address, BASE + 4);
+        assert_eq!(answer.value[1].bytes.len(), 2);
     }
 
     #[test]

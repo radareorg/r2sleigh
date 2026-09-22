@@ -655,54 +655,25 @@ fn with_native<T>(
     addr: u64,
     ask: impl FnOnce(&r2engine::native::NativeTarget<'_>, &OpenImage<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    session.ensure_current()?;
+    session.ensure_assembled(addr)?;
+    let session: &Session = session;
     let machine = session
         .machine_at(addr)
         .ok_or("no Sleigh specification for this architecture")?;
-
-    let bits = session.image.arch().bits;
-    let conventions = r2abi::Conventions::for_arch(machine.arch.name.as_str(), bits)
-        .ok_or_else(|| format!("no calling conventions for {} {}", machine.arch.name, bits))?;
-    let convention = conventions
+    let assembled = session.assembled().expect("assembled just above");
+    let convention = assembled
+        .conventions
         .default_convention()
         .ok_or("the convention data names no default")?;
-    let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
-
-    // The format says which platform's own declarations apply: `_Exit` is
-    // declared by the platform, not by the table every target shares.
-    let mut prototypes = r2abi::Prototypes::embedded_for(match session.image.format() {
-        r2image::Format::Elf => r2abi::Platform::Linux,
-        r2image::Format::MachO => r2abi::Platform::Darwin,
-        _ => r2abi::Platform::Unknown,
-    });
-    // What the binary's own debug information says beats the shared table: the
-    // table describes what a library is expected to look like, and this
-    // describes what this one is.
-    prototypes.declare(session.image.debug_prototypes().prototypes());
     let target = r2engine::native::NativeTarget {
         arch: &machine.arch,
         disasm: &machine.disasm,
         cpu: machine.cpu,
         convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
+        compiler: &assembled.compiler,
+        prototypes: &assembled.prototypes,
     };
-    // The specification names the register; the architecture says where it
-    // lives, and the lift spells writes to it in those coordinates.
-    let link = compiler.return_address.as_ref().and_then(|name| {
-        machine
-            .arch
-            .registers
-            .iter()
-            .find(|register| register.name.eq_ignore_ascii_case(name))
-            .map(|register| r2il::Varnode {
-                space: r2il::SpaceId::Register,
-                offset: register.offset,
-                size: register.size,
-                meta: None,
-            })
-    });
-    let program = open_image(session, link);
+    let program = open_image(session, assembled.link.clone());
     ask(&target, &program)
 }
 
@@ -793,9 +764,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
     session.ensure_current()?;
-    let machine = session
-        .machine_at(start)
-        .ok_or("no decoder for this architecture")?;
+    let session: &Session = session;
     let program = open_image(session, None);
     let memory = Memory {
         program: &program,
@@ -808,7 +777,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
         },
     };
     let answer = listing(
-        machine,
+        session,
         &memory,
         Listing { start, count },
         r2engine::query::Work::InstructionLocal,

@@ -50,6 +50,9 @@ pub struct Session {
     /// The same, for what the binary defines at each address.
     #[cfg(feature = "sleigh")]
     entries_revision: u64,
+    /// What a native request needs beside the machine, assembled once.
+    #[cfg(feature = "sleigh")]
+    assembled: Option<Assembled>,
     #[cfg(feature = "sleigh")]
     machine: Option<r2sleigh_lift::EmbeddedMachine>,
     /// The same instruction set with TMode set. ARM states the mode per
@@ -107,6 +110,8 @@ impl Session {
             image,
             path: path.to_owned(),
             addr,
+            #[cfg(feature = "sleigh")]
+            assembled: None,
             #[cfg(feature = "sleigh")]
             machine: None,
             #[cfg(feature = "sleigh")]
@@ -171,6 +176,71 @@ impl Session {
         Ok(())
     }
 
+    /// Assemble what a native request needs, once per program and machine.
+    ///
+    /// All of it is constant while one program is open, and rebuilding it per
+    /// command cost two milliseconds -- almost all of it parsing the embedded
+    /// prototype table -- on every `pdd`, `pdil`, `afl` and `ax`.
+    #[cfg(feature = "sleigh")]
+    pub fn ensure_assembled(&mut self, addr: u64) -> Result<(), String> {
+        self.ensure_current()?;
+        let machine = self
+            .machine_at(addr)
+            .ok_or("no Sleigh specification for this architecture")?;
+        let key = (machine.arch.name.clone(), machine.compiler_spec);
+        if self
+            .assembled
+            .as_ref()
+            .is_some_and(|held| held.machine == key)
+        {
+            return Ok(());
+        }
+        let bits = self.image.arch().bits;
+        let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
+            .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
+        let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
+        // The specification names the register; the architecture says where it
+        // lives, and the lift spells writes to it in those coordinates.
+        let link = compiler.return_address.as_ref().and_then(|name| {
+            machine
+                .arch
+                .registers
+                .iter()
+                .find(|register| register.name.eq_ignore_ascii_case(name))
+                .map(|register| r2il::Varnode {
+                    space: r2il::SpaceId::Register,
+                    offset: register.offset,
+                    size: register.size,
+                    meta: None,
+                })
+        });
+        // The format says which platform's own declarations apply: `_Exit` is
+        // declared by the platform, not by the table every target shares.
+        let mut prototypes = r2abi::Prototypes::embedded_for(match self.image.format() {
+            r2image::Format::Elf => r2abi::Platform::Linux,
+            r2image::Format::MachO => r2abi::Platform::Darwin,
+            _ => r2abi::Platform::Unknown,
+        });
+        // What the binary's own debug information says beats the shared table:
+        // the table describes what a library is expected to look like, and
+        // this describes what this one is.
+        prototypes.declare(self.image.debug_prototypes().prototypes());
+        self.assembled = Some(Assembled {
+            machine: key,
+            conventions,
+            compiler,
+            prototypes,
+            link,
+        });
+        Ok(())
+    }
+
+    /// What was assembled for the machine at this address.
+    #[cfg(feature = "sleigh")]
+    pub fn assembled(&self) -> Option<&Assembled> {
+        self.assembled.as_ref()
+    }
+
     /// Which state of this program every answer is about.
     #[cfg(feature = "sleigh")]
     pub const fn revision(&self) -> r2engine::query::Revision {
@@ -202,6 +272,28 @@ impl Session {
             .next_back()
             .is_some_and(|(_, definition)| definition.function && definition.thumb)
     }
+}
+
+/// The shell answers the engine's decoder question from the same index the
+/// rest of it uses, so a listing that crosses a mode boundary asks again.
+#[cfg(feature = "sleigh")]
+impl r2engine::query::listing::Decoders for Session {
+    fn at(&self, vaddr: u64) -> Option<&r2sleigh_lift::EmbeddedMachine> {
+        self.machine_at(vaddr)
+    }
+}
+
+/// Everything a native request needs that is not the decoder itself.
+#[cfg(feature = "sleigh")]
+pub struct Assembled {
+    /// Which architecture and compiler specification this was built for, so a
+    /// second instruction set in one program gets its own rather than this one.
+    machine: (String, &'static str),
+    pub conventions: r2abi::Conventions,
+    pub compiler: r2abi::CompilerSpec,
+    pub prototypes: r2abi::Prototypes,
+    /// The register a call returns through, in the coordinates the lift spells.
+    pub link: Option<r2il::Varnode>,
 }
 
 /// What the binary defines at one address.
