@@ -541,6 +541,20 @@ pub struct Image {
     /// nor destroy one, and nothing mutates the segments or sections after the
     /// file is parsed.
     byte_revision: u64,
+    /// Which open program this is, among those this process has opened.
+    ///
+    /// Two images of one file are still two programs: one may be patched and
+    /// the other not, and nothing in the bytes tells them apart. Anything that
+    /// keeps an answer beside the image it was computed from records this too,
+    /// so one program's answer is never served for another's.
+    identity: u64,
+}
+
+/// How many programs this process has opened.
+static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_identity() -> u64 {
+    OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Image {
@@ -819,6 +833,7 @@ impl Image {
             relocations,
             patches: BTreeMap::new(),
             byte_revision: 0,
+            identity: next_identity(),
         })
     }
 
@@ -991,6 +1006,11 @@ impl Image {
     /// and is derived again when they differ.
     pub const fn byte_revision(&self) -> u64 {
         self.byte_revision
+    }
+
+    /// Which open program this is.
+    pub const fn identity(&self) -> u64 {
+        self.identity
     }
 
     /// Whether the address is inside a segment marked executable.
@@ -1219,6 +1239,7 @@ mod tests {
             debug_prototypes: debug::DebugPrototypes::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,
+            identity: next_identity(),
         }
     }
 

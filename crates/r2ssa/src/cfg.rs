@@ -332,15 +332,7 @@ impl BasicBlock {
 
     /// Extract a constant address from a varnode.
     fn extract_const_addr(vn: &r2il::Varnode) -> Option<u64> {
-        use r2il::SpaceId;
-        if vn.space == SpaceId::Const {
-            Some(vn.offset)
-        } else if vn.space == SpaceId::Ram {
-            // Direct address in RAM space
-            Some(vn.offset)
-        } else {
-            None
-        }
+        crate::origin::encoded_target(vn)
     }
 
     /// Get the successor addresses of this block.

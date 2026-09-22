@@ -40,6 +40,16 @@ pub struct Session {
     /// not a stale listing, it is a body that ends in the wrong place.
     #[cfg(feature = "sleigh")]
     derived_at: Option<u64>,
+    /// How many times the rebuilt name table has actually differed.
+    ///
+    /// Separate from the byte revision because most patches rename nothing:
+    /// anything that depended only on a name stays good across them, and one
+    /// counter for both would throw that away.
+    #[cfg(feature = "sleigh")]
+    names_revision: u64,
+    /// The same, for what the binary defines at each address.
+    #[cfg(feature = "sleigh")]
+    entries_revision: u64,
     #[cfg(feature = "sleigh")]
     machine: Option<r2sleigh_lift::EmbeddedMachine>,
     /// The same instruction set with TMode set. ARM states the mode per
@@ -90,6 +100,10 @@ impl Session {
             // The import table needs a decoder, so nothing here is derived yet.
             #[cfg(feature = "sleigh")]
             derived_at: None,
+            #[cfg(feature = "sleigh")]
+            names_revision: 0,
+            #[cfg(feature = "sleigh")]
+            entries_revision: 0,
             image,
             path: path.to_owned(),
             addr,
@@ -125,18 +139,26 @@ impl Session {
         // Taken out and put back so the decoder can be read while the tables it
         // fills are written.
         let machine = self.machine.take().expect("the machine is loaded above");
-        self.names = crate::names::of(&self.image);
-        crate::names::name_strings(&mut self.names, &self.image);
-        self.defined = definitions(&self.image);
+        let mut names = crate::names::of(&self.image);
+        crate::names::name_strings(&mut names, &self.image);
+        let defined = definitions(&self.image);
         // The import stubs can only be read once there is a decoder.
-        self.imports = crate::names::imports(&self.image, &machine.disasm, machine.arch.alignment);
+        let imports = crate::names::imports(&self.image, &machine.disasm, machine.arch.alignment);
         self.slots = self
             .image
             .relocations()
             .iter()
             .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
             .collect();
-        crate::names::name_imports(&mut self.names, self.image.format(), &self.imports);
+        crate::names::name_imports(&mut names, self.image.format(), &imports);
+        // A patch that changed no name and moved no entry leaves everything
+        // derived from those still good, so the counters move only on a
+        // difference rather than on every write.
+        self.names_revision += u64::from(names != self.names);
+        self.entries_revision += u64::from(defined != self.defined || imports != self.imports);
+        self.names = names;
+        self.defined = defined;
+        self.imports = imports;
         self.machine = Some(machine);
         // Only where a function says it is Thumb, so a machine with no Thumb
         // code pays nothing for the second specification.
@@ -146,6 +168,17 @@ impl Session {
         };
         self.derived_at = Some(revision);
         Ok(())
+    }
+
+    /// Which state of this program every answer is about.
+    #[cfg(feature = "sleigh")]
+    pub const fn revision(&self) -> r2engine::query::Revision {
+        r2engine::query::Revision {
+            program: self.image.identity(),
+            bytes: self.image.byte_revision(),
+            names: self.names_revision,
+            entries: self.entries_revision,
+        }
     }
 
     /// The decoder the code at this address is written in.
@@ -172,7 +205,7 @@ impl Session {
 
 /// What the binary defines at one address.
 #[cfg(feature = "sleigh")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
     /// Whether a function begins here, which is what bounds a body.
     pub function: bool,

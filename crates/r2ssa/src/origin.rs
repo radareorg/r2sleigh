@@ -50,6 +50,16 @@ impl ValueOrigin {
     }
 }
 
+/// The address a transfer operation encodes, where it encodes one.
+///
+/// A branch target is not a value to be read: the varnode *is* the address,
+/// whether Sleigh spells it in the constant space or the code space. That is
+/// the one place a RAM varnode means its own offset rather than what is stored
+/// there, so it is asked for separately from what a value holds.
+pub fn encoded_target(target: &Varnode) -> Option<u64> {
+    matches!(target.space, SpaceId::Const | SpaceId::Ram).then_some(target.offset)
+}
+
 /// What every storage holds at one point in a block.
 #[derive(Debug, Default, Clone)]
 pub struct BlockOrigins {

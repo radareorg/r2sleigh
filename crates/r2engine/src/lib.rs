@@ -13,6 +13,7 @@ mod tests;
 pub mod discovery;
 pub mod names;
 pub mod native;
+pub mod query;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;

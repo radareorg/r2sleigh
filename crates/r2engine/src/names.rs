@@ -132,7 +132,7 @@ fn identifier(text: &str) -> String {
 /// both statements are the container's. They are kept in one place per
 /// namespace and ordered by strength, so a listing can show every one while a
 /// spelling asks for the strongest.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NameDb {
     by_address: BTreeMap<u64, Vec<Name>>,
 }

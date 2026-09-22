@@ -702,15 +702,21 @@ fn with_native<T>(
                 meta: None,
             })
     });
-    let program = OpenImage {
+    let program = open_image(session, link);
+    ask(&target, &program)
+}
+
+/// The open binary, as the engine asks about it.
+#[cfg(feature = "sleigh")]
+fn open_image(session: &Session, link: Option<r2il::Varnode>) -> OpenImage<'_> {
+    OpenImage {
         image: &session.image,
         link,
         imports: &session.imports,
         slots: &session.slots,
         defined: &session.defined,
         names: &session.names,
-    };
-    ask(&target, &program)
+    }
 }
 
 /// The open binary, as the engine asks about it.
@@ -782,8 +788,7 @@ impl r2engine::native::Program for OpenImage<'_> {
 
 #[cfg(feature = "sleigh")]
 fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> {
-    /// Sleigh fetches a whole window whatever the instruction needs.
-    const DECODE_WINDOW: usize = 16;
+    use r2engine::query::listing::{Listing, listing};
 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
@@ -791,71 +796,48 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
     let machine = session
         .machine_at(start)
         .ok_or("no decoder for this architecture")?;
-    let decoder = &machine.disasm;
-    // Bytes that do not decode are stepped over by the width the machine
-    // addresses instructions at. Stepping one byte put the next instruction at
-    // an odd address on ARM, where no instruction can begin, and every line
-    // after it decoded from the wrong place.
-    let step = u64::from(machine.arch.alignment.max(1));
-
+    let program = open_image(session, None);
+    let answer = listing(
+        machine,
+        &program,
+        Listing { start, count },
+        r2engine::query::Work::Decode,
+        session.revision(),
+    );
+    if answer.value.is_empty() {
+        return Err(format!("nothing mapped at {:#x}", start));
+    }
     let mut out = String::new();
-    let mut pc = start;
-    for index in 0..count {
-        let Some(window) = session.image.read_upto(pc, DECODE_WINDOW) else {
-            if index == 0 {
-                return Err(format!("nothing mapped at {:#x}", start));
-            }
-            break;
-        };
-        let available = window.len();
-        let mut fetch = window.into_owned();
-        fetch.resize(DECODE_WINDOW, 0);
-
-        let spelled = match decoder.disasm_syntax(&fetch, pc) {
-            Ok(decoded) => decoded,
-            Err(_) => {
-                out.push_str(&format!(
-                    "            {:#010x}      {:<14} invalid\n",
-                    pc,
-                    format!("{:02x}", fetch[0])
-                ));
-                pc += step;
-                continue;
-            }
-        };
-        let size = spelled.size;
-        if size == 0 || size > available {
-            out.push_str(&format!(
-                "            {:#010x}      {:<14} invalid\n",
-                pc,
-                format!("{:02x}", fetch[0])
-            ));
-            pc += step;
-            continue;
-        }
-
-        let mut hex: String = fetch[..size].iter().map(|b| format!("{:02x}", b)).collect();
-        // radare2 caps the byte column at twelve characters and marks the cut.
-        if hex.len() > 12 {
-            hex.truncate(10);
-            hex.push_str("..");
-        }
-        out.push_str(&format!(
-            "            {:#010x}      {:<14} {}\n",
-            pc,
-            hex,
-            {
-                let text = spelled.text();
-                let text = match session.image.arch().name {
-                    "ARM" => named_literal_pool(session, &text),
-                    _ => text,
-                };
-                crate::names::spell(&session.names, &text)
-            }
-        ));
-        pc += size as u64;
+    for line in &answer.value {
+        out.push_str(&listed(session, line));
     }
     Ok(out.trim_end().to_owned())
+}
+
+/// One listing line, in the columns radare2 writes them in.
+#[cfg(feature = "sleigh")]
+fn listed(session: &Session, line: &r2engine::query::Line) -> String {
+    let mut hex: String = line.bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    // radare2 caps the byte column at twelve characters and marks the cut.
+    if hex.len() > 12 {
+        hex.truncate(10);
+        hex.push_str("..");
+    }
+    let text = match &line.syntax {
+        None => "invalid".to_owned(),
+        Some(syntax) => {
+            let text = syntax.text();
+            let text = match session.image.arch().name {
+                "ARM" => named_literal_pool(session, &text),
+                _ => text,
+            };
+            crate::names::spell(&session.names, &text)
+        }
+    };
+    format!(
+        "            {:#010x}      {:<14} {}\n",
+        line.address, hex, text
+    )
 }
 
 /// An ARM literal-pool load, spelled as the name the pool word holds.
