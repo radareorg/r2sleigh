@@ -550,6 +550,19 @@ impl Image {
         let format = map_format(file.format());
         let base_address = file.relative_address_base();
 
+        // A relocatable object states no addresses: every section says zero, so
+        // each is placed at its own file offset above one base, which is the
+        // only placement the file itself derives and the one radare2 uses too.
+        const RELOCATABLE_BASE: u64 = 0x0800_0000;
+        let relocatable = file.kind() == object::ObjectKind::Relocatable;
+        let placed = |section: &object::read::Section<'_, '_>| {
+            if relocatable {
+                RELOCATABLE_BASE + section.file_range().map_or(0, |(offset, _)| offset)
+            } else {
+                section.address()
+            }
+        };
+
         let mut segments: Vec<Segment> = file
             .segments()
             .map(|segment| {
@@ -571,11 +584,11 @@ impl Image {
         if segments.is_empty() {
             segments = file
                 .sections()
-                .filter(|section| section.address() != 0 || section.size() != 0)
+                .filter(|section| placed(section) != 0 || section.size() != 0)
                 .map(|section| {
                     let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
                     Segment {
-                        vaddr: section.address(),
+                        vaddr: placed(&section),
                         vsize: section.size(),
                         file_offset,
                         file_size,
@@ -595,11 +608,18 @@ impl Image {
             if name.is_empty() {
                 return None;
             }
+            // An unplaced section's symbols are offsets into it, so they move with it.
+            let address = symbol.address()
+                + symbol
+                    .section_index()
+                    .filter(|_| relocatable)
+                    .and_then(|index| file.section_by_index(index).ok())
+                    .map_or(0, |section| placed(&section));
             Some(Symbol {
                 name: name.to_owned(),
                 vaddr: match symbol.kind() {
-                    object::SymbolKind::Text => code_address(&arch, symbol.address()),
-                    _ => symbol.address(),
+                    object::SymbolKind::Text => code_address(&arch, address),
+                    _ => address,
                 },
                 size: symbol.size(),
                 kind: match symbol.kind() {
@@ -608,10 +628,13 @@ impl Image {
                     object::SymbolKind::Section => SymbolKind::Section,
                     _ => SymbolKind::Other,
                 },
-                defined: symbol.is_definition(),
+                // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
+                // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
+                defined: matches!(symbol.section(), object::SymbolSection::Section(_))
+                    && symbol.kind() != object::SymbolKind::Tls,
                 thumb: is_arm32(&arch)
                     && symbol.kind() == object::SymbolKind::Text
-                    && symbol.address() & 1 == 1,
+                    && address & 1 == 1,
             })
         };
         let mut symbols: Vec<Symbol> = file
@@ -665,7 +688,7 @@ impl Image {
                 let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
                 Section {
                     name: section.name().unwrap_or_default().to_owned(),
-                    vaddr: section.address(),
+                    vaddr: placed(&section),
                     vsize: section.size(),
                     file_offset,
                     file_size,
