@@ -5,7 +5,6 @@
 //! crosses a boundary and kept the decoder it started with decodes the rest of
 //! itself wrongly.
 
-use super::annotate::instruction_local;
 use super::records::{Decoders, Line, Listing, Memory};
 use super::{Answer, Completion, Revision, Work};
 
@@ -21,17 +20,19 @@ pub fn listing(
     revision: Revision,
 ) -> Answer<Vec<Line>> {
     let mut lines = Vec::with_capacity(request.count);
+    // The lift of each line, kept until the run has been read: whether an
+    // instruction's own result is an address or a step towards one is a fact
+    // about what the next instruction does with it.
+    let mut lifts: Vec<Option<r2il::R2ILBlock>> = Vec::with_capacity(request.count);
     let mut pc = request.start;
+    let mut completion = Completion::Complete;
 
     for _ in 0..request.count {
         let (Some(machine), Some(window)) =
             (decoders.at(pc), memory.program.read(pc, DECODE_WINDOW))
         else {
-            return Answer {
-                value: lines,
-                revision,
-                completion: Completion::Unmapped { at: pc },
-            };
+            completion = Completion::Unmapped { at: pc };
+            break;
         };
         // Bytes that do not decode are stepped over by the width this machine
         // addresses instructions at. Stepping one byte puts the next
@@ -53,24 +54,34 @@ pub fn listing(
                 syntax: None,
                 annotations: Vec::new(),
             });
+            lifts.push(None);
             pc += step;
             continue;
         };
 
         let size = syntax.size;
-        let annotations = match work {
-            Work::Decode => Vec::new(),
-            _ => instruction_local(machine, memory, &fetch, pc, &syntax),
-        };
         lines.push(Line {
             address: pc,
             bytes: fetch[..size].to_vec(),
             syntax: Some(syntax),
-            annotations,
+            annotations: Vec::new(),
+        });
+        // The window is the decoder's, not the instruction's: Sleigh reads the
+        // whole of it whatever the instruction needs, and handing it only the
+        // bytes the instruction occupies fails the decode just performed.
+        lifts.push(match work {
+            Work::Decode => None,
+            _ => machine.disasm.lift(&fetch, pc).ok(),
         });
         pc += size as u64;
     }
-    Answer::complete(lines, revision)
+
+    super::annotate::over_run(memory, work, &lifts, &mut lines);
+    Answer {
+        value: lines,
+        revision,
+        completion,
+    }
 }
 
 #[cfg(test)]
@@ -208,7 +219,7 @@ mod tests {
             .find(|annotation| matches!(annotation.kind, AnnotationKind::Target { call: true, .. }))
             .expect("a direct call encodes its target");
         assert_eq!(call.kind.address(), BASE + 0x10);
-        assert_eq!(call.support, Support::Folded);
+        assert_eq!(call.support, Support::Decoded);
         let body = &line.syntax.as_ref().expect("decoded").body;
         let span = call.operand.expect("one operand spells that address");
         assert_eq!(&body[span.start..span.end], "0x1010");

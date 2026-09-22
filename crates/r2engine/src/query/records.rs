@@ -100,6 +100,14 @@ pub enum AnnotationKind {
     Reads { address: u64, width: u32 },
     /// The instruction writes this many bytes at this address.
     Writes { address: u64, width: u32 },
+    /// The instruction produces this number, and nothing later in the run
+    /// reads it back.
+    ///
+    /// `lea rdi, 0x4070` computes an address and that is its whole result;
+    /// `adrp x17, 0x100008000` computes a page base the next instruction moves
+    /// fifty bytes past. The difference is not in either instruction, which is
+    /// why this is the rung above one.
+    Computes { value: u64 },
     /// The revision this answer names holds this value at that address.
     ///
     /// Not "the load returns it". Nothing here says the bytes will still be
@@ -120,6 +128,7 @@ impl AnnotationKind {
             | Self::Reads { address, .. }
             | Self::Writes { address, .. }
             | Self::Holds { address, .. } => address,
+            Self::Computes { value } => value,
         }
     }
 }

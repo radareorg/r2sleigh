@@ -24,7 +24,10 @@ pub use records::{Annotation, AnnotationKind, Decoders, Line, Listing, Memory};
 
 /// How much work a request permits.
 ///
-/// A ladder of scheduling, not of truth. Each rung admits everything below it.
+/// A ladder of scheduling, not of truth: allowing more work decides whether a
+/// fact could be established, never what the fact means. Each rung admits
+/// everything below it, and a rung is added when something asks for it rather
+/// than because a plan named it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Work {
     /// Read the bytes and spell the instruction. No lifting.
@@ -32,34 +35,24 @@ pub enum Work {
     /// Lift one instruction and fold within it.
     InstructionLocal,
     /// Fold across a run of instructions, which is what an address built over
-    /// three of them needs.
+    /// three of them needs, and what says whether a number one instruction
+    /// computes is an address or a step towards one.
     BlockLocal,
-    /// Walk the function and prepare its SSA.
-    Function,
-    /// Use what the functions this one calls were separately shown to do.
-    CalleeSummaries,
-    /// Ask the solver.
-    Solver,
-    /// Build a binding plan and render.
-    Render,
 }
 
-/// How well a claim about an address is supported, strongest first.
+/// How well supported a claim about a number is, strongest first.
 ///
 /// This is the axis that was missing. Substituting a name wherever a number
 /// happened to equal an address is not wrong so much as unlabelled: it is a
 /// coincidence until something says the number is used as an address, and a
-/// reader who is told which is which can act on the difference.
+/// reader told which is which can act on the difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Support {
-    /// The container says so: a symbol, a relocation, a declared entry point.
-    Stated,
-    /// An operand of one decoded instruction says so.
+    /// An operand of one decoded instruction says the instruction transfers
+    /// there or accesses it.
     Decoded,
-    /// Constants folded within one instruction, or across a run of them.
+    /// Constants folded, within one instruction or across a run of them.
     Folded,
-    /// A declaration the engine trusts, applied to something folded.
-    Declared,
     /// The number equals an address something names, and nothing in the
     /// instruction says it is used as one.
     Coincident,

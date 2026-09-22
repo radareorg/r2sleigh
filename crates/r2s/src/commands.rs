@@ -737,11 +737,13 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
         &session.program,
         &memory,
         Listing { start, count },
-        r2engine::query::Work::InstructionLocal,
+        r2engine::query::Work::BlockLocal,
         session.program.revision(),
     );
-    if answer.value.is_empty() {
-        return Err(format!("nothing mapped at {:#x}", start));
+    if let r2engine::query::Completion::Unmapped { at } = answer.completion
+        && answer.value.is_empty()
+    {
+        return Err(format!("nothing mapped at {at:#x}"));
     }
     let mut out = String::new();
     for line in &answer.value {
@@ -792,6 +794,13 @@ fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> Str
         let Ok(value) = u64::try_from(number.value) else {
             continue;
         };
+        // Only where the engine says the instruction uses that number as an
+        // address. Naming every number the table happens to know spelled
+        // `adrp x17, reloc.humanize_number` over a page base the next
+        // instruction was about to move fifty bytes past.
+        if claim(line, *number).is_none() {
+            continue;
+        }
         let Some(name) = names.of(value) else {
             continue;
         };
@@ -801,6 +810,22 @@ fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> Str
         true => syntax.mnemonic.clone(),
         false => format!("{} {}", syntax.mnemonic, body),
     }
+}
+
+/// How well supported a claim about this number is, where anything claims it.
+///
+/// A number no annotation claims is a coincidence: the table knows an address
+/// of that value and nothing in the instruction says this is one.
+#[cfg(feature = "sleigh")]
+fn claim(
+    line: &r2engine::query::Line,
+    number: r2engine::NumberSpan,
+) -> Option<r2engine::query::Support> {
+    line.annotations
+        .iter()
+        .filter(|annotation| annotation.operand == Some(number))
+        .map(|annotation| annotation.support)
+        .min()
 }
 
 /// What this revision holds where the instruction reads, as a trailing note.
@@ -869,7 +894,34 @@ mod tests {
         db
     }
 
+    /// A line whose every number the instruction is said to transfer to.
     fn line(mnemonic: &str, body: &str) -> Line {
+        claiming(mnemonic, body, true)
+    }
+
+    /// The same, with nothing claiming any of its numbers.
+    fn unclaimed(mnemonic: &str, body: &str) -> Line {
+        claiming(mnemonic, body, false)
+    }
+
+    fn claiming(mnemonic: &str, body: &str, claimed: bool) -> Line {
+        let numbers = r2engine::number_spans(body);
+        let annotations = match claimed {
+            false => Vec::new(),
+            true => numbers
+                .iter()
+                .filter_map(|number| {
+                    Some(r2engine::query::Annotation {
+                        kind: r2engine::query::AnnotationKind::Target {
+                            address: u64::try_from(number.value).ok()?,
+                            call: true,
+                        },
+                        support: r2engine::query::Support::Decoded,
+                        operand: Some(*number),
+                    })
+                })
+                .collect(),
+        };
         Line {
             address: 0x1000,
             bytes: vec![0x90],
@@ -877,9 +929,9 @@ mod tests {
                 mnemonic: mnemonic.to_owned(),
                 body: body.to_owned(),
                 size: 1,
-                numbers: r2engine::number_spans(body),
+                numbers,
             }),
-            annotations: Vec::new(),
+            annotations,
         }
     }
 
@@ -917,6 +969,16 @@ mod tests {
         assert_eq!(
             spelled(&line("mov", "0x100000340, [0x100000340]"), &db()),
             "mov sym._add_two, [sym._add_two]"
+        );
+    }
+
+    #[test]
+    fn a_number_nothing_claims_is_a_coincidence_and_stays_a_number() {
+        // `adrp x17, 0x100008000` computes a page base that happens to equal a
+        // named address; the instruction after it moves fifty bytes past.
+        assert_eq!(
+            spelled(&unclaimed("adrp", "x17, 0x100000340"), &db()),
+            "adrp x17, 0x100000340"
         );
     }
 

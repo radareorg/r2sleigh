@@ -8,29 +8,78 @@ use r2sleigh_lift::{NumberSpan, Syntax};
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
 
 use super::Support;
-use super::records::{Annotation, AnnotationKind, Memory};
-use r2sleigh_lift::EmbeddedMachine;
+use super::Work;
+use super::records::{Annotation, AnnotationKind, Line, Memory};
 
-/// What one instruction's own lift says about the addresses it touches.
+/// Say what each line's own lift says, and what the run says about it.
 ///
-/// Lifting is the whole point: a number in the operands is an address because
-/// the instruction transfers to it or reads it, not because it looks like one.
-/// The window is the decoder's, not the instruction's: Sleigh reads the whole
-/// of it whatever the instruction needs, and handing it only the bytes the
-/// instruction occupies fails the decode it just performed.
-pub(super) fn instruction_local(
-    machine: &EmbeddedMachine,
+/// Two passes, because they answer different questions. What an instruction
+/// transfers to or reads is a fact about the instruction. Whether the number
+/// it computes is an address or a step towards one is a fact about what the
+/// next instruction does with it: `adrp x17, 0x100008000` computes a page
+/// base, and only the `add` after it says the address is fifty bytes further
+/// on.
+pub(super) fn over_run(
     memory: &Memory<'_>,
-    window: &[u8],
-    address: u64,
-    syntax: &Syntax,
-) -> Vec<Annotation> {
-    let Ok(block) = machine.disasm.lift(window, address) else {
-        return Vec::new();
-    };
+    work: Work,
+    lifts: &[Option<r2il::R2ILBlock>],
+    lines: &mut [Line],
+) {
+    if work == Work::Decode {
+        return;
+    }
+    for (index, line) in lines.iter_mut().enumerate() {
+        let (Some(lift), Some(syntax)) = (lifts.get(index).and_then(Option::as_ref), &line.syntax)
+        else {
+            continue;
+        };
+        let mut kinds = touched_by(lift);
+        if work >= Work::BlockLocal {
+            kinds.extend(computed_by(lift, &lifts[index + 1..]));
+        }
+        // What a read finds there is a fact about this revision, so it is said
+        // beside the read rather than folded into it.
+        for index in 0..kinds.len() {
+            let AnnotationKind::Reads { address, width } = kinds[index] else {
+                continue;
+            };
+            let Some(value) = memory.word(address, width) else {
+                continue;
+            };
+            kinds.push(AnnotationKind::Holds {
+                address,
+                width,
+                value,
+            });
+        }
+        line.annotations = kinds
+            .into_iter()
+            .map(|kind| Annotation {
+                support: support_for(kind),
+                operand: sole_operand(syntax, kind.address()),
+                kind,
+            })
+            .collect();
+    }
+}
+
+/// How well supported a claim of this shape is.
+fn support_for(kind: AnnotationKind) -> Support {
+    match kind {
+        // The instruction's own operands say it transfers there or reads it.
+        AnnotationKind::Target { .. }
+        | AnnotationKind::Reads { .. }
+        | AnnotationKind::Writes { .. } => Support::Decoded,
+        // Folded, either within the instruction or across the run.
+        AnnotationKind::Computes { .. } | AnnotationKind::Holds { .. } => Support::Folded,
+    }
+}
+
+/// Every address one instruction's operations name.
+fn touched_by(lift: &r2il::R2ILBlock) -> Vec<AnnotationKind> {
     let mut origins = BlockOrigins::default();
     let mut kinds: Vec<AnnotationKind> = Vec::new();
-    for op in &block.ops {
+    for op in &lift.ops {
         for kind in touched(&origins, op) {
             if !kinds.contains(&kind) {
                 kinds.push(kind);
@@ -38,29 +87,32 @@ pub(super) fn instruction_local(
         }
         origins.step(op);
     }
-    // What a read finds there is a fact about this revision, so it is said
-    // beside the read rather than folded into it.
-    for index in 0..kinds.len() {
-        let AnnotationKind::Reads { address, width } = kinds[index] else {
-            continue;
-        };
-        let Some(value) = memory.word(address, width) else {
-            continue;
-        };
-        kinds.push(AnnotationKind::Holds {
-            address,
-            width,
-            value,
-        });
-    }
     kinds
-        .into_iter()
-        .map(|kind| Annotation {
-            kind,
-            support: Support::Folded,
-            operand: sole_operand(syntax, kind.address()),
-        })
-        .collect()
+}
+
+/// The number this instruction produces, where the run leaves it standing.
+///
+/// A value a later instruction reads back is a step towards an address rather
+/// than one: spelling `adrp x17, reloc.humanize_number` named the page base
+/// the `add` after it was about to move fifty bytes past.
+fn computed_by(lift: &r2il::R2ILBlock, rest: &[Option<r2il::R2ILBlock>]) -> Option<AnnotationKind> {
+    let mut origins = BlockOrigins::default();
+    for op in &lift.ops {
+        origins.step(op);
+    }
+    let output = lift.ops.iter().rev().find_map(r2il::R2ILOp::output)?;
+    let value = origins.of(output)?.constant()?;
+    let storage = (output.space, output.offset);
+    let read_later = rest
+        .iter()
+        .flatten()
+        .flat_map(|block| block.ops.iter())
+        .any(|op| {
+            op.inputs()
+                .into_iter()
+                .any(|input| (input.space, input.offset) == storage)
+        });
+    (!read_later).then_some(AnnotationKind::Computes { value })
 }
 
 /// The addresses one operation names, as far as the block so far shows.
