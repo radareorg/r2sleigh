@@ -384,7 +384,8 @@ impl<'a> Walk<'a> {
                         self.continues(Some(next), &mut successors)
                     }
                     Some(targets) => {
-                        for target in targets.clone() {
+                        // Several cases reach one arm, and that is one edge.
+                        for target in targets.iter().copied().collect::<BTreeSet<_>>() {
                             self.transfer(target, &mut successors);
                         }
                     }

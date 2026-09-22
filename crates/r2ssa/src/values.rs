@@ -260,8 +260,30 @@ fn transfer(
         // Zero extension keeps the value and changes only the width it is
         // read at, which the bounds already say.
         SSAOp::IntZExt { .. } | SSAOp::Subpiece { .. } => at_width(input(0)),
-        // A selection is one arm or the other.
-        SSAOp::Select(_) => at_width(input(1)).join(&at_width(input(2))),
+        // A selection is one arm or the other, and its condition says which.
+        //
+        // `csel x16, x16, xzr, ls` after `cmp x16, 0x5b` is how a compiler
+        // clamps a switch index, and without reading the condition the arm it
+        // keeps stays unbounded -- which made a jump table run to the end of
+        // the address space rather than over its cases.
+        SSAOp::Select(_) => {
+            let arm = |index: usize, truth: bool| match (
+                inst.inputs
+                    .first()
+                    .and_then(|condition| comparison_of(graph, *condition)),
+                inst.inputs.get(index).copied(),
+            ) {
+                (Some(compare), Some(value)) => narrow(
+                    &|value| Some(lookup(value)),
+                    at_width(input(index)),
+                    &compare,
+                    truth,
+                    value,
+                ),
+                _ => at_width(input(index)),
+            };
+            arm(1, true).join(&arm(2, false))
+        }
         // A comparison is nought or one, whatever it compares.
         SSAOp::IntEqual { .. }
         | SSAOp::IntNotEqual { .. }
@@ -333,7 +355,17 @@ fn assumptions_by_block(
                 else {
                     continue;
                 };
-                let now = narrow(&held, state, was, compare, assumption.truth, side);
+                let now = narrow(
+                    &|value| {
+                        held.get(&value)
+                            .copied()
+                            .or_else(|| state.get(value.0 as usize).copied())
+                    },
+                    was,
+                    compare,
+                    assumption.truth,
+                    side,
+                );
                 if now != was {
                     held.insert(side, now);
                 }
@@ -353,8 +385,7 @@ fn assumptions_by_block(
 /// `!(a < b)` is `b <= a` -- so the false case is taken by turning the
 /// comparison round rather than by four more arms saying the same thing.
 fn narrow(
-    held: &BTreeMap<ValueId, StridedInterval>,
-    state: &[StridedInterval],
+    known: &dyn Fn(ValueId) -> Option<StridedInterval>,
     range: StridedInterval,
     compare: &crate::semantic::CompareProvenance,
     truth: bool,
@@ -379,12 +410,7 @@ fn narrow(
             !mirrored,
         ),
     };
-    let Some(bound) = held
-        .get(&other)
-        .copied()
-        .or_else(|| state.get(other.0 as usize).copied())
-        .filter(|other| !other.is_bottom())
-    else {
+    let Some(bound) = known(other).filter(|other| !other.is_bottom()) else {
         return range;
     };
     let Some((low, high)) = bound.bounds() else {
@@ -412,6 +438,32 @@ fn narrow(
         (CompareKind::LessEqual, true) => above(Some(low)),
         _ => range,
     }
+}
+
+/// The comparison a condition is, read off the operation that defines it.
+fn comparison_of(
+    graph: &SsaGraph,
+    condition: ValueId,
+) -> Option<crate::semantic::CompareProvenance> {
+    use crate::semantic::CompareKind;
+    let inst = graph.inst(graph.def_inst(condition)?)?;
+    let InstPayload::Op(op) = &inst.payload else {
+        return None;
+    };
+    let kind = match op {
+        SSAOp::IntEqual { .. } => CompareKind::Equal,
+        SSAOp::IntNotEqual { .. } => CompareKind::NotEqual,
+        SSAOp::IntLess { .. } => CompareKind::Less,
+        SSAOp::IntLessEqual { .. } => CompareKind::LessEqual,
+        SSAOp::IntSLess { .. } => CompareKind::SignedLess,
+        SSAOp::IntSLessEqual { .. } => CompareKind::SignedLessEqual,
+        _ => return None,
+    };
+    Some(crate::semantic::CompareProvenance {
+        kind,
+        lhs: *inst.inputs.first()?,
+        rhs: *inst.inputs.get(1)?,
+    })
 }
 
 /// Where an instruction stands.
