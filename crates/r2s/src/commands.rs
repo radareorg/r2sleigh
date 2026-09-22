@@ -722,7 +722,7 @@ fn with_native<T>(
 
 #[cfg(feature = "sleigh")]
 fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> {
-    use r2engine::query::listing::{Listing, Memory, listing};
+    use r2engine::query::{Listing, Memory, listing};
 
     let count = parse_count(argument, 16)?;
     let start = session.addr;

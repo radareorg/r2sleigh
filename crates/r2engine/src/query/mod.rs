@@ -13,11 +13,14 @@
 //! names the state of the program it was computed against, so no two answers
 //! in one view can describe different programs.
 
-pub mod listing;
+pub mod annotate;
+pub mod decode;
 pub mod memo;
+pub mod records;
 
-pub use listing::{Annotation, AnnotationKind, Line, Listing, Memory};
+pub use decode::listing;
 pub use memo::{Memo, MemoStats};
+pub use records::{Annotation, AnnotationKind, Decoders, Line, Listing, Memory};
 
 /// How much work a request permits.
 ///

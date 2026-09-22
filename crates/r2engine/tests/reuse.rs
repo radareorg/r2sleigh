@@ -68,7 +68,7 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
         program: &program,
         endian: program.endian(),
     };
-    let answer = r2engine::query::listing::listing(
+    let answer = r2engine::query::listing(
         &program,
         &memory,
         r2engine::query::Listing {

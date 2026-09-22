@@ -23,7 +23,7 @@ use r2sleigh_lift::EmbeddedMachine;
 
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
-use crate::query::{Memo, Revision, listing::Decoders};
+use crate::query::{Decoders, Memo, Revision};
 
 /// What the binary defines at one address.
 #[derive(Debug, Clone, PartialEq, Eq)]

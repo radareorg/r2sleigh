@@ -1,133 +1,16 @@
-//! A listing, as records rather than as lines of text.
+//! Reading a run of instructions out of the program.
 //!
-//! The shell used to build each line by rewriting the decoder's prose seven
-//! times and then substituting a name wherever a hexadecimal run happened to
-//! equal an address it knew. Both halves of that are answered here instead:
-//! the decoder says how the instruction is spelled and where each number in it
-//! is written, and the lift says which of those numbers the instruction
-//! actually uses as an address. What is left for a caller is column layout.
+//! The decoder is asked again at every line. ARM states the instruction set
+//! per function, in the low bit of the symbol that names it, so a listing that
+//! crosses a boundary and kept the decoder it started with decodes the rest of
+//! itself wrongly.
 
-use r2il::{Endianness, R2ILOp, SpaceId, Varnode};
-use r2sleigh_lift::{EmbeddedMachine, NumberSpan, Syntax};
-use r2ssa::body::Program;
-use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
-
-use super::{Answer, Completion, Revision, Support, Work};
+use super::annotate::instruction_local;
+use super::records::{Decoders, Line, Listing, Memory};
+use super::{Answer, Completion, Revision, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
-
-/// Which decoder the code at an address is written in.
-///
-/// ARM states the instruction set per function, in the low bit of the symbol
-/// that names it, so a program has no one decoder and a listing that crosses a
-/// boundary decodes the rest of itself wrongly unless it asks again at every
-/// line.
-pub trait Decoders {
-    fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine>;
-}
-
-/// The program's own memory, and how it spells a word in it.
-///
-/// The endianness is the container's and not the decoder's. ARM BE8 is the
-/// case that forces them apart: instructions are little-endian there while
-/// data is big, so asking the Sleigh specification which way a pool word reads
-/// gives the wrong answer on exactly the binaries that have pool words.
-pub struct Memory<'a> {
-    pub program: &'a dyn Program,
-    pub endian: Endianness,
-}
-
-impl Memory<'_> {
-    /// The value this revision holds at an address, where it holds one.
-    fn word(&self, address: u64, width: u32) -> Option<u64> {
-        let width = usize::try_from(width)
-            .ok()
-            .filter(|width| (1..=8).contains(width))?;
-        let read = self
-            .program
-            .read(address, width)
-            .filter(|read| read.len() == width)?;
-        let mut bytes = [0u8; 8];
-        bytes[..width].copy_from_slice(&read);
-        Some(match self.endian {
-            Endianness::Little => u64::from_le_bytes(bytes),
-            Endianness::Big => u64::from_be_bytes(bytes) >> (8 * (8 - width as u32)),
-            // Nothing says which way a word reads here, so nothing is claimed.
-            Endianness::Mixed | Endianness::Custom => return None,
-        })
-    }
-}
-
-/// A run of instructions, asked for by where it starts and how many.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Listing {
-    pub start: u64,
-    pub count: usize,
-}
-
-/// One line of a listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Line {
-    pub address: u64,
-    /// The bytes this line accounts for: the whole instruction, or the single
-    /// byte that did not begin one.
-    pub bytes: Vec<u8>,
-    /// How the decoder spells it. Absent where the bytes are not an instruction.
-    pub syntax: Option<Syntax>,
-    pub annotations: Vec<Annotation>,
-}
-
-impl Line {
-    /// Whether the bytes decoded at all.
-    pub fn decoded(&self) -> bool {
-        self.syntax.is_some()
-    }
-}
-
-/// Something the engine can say about one instruction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Annotation {
-    pub kind: AnnotationKind,
-    pub support: Support,
-    /// Which number in the operand body this is about, where exactly one of
-    /// them spells it. Two operands holding the same value leave this empty
-    /// rather than guessing which was meant.
-    pub operand: Option<NumberSpan>,
-}
-
-/// What one annotation claims.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnnotationKind {
-    /// The instruction encodes a transfer of control to this address.
-    Target { address: u64, call: bool },
-    /// The instruction reads this many bytes at this address.
-    Reads { address: u64, width: u32 },
-    /// The instruction writes this many bytes at this address.
-    Writes { address: u64, width: u32 },
-    /// The revision this answer names holds this value at that address.
-    ///
-    /// Not "the load returns it". Nothing here says the bytes will still be
-    /// these when the instruction runs, and saying so would be the one claim
-    /// a listing cannot support.
-    Holds {
-        address: u64,
-        width: u32,
-        value: u64,
-    },
-}
-
-impl AnnotationKind {
-    /// The address this claim is about.
-    pub fn address(self) -> u64 {
-        match self {
-            Self::Target { address, .. }
-            | Self::Reads { address, .. }
-            | Self::Writes { address, .. }
-            | Self::Holds { address, .. } => address,
-        }
-    }
-}
 
 /// Decode a run of instructions, saying as much about each as `work` allows.
 pub fn listing(
@@ -190,112 +73,14 @@ pub fn listing(
     Answer::complete(lines, revision)
 }
 
-/// What one instruction's own lift says about the addresses it touches.
-///
-/// Lifting is the whole point: a number in the operands is an address because
-/// the instruction transfers to it or reads it, not because it looks like one.
-/// The window is the decoder's, not the instruction's: Sleigh reads the whole
-/// of it whatever the instruction needs, and handing it only the bytes the
-/// instruction occupies fails the decode it just performed.
-fn instruction_local(
-    machine: &EmbeddedMachine,
-    memory: &Memory<'_>,
-    window: &[u8],
-    address: u64,
-    syntax: &Syntax,
-) -> Vec<Annotation> {
-    let Ok(block) = machine.disasm.lift(window, address) else {
-        return Vec::new();
-    };
-    let mut origins = BlockOrigins::default();
-    let mut kinds: Vec<AnnotationKind> = Vec::new();
-    for op in &block.ops {
-        for kind in touched(&origins, op) {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-        origins.step(op);
-    }
-    // What a read finds there is a fact about this revision, so it is said
-    // beside the read rather than folded into it.
-    for index in 0..kinds.len() {
-        let AnnotationKind::Reads { address, width } = kinds[index] else {
-            continue;
-        };
-        let Some(value) = memory.word(address, width) else {
-            continue;
-        };
-        kinds.push(AnnotationKind::Holds {
-            address,
-            width,
-            value,
-        });
-    }
-    kinds
-        .into_iter()
-        .map(|kind| Annotation {
-            kind,
-            support: Support::Folded,
-            operand: sole_operand(syntax, kind.address()),
-        })
-        .collect()
-}
-
-/// The addresses one operation names, as far as the block so far shows.
-fn touched(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
-    let folded = |addr: &Varnode| origins.of(addr).and_then(ValueOrigin::constant);
-    let mut found = Vec::new();
-    match op {
-        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => found.extend(
-            encoded_target(target).map(|address| AnnotationKind::Target {
-                address,
-                call: false,
-            }),
-        ),
-        R2ILOp::Call { target } => {
-            found.extend(
-                encoded_target(target).map(|address| AnnotationKind::Target {
-                    address,
-                    call: true,
-                }),
-            )
-        }
-        R2ILOp::Load {
-            dst,
-            space: SpaceId::Ram,
-            addr,
-        } => found.extend(folded(addr).map(|address| AnnotationKind::Reads {
-            address,
-            width: dst.size,
-        })),
-        R2ILOp::Store {
-            space: SpaceId::Ram,
-            addr,
-            val,
-        } => found.extend(folded(addr).map(|address| AnnotationKind::Writes {
-            address,
-            width: val.size,
-        })),
-        _ => {}
-    }
-    found
-}
-
-/// The one number in the operands that spells this address, where there is one.
-fn sole_operand(syntax: &Syntax, address: u64) -> Option<NumberSpan> {
-    let mut spelling = syntax
-        .numbers
-        .iter()
-        .filter(|number| number.value == i128::from(address));
-    let found = spelling.next()?;
-    spelling.next().is_none().then_some(*found)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2sleigh_lift::embedded_machine;
+    use crate::query::Support;
+    use crate::query::records::AnnotationKind;
+    use r2il::Endianness;
+    use r2sleigh_lift::{EmbeddedMachine, embedded_machine};
+    use r2ssa::body::Program;
 
     /// A flat run of bytes mapped at one address and nothing else.
     struct Mapped {
