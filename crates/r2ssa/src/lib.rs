@@ -47,6 +47,7 @@ mod naming;
 pub(crate) mod obligation;
 pub(crate) mod op;
 pub(crate) mod optimize;
+pub mod origin;
 pub(crate) mod phi;
 pub(crate) mod printf;
 pub(crate) mod promote;

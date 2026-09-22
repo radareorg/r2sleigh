@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::function::SSAFunction;
 use crate::op::SSAOp;
+use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
@@ -2093,50 +2094,13 @@ fn collect_raw_call_site_identities(
     (by_instruction, tails)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RawValueOrigin {
-    Constant { value: u64, size: u32 },
-    LoadedSlot(CanonicalStorageId),
-}
-
-fn truncated_raw_value(value: u64, size: u32) -> u64 {
-    match size {
-        0 | 8.. => value,
-        bytes => value & (u64::MAX >> (64 - bytes * 8)),
-    }
-}
-
-fn raw_value_origin(
-    origins: &BTreeMap<CanonicalStorageId, RawValueOrigin>,
-    value: &r2il::Varnode,
-) -> Option<RawValueOrigin> {
-    match value.space {
-        SpaceId::Const => Some(RawValueOrigin::Constant {
-            value: truncated_raw_value(value.offset, value.size),
-            size: value.size,
-        }),
-        // On x86-64 an indirect memory operand is lifted as the RAM value
-        // itself, with no defining load. Its canonical storage is the slot.
-        SpaceId::Ram => Some(RawValueOrigin::LoadedSlot(
-            CanonicalStorageId::from_varnode(value),
-        )),
-        _ => origins
-            .get(&CanonicalStorageId::from_varnode(value))
-            .copied(),
-    }
-}
-
 /// The canonical RAM slot whose loaded value a terminal indirect branch reads.
 ///
 /// This is one fact with two lifted representations. x86-64 may put the RAM
 /// varnode directly on `BranchInd`, leaving it undefined in SSA. AArch64 loads
 /// the slot through an exactly folded address and copies the result through a
-/// register into the program counter. A single forward reaching-origin pass
+/// register into the program counter. Reading the block's own origins forward
 /// recognizes both without depending on a variable name or architecture.
-///
-/// The pass is `O(n log s)` for `n` operations and `s` distinct storages in the
-/// block. Unsupported definitions clear their destination, so an older origin
-/// can never survive a clobber and become false evidence.
 pub fn terminal_indirect_loaded_slot(
     block: &R2ILBlock,
     branch_op_index: usize,
@@ -2147,84 +2111,9 @@ pub fn terminal_indirect_loaded_slot(
     let R2ILOp::BranchInd { target } = block.ops.get(branch_op_index)? else {
         return None;
     };
-
-    let mut origins = BTreeMap::<CanonicalStorageId, RawValueOrigin>::new();
-    for op in &block.ops[..branch_op_index] {
-        let Some(output) = op.output() else {
-            continue;
-        };
-        let output_storage = CanonicalStorageId::from_varnode(output);
-        let origin = match op {
-            R2ILOp::Copy { src, .. } => raw_value_origin(&origins, src),
-            R2ILOp::IntAdd { a, b, dst } => {
-                match (raw_value_origin(&origins, a), raw_value_origin(&origins, b)) {
-                    (
-                        Some(RawValueOrigin::Constant { value: left, .. }),
-                        Some(RawValueOrigin::Constant { value: right, .. }),
-                    ) => Some(RawValueOrigin::Constant {
-                        value: truncated_raw_value(left.wrapping_add(right), dst.size),
-                        size: dst.size,
-                    }),
-                    _ => None,
-                }
-            }
-            R2ILOp::IntSub { a, b, dst } => {
-                match (raw_value_origin(&origins, a), raw_value_origin(&origins, b)) {
-                    (
-                        Some(RawValueOrigin::Constant { value: left, .. }),
-                        Some(RawValueOrigin::Constant { value: right, .. }),
-                    ) => Some(RawValueOrigin::Constant {
-                        value: truncated_raw_value(left.wrapping_sub(right), dst.size),
-                        size: dst.size,
-                    }),
-                    _ => None,
-                }
-            }
-            // ARM clears the low bit of a loaded target before branching to
-            // it: the bit selects the instruction set, not the address, so the
-            // value still names the slot it was loaded from.
-            R2ILOp::IntAnd { a, b, dst }
-                if b.space == SpaceId::Const
-                    && b.offset == truncated_raw_value(u64::MAX << 1, dst.size) =>
-            {
-                raw_value_origin(&origins, a)
-            }
-            R2ILOp::Load {
-                dst,
-                space: SpaceId::Ram,
-                addr,
-            } => match raw_value_origin(&origins, addr) {
-                Some(RawValueOrigin::Constant { value, .. }) => {
-                    Some(RawValueOrigin::LoadedSlot(CanonicalStorageId {
-                        space: CanonicalStorageSpace::Ram,
-                        offset: value,
-                        size: dst.size,
-                    }))
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        match origin {
-            Some(origin) => {
-                origins.insert(output_storage, origin);
-            }
-            None => {
-                origins.remove(&output_storage);
-            }
-        }
-    }
-
-    match raw_value_origin(&origins, target)? {
-        RawValueOrigin::LoadedSlot(slot)
-            if slot.space == CanonicalStorageSpace::Ram
-                && slot.size != 0
-                && slot.offset.checked_add(u64::from(slot.size)).is_some() =>
-        {
-            Some(slot)
-        }
-        RawValueOrigin::Constant { .. } | RawValueOrigin::LoadedSlot(_) => None,
-    }
+    BlockOrigins::upto(block, branch_op_index)
+        .of(target)?
+        .loaded_slot()
 }
 
 fn memory_space(op: &R2ILOp) -> Option<SpaceId> {
