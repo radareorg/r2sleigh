@@ -637,6 +637,12 @@ impl BindingPlan {
                     let Some(width_bits) =
                         binding_declaration_width(&binding.declaration_type, ptr_bits)
                     else {
+                        // The type itself has no width the model can state.
+                        r2il::refusal_evidence!(
+                            "seal-declaration-width",
+                            "{binding_id:?}: {:?} has no width",
+                            binding.declaration_type
+                        );
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::DeclarationWidth {
                                 binding: binding_id,
@@ -648,6 +654,12 @@ impl BindingPlan {
                         .all(|lower_bound| *lower_bound <= width_bits);
                     let has_minimality_witness = lower_bounds.contains(&width_bits);
                     if width_bits == 0 || !satisfies_every_bound || !has_minimality_witness {
+                        // Which of the three the width broke says which layer to look at.
+                        r2il::refusal_evidence!(
+                            "seal-declaration-width",
+                            "{binding_id:?}: {:?} is {width_bits} bits over {lower_bounds:?}; covers={satisfies_every_bound} witnessed={has_minimality_witness}",
+                            binding.declaration_type
+                        );
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::DeclarationWidth {
                                 binding: binding_id,

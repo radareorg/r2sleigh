@@ -834,9 +834,10 @@ fn read_end_bits_through_merges(
         } else if let Some(output) = forwarded_output
             && value_width_bits(source_owned, output)? == member_width_bits
         {
+            // Nothing read the copy's destination, so no narrower witness exists and the copy's own read stands whole.
             match read_end_bits_through_merges(source_owned, machine_projection, output, visited)? {
+                Ok(0) | Err(_) => member_width_bits,
                 Ok(bits) => bits,
-                Err(_) => member_width_bits,
             }
         } else {
             machine_projection
