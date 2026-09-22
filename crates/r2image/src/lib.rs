@@ -600,6 +600,40 @@ impl Image {
             segments.sort_by_key(|segment| segment.vaddr);
         }
 
+        let sections: Vec<Section> = file
+            .sections()
+            .map(|section| {
+                let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                Section {
+                    name: section.name().unwrap_or_default().to_owned(),
+                    vaddr: placed(&section),
+                    vsize: section.size(),
+                    file_offset,
+                    file_size,
+                    is_code: section.kind() == object::SectionKind::Text,
+                    loaded: section_is_loaded(&section),
+                }
+            })
+            .collect();
+
+        // Code lives in code sections, not merely in executable segments: Mach-O
+        // puts __cstring and __const inside __TEXT, and the header itself starts it.
+        let code_ranges: Vec<(u64, u64)> = sections
+            .iter()
+            .filter(|section| section.is_code && section.vsize > 0)
+            .map(|section| (section.vaddr, section.vsize))
+            .collect();
+        let executable = |vaddr: u64| {
+            if code_ranges.is_empty() {
+                return segments
+                    .iter()
+                    .any(|segment| segment.contains(vaddr) && segment.permissions.execute);
+            }
+            code_ranges
+                .iter()
+                .any(|(address, size)| vaddr >= *address && vaddr - *address < *size)
+        };
+
         // Both tables, because a stripped shared library has no `.symtab` and
         // every name it still carries is in `.dynsym`. Reading only the first
         // is why such a library listed no functions at all.
@@ -623,7 +657,10 @@ impl Image {
                 },
                 size: symbol.size(),
                 kind: match symbol.kind() {
-                    object::SymbolKind::Text => SymbolKind::Function,
+                    // A name in code is a function; `__mh_execute_header` is
+                    // typed as code and sits at the Mach-O header, where no
+                    // instruction begins, so discovery walked the header.
+                    object::SymbolKind::Text if executable(address) => SymbolKind::Function,
                     object::SymbolKind::Data => SymbolKind::Data,
                     object::SymbolKind::Section => SymbolKind::Section,
                     _ => SymbolKind::Other,
@@ -681,40 +718,6 @@ impl Image {
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
         let debug_prototypes = debug::read(&file);
-
-        let sections: Vec<Section> = file
-            .sections()
-            .map(|section| {
-                let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
-                Section {
-                    name: section.name().unwrap_or_default().to_owned(),
-                    vaddr: placed(&section),
-                    vsize: section.size(),
-                    file_offset,
-                    file_size,
-                    is_code: section.kind() == object::SectionKind::Text,
-                    loaded: section_is_loaded(&section),
-                }
-            })
-            .collect();
-
-        // Code lives in code sections, not merely in executable segments: Mach-O
-        // puts __cstring and __const inside __TEXT, and the header itself starts it.
-        let code_ranges: Vec<(u64, u64)> = sections
-            .iter()
-            .filter(|section| section.is_code && section.vsize > 0)
-            .map(|section| (section.vaddr, section.vsize))
-            .collect();
-        let executable = |vaddr: u64| {
-            if code_ranges.is_empty() {
-                return segments
-                    .iter()
-                    .any(|segment| segment.contains(vaddr) && segment.permissions.execute);
-            }
-            code_ranges
-                .iter()
-                .any(|(address, size)| vaddr >= *address && vaddr - *address < *size)
-        };
 
         let mut entry_points = Vec::new();
         let declared_entry = file.entry();
