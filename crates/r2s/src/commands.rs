@@ -811,7 +811,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
         let mut fetch = window.into_owned();
         fetch.resize(DECODE_WINDOW, 0);
 
-        let (mnemonic, size) = match decoder.disasm_native(&fetch, pc) {
+        let spelled = match decoder.disasm_syntax(&fetch, pc) {
             Ok(decoded) => decoded,
             Err(_) => {
                 out.push_str(&format!(
@@ -823,6 +823,7 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
                 continue;
             }
         };
+        let size = spelled.size;
         if size == 0 || size > available {
             out.push_str(&format!(
                 "            {:#010x}      {:<14} invalid\n",
@@ -844,12 +845,12 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
             pc,
             hex,
             {
-                let spelled = r2_mnemonic(&mnemonic, session.image.arch().name);
-                let spelled = match session.image.arch().name {
-                    "ARM" => named_literal_pool(session, &spelled),
-                    _ => spelled,
+                let text = spelled.text();
+                let text = match session.image.arch().name {
+                    "ARM" => named_literal_pool(session, &text),
+                    _ => text,
                 };
-                crate::names::spell(&session.names, &spelled)
+                crate::names::spell(&session.names, &text)
             }
         ));
         pc += size as u64;
@@ -897,135 +898,6 @@ fn named_literal_pool(session: &Session, text: &str) -> String {
         Some(name) => format!("ldr {}{}", &rest[..open], name.spelled()),
         None => text.to_owned(),
     }
-}
-
-/// Radare2 spells an instruction lowercase, with a space after each comma and
-/// no `#` before an immediate, where Sleigh keeps the assembler's own prefix.
-#[cfg(feature = "sleigh")]
-fn r2_mnemonic(text: &str, arch: &str) -> String {
-    let lowered = text.to_lowercase();
-    let mut out = String::with_capacity(lowered.len());
-    let mut chars = lowered.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '#' {
-            continue;
-        }
-        out.push(c);
-        if c == ',' && chars.peek().is_some_and(|next| *next != ' ') {
-            out.push(' ');
-        }
-    }
-    // Sleigh writes the x86 memory-operand size as `dword ptr [..]` and a
-    // negative displacement as `+ -0x4`; radare2 writes `dword [..]` and
-    // `- 0x4`. Same operand, and the two spellings are only spellings.
-    let out = out.replace(" ptr [", " [").replace("+ -", "- ");
-    let out = bare_effective_address(&out);
-    if arch == "ARM" {
-        arm_alias(&arm_role_registers(&out))
-    } else {
-        x86_condition_alias(&out)
-    }
-}
-
-/// Two ARM spellings Sleigh keeps from before the unified syntax.
-///
-/// `cpy rd, rm` is what `mov rd, rm` was called, and a post-indexed load of one
-/// register from the stack pointer is a `pop` of it. Every other ARM
-/// disassembler prints the later name.
-#[cfg(feature = "sleigh")]
-fn arm_alias(text: &str) -> String {
-    if let Some(rest) = text.strip_prefix("cpy ") {
-        return format!("mov {rest}");
-    }
-    if let Some(register) = text
-        .strip_prefix("ldr ")
-        .and_then(|rest| rest.strip_suffix(", [sp], 0x4"))
-    {
-        return format!("pop {{{register}}}");
-    }
-    text.to_owned()
-}
-
-/// One x86 condition, two names: the flag it tests and the comparison it came from.
-///
-/// `jnz` and `jne` are the same opcode; Sleigh prints the flag and radare2
-/// prints the comparison. Only the four conditions whose two spellings differ
-/// are listed; the rest are already the same word in both.
-#[cfg(feature = "sleigh")]
-fn x86_condition_alias(text: &str) -> String {
-    const CONDITIONS: [(&str, &str); 4] = [("z", "e"), ("nz", "ne"), ("c", "b"), ("nc", "ae")];
-    const VERBS: [&str; 4] = ["j", "set", "cmov", "loop"];
-    let head = text.split_whitespace().next().unwrap_or_default();
-    for verb in VERBS {
-        let Some(condition) = head.strip_prefix(verb) else {
-            continue;
-        };
-        let Some((_, spelled)) = CONDITIONS.iter().find(|(flag, _)| *flag == condition) else {
-            continue;
-        };
-        return format!("{verb}{spelled}{}", &text[head.len()..]);
-    }
-    text.to_owned()
-}
-
-/// radare2 spells the three ARM registers that have a job by that job.
-///
-/// The procedure call standard gives r11, r12, r13 and r14 the roles of frame
-/// pointer, intra-procedure scratch, stack pointer and link register, and
-/// every ARM disassembler but Sleigh's prints the role.
-#[cfg(feature = "sleigh")]
-fn arm_role_registers(text: &str) -> String {
-    const ROLES: [(&str, &str); 5] = [
-        ("r11", "fp"),
-        ("r12", "ip"),
-        ("r13", "sp"),
-        ("r14", "lr"),
-        ("r15", "pc"),
-    ];
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find('r') {
-        out.push_str(&rest[..start]);
-        let taken = ROLES.iter().find(|(spelling, _)| {
-            rest[start..].starts_with(spelling)
-                && !rest[start + spelling.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())
-        });
-        match taken {
-            Some((spelling, role)) => {
-                out.push_str(role);
-                rest = &rest[start + spelling.len()..];
-            }
-            None => {
-                out.push('r');
-                rest = &rest[start + 1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// `lea` loads an address rather than what is there, and radare2 writes that
-/// address without the brackets that would say it was read.
-///
-/// Only where the brackets hold one thing: `lea r8, [0x8f0]` is that address,
-/// while `lea rax, [rbp - 0x4]` is a computation and keeps its shape.
-#[cfg(feature = "sleigh")]
-fn bare_effective_address(text: &str) -> String {
-    let Some(rest) = text.strip_prefix("lea ") else {
-        return text.to_owned();
-    };
-    let Some(open) = rest.find('[') else {
-        return text.to_owned();
-    };
-    let Some(close) = rest.rfind(']') else {
-        return text.to_owned();
-    };
-    let inside = &rest[open + 1..close];
-    if close + 1 != rest.len() || inside.contains(' ') || inside.is_empty() {
-        return text.to_owned();
-    }
-    format!("lea {}{}", &rest[..open], inside)
 }
 
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {

@@ -3,6 +3,8 @@
 //! This module provides runtime disassembly of instruction bytes to P-code
 //! and translation to r2il using Ghidra's libsla library.
 
+pub mod syntax;
+
 #[cfg(test)]
 mod tests;
 
@@ -2247,6 +2249,22 @@ impl Disassembler {
 
     /// Disassemble and get native assembly mnemonic.
     pub fn disasm_native(&self, bytes: &[u8], addr: u64) -> Result<(String, usize)> {
+        let (mnemonic, body, size) = self.disasm_parts(bytes, addr)?;
+        Ok((format!("{mnemonic} {body}").trim().to_string(), size))
+    }
+
+    /// Disassemble one instruction into the spelling a listing prints.
+    ///
+    /// The decoder knows which architecture it decodes and where each number
+    /// in the operands is written, so it says both rather than handing out a
+    /// line for someone else to parse back apart.
+    pub fn disasm_syntax(&self, bytes: &[u8], addr: u64) -> Result<syntax::Syntax> {
+        let (mnemonic, body, size) = self.disasm_parts(bytes, addr)?;
+        Ok(syntax::radare2(&mnemonic, &body, size, &self.arch_name))
+    }
+
+    /// One instruction's operation and operands, as Sleigh itself spells them.
+    fn disasm_parts(&self, bytes: &[u8], addr: u64) -> Result<(String, String, usize)> {
         self.clear_decode_cache()?;
         let sleigh = self.spec.sleigh.borrow();
         let code_space = sleigh.default_code_space();
@@ -2257,13 +2275,11 @@ impl Disassembler {
             .disassemble_native(&loader, address)
             .map_err(|e| LiftError::Parse(format!("Disassembly failed: {}", e)))?;
 
-        let mnemonic = format!(
-            "{} {}",
-            native.instruction.mnemonic, native.instruction.body
-        );
-        let size = native.origin.size;
-
-        Ok((mnemonic.trim().to_string(), size))
+        Ok((
+            native.instruction.mnemonic,
+            native.instruction.body,
+            native.origin.size,
+        ))
     }
 
     /// Translate a P-code disassembly to an r2il block.
