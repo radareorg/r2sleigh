@@ -1,0 +1,28 @@
+---
+source: crates/r2s/tests/commands.rs
+expression: run.out
+---
+            0x100000420      ff4301d1       sub sp, sp, 0x50
+            0x100000424      fd7b04a9       stp x29, x30, [sp, 0x40]
+            0x100000428      fd030191       add x29, sp, 0x40
+            0x10000042c      a0831ff8       stur x0, [x29, -0x8]
+            0x100000430      a1031ff8       stur x1, [x29, -0x10]
+            0x100000434      28000090       adrp x8, 0x100004000
+            0x100000438      08010091       add x8, x8, 0x0
+            0x10000043c      0001c03d       ldr q0, [x8]
+            0x100000440      e007803d       str q0, [sp, 0x10]
+            0x100000444      080940f9       ldr x8, [x8, 0x10]
+            0x100000448      e81300f9       str x8, [sp, 0x20]
+            0x10000044c      a8835ff8       ldur x8, [x29, -0x8]
+            0x100000450      e80700f9       str x8, [sp, 0x8]
+            0x100000454      ff0700b9       str wzr, [sp, 0x4]
+            0x100000458      01000014       b 0x10000045c
+            0x10000045c      e80740b9       ldr w8, [sp, 0x4]
+            0x100000460      080d0071       subs w8, w8, 0x3
+            0x100000464      22020054       b.cs 0x1000004a8
+            0x100000468      01000014       b 0x10000046c
+            0x10000046c      e80740b9       ldr w8, [sp, 0x4]
+            0x100000470      e90308aa       mov x9, x8
+            0x100000474      e8430091       add x8, sp, 0x10
+            0x100000478      087969f8       ldr x8, [x8, x9, lsl 0x3]
+            0x10000047c      e00740f9       ldr x0, [sp, 0x8]

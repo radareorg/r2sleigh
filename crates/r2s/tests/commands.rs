@@ -355,6 +355,70 @@ mod tiers {
     }
 }
 
+/// The listing, pinned on one binary per architecture the tree carries.
+///
+/// `pd` is the command with the least protection and the most rewriting: every
+/// line it prints is built by successive substitutions over one formatted
+/// string, and until now a change to any of them was caught only by a
+/// comparison against radare2 that lives outside this repository. These pin the
+/// spellings that rewriting is meant to preserve, so a listing that changes is
+/// a listing someone decided to change.
+///
+/// What each one covers, beyond the decode:
+///
+/// - x86-64: the `ptr` and displacement spellings, and `jz` printed as `jne`'s
+///   comparison rather than its flag.
+/// - aarch64: a Mach-O whose operands reach data through a page and an offset.
+/// - ARM 32-bit: the register roles (`fp`, `ip`, `sp`, `lr`, `pc`), the `mov`
+///   alias for the encoding Sleigh spells `cpy`, and a big-endian Thumb-2
+///   decode, which is the one place this engine reads an instruction radare2
+///   reads wrongly.
+///
+/// Two spellings in these recordings are ours and not radare2's, and they are
+/// pinned so that changing them is a decision rather than an accident. The x86
+/// snapshot writes `nop word ptr cs:[rax + rax*0x1]`, because the rule that
+/// drops `ptr` matches ` ptr [` and this operand carries a segment between the
+/// two; and it writes a sixty-four-bit immediate signed, as Sleigh does, where
+/// radare2 writes it unsigned. The listing comparison against radare2
+/// normalises integers, so neither shows up there.
+mod listing {
+    use super::{FNV1A32, Run, on, r2s};
+    use std::path::PathBuf;
+
+    fn at(fixture: &str, script: &str) -> Run {
+        on(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(fixture),
+            script,
+        )
+    }
+
+    #[test]
+    fn the_x86_listing_is_pinned() {
+        let run = r2s(&format!("s {FNV1A32}; pd 24"));
+        assert!(run.ok, "{}", run.out);
+        insta::assert_snapshot!("fnv1a32_pd", run.out);
+    }
+
+    #[test]
+    fn the_aarch64_listing_is_pinned() {
+        let run = at(
+            "tests/fixtures/code_pointer_table_O0",
+            "s 0x100000420; pd 24",
+        );
+        assert!(run.ok, "{}", run.out);
+        insta::assert_snapshot!("table_dispatch_pd", run.out);
+    }
+
+    #[test]
+    fn the_arm_listing_is_pinned() {
+        let run = at("crates/r2image/tests/data/arm_thumb_entry.elf", "pd 12");
+        assert!(run.ok, "{}", run.out);
+        insta::assert_snapshot!("arm_thumb_pd", run.out);
+    }
+}
+
 /// An aarch64 Mach-O whose dispatcher calls through a table of function
 /// pointers, which is the shape the engine has to derive for itself.
 mod dispatch_table {

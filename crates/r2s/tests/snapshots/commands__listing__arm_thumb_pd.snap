@@ -1,0 +1,8 @@
+---
+source: crates/r2s/tests/commands.rs
+expression: run.out
+---
+            0x00010054      4ff0000b       mov.w fp, 0x0
+            0x00010058      4ff0000e       mov.w lr, 0x0
+            0x0001005c      02bc           pop {r1}
+            0x0001005e      6a46           mov r2, sp

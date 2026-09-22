@@ -1,0 +1,28 @@
+---
+source: crates/r2s/tests/commands.rs
+expression: run.out
+---
+            0x00401330      f30f1efa       endbr64
+            0x00401334      4885f6         test rsi, rsi
+            0x00401337      7427           je 0x401360
+            0x00401339      4801fe         add rsi, rdi
+            0x0040133c      b8c59d1c81     mov eax, 0x811c9dc5
+            0x00401341      0f1f800000..   nop dword [rax]
+            0x00401348      0fb617         movzx edx, byte [rdi]
+            0x0040134b      4883c701       add rdi, 0x1
+            0x0040134f      31d0           xor eax, edx
+            0x00401351      69c093010001   imul eax, eax, 0x1000193
+            0x00401357      4839fe         cmp rsi, rdi
+            0x0040135a      75ec           jne 0x401348
+            0x0040135c      c3             ret
+            0x0040135d      0f1f00         nop dword [rax]
+            0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
+            0x00401365      c3             ret
+            0x00401366      662e0f1f84..   nop word ptr cs:[rax + rax*0x1]
+            0x00401370      f30f1efa       endbr64
+            0x00401374      48b8252322..   mov rax, -0x340d631b7bdddcdb
+            0x0040137e      4885f6         test rsi, rsi
+            0x00401381      7420           je 0x4013a3
+            0x00401383      48b9b30100..   mov rcx, 0x100000001b3
+            0x0040138d      4801fe         add rsi, rdi
+            0x00401390      0fb617         movzx edx, byte [rdi]
