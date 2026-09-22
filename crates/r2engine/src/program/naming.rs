@@ -1,16 +1,16 @@
 //! What this binary calls each address, filled from what the container states.
 //!
-//! The table itself is `r2engine::names::NameDb`: one name per address, stored
+//! The table itself is `crate::names::NameDb`: one name per address, stored
 //! plain beside the namespace it belongs to, so the engine can key a prototype
 //! by `printf` while a listing writes `sym.imp.printf`. This module is the
-//! half that only the host can do -- reading the container and decoding the
-//! linkage stubs -- plus the substitution that puts a name where a listing
-//! would otherwise print a number.
+//! half that reads the container and decodes the linkage stubs, plus the
+//! substitution that puts a name where a listing would otherwise print a
+//! number.
 
 use std::collections::BTreeMap;
 
-use r2engine::discovery::Confidence;
-use r2engine::names::{Name, NameDb, Namespace};
+use crate::discovery::Confidence;
+use crate::names::{Name, NameDb, Namespace};
 use r2il::R2ILOp;
 use r2image::{EntryKind, Format, Image, SymbolKind};
 use r2sleigh_lift::Disassembler;
@@ -130,7 +130,7 @@ pub fn name_strings(db: &mut NameDb, image: &Image) {
         };
         let mut at = 0usize;
         while at < bytes.len() {
-            let Some(text) = r2engine::names::text_in(&bytes[at..]) else {
+            let Some(text) = crate::names::text_in(&bytes[at..]) else {
                 at += 1;
                 continue;
             };

@@ -13,6 +13,7 @@ mod tests;
 pub mod discovery;
 pub mod names;
 pub mod native;
+pub mod program;
 pub mod query;
 
 use std::collections::{BTreeSet, HashMap};
@@ -36,6 +37,7 @@ pub use program_cache::{
     cache_root_artifact, cached_callee_facts, cached_root_artifact, cached_root_fingerprint,
     clear_program_cache, program_cache_stats,
 };
+pub use r2ssa::DataRefFact;
 
 mod route;
 

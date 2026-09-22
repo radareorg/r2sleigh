@@ -652,6 +652,7 @@ dependencies = [
  "r2abi",
  "r2dec",
  "r2il",
+ "r2image",
  "r2sleigh-lift",
  "r2source",
  "r2ssa",
@@ -697,13 +698,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "insta",
- "r2abi",
  "r2engine",
- "r2il",
- "r2image",
- "r2sleigh-lift",
- "r2ssa",
- "sleigh-config",
 ]
 
 [[package]]

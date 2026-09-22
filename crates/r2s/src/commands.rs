@@ -6,6 +6,8 @@
 //! column rather than a wrong value.
 
 use crate::session::Session;
+#[cfg(feature = "sleigh")]
+use r2engine::program::OpenProgram;
 
 pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
     let line = line.trim();
@@ -84,10 +86,11 @@ fn parse_number(session: &Session, text: &str) -> Result<u64, String> {
     // `s entry0` on a file with no declared entry keeps the session's start.
     if text == "entry0" {
         return Ok(session
+            .program
             .image
             .entry_points()
             .iter()
-            .find(|entry| entry.kind == r2image::EntryKind::Main)
+            .find(|entry| entry.kind == r2engine::program::EntryKind::Main)
             .map(|entry| entry.vaddr)
             .unwrap_or(session.addr));
     }
@@ -113,7 +116,7 @@ fn seek(session: &mut Session, argument: &str) -> Result<String, String> {
 }
 
 fn info(session: &Session) -> Result<String, String> {
-    let image = &session.image;
+    let image = &session.program.image;
     let arch = image.arch();
     let mut out = String::new();
     out.push_str(&format!("file     {}\n", session.path));
@@ -123,15 +126,15 @@ fn info(session: &Session) -> Result<String, String> {
     out.push_str(&format!(
         "endian   {}\n",
         match arch.endian {
-            r2image::Endian::Little => "little",
-            r2image::Endian::Big => "big",
+            r2engine::program::Endian::Little => "little",
+            r2engine::program::Endian::Big => "big",
         }
     ));
     out.push_str(&format!("baddr    {:#010x}\n", image.base_address()));
     if let Some(entry) = image
         .entry_points()
         .iter()
-        .find(|entry| entry.kind == r2image::EntryKind::Main)
+        .find(|entry| entry.kind == r2engine::program::EntryKind::Main)
     {
         out.push_str(&format!("entry    {:#010x}", entry.vaddr));
     } else {
@@ -144,10 +147,11 @@ fn entries(session: &Session) -> Result<String, String> {
     let mut out = String::from("paddr      vaddr      type\n");
     out.push_str(&"-".repeat(32));
     for entry in session
+        .program
         .image
         .entry_points()
         .iter()
-        .filter(|entry| entry.kind == r2image::EntryKind::Main)
+        .filter(|entry| entry.kind == r2engine::program::EntryKind::Main)
     {
         let paddr = file_offset_of(session, entry.vaddr);
         out.push_str(&format!(
@@ -157,12 +161,12 @@ fn entries(session: &Session) -> Result<String, String> {
                 .unwrap_or_else(|| "----------".to_owned()),
             entry.vaddr,
             match entry.kind {
-                r2image::EntryKind::Main => "program",
-                r2image::EntryKind::Init => "init",
-                r2image::EntryKind::Fini => "fini",
-                r2image::EntryKind::Symbol => "symbol",
-                r2image::EntryKind::CMain => "main",
-                r2image::EntryKind::Declared => "declared",
+                r2engine::program::EntryKind::Main => "program",
+                r2engine::program::EntryKind::Init => "init",
+                r2engine::program::EntryKind::Fini => "fini",
+                r2engine::program::EntryKind::Symbol => "symbol",
+                r2engine::program::EntryKind::CMain => "main",
+                r2engine::program::EntryKind::Declared => "declared",
             }
         ));
     }
@@ -179,13 +183,14 @@ fn entries(session: &Session) -> Result<String, String> {
 fn discovered(session: &mut Session) -> Result<String, String> {
     // The machine first: the stub table is decoded when it loads, and reading
     // it before then is reading an empty map.
-    session.ensure_current()?;
-    let mut seeds = stated_seeds(&session.image);
+    session.program.ensure_current()?;
+    let mut seeds = stated_seeds(&session.program.image);
     // A linkage stub is a function the format declares: the loader's own
     // table says where each one begins, which is why they are stated rather
     // than inferred. These were decoded already and read only for naming.
     seeds.extend(
         session
+            .program
             .imports
             .keys()
             .map(|vaddr| (*vaddr, r2engine::discovery::Confidence::Stated)),
@@ -202,6 +207,7 @@ fn discovered(session: &mut Session) -> Result<String, String> {
         // Spelled as a listing spells it, which is how radare2 writes it and
         // what makes the two comparable. The engine keeps the plain name.
         let name = session
+            .program
             .names
             .of(one.address)
             .map(r2engine::names::Name::spelled)
@@ -252,6 +258,7 @@ fn write_hex(session: &mut Session, argument: &str) -> Result<String, String> {
 fn patch(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
     let addr = session.addr;
     session
+        .program
         .image
         .write(addr, bytes)
         .map_err(|error| format!("r2s: {error}"))?;
@@ -263,7 +270,7 @@ fn patches(session: &mut Session) -> Result<String, String> {
     let mut out = String::from("vaddr      byte\n");
     out.push_str(&"-".repeat(16));
     let mut count = 0usize;
-    for (vaddr, byte) in session.image.patches() {
+    for (vaddr, byte) in session.program.image.patches() {
         count += 1;
         out.push_str(&format!("\n{vaddr:#010x} {byte:02x}"));
     }
@@ -273,8 +280,8 @@ fn patches(session: &mut Session) -> Result<String, String> {
 
 /// Drop every patch, so the image reads as the file does.
 fn revert(session: &mut Session) -> Result<String, String> {
-    let count = session.image.patches().count();
-    session.image.revert();
+    let count = session.program.image.patches().count();
+    session.program.image.revert();
     Ok(format!("{count} patched bytes reverted"))
 }
 
@@ -283,11 +290,12 @@ fn revert(session: &mut Session) -> Result<String, String> {
 /// A cross-reference is a query over the lift, not a scan: a body that names
 /// an address names it in an operation, and every function is asked once.
 #[cfg(feature = "sleigh")]
-fn references(session: &mut Session) -> Result<Vec<r2ssa::DataRefFact>, String> {
-    session.ensure_current()?;
-    let mut seeds = stated_seeds(&session.image);
+fn references(session: &mut Session) -> Result<Vec<r2engine::DataRefFact>, String> {
+    session.program.ensure_current()?;
+    let mut seeds = stated_seeds(&session.program.image);
     seeds.extend(
         session
+            .program
             .imports
             .keys()
             .map(|vaddr| (*vaddr, r2engine::discovery::Confidence::Stated)),
@@ -347,11 +355,11 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
 #[cfg(feature = "sleigh")]
 fn strings(session: &mut Session) -> Result<String, String> {
     // The strings are read out of the image, so a patched image has other ones.
-    session.ensure_current()?;
+    session.program.ensure_current()?;
     let mut out = String::from("vaddr       size string\n");
     out.push_str(&"-".repeat(46));
     let mut count = 0usize;
-    for (vaddr, name) in session.names.iter() {
+    for (vaddr, name) in session.program.names.iter() {
         if name.namespace != r2engine::names::Namespace::String {
             continue;
         }
@@ -382,10 +390,10 @@ fn strings(_session: &mut Session) -> Result<String, String> {
 fn flags(session: &mut Session) -> Result<String, String> {
     // The linkage stubs are named once there is a decoder to read them with,
     // so asking for the machine first is what makes the listing complete.
-    session.ensure_current()?;
+    session.program.ensure_current()?;
     let mut out = String::from("vaddr       size name\n");
     out.push_str(&"-".repeat(46));
-    for (vaddr, name) in session.names.iter() {
+    for (vaddr, name) in session.program.names.iter() {
         out.push_str(&format!(
             "\n{:#010x} {:>6} {}",
             vaddr,
@@ -393,7 +401,7 @@ fn flags(session: &mut Session) -> Result<String, String> {
             name.spelled()
         ));
     }
-    out.push_str(&format!("\n\n{} flags", session.names.len()));
+    out.push_str(&format!("\n\n{} flags", session.program.names.len()));
     Ok(out)
 }
 
@@ -412,7 +420,7 @@ fn discovered(_session: &mut Session) -> Result<String, String> {
 /// Every one of these was already computed and only the program's own entry
 /// point was read.
 #[cfg(feature = "sleigh")]
-fn stated_seeds(image: &r2image::Image) -> Vec<(u64, r2engine::discovery::Confidence)> {
+fn stated_seeds(image: &r2engine::program::Image) -> Vec<(u64, r2engine::discovery::Confidence)> {
     use r2engine::discovery::Confidence;
     image
         .entry_points()
@@ -422,7 +430,9 @@ fn stated_seeds(image: &r2image::Image) -> Vec<(u64, r2engine::discovery::Confid
             image
                 .symbols()
                 .iter()
-                .filter(|symbol| symbol.defined && symbol.kind == r2image::SymbolKind::Function)
+                .filter(|symbol| {
+                    symbol.defined && symbol.kind == r2engine::program::SymbolKind::Function
+                })
                 .map(|symbol| symbol.vaddr),
         )
         .map(|vaddr| (vaddr, Confidence::Stated))
@@ -432,8 +442,9 @@ fn stated_seeds(image: &r2image::Image) -> Vec<(u64, r2engine::discovery::Confid
 fn sections(session: &Session) -> Result<String, String> {
     let mut out = String::from("nth paddr           size vaddr          vsize perm name\n");
     out.push_str(&"-".repeat(70));
-    for (index, section) in session.image.sections().iter().enumerate() {
+    for (index, section) in session.program.image.sections().iter().enumerate() {
         let permissions = session
+            .program
             .image
             .segment_at(section.vaddr)
             .map(|segment| segment.permissions)
@@ -458,6 +469,7 @@ fn symbols(session: &Session) -> Result<String, String> {
     let mut out = String::from("nth vaddr      size type name\n");
     out.push_str(&"-".repeat(60));
     for (index, symbol) in session
+        .program
         .image
         .symbols()
         .iter()
@@ -470,10 +482,10 @@ fn symbols(session: &Session) -> Result<String, String> {
             symbol.vaddr,
             symbol.size,
             match symbol.kind {
-                r2image::SymbolKind::Function => "FUNC",
-                r2image::SymbolKind::Data => "OBJ",
-                r2image::SymbolKind::Section => "SECT",
-                r2image::SymbolKind::Other => "NOTY",
+                r2engine::program::SymbolKind::Function => "FUNC",
+                r2engine::program::SymbolKind::Data => "OBJ",
+                r2engine::program::SymbolKind::Section => "SECT",
+                r2engine::program::SymbolKind::Other => "NOTY",
             },
             symbol.name
         ));
@@ -485,6 +497,7 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
     let count = parse_count(argument, 64)?;
     let addr = session.addr;
     let bytes = session
+        .program
         .image
         .read_upto(addr, count)
         .ok_or_else(|| format!("nothing mapped at {:#x}", addr))?;
@@ -538,7 +551,7 @@ fn relocations(session: &Session) -> Result<String, String> {
     let mut out = String::from("vaddr      name\n");
     out.push_str(&"-".repeat(40));
     out.push('\n');
-    for relocation in session.image.relocations() {
+    for relocation in session.program.image.relocations() {
         out.push_str(&format!(
             "{:#010x} {}\n",
             relocation.vaddr, relocation.symbol
@@ -645,22 +658,23 @@ fn obligations(_session: &mut Session, _argument: &str) -> Result<String, String
     Err("r2s: built without the sleigh feature".to_owned())
 }
 
-/// Open the binary the way the engine wants it, and ask one question.
+/// Ask one question of the open program.
 ///
-/// Every tier is asked for through here, so the machine, the conventions, the
-/// compiler specification and the image are assembled once.
+/// Every tier is asked for through here, so the machine, the conventions and
+/// the compiler specification are assembled once and shared.
 #[cfg(feature = "sleigh")]
 fn with_native<T>(
     session: &mut Session,
     addr: u64,
-    ask: impl FnOnce(&r2engine::native::NativeTarget<'_>, &OpenImage<'_>) -> Result<T, String>,
+    ask: impl FnOnce(&r2engine::native::NativeTarget<'_>, &OpenProgram) -> Result<T, String>,
 ) -> Result<T, String> {
-    session.ensure_assembled(addr)?;
+    session.program.ensure_assembled(addr)?;
     let session: &Session = session;
     let machine = session
+        .program
         .machine_at(addr)
         .ok_or("no Sleigh specification for this architecture")?;
-    let assembled = session.assembled().expect("assembled just above");
+    let assembled = session.program.assembled().expect("assembled just above");
     let convention = assembled
         .conventions
         .default_convention()
@@ -673,88 +687,7 @@ fn with_native<T>(
         compiler: &assembled.compiler,
         prototypes: &assembled.prototypes,
     };
-    let program = open_image(session, assembled.link.clone());
-    ask(&target, &program)
-}
-
-/// The open binary, as the engine asks about it.
-#[cfg(feature = "sleigh")]
-fn open_image(session: &Session, link: Option<r2il::Varnode>) -> OpenImage<'_> {
-    OpenImage {
-        image: &session.image,
-        link,
-        imports: &session.imports,
-        slots: &session.slots,
-        defined: &session.defined,
-        names: &session.names,
-    }
-}
-
-/// The open binary, as the engine asks about it.
-#[cfg(feature = "sleigh")]
-struct OpenImage<'a> {
-    image: &'a r2image::Image,
-    /// The register a call returns through, as the compiler specification
-    /// names it, resolved to the storage the lift spells.
-    link: Option<r2il::Varnode>,
-    imports: &'a std::collections::BTreeMap<u64, String>,
-    slots: &'a std::collections::BTreeMap<u64, String>,
-    defined: &'a std::collections::BTreeMap<u64, crate::session::Definition>,
-    names: &'a r2engine::names::NameDb,
-}
-
-#[cfg(feature = "sleigh")]
-impl r2ssa::body::Program for OpenImage<'_> {
-    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        self.image
-            .read_upto(vaddr, max)
-            .map(std::borrow::Cow::into_owned)
-    }
-
-    fn is_entry(&self, vaddr: u64) -> bool {
-        // A stub is a function of the program's as much as a body is: control
-        // that reaches one has left the function it came from.
-        self.imports.contains_key(&vaddr)
-            || self
-                .defined
-                .get(&vaddr)
-                .is_some_and(|definition| definition.function)
-    }
-
-    fn return_address_register(&self) -> Option<r2il::Varnode> {
-        self.link.clone()
-    }
-}
-
-#[cfg(feature = "sleigh")]
-impl r2engine::native::Program for OpenImage<'_> {
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        // The plain name, with no namespace on it: this keys the prototype
-        // table and spells a call, where a listing asks the same entry for
-        // `sym.imp.printf`. A slot the loader fills is not in the table --
-        // only a stub is an address the program transfers to -- so it is
-        // asked for separately.
-        self.names
-            .text_at(vaddr)
-            .map(str::to_owned)
-            .or_else(|| self.slots.get(&vaddr).cloned())
-    }
-
-    fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.image.sections().iter().any(|section| {
-            section.loaded
-                && !section.is_code
-                && vaddr >= section.vaddr
-                && vaddr - section.vaddr < section.vsize
-        })
-    }
-
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        self.imports
-            .get(&vaddr)
-            .or_else(|| self.slots.get(&vaddr))
-            .cloned()
-    }
+    ask(&target, &session.program)
 }
 
 #[cfg(feature = "sleigh")]
@@ -763,25 +696,19 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
 
     let count = parse_count(argument, 16)?;
     let start = session.addr;
-    session.ensure_current()?;
+    session.program.ensure_current()?;
     let session: &Session = session;
-    let program = open_image(session, None);
+
     let memory = Memory {
-        program: &program,
-        // The container states how a word in memory reads. ARM BE8 puts
-        // little-endian instructions in a big-endian program, so the decoder's
-        // own specification is the wrong thing to ask.
-        endian: match session.image.arch().endian {
-            r2image::Endian::Little => r2il::Endianness::Little,
-            r2image::Endian::Big => r2il::Endianness::Big,
-        },
+        program: &session.program,
+        endian: session.program.endian(),
     };
     let answer = listing(
-        session,
+        &session.program,
         &memory,
         Listing { start, count },
         r2engine::query::Work::InstructionLocal,
-        session.revision(),
+        session.program.revision(),
     );
     if answer.value.is_empty() {
         return Err(format!("nothing mapped at {:#x}", start));
@@ -804,7 +731,7 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     }
     let text = match &line.syntax {
         None => "invalid".to_owned(),
-        Some(syntax) => crate::names::spell(&session.names, &syntax.text()),
+        Some(syntax) => r2engine::program::naming::spell(&session.program.names, &syntax.text()),
     };
     format!(
         "            {:#010x}      {:<14} {}{}\n",
@@ -833,7 +760,7 @@ fn held(session: &Session, line: &r2engine::query::Line) -> String {
         else {
             continue;
         };
-        let named = match session.names.of(value) {
+        let named = match session.program.names.of(value) {
             Some(name) => format!(" {}", name.spelled()),
             None => String::new(),
         };
@@ -846,7 +773,7 @@ fn held(session: &Session, line: &r2engine::query::Line) -> String {
 }
 
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
-    let segment = session.image.segment_at(vaddr)?;
+    let segment = session.program.image.segment_at(vaddr)?;
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size).then(|| segment.file_offset + offset_in_segment)
 }

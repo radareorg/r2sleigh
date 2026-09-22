@@ -1,8 +1,6 @@
 //! r2s: a radare2-compatible shell over the r2sleigh engine.
 
 mod commands;
-#[cfg(feature = "sleigh")]
-mod names;
 mod session;
 
 use clap::Parser;
@@ -42,11 +40,11 @@ fn main() {
     }
 
     if !cli.quiet {
-        let arch = session.image.arch();
+        let arch = session.program.image.arch();
         println!(
             "r2s: {} {:?} {} {}-bit, entry {:#x}",
             cli.file,
-            session.image.format(),
+            session.program.image.format(),
             arch.name,
             arch.bits,
             session.addr
