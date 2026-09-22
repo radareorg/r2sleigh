@@ -20,6 +20,12 @@
 //! renders a body that is not the function's and nothing downstream would say
 //! so.
 //!
+//! **Only answers are held.** Re-deriving a refusal costs exactly what
+//! deriving it did, which is a real temptation to keep one. It is still wrong:
+//! a request can be cancelled or run out of its deadline, and a refusal for
+//! that reason is a fact about the request rather than about the program.
+//! Holding one would serve somebody else's timeout as this program's answer.
+//!
 //! **What bounds it.** One analysis, the most recent. A session sweeping a
 //! binary asks about each function exactly once, so every entry but the last
 //! would be dead weight, and an interactive session asking about one function
@@ -47,10 +53,7 @@ pub struct MemoStats {
 struct Held<T> {
     revision: Revision,
     entry: u64,
-    /// Kept whether it succeeded or refused, because a refusal is as much a
-    /// function of the program's state as an answer is, and re-deriving one
-    /// costs exactly what deriving it did.
-    analysis: Result<Arc<T>, NativeRefusal>,
+    analysis: Arc<T>,
 }
 
 /// The most recent analysis, and nothing older.
@@ -80,25 +83,25 @@ impl<T> Memo<T> {
         derive: impl FnOnce() -> Result<T, NativeRefusal>,
     ) -> Result<Arc<T>, NativeRefusal> {
         if let Some(held) = self.lookup(revision, entry) {
-            return held;
+            return Ok(held);
         }
-        let analysis = derive().map(Arc::new);
+        let analysis = Arc::new(derive()?);
         let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
         *held = Some(Held {
             revision,
             entry,
-            analysis: analysis.clone(),
+            analysis: Arc::clone(&analysis),
         });
-        analysis
+        Ok(analysis)
     }
 
-    fn lookup(&self, revision: Revision, entry: u64) -> Option<Result<Arc<T>, NativeRefusal>> {
+    fn lookup(&self, revision: Revision, entry: u64) -> Option<Arc<T>> {
         let held = self.held.lock().unwrap_or_else(|held| held.into_inner());
         let mut stats = self.stats.lock().unwrap_or_else(|stats| stats.into_inner());
         match held.as_ref() {
             Some(held) if held.entry == entry && held.revision == revision => {
                 stats.hits += 1;
-                Some(held.analysis.clone())
+                Some(Arc::clone(&held.analysis))
             }
             Some(held) if held.entry == entry => {
                 stats.replacements += 1;
@@ -199,12 +202,16 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_is_held_the_way_an_answer_is() {
+    fn a_refusal_is_not_held() {
+        // A request that was cancelled or ran out of its deadline refuses, and
+        // that is a fact about the request. Holding one would serve somebody
+        // else's timeout as this program's answer.
         let memo = memo();
         let refused = memo.analysed(at(0), 0x1000, || Err(NativeRefusal::NoStackPointer));
         assert_eq!(refused.unwrap_err(), NativeRefusal::NoStackPointer);
-        let again = memo.analysed(at(0), 0x1000, || panic!("the held refusal answers"));
-        assert_eq!(again.unwrap_err(), NativeRefusal::NoStackPointer);
-        assert_eq!(memo.stats().hits, 1);
+        assert_eq!(
+            *memo.analysed(at(0), 0x1000, || Ok(99)).expect("derived"),
+            99
+        );
     }
 }

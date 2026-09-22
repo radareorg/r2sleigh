@@ -45,6 +45,18 @@ pub trait Program: r2ssa::body::Program {
     /// against the library's declaration would be a claim it never made.
     fn import_at(&self, vaddr: u64) -> Option<String>;
 
+    /// The control for the request in hand: its cancellation, its deadline and
+    /// the work it has spent.
+    ///
+    /// Asked of the program because that is what a request is made of here.
+    /// Three sites used to mint one inline and drop the owner, so a native
+    /// request carried tokens nothing could ever set and no request could be
+    /// stopped once it started. The token and the meter are shared, so the
+    /// control returned here is the caller's own and not a copy of it.
+    fn control(&self) -> crate::EngineExecutionControl {
+        crate::EngineExecutionControl::default()
+    }
+
     /// Whether static data can live here: a section the program declares that
     /// is not code.
     ///
@@ -269,7 +281,7 @@ pub fn transfers(
         target,
         program,
         machine: machine(target).ok()?,
-        control: crate::EngineExecutionControl::default().ssa_execution_control(),
+        control: program.control().ssa_execution_control(),
     };
     let walked = native.walk(entry).ok()?;
     let mut transfers = crate::discovery::Transfers::from(&walked.body);
@@ -306,7 +318,7 @@ pub fn data_refs(
         target,
         program,
         machine,
-        control: crate::EngineExecutionControl::default().ssa_execution_control(),
+        control: program.control().ssa_execution_control(),
     };
     let Ok(walked) = native.walk(entry) else {
         return Vec::new();
@@ -335,20 +347,27 @@ fn render(
     entry: u64,
     tier: crate::RenderTier,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
+    let control = program.control();
     Ok(rendered(
         target,
         entry,
         tier,
         &analyse(target, program, entry)?,
+        &control,
     ))
 }
 
 /// Render one tier from an analysis already done.
+///
+/// The control is the current request's, not the one the analysis was made
+/// under: a held analysis outlives the request that produced it, and stopping
+/// this render has to stop this render.
 pub fn rendered(
     target: &NativeTarget<'_>,
     entry: u64,
     tier: crate::RenderTier,
     prepared: &Prepared,
+    control: &crate::EngineExecutionControl,
 ) -> EngineDecompileResponse {
     let Prepared {
         artifact,
@@ -382,7 +401,8 @@ pub fn rendered(
     .with_trusted_ssa(artifact)
     .with_callee_facts(facts)
     .with_declared_signatures(declared)
-    .rendering(tier);
+    .rendering(tier)
+    .with_execution_control(control.clone());
 
     EngineSession::new().decompile_function_from_input(input)
 }
@@ -396,7 +416,7 @@ fn analyse(
         target,
         program,
         machine: machine(target)?,
-        control: crate::EngineExecutionControl::default().ssa_execution_control(),
+        control: program.control().ssa_execution_control(),
     };
     let root = native.walk(entry)?;
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);

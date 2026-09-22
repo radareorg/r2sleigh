@@ -78,6 +78,10 @@ pub struct OpenProgram {
     assembled: Option<Assembled>,
     /// What this session has already worked out about one function.
     memo: Memo<Prepared>,
+    /// The control for the request in hand: its cancellation, its deadline and
+    /// the work it has spent. Held here so a caller can reach it while the
+    /// request runs, which is the whole point of having one.
+    control: crate::EngineExecutionControl,
     machine: Option<EmbeddedMachine>,
     /// The same instruction set with TMode set. ARM states the mode per
     /// function in the low bit of its symbol, so both decoders are needed at
@@ -107,6 +111,7 @@ impl OpenProgram {
             entries_revision: 0,
             assembled: None,
             memo: Memo::default(),
+            control: crate::EngineExecutionControl::default(),
             machine: None,
             thumb_machine: None,
         }
@@ -266,6 +271,20 @@ impl OpenProgram {
         })
     }
 
+    /// The control every request against this program runs under.
+    pub fn control(&self) -> &crate::EngineExecutionControl {
+        &self.control
+    }
+
+    /// Start a request, replacing the control the last one ran under.
+    ///
+    /// A deadline and a cancellation belong to one request, so carrying the
+    /// previous request's control into the next would let a stop meant for one
+    /// question refuse the next.
+    pub fn begin_request(&mut self, control: crate::EngineExecutionControl) {
+        self.control = control;
+    }
+
     /// What the memo has been asked and what it holds.
     pub fn memo_stats(&self) -> crate::query::MemoStats {
         self.memo.stats()
@@ -348,6 +367,12 @@ impl r2ssa::body::Program for OpenProgram {
 }
 
 impl crate::native::Program for OpenProgram {
+    fn control(&self) -> crate::EngineExecutionControl {
+        // The token and the meter are shared, so this is the request's own
+        // control rather than a copy that nothing could stop.
+        self.control.clone()
+    }
+
     fn name_at(&self, vaddr: u64) -> Option<String> {
         // The plain name, with no namespace on it: this keys the prototype
         // table and spells a call, where a listing asks the same entry for

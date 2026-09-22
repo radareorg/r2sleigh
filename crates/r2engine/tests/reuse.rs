@@ -25,7 +25,8 @@ fn every_tier_of_one_function_is_rendered_from_one_analysis() {
         r2engine::RenderTier::Values,
     ] {
         let prepared = program.analysed(&target, FUNCTION).expect("it prepares");
-        let rendered = r2engine::native::rendered(&target, FUNCTION, tier, &prepared);
+        let rendered =
+            r2engine::native::rendered(&target, FUNCTION, tier, &prepared, program.control());
         assert!(!rendered.output.clone().into_text().is_empty());
     }
 

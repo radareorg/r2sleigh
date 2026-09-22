@@ -594,10 +594,15 @@ fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> 
         // Beside the operations, what the renderer decided about each value.
         // The operations alone never answered the question that cost the most
         // time: which variable a value became, or why nothing spells it.
-        let values =
-            r2engine::native::rendered(target, addr, r2engine::RenderTier::Values, &prepared)
-                .output
-                .into_text();
+        let values = r2engine::native::rendered(
+            target,
+            addr,
+            r2engine::RenderTier::Values,
+            &prepared,
+            program.control(),
+        )
+        .output
+        .into_text();
         Ok(format!("{ssa}\n{values}"))
     })
 }
@@ -616,11 +621,15 @@ fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
         let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
-        Ok(
-            r2engine::native::rendered(target, addr, r2engine::RenderTier::Structured, &prepared)
-                .output
-                .into_text(),
+        Ok(r2engine::native::rendered(
+            target,
+            addr,
+            r2engine::RenderTier::Structured,
+            &prepared,
+            program.control(),
         )
+        .output
+        .into_text())
     })
 }
 
@@ -635,11 +644,15 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
         let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
-        Ok(
-            r2engine::native::rendered(target, addr, r2engine::RenderTier::C, &prepared)
-                .output
-                .into_text(),
+        Ok(r2engine::native::rendered(
+            target,
+            addr,
+            r2engine::RenderTier::C,
+            &prepared,
+            program.control(),
         )
+        .output
+        .into_text())
     })
 }
 
@@ -653,7 +666,13 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
     let addr = parse_number(session, argument)?;
     with_native(session, addr, |target, program| {
         let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
-        let response = r2engine::native::rendered(target, addr, r2engine::RenderTier::C, &prepared);
+        let response = r2engine::native::rendered(
+            target,
+            addr,
+            r2engine::RenderTier::C,
+            &prepared,
+            program.control(),
+        );
         response.obligation_ledger.as_ref().map_or_else(
             || Ok("no obligation ledger: the function did not reach native rendering\n".to_owned()),
             |ledger| Ok(format!("{}\n", ledger.report())),
