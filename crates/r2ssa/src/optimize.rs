@@ -1013,7 +1013,9 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         };
         for op in &mut block.ops {
             loop {
-                let Some(new_op) = fold_through_definition(op, &defs).or_else(|| simplify_op(op))
+                let Some(new_op) = substitute_constant_temporaries(op, &defs)
+                    .or_else(|| fold_through_definition(op, &defs))
+                    .or_else(|| simplify_op(op))
                 else {
                     break;
                 };
@@ -1732,6 +1734,77 @@ fn constant_through_definitions(
     eval_const_op(op, &consts)
 }
 
+/// A mask over a boolean keeps it or kills it, and nothing in between.
+fn fold_mask_over_boolean(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+    let SSAOp::IntAnd { dst, a, b } = op else {
+        return None;
+    };
+    let (mask, value) = match (const_value(a), const_value(b)) {
+        (Some(mask), _) => (mask, b),
+        (_, Some(mask)) => (mask, a),
+        _ => return None,
+    };
+    if !is_boolean_valued(value, defs) {
+        return None;
+    }
+    let src = if mask & 1 == 1 {
+        value.clone()
+    } else {
+        SSAVar::constant(0, dst.size)
+    };
+    Some(SSAOp::Copy {
+        dst: dst.clone(),
+        src,
+    })
+}
+
+/// Whether a value is known to be `0` or `1` rather than merely narrow.
+fn is_boolean_valued(var: &SSAVar, defs: &HashMap<VarKey, SSAOp>) -> bool {
+    if let Some(value) = const_value(var) {
+        return value <= 1;
+    }
+    matches!(
+        defs.get(&VarKey::from_var(var)),
+        Some(
+            SSAOp::IntEqual { .. }
+                | SSAOp::IntNotEqual { .. }
+                | SSAOp::IntLess { .. }
+                | SSAOp::IntSLess { .. }
+                | SSAOp::IntLessEqual { .. }
+                | SSAOp::IntSLessEqual { .. }
+                | SSAOp::IntCarry { .. }
+                | SSAOp::IntSCarry { .. }
+                | SSAOp::IntSBorrow { .. }
+                | SSAOp::BoolNot { .. }
+                | SSAOp::BoolAnd { .. }
+                | SSAOp::BoolOr { .. }
+                | SSAOp::BoolXor { .. }
+        )
+    )
+}
+
+/// Read every temporary operand as the constant its definitions make it.
+fn substitute_constant_temporaries(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+    // A phi arm is an edge, not an operand.
+    if matches!(op, SSAOp::Phi { .. }) {
+        return None;
+    }
+    let substituted = std::cell::Cell::new(false);
+    let mapped = map_sources_in_op(op, &|var: &SSAVar| {
+        if !var.is_temp() || const_value(var).is_some() {
+            return var.clone();
+        }
+        match constant_through_definitions(var, defs, 0) {
+            Some(value) => {
+                substituted.set(true);
+                SSAVar::constant(value, var.size)
+            }
+            None => var.clone(),
+        }
+    });
+    substituted.get().then_some(mapped)
+}
+
 fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
     // A selection on a condition its definitions decide is the arm decided.
     if let SSAOp::Select(select) = op {
@@ -1743,6 +1816,9 @@ fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<
             dst: select.dst.clone(),
             src: chosen.clone(),
         });
+    }
+    if let Some(folded) = fold_mask_over_boolean(op, defs) {
+        return Some(folded);
     }
     let SSAOp::Subpiece { dst, src, offset } = op else {
         return None;

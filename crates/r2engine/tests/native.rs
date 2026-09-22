@@ -532,8 +532,10 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
         response.render_refusal,
         response.output
     );
+    // Spelled by name now that the target folds to its constant, so the
+    // address is in the name rather than beside it.
     assert!(
-        response.output.text().contains("0xffff0fc0"),
+        response.output.text().contains("fcn_ffff0fc0();"),
         "the helper call is missing:\n{}",
         response.output
     );

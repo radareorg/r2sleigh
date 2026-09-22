@@ -47,39 +47,39 @@ fn and_of_one_value_is_that_value() {
 
 #[test]
 fn a_constant_chain_across_instructions_is_one_literal() {
-    // movz/movk: each step reads the previous one once.
+    // movz/movk: each step reads the previous one once, in the register the
+    // instruction names. A chain through lifter temporaries is folded before
+    // the rewriter sees it, which is a different mechanism and another test.
     let artifact = artifact(vec![
         R2ILOp::IntAnd {
-            dst: tmp(0x100, 8),
+            dst: reg(RDI, 8),
             a: konst(0x2325, 8),
             b: konst(0xffff_ffff_0000_ffff, 8),
         },
         R2ILOp::IntOr {
-            dst: tmp(0x200, 8),
-            a: tmp(0x100, 8),
+            dst: reg(RDI, 8),
+            a: reg(RDI, 8),
             b: konst(0x8422_0000, 8),
         },
         R2ILOp::IntAnd {
-            dst: tmp(0x300, 8),
-            a: tmp(0x200, 8),
+            dst: reg(RDI, 8),
+            a: reg(RDI, 8),
             b: konst(0xffff_0000_ffff_ffff, 8),
         },
         R2ILOp::IntOr {
-            dst: tmp(0x400, 8),
-            a: tmp(0x300, 8),
+            dst: reg(RDI, 8),
+            a: reg(RDI, 8),
             b: konst(0x9ce4_0000_0000, 8),
         },
         R2ILOp::Copy {
             dst: reg(RAX, 8),
-            src: tmp(0x400, 8),
+            src: reg(RDI, 8),
         },
         ret(),
     ]);
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
-    let last = roots
-        .value(value_named(&artifact, "tmp:400_1"))
-        .expect("last");
+    let last = roots.value(value_named(&artifact, "RDI_4")).expect("last");
     let TermKind::Literal(bits) = roots.arena().term(last.canonical).kind else {
         panic!(
             "expected a literal, got {:?}",

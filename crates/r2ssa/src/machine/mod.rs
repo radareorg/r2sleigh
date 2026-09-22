@@ -2728,13 +2728,18 @@ impl MachineFunction {
                         .graph()
                         .value(binding.value)
                         .ok_or(MachineBuildError::MissingGraphValue(binding.value))?;
-                    if binding_for_value(value)? != *binding
-                        || value.var.constant_bits().is_some()
-                        || (matches!(expr.ty, MachineType::Bool { .. })
-                            && !value_has_boolean_producer(artifact.graph(), binding.value))
-                        || (matches!(expr.ty, MachineType::Address { .. })
-                            && !address_nodes.contains(&id))
-                    {
+                    let rebound = binding_for_value(value)? != *binding;
+                    let folded = value.var.constant_bits().is_some();
+                    let unproven_bool = matches!(expr.ty, MachineType::Bool { .. })
+                        && !value_has_boolean_producer(artifact.graph(), binding.value);
+                    let unaddressed = matches!(expr.ty, MachineType::Address { .. })
+                        && !address_nodes.contains(&id);
+                    if rebound || folded || unproven_bool || unaddressed {
+                        r2il::refusal_evidence!(
+                            "machine-source-invalid",
+                            "{id:?} {:?} rebound={rebound} folded={folded} unproven_bool={unproven_bool} unaddressed={unaddressed}",
+                            binding.value
+                        );
                         return Err(MachineBuildError::InvalidExpressionType { expr: id });
                     }
                 }
@@ -2747,12 +2752,19 @@ impl MachineFunction {
                         .var
                         .constant_bits()
                         .ok_or(MachineBuildError::InvalidExpressionType { expr: id })?;
-                    if binding_for_value(graph_value)? != *binding
-                        || *value != bit_vector(binding.value, binding.width_bits, source_bits)?
-                        || matches!(expr.ty, MachineType::Bool { .. })
-                        || (matches!(expr.ty, MachineType::Address { .. })
-                            && !address_nodes.contains(&id))
-                    {
+                    let rebound = binding_for_value(graph_value)? != *binding;
+                    let restated =
+                        *value != bit_vector(binding.value, binding.width_bits, source_bits)?;
+                    // Folding a comparison leaves a boolean constant, and 0 and 1 are the only ones.
+                    let boolean = matches!(expr.ty, MachineType::Bool { .. }) && value.bits() > 1;
+                    let unaddressed = matches!(expr.ty, MachineType::Address { .. })
+                        && !address_nodes.contains(&id);
+                    if rebound || restated || boolean || unaddressed {
+                        r2il::refusal_evidence!(
+                            "machine-constant-invalid",
+                            "{id:?} {:?} rebound={rebound} restated={restated} boolean={boolean} unaddressed={unaddressed}",
+                            binding.value
+                        );
                         return Err(MachineBuildError::InvalidExpressionType { expr: id });
                     }
                 }

@@ -1435,9 +1435,10 @@ mod tests {
     fn population_count_consumes_the_upstream_machine_projection() {
         let arch = make_test_arch_x86_64();
         let mut entry = R2ILBlock::new(0x1000, 4);
+        // A register source, so the count is the machine's rather than folded away.
         entry.push(R2ILOp::PopCount {
             dst: Varnode::unique(0x100, 1),
-            src: Varnode::constant(0xf0f0, 8),
+            src: Varnode::register(0x38, 8),
         });
         entry.push(R2ILOp::IntZExt {
             dst: Varnode::unique(0x108, 8),
@@ -1765,10 +1766,14 @@ mod tests {
             // now foldable -- the callsite certificate is a reader even though
             // the graph records none -- so the staging writes reach this and
             // the loop has to skip them exactly as the folder does.
-            if block.ops[prefix_idx]
-                .dst()
-                .is_some_and(|dst| ctx.should_inline(dst))
-            {
+            // A definition the plan does not bind has no statement of its own.
+            if block.ops[prefix_idx].dst().is_some_and(|dst| {
+                !matches!(
+                    ctx.prepared_value_id_for_var(dst)
+                        .and_then(|value| names.disposition_for_value(value)),
+                    Some(crate::binding_plan::ValueDisposition::Bound { .. })
+                )
+            }) {
                 continue;
             }
             enter_exact_test_site(&ctx, block.addr, prefix_idx);

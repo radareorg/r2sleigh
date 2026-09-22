@@ -117,6 +117,23 @@ fn a_function_renders_as_c_with_its_proof() {
     assert!(run.out.contains("0 refused"), "{}", run.out);
 }
 
+/// One function of that fixture whose tail shifts by an immediate.
+const MURMUR3_32: &str = "0x401680";
+
+#[test]
+fn a_shift_by_an_immediate_does_not_read_the_flags_it_sets() {
+    // `shr rax, 2` keeps its flags when the count is zero, and Sleigh lifts that
+    // guard; with the count decided the guard is dead and must not read ZF.
+    let run = r2s(&format!("s {MURMUR3_32}; pdd"));
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.contains("murmur3_32("), "{}", run.out);
+    assert!(!run.out.contains("r2sleigh refused"), "{}", run.out);
+    assert!(run.out.contains("if (RAX_2 != 0)"), "{}", run.out);
+    for flag in ["ZF", "CF_0", "OF_0", "PF_0", "SF_0"] {
+        assert!(!run.out.contains(flag), "{flag} is read by {}", run.out);
+    }
+}
+
 #[test]
 fn the_ledger_says_what_the_function_owes_and_whether_it_paid() {
     // The counts behind `pdd`'s proof line, which used to reach only a file

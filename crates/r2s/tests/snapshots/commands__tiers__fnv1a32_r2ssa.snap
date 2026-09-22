@@ -84,7 +84,7 @@ Block 0x401348:
   tmp:lane:401348:16:5_1 = COPY tmp:lane:401348:e:3_1
   tmp:4c600_2 = SEXT(tmp:lane:401348:e:3_1)
   tmp:4c680_2 = COPY const:1000193_0
-  tmp:4c780_2 = tmp:4c600_2 * tmp:4c680_2
+  tmp:4c780_2 = tmp:4c600_2 * const:1000193_0
   tmp:lane:401348:19:6_1 = SUBPIECE(tmp:4c780_2, 0)
   tmp:4c900_2 = SUBPIECE(tmp:4c780_2, 4)
   tmp:2d180_2 = SEXT(tmp:lane:401348:19:6_1)
@@ -198,7 +198,7 @@ Values:
   tmp:4c600_2 inline TermId(147)
   tmp:4c600_1 elided UnobservedMerge
   tmp:4c680_0 elided UnobservedValue
-  tmp:4c680_2 inline TermId(103)
+  tmp:4c680_2 elided UnobservedValue
   tmp:4c680_1 elided UnobservedMerge
   tmp:4c780_0 elided UnobservedValue
   tmp:4c780_2 inline TermId(148)
