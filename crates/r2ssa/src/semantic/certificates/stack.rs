@@ -1003,6 +1003,7 @@ pub(crate) fn accessed_object_storage(
         .any(|access| access.object == object && objects.address_is_indexed(access.address))
     {
         return accessed_object_extent(values, objects, structured, object)
+            .or_else(|| placed_object_extent(objects, structured, object))
             .map(|extent| (extent, true));
     }
     let mut width = None;
@@ -1049,6 +1050,7 @@ pub(crate) fn accessed_object_storage(
                     access.width
                 );
                 return accessed_object_extent(values, objects, structured, object)
+                    .or_else(|| placed_object_extent(objects, structured, object))
                     .map(|extent| (extent, true));
             }
         }
@@ -1074,6 +1076,30 @@ pub(crate) fn accessed_object_storage(
         );
     }
     width.map(|width| (width, false))
+}
+
+/// How far the accesses whose offset the object model knows actually reach.
+///
+/// An access at a computed index whose bound is unproven cannot say how far the
+/// object goes; it cannot shorten it either. The accesses that land at a known
+/// offset prove those bytes belong to one object, which is exactly what the
+/// byte array this extent names claims, and all it claims. Without this an
+/// object written once as sixteen bytes and twice as eight -- one `stp q0, q0`
+/// and its halves -- had no width at all, so nothing could name it.
+fn placed_object_extent(
+    objects: &ObjectModel,
+    structured: &StructuredDataflowFacts,
+    object: ObjectId,
+) -> Option<u32> {
+    let mut extent = 0u32;
+    for access in structured.memory_accesses.values() {
+        if access.object != object || objects.address_is_indexed(access.address) {
+            continue;
+        }
+        let offset = u32::try_from(access.object_offset?).ok()?;
+        extent = extent.max(offset.checked_add(access.width)?);
+    }
+    (extent > 0).then_some(extent)
 }
 
 /// The extent an object's accesses reach, when every one lands at a known
