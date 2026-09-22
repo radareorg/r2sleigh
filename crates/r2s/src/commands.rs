@@ -673,9 +673,22 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
             &prepared,
             program.control(),
         );
+        // What the analysis could not read is part of what the rendering owes:
+        // a call to a callee nothing proved renders from the call site alone.
+        let unread = match prepared.unread() {
+            [] => String::new(),
+            missing => {
+                missing
+                    .iter()
+                    .fold(String::from("\ncallees not read\n"), |mut out, callee| {
+                        out.push_str(&format!("  {callee}\n"));
+                        out
+                    })
+            }
+        };
         response.obligation_ledger.as_ref().map_or_else(
             || Ok("no obligation ledger: the function did not reach native rendering\n".to_owned()),
-            |ledger| Ok(format!("{}\n", ledger.report())),
+            |ledger| Ok(format!("{}\n{unread}", ledger.report())),
         )
     })
 }

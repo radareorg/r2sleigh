@@ -239,11 +239,52 @@ pub struct Prepared {
     facts: Vec<crate::CalleeFacts>,
     declared: Vec<r2types::SourceOwnedCalleeSignature>,
     ptr_bits: u32,
+    unread: Vec<Unread>,
 }
 
 impl Prepared {
     pub fn artifact(&self) -> &std::sync::Arc<TrustedSsaArtifact> {
         &self.artifact
+    }
+
+    /// The callees this analysis could not read, and how far each got.
+    ///
+    /// A call to one of these renders from whatever the call site itself
+    /// shows, which for a result register is nothing. Until now they were
+    /// skipped in silence, so a degraded answer and a clean one looked the
+    /// same from outside.
+    pub fn unread(&self) -> &[Unread] {
+        &self.unread
+    }
+}
+
+/// A callee whose contribution to this analysis is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unread {
+    pub address: u64,
+    pub reason: Unreadable,
+}
+
+/// How far reading a callee got before it stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unreadable {
+    /// The body could not be walked, so nothing about its boundary is known.
+    NotWalked,
+    /// The body was walked and could not be prepared.
+    NotPrepared,
+    /// It was prepared and proved nothing about its boundary that a caller
+    /// could use.
+    NothingProved,
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self.reason {
+            Unreadable::NotWalked => "its body could not be walked",
+            Unreadable::NotPrepared => "its body could not be prepared",
+            Unreadable::NothingProved => "it proved nothing about its boundary",
+        };
+        write!(f, "{:#x}: {reason}", self.address)
     }
 }
 
@@ -375,6 +416,7 @@ pub fn rendered(
         facts,
         declared,
         ptr_bits,
+        unread: _,
     } = prepared;
     let (artifact, facts, declared, ptr_bits) = (
         std::sync::Arc::clone(artifact),
@@ -477,8 +519,13 @@ fn analyse(
         .copied()
         .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
         .collect();
+    let mut unread = Vec::new();
     for address in &bodies {
         let Ok(walked) = native.walk(*address) else {
+            unread.push(Unread {
+                address: *address,
+                reason: Unreadable::NotWalked,
+            });
             continue;
         };
         // Against what the binary declares about it, exactly as the root is
@@ -489,6 +536,10 @@ fn analyse(
         let Ok(artifact) =
             native.prepare_restated(&walked, &Callees::default(), Vec::new(), declared, &[])
         else {
+            unread.push(Unread {
+                address: *address,
+                reason: Unreadable::NotPrepared,
+            });
             continue;
         };
         // The interface is what the callee's body proves about its boundary,
@@ -502,6 +553,10 @@ fn analyse(
             callees.interfaces.insert(*address, interface.clone());
         }
         let Some(derived) = CalleeFacts::derive(&artifact, ptr_bits) else {
+            unread.push(Unread {
+                address: *address,
+                reason: Unreadable::NothingProved,
+            });
             continue;
         };
         callees.record(*address, &derived);
@@ -578,6 +633,7 @@ fn analyse(
         facts,
         declared,
         ptr_bits,
+        unread,
     })
 }
 
