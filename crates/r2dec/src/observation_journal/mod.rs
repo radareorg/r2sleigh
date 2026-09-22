@@ -2641,17 +2641,16 @@ impl LegacyObservationJournal {
     }
 
     /// Whether a certificate answers for every occurrence of an undefined value.
-    fn every_occurrence_certified(&self, value: ValueId) -> bool {
+    fn every_occurrence_certified(
+        &self,
+        silence: &crate::binding_plan::CertifiedSilence,
+        value: ValueId,
+    ) -> bool {
         let graph = self.source.graph();
-        if graph.def_inst(value).is_some() {
-            return false;
-        }
         let uses = graph.use_sites(value);
-        if uses.is_empty() {
-            return false;
-        }
-        let silence = crate::binding_plan::CertifiedSilence::for_function(&self.source);
-        uses.iter().all(|site| silence.contains(site.inst))
+        graph.def_inst(value).is_none()
+            && !uses.is_empty()
+            && uses.iter().all(|site| silence.contains(site.inst))
     }
 
     /// Name every cell and reader of an unaccounted value, under the trace
@@ -2832,13 +2831,22 @@ impl LegacyObservationJournal {
         // table's scale and the stack-pointer restore in each arm; both are
         // certified, and demanding a rendered occurrence of it asked for a
         // statement that would have been wrong to write.
+        let silence = std::cell::OnceCell::new();
         let mut unaccounted = self
             .values
             .iter()
             .enumerate()
             .filter(|(_, observation)| observation.is_none())
             .map(|(index, _)| (index, ValueId(index as u32)))
-            .filter(|(_, value)| !self.every_occurrence_certified(*value));
+            // Built once, and only if some value is unaccounted at all.
+            .filter(|(_, value)| {
+                !self.every_occurrence_certified(
+                    silence.get_or_init(|| {
+                        crate::binding_plan::CertifiedSilence::for_function(&self.source)
+                    }),
+                    *value,
+                )
+            });
         if let Some((index, value)) = unaccounted.next() {
             return Some(self.unaccounted_value(index, value));
         }

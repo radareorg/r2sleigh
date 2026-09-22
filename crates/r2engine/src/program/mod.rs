@@ -85,9 +85,10 @@ pub struct OpenProgram {
     /// Which bytes the derivation in progress has read.
     ///
     /// An answer that recorded this can be kept across a write that missed
-    /// every one of them, which is what a patch to another function is. Empty
-    /// except while a derivation runs.
-    read: std::cell::RefCell<Vec<std::ops::Range<u64>>>,
+    /// every one of them, which is what a patch to another function is.
+    /// `None` outside a derivation, so a read nothing will keep -- every line
+    /// of every listing -- is not logged at all.
+    read: std::cell::RefCell<Option<Vec<std::ops::Range<u64>>>>,
     /// The control for the request in hand: its cancellation, its deadline and
     /// the work it has spent. Held here so a caller can reach it while the
     /// request runs, which is the whole point of having one.
@@ -121,7 +122,7 @@ impl OpenProgram {
             entries_revision: 0,
             assembled: None,
             memo: Memo::default(),
-            read: std::cell::RefCell::new(Vec::new()),
+            read: std::cell::RefCell::new(None),
             control: crate::EngineExecutionControl::default(),
             machine: None,
             thumb_machine: None,
@@ -277,14 +278,15 @@ impl OpenProgram {
         target: &NativeTarget<'_>,
         entry: u64,
     ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
-        self.read.borrow_mut().clear();
+        *self.read.borrow_mut() = Some(Vec::new());
         let analysis = self.memo.analysed_since(
             self.revision(),
             entry,
             &|since, range| self.image.written_since(since, range),
             || crate::native::analysed(target, self, entry),
         );
-        self.memo.record_reads(self.read.borrow_mut().drain(..));
+        self.memo
+            .record_reads(self.read.borrow_mut().take().unwrap_or_default());
         analysis
     }
 
@@ -403,9 +405,9 @@ impl r2ssa::body::Program for OpenProgram {
         // Recorded whole, including what was asked for beyond what is mapped:
         // a write that lands in the unmapped tail cannot happen, and one that
         // lands in the rest is a write this answer read.
-        self.read
-            .borrow_mut()
-            .push(vaddr..vaddr.saturating_add(read.len() as u64));
+        if let Some(log) = self.read.borrow_mut().as_mut() {
+            log.push(vaddr..vaddr.saturating_add(read.len() as u64));
+        }
         Some(read)
     }
 
