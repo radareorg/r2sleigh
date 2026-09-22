@@ -384,7 +384,6 @@ impl<'a> Walk<'a> {
                         self.continues(Some(next), &mut successors)
                     }
                     Some(targets) => {
-                        // Several cases reach one arm, and that is one edge.
                         for target in targets.iter().copied().collect::<BTreeSet<_>>() {
                             self.transfer(target, &mut successors);
                         }
@@ -515,9 +514,14 @@ fn successors_of(
         BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
             vec![(AdvisorySuccessorKind::Fallthrough, end)]
         }
+        // Several cases reach one arm, and that is one edge; which cases
+        // those were is the dispatch's own fact, carried by its table.
         BlockTerminator::Switch { .. } | BlockTerminator::IndirectBranch => dispatched
             .iter()
-            .map(|target| (AdvisorySuccessorKind::Direct, *target))
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|target| (AdvisorySuccessorKind::Direct, target))
             .collect(),
         BlockTerminator::Return | BlockTerminator::None => Vec::new(),
     }
