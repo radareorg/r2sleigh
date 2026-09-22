@@ -54,6 +54,9 @@ struct Held<T> {
     revision: Revision,
     entry: u64,
     analysis: Arc<T>,
+    /// Which bytes deriving it read. A write that missed every one of them --
+    /// a patch to another function -- leaves this answer about this program.
+    read: Vec<std::ops::Range<u64>>,
 }
 
 /// The most recent analysis, and nothing older.
@@ -75,14 +78,29 @@ impl<T> Default for Memo<T> {
 }
 
 impl<T> Memo<T> {
-    /// The analysis of one function at one revision, derived if it is not held.
-    pub fn analysed(
+    /// Say which bytes deriving the held answer read.
+    pub fn record_reads(&self, read: impl IntoIterator<Item = std::ops::Range<u64>>) {
+        let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(held) = held.as_mut() {
+            held.read = coalesced(read);
+        }
+    }
+
+    /// The held answer, where the program has not moved under it.
+    ///
+    /// `written_since` says whether anything in a range has been written since
+    /// a revision. A write that missed every byte the derivation read leaves
+    /// the answer standing, which is what a patch to another function is; the
+    /// name and entry tables are compared whole, because a walk consults them
+    /// about addresses it never read.
+    pub fn analysed_since(
         &self,
         revision: Revision,
         entry: u64,
+        written_since: &dyn Fn(u64, &std::ops::Range<u64>) -> bool,
         derive: impl FnOnce() -> Result<T, NativeRefusal>,
     ) -> Result<Arc<T>, NativeRefusal> {
-        if let Some(held) = self.lookup(revision, entry) {
+        if let Some(held) = self.lookup_against(revision, entry, written_since) {
             return Ok(held);
         }
         let analysis = Arc::new(derive()?);
@@ -91,15 +109,30 @@ impl<T> Memo<T> {
             revision,
             entry,
             analysis: Arc::clone(&analysis),
+            read: Vec::new(),
         });
         Ok(analysis)
     }
 
-    fn lookup(&self, revision: Revision, entry: u64) -> Option<Arc<T>> {
+    fn lookup_against(
+        &self,
+        revision: Revision,
+        entry: u64,
+        written_since: &dyn Fn(u64, &std::ops::Range<u64>) -> bool,
+    ) -> Option<Arc<T>> {
         let held = self.held.lock().unwrap_or_else(|held| held.into_inner());
         let mut stats = self.stats.lock().unwrap_or_else(|stats| stats.into_inner());
         match held.as_ref() {
-            Some(held) if held.entry == entry && held.revision == revision => {
+            Some(held)
+                if held.entry == entry
+                    && held.revision.program == revision.program
+                    && held.revision.names == revision.names
+                    && held.revision.entries == revision.entries
+                    && !held
+                        .read
+                        .iter()
+                        .any(|range| written_since(held.revision.bytes, range)) =>
+            {
                 stats.hits += 1;
                 Some(Arc::clone(&held.analysis))
             }
@@ -128,6 +161,24 @@ impl<T> std::fmt::Debug for Memo<T> {
     }
 }
 
+/// One range per run of addresses, so a walk's thousands of reads become the
+/// handful of extents it actually covered.
+fn coalesced(read: impl IntoIterator<Item = std::ops::Range<u64>>) -> Vec<std::ops::Range<u64>> {
+    let mut ranges: Vec<std::ops::Range<u64>> = read
+        .into_iter()
+        .filter(|range| range.start < range.end)
+        .collect();
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,15 +196,29 @@ mod tests {
         Memo::default()
     }
 
+    /// Nothing has been written at all.
+    fn untouched(_since: u64, _range: &std::ops::Range<u64>) -> bool {
+        false
+    }
+
+    /// Everything the answer read has been written over.
+    fn overwritten(_since: u64, _range: &std::ops::Range<u64>) -> bool {
+        true
+    }
+
+    fn derived(memo: &Memo<u32>, revision: Revision, value: u32) -> Arc<u32> {
+        memo.analysed_since(revision, 0x1000, &untouched, || Ok(value))
+            .expect("derived")
+    }
+
     #[test]
     fn one_function_at_one_revision_is_derived_once() {
         let memo = memo();
-        assert_eq!(
-            *memo.analysed(at(0), 0x1000, || Ok(99)).expect("derived"),
-            99
-        );
+        assert_eq!(*derived(&memo, at(0), 99), 99);
         let again = memo
-            .analysed(at(0), 0x1000, || panic!("the held analysis answers"))
+            .analysed_since(at(0), 0x1000, &untouched, || {
+                panic!("the held analysis answers")
+            })
             .expect("held");
         assert_eq!(*again, 99);
         let stats = memo.stats();
@@ -161,17 +226,53 @@ mod tests {
     }
 
     #[test]
-    fn the_same_function_at_a_later_revision_is_a_replacement_not_a_hit() {
+    fn a_write_over_what_it_read_is_a_replacement_not_a_hit() {
         let memo = memo();
-        memo.analysed(at(0), 0x1000, || Ok(99)).expect("derived");
-        assert_eq!(
-            *memo.analysed(at(1), 0x1000, || Ok(100)).expect("derived"),
-            100
-        );
-        let stats = memo.stats();
-        assert_eq!((stats.hits, stats.replacements), (0, 1));
-        // And the replacement is the one entry, not a second beside it.
-        assert!(memo.lookup(at(0), 0x1000).is_none());
+        derived(&memo, at(0), 99);
+        memo.record_reads(std::iter::once(0x1000..0x1010));
+        let value = memo
+            .analysed_since(at(1), 0x1000, &overwritten, || Ok(100))
+            .expect("derived");
+        assert_eq!(*value, 100);
+        assert_eq!((memo.stats().hits, memo.stats().replacements), (0, 1));
+    }
+
+    #[test]
+    fn a_write_that_missed_everything_it_read_leaves_it_standing() {
+        // A patch to another function. The bytes moved and this answer is
+        // still about this program, which is the whole point of recording
+        // which bytes it read.
+        let memo = memo();
+        derived(&memo, at(0), 99);
+        memo.record_reads(std::iter::once(0x1000..0x1010));
+        let held = memo
+            .analysed_since(at(1), 0x1000, &untouched, || {
+                panic!("the held analysis answers")
+            })
+            .expect("held");
+        assert_eq!(*held, 99);
+        assert_eq!(memo.stats().hits, 1);
+    }
+
+    #[test]
+    fn a_renaming_or_a_moved_entry_is_a_replacement() {
+        // A walk asks what the program defines at addresses it never reads, so
+        // those tables are compared whole rather than by what was read.
+        for moved in [
+            Revision { names: 1, ..at(1) },
+            Revision {
+                entries: 1,
+                ..at(1)
+            },
+        ] {
+            let memo = memo();
+            derived(&memo, at(0), 99);
+            memo.record_reads(std::iter::once(0x1000..0x1010));
+            let value = memo
+                .analysed_since(moved, 0x1000, &untouched, || Ok(100))
+                .expect("derived");
+            assert_eq!(*value, 100);
+        }
     }
 
     #[test]
@@ -179,24 +280,20 @@ mod tests {
         // Two opens of one file are two programs: one may be patched and the
         // other not, and nothing in the counters alone would tell them apart.
         let memo = memo();
-        memo.analysed(at(0), 0x1000, || Ok(99)).expect("derived");
+        derived(&memo, at(0), 99);
         let elsewhere = Revision {
             program: 8,
             ..at(0)
         };
-        assert_eq!(
-            *memo
-                .analysed(elsewhere, 0x1000, || Ok(100))
-                .expect("derived"),
-            100
-        );
+        assert_eq!(*derived(&memo, elsewhere, 100), 100);
     }
 
     #[test]
     fn another_function_is_a_plain_miss() {
         let memo = memo();
-        memo.analysed(at(0), 0x1000, || Ok(99)).expect("derived");
-        memo.analysed(at(0), 0x2000, || Ok(100)).expect("derived");
+        derived(&memo, at(0), 99);
+        memo.analysed_since(at(0), 0x2000, &untouched, || Ok(100))
+            .expect("derived");
         let stats = memo.stats();
         assert_eq!((stats.misses, stats.replacements), (2, 0));
     }
@@ -207,11 +304,23 @@ mod tests {
         // that is a fact about the request. Holding one would serve somebody
         // else's timeout as this program's answer.
         let memo = memo();
-        let refused = memo.analysed(at(0), 0x1000, || Err(NativeRefusal::NoStackPointer));
+        let refused = memo.analysed_since(at(0), 0x1000, &untouched, || {
+            Err(NativeRefusal::NoStackPointer)
+        });
         assert_eq!(refused.unwrap_err(), NativeRefusal::NoStackPointer);
+        assert_eq!(*derived(&memo, at(0), 99), 99);
+    }
+
+    #[test]
+    fn a_read_is_recorded_as_the_extents_it_covered() {
         assert_eq!(
-            *memo.analysed(at(0), 0x1000, || Ok(99)).expect("derived"),
-            99
+            coalesced([
+                0x1000..0x1004,
+                0x1004..0x1008,
+                0x2000..0x2004,
+                0x1002..0x1003
+            ]),
+            vec![0x1000..0x1008, 0x2000..0x2004]
         );
     }
 }

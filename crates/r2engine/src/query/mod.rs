@@ -61,10 +61,13 @@ pub enum Support {
 /// Which state of a program an answer was computed against.
 ///
 /// Four axes rather than one counter, so a patch does not invalidate what it
-/// cannot have touched. There is no axis for which addresses exist, because
-/// that never moves within one program: a write refuses a range the file does
-/// not map, so a patch can neither create an address nor destroy one. What
-/// does move is covered here, and what identifies the program is `program`.
+/// cannot have touched. `bytes` alone would be that counter: it moves on every
+/// write, so comparing it threw away every answer about every other function.
+/// What an answer read is compared by range instead, and the two derived
+/// tables are compared whole, because a walk consults them about addresses it
+/// never reads. There is no axis for which addresses exist, because that never
+/// moves within one program: a write refuses a range the file does not map, so
+/// a patch can neither create an address nor destroy one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision {
     /// Which open program this is. Two answers about different programs are

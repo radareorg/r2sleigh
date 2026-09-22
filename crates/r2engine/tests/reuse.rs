@@ -85,3 +85,29 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
         "a listing asked the engine to analyse a function"
     );
 }
+
+#[test]
+fn a_patch_to_another_function_leaves_this_one_standing() {
+    // The bytes moved, and nothing this analysis read did. Recording which
+    // bytes were read is what tells those two apart; comparing revisions
+    // alone made every write invalidate everything.
+    let mut program =
+        OpenProgram::open(pinned().to_str().expect("the fixture path is text")).expect("it opens");
+    program.ensure_assembled(FUNCTION).expect("it assembles");
+    {
+        let target = program.target(FUNCTION).expect("the machine is described");
+        program.analysed(&target, FUNCTION).expect("it prepares");
+    }
+    // `crc32_init` is another function entirely, and patching an instruction
+    // in it renames nothing and moves no entry.
+    program.image.write(0x401584, &[0x90]).expect("it patches");
+    program.ensure_assembled(FUNCTION).expect("it reassembles");
+    let target = program.target(FUNCTION).expect("the machine is described");
+    program.analysed(&target, FUNCTION).expect("it prepares");
+    let stats = program.memo_stats();
+    assert_eq!(
+        (stats.misses, stats.hits, stats.replacements),
+        (1, 1, 0),
+        "a patch to another function threw this analysis away"
+    );
+}

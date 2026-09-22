@@ -82,6 +82,12 @@ pub struct OpenProgram {
     assembled: Option<Assembled>,
     /// What this session has already worked out about one function.
     memo: Memo<Prepared>,
+    /// Which bytes the derivation in progress has read.
+    ///
+    /// An answer that recorded this can be kept across a write that missed
+    /// every one of them, which is what a patch to another function is. Empty
+    /// except while a derivation runs.
+    read: std::cell::RefCell<Vec<std::ops::Range<u64>>>,
     /// The control for the request in hand: its cancellation, its deadline and
     /// the work it has spent. Held here so a caller can reach it while the
     /// request runs, which is the whole point of having one.
@@ -115,6 +121,7 @@ impl OpenProgram {
             entries_revision: 0,
             assembled: None,
             memo: Memo::default(),
+            read: std::cell::RefCell::new(Vec::new()),
             control: crate::EngineExecutionControl::default(),
             machine: None,
             thumb_machine: None,
@@ -270,9 +277,15 @@ impl OpenProgram {
         target: &NativeTarget<'_>,
         entry: u64,
     ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
-        self.memo.analysed(self.revision(), entry, || {
-            crate::native::analysed(target, self, entry)
-        })
+        self.read.borrow_mut().clear();
+        let analysis = self.memo.analysed_since(
+            self.revision(),
+            entry,
+            &|since, range| self.image.written_since(since, range),
+            || crate::native::analysed(target, self, entry),
+        );
+        self.memo.record_reads(self.read.borrow_mut().drain(..));
+        analysis
     }
 
     /// The control every request against this program runs under.
@@ -350,9 +363,17 @@ impl Decoders for OpenProgram {
 
 impl r2ssa::body::Program for OpenProgram {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        self.image
+        let read = self
+            .image
             .read_upto(vaddr, max)
-            .map(std::borrow::Cow::into_owned)
+            .map(std::borrow::Cow::into_owned)?;
+        // Recorded whole, including what was asked for beyond what is mapped:
+        // a write that lands in the unmapped tail cannot happen, and one that
+        // lands in the rest is a write this answer read.
+        self.read
+            .borrow_mut()
+            .push(vaddr..vaddr.saturating_add(read.len() as u64));
+        Some(read)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {

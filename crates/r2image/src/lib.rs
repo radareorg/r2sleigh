@@ -541,6 +541,13 @@ pub struct Image {
     /// nor destroy one, and nothing mutates the segments or sections after the
     /// file is parsed.
     byte_revision: u64,
+    /// Which addresses each write covered, and the revision it made.
+    ///
+    /// A holder that recorded which bytes it read can ask whether anything it
+    /// read has been written since, which is what lets an answer about one
+    /// function survive a patch to another. Bounded by the number of writes a
+    /// session makes, which is the number of times someone typed one.
+    written: Vec<(u64, std::ops::Range<u64>)>,
     /// Which open program this is, among those this process has opened.
     ///
     /// Two images of one file are still two programs: one may be patched and
@@ -833,6 +840,7 @@ impl Image {
             relocations,
             patches: BTreeMap::new(),
             byte_revision: 0,
+            written: Vec::new(),
             identity: next_identity(),
         })
     }
@@ -976,6 +984,7 @@ impl Image {
             self.patches.insert(vaddr + offset as u64, *byte);
         }
         self.byte_revision += 1;
+        self.written.push((self.byte_revision, vaddr..end));
         Ok(())
     }
 
@@ -995,8 +1004,19 @@ impl Image {
         if self.patches.is_empty() {
             return;
         }
+        let dropped = self
+            .patches
+            .keys()
+            .fold(None::<std::ops::Range<u64>>, |range, at| {
+                Some(match range {
+                    Some(range) => range.start.min(*at)..range.end.max(at + 1),
+                    None => *at..at + 1,
+                })
+            });
         self.patches.clear();
         self.byte_revision += 1;
+        self.written
+            .extend(dropped.map(|range| (self.byte_revision, range)));
     }
 
     /// Which state of the image's bytes this is.
@@ -1006,6 +1026,17 @@ impl Image {
     /// and is derived again when they differ.
     pub const fn byte_revision(&self) -> u64 {
         self.byte_revision
+    }
+
+    /// Whether anything in this range has been written since that revision.
+    ///
+    /// The question an answer asks to find out whether it is still about this
+    /// program: it recorded what it read, and this says whether any of it has
+    /// moved underneath.
+    pub fn written_since(&self, revision: u64, range: &std::ops::Range<u64>) -> bool {
+        self.written.iter().any(|(at, written)| {
+            *at > revision && written.start < range.end && range.start < written.end
+        })
     }
 
     /// Which open program this is.
@@ -1239,6 +1270,7 @@ mod tests {
             debug_prototypes: debug::DebugPrototypes::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,
+            written: Vec::new(),
             identity: next_identity(),
         }
     }
