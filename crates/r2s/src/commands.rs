@@ -740,7 +740,10 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
     };
     let answer = listing(
         &answered,
-        Listing { start, count },
+        Listing {
+            start,
+            stop: r2engine::query::Stop::After(count),
+        },
         r2engine::query::Work::BlockLocal,
         session.program.revision(),
     );
@@ -824,7 +827,7 @@ fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> Str
 /// to lie in.
 #[cfg(feature = "sleigh")]
 fn disassemble_function(session: &mut Session, argument: &str) -> Result<String, String> {
-    use r2engine::query::{Listing, Memory, listing};
+    use r2engine::query::{Listing, Memory, Stop, Work, listing};
 
     let addr = parse_number(session, argument)?;
     session.program.ensure_assembled(addr)?;
@@ -834,43 +837,42 @@ fn disassemble_function(session: &mut Session, argument: &str) -> Result<String,
         .program
         .analysed(&target, addr)
         .map_err(|refusal| refusal.to_string())?;
-    // The function is exactly what the analysis covers, so its extent is the
-    // artifact's own rather than a guess from the next symbol's address.
-    let function = prepared.artifact().artifact().function();
-    let (start, end) = function
-        .blocks()
-        .iter()
-        .fold((u64::MAX, 0), |(low, high), block| {
-            (
-                low.min(block.addr),
-                high.max(block.addr + u64::from(block.size)),
-            )
-        });
-    if start == u64::MAX {
-        return Err(format!("no blocks at {addr:#x}"));
-    }
+    let artifact = prepared.artifact().artifact();
     let answered = r2engine::query::Answered {
         decoders: &session.program,
         memory: Memory {
             program: &session.program,
             endian: session.program.endian(),
         },
-        facts: Some(prepared.artifact().artifact()),
+        facts: Some(artifact),
     };
-    let answer = listing(
-        &answered,
-        Listing {
-            start,
-            // One line per instruction, and no instruction is shorter than a
-            // byte, so the extent bounds the count.
-            count: usize::try_from(end - start).unwrap_or(usize::MAX),
-        },
-        r2engine::query::Work::Function,
-        session.program.revision(),
-    );
+    // Block by block, each by its own extent. The function is what the
+    // analysis covers, and sweeping from its lowest block to its highest ran
+    // through whatever lay between -- another function's bytes, or the whole
+    // gap to a cold partition placed far away.
+    let mut blocks = artifact
+        .function()
+        .blocks()
+        .iter()
+        .filter(|block| block.size > 0)
+        .map(|block| (block.addr, block.addr + u64::from(block.size)))
+        .collect::<Vec<_>>();
+    blocks.sort_unstable();
+    if blocks.is_empty() {
+        return Err(format!("no blocks at {addr:#x}"));
+    }
     let mut out = String::new();
-    for line in answer.value.iter().take_while(|line| line.address < end) {
-        out.push_str(&listed(session, line));
+    for (start, end) in blocks {
+        let answer = listing(
+            &answered,
+            Listing {
+                start,
+                stop: Stop::At(end),
+            },
+            Work::Function,
+            session.program.revision(),
+        );
+        out.extend(answer.value.iter().map(|line| listed(session, line)));
     }
     Ok(out.trim_end().to_owned())
 }

@@ -66,11 +66,22 @@ pub struct Answered<'a> {
     pub facts: Option<&'a r2ssa::SsaArtifact>,
 }
 
-/// A run of instructions, asked for by where it starts and how many.
+/// A run of instructions: where it starts, and where it stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Listing {
     pub start: u64,
-    pub count: usize,
+    pub stop: Stop,
+}
+
+/// Where a listing stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// After this many lines, which is what `pd N` asks for.
+    After(usize),
+    /// At this address, which is what a block's extent says. Asking for a
+    /// count and discarding what ran past the end decoded, lifted and read the
+    /// bytes of whatever came next.
+    At(u64),
 }
 
 /// One line of a listing.

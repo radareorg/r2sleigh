@@ -5,7 +5,7 @@
 //! crosses a boundary and kept the decoder it started with decodes the rest of
 //! itself wrongly.
 
-use super::records::{Answered, Line, Listing};
+use super::records::{Answered, Line, Listing, Stop};
 use super::{Answer, Completion, Revision, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
@@ -19,15 +19,18 @@ pub fn listing(
     revision: Revision,
 ) -> Answer<Vec<Line>> {
     let (decoders, memory) = (answered.decoders, &answered.memory);
-    let mut lines = Vec::with_capacity(request.count);
+    let mut lines = Vec::new();
     // The lift of each line, kept until the run has been read: whether an
     // instruction's own result is an address or a step towards one is a fact
     // about what the next instruction does with it.
-    let mut lifts: Vec<Option<r2il::R2ILBlock>> = Vec::with_capacity(request.count);
+    let mut lifts: Vec<Option<r2il::R2ILBlock>> = Vec::new();
     let mut pc = request.start;
     let mut completion = Completion::Complete;
 
-    for _ in 0..request.count {
+    while match request.stop {
+        Stop::After(count) => lines.len() < count,
+        Stop::At(end) => pc < end,
+    } {
         let (Some(machine), Some(window)) =
             (decoders.at(pc), memory.program.read(pc, DECODE_WINDOW))
         else {
@@ -138,7 +141,10 @@ mod tests {
         };
         listing(
             &answered,
-            Listing { start: BASE, count },
+            Listing {
+                start: BASE,
+                stop: Stop::After(count),
+            },
             work,
             Revision::default(),
         )
@@ -184,7 +190,7 @@ mod tests {
             &answered,
             Listing {
                 start: BASE,
-                count: 2,
+                stop: Stop::After(2),
             },
             Work::Decode,
             Revision::default(),

@@ -76,7 +76,7 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
         &answered,
         r2engine::query::Listing {
             start: FUNCTION,
-            count: 64,
+            stop: r2engine::query::Stop::After(64),
         },
         r2engine::query::Work::InstructionLocal,
         program.revision(),

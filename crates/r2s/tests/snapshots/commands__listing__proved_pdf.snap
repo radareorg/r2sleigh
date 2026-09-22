@@ -15,6 +15,5 @@ expression: run.out
             0x00401357      4839fe         cmp rsi, rdi
             0x0040135a      75ec           jne 0x401348
             0x0040135c      c3             ret
-            0x0040135d      0f1f00         nop dword [rax]
             0x00401360      b8c59d1c81     mov eax, 0x811c9dc5 ; rax = 0x811c9dc5
             0x00401365      c3             ret

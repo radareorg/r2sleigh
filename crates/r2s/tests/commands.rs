@@ -467,6 +467,26 @@ mod listing {
         insta::assert_snapshot!("proved_pdf", run.out);
     }
 
+    /// A function is its blocks. The alignment padding after the loop's `ret`
+    /// belongs to no block, and a linear sweep from the lowest block to the
+    /// highest listed it -- or, for a cold partition placed far away, the
+    /// whole gap between.
+    #[test]
+    fn a_function_listing_is_its_blocks_and_nothing_between() {
+        let run = super::r2s("s 0x401330; pdf");
+        assert!(run.ok, "{}", run.out);
+        assert!(run.out.contains("0x0040135c"), "{}", run.out);
+        assert!(!run.out.contains("0x0040135d"), "{}", run.out);
+        assert!(run.out.contains("0x00401360"), "{}", run.out);
+    }
+
+    #[test]
+    fn a_function_listing_of_nothing_says_so() {
+        let run = super::r2s("s 0x10; pdf");
+        assert!(!run.ok);
+        assert!(run.out.contains("nothing mapped at 0x10"), "{}", run.out);
+    }
+
     /// `pd` stays cheap: the expensive listing is the one that was asked for.
     #[test]
     fn a_plain_listing_proves_nothing_about_a_value() {

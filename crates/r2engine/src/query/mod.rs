@@ -20,7 +20,7 @@ pub mod records;
 
 pub use decode::listing;
 pub use memo::{Memo, MemoStats};
-pub use records::{Annotation, AnnotationKind, Answered, Decoders, Line, Listing, Memory};
+pub use records::{Annotation, AnnotationKind, Answered, Decoders, Line, Listing, Memory, Stop};
 
 /// How much work a request permits.
 ///
@@ -101,8 +101,6 @@ pub enum Completion {
     Complete,
     /// The program maps nothing at this address, so there was nothing to read.
     Unmapped { at: u64 },
-    /// The permitted work ran out before the question did.
-    Exhausted { after: usize },
 }
 
 /// One answer, with the state it describes and how far it got.
