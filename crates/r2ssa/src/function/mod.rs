@@ -1168,6 +1168,17 @@ impl SsaArtifact {
         &self.facts.objects
     }
 
+    /// What each value can hold, as the ascent and the narrowing left it.
+    ///
+    /// One interval per value, narrowed at the definition site rather than at
+    /// every point that reads it, so this is what the value can hold anywhere
+    /// it is live and not what it holds at a particular instruction. A caller
+    /// that wants the second has to say so; a caller that prints this as the
+    /// first is claiming more than was proved.
+    pub fn values(&self) -> &crate::values::ValueRanges {
+        &self.facts.values
+    }
+
     pub fn addresses(&self) -> &crate::AddressProvenanceFacts {
         &self.facts.addresses
     }
