@@ -302,12 +302,19 @@ fn references(session: &mut Session) -> Result<Vec<r2engine::DataRefFact>, Strin
     );
     let addr = session.addr;
     with_native(session, addr, |target, program| {
+        // Discovery walks every body it believes, and the reverse index wants
+        // what that same walk already saw. Asking twice walked and lifted each
+        // function again for the half the first ask threw away.
+        let mut seen = std::collections::BTreeMap::new();
         let found = r2engine::discovery::functions(program, seeds, |entry| {
-            r2engine::native::transfers(target, program, entry)
+            let survey = r2engine::native::surveyed(target, program, entry)?;
+            seen.insert(entry, survey.data_refs);
+            Some(survey.transfers)
         });
         let mut refs = found
             .iter()
-            .flat_map(|one| r2engine::native::data_refs(target, program, one.address))
+            .filter_map(|one| seen.remove(&one.address))
+            .flatten()
             .collect::<Vec<_>>();
         refs.sort_unstable();
         refs.dedup();

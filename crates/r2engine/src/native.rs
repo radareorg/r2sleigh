@@ -308,6 +308,17 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
+/// What one walk of a body says, for the two consumers that ask about it.
+///
+/// Discovery wants where control goes and the reverse index wants every
+/// address the body names. Asked separately, each walked and lifted the same
+/// function, so the cross-reference command walked every discovered body twice
+/// -- 0.33 seconds against 0.05 for the discovery alone on `/bin/ls`.
+pub struct Survey {
+    pub transfers: crate::discovery::Transfers,
+    pub data_refs: Vec<r2ssa::DataRefFact>,
+}
+
 /// Where one body transfers, without preparing or rendering it.
 ///
 /// Discovery asks this of every address it believes, and it asks only for the
@@ -318,6 +329,11 @@ pub fn transfers(
     program: &dyn Program,
     entry: u64,
 ) -> Option<crate::discovery::Transfers> {
+    surveyed(target, program, entry).map(|survey| survey.transfers)
+}
+
+/// Both answers from one walk.
+pub fn surveyed(target: &NativeTarget<'_>, program: &dyn Program, entry: u64) -> Option<Survey> {
     let native = Native {
         target,
         program,
@@ -325,6 +341,13 @@ pub fn transfers(
         control: program.control().ssa_execution_control(),
     };
     let walked = native.walk(entry).ok()?;
+    let blocks = walked
+        .body
+        .blocks
+        .iter()
+        .map(|block| block.lifted.clone())
+        .collect::<Vec<_>>();
+    let data_refs = r2ssa::data_refs_from_blocks(&blocks, Some(target.arch)).unwrap_or_default();
     let mut transfers = crate::discovery::Transfers::from(&walked.body);
     // Preparing a body costs far more than walking one, so it is done only
     // where the typed rule could fire at all: this function has to call
@@ -339,7 +362,10 @@ pub fn transfers(
             ),
         }
     }
-    Some(transfers)
+    Some(Survey {
+        transfers,
+        data_refs,
+    })
 }
 
 /// Every reference one function makes, from its own lift.
@@ -352,25 +378,9 @@ pub fn data_refs(
     program: &dyn Program,
     entry: u64,
 ) -> Vec<r2ssa::DataRefFact> {
-    let Ok(machine) = machine(target) else {
-        return Vec::new();
-    };
-    let native = Native {
-        target,
-        program,
-        machine,
-        control: program.control().ssa_execution_control(),
-    };
-    let Ok(walked) = native.walk(entry) else {
-        return Vec::new();
-    };
-    let blocks = walked
-        .body
-        .blocks
-        .iter()
-        .map(|block| block.lifted.clone())
-        .collect::<Vec<_>>();
-    r2ssa::data_refs_from_blocks(&blocks, Some(target.arch)).unwrap_or_default()
+    surveyed(target, program, entry)
+        .map(|survey| survey.data_refs)
+        .unwrap_or_default()
 }
 
 /// What the binding plan decided about each value.

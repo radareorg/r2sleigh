@@ -31233,3 +31233,58 @@ Relocation slots are now named. A call through the global offset table reads a
 word rather than reaching a stub, so the address in the instruction is the slot;
 `reloc.__libc_start_main` is what the container states about it, and the line is
 now identical to radare2's.
+
+### The three live defects the inventory named
+
+**A patch did not invalidate what was decoded from the bytes.** Fixed by the
+byte revision above, with a test that patches and re-reads inside one process,
+because each `r2s` invocation is a fresh one and the bug is invisible across
+two of them.
+
+**No request could be cancelled.** Three sites in `native.rs` minted an
+`EngineExecutionControl` inline and dropped the owner, so a request carried
+tokens nothing could reach. The control is now asked of the program, which
+holds the one the request runs under; `crates/r2engine/tests/control.rs`
+cancels a request and watches it refuse, and watches the next request not
+inherit that stop. Nothing had ever run under a cancellation before.
+
+That last test found a hazard in the memo the same day it was written: an
+analysis cut short by a cancellation refuses, and a memo that held refusals
+would serve that refusal to the next request as a fact about the program. The
+memo holds answers only.
+
+**A skipped callee was indistinguishable from a proven one.** A body that
+could not be walked or prepared was `continue`d in silence. `Prepared::unread()`
+now names each one and how far it got, and `pddo` prints them under "callees
+not read". A sweep of the corpus reports none; `/usr/bin/ls` built for x86-64
+has one, `libarm.so` another.
+
+### What the memo is keyed by
+
+The byte-keyed design in `program_cache.rs` was sound and had no callers at
+all: `cached_root_artifact`, `cache_root_artifact`, `cached_callee_facts` and
+`cache_callee_facts` were dead, taken by the plugin deletion and never wired
+to the native path. Its doctrine is kept and its key is replaced.
+
+The key is now the program's revision plus the entry address. That states the
+identity exactly for the same reason the byte-for-byte comparison did -- every
+write bumps the counter and every open mints a fresh identity, so one revision
+is one state of one program -- at the cost of comparing four integers rather
+than a whole serialized capture. The bound is the same: one analysis, the most
+recent, because a prepared body is megabytes and a sweep asks about each
+function once.
+
+Measured on `hashes_gcc_x64_O2`, the marginal cost of repeating `pdd` on one
+function fell from 18.7 ms to 3.3 ms; what is left is the render.
+`crates/r2engine/tests/reuse.rs` asserts three tiers cost one analysis.
+
+### What `ax` still costs, and why
+
+Discovery walks every body it believes and the reverse index wanted what that
+same walk had already seen, so `native::surveyed` returns both from one walk
+and `transfers` and `data_refs` are projections of it. The output is
+byte-identical on three binaries and `ax /bin/ls` fell only from 0.34 s to
+0.33 s, which is the finding worth carrying: the walk is about 0.15 ms per
+function and the reduced SSA build behind `data_refs_from_blocks` is about
+2.1 ms, so the duplicated walk was never the cost. Eliminating the
+reduced-versus-full split is what would move this, and that is step 2.
