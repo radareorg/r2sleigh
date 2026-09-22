@@ -847,7 +847,7 @@ pub(super) fn certified_direct_control_target_values(
 ) -> BTreeSet<ValueId> {
     let graph = source.graph();
     let sites = certified_direct_control_target_sites(source);
-    sites
+    let mut values = sites
         .iter()
         .filter_map(|site| graph.inst(site.inst)?.inputs.get(site.input_idx).copied())
         .collect::<BTreeSet<_>>()
@@ -856,7 +856,19 @@ pub(super) fn certified_direct_control_target_values(
             let uses = graph.use_sites(*value);
             !uses.is_empty() && uses.iter().all(|site| sites.contains(site))
         })
-        .collect()
+        .collect::<BTreeSet<_>>();
+    // And everything a certified dispatch computes on the way to that target.
+    // The structured `switch` is made of those operations, so no statement
+    // renders them and nothing is left to spell the values they define.
+    values.extend(
+        source
+            .certificates()
+            .switches
+            .values()
+            .flat_map(|switch| switch.dispatch.iter().copied())
+            .filter_map(|inst| graph.inst(inst)?.output),
+    );
+    values
 }
 
 /// Every operation a certificate already answers for, so it renders nothing of
@@ -910,6 +922,15 @@ impl CertifiedSilence {
                 sites.filter_map(|op| graph.inst_id_for_op_site(certificate.block_addr, op)),
             );
         }
+        // The dispatch of a certified switch: scaling the selector, addressing
+        // the table, reading the entry, transferring through it. The `switch`
+        // is made of those, so none of them is a statement beside it.
+        insts.extend(
+            certificates
+                .switches
+                .values()
+                .flat_map(|switch| switch.dispatch.iter().copied()),
+        );
         // The lane of an entry register a formal was minted from: the
         // declaration is its definition.
         insts.extend(

@@ -2640,6 +2640,20 @@ impl LegacyObservationJournal {
         self.account_coalesced_copy_outputs(symbol_bindings)
     }
 
+    /// Whether a certificate answers for every occurrence of an undefined value.
+    fn every_occurrence_certified(&self, value: ValueId) -> bool {
+        let graph = self.source.graph();
+        if graph.def_inst(value).is_some() {
+            return false;
+        }
+        let uses = graph.use_sites(value);
+        if uses.is_empty() {
+            return false;
+        }
+        let silence = crate::binding_plan::CertifiedSilence::for_function(&self.source);
+        uses.iter().all(|site| silence.contains(site.inst))
+    }
+
     fn first_unaccounted_render_observation(&self) -> Option<LegacyObservationJournalError> {
         // Each of the three loops below names the exact cell it found empty
         // under `R2DEC_TRACE_REFUSAL`, the same switch the lowering refusals
@@ -2649,6 +2663,16 @@ impl LegacyObservationJournal {
         for (index, observation) in self.values.iter().enumerate() {
             if observation.is_none() {
                 let value = ValueId(index as u32);
+                // A value nothing defines is spelled at its occurrences and
+                // nowhere else, so where a certificate answers for every one
+                // of them it is never spelled and has no cell. `const:8` is
+                // shared between a jump table's scale and the stack-pointer
+                // restore in each arm; both are certified, and demanding a
+                // rendered occurrence of it asked for a statement that would
+                // have been wrong to write.
+                if self.every_occurrence_certified(value) {
+                    continue;
+                }
                 if r2il::refusal_evidence::tracing() {
                     let graph = self.source.graph();
                     let targets = self

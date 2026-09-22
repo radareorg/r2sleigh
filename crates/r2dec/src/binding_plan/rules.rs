@@ -2968,6 +2968,41 @@ pub(crate) fn certificate_elided_cells(
     for site in super::certified_direct_control_target_sites(source) {
         insert_elided_use(&mut uses, site, ElisionReason::DirectControlTarget)?;
     }
+    // The rest of a certified dispatch, on the same ground: the structured
+    // `switch` is made of those operations, so none of them renders, and an
+    // occurrence inside a statement no structured form emits is not a read.
+    //
+    // The transfer itself is not one of them. Its target operand is already
+    // accounted just above, and its other shape reads the selector, which the
+    // switch spells; eliding either here answered a cell twice.
+    for inst in source
+        .certificates()
+        .switches
+        .values()
+        .flat_map(|switch| switch.dispatch.iter().copied())
+        .filter(|inst| {
+            !matches!(
+                graph.inst(*inst).map(|inst| &inst.payload),
+                Some(r2ssa::InstPayload::Op(
+                    r2ssa::SSAOp::BranchInd { .. } | r2ssa::SSAOp::Switch { .. }
+                ))
+            )
+        })
+    {
+        let definition = graph
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
+        if definition.output.is_some() {
+            insert_elided_write(&mut writes, inst, ElisionReason::DirectControlTarget)?;
+        }
+        for input_idx in 0..definition.inputs.len() {
+            insert_elided_use(
+                &mut uses,
+                UseSite { inst, input_idx },
+                ElisionReason::DirectControlTarget,
+            )?;
+        }
+    }
     // A direct call names its callee. The name comes from the symbol table,
     // not from any object the function holds, so the operand's occurrence is
     // not a read and the value it names is elided beside it.

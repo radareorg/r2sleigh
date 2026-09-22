@@ -31333,59 +31333,53 @@ itself: a certified switch expresses the transfer by which case block the code
 sits in, so the gap need not stand in for it. The gap now covers the
 instruction minus a transfer a certificate already accounts for.
 
-**Decided: structuring consumes the dispatch.** On the jump-table fixture the
-rendering is
+**Done: structuring consumes the dispatch.** The rendering was
 
 ```
 /* r2dec gap: planned_elided_value_rendered at 0x1005:5 covering 4 ops */
 switch (EDI_0) { ... }
 ```
 
-A fully proved four-case switch carries a marked gap over its own dispatch, and
-five obligations are counted as gapped. The cause is that the table read's value
-is elided as `DirectControlTarget` -- its only reader is the branch, which the
-switch spells -- while the read still renders a statement that names it.
+with five obligations counted as gapped, and is now a bare `switch` with
+`41 source obligations: 20 rendered, 21 elided, 0 refused` and nothing gapped.
 
-The decision is that the structured `switch` owns the operations it is made of,
-so they never reach the renderer at all. Four places read that one fact, and
-three of them were built and shown to work:
+The first attempt changed four layers one at a time and moved the refusal three
+times. What made the second work was writing down how an operation comes to be
+a statement first, which is worth keeping:
 
-1. `SwitchCertificate` gains `dispatch: Vec<InstId>`, grown to a fixpoint
-   backwards from the transfer: an operation belongs to the dispatch when
-   everything that reads it is already in the dispatch. The selector stops the
-   walk twice over, since the switch spells it and the guard that bounds the
-   index reads it too. On the fixture this is exactly the zero-extension, the
-   scale, the table address, the load and the branch.
-2. The statement loop in `fold/op_lower/implementation.rs` emits nothing for
-   them, beside the certificates that already work that way -- the call's
-   target copy, the return-address store, the halves of a memory round trip.
-3. The effect ledger discharges their obligations as `DirectControlTarget`,
-   beside the transfer it already discharges.
-4. The binding plan elides the values they define and the operands only they
-   read.
+1. `fold/op_lower/implementation.rs` walks a block's operations and emits a
+   statement for each, skipping a planned gap, a site a gap already owns, an
+   inlined single-use call result, and an operation a certificate answers for.
+2. The binding plan gives every *value* a disposition -- bound, inline, elided
+   with a reason, or refused -- and every *use* and *write* a cell.
+3. The observation journal checks the two agree: a rendered statement must not
+   name an elided value, and every cell must have an occurrence or an elision.
+4. The effect ledger checks the source's obligations are each discharged by a
+   rendering or an elision.
 
-The prerequisite is done and committed: "a certificate already answers for this
-operation, so it renders nothing" was a chain of lookups written out inside the
-statement loop, where the plan could not ask it, and is now
-`binding_plan::certificate_answers_for_inst`. Adding the dispatch to it is one
-arm; the statement loop and the plan then agree by construction.
+So consuming an operation means saying so in all four, and the four must be
+saying the same thing. That is what `binding_plan::CertifiedSilence` is: the
+one set of operations a certificate answers for, built once per function, read
+by the statement loop and by everything that has to agree with it. The switch's
+dispatch joins that set and the rest follows:
 
-What is left is one general rule that the fourth exposes rather than creates.
-`const:8` is shared between the dispatch's `imul` and the stack-pointer restore
-in every arm; the restores are elided as stack geometry, so once the dispatch
-stops rendering, that constant has no rendered occurrence anywhere and its cell
-is unobserved at seal. **A value whose every occurrence is elided must be
-elided itself**. Expressing that directly -- a value every one of whose use
-sites is answered for by a certificate is elided as a dead temporary -- was
-tried and met a fifth refusal, `MissingProgramVariableAuthorization`, which is
-the signal this project reads as being in the wrong layer: five sealed layers
-each accommodating one decision. The dispatch pieces are reverted, so the tree
-is green and the gap is still there.
+- `SwitchCertificate::dispatch` names the operations, grown backwards from the
+  transfer to a fixpoint -- an operation belongs when everything that reads it
+  already belongs. The selector stops the walk twice over, since the switch
+  spells it and the guard that bounds the index reads it too.
+- The values those operations define are elided as `DirectControlTarget`, and
+  their reads and writes are elided cells on the same ground.
+- The effect ledger discharges their obligations beside the transfer's, which
+  it already discharged.
+- A value *nothing defines* whose every occurrence a certificate answers for
+  has no cell at all. `const:8` is shared between the table's scale and the
+  stack-pointer restore in each arm; once both are certified it is never
+  spelled, and demanding a rendered occurrence asked for a statement that would
+  have been wrong to write.
 
-The next attempt should start from the shape rather than the symptom. Each step
-so far moved the refusal rather than removing it -- `PlannedElidedValueRendered`
-to `RenderedValueRequired` to `MissingProgramVariableAuthorization` -- which
-says the renderer is being told after the fact about operations it should never
-have been given. Consuming the dispatch probably means the structured form
-takes those operations out of the block it renders, rather than every
-downstream pass learning to skip them.
+Two things the corpus caught that the suite did not. The transfer's own cells
+are accounted by the rule that already had them, so eliding them again in the
+dispatch loop answered a cell twice and three functions refused with
+`ConflictingUse`. And `Switch`'s operand is the selector, which the switch
+spells, so the transfer has to be left out of that loop rather than filtered by
+opcode at each use.

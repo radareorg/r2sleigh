@@ -367,6 +367,19 @@ fn structured_transfer_elision(
     {
         return Some(ElisionReason::DirectControlTarget);
     }
+    // And the rest of the dispatch with it. A jump table is addressed, read
+    // and branched through by one instruction; the structured `switch` is made
+    // of all of that, so none of it is an effect the rendered program performs
+    // beside the switch.
+    if let Some(inst) = source_inst
+        && prepared
+            .certificates()
+            .switches
+            .values()
+            .any(|switch| switch.dispatch.contains(&inst))
+    {
+        return Some(ElisionReason::DirectControlTarget);
+    }
     None
 }
 

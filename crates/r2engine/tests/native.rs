@@ -722,6 +722,11 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     );
     let output = response.output.text();
     assert!(output.contains("switch ("), "{output}");
+    // The `switch` is what the dispatch is: scaling the index, addressing the
+    // table, reading the entry and branching through it are the statement, not
+    // operations beside it that a marker has to stand in for.
+    assert!(!output.contains("r2dec gap"), "{output}");
+    assert!(!output.contains("gapped"), "{output}");
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");

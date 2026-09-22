@@ -76,6 +76,70 @@ pub struct ForLoopCertificate {
     pub initializer: LoopCarrierEdgeValue,
 }
 
+/// The operations a certified dispatch performs to reach its target.
+///
+/// Grown backwards from the transfer to a fixpoint: an operation belongs to the
+/// dispatch when everything that reads it is already in the dispatch, which can
+/// only be decided once its readers are known. The selector stops the walk
+/// twice over -- the switch spells it, and the guard that bounds the index
+/// reads it too.
+fn dispatch_operations(
+    graph: &crate::SsaGraph,
+    block_addr: u64,
+    selector: Option<ValueId>,
+) -> Vec<InstId> {
+    let Some(block) = graph
+        .block_by_addr
+        .get(&block_addr)
+        .and_then(|id| graph.block(*id))
+    else {
+        return Vec::new();
+    };
+    let Some(transfer) = block.insts.iter().copied().rev().find(|inst| {
+        matches!(
+            graph.inst(*inst).map(|inst| &inst.payload),
+            Some(crate::graph::InstPayload::Op(
+                crate::SSAOp::BranchInd { .. } | crate::SSAOp::Switch { .. }
+            ))
+        )
+    }) else {
+        return Vec::new();
+    };
+    let mut found = vec![transfer];
+    loop {
+        let candidates: Vec<ValueId> = found
+            .iter()
+            .filter_map(|inst| graph.inst(*inst))
+            .flat_map(|inst| inst.inputs.iter().copied())
+            .collect();
+        let mut grew = false;
+        for value in candidates {
+            if selector == Some(value) {
+                continue;
+            }
+            let Some(definition) = graph.def_inst(value) else {
+                continue;
+            };
+            if found.contains(&definition)
+                || graph.inst(definition).map(|inst| inst.block) != Some(block.id)
+                || !graph
+                    .use_sites(value)
+                    .iter()
+                    .all(|site| found.contains(&site.inst))
+            {
+                continue;
+            }
+            found.push(definition);
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchCertificate {
     pub proof_node: ProofNodeId,
@@ -83,6 +147,14 @@ pub struct SwitchCertificate {
     pub selector: Option<ValueId>,
     pub cases: Vec<(u64, u64)>,
     pub default: Option<u64>,
+    /// The operations the dispatch performs to reach its target: scaling the
+    /// selector, addressing the table, reading the entry, transferring to it.
+    ///
+    /// A structured `switch` is made of these, so the certificate owns them and
+    /// the renderer never sees them. Leaving them for the renderer to explain
+    /// meant the table read named a value the plan had elided, and the only
+    /// account left was a marked gap over a dispatch the engine had proved.
+    pub dispatch: Vec<InstId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -630,6 +702,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     selector: fact.selector,
                     cases: fact.cases.clone(),
                     default: fact.default,
+                    dispatch: dispatch_operations(graph, *block_addr, fact.selector),
                 },
             )
         })
