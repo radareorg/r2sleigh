@@ -33,6 +33,8 @@ mod json;
 mod program_cache;
 use json::*;
 pub use program_cache::cache_program_data_object_types;
+pub use r2sleigh_lift::disasm::syntax::number_spans;
+pub use r2sleigh_lift::{NumberSpan, Syntax};
 pub use r2ssa::DataRefFact;
 
 mod route;

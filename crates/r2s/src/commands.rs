@@ -759,9 +759,9 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
         hex.truncate(10);
         hex.push_str("..");
     }
-    let text = match &line.syntax {
-        None => "invalid".to_owned(),
-        Some(syntax) => r2engine::program::naming::spell(&session.program.names, &syntax.text()),
+    let text = match line.decoded() {
+        false => "invalid".to_owned(),
+        true => spelled(line, &session.program.names),
     };
     format!(
         "            {:#010x}      {:<14} {}{}\n",
@@ -770,6 +770,37 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
         text,
         held(session, line)
     )
+}
+
+#[cfg(feature = "sleigh")]
+/// One line, with a name written wherever a number is one.
+///
+/// Substitution is by span rather than by value. Scanning the finished text
+/// for hexadecimal runs cannot tell an address from a displacement that
+/// happens to equal one, which is how a `-0x4` became a symbol's name, and it
+/// cannot tell two operands of one instruction apart when both hold the same
+/// number. A span says which number is being claimed about, and the sign it
+/// was written with is part of it: a negative literal names no address however
+/// well its magnitude matches.
+fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> String {
+    let Some(syntax) = &line.syntax else {
+        return String::new();
+    };
+    let mut body = syntax.body.clone();
+    // Rewritten from the end, so an earlier span's offsets stay true.
+    for number in syntax.numbers.iter().rev() {
+        let Ok(value) = u64::try_from(number.value) else {
+            continue;
+        };
+        let Some(name) = names.of(value) else {
+            continue;
+        };
+        body.replace_range(number.start..number.end, &name.spelled());
+    }
+    match body.is_empty() {
+        true => syntax.mnemonic.clone(),
+        false => format!("{} {}", syntax.mnemonic, body),
+    }
 }
 
 /// What this revision holds where the instruction reads, as a trailing note.
@@ -806,4 +837,94 @@ fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
     let segment = session.program.image.segment_at(vaddr)?;
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size).then(|| segment.file_offset + offset_in_segment)
+}
+
+#[cfg(all(test, feature = "sleigh"))]
+mod tests {
+    use super::spelled;
+    use r2engine::discovery::Confidence;
+    use r2engine::names::{Name, NameDb, Namespace};
+    use r2engine::query::Line;
+
+    fn db() -> NameDb {
+        let mut db = NameDb::new();
+        db.insert(
+            0x100000340,
+            Name {
+                text: "_add_two".to_owned(),
+                namespace: Namespace::Symbol,
+                size: 0,
+                confidence: Confidence::Stated,
+            },
+        );
+        db.insert(
+            0x4,
+            Name {
+                text: "_nl_current".to_owned(),
+                namespace: Namespace::Label,
+                size: 0,
+                confidence: Confidence::Stated,
+            },
+        );
+        db
+    }
+
+    fn line(mnemonic: &str, body: &str) -> Line {
+        Line {
+            address: 0x1000,
+            bytes: vec![0x90],
+            syntax: Some(r2engine::Syntax {
+                mnemonic: mnemonic.to_owned(),
+                body: body.to_owned(),
+                size: 1,
+                numbers: r2engine::number_spans(body),
+            }),
+            annotations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_named_address_is_spelled_by_its_name() {
+        assert_eq!(
+            spelled(&line("call", "0x100000340"), &db()),
+            "call sym._add_two"
+        );
+    }
+
+    #[test]
+    fn an_address_with_no_name_stays_a_number() {
+        assert_eq!(
+            spelled(&line("call", "0x100000341"), &db()),
+            "call 0x100000341"
+        );
+        assert_eq!(spelled(&line("sub", "rsp, 0x10"), &db()), "sub rsp, 0x10");
+    }
+
+    #[test]
+    fn a_negative_displacement_is_not_an_address() {
+        // The defect this replaced: a `-0x4` written against a register came
+        // out as the name of whatever sits at address four.
+        assert_eq!(
+            spelled(&line("ldr", "r3, [sp, -0x4]"), &db()),
+            "ldr r3, [sp, -0x4]"
+        );
+    }
+
+    #[test]
+    fn each_operand_holding_one_number_is_written_once() {
+        // Substituting by value rewrote the whole line at once; by span, each
+        // occurrence is its own decision and the count comes out right.
+        assert_eq!(
+            spelled(&line("mov", "0x100000340, [0x100000340]"), &db()),
+            "mov sym._add_two, [sym._add_two]"
+        );
+    }
+
+    #[test]
+    fn a_binary_with_no_names_changes_nothing() {
+        assert_eq!(
+            spelled(&line("call", "0x1030"), &NameDb::new()),
+            "call 0x1030"
+        );
+    }
 }

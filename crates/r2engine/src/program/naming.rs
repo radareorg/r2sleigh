@@ -240,38 +240,6 @@ pub fn name_slots(
     }
 }
 
-/// Replace every literal that names something.
-///
-/// radare2 substitutes on the value alone: an immediate equal to an address it
-/// has a name for is spelled by the name, whether the instruction branches
-/// there or merely computes it. What keeps that from renaming ordinary
-/// arithmetic is the table, not the operand: a symbol that names no place in
-/// the program never enters it.
-pub fn spell(db: &NameDb, text: &str) -> String {
-    if db.is_empty() {
-        return text.to_owned();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("0x") {
-        out.push_str(&rest[..start]);
-        let digits = rest[start + 2..]
-            .find(|c: char| !c.is_ascii_hexdigit())
-            .map_or(rest.len() - start - 2, |end| end);
-        let literal = &rest[start..start + 2 + digits];
-        match u64::from_str_radix(&literal[2..], 16)
-            .ok()
-            .and_then(|value| db.of(value))
-        {
-            Some(name) => out.push_str(&name.spelled()),
-            None => out.push_str(literal),
-        }
-        rest = &rest[start + 2 + digits..];
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Which stub stands for which import, by its own name.
 ///
 /// A call to an import reaches a stub, and the stub reads the slot the loader
@@ -470,18 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn a_named_address_is_spelled_by_its_name() {
-        assert_eq!(spell(&db(), "call 0x100000340"), "call sym._add_two");
-        assert_eq!(spell(&db(), "lea r8, [0x1030]"), "lea r8, [sym.imp.printf]");
-    }
-
-    #[test]
-    fn an_address_with_no_name_stays_a_number() {
-        assert_eq!(spell(&db(), "call 0x100000341"), "call 0x100000341");
-        assert_eq!(spell(&db(), "sub rsp, 0x10"), "sub rsp, 0x10");
-    }
-
-    #[test]
     fn the_engine_reads_a_name_without_its_namespace() {
         // A prototype table is keyed by what the import is called, not by how
         // a listing writes it, so both answers come from one entry.
@@ -507,10 +463,5 @@ mod tests {
             };
             assert!(!names_an_address(&symbol), "{name}");
         }
-    }
-
-    #[test]
-    fn a_binary_with_no_names_changes_nothing() {
-        assert_eq!(spell(&NameDb::new(), "call 0x1030"), "call 0x1030");
     }
 }
