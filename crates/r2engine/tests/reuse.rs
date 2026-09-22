@@ -55,3 +55,33 @@ fn a_patch_makes_the_held_analysis_stale() {
     let _ = program.analysed(&target, FUNCTION);
     assert_eq!(program.memo_stats().replacements, 1);
 }
+
+#[test]
+fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
+    // The listing is the cheap request and has to stay cheap: every line is a
+    // single instruction lifted on its own, and nothing about it needs a walk,
+    // a prepare or a rendering.
+    let mut program =
+        OpenProgram::open(pinned().to_str().expect("the fixture path is text")).expect("it opens");
+    program.ensure_assembled(FUNCTION).expect("it assembles");
+    let memory = r2engine::query::Memory {
+        program: &program,
+        endian: program.endian(),
+    };
+    let answer = r2engine::query::listing::listing(
+        &program,
+        &memory,
+        r2engine::query::Listing {
+            start: FUNCTION,
+            count: 64,
+        },
+        r2engine::query::Work::InstructionLocal,
+        program.revision(),
+    );
+    assert_eq!(answer.value.len(), 64);
+    assert_eq!(
+        program.memo_stats(),
+        r2engine::query::MemoStats::default(),
+        "a listing asked the engine to analyse a function"
+    );
+}
