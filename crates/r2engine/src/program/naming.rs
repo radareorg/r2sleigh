@@ -206,9 +206,21 @@ pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Str
 /// stub, so the address in the instruction is the slot. Without this the
 /// listing prints the bare number for the one operand whose meaning the
 /// container states outright.
-pub fn name_slots(db: &mut NameDb, format: Format, slots: &BTreeMap<u64, String>) {
+pub fn name_slots(
+    db: &mut NameDb,
+    format: Format,
+    slots: &BTreeMap<u64, String>,
+    stubs: &BTreeMap<u64, String>,
+) {
     let decorated = format == Format::MachO;
     for (slot, symbol) in slots {
+        // Mach-O records its relocations against the stub itself, so the same
+        // address is in both tables. A stub is code the program transfers to
+        // and `sym.imp.` is what says so; `reloc.` is for the word a stub
+        // reads, and calling a stub one would state the wrong thing about it.
+        if stubs.contains_key(slot) {
+            continue;
+        }
         let undecorated = match decorated {
             true => symbol.strip_prefix('_').unwrap_or(symbol),
             false => symbol.as_str(),
@@ -412,7 +424,12 @@ fn fresh_run(addr: u64) -> r2il::R2ILBlock {
 
 /// The sections a format puts import stubs in.
 fn stubs(name: &str) -> bool {
-    name.starts_with(".plt") || name == "__stubs" || name == "__symbol_stub"
+    // `__auth_stubs` is where arm64e puts them, and every Mach-O built for
+    // Apple silicon has that section and no `__stubs`. Missing it left the
+    // import table empty on those binaries, which is not a cosmetic gap: the
+    // table decides which addresses are entries, and that is what bounds a
+    // body walk.
+    name.starts_with(".plt") || matches!(name, "__stubs" | "__auth_stubs" | "__symbol_stub")
 }
 
 /// Whether a symbol names a place in the program.

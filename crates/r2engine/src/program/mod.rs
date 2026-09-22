@@ -153,7 +153,7 @@ impl OpenProgram {
             .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
             .collect();
         naming::name_imports(&mut names, self.image.format(), &imports);
-        naming::name_slots(&mut names, self.image.format(), &self.slots);
+        naming::name_slots(&mut names, self.image.format(), &self.slots, &imports);
         // A patch that changed no name and moved no entry leaves everything
         // derived from those still good, so the counters move only on a
         // difference rather than on every write.

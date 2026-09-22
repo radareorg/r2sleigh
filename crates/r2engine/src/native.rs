@@ -473,13 +473,17 @@ fn analyse(
     // and the same declaration states the C signature the call renders with.
     let mut declared = Vec::new();
     // A tail jump reaches another function exactly as a call does; the only
-    // difference is that its result is this function's own.
+    // difference is that its result is this function's own. One callee reached
+    // both ways is still one callee: declaring it twice makes the type
+    // analysis reject the whole capture as holding a duplicate address.
     let targets: Vec<u64> = root
         .body
         .calls
         .iter()
         .chain(root.body.tail_calls.iter())
         .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
     for address in &targets {
         let Some(name) = native.program.import_at(*address) else {
