@@ -82,8 +82,7 @@ pub use control::{
     SsaWorkControl, SsaWorkMeter,
 };
 pub use data_ref::{
-    DataRefFact, DataRefKind, data_refs_from_artifact_with_op_sources, data_refs_from_blocks,
-    parse_const_value,
+    DataRefFact, DataRefKind, data_refs_from_artifact, data_refs_from_blocks, parse_const_value,
 };
 pub use defuse::{
     BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,

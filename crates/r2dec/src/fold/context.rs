@@ -285,33 +285,50 @@ fn reader_renders_nothing(
         })
 }
 
-/// Every instruction of the native machine instruction that `seed` belongs to.
+/// Every operation of the machine instruction that `seed` belongs to.
+///
+/// Asked of the graph, which records it where both index spaces were known.
+/// Finding the instruction's span of *lifted* operations and reading that
+/// range out of the graph instead was a range in the wrong index space: on the
+/// decompile path renaming puts a carrier read before every call and a run of
+/// clobbers after it, so the two stop agreeing at the first call in a block.
 fn native_span_instructions(
     prepared: &r2ssa::SsaArtifact,
     graph: &r2ssa::SsaGraph,
     seed: InstId,
 ) -> Vec<InstId> {
-    let Some((block_addr, op_idx)) = graph.op_site_for_inst(seed) else {
+    let Some(from) = graph.instruction_for_inst(seed) else {
         return Vec::new();
     };
-    let op_idx = op_idx as u64;
-    let Some(span) = prepared
-        .obligations()
-        .native_spans()
-        .values()
+    graph
+        .insts_for_instruction(from)
+        .iter()
         .copied()
-        .find(|span| {
-            span.block_addr() == block_addr
-                && op_idx >= span.first_canonical_op()
-                && op_idx < span.first_canonical_op() + span.canonical_op_count()
-        })
-    else {
-        return Vec::new();
-    };
-    (span.first_canonical_op()..span.first_canonical_op() + span.canonical_op_count())
-        .filter_map(|op| usize::try_from(op).ok())
-        .filter_map(|op| graph.inst_id_for_op_site(block_addr, op))
+        // A dispatch is one instruction that addresses a table, reads it and
+        // transfers through it, and a marker cannot stand in for the transfer.
+        // Where a certificate already accounts for that transfer -- the
+        // structured form expresses it by which case block the code sits in --
+        // the rest of the instruction can still be gapped without the gap
+        // claiming where control goes.
+        .filter(|inst| !transfer_the_structure_expresses(prepared, graph, *inst))
         .collect()
+}
+
+/// Whether a certificate already accounts for this operation's transfer.
+fn transfer_the_structure_expresses(
+    prepared: &r2ssa::SsaArtifact,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> bool {
+    let Some(instruction) = graph.inst(inst) else {
+        return false;
+    };
+    matches!(
+        &instruction.payload,
+        r2ssa::graph::InstPayload::Op(r2ssa::SSAOp::BranchInd { .. } | r2ssa::SSAOp::Switch { .. })
+    ) && graph
+        .block(instruction.block)
+        .is_some_and(|block| prepared.certificates().switches.contains_key(&block.addr))
 }
 
 impl<'a> FoldingContext<'a> {

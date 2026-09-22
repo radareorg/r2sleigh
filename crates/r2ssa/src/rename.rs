@@ -375,6 +375,22 @@ impl Default for RenameContext {
 pub struct RenamedFunction {
     /// SSA operations for each block (block addr -> ops).
     pub blocks: HashMap<u64, Vec<SSAOp>>,
+    /// Which machine instruction each of those operations came from, one entry
+    /// per operation and in the same order.
+    ///
+    /// Renaming is the only place both index spaces are known at once. It
+    /// inserts operations the lift never had -- a lane projection before a
+    /// read, a lane insert after a write, the carrier reads and clobbers
+    /// around a call -- so an index into these operations stops agreeing with
+    /// an index into the lifted ones at the first insertion in a block.
+    /// Anything asking which instruction an operation came from had been
+    /// looking that up in the lifted index space and silently falling back to
+    /// the block address; on one pinned binary 118 of 134 cross-references
+    /// named an instruction that does not mention their target.
+    ///
+    /// `None` for a phi, which is a merge of edges rather than anything the
+    /// machine executes.
+    pub instruction_addrs: HashMap<u64, Vec<Option<u64>>>,
     /// Block addresses in order.
     pub block_order: Vec<u64>,
     /// Lifted storage provenance for SSA values.
@@ -392,6 +408,7 @@ impl RenamedFunction {
     pub fn new() -> Self {
         Self {
             blocks: HashMap::new(),
+            instruction_addrs: HashMap::new(),
             block_order: Vec::new(),
             canonical_storage_by_var: BTreeMap::new(),
             ambiguous_storage_vars: BTreeSet::new(),
@@ -462,6 +479,7 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
     for &addr in &result.block_order {
         control.poll()?;
         result.blocks.insert(addr, Vec::new());
+        result.instruction_addrs.insert(addr, Vec::new());
     }
 
     // Prepopulate phi placeholders so predecessor-edge source propagation can update them
@@ -469,6 +487,10 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
     for &addr in &result.block_order {
         control.poll()?;
         let block_ops = result.blocks.get_mut(&addr).expect("preinitialized block");
+        let block_addrs = result
+            .instruction_addrs
+            .get_mut(&addr)
+            .expect("preinitialized block");
         for phi in phi_placement.get_phis(addr) {
             control.poll()?;
             let sources: Vec<SSAVar> = phi
@@ -476,6 +498,7 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
                 .iter()
                 .map(|_| ctx.var_at(&phi.identity, 0))
                 .collect();
+            block_addrs.push(None);
             block_ops.push(SSAOp::Phi {
                 dst: ctx.var_at(&phi.identity, 0),
                 sources,
@@ -588,6 +611,11 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         .map(|_| ctx.var_at(&phi.identity, 0))
                         .collect();
                     block_ops.insert(phi_idx, SSAOp::Phi { dst, sources });
+                    result
+                        .instruction_addrs
+                        .get_mut(&block_addr)
+                        .expect("preinitialized block")
+                        .insert(phi_idx, None);
                 }
             }
         }
@@ -718,6 +746,16 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         identity.storage,
                     );
                 }
+                // Everything this iteration appended -- the lane projections,
+                // the carrier reads and clobbers around a call, the renamed op
+                // itself -- was emitted for this instruction, so one alignment
+                // at the end of the iteration covers them all.
+                let renamed = result.blocks[&block_addr].len();
+                let addrs = result
+                    .instruction_addrs
+                    .get_mut(&block_addr)
+                    .expect("preinitialized block");
+                addrs.resize(renamed, op_addr);
             }
         }
 

@@ -2403,6 +2403,14 @@ pub struct SSAFunction {
     /// The same addresses as `blocks`, in the same order, for readers that want
     /// the addresses without the operations.
     block_order: Vec<u64>,
+    /// Which machine instruction each operation came from, by its site.
+    ///
+    /// Renaming inserts operations the lift never had, so an index into these
+    /// operations stops agreeing with an index into the lifted ones at the
+    /// first insertion in a block. This is the answer in *this* index space,
+    /// recorded where both were known. Absent for a phi and for anything the
+    /// lifter stamped no address on.
+    op_instruction_addrs: BTreeMap<(u64, usize), u64>,
     /// Canonical lifted storage retained during SSA renaming.
     ///
     /// Values are attached from raw varnodes at the lift/SSA seam. Consumers
@@ -2515,6 +2523,19 @@ fn block_at_mut<'a>(
     blocks.get_mut(*index.get(&addr)? as usize)
 }
 
+impl SSAFunction {
+    /// Which machine instruction this operation came from.
+    ///
+    /// The site is in the operations' own index space: a block address and an
+    /// index into that block's `ops`. `None` for an operation renaming added
+    /// and for anything the lifter stamped no address on.
+    pub fn instruction_at(&self, block_addr: u64, op_idx: usize) -> Option<u64> {
+        self.op_instruction_addrs
+            .get(&(block_addr, op_idx))
+            .copied()
+    }
+}
+
 /// Where each block sits in a reverse-postorder block vector.
 fn block_index_of(blocks: &[SSABlock]) -> BTreeMap<u64, u32> {
     blocks
@@ -2537,6 +2558,7 @@ impl Clone for SSAFunction {
             blocks: self.blocks.clone(),
             block_index: self.block_index.clone(),
             block_order: self.block_order.clone(),
+            op_instruction_addrs: self.op_instruction_addrs.clone(),
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             decompile_prep_facts: self.decompile_prep_facts.clone(),

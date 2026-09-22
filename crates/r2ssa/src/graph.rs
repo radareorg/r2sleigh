@@ -218,6 +218,13 @@ pub struct SsaGraph {
     pub(crate) value_index: Vec<u32>,
     pub op_inst_by_site: BTreeMap<(u64, usize), InstId>,
     pub op_site_by_inst: BTreeMap<InstId, (u64, usize)>,
+    /// Which machine instruction each operation came from.
+    ///
+    /// Carried here from the function so a consumer holding only the graph can
+    /// ask. Absent for a phi and for anything the lifter stamped no address on.
+    pub(crate) instruction_by_inst: BTreeMap<InstId, u64>,
+    /// The inverse: every operation one machine instruction became, in order.
+    pub(crate) insts_by_instruction: BTreeMap<u64, Vec<InstId>>,
     /// Entry-lane projections by value, valued by the lane's storage
     /// (`SSAFunction::mint_entry_lane_projections`).
     pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
@@ -324,6 +331,8 @@ impl SsaGraph {
         let mut insts = Vec::new();
         let mut op_inst_by_site = BTreeMap::new();
         let mut op_site_by_inst = BTreeMap::new();
+        let mut instruction_by_inst = BTreeMap::new();
+        let mut insts_by_instruction: BTreeMap<u64, Vec<InstId>> = BTreeMap::new();
 
         let intern_value = |var: &SSAVar,
                             values: &mut Vec<GraphValue>,
@@ -453,6 +462,10 @@ impl SsaGraph {
                 blocks[block_id.0 as usize].insts.push(inst_id);
                 op_inst_by_site.insert((block.addr, op_idx), inst_id);
                 op_site_by_inst.insert(inst_id, (block.addr, op_idx));
+                if let Some(from) = function.instruction_at(block.addr, op_idx) {
+                    instruction_by_inst.insert(inst_id, from);
+                    insts_by_instruction.entry(from).or_default().push(inst_id);
+                }
             }
         }
 
@@ -479,6 +492,8 @@ impl SsaGraph {
             value_index,
             op_inst_by_site,
             op_site_by_inst,
+            instruction_by_inst,
+            insts_by_instruction,
             formal_projections,
         }
     }
@@ -536,6 +551,26 @@ impl SsaGraph {
 
     pub fn op_site_for_inst(&self, id: InstId) -> Option<(u64, usize)> {
         self.op_site_by_inst.get(&id).copied()
+    }
+
+    /// Which machine instruction this operation came from.
+    ///
+    /// The one answer to that question. Looking it up in the lifted operations'
+    /// index space instead was wrong from the first operation renaming added
+    /// to a block, and wrong in silence.
+    pub fn instruction_for_inst(&self, id: InstId) -> Option<u64> {
+        self.instruction_by_inst.get(&id).copied()
+    }
+
+    /// Every operation one machine instruction became, in order.
+    ///
+    /// This used to be answered by finding the instruction's span of *lifted*
+    /// operations and reading that range out of the graph, which is a range in
+    /// the wrong index space and misses a block the CFG split.
+    pub fn insts_for_instruction(&self, from: u64) -> &[InstId] {
+        self.insts_by_instruction
+            .get(&from)
+            .map_or(&[], Vec::as_slice)
     }
 
     pub fn block(&self, id: BlockId) -> Option<&GraphBlock> {

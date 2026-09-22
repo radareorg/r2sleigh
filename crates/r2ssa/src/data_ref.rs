@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use r2il::{ArchSpec, R2ILBlock, SpaceId};
 use serde::{Deserialize, Serialize};
@@ -373,11 +373,7 @@ fn push_code_ref(
     }
 }
 
-fn collect_graph_refs<F>(
-    graph: &SsaGraph,
-    op_sources: &BTreeMap<(u64, usize), u64>,
-    reload_source: F,
-) -> Vec<DataRefFact>
+fn collect_graph_refs<F>(graph: &SsaGraph, reload_source: F) -> Vec<DataRefFact>
 where
     F: FnMut(&GraphInst, ValueId, &SSAOp) -> Option<ValueId>,
 {
@@ -387,13 +383,15 @@ where
         let InstPayload::Op(op) = &inst.payload else {
             continue;
         };
-        let Some((block_addr, op_idx)) = graph.op_site_for_inst(inst.id) else {
+        let Some((block_addr, _)) = graph.op_site_for_inst(inst.id) else {
             continue;
         };
-        let from = op_sources
-            .get(&(block_addr, op_idx))
-            .copied()
-            .unwrap_or(block_addr);
+        // The graph's own answer. This used to be looked up in a table keyed
+        // by the *lifted* operation index, which renaming's insertions make a
+        // different index space, and a miss fell silently to the block
+        // address; on one pinned binary that named the wrong instruction for
+        // 118 of 134 references.
+        let from = graph.instruction_for_inst(inst.id).unwrap_or(block_addr);
         match op {
             SSAOp::Copy { .. }
             | SSAOp::Cast { .. }
@@ -468,14 +466,12 @@ where
 
 /// Recover references from one sealed SSA artifact.
 ///
-/// `op_sources` binds graph operation sites to their native instruction. When
-/// an operation has no finer source address, its canonical block address is
-/// used. No variable display spelling participates in identity or propagation.
-pub fn data_refs_from_artifact_with_op_sources(
-    artifact: &SsaArtifact,
-    op_sources: &BTreeMap<(u64, usize), u64>,
-) -> Vec<DataRefFact> {
-    collect_graph_refs(artifact.graph(), op_sources, |inst, output, op| {
+/// Which instruction an operation came from is the graph's own answer. When it
+/// has none -- a phi, or an operation the lifter stamped nothing on -- the
+/// canonical block address is used. No variable display spelling participates
+/// in identity or propagation.
+pub fn data_refs_from_artifact(artifact: &SsaArtifact) -> Vec<DataRefFact> {
+    collect_graph_refs(artifact.graph(), |inst, output, op| {
         let SSAOp::Load { space, .. } = op else {
             return None;
         };
@@ -503,22 +499,7 @@ pub fn data_refs_from_blocks(
     if artifact.graph().blocks.is_empty() {
         return None;
     }
-    let op_sources = blocks
-        .iter()
-        .flat_map(|block| {
-            block.ops.iter().enumerate().map(|(op_idx, _)| {
-                let instruction_addr = block
-                    .op_metadata(op_idx)
-                    .and_then(|metadata| metadata.instruction_addr)
-                    .unwrap_or(block.addr);
-                ((block.addr, op_idx), instruction_addr)
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
-    Some(data_refs_from_artifact_with_op_sources(
-        &artifact,
-        &op_sources,
-    ))
+    Some(data_refs_from_artifact(&artifact))
 }
 
 #[cfg(test)]
@@ -526,6 +507,7 @@ mod tests {
     use super::*;
     use crate::{BlockId, CanonicalStorageId, GraphBlock, GraphValue, InstId, SSAVar, UseSite};
     use r2il::{R2ILOp, Varnode};
+    use std::collections::BTreeMap;
 
     fn graph_value(id: u32, var: SSAVar, space: CanonicalStorageSpace, offset: u64) -> GraphValue {
         GraphValue {
@@ -542,6 +524,15 @@ mod tests {
     fn graph_with_ops(
         values: Vec<GraphValue>,
         ops: Vec<(Vec<ValueId>, Option<ValueId>, SSAOp)>,
+    ) -> SsaGraph {
+        graph_with_ops_from(values, ops, BTreeMap::new())
+    }
+
+    /// The same, saying which instruction each operation came from.
+    fn graph_with_ops_from(
+        values: Vec<GraphValue>,
+        ops: Vec<(Vec<ValueId>, Option<ValueId>, SSAOp)>,
+        instruction_by_inst: BTreeMap<InstId, u64>,
     ) -> SsaGraph {
         let block = BlockId(0);
         let mut insts = Vec::new();
@@ -596,6 +587,8 @@ mod tests {
             value_index,
             op_inst_by_site,
             op_site_by_inst,
+            instruction_by_inst,
+            insts_by_instruction: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
         }
     }
@@ -608,7 +601,9 @@ mod tests {
         let second = SSAVar::new("alias", 1, 8);
         let first_load = SSAVar::new("first_load", 1, 8);
         let second_load = SSAVar::new("second_load", 1, 8);
-        let graph = graph_with_ops(
+        // The two loads are the third and fourth operations of the block, and
+        // each came from its own instruction.
+        let graph = graph_with_ops_from(
             vec![
                 graph_value(
                     0,
@@ -663,9 +658,9 @@ mod tests {
                     },
                 ),
             ],
+            BTreeMap::from([(InstId(2), 0x401008), (InstId(3), 0x40100c)]),
         );
-        let sources = BTreeMap::from([((0x401000, 2), 0x401008), ((0x401000, 3), 0x40100c)]);
-        let refs = collect_graph_refs(&graph, &sources, |_, _, _| None);
+        let refs = collect_graph_refs(&graph, |_, _, _| None);
         assert!(refs.contains(&DataRefFact::data(0x401008, 0x410000, SpaceId::Ram)));
         assert!(refs.contains(&DataRefFact::data(0x40100c, 0x520000, SpaceId::Ram)));
         assert!(!refs.contains(&DataRefFact::data(0x401008, 0x520000, SpaceId::Ram)));
@@ -691,35 +686,106 @@ mod tests {
                 },
             )],
         );
-        assert!(collect_graph_refs(&graph, &BTreeMap::new(), |_, _, _| None).is_empty());
+        assert!(collect_graph_refs(&graph, |_, _, _| None).is_empty());
+    }
+
+    /// One instruction's operations, as the lifter hands them over.
+    fn instruction(addr: u64, size: u32, ops: Vec<R2ILOp>) -> R2ILBlock {
+        let mut block = R2ILBlock::new(addr, size);
+        for op in ops {
+            block.push(op);
+        }
+        block
     }
 
     #[test]
     fn artifact_api_uses_exact_constants_and_op_source_sites() {
-        let mut block = R2ILBlock::new(0x404000, 0x20);
-        block.push(R2ILOp::Copy {
-            dst: Varnode::unique(0x10, 8),
-            src: Varnode::constant(0x404d00, 8),
-        });
-        block.push(R2ILOp::IntAdd {
-            dst: Varnode::unique(0x20, 8),
-            a: Varnode::unique(0x10, 8),
-            b: Varnode::constant(0x108, 8),
-        });
-        block.push(R2ILOp::Load {
-            dst: Varnode::unique(0x30, 8),
-            space: SpaceId::Ram,
-            addr: Varnode::unique(0x20, 8),
-        });
-        let artifact = SsaArtifact::for_data_refs(&[block], None).expect("valid SSA artifact");
-        let sources = BTreeMap::from([
-            ((0x404000, 0), 0x404008),
-            ((0x404000, 1), 0x40400c),
-            ((0x404000, 2), 0x404010),
-        ]);
-        let refs = data_refs_from_artifact_with_op_sources(&artifact, &sources);
+        // Four instructions joined the way the lifter joins them, so each
+        // operation carries the address it came from rather than a table
+        // saying so beside it.
+        let blocks = [R2ILBlock::join(
+            0x404000,
+            0x20,
+            [
+                instruction(
+                    0x404008,
+                    4,
+                    vec![R2ILOp::Copy {
+                        dst: Varnode::unique(0x10, 8),
+                        src: Varnode::constant(0x404d00, 8),
+                    }],
+                ),
+                instruction(
+                    0x40400c,
+                    4,
+                    vec![R2ILOp::IntAdd {
+                        dst: Varnode::unique(0x20, 8),
+                        a: Varnode::unique(0x10, 8),
+                        b: Varnode::constant(0x108, 8),
+                    }],
+                ),
+                instruction(
+                    0x404010,
+                    4,
+                    vec![R2ILOp::Load {
+                        dst: Varnode::unique(0x30, 8),
+                        space: SpaceId::Ram,
+                        addr: Varnode::unique(0x20, 8),
+                    }],
+                ),
+            ],
+        )];
+        let artifact = SsaArtifact::for_data_refs(&blocks, None).expect("valid SSA artifact");
+        let refs = data_refs_from_artifact(&artifact);
         assert!(refs.contains(&DataRefFact::data(0x40400c, 0x404e08, SpaceId::Ram)));
         assert!(refs.contains(&DataRefFact::data(0x404010, 0x404e08, SpaceId::Ram)));
+    }
+
+    #[test]
+    fn a_reference_is_attributed_to_the_instruction_that_makes_it() {
+        // A lane write first, so renaming inserts an operation the lift never
+        // had. Everything after it sits at a different index than it did in
+        // the lift, and a table keyed by the lifted index names the wrong
+        // instruction from there on.
+        let mut arch = ArchSpec::new("x86-64");
+        arch.add_register(r2il::RegisterDef::sub("EAX", 0, 4, "RAX"));
+        arch.add_register(r2il::RegisterDef::new("RAX", 0, 8));
+        let blocks = [R2ILBlock::join(
+            0x404000,
+            0x20,
+            [
+                instruction(
+                    0x404008,
+                    4,
+                    vec![R2ILOp::Copy {
+                        dst: Varnode::register(0, 4),
+                        src: Varnode::constant(1, 4),
+                    }],
+                ),
+                instruction(
+                    0x40400c,
+                    4,
+                    vec![R2ILOp::Copy {
+                        dst: Varnode::unique(0x10, 8),
+                        src: Varnode::constant(0x404d00, 8),
+                    }],
+                ),
+                instruction(
+                    0x404010,
+                    4,
+                    vec![R2ILOp::Load {
+                        dst: Varnode::unique(0x30, 8),
+                        space: SpaceId::Ram,
+                        addr: Varnode::unique(0x10, 8),
+                    }],
+                ),
+            ],
+        )];
+        let refs = data_refs_from_blocks(&blocks, Some(&arch)).expect("the body names an address");
+        assert!(
+            refs.contains(&DataRefFact::data(0x404010, 0x404d00, SpaceId::Ram)),
+            "the reference was attributed to another instruction: {refs:?}"
+        );
     }
 }
 

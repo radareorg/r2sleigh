@@ -31288,3 +31288,64 @@ byte-identical on three binaries and `ax /bin/ls` fell only from 0.34 s to
 function and the reduced SSA build behind `data_refs_from_blocks` is about
 2.1 ms, so the duplicated walk was never the cost. Eliminating the
 reduced-versus-full split is what would move this, and that is step 2.
+
+## Which instruction an operation came from
+
+Three index spaces were being compared as if they were one. `BasicBlock::op_instruction_addrs`
+is keyed by the *lifted* operation index; `SsaGraph::op_inst_by_site` by the
+*renamed* one; and renaming inserts operations the lift never had -- a lane
+projection before a read, a lane insert after a write, a carrier read before
+every call and a run of clobbers after it -- so the two stop agreeing at the
+first insertion in a block. Two consumers bridged them anyway, and both fell
+back silently when the lookup missed.
+
+Measured on `tests/coverage/pinned/hashes_gcc_x64_O2`, comparing every
+cross-reference against the instruction it was attributed to:
+
+| | before | after |
+|---|---:|---:|
+| references reported | 134 | 134 |
+| return addresses attributed to their own call | 7 | 34 |
+| attributed to an instruction that spells nothing | **47** | **4** |
+
+`endbr64` was said to reference a string; `xor eax, eax` was said to reference
+three. The four that remain are folded products (`imul rax, rcx` naming the
+constant its operands multiply to), which is a different question about whether
+a product is a reference at all.
+
+The fix records the answer where both index spaces are known, which is
+renaming: `SSAFunction::instruction_at`, carried onto the graph as
+`instruction_for_inst` and its inverse `insts_for_instruction`. The obsolete
+`op_sources` parameter is gone from the data-ref entry points, so there is one
+answer to the question and no table to get out of step.
+
+### A dispatch is gapped around its transfer
+
+Making the span correct exposed a rule that contradicted itself. A marked gap
+covers a whole machine instruction, and no marked gap may cover a control
+transfer -- which together forbid any gap over a dispatch, since a jump table
+addresses, reads and branches through the table in one instruction. Previously
+the span lookup missed and the gap covered four operations that were not the
+instruction's, so the contradiction never showed.
+
+The resolution is the argument the effect ledger already makes for the transfer
+itself: a certified switch expresses the transfer by which case block the code
+sits in, so the gap need not stand in for it. The gap now covers the
+instruction minus a transfer a certificate already accounts for.
+
+**Still open, and worth a decision.** On the jump-table fixture the rendering is
+
+```
+/* r2dec gap: planned_elided_value_rendered at 0x1005:5 covering 4 ops */
+switch (EDI_0) { ... }
+```
+
+A fully proved four-case switch carries a marked gap over its own dispatch, and
+five obligations are counted as gapped. The cause is that the table read's value
+is elided as `DirectControlTarget` -- its only reader is the branch, which the
+switch spells -- while the read still renders a statement that names it. Three
+layers can each be made to accommodate that (the switch certificate could name
+the dispatch it subsumes, the effect ledger could discharge the read, the
+renderer could decline to materialise it), which by this project's own rule
+means the work belongs a level up: the structuring should consume the dispatch's
+operations rather than leave them for the renderer to explain.

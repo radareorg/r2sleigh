@@ -26,6 +26,7 @@ impl SSAFunction {
             block_index: block_index_of(&ordered),
             blocks: ordered,
             block_order,
+            op_instruction_addrs: BTreeMap::new(),
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
             decompile_prep_facts: None,
@@ -487,18 +488,39 @@ impl SSAFunction {
         // cloned: holding both copies doubled every operation of the function,
         // and each operation owns up to four named variables.
         let mut renamed_blocks = renamed.blocks;
+        let mut renamed_addrs = renamed.instruction_addrs;
         let renamed_block_order = renamed.block_order;
         let renamed_storage = renamed.canonical_storage_by_var;
         let mut ssa_blocks = Vec::with_capacity(renamed_block_order.len());
+        let mut op_instruction_addrs = BTreeMap::new();
         for &addr in &renamed_block_order {
             control.poll()?;
             let cfg_block = cfg.get_block(addr).ok_or_else(malformed_ssa_input)?;
             let ops = renamed_blocks.remove(&addr).unwrap_or_default();
+            let mut instruction_addrs = renamed_addrs.remove(&addr).unwrap_or_default();
+            // Renaming keeps the two in step; an operation with no address
+            // beside it would silently take the next operation's, so the
+            // shorter vector is padded rather than trusted.
+            instruction_addrs.resize(ops.len(), None);
 
-            // Separate phi nodes from other ops
+            // Separate phi nodes from other ops. The addresses travel with
+            // them: a phi is dropped and every other operation keeps the
+            // instruction it was emitted for, at its new index.
             let (phi_ops, other_ops): (Vec<_>, Vec<_>) = ops
                 .into_iter()
-                .partition(|op| matches!(op, SSAOp::Phi { .. }));
+                .zip(instruction_addrs)
+                .partition(|(op, _)| matches!(op, SSAOp::Phi { .. }));
+            let phi_ops = phi_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
+            let other_ops = other_ops
+                .into_iter()
+                .enumerate()
+                .map(|(op_idx, (op, from))| {
+                    if let Some(from) = from {
+                        op_instruction_addrs.insert((addr, op_idx), from);
+                    }
+                    op
+                })
+                .collect::<Vec<_>>();
 
             // Convert phi ops to PhiNode structs
             let preds = cfg.predecessors(addr);
@@ -548,6 +570,7 @@ impl SSAFunction {
             block_index: block_index_of(&ssa_blocks),
             block_order: renamed_block_order,
             blocks: ssa_blocks,
+            op_instruction_addrs,
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
             decompile_prep_facts: None,
