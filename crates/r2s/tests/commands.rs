@@ -458,6 +458,24 @@ mod listing {
         insta::assert_snapshot!("reads_pd", run.out);
     }
 
+    /// The listing radare2 cannot write: every line carrying the range its
+    /// value was proved to lie in.
+    #[test]
+    fn what_the_engine_proved_is_pinned() {
+        let run = super::r2s("s 0x401330; pdf");
+        assert!(run.ok, "{}", run.out);
+        insta::assert_snapshot!("proved_pdf", run.out);
+    }
+
+    /// `pd` stays cheap: the expensive listing is the one that was asked for.
+    #[test]
+    fn a_plain_listing_proves_nothing_about_a_value() {
+        let plain = super::r2s("s 0x401330; pd 12");
+        let proved = super::r2s("s 0x401330; pdf");
+        assert!(!plain.out.contains(" in ["), "{}", plain.out);
+        assert!(proved.out.contains(" in ["), "{}", proved.out);
+    }
+
     #[test]
     fn the_aarch64_listing_is_pinned() {
         let run = at(

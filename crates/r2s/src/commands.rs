@@ -51,6 +51,7 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "ir" => relocations(session),
         "px" => hexdump(session, argument),
         "pd" => disassemble(session, argument),
+        "pdf" => disassemble_function(session, argument),
         "pdd" => decompile(session, argument),
         "afl" => discovered(session),
         "f" => flags(session),
@@ -729,13 +730,16 @@ fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> 
     session.program.ensure_current()?;
     let session: &Session = session;
 
-    let memory = Memory {
-        program: &session.program,
-        endian: session.program.endian(),
+    let answered = r2engine::query::Answered {
+        decoders: &session.program,
+        memory: Memory {
+            program: &session.program,
+            endian: session.program.endian(),
+        },
+        facts: None,
     };
     let answer = listing(
-        &session.program,
-        &memory,
+        &answered,
         Listing { start, count },
         r2engine::query::Work::BlockLocal,
         session.program.revision(),
@@ -812,6 +816,70 @@ fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> Str
     }
 }
 
+/// `pdf`: the function at the cursor, listed with what the engine proved.
+///
+/// The listing radare2 cannot write. `pd` stays cheap and claims only what one
+/// instruction and its neighbours show; this pays for the walk and the
+/// preparation, and every line can then carry the range its value was proved
+/// to lie in.
+#[cfg(feature = "sleigh")]
+fn disassemble_function(session: &mut Session, argument: &str) -> Result<String, String> {
+    use r2engine::query::{Listing, Memory, listing};
+
+    let addr = parse_number(session, argument)?;
+    session.program.ensure_assembled(addr)?;
+    let session: &Session = session;
+    let target = session.program.target(addr)?;
+    let prepared = session
+        .program
+        .analysed(&target, addr)
+        .map_err(|refusal| refusal.to_string())?;
+    // The function is exactly what the analysis covers, so its extent is the
+    // artifact's own rather than a guess from the next symbol's address.
+    let function = prepared.artifact().artifact().function();
+    let (start, end) = function
+        .blocks()
+        .iter()
+        .fold((u64::MAX, 0), |(low, high), block| {
+            (
+                low.min(block.addr),
+                high.max(block.addr + u64::from(block.size)),
+            )
+        });
+    if start == u64::MAX {
+        return Err(format!("no blocks at {addr:#x}"));
+    }
+    let answered = r2engine::query::Answered {
+        decoders: &session.program,
+        memory: Memory {
+            program: &session.program,
+            endian: session.program.endian(),
+        },
+        facts: Some(prepared.artifact().artifact()),
+    };
+    let answer = listing(
+        &answered,
+        Listing {
+            start,
+            // One line per instruction, and no instruction is shorter than a
+            // byte, so the extent bounds the count.
+            count: usize::try_from(end - start).unwrap_or(usize::MAX),
+        },
+        r2engine::query::Work::Function,
+        session.program.revision(),
+    );
+    let mut out = String::new();
+    for line in answer.value.iter().take_while(|line| line.address < end) {
+        out.push_str(&listed(session, line));
+    }
+    Ok(out.trim_end().to_owned())
+}
+
+#[cfg(not(feature = "sleigh"))]
+fn disassemble_function(_session: &mut Session, _argument: &str) -> Result<String, String> {
+    Err("r2s: built without the sleigh feature".to_owned())
+}
+
 /// How well supported a claim about this number is, where anything claims it.
 ///
 /// A number no annotation claims is a coincidence: the table knows an address
@@ -836,25 +904,52 @@ fn claim(
 /// now, and the instruction text stays what the machine encodes.
 #[cfg(feature = "sleigh")]
 fn held(session: &Session, line: &r2engine::query::Line) -> String {
-    let mut notes = Vec::new();
-    for annotation in &line.annotations {
-        let r2engine::query::AnnotationKind::Holds {
-            address,
-            width,
-            value,
-        } = annotation.kind
-        else {
-            continue;
-        };
-        let named = match session.program.names.of(value) {
-            Some(name) => format!(" {}", name.spelled()),
-            None => String::new(),
-        };
-        notes.push(format!("[{address:#x}:{width}]={value:#x}{named}"));
-    }
+    let notes = line
+        .annotations
+        .iter()
+        .filter_map(|annotation| note(session, line.address, annotation.kind))
+        .collect::<Vec<_>>();
     match notes.is_empty() {
         true => String::new(),
         false => format!(" ; {}", notes.join(" ")),
+    }
+}
+
+/// One annotation, as a reader reads it.
+#[cfg(feature = "sleigh")]
+fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Option<String> {
+    match kind {
+        r2engine::query::AnnotationKind::Holds {
+            address,
+            width,
+            value,
+        } => {
+            let named = session
+                .program
+                .names
+                .of(value)
+                .map(r2engine::names::Name::spelled);
+            Some(format!(
+                "[{address:#x}:{width}]={value:#x}{}",
+                named.map(|name| format!(" {name}")).unwrap_or_default()
+            ))
+        }
+        // What the analysis proved the value lies in, wherever it is live. A
+        // single value is written as itself; a range says so. The machine's
+        // words only: every flag a line sets is proved to hold nought or one,
+        // which is true and says nothing.
+        r2engine::query::AnnotationKind::Bounds {
+            storage, low, high, ..
+        } => session
+            .program
+            .is_machine_word(at, storage)
+            .then(|| session.program.spell_storage(at, storage))
+            .flatten()
+            .map(|name| match low == high {
+                true => format!("{name} = {low:#x}"),
+                false => format!("{name} in [{low:#x}, {high:#x}]"),
+            }),
+        _ => None,
     }
 }
 

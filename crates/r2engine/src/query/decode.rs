@@ -5,7 +5,7 @@
 //! crosses a boundary and kept the decoder it started with decodes the rest of
 //! itself wrongly.
 
-use super::records::{Decoders, Line, Listing, Memory};
+use super::records::{Answered, Line, Listing};
 use super::{Answer, Completion, Revision, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
@@ -13,12 +13,12 @@ const DECODE_WINDOW: usize = 16;
 
 /// Decode a run of instructions, saying as much about each as `work` allows.
 pub fn listing(
-    decoders: &dyn Decoders,
-    memory: &Memory<'_>,
+    answered: &Answered<'_>,
     request: Listing,
     work: Work,
     revision: Revision,
 ) -> Answer<Vec<Line>> {
+    let (decoders, memory) = (answered.decoders, &answered.memory);
     let mut lines = Vec::with_capacity(request.count);
     // The lift of each line, kept until the run has been read: whether an
     // instruction's own result is an address or a step towards one is a fact
@@ -76,7 +76,7 @@ pub fn listing(
         pc += size as u64;
     }
 
-    super::annotate::over_run(memory, work, &lifts, &mut lines);
+    super::annotate::over_run(answered, work, &lifts, &mut lines);
     Answer {
         value: lines,
         revision,
@@ -88,7 +88,7 @@ pub fn listing(
 mod tests {
     use super::*;
     use crate::query::Support;
-    use crate::query::records::AnnotationKind;
+    use crate::query::records::{AnnotationKind, Decoders, Memory};
     use r2il::Endianness;
     use r2sleigh_lift::{EmbeddedMachine, embedded_machine};
     use r2ssa::body::Program;
@@ -128,13 +128,16 @@ mod tests {
             base: BASE,
             bytes: bytes.to_vec(),
         };
-        let memory = Memory {
-            program: &program,
-            endian: Endianness::Little,
+        let answered = Answered {
+            decoders: &machine,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            facts: None,
         };
         listing(
-            &machine,
-            &memory,
+            &answered,
             Listing { start: BASE, count },
             work,
             Revision::default(),
@@ -169,13 +172,16 @@ mod tests {
             thumb: embedded_machine("arm-thumb").expect("Thumb is compiled in"),
             at: BASE + 4,
         };
-        let memory = Memory {
-            program: &Mapped { base: BASE, bytes },
-            endian: Endianness::Little,
+        let answered = Answered {
+            decoders: &decoders,
+            memory: Memory {
+                program: &Mapped { base: BASE, bytes },
+                endian: Endianness::Little,
+            },
+            facts: None,
         };
         let answer = listing(
-            &decoders,
-            &memory,
+            &answered,
             Listing {
                 start: BASE,
                 count: 2,

@@ -302,6 +302,39 @@ impl OpenProgram {
         self.control = control;
     }
 
+    /// Whether a storage is one of the machine's words.
+    ///
+    /// What separates `rdx` from `cf` for a reader: a listing that reported
+    /// every proved range said `cf in [0x0, 0x1]` on every line that sets a
+    /// flag, which is true, proved, and only says that a flag is a flag. The
+    /// width comes from the architecture rather than from a number chosen to
+    /// look right.
+    pub fn is_machine_word(&self, addr: u64, storage: r2ssa::CanonicalStorageId) -> bool {
+        storage.space == r2ssa::CanonicalStorageSpace::Register
+            && self
+                .machine_at(addr)
+                .is_some_and(|machine| storage.size == machine.arch.addr_size)
+    }
+
+    /// The register a storage names, as this machine spells it.
+    ///
+    /// The shell prints what the engine proved about a value, and a value is
+    /// about a storage; naming it needs the register table, which belongs to
+    /// the machine and therefore here.
+    pub fn spell_storage(&self, addr: u64, storage: r2ssa::CanonicalStorageId) -> Option<String> {
+        let machine = self.machine_at(addr)?;
+        machine
+            .arch
+            .registers
+            .iter()
+            .find(|register| {
+                register.offset == storage.offset
+                    && register.size == storage.size
+                    && storage.space == r2ssa::CanonicalStorageSpace::Register
+            })
+            .map(|register| register.name.to_lowercase())
+    }
+
     /// What the memo has been asked and what it holds.
     pub fn memo_stats(&self) -> crate::query::MemoStats {
         self.memo.stats()

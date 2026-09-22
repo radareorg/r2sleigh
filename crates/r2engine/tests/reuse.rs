@@ -64,13 +64,16 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
     let mut program =
         OpenProgram::open(pinned().to_str().expect("the fixture path is text")).expect("it opens");
     program.ensure_assembled(FUNCTION).expect("it assembles");
-    let memory = r2engine::query::Memory {
-        program: &program,
-        endian: program.endian(),
+    let answered = r2engine::query::Answered {
+        decoders: &program,
+        memory: r2engine::query::Memory {
+            program: &program,
+            endian: program.endian(),
+        },
+        facts: None,
     };
     let answer = r2engine::query::listing(
-        &program,
-        &memory,
+        &answered,
         r2engine::query::Listing {
             start: FUNCTION,
             count: 64,

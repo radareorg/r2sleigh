@@ -9,7 +9,7 @@ use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
 
 use super::Support;
 use super::Work;
-use super::records::{Annotation, AnnotationKind, Line, Memory};
+use super::records::{Annotation, AnnotationKind, Answered, Line, Memory};
 
 /// Say what each line's own lift says, and what the run says about it.
 ///
@@ -20,7 +20,7 @@ use super::records::{Annotation, AnnotationKind, Line, Memory};
 /// base, and only the `add` after it says the address is fifty bytes further
 /// on.
 pub(super) fn over_run(
-    memory: &Memory<'_>,
+    answered: &Answered<'_>,
     work: Work,
     lifts: &[Option<r2il::R2ILBlock>],
     lines: &mut [Line],
@@ -28,6 +28,7 @@ pub(super) fn over_run(
     if work == Work::Decode {
         return;
     }
+    let memory = &answered.memory;
     for (index, line) in lines.iter_mut().enumerate() {
         let (Some(lift), Some(syntax)) = (lifts.get(index).and_then(Option::as_ref), &line.syntax)
         else {
@@ -37,20 +38,9 @@ pub(super) fn over_run(
         if work >= Work::BlockLocal {
             kinds.extend(computed_by(lift, &lifts[index + 1..]));
         }
-        // What a read finds there is a fact about this revision, so it is said
-        // beside the read rather than folded into it.
-        for index in 0..kinds.len() {
-            let AnnotationKind::Reads { address, width } = kinds[index] else {
-                continue;
-            };
-            let Some(value) = memory.word(address, width) else {
-                continue;
-            };
-            kinds.push(AnnotationKind::Holds {
-                address,
-                width,
-                value,
-            });
+        kinds.extend(held_at(memory, &kinds));
+        if work >= Work::Function {
+            kinds.extend(proved_about(answered.facts, line.address));
         }
         line.annotations = kinds
             .into_iter()
@@ -63,6 +53,58 @@ pub(super) fn over_run(
     }
 }
 
+/// What this revision holds wherever the instruction reads.
+///
+/// Said beside the read rather than folded into it: the bytes there are a fact
+/// about this revision, and the load is a fact about the instruction.
+fn held_at(memory: &Memory<'_>, kinds: &[AnnotationKind]) -> Vec<AnnotationKind> {
+    kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            AnnotationKind::Reads { address, width } => Some(AnnotationKind::Holds {
+                address: *address,
+                width: *width,
+                value: memory.word(*address, *width)?,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the analysis proved about the values one instruction defines.
+///
+/// One range per value, and the range is the value's own: it is narrowed where
+/// the value is defined, so it holds wherever the value is live rather than at
+/// this instruction in particular.
+fn proved_about(facts: Option<&r2ssa::SsaArtifact>, address: u64) -> Vec<AnnotationKind> {
+    let Some(facts) = facts else {
+        return Vec::new();
+    };
+    let graph = facts.graph();
+    graph
+        .insts_for_instruction(address)
+        .iter()
+        .filter_map(|inst| {
+            let instruction = graph.inst(*inst)?;
+            let value = instruction.output?;
+            let range = facts.values().get(value)?;
+            // A range that spans the storage proves nothing about it, and a
+            // line that said `cf in [0x0, 0x1]` of a one-bit flag was saying
+            // only that the flag is a flag.
+            if range.is_top() {
+                return None;
+            }
+            let (low, high) = range.bounds()?;
+            Some(AnnotationKind::Bounds {
+                storage: instruction.canonical_storage?,
+                low,
+                high,
+                stride: range.stride().unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
 /// How well supported a claim of this shape is.
 fn support_for(kind: AnnotationKind) -> Support {
     match kind {
@@ -72,6 +114,8 @@ fn support_for(kind: AnnotationKind) -> Support {
         | AnnotationKind::Writes { .. } => Support::Decoded,
         // Folded, either within the instruction or across the run.
         AnnotationKind::Computes { .. } | AnnotationKind::Holds { .. } => Support::Folded,
+        // An over-approximation an analysis over the function established.
+        AnnotationKind::Bounds { .. } => Support::Solved,
     }
 }
 

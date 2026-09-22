@@ -20,7 +20,7 @@ pub mod records;
 
 pub use decode::listing;
 pub use memo::{Memo, MemoStats};
-pub use records::{Annotation, AnnotationKind, Decoders, Line, Listing, Memory};
+pub use records::{Annotation, AnnotationKind, Answered, Decoders, Line, Listing, Memory};
 
 /// How much work a request permits.
 ///
@@ -38,6 +38,9 @@ pub enum Work {
     /// three of them needs, and what says whether a number one instruction
     /// computes is an address or a step towards one.
     BlockLocal,
+    /// Walk the function and prepare it, so a line can carry what was proved
+    /// about the values it defines.
+    Function,
 }
 
 /// How well supported a claim about a number is, strongest first.
@@ -53,6 +56,9 @@ pub enum Support {
     Decoded,
     /// Constants folded, within one instruction or across a run of them.
     Folded,
+    /// An analysis over the whole function proved it, as a bound rather than a
+    /// value: true everywhere, exact nowhere in particular.
+    Solved,
     /// The number equals an address something names, and nothing in the
     /// instruction says it is used as one.
     Coincident,

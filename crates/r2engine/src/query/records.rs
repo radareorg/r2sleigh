@@ -54,6 +54,18 @@ impl Memory<'_> {
     }
 }
 
+/// What a listing is answered from.
+///
+/// The decoder, the bytes, and -- where the request paid for it -- what the
+/// engine proved about the function the run is inside. The three travel
+/// together from the request down into every line.
+pub struct Answered<'a> {
+    pub decoders: &'a dyn Decoders,
+    pub memory: Memory<'a>,
+    /// Absent below `Work::Function`, which is what keeps a listing cheap.
+    pub facts: Option<&'a r2ssa::SsaArtifact>,
+}
+
 /// A run of instructions, asked for by where it starts and how many.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Listing {
@@ -108,6 +120,19 @@ pub enum AnnotationKind {
     /// fifty bytes past. The difference is not in either instruction, which is
     /// why this is the rung above one.
     Computes { value: u64 },
+    /// The value this instruction defines lies in this range wherever it is
+    /// live.
+    ///
+    /// Not refined to this point. The range is narrowed where the value is
+    /// defined, because every execution that defines it passes there, so
+    /// reading it as what the storage holds *here* would claim more than was
+    /// proved.
+    Bounds {
+        storage: r2ssa::CanonicalStorageId,
+        low: u64,
+        high: u64,
+        stride: u64,
+    },
     /// The revision this answer names holds this value at that address.
     ///
     /// Not "the load returns it". Nothing here says the bytes will still be
@@ -129,6 +154,8 @@ impl AnnotationKind {
             | Self::Writes { address, .. }
             | Self::Holds { address, .. } => address,
             Self::Computes { value } => value,
+            // A range is about a storage, not about an address in the program.
+            Self::Bounds { low, .. } => low,
         }
     }
 }
