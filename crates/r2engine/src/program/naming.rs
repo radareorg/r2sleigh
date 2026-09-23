@@ -305,6 +305,8 @@ fn section_stubs(
     // Each reader: where its transfer is, where its run began, and the import.
     let mut readers: Vec<(u64, u64, String)> = Vec::new();
     let mut run = fresh_run(section.vaddr);
+    // Where each instruction of the run begins, and its first operation.
+    let mut starts: Vec<(u64, usize)> = Vec::new();
     let step = u64::from(alignment.max(1));
     let mut pc = section.vaddr;
     let end = section.vaddr + section.vsize;
@@ -329,6 +331,7 @@ fn section_stubs(
             _ => {
                 pc += step;
                 run = fresh_run(pc);
+                starts.clear();
                 continue;
             }
         };
@@ -336,6 +339,7 @@ fn section_stubs(
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
+        starts.push((pc, run.ops.len()));
         run.ops.extend(lifted.ops);
         run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
         let leaving_at = pc;
@@ -347,9 +351,10 @@ fn section_stubs(
         if let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
             && let Some(found) = slots.get(&slot.offset)
         {
-            readers.push((leaving_at, run.addr, (*found).to_owned()));
+            readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
         }
         run = fresh_run(pc);
+        starts.clear();
     }
 
     // The stubs are uniform cells filling the section's tail: whatever header
@@ -359,8 +364,7 @@ fn section_stubs(
     // twenty-byte header alike.
     let stride = match readers.as_slice() {
         [first, second, ..] => second.0.saturating_sub(first.0),
-        // One stub has no neighbour to measure against; its run is the cell,
-        // because nothing but a zero-byte pad can precede it in its section.
+        // One stub has no neighbour to measure against, so its cell is what its transfer needs.
         [(_, start, symbol)] => return vec![(*start, symbol.clone())],
         [] => return Vec::new(),
     };
@@ -376,6 +380,55 @@ fn section_stubs(
             Some((end.checked_sub(from_end)?, symbol))
         })
         .collect()
+}
+
+/// Where a stub begins: the longest tail of its run that only feeds the transfer or does nothing.
+///
+/// A stub's work before its transfer is computing where it goes. An instruction
+/// that stores, or writes what the transfer never reads, is not part of that:
+/// on x86 the zero pad after PLT0 decodes as `add byte [eax], al`. One that
+/// writes nothing stays, so a landing pad at the stub's head is its own.
+fn stub_start(run: &r2il::R2ILBlock, starts: &[(u64, usize)]) -> u64 {
+    let register = |varnode: &&r2il::Varnode| {
+        !matches!(varnode.space, r2il::SpaceId::Unique | r2il::SpaceId::Const)
+    };
+    let overlaps = |a: &r2il::Varnode, b: &r2il::Varnode| {
+        a.space == b.space
+            && a.offset < b.offset + u64::from(b.size)
+            && b.offset < a.offset + u64::from(a.size)
+    };
+    let mut needed: Vec<r2il::Varnode> = Vec::new();
+    let mut start = run.addr;
+    let ends = starts
+        .iter()
+        .skip(1)
+        .map(|(_, first)| *first)
+        .chain([run.ops.len()]);
+    let instructions: Vec<(u64, &[R2ILOp])> = starts
+        .iter()
+        .zip(ends)
+        .map(|((pc, first), end)| (*pc, &run.ops[*first..end]))
+        .collect();
+    for (index, (pc, ops)) in instructions.iter().enumerate().rev() {
+        let transfer = index + 1 == instructions.len();
+        let stores = ops.iter().any(|op| matches!(op, R2ILOp::Store { .. }));
+        let stray = ops
+            .iter()
+            .filter_map(R2ILOp::output)
+            .filter(register)
+            .any(|written| !needed.iter().any(|want| overlaps(want, written)));
+        if !transfer && (stores || stray) {
+            break;
+        }
+        needed.extend(
+            ops.iter()
+                .flat_map(R2ILOp::inputs)
+                .filter(register)
+                .cloned(),
+        );
+        start = *pc;
+    }
+    start
 }
 
 /// An empty run beginning here.

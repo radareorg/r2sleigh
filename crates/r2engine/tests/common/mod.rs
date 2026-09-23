@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Format, Mapping, OpenProgram, Section, Source, Symbol, SymbolKind,
+    Arch, Container, Format, Mapping, OpenProgram, Relocation, Section, Source, Symbol, SymbolKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -129,6 +129,24 @@ const ARM_THUMB: [u8; 0x30] = {
     code
 };
 
+/// The one import stub in `Literal::plt`, after PLT0 and four zero bytes.
+pub const PLT_STUB: u64 = BASE + 0x10;
+/// `call stub; ret`
+pub const PLT_CALLER: u64 = BASE + 0x20;
+/// The slot the stub jumps through, which the loader fills with `_Exit`.
+pub const PLT_SLOT: u64 = BASE + 0x1000;
+
+const PLT: [u8; 0x26] = [
+    0xff, 0x35, 0xea, 0x0f, 0x00, 0x00, // push qword [rip + 0xfea]
+    0xff, 0x25, 0xec, 0x0f, 0x00, 0x00, // jmp qword [rip + 0xfec]
+    0x00, 0x00, 0x00, 0x00, // the pad, which decodes as add byte [rax], al
+    0xff, 0x25, 0xea, 0x0f, 0x00, 0x00, // jmp qword [rip + 0xfea], the slot
+    0x68, 0x00, 0x00, 0x00, 0x00, // push 0
+    0xe9, 0xe0, 0xff, 0xff, 0xff, // jmp PLT0
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // call stub
+    0xc3, // ret
+];
+
 /// The bytes, the container's statement about them, and what has been written.
 pub struct Literal {
     code: &'static [u8],
@@ -206,6 +224,34 @@ impl Literal {
             symbol("$t", VENEER, SymbolKind::Mapping(Mapping::Thumb), false),
             symbol("$a", VENEER + 4, SymbolKind::Mapping(Mapping::Arm), false),
         ];
+        program
+    }
+
+    /// A `.plt` holding PLT0, the zero pad after it, and one stub, then a caller.
+    pub fn plt() -> Self {
+        let mut program = Self::new();
+        program.code = &PLT;
+        program.container.sections = vec![
+            Section {
+                name: ".plt".to_owned(),
+                vaddr: BASE,
+                vsize: 0x20,
+                is_code: true,
+                loaded: true,
+            },
+            Section {
+                name: ".text".to_owned(),
+                vaddr: PLT_CALLER,
+                vsize: 6,
+                is_code: true,
+                loaded: true,
+            },
+        ];
+        program.container.symbols.clear();
+        program.container.relocations = vec![Relocation {
+            vaddr: PLT_SLOT,
+            symbol: "_Exit".to_owned(),
+        }];
         program
     }
 
