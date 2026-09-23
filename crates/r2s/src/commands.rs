@@ -87,15 +87,9 @@ pub(crate) fn parse_number(session: &mut Session, text: &str) -> Result<u64, Str
     if let Ok(number) = text.parse::<u64>() {
         return Ok(number);
     }
-    if let Some(addr) = session.program.names().address_of(text) {
-        return Ok(addr);
-    }
-    // Import stubs are named only once there is a decoder to read them with.
-    session.program.ensure_current()?;
     session
         .program
-        .names()
-        .address_of(text)
+        .address_named(text)?
         .ok_or_else(|| format!("unknown address or flag '{}'", text))
 }
 

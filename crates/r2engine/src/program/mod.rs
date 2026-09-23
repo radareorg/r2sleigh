@@ -213,6 +213,27 @@ impl<S: Source> OpenProgram<S> {
             })
     }
 
+    /// The address a flag spelling names, with `entry0` always the declared
+    /// entry: Mach-O names that address `main`, and radare2 answers both.
+    pub fn address_named(&mut self, spelling: &str) -> Result<Option<u64>, String> {
+        if let Some(addr) = self.names.address_of(spelling) {
+            return Ok(Some(addr));
+        }
+        // Import stubs are named only once there is a decoder to read them with.
+        self.ensure_current()?;
+        let declared = || {
+            let entries = &self.source.container().entries;
+            entries
+                .iter()
+                .find(|entry| entry.kind == EntryKind::Main)
+                .map(|entry| entry.vaddr)
+        };
+        Ok(self
+            .names
+            .address_of(spelling)
+            .or_else(|| (spelling == "entry0").then(declared).flatten()))
+    }
+
     /// Which stub stands for which import, as of the last `ensure_current`.
     pub const fn imports(&self) -> &BTreeMap<u64, String> {
         &self.imports

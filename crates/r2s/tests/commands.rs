@@ -651,3 +651,13 @@ mod stripped {
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 }
+
+#[test]
+fn entry0_is_the_declared_entry_where_the_format_names_it_main() {
+    // `LC_MAIN` puts `main` on the entry, and radare2 answers `entry0` there too.
+    let macho = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../r2image/tests/data/function_starts.macho");
+    let run = on(macho, "s entry0; s; s main; s");
+    assert!(run.ok, "{}", run.out);
+    assert_eq!(run.out.lines().collect::<Vec<_>>(), ["0x100000344"; 2]);
+}
