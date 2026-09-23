@@ -501,11 +501,11 @@ mod listing {
         insta::assert_snapshot!("reads_pd", run.out);
     }
 
-    /// The listing radare2 cannot write: every line carrying the range its
-    /// value was proved to lie in.
+    /// The listing radare2 cannot write: a line carries the range of the value
+    /// it defines only where that says more than the write's own width.
     #[test]
     fn what_the_engine_proved_is_pinned() {
-        let run = super::r2s("s 0x401330; pdf");
+        let run = super::r2s("s 0x401330; pdf; s 0x401530; pdf");
         assert!(run.ok, "{}", run.out);
         insta::assert_snapshot!("proved_pdf", run.out);
     }
@@ -533,9 +533,9 @@ mod listing {
     /// `pd` stays cheap: the expensive listing is the one that was asked for.
     #[test]
     fn a_plain_listing_proves_nothing_about_a_value() {
-        let plain = super::r2s("s 0x401330; pd 12");
-        let proved = super::r2s("s 0x401330; pdf");
-        assert!(!plain.out.contains(" in ["), "{}", plain.out);
+        let plain = super::r2s("s 0x401530; pd 16");
+        let proved = super::r2s("s 0x401530; pdf");
+        assert!(!plain.out.contains("defines "), "{}", plain.out);
         assert!(proved.out.contains(" in ["), "{}", proved.out);
     }
 

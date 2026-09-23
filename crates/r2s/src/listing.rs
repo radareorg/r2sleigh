@@ -169,20 +169,15 @@ fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Op
                 named.map(|name| format!(" {name}")).unwrap_or_default()
             ))
         }
-        // What the analysis proved the value lies in, wherever it is live. A
-        // single value is written as itself; a range says so. The machine's
-        // words only: every flag a line sets is proved to hold nought or one,
-        // which is true and says nothing.
+        // The value this line defines, over its whole life: not what the storage holds at this point.
         r2engine::query::AnnotationKind::Bounds {
             storage, low, high, ..
         } => session
             .program
-            .is_machine_word(at, storage)
-            .then(|| session.program.spell_storage(at, storage))
-            .flatten()
+            .spell_storage(at, storage)
             .map(|name| match low == high {
-                true => format!("{name} = {low:#x}"),
-                false => format!("{name} in [{low:#x}, {high:#x}]"),
+                true => format!("defines {name} = {low:#x}"),
+                false => format!("defines {name} in [{low:#x}, {high:#x}]"),
             }),
         _ => None,
     }

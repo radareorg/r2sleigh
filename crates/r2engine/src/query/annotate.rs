@@ -61,7 +61,7 @@ pub(super) fn over_run(
         }
         kinds.extend(held_at(memory, &kinds));
         if work >= Work::Function {
-            kinds.extend(proved_about(answered.facts, line.address));
+            kinds.extend(proved_about(answered, line.address));
         }
         line.annotations = kinds
             .into_iter()
@@ -92,38 +92,74 @@ fn held_at(memory: &Memory<'_>, kinds: &[AnnotationKind]) -> Vec<AnnotationKind>
         .collect()
 }
 
-/// What the analysis proved about the values one instruction defines.
+/// What the analysis proved about the machine words one instruction defines.
 ///
 /// One range per value, and the range is the value's own: it is narrowed where
 /// the value is defined, so it holds wherever the value is live rather than at
 /// this instruction in particular.
-fn proved_about(facts: Option<&r2ssa::SsaArtifact>, address: u64) -> Vec<AnnotationKind> {
-    let Some(facts) = facts else {
+fn proved_about(answered: &Answered<'_>, address: u64) -> Vec<AnnotationKind> {
+    let (Some(facts), Some(machine)) = (answered.facts, answered.decoders.at(address)) else {
         return Vec::new();
     };
     let graph = facts.graph();
+    // A flag is proved to hold nought or one on every line that sets it, which says only that it is a flag.
+    let word = |storage: &r2ssa::CanonicalStorageId| {
+        storage.space == r2ssa::CanonicalStorageSpace::Register
+            && storage.size == machine.arch.addr_size
+    };
     graph
         .insts_for_instruction(address)
         .iter()
         .filter_map(|inst| {
             let instruction = graph.inst(*inst)?;
-            let value = instruction.output?;
-            let range = facts.values().get(value)?;
-            // A range that spans the storage proves nothing about it, and a
-            // line that said `cf in [0x0, 0x1]` of a one-bit flag was saying
-            // only that the flag is a flag.
-            if range.is_top() {
+            let storage = instruction.canonical_storage.filter(word)?;
+            let range = facts.values().get(instruction.output?)?;
+            if !bounded_beyond_its_operation(facts, instruction, range) {
                 return None;
             }
             let (low, high) = range.bounds()?;
             Some(AnnotationKind::Bounds {
-                storage: instruction.canonical_storage?,
+                storage,
                 low,
                 high,
                 stride: range.stride().unwrap_or(0),
             })
         })
         .collect()
+}
+
+/// Whether a range says more than the operation that defines the value.
+///
+/// A range spanning the width written proves nothing, and a zero extension of
+/// an unbounded narrower value spans exactly that narrower width: `xor eax, edx`
+/// said `rax in [0x0, 0xffffffff]`, which is only that a 32-bit write clears the rest.
+fn bounded_beyond_its_operation(
+    facts: &r2ssa::SsaArtifact,
+    instruction: &r2ssa::GraphInst,
+    range: r2ssa::StridedInterval,
+) -> bool {
+    let graph = facts.graph();
+    let mut defined = (instruction, range);
+    loop {
+        let (instruction, range) = defined;
+        if range.is_top() || range.is_bottom() {
+            return false;
+        }
+        let InstPayload::Op(r2ssa::SSAOp::IntZExt { .. }) = &instruction.payload else {
+            return true;
+        };
+        // The extension's range is its operand's, so the operand's width is the one written.
+        let Some(extended) = instruction.inputs.first().copied() else {
+            return true;
+        };
+        let Some(operand) = facts.values().get(extended) else {
+            return true;
+        };
+        let Some(producer) = graph.def_inst(extended).and_then(|inst| graph.inst(inst)) else {
+            return !operand.is_top();
+        };
+        defined = (producer, operand);
+    }
 }
 
 /// How well supported a claim of this shape is.

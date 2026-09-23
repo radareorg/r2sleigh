@@ -410,20 +410,6 @@ impl<S: Source> OpenProgram<S> {
         self.control = self.next.take().unwrap_or_default();
     }
 
-    /// Whether a storage is one of the machine's words.
-    ///
-    /// What separates `rdx` from `cf` for a reader: a listing that reported
-    /// every proved range said `cf in [0x0, 0x1]` on every line that sets a
-    /// flag, which is true, proved, and only says that a flag is a flag. The
-    /// width comes from the architecture rather than from a number chosen to
-    /// look right.
-    pub fn is_machine_word(&self, addr: u64, storage: r2ssa::CanonicalStorageId) -> bool {
-        storage.space == r2ssa::CanonicalStorageSpace::Register
-            && self
-                .machine_at(addr)
-                .is_some_and(|machine| storage.size == machine.arch.addr_size)
-    }
-
     /// The register a storage names, as this machine spells it.
     ///
     /// The shell prints what the engine proved about a value, and a value is
