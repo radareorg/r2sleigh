@@ -25,6 +25,12 @@ type Surveyed = (Vec<Discovered>, BTreeMap<u64, Vec<DataRefFact>>);
 impl<S: Source> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
     pub fn prepared(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
+        self.start_request();
+        self.prepare(entry)
+    }
+
+    /// The analysis, within a request already started.
+    fn prepare(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
         self.ensure_decodable()?;
         self.ensure_assembled(entry)?;
         let target = self.target(entry)?;
@@ -34,7 +40,8 @@ impl<S: Source> OpenProgram<S> {
 
     /// One function rendered at one tier.
     pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
-        let prepared = self.prepared(entry)?;
+        self.start_request();
+        let prepared = self.prepare(entry)?;
         let target = self.target(entry)?;
         let response = crate::native::rendered(&target, entry, tier, &prepared, &self.control);
         Ok(Rendering { prepared, response })
@@ -42,6 +49,7 @@ impl<S: Source> OpenProgram<S> {
 
     /// The operations Sleigh produced for one function, before any analysis.
     pub fn lifted(&mut self, entry: u64) -> Result<String, String> {
+        self.start_request();
         self.ensure_decodable()?;
         self.ensure_assembled(entry)?;
         crate::native::lifted(&self.target(entry)?, self, entry)
@@ -51,6 +59,7 @@ impl<S: Source> OpenProgram<S> {
     /// A run of instructions, each carrying what its own run of neighbours
     /// shows. Nothing is walked or prepared.
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
+        self.start_request();
         self.ensure_decodable()?;
         Ok(crate::query::listing(
             &self.answered(None),
@@ -67,7 +76,8 @@ impl<S: Source> OpenProgram<S> {
     /// highest ran through whatever lay between -- another function's bytes,
     /// or the whole gap to a cold partition placed far away.
     pub fn function_listing(&mut self, entry: u64) -> Result<Answer<Vec<Line>>, String> {
-        let prepared = self.prepared(entry)?;
+        self.start_request();
+        let prepared = self.prepare(entry)?;
         let artifact = prepared.artifact().artifact();
         let mut blocks = artifact
             .function()
@@ -100,6 +110,7 @@ impl<S: Source> OpenProgram<S> {
     /// Every function the program has, from what the container states and
     /// what the bodies reach.
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
+        self.start_request();
         Ok(self.surveyed()?.0)
     }
 
@@ -109,6 +120,7 @@ impl<S: Source> OpenProgram<S> {
     /// Discovery walks every body it believes and the index wants what that
     /// same walk saw, so both come from one walk per function.
     pub fn references(&mut self) -> Result<Vec<DataRefFact>, String> {
+        self.start_request();
         let (found, mut seen) = self.surveyed()?;
         let mut refs = found
             .iter()
@@ -165,7 +177,7 @@ impl<S: Source> OpenProgram<S> {
                 .iter()
                 .map(|one| (one.address, one.thumb))
                 .collect::<BTreeMap<_, _>>();
-            self.entries_revision += u64::from(modes != self.modes);
+            self.entries_revision += u64::from(self.modes_at.is_some() && modes != self.modes);
             self.modes = modes;
             self.modes_at = Some(self.source.byte_revision());
         }

@@ -24,6 +24,14 @@ fn every_tier_of_one_function_is_rendered_from_one_analysis() {
 }
 
 #[test]
+fn deriving_the_tables_the_first_time_is_not_a_change() {
+    let mut program = opened();
+    program.prepared(ONE).expect("it prepares");
+    let revision = program.revision();
+    assert_eq!((revision.names, revision.entries), (0, 0));
+}
+
+#[test]
 fn a_patch_makes_the_held_analysis_stale() {
     let mut program = opened();
     program.prepared(ONE).expect("it prepares");

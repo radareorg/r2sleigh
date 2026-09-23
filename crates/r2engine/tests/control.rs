@@ -38,3 +38,17 @@ fn the_next_request_does_not_inherit_the_last_one_s_stop() {
         "a stop meant for one request refused the next"
     );
 }
+
+#[test]
+fn each_request_counts_only_its_own_work() {
+    // One meter spanning the session made every answer report the work of
+    // every request before it; a held analysis costs nothing to hand out.
+    let mut program = opened();
+    program.prepared(ONE).expect("it prepares");
+    assert!(
+        program.control().work_spent() > 0,
+        "the derivation spent nothing"
+    );
+    program.prepared(ONE).expect("it is served");
+    assert_eq!(program.control().work_spent(), 0, "a memo hit counted work");
+}

@@ -89,17 +89,13 @@ pub struct OpenProgram<S: Source> {
     assembled: Option<Assembled>,
     /// What this session has already worked out about one function.
     memo: Memo<Prepared>,
-    /// Which bytes the derivation in progress has read.
-    ///
-    /// An answer that recorded this can be kept across a write that missed
-    /// every one of them, which is what a patch to another function is.
-    /// `None` outside a derivation, so a read nothing will keep -- every line
-    /// of every listing -- is not logged at all.
-    read: std::cell::RefCell<Option<Vec<std::ops::Range<u64>>>>,
     /// The control for the request in hand: its cancellation, its deadline and
     /// the work it has spent. Held here so a caller can reach it while the
     /// request runs, which is the whole point of having one.
     control: crate::EngineExecutionControl,
+    /// The control a caller set for the next request, which that request
+    /// consumes; without one a request runs under a fresh control.
+    next: Option<crate::EngineExecutionControl>,
     machine: Option<EmbeddedMachine>,
     /// The same instruction set with TMode set, where the architecture has
     /// one. Which functions it decodes is what `modes` says.
@@ -110,11 +106,9 @@ impl<S: Source> OpenProgram<S> {
     pub fn of(source: S) -> Self {
         let container = source.container();
         Self {
-            names: {
-                let mut db = naming::of(&source);
-                naming::name_strings(&mut db, &source);
-                db
-            },
+            // Derived by `ensure_current` alone, which is the first thing
+            // every request does.
+            names: NameDb::new(),
             imports: BTreeMap::new(),
             slots: container
                 .relocations
@@ -141,8 +135,8 @@ impl<S: Source> OpenProgram<S> {
             entries_revision: 0,
             assembled: None,
             memo: Memo::default(),
-            read: std::cell::RefCell::new(None),
             control: crate::EngineExecutionControl::default(),
+            next: None,
             machine: None,
             thumb_machine: None,
         }
@@ -192,9 +186,11 @@ impl<S: Source> OpenProgram<S> {
         naming::name_slots(&mut names, format, &self.slots, &imports);
         // A patch that renamed nothing and moved no stub leaves everything
         // derived from those still good, so the counters move only on a
-        // difference rather than on every write.
-        self.names_revision += u64::from(names != self.names);
-        self.entries_revision += u64::from(imports != self.imports);
+        // difference rather than on every write; the first derivation is no
+        // change, since nothing was derived before it.
+        let derived = self.derived_at.is_some();
+        self.names_revision += u64::from(derived && names != self.names);
+        self.entries_revision += u64::from(derived && imports != self.imports);
         self.names = names;
         self.imports = imports;
         self.derived_at = Some(revision);
@@ -385,26 +381,33 @@ impl<S: Source> OpenProgram<S> {
             entry,
             &|since, range| self.source.written_since(since, range),
             || {
-                *self.read.borrow_mut() = Some(Vec::new());
-                let analysis = crate::native::analysed(target, self, entry);
-                let read = self.read.borrow_mut().take().unwrap_or_default();
-                analysis.map(|analysis| (analysis, read))
+                let recording = Recording {
+                    program: self,
+                    read: std::cell::RefCell::new(Vec::new()),
+                };
+                let analysis = crate::native::analysed(target, &recording, entry);
+                analysis.map(|analysis| (analysis, recording.read.into_inner()))
             },
         )
     }
 
-    /// The control every request against this program runs under.
+    /// The control the request in hand runs under, or the last one ran under.
     pub fn control(&self) -> &crate::EngineExecutionControl {
         &self.control
     }
 
-    /// Start a request, replacing the control the last one ran under.
+    /// Set the control the next request runs under; that request consumes it.
     ///
-    /// A deadline and a cancellation belong to one request, so carrying the
-    /// previous request's control into the next would let a stop meant for one
-    /// question refuse the next.
+    /// A deadline, a cancellation and the work spent belong to one request,
+    /// so carrying one request's control into the next would let a stop meant
+    /// for one question refuse the next and add its work to the next one's.
     pub fn begin_request(&mut self, control: crate::EngineExecutionControl) {
-        self.control = control;
+        self.next = Some(control);
+    }
+
+    /// Start a request under the control a caller set, or a fresh one.
+    fn start_request(&mut self) {
+        self.control = self.next.take().unwrap_or_default();
     }
 
     /// Whether a storage is one of the machine's words.
@@ -496,14 +499,7 @@ impl<S: Source> Decoders for OpenProgram<S> {
 
 impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let read = self.source.read(vaddr, max)?;
-        // Recorded whole, including what was asked for beyond what is mapped:
-        // a write that lands in the unmapped tail cannot happen, and one that
-        // lands in the rest is a write this answer read.
-        if let Some(log) = self.read.borrow_mut().as_mut() {
-            log.push(vaddr..vaddr.saturating_add(read.len() as u64));
-        }
-        Some(read)
+        self.source.read(vaddr, max)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
@@ -559,6 +555,61 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.target(vaddr).ok()
+    }
+}
+
+/// The program as one derivation reads it, logging which bytes it read.
+///
+/// An answer that recorded this can be kept across a write that missed every
+/// one of them, which is what a patch to another function is. The log lives
+/// for one derivation only, so nothing else reads through it.
+struct Recording<'a, S: Source> {
+    program: &'a OpenProgram<S>,
+    read: std::cell::RefCell<Vec<std::ops::Range<u64>>>,
+}
+
+impl<S: Source> r2ssa::body::Program for Recording<'_, S> {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let read = self.program.source.read(vaddr, max)?;
+        // Only what is mapped: no write can land in the unmapped rest.
+        self.read
+            .borrow_mut()
+            .push(vaddr..vaddr.saturating_add(read.len() as u64));
+        Some(read)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        r2ssa::body::Program::is_entry(self.program, vaddr)
+    }
+
+    fn return_address_register(&self) -> Option<r2il::Varnode> {
+        r2ssa::body::Program::return_address_register(self.program)
+    }
+
+    fn mode_register(&self) -> Option<r2il::Varnode> {
+        r2ssa::body::Program::mode_register(self.program)
+    }
+}
+
+impl<S: Source> crate::native::Program for Recording<'_, S> {
+    fn control(&self) -> crate::EngineExecutionControl {
+        crate::native::Program::control(self.program)
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.program.name_at(vaddr)
+    }
+
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.program.holds_static_data(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.program.import_at(vaddr)
+    }
+
+    fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
+        self.program.target_at(vaddr)
     }
 }
 
