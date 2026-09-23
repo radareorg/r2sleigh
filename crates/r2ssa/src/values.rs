@@ -88,6 +88,81 @@ pub fn solve_value_ranges(
     solve_counted(graph, function, predicates).0
 }
 
+/// What one instruction alone makes of the value it leaves in a storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionBound {
+    /// The range its own operations give the value, with every value from before it at top.
+    pub range: StridedInterval,
+    /// Whether that is only the width the instruction wrote, before it was zero-extended.
+    pub spans_width_written: bool,
+}
+
+/// The instruction's own operations transferred in `O(k)`, earlier values at top, over a graph no pass folded constants into.
+pub fn instruction_bound(
+    graph: &SsaGraph,
+    instruction: u64,
+    storage: crate::CanonicalStorageId,
+) -> Option<InstructionBound> {
+    let left = graph.left_by_instruction(instruction, storage)?;
+    let mut local = BTreeMap::new();
+    let insts = graph.insts_for_instruction(instruction);
+    for inst in insts.iter().filter_map(|inst| graph.inst(*inst)) {
+        let Some(output) = inst.output else {
+            continue;
+        };
+        let range = transfer(graph, inst, &|value: ValueId| {
+            local
+                .get(&value)
+                .copied()
+                .unwrap_or_else(|| literal_or_top(graph, value))
+        });
+        local.insert(output, range);
+    }
+    Some(InstructionBound {
+        range: *local.get(&left)?,
+        spans_width_written: spans_width_written(graph, &local, left),
+    })
+}
+
+/// Whether the instruction alone leaves a value unbounded at the width it wrote, following its zero extensions back.
+fn spans_width_written(
+    graph: &SsaGraph,
+    local: &BTreeMap<ValueId, StridedInterval>,
+    mut value: ValueId,
+) -> bool {
+    loop {
+        let known = local
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| literal_or_top(graph, value));
+        if known.is_top() {
+            return true;
+        }
+        let extended = graph
+            .def_inst(value)
+            .filter(|_| local.contains_key(&value))
+            .and_then(|inst| graph.inst(inst))
+            .filter(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::IntZExt { .. })))
+            .and_then(|inst| inst.inputs.first().copied());
+        let Some(extended) = extended else {
+            return false;
+        };
+        value = extended;
+    }
+}
+
+/// What a value is before anything in the function is known: a literal is itself, anything else is top.
+fn literal_or_top(graph: &SsaGraph, value: ValueId) -> StridedInterval {
+    let Some(value) = graph.value(value) else {
+        return StridedInterval::top(64);
+    };
+    let width = width_of(value.var.size);
+    match value.var.constant_bits() {
+        Some(bits) => StridedInterval::constant(width, bits),
+        None => StridedInterval::top(width),
+    }
+}
+
 /// The solution, and how many transfers the ascent spent reaching it.
 fn solve_counted(
     graph: &SsaGraph,
@@ -251,6 +326,9 @@ fn transfer(
     if bounds_unknown_as_known(graph, inst, op) {
         return StridedInterval::top(width);
     }
+    if let Some(bits) = exact(graph, inst, op, lookup) {
+        return StridedInterval::constant(width, bits);
+    }
     // A shift by more than `u32` holds is still past every width.
     let places = |index: usize| {
         input(index)
@@ -309,6 +387,29 @@ fn transfer(
         }
         _ => StridedInterval::top(width),
     }
+}
+
+/// The one value an operation computes whatever its inputs hold, where its inputs fix it.
+fn exact(
+    graph: &SsaGraph,
+    inst: &GraphInst,
+    op: &SSAOp,
+    lookup: &dyn Fn(ValueId) -> StridedInterval,
+) -> Option<u64> {
+    // A number less itself, or exclusive-or itself, is nought whatever it is: `xor eax, eax`.
+    let (first, second) = (inst.inputs.first(), inst.inputs.get(1));
+    if matches!(op, SSAOp::IntXor { .. } | SSAOp::IntSub { .. })
+        && first.is_some()
+        && first == second
+    {
+        return Some(0);
+    }
+    // An operation over literals is the one value it computes: `mvn r3, 0` leaves exactly `!0`.
+    let narrow = |value: &ValueId| !wide(graph, *value);
+    if !inst.output.iter().chain(&inst.inputs).all(narrow) {
+        return None;
+    }
+    crate::constant::fold_inst(graph, inst, |value| lookup(value).as_constant())
 }
 
 /// A value read at a width other than its own keeps its bounds where they fit and is otherwise unknown.
@@ -1073,5 +1174,115 @@ mod tests {
         let scaled = range_of(&ranges, &graph, &offset);
         assert_eq!(scaled.bounds(), Some((0, 28)), "{scaled:?}");
         assert_eq!(scaled.stride(), Some(4), "{scaled:?}");
+    }
+
+    /// Every consumer of the solution reads an operation its inputs fix as that one value, whatever the operand holds.
+    #[test]
+    fn the_solver_reads_an_operation_its_inputs_fix_as_one_value() {
+        let entry = 0x1000;
+        let (left, right, merge) = (0x1010, 0x1020, 0x1030);
+        let raw = var("eax", 0, 4);
+        let cleared = var("eax", 1, 4);
+        let seven = var("eax", 2, 4);
+        let merged = var("eax", 3, 4);
+        let inverted = var("r3", 1, 4);
+        let mut head = SSABlock::new(entry, 16);
+        head.ops.push(crate::op::SSAOp::IntNot {
+            dst: inverted.clone(),
+            src: constant(0, 4),
+        });
+        // `xor eax, eax` on one arm, `mov eax, 7` on the other.
+        let mut left_block = SSABlock::new(left, 16);
+        left_block.ops.push(crate::op::SSAOp::IntXor {
+            dst: cleared.clone(),
+            a: raw.clone(),
+            b: raw,
+        });
+        let mut right_block = SSABlock::new(right, 16);
+        right_block.ops.push(crate::op::SSAOp::Copy {
+            dst: seven.clone(),
+            src: constant(7, 4),
+        });
+        let mut merge_block = SSABlock::new(merge, 16);
+        merge_block.phis.push(PhiNode {
+            dst: merged.clone(),
+            sources: vec![(left, cleared.clone()), (right, seven)],
+            canonical_storage: None,
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: left,
+                        false_target: right,
+                    },
+                ),
+                (left, BlockTerminator::Branch { target: merge }),
+                (right, BlockTerminator::Branch { target: merge }),
+                (merge, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, left_block, right_block, merge_block];
+        let (ranges, graph) = solve_over(&blocks, cfg);
+        let of = |name: &SSAVar| range_of(&ranges, &graph, name);
+        assert_eq!(of(&inverted).as_constant(), Some(0xffff_ffff));
+        assert_eq!(of(&cleared).as_constant(), Some(0));
+        assert_eq!(of(&merged).bounds(), Some((0, 7)), "{:?}", of(&merged));
+    }
+
+    /// `mvn r3, 0` computes one value from its literal, and `xor eax, eax` is nought: each instruction alone fixes it.
+    #[test]
+    fn an_instruction_alone_fixes_what_it_computes_from_literals() {
+        use r2il::{OpMetadata, R2ILBlock, R2ILOp, Varnode};
+        let r3 = Varnode::register(0, 4);
+        let eax = Varnode::register(8, 4);
+        let scratch = Varnode::unique(0x100, 4);
+        let ops = [
+            (
+                0x1000,
+                R2ILOp::IntNot {
+                    dst: scratch.clone(),
+                    src: Varnode::constant(0, 4),
+                },
+            ),
+            (
+                0x1000,
+                R2ILOp::Copy {
+                    dst: r3.clone(),
+                    src: scratch,
+                },
+            ),
+            (
+                0x1004,
+                R2ILOp::IntXor {
+                    dst: eax.clone(),
+                    a: eax.clone(),
+                    b: eax.clone(),
+                },
+            ),
+            (
+                0x1006,
+                R2ILOp::Return {
+                    target: Varnode::constant(0, 4),
+                },
+            ),
+        ];
+        let mut block = R2ILBlock::new(0x1000, 8);
+        for (addr, op) in ops {
+            let meta = OpMetadata {
+                instruction_addr: Some(addr),
+                ..OpMetadata::default()
+            };
+            block.push_with_metadata(op, Some(meta));
+        }
+        let graph = crate::def_use_graph(&[block], None).expect("it builds");
+        let fixed = |at: u64, storage: &Varnode| {
+            let storage = crate::CanonicalStorageId::from_varnode(storage);
+            instruction_bound(&graph, at, storage).and_then(|bound| bound.range.as_constant())
+        };
+        assert_eq!(fixed(0x1000, &r3), Some(0xffff_ffff));
+        assert_eq!(fixed(0x1004, &eax), Some(0));
     }
 }

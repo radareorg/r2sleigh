@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -587,6 +587,28 @@ impl SsaGraph {
         self.insts_by_instruction
             .get(&from)
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// What one instruction leaves in each storage it writes: the last value it defines there, in the order it leaves them.
+    pub fn left_by(&self, from: u64) -> Vec<(CanonicalStorageId, ValueId)> {
+        let mut seen = BTreeSet::new();
+        let mut left = self
+            .insts_for_instruction(from)
+            .iter()
+            .rev()
+            .filter_map(|inst| self.inst(*inst))
+            .filter_map(|inst| Some((inst.canonical_storage?, inst.output?)))
+            .filter(|(storage, _)| seen.insert(*storage))
+            .collect::<Vec<_>>();
+        left.reverse();
+        left
+    }
+
+    /// The value one instruction leaves in a storage.
+    pub fn left_by_instruction(&self, from: u64, storage: CanonicalStorageId) -> Option<ValueId> {
+        self.left_by(from)
+            .into_iter()
+            .find_map(|(held, value)| (held == storage).then_some(value))
     }
 
     pub fn block(&self, id: BlockId) -> Option<&GraphBlock> {

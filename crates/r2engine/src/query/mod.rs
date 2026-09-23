@@ -16,6 +16,7 @@
 pub mod annotate;
 pub mod decode;
 pub mod memo;
+mod proved;
 pub mod records;
 pub mod references;
 
@@ -50,31 +51,21 @@ pub enum Work {
     Function,
 }
 
-/// How well supported a claim about a number is, strongest first.
-///
-/// This is the axis that was missing. Substituting a name wherever a number
-/// happened to equal an address is not wrong so much as unlabelled: it is a
-/// coincidence until something says the number is used as an address, and a
-/// reader told which is which can act on the difference.
+/// The smallest evidence that establishes a claim, each rung reading more of the program; an unclaimed number has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Support {
-    /// An operand of one decoded instruction says the instruction transfers
-    /// there or accesses it.
+    /// The instruction alone says it: where it transfers, what it accesses, or the bound its own operations put on what it writes.
     Decoded,
-    /// Constants folded, within one instruction or across a run of them.
+    /// Evaluated over the run of instructions around it in its block.
     Folded,
-    /// The number is passed to a callee whose own body loads or stores
-    /// through the parameter it arrives in.
-    Dereferenced,
-    /// An analysis over the whole function proved it, as a bound rather than a
-    /// value: true everywhere, exact nowhere in particular.
+    /// Exact over the whole function: its def-use, or a certificate `r2ssa` issued.
+    Certified,
+    /// A bound an analysis over the whole function proved: true everywhere, exact nowhere.
     Solved,
-    /// The number is passed in a parameter a declaration the program's
-    /// libraries state types as a pointer.
+    /// A callee's own body loads or stores through the parameter the number arrives in.
+    Dereferenced,
+    /// A library declaration types the parameter the number arrives in as a pointer.
     Declared,
-    /// The number equals an address something names, and nothing in the
-    /// instruction says it is used as one.
-    Coincident,
 }
 
 /// Which state of a program an answer was computed against.

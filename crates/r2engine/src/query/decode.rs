@@ -300,7 +300,7 @@ mod tests {
                 endian: Endianness::Little,
             },
             call_effect: None,
-            facts: None,
+            prepared: None,
             fate: None,
             spelled: true,
             parameters: None,
@@ -351,7 +351,7 @@ mod tests {
                 endian: Endianness::Little,
             },
             call_effect: None,
-            facts: None,
+            prepared: None,
             fate: None,
             spelled: true,
             parameters: None,
@@ -399,7 +399,7 @@ mod tests {
                     program: &program,
                     endian: Endianness::Little,
                 },
-                facts: None,
+                prepared: None,
                 fate: None,
                 spelled,
                 call_effect: None,
@@ -648,7 +648,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            facts: None,
+            prepared: None,
             fate: None,
             spelled: true,
             call_effect: None,
@@ -665,7 +665,10 @@ mod tests {
             lines
                 .iter()
                 .map(|line| {
-                    let kinds = line.annotations.iter().map(|annotation| annotation.kind);
+                    let kinds = line
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.kind.clone());
                     kinds.collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -697,7 +700,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            facts: None,
+            prepared: None,
             fate: None,
             spelled: true,
             call_effect: None,

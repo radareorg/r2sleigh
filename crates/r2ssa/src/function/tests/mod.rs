@@ -2558,3 +2558,46 @@ fn promotion_fixture_with_argument(
         .expect("artifact");
     artifact.function().promoted_slot_sites().clone()
 }
+
+#[test]
+fn operations_inserted_ahead_of_a_block_leave_every_later_operation_on_its_instruction() {
+    let rax = Varnode::register(0, 8);
+    let rcx = Varnode::register(8, 8);
+    let instructions = [
+        (
+            0x1000,
+            R2ILOp::Copy {
+                dst: rax.clone(),
+                src: Varnode::constant(1, 8),
+            },
+        ),
+        (0x1004, R2ILOp::Copy { dst: rcx, src: rax }),
+        (
+            0x1008,
+            R2ILOp::Return {
+                target: Varnode::constant(0, 8),
+            },
+        ),
+    ];
+    let mut block = R2ILBlock::new(0x1000, 12);
+    for (addr, op) in instructions {
+        let meta = r2il::OpMetadata {
+            instruction_addr: Some(addr),
+            ..Default::default()
+        };
+        block.push_with_metadata(op, Some(meta));
+    }
+    let mut function = SSAFunction::from_blocks(&[block]).expect("it builds");
+    let entry = function.entry;
+    let attributed = |function: &SSAFunction, from: usize| {
+        (from..from + 3)
+            .map(|index| function.instruction_at(entry, index))
+            .collect::<Vec<_>>()
+    };
+    let before = attributed(&function, 0);
+    assert_eq!(before, [Some(0x1000), Some(0x1004), Some(0x1008)]);
+    function.insert_ops(entry, 0, vec![(SSAOp::Nop, None)]);
+    // The minted operation belongs to no instruction, and each lifted one keeps its own.
+    assert_eq!(function.instruction_at(entry, 0), None);
+    assert_eq!(attributed(&function, 1), before);
+}

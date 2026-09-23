@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::CanonicalStorageSpace;
 use crate::function::DecompilePrepFacts;
-use crate::graph::{InstPayload, SsaGraph, ValueId};
+use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
 use crate::indirect::exact_input;
 use crate::op::SSAOp;
 
@@ -158,6 +158,27 @@ fn folded_arity(op: &SSAOp) -> Option<usize> {
         | SSAOp::BoolXor { .. } => 2,
         _ => return None,
     })
+}
+
+/// The operands an operation folds over, where it folds at all.
+fn folded_inputs(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> Option<Vec<ValueId>> {
+    (0..folded_arity(op)?)
+        .map(|index| exact_input(graph, inst, index))
+        .collect()
+}
+
+/// What one operation computes where `known` gives every operand it folds over.
+pub(crate) fn fold_inst(
+    graph: &SsaGraph,
+    inst: &GraphInst,
+    known: impl Fn(ValueId) -> Option<u64>,
+) -> Option<u64> {
+    let InstPayload::Op(op) = &inst.payload else {
+        return None;
+    };
+    let inputs = folded_inputs(graph, inst, op)?;
+    let operands = inputs.iter().map(|input| known(*input)).collect::<Vec<_>>();
+    fold_op(graph, op, inst.output?, &inputs, &operands)
 }
 
 /// Evaluate one operation over operands already folded to constants.
@@ -296,10 +317,7 @@ fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) ->
         let InstPayload::Op(op) = &inst.payload else {
             unreachable!("filtered to an operation");
         };
-        let inputs = folded_arity(op)
-            .map(|arity| (0..arity).map(|index| exact_input(graph, inst, index)))
-            .and_then(|inputs| inputs.collect::<Option<Vec<_>>>());
-        let Some(inputs) = inputs else {
+        let Some(inputs) = folded_inputs(graph, inst, op) else {
             known.insert(current, None);
             continue;
         };

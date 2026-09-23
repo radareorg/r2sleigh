@@ -146,7 +146,7 @@ impl<S: Source> OpenProgram<S> {
         let fate = DefUse::new(&lifted, target.arch);
         let answered = Answered {
             fate: Some(&fate),
-            ..self.answered(Some(prepared.artifact().artifact()))
+            ..self.answered(Some(&prepared))
         };
         Ok(listed_by_block(&answered, &lifted, self.revision()))
     }
@@ -292,7 +292,7 @@ impl<S: Source> OpenProgram<S> {
             .collect()
     }
 
-    fn answered<'a>(&'a self, facts: Option<&'a r2ssa::SsaArtifact>) -> Answered<'a> {
+    fn answered<'a>(&'a self, prepared: Option<&'a Prepared>) -> Answered<'a> {
         Answered {
             decoders: self,
             memory: Memory {
@@ -303,7 +303,7 @@ impl<S: Source> OpenProgram<S> {
                 .assembled
                 .as_ref()
                 .and_then(|held| held.call_effect.as_ref()),
-            facts,
+            prepared,
             fate: None,
             spelled: true,
             parameters: Some(self),

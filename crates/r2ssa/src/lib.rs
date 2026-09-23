@@ -29,6 +29,7 @@ pub(crate) mod deadphi;
 pub(crate) mod defuse;
 pub mod domtree;
 pub(crate) mod execution;
+pub mod fate;
 pub(crate) mod fingerprint;
 pub mod function;
 pub mod graph;
@@ -184,5 +185,5 @@ pub use semantic::{
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
-pub use values::{ValueRanges, solve_value_ranges};
+pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};

@@ -3,8 +3,9 @@
 
 mod common;
 
-use common::{FORKED, JOINED, ONE, PASSES, STEPPED, TWO, opened};
-use r2engine::query::{AnnotationKind, Line, Listing, Stop};
+use common::{BASE, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, TWO, opened};
+use r2engine::program::OpenProgram;
+use r2engine::query::{AnnotationKind, Line, Listing, Stop, Support};
 
 /// The result each line claims, by address.
 fn computes(lines: &[Line]) -> Vec<(u64, Option<u64>)> {
@@ -80,25 +81,201 @@ fn an_address_the_next_instruction_adds_to_is_a_step() {
     assert_eq!(pdf(STEPPED)[0], (STEPPED, None));
 }
 
+/// Each claim a line carries, with the rung it stands on.
+fn supported(line: &Line) -> Vec<(AnnotationKind, Support)> {
+    line.annotations
+        .iter()
+        .map(|annotation| (annotation.kind.clone(), annotation.support))
+        .collect()
+}
+
 #[test]
-fn a_value_the_prelude_mints_leaves_every_line_its_own_definitions() {
-    // The entry block reads `edi`, so a projection is minted ahead of the lea without taking its place.
-    let rax = |kind: &AnnotationKind| match kind {
-        AnnotationKind::Bounds {
-            storage, low, high, ..
-        } => (storage.offset == 0 && storage.size == 8).then_some((*low, *high)),
-        _ => None,
+fn each_claim_carries_the_smallest_evidence_that_establishes_it() {
+    let rax = r2ssa::CanonicalStorageId {
+        space: r2ssa::CanonicalStorageSpace::Register,
+        offset: 0,
+        size: 8,
     };
-    let lines = opened().function_listing(FORKED).expect("it lists").value;
-    let proved = |address: u64| {
-        let line = lines.iter().find(|line| line.address == address);
-        line.into_iter()
-            .flat_map(|line| &line.annotations)
-            .filter_map(|annotation| rax(&annotation.kind))
-            .collect::<Vec<_>>()
+    // lea rax, [one]; add rax, 8; ret -- the ret ends the straight line, so only the def-use settles the sum.
+    let stepped = opened().function_listing(STEPPED).expect("it lists").value;
+    let sum = ONE + 8;
+    assert_eq!(
+        supported(&stepped[1]),
+        [
+            (AnnotationKind::Computes { value: sum }, Support::Certified),
+            // The block folds the lea into the add, so the one value the range holds needs no more than the run.
+            (
+                AnnotationKind::Bounds {
+                    storage: rax,
+                    low: sum,
+                    high: sum,
+                    stride: 0,
+                },
+                Support::Folded,
+            ),
+        ]
+    );
+    // lea rdi, [one]; call one -- the call clobbers rdi, so the run after the lea settles it in either listing.
+    let computes = [(AnnotationKind::Computes { value: ONE }, Support::Folded)];
+    let plain = opened()
+        .listing(Listing {
+            start: PASSES,
+            stop: Stop::After(3),
+        })
+        .expect("it lists");
+    assert_eq!(supported(&plain.value[0]), computes);
+    let whole = opened().function_listing(PASSES).expect("it lists").value;
+    assert_eq!(supported(&whole[0]), computes);
+    // mov eax, 1 fixes its value, and a number that stays put is no address, so the line claims nothing.
+    let one = opened().function_listing(ONE).expect("it lists").value;
+    assert_eq!(supported(&one[0]), []);
+    // The lea's range would only restate the address its operand fixes, so FORKED's first line claims no range.
+    let forked = opened().function_listing(FORKED).expect("it lists").value;
+    assert!(bounds(&forked[..1]).is_empty(), "{:?}", forked[0]);
+    // A constant copied in a later block is exact through the def-use, which the block's own run cannot see.
+    let mut program = opened();
+    program.source_mut().write(TWO, &CARRIED);
+    let carried = program.function_listing(TWO).expect("it lists").value;
+    let copy = carried.iter().find(|line| line.address == TWO + 0xa);
+    let rcx = r2ssa::CanonicalStorageId { offset: 8, ..rax };
+    let bound = AnnotationKind::Bounds {
+        storage: rcx,
+        low: 5,
+        high: 5,
+        stride: 0,
     };
-    assert_eq!(proved(FORKED), [(ONE, ONE)]);
-    assert_eq!(proved(FORKED + 7), []);
+    assert_eq!(copy.map(supported), Some(vec![(bound, Support::Certified)]));
+}
+
+/// `mov eax, 5; test edi, edi; je L; nop; L: mov ecx, eax; ret`
+const CARRIED: [u8; 13] = [
+    0xb8, 0x05, 0x00, 0x00, 0x00, 0x85, 0xff, 0x74, 0x01, 0x90, 0x89, 0xc1, 0xc3,
+];
+
+/// `one: mov eax, 1; ret`, `caller: lea rdi, [rip + 0x1e9]; call one; ret` and
+/// `reader: mov rax, qword [rip + 0x1e9]; mov rcx, qword [rip + 0x1f2]; ret`,
+/// with `"x"`, the word `0x402041` and `"hello world"` in the data after them.
+const TEXTUAL: [u8; 0x400] = {
+    let mut bytes = [0; 0x400];
+    let runs: [(usize, &[u8]); 6] = [
+        (0x00, &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]),
+        (
+            0x10,
+            &[
+                0x48, 0x8d, 0x3d, 0xe9, 0x01, 0x00, 0x00, // lea rdi, [rip + 0x1e9]
+                0xe8, 0xe4, 0xff, 0xff, 0xff, // call one
+                0xc3, // ret
+            ],
+        ),
+        (
+            0x20,
+            &[
+                0x48, 0x8b, 0x05, 0xe9, 0x01, 0x00, 0x00, // mov rax, qword [rip + 0x1e9]
+                0x48, 0x8b, 0x0d, 0xf2, 0x01, 0x00, 0x00, // mov rcx, qword [rip + 0x1f2]
+                0xc3, // ret
+            ],
+        ),
+        (0x200, b"x\0"),
+        (0x210, &[0x41, 0x20, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        (0x220, b"hello world\0"),
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            bytes[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    bytes
+};
+
+/// Where `TEXTUAL` keeps its one-character string.
+const TEXT_AT: u64 = BASE + 0x200;
+
+/// `TEXTUAL` opened, its code the first page and the rest a data section.
+fn textual() -> OpenProgram<Literal> {
+    let functions = [
+        ("one", ONE, 6),
+        ("caller", BASE + 0x10, 0xd),
+        ("reader", BASE + 0x20, 0xf),
+    ];
+    OpenProgram::of(Literal::of_code(&TEXTUAL, &functions).with_data_after(BASE + 0x100))
+}
+
+#[test]
+fn a_word_read_claims_only_the_text_that_runs_past_it() {
+    let mut program = textual();
+    let lines = program
+        .listing(Listing {
+            start: BASE + 0x20,
+            stop: Stop::After(3),
+        })
+        .expect("it lists")
+        .value;
+    // The word is an address whose bytes spell `"A @"` then stop inside the read, so the read claims what it holds and no text.
+    let (pointer, width) = (BASE + 0x210, 8);
+    assert_eq!(
+        supported(&lines[0]),
+        [
+            (
+                AnnotationKind::Reads {
+                    address: pointer,
+                    width
+                },
+                Support::Decoded
+            ),
+            (
+                AnnotationKind::Holds {
+                    address: pointer,
+                    width,
+                    value: 0x40_2041,
+                },
+                Support::Decoded,
+            ),
+        ]
+    );
+    // Eight bytes of `"hello world"` are text running past the read, so the line says it.
+    let hello = BASE + 0x220;
+    let text = AnnotationKind::Text {
+        address: hello,
+        text: "hello world".to_owned(),
+    };
+    let said = supported(&lines[1]);
+    assert!(said.contains(&(text, Support::Decoded)), "{said:?}");
+}
+
+#[test]
+fn a_line_says_the_text_at_an_address_it_uses() {
+    let caller = BASE + 0x10;
+    let mut program = textual();
+    let lines = program
+        .listing(Listing {
+            start: caller,
+            stop: Stop::After(3),
+        })
+        .expect("it lists")
+        .value;
+    // The text is claimed on the rung of the claim that the line uses its address.
+    let text = AnnotationKind::Text {
+        address: TEXT_AT,
+        text: "x".to_owned(),
+    };
+    assert_eq!(
+        supported(&lines[0]),
+        [
+            (AnnotationKind::Computes { value: TEXT_AT }, Support::Folded),
+            (text, Support::Folded),
+        ]
+    );
+    // One character is text by chance too often to name it from a scan, so the name table has no string there.
+    assert!(
+        program.names().all_at(TEXT_AT).is_empty(),
+        "{:?}",
+        program.names().all_at(TEXT_AT)
+    );
 }
 
 /// `mov eax, edi; and eax, 7; ret`
@@ -123,6 +300,14 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
     let function = program.function_listing(TWO).expect("it lists");
     let proved = bounds(&function.value);
     assert!(proved.contains(&(TWO + 2, 0, 7)), "{proved:?}");
+    // The mask is the and's own bound, which evaluating the instruction alone establishes.
+    let masked = function.value.iter().find(|line| line.address == TWO + 2);
+    let rung = masked
+        .into_iter()
+        .flat_map(|line| &line.annotations)
+        .find(|annotation| matches!(annotation.kind, AnnotationKind::Bounds { .. }))
+        .map(|annotation| annotation.support);
+    assert_eq!(rung, Some(Support::Decoded));
     // Writing eax only restates the width a 32-bit write clears, which says nothing.
     assert!(!proved.contains(&(TWO, 0, 0xffff_ffff)), "{proved:?}");
     let plain = program

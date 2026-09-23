@@ -440,7 +440,11 @@ fn a_pool_load_an_it_predicates_still_reads_its_pool_word() {
         "the `it` changed nothing, so this program proves nothing: {spelled}"
     );
     let pool = ARM + 0xc;
-    let kinds: Vec<_> = lines[2].annotations.iter().map(|one| one.kind).collect();
+    let kinds: Vec<_> = lines[2]
+        .annotations
+        .iter()
+        .map(|one| one.kind.clone())
+        .collect();
     let reads = AnnotationKind::Reads {
         address: pool,
         width: 4,

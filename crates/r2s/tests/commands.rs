@@ -525,13 +525,41 @@ mod listing {
         insta::assert_snapshot!("reads_pd", run.out);
     }
 
-    /// The listing radare2 cannot write: a line carries the range of the value
-    /// it defines only where that says more than the write's own width.
+    /// The listing radare2 cannot write: no range that is one value the instruction fixes or only the width it wrote, each note ending in its rung.
     #[test]
     fn what_the_engine_proved_is_pinned() {
         let run = super::r2s("s 0x401330; pdf; s 0x401530; pdf");
         assert!(run.ok, "{}", run.out);
+        // A move of a constant fixes its one value, so a range would only restate the operand.
+        for restated in ["defines rax = 0x811c9dc5", "defines rdx = 0x8"] {
+            assert!(!run.out.contains(restated), "{restated}: {}", run.out);
+        }
+        // The mask bounds the value by evaluating the and alone, so the instruction's own bound is decoded.
+        assert!(
+            run.out
+                .contains("and eax, 0x1 ; defines rax in [0x0, 0x1] (decoded)"),
+            "{}",
+            run.out
+        );
         insta::assert_snapshot!("proved_pdf", run.out);
+    }
+
+    /// A line that hands a string to a call says the text beside the address, on the rung the address stands on.
+    #[test]
+    fn a_line_says_the_text_at_an_address_it_hands_on() {
+        let run = super::r2s("s main; pd 8");
+        assert!(run.ok, "{}", run.out);
+        let format = run
+            .out
+            .lines()
+            .find(|line| line.contains("0x0040106c"))
+            .unwrap_or_default();
+        // `__printf_chk` is declared to take its format as a pointer, and the number stays put.
+        assert!(
+            format.ends_with(r#"mov esi, str.fnv1a32______08x_ ; "fnv1a32     %08x\n" (declared)"#),
+            "{}",
+            run.out
+        );
     }
 
     /// A function is its blocks. The alignment padding after the loop's `ret`

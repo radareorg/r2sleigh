@@ -6,9 +6,9 @@
 use r2il::ValueUse;
 use r2il::{R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::{NumberSpan, Syntax};
+use r2ssa::CanonicalStorageId;
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
-use r2ssa::{CanonicalStorageId, CanonicalStorageSpace, InstPayload, SsaGraph, ValueId};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Support;
 use super::Work;
@@ -79,7 +79,7 @@ pub(super) fn over_run(
         let mut claims = named
             .touched
             .iter()
-            .map(|(kind, own)| (*kind, folded_support(*own)))
+            .map(|(kind, own)| (kind.clone(), folded_support(*own)))
             .collect::<Vec<_>>();
         if work >= Work::BlockLocal
             && let Some(computed) = &named.computed
@@ -97,8 +97,8 @@ pub(super) fn over_run(
             };
             // A number that moves with the program is an address; one that stays put is one only where it is used as one.
             let support = match relative {
-                true => (fate_of(lift, &mut after, &computed.output, line.address) == Fate::Result)
-                    .then(|| folded_support(computed.own)),
+                true => result_of(lift, &mut after, &computed.output, line.address)
+                    .map(|settled| settled.max(folded_support(computed.own))),
                 false => {
                     straight_line_fate(lift, &mut after, &computed.output);
                     after.used
@@ -111,22 +111,25 @@ pub(super) fn over_run(
                 claims.push((kind, support));
             }
         }
-        let held = held_at(memory, &claims);
-        claims.extend(held.into_iter().map(|kind| (kind, Support::Folded)));
+        // What the bytes hold is for a reader; the reference index reads only what the lines claim.
+        if answered.spelled {
+            let revision = revision_at(memory, &claims);
+            claims.extend(revision);
+        }
         if work >= Work::Function {
-            let proved = proved_about(answered, line.address);
-            claims.extend(proved.into_iter().map(|kind| (kind, Support::Solved)));
+            let folded = |storage| named.left(storage);
+            claims.extend(super::proved::proved_about(answered, line.address, &folded));
         }
         line.annotations = claims
             .into_iter()
             .map(|(kind, support)| Annotation {
-                kind,
-                support,
                 operand: line
                     .syntax
                     .as_ref()
                     .and_then(|syntax| sole_operand(syntax, kind.address())),
-                reference: referenced(memory, kind),
+                reference: referenced(memory, &kind),
+                kind,
+                support,
             })
             .collect();
     }
@@ -140,8 +143,8 @@ pub(super) fn over_run(
 /// this program wherever the program maps it. What a read holds
 /// is data, and a pool word is a pc-relative or thread offset as often as a
 /// pointer, so the read is the reference and the word it holds is not.
-fn referenced(memory: &Memory<'_>, kind: AnnotationKind) -> Option<ReferenceKind> {
-    match kind {
+fn referenced(memory: &Memory<'_>, kind: &AnnotationKind) -> Option<ReferenceKind> {
+    match *kind {
         AnnotationKind::Target { address, .. } => {
             memory.maps(address).then_some(ReferenceKind::Code)
         }
@@ -150,11 +153,13 @@ fn referenced(memory: &Memory<'_>, kind: AnnotationKind) -> Option<ReferenceKind
         | AnnotationKind::Computes { value: address } => {
             memory.maps(address).then_some(ReferenceKind::Data)
         }
-        AnnotationKind::Holds { .. } | AnnotationKind::Bounds { .. } => None,
+        AnnotationKind::Holds { .. }
+        | AnnotationKind::Text { .. }
+        | AnnotationKind::Bounds { .. } => None,
     }
 }
 
-/// Decoded where the instruction's own operations fold the number, folded where the block before it had to.
+/// Decoded where the instruction alone folds the number, folded where the block before it had to.
 fn folded_support(own: bool) -> Support {
     match own {
         true => Support::Decoded,
@@ -168,6 +173,18 @@ struct Named {
     touched: Vec<(AnnotationKind, bool)>,
     /// The number it leaves, where it computes one rather than copying one it read.
     computed: Option<Computed>,
+    /// The number the run leaves in each register it writes, where the run folds one.
+    folded: Vec<(CanonicalStorageId, u64)>,
+}
+
+impl Named {
+    /// The number the run leaves in a storage after this instruction, where it folds one.
+    fn left(&self, storage: CanonicalStorageId) -> Option<u64> {
+        self.folded
+            .iter()
+            .find(|(held, _)| *held == storage)
+            .map(|(_, value)| *value)
+    }
 }
 
 /// A number one instruction leaves, where it leaves it, and whether its own operations fold it.
@@ -212,7 +229,8 @@ fn named_by(
         let alone = touched_at(&own, op);
         for kind in touched_at(carried, op) {
             if !touched.iter().any(|(held, _)| *held == kind) {
-                touched.push((kind, alone.contains(&kind)));
+                let own = alone.contains(&kind);
+                touched.push((kind, own));
             }
         }
         carried.step_under(op, call_effect);
@@ -226,21 +244,32 @@ fn named_by(
         .filter(|input| input.space == SpaceId::Register)
         .filter_map(|input| before.of(input).and_then(ValueOrigin::constant))
         .collect::<BTreeSet<_>>();
-    // An address fills a register, so of the registers left holding a number the widest is the result; a flag is one bit.
-    let computed = lift
+    let left = lift
         .ops
         .iter()
         .filter_map(R2ILOp::output)
         .filter(|output| output.space == SpaceId::Register)
         .filter_map(|output| Some((output, carried.of(output)?.constant()?)))
+        .collect::<Vec<_>>();
+    // An address fills a register, so of the registers left holding a number the widest is the result; a flag is one bit.
+    let computed = left
+        .iter()
         .filter(|(_, value)| !copied.contains(value))
         .max_by_key(|(output, _)| output.size)
         .map(|(output, value)| Computed {
-            value,
-            output: output.clone(),
-            own: own.of(output).and_then(ValueOrigin::constant) == Some(value),
+            value: *value,
+            output: (*output).clone(),
+            own: own.of(output).and_then(ValueOrigin::constant) == Some(*value),
         });
-    Named { touched, computed }
+    let folded = left
+        .into_iter()
+        .map(|(output, value)| (CanonicalStorageId::from_varnode(output), value))
+        .collect();
+    Named {
+        touched,
+        computed,
+        folded,
+    }
 }
 
 /// The number one named line computes, where it computes one.
@@ -282,92 +311,52 @@ fn relative_over(
         .collect()
 }
 
-/// What this revision holds wherever the instruction reads.
-///
-/// Said beside the read rather than folded into it: the bytes there are a fact
-/// about this revision, and the load is a fact about the instruction.
-fn held_at(memory: &Memory<'_>, claims: &[(AnnotationKind, Support)]) -> Vec<AnnotationKind> {
-    claims
-        .iter()
-        .filter_map(|(kind, _)| match kind {
-            AnnotationKind::Reads { address, width } => Some(AnnotationKind::Holds {
-                address: *address,
-                width: *width,
-                value: memory.word(*address, *width)?,
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
-/// What the analysis proved about the machine words one instruction defines.
-///
-/// One range per value, and the range is the value's own: it is narrowed where
-/// the value is defined, so it holds wherever the value is live rather than at
-/// this instruction in particular.
-fn proved_about(answered: &Answered<'_>, address: u64) -> Vec<AnnotationKind> {
-    let (Some(facts), Some(machine)) = (answered.facts, answered.decoders.at(address)) else {
-        return Vec::new();
-    };
-    let graph = facts.graph();
-    // A flag is proved to hold nought or one on every line that sets it, which says only that it is a flag.
-    let word = |storage: &r2ssa::CanonicalStorageId| {
-        storage.space == r2ssa::CanonicalStorageSpace::Register
-            && storage.size == machine.arch.addr_size
-    };
-    graph
-        .insts_for_instruction(address)
-        .iter()
-        .filter_map(|inst| {
-            let instruction = graph.inst(*inst)?;
-            let storage = instruction.canonical_storage.filter(word)?;
-            let range = facts.values().get(instruction.output?)?;
-            if !bounded_beyond_its_operation(facts, instruction, range) {
-                return None;
+/// What this revision holds at the addresses the line's claims use, each on the rung of the claim; a word read is data, not a use.
+fn revision_at(
+    memory: &Memory<'_>,
+    claims: &[(AnnotationKind, Support)],
+) -> Vec<(AnnotationKind, Support)> {
+    let mut said = Vec::new();
+    // Each address a claim uses, with how many bytes the claim itself accesses there.
+    let mut used = BTreeMap::<u64, Vec<(u32, Support)>>::new();
+    for (kind, support) in claims {
+        let (address, accessed) = match *kind {
+            AnnotationKind::Reads { address, width } => {
+                if let Some(value) = memory.word(address, width) {
+                    let kind = AnnotationKind::Holds {
+                        address,
+                        width,
+                        value,
+                    };
+                    said.push((kind, *support));
+                }
+                (address, width)
             }
-            let (low, high) = range.bounds()?;
-            Some(AnnotationKind::Bounds {
-                storage,
-                low,
-                high,
-                stride: range.stride().unwrap_or(0),
-            })
-        })
-        .collect()
-}
-
-/// Whether a range says more than the operation that defines the value.
-///
-/// A range spanning the width written proves nothing, and a zero extension of
-/// an unbounded narrower value spans exactly that narrower width: `xor eax, edx`
-/// said `rax in [0x0, 0xffffffff]`, which is only that a 32-bit write clears the rest.
-fn bounded_beyond_its_operation(
-    facts: &r2ssa::SsaArtifact,
-    instruction: &r2ssa::GraphInst,
-    range: r2ssa::StridedInterval,
-) -> bool {
-    let graph = facts.graph();
-    let mut defined = (instruction, range);
-    loop {
-        let (instruction, range) = defined;
-        if range.is_top() || range.is_bottom() {
-            return false;
-        }
-        let InstPayload::Op(r2ssa::SSAOp::IntZExt { .. }) = &instruction.payload else {
-            return true;
+            AnnotationKind::Writes { address, width } => (address, width),
+            AnnotationKind::Target { address, .. }
+            | AnnotationKind::Computes { value: address } => (address, 0),
+            AnnotationKind::Holds { .. }
+            | AnnotationKind::Text { .. }
+            | AnnotationKind::Bounds { .. } => continue,
         };
-        // The extension's range is its operand's, so the operand's width is the one written.
-        let Some(extended) = instruction.inputs.first().copied() else {
-            return true;
-        };
-        let Some(operand) = facts.values().get(extended) else {
-            return true;
-        };
-        let Some(producer) = graph.def_inst(extended).and_then(|inst| graph.inst(inst)) else {
-            return !operand.is_top();
-        };
-        defined = (producer, operand);
+        used.entry(address).or_default().push((accessed, *support));
     }
+    for (address, uses) in used {
+        let Some(text) = memory.text(address) else {
+            continue;
+        };
+        // Text an access holds whole is only that word's bytes spelled by chance, so only text running past the access is claimed.
+        let past = |accessed: u32| usize::try_from(accessed).is_ok_and(|bytes| text.len() > bytes);
+        let support = uses
+            .iter()
+            .filter(|(accessed, _)| past(*accessed))
+            .map(|(_, support)| *support)
+            .min();
+        if let Some(support) = support {
+            said.push((AnnotationKind::Text { address, text }, support));
+        }
+    }
+    said
 }
 
 /// What can be known of the program after one instruction.
@@ -386,24 +375,27 @@ struct After<'a, 'r, 'b> {
     used: Option<Support>,
 }
 
-/// Whether the number an instruction leaves in `output` is a step or its result.
+/// The rung that settles the number an instruction leaves in `output` as its result: the run after it, else the def-use.
 ///
 /// A value a later instruction builds a number on is a step towards an address
 /// rather than one: spelling `adrp x17, reloc.humanize_number` named the page
 /// base the `add` after it was about to move fifty bytes past. Copying, storing,
 /// comparing, loading through or passing the number is using it as it stands.
-fn fate_of(
+fn result_of(
     lift: &r2il::R2ILBlock,
     after: &mut After<'_, '_, '_>,
     output: &Varnode,
     address: u64,
-) -> Fate {
+) -> Option<Support> {
     match straight_line_fate(lift, after, output) {
-        Fate::Unknown => after
-            .graph
-            .and_then(super::records::DefUse::graph)
-            .map_or(Fate::Unknown, |graph| defined_fate(graph, address, output)),
-        settled => settled,
+        Fate::Result => Some(Support::Folded),
+        Fate::Step => None,
+        Fate::Unknown => {
+            let settled = after
+                .graph?
+                .fate_of(address, CanonicalStorageId::from_varnode(output))?;
+            (settled == r2ssa::fate::Fate::Result).then_some(Support::Certified)
+        }
     }
 }
 
@@ -557,60 +549,6 @@ fn covers(outer: &Varnode, inner: &Varnode) -> bool {
     outer.space == inner.space
         && outer.offset <= inner.offset
         && inner.offset + u64::from(inner.size) <= outer.offset + u64::from(outer.size)
-}
-
-/// What the function's def-use says of the value this instruction leaves in `output`.
-fn defined_fate(graph: &SsaGraph, address: u64, output: &Varnode) -> Fate {
-    let storage = CanonicalStorageId::from_varnode(output);
-    let defined = graph
-        .insts_for_instruction(address)
-        .iter()
-        .rev()
-        .filter_map(|inst| graph.inst(*inst))
-        .find(|inst| inst.canonical_storage == Some(storage))
-        .and_then(|inst| inst.output);
-    match defined {
-        Some(defined) if derived_from(graph, defined) => Fate::Step,
-        Some(_) => Fate::Result,
-        None => Fate::Unknown,
-    }
-}
-
-/// Whether an operation builds a number on this value, through the copies and merges it flows into.
-fn derived_from(graph: &SsaGraph, defined: ValueId) -> bool {
-    let mut seen = BTreeSet::from([(defined, false)]);
-    let mut pending = vec![(defined, false)];
-    while let Some((value, built)) = pending.pop() {
-        let users = graph
-            .use_sites(value)
-            .iter()
-            .filter_map(|site| graph.inst(site.inst));
-        for user in users {
-            let carried = match &user.payload {
-                InstPayload::Phi { .. } => built,
-                InstPayload::Op(op) => match op.value_use() {
-                    ValueUse::Carries => built,
-                    ValueUse::Derives => true,
-                    ValueUse::Consumes if built => return true,
-                    ValueUse::Consumes | ValueUse::Tests => continue,
-                },
-            };
-            let Some(next) = user.output else {
-                continue;
-            };
-            let temporary = graph
-                .value(next)
-                .and_then(|value| value.canonical_storage)
-                .is_some_and(|storage| storage.space == CanonicalStorageSpace::Unique);
-            if carried && !temporary {
-                return true;
-            }
-            if seen.insert((next, carried)) {
-                pending.push((next, carried));
-            }
-        }
-    }
-    false
 }
 
 /// The addresses one operation names, as far as the block so far shows.

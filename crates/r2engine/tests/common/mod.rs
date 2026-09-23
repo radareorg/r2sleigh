@@ -356,6 +356,21 @@ impl Literal {
         self
     }
 
+    /// The same program with its code ending at `end` and the rest of its bytes a data section.
+    pub fn with_data_after(mut self, end: u64) -> Self {
+        let code = &mut self.container.sections[0];
+        let stop = code.vaddr + code.vsize;
+        code.vsize = end - code.vaddr;
+        self.container.sections.push(Section {
+            name: ".rodata".to_owned(),
+            vaddr: end,
+            vsize: stop - end,
+            is_code: false,
+            loaded: true,
+        });
+        self
+    }
+
     /// Write bytes over the program's own, as a patch would.
     pub fn write(&mut self, vaddr: u64, bytes: &[u8]) {
         for (offset, byte) in bytes.iter().enumerate() {

@@ -31481,3 +31481,29 @@ build P-code for (an `unimpl` constructor) is still spelled, with no lift and a
 fresh context after it. Open, found while checking this: `extract_architecture`
 never sets `alignment`, so an undecodable ARM word is stepped one byte and the
 bytes after it are listed as invented instructions (libarm.so 0x1879d).
+
+## Each listing note ends with its rung
+
+`query::Support` is one ladder by evidence scope: decoded (the instruction
+alone), folded (its block's run), certified (the function's exact def-use),
+solved (the range solver), then the two callee rungs. `r2ssa::fate` answers
+step-or-result for every value in one backward pass, and a `Computes` it
+settles is certified. A range is not claimed where it is one value the
+instruction alone fixes or only the width it wrote (`mov eax, 0x811c9dc5`,
+`mvn r3, 0`). The instruction's own wider bound is claimed decoded (`and eax,
+0x1` in [0, 1]). A range strictly inside it is folded or certified where the
+run or the def-use folds it to one value, and solved otherwise.
+`values::instruction_bound` runs the solver's transfer over the instruction's
+own operations; that transfer now reads an operation its inputs fix (`xor eax,
+eax`, an operation over literals) as one value for every `solve_value_ranges`
+consumer, jump-table bounds and stack certificates included. A line carries
+the text at an address one of its claims uses, on that claim's rung; an access
+claims it only where the text runs past the bytes it reads, so a data word
+whose own bytes spell `"A @"` is not called a string.
+
+Open: the run's evaluator, `BlockOrigins`, folds only copy, add and sub, so a
+constant a shift computes inside one block (`shr rsi, 0x3f` in
+`register_tm_clones`) is labelled certified where folded would do. The cause is
+four constant evaluators (`constant::fold_op`, `optimize::eval_const_op`, the
+SCCP, `BlockOrigins`); they want one owner. Text at a word a pool load holds is
+not claimed, because nothing on the line uses that word as an address.

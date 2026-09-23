@@ -589,7 +589,9 @@ impl R2ILOp {
             | R2ILOp::IntSExt { .. }
             | R2ILOp::Subpiece { .. }
             | R2ILOp::Multiequal { .. }
-            | R2ILOp::Indirect { .. } => ValueUse::Carries,
+            | R2ILOp::Indirect { .. }
+            | R2ILOp::Cast { .. }
+            | R2ILOp::Select { .. } => ValueUse::Carries,
             R2ILOp::IntAdd { .. }
             | R2ILOp::IntSub { .. }
             | R2ILOp::IntMult { .. }
@@ -608,7 +610,9 @@ impl R2ILOp {
             | R2ILOp::Piece { .. }
             | R2ILOp::PtrAdd { .. }
             | R2ILOp::PtrSub { .. }
-            | R2ILOp::SegmentOp { .. } => ValueUse::Derives,
+            | R2ILOp::SegmentOp { .. }
+            | R2ILOp::Extract { .. }
+            | R2ILOp::Insert { .. } => ValueUse::Derives,
             R2ILOp::IntEqual { .. }
             | R2ILOp::IntNotEqual { .. }
             | R2ILOp::IntLess { .. }

@@ -8,6 +8,7 @@
 
 use r2il::Endianness;
 use r2sleigh_lift::{EmbeddedMachine, NumberSpan, Syntax};
+use r2ssa::fate::{Fate, Fates};
 
 use super::Support;
 use super::references::ReferenceKind;
@@ -69,6 +70,11 @@ impl Memory<'_> {
         self.program.extents().holds(address)
     }
 
+    /// The text this revision holds at an address in a section of static data, where it holds text.
+    pub(super) fn text(&self, address: u64) -> Option<String> {
+        crate::native::text_at(self.program, address)
+    }
+
     /// The value this revision holds at an address, where it holds one.
     pub(super) fn word(&self, address: u64, width: u32) -> Option<u64> {
         let width = usize::try_from(width)
@@ -99,8 +105,8 @@ pub struct Answered<'a> {
     pub memory: Memory<'a>,
     /// What a call does, where the program's convention was read.
     pub call_effect: Option<&'a r2ssa::SourceCallEffect>,
-    /// Absent below `Work::Function`, which is what keeps a listing cheap.
-    pub facts: Option<&'a r2ssa::SsaArtifact>,
+    /// The function's analysis; absent below `Work::Function`, which is what keeps a listing cheap.
+    pub prepared: Option<&'a crate::native::Prepared>,
     /// The def-use of the body the run is in, which says whether a number it computes is a step.
     pub fate: Option<&'a DefUse<'a>>,
     /// Whether each line is spelled; the reference index reads only what the lines claim.
@@ -109,9 +115,9 @@ pub struct Answered<'a> {
     pub parameters: Option<&'a dyn Parameters>,
 }
 
-/// The def-use of one body, built the first time a line's fate needs it.
+/// The def-use of one body and every value's fate on it, built the first time a line's fate needs them.
 pub struct DefUse<'a> {
-    built: std::cell::OnceCell<Option<r2ssa::SsaGraph>>,
+    built: std::cell::OnceCell<Option<(r2ssa::SsaGraph, Fates)>>,
     blocks: &'a [r2il::R2ILBlock],
     arch: &'a r2il::ArchSpec,
 }
@@ -125,10 +131,31 @@ impl<'a> DefUse<'a> {
         }
     }
 
-    /// The graph, built now if nothing has asked for it yet.
-    pub fn graph(&self) -> Option<&r2ssa::SsaGraph> {
+    /// What becomes of the value one instruction leaves in a storage, as the body's def-use settles it.
+    pub fn fate_of(&self, instruction: u64, storage: r2ssa::CanonicalStorageId) -> Option<Fate> {
+        let (graph, fates) = self.settled()?;
+        let value = graph.left_by_instruction(instruction, storage)?;
+        Some(fates.of_value(value))
+    }
+
+    /// What one instruction alone makes of the value it leaves in a storage, read off the lift's own operations.
+    pub fn own_bound(
+        &self,
+        instruction: u64,
+        storage: r2ssa::CanonicalStorageId,
+    ) -> Option<r2ssa::InstructionBound> {
+        let (graph, _) = self.settled()?;
+        r2ssa::instruction_bound(graph, instruction, storage)
+    }
+
+    /// The graph and the fates, built now if nothing has asked for them yet.
+    fn settled(&self) -> Option<&(r2ssa::SsaGraph, Fates)> {
         self.built
-            .get_or_init(|| r2ssa::def_use_graph(self.blocks, Some(self.arch)))
+            .get_or_init(|| {
+                let graph = r2ssa::def_use_graph(self.blocks, Some(self.arch))?;
+                let fates = Fates::of(&graph);
+                Some((graph, fates))
+            })
             .as_ref()
     }
 
@@ -189,7 +216,7 @@ pub struct Annotation {
 }
 
 /// What one annotation claims.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnotationKind {
     /// The instruction encodes a transfer of control to this address.
     Target { address: u64, call: bool },
@@ -231,16 +258,19 @@ pub enum AnnotationKind {
         width: u32,
         value: u64,
     },
+    /// The revision holds this text where a claim on the line uses the address; like `Holds`, never that the line reads it.
+    Text { address: u64, text: String },
 }
 
 impl AnnotationKind {
     /// The address this claim is about.
-    pub fn address(self) -> u64 {
-        match self {
+    pub fn address(&self) -> u64 {
+        match *self {
             Self::Target { address, .. }
             | Self::Reads { address, .. }
             | Self::Writes { address, .. }
-            | Self::Holds { address, .. } => address,
+            | Self::Holds { address, .. }
+            | Self::Text { address, .. } => address,
             Self::Computes { value } => value,
             // A range is about a storage, not about an address in the program.
             Self::Bounds { low, .. } => low,

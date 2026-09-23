@@ -6,7 +6,7 @@ expression: run.out
             0x00401334      4885f6         test rsi, rsi
             0x00401337      7427           je 0x401360
             0x00401339      4801fe         add rsi, rdi
-            0x0040133c      b8c59d1c81     mov eax, 0x811c9dc5 ; defines rax = 0x811c9dc5
+            0x0040133c      b8c59d1c81     mov eax, 0x811c9dc5
             0x00401341      0f1f800000..   nop dword [rax]
             0x00401348      0fb617         movzx edx, byte [rdi]
             0x0040134b      4883c701       add rdi, 0x1
@@ -15,23 +15,23 @@ expression: run.out
             0x00401357      4839fe         cmp rsi, rdi
             0x0040135a      75ec           jne 0x401348
             0x0040135c      c3             ret
-            0x00401360      b8c59d1c81     mov eax, 0x811c9dc5 ; defines rax = 0x811c9dc5
+            0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
             0x00401365      c3             ret
             0x00401530      f30f1efa       endbr64
             0x00401534      4885f6         test rsi, rsi
             0x00401537      7440           je 0x401579
             0x00401539      4801fe         add rsi, rdi
-            0x0040153c      b8ffffffff     mov eax, 0xffffffff ; defines rax = 0xffffffff
+            0x0040153c      b8ffffffff     mov eax, 0xffffffff
             0x00401541      0f1f800000..   nop dword [rax]
             0x00401548      0fb617         movzx edx, byte [rdi]
             0x0040154b      31d0           xor eax, edx
-            0x0040154d      ba08000000     mov edx, 0x8 ; defines rdx = 0x8
+            0x0040154d      ba08000000     mov edx, 0x8
             0x00401552      660f1f440000   nop word [rax + rax*0x1]
             0x00401558      89c1           mov ecx, eax
-            0x0040155a      83e001         and eax, 0x1 ; defines rax in [0x0, 0x1]
+            0x0040155a      83e001         and eax, 0x1 ; defines rax in [0x0, 0x1] (decoded)
             0x0040155d      f7d8           neg eax
-            0x0040155f      d1e9           shr ecx, 0x1 ; defines rcx in [0x0, 0x7fffffff]
-            0x00401561      252083b8ed     and eax, 0xedb88320 ; defines rax in [0x0, 0xedb88320]
+            0x0040155f      d1e9           shr ecx, 0x1 ; defines rcx in [0x0, 0x7fffffff] (decoded)
+            0x00401561      252083b8ed     and eax, 0xedb88320 ; defines rax in [0x0, 0xedb88320] (decoded)
             0x00401566      31c8           xor eax, ecx
             0x00401568      83ea01         sub edx, 0x1
             0x0040156b      75eb           jne 0x401558
@@ -40,5 +40,5 @@ expression: run.out
             0x00401574      75d2           jne 0x401548
             0x00401576      f7d0           not eax
             0x00401578      c3             ret
-            0x00401579      31c0           xor eax, eax ; defines rax = 0x0
+            0x00401579      31c0           xor eax, eax
             0x0040157b      c3             ret

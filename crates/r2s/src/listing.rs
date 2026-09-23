@@ -134,27 +134,25 @@ fn claim(
         .min()
 }
 
-/// What this revision holds where the instruction reads, as a trailing note.
+/// What this revision holds and what was proved at the line, as trailing notes each ending in its rung.
 ///
 /// The value is stated beside the read rather than substituted into it. A pool
 /// load used to be spelled `ldr r3, sym.foo`, which says the load returns that
 /// address; all this program states is that the word there is that address
 /// now, and the instruction text stays what the machine encodes.
 fn held(session: &Session, line: &r2engine::query::Line) -> String {
-    let notes = line
-        .annotations
+    line.annotations
         .iter()
-        .filter_map(|annotation| note(session, line.address, annotation.kind))
-        .collect::<Vec<_>>();
-    match notes.is_empty() {
-        true => String::new(),
-        false => format!(" ; {}", notes.join(" ")),
-    }
+        .filter_map(|annotation| {
+            let said = note(session, line.address, &annotation.kind)?;
+            Some(format!(" ; {said} ({})", rung(annotation.support)))
+        })
+        .collect()
 }
 
 /// One annotation, as a reader reads it.
-fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Option<String> {
-    match kind {
+fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> Option<String> {
+    match *kind {
         r2engine::query::AnnotationKind::Holds {
             address,
             width,
@@ -180,7 +178,21 @@ fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Op
                 true => format!("defines {name} = {low:#x}"),
                 false => format!("defines {name} in [{low:#x}, {high:#x}]"),
             }),
+        r2engine::query::AnnotationKind::Text { ref text, .. } => Some(format!("{text:?}")),
         _ => None,
+    }
+}
+
+/// The rung a claim stands on, as a reader reads it.
+fn rung(support: r2engine::query::Support) -> &'static str {
+    use r2engine::query::Support;
+    match support {
+        Support::Decoded => "decoded",
+        Support::Folded => "folded",
+        Support::Certified => "certified",
+        Support::Solved => "solved",
+        Support::Dereferenced => "dereferenced",
+        Support::Declared => "declared",
     }
 }
 

@@ -1777,13 +1777,10 @@ impl Native<'_> {
             let Some(address) = prepared.folded_value(value) else {
                 continue;
             };
-            if address == 0
-                || already.contains(&address)
-                || !self.program.holds_static_data(address)
-            {
+            if address == 0 || already.contains(&address) {
                 continue;
             }
-            if let Some(text) = self.text_at(address) {
+            if let Some(text) = text_at(self.program, address) {
                 found.insert(address, text);
             }
         }
@@ -2061,8 +2058,7 @@ impl Native<'_> {
     fn literals(&self, body: &r2ssa::body::Body) -> Vec<(u64, String)> {
         referenced(body)
             .into_iter()
-            .filter(|address| self.program.holds_static_data(*address))
-            .filter_map(|address| Some((address, self.text_at(address)?)))
+            .filter_map(|address| Some((address, text_at(self.program, address)?)))
             .collect()
     }
 
@@ -2201,12 +2197,15 @@ impl Native<'_> {
         found.dedup();
         found
     }
+}
 
-    /// The text at an address, where there is text there.
-    fn text_at(&self, address: u64) -> Option<String> {
-        let bytes = self.program.read(address, crate::names::LITERAL_LIMIT)?;
-        crate::names::text_in(&bytes).map(str::to_owned)
+/// The text a section of static data holds at an address; the one reader a rendering and a listing share.
+pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
+    if !program.holds_static_data(address) {
+        return None;
     }
+    let bytes = program.read(address, crate::names::LITERAL_LIMIT)?;
+    crate::names::text_in(&bytes).map(str::to_owned)
 }
 
 /// Whether an instruction decodes at an address.
