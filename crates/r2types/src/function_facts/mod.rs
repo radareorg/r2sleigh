@@ -789,6 +789,16 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
 
 /// Admit a logical type only where it describes this exact storage width.
 pub fn admit_declaration_type(ty: CTypeLike, width_bits: u32, ptr_bits: u32) -> CTypeLike {
+    admissible_declaration_type(ty, width_bits, ptr_bits)
+        .unwrap_or_else(|| CTypeLike::machine_bits(width_bits))
+}
+
+/// A logical type as declared at this storage width, where it describes that width.
+pub fn admissible_declaration_type(
+    ty: CTypeLike,
+    width_bits: u32,
+    ptr_bits: u32,
+) -> Option<CTypeLike> {
     // Fixed-width C spellings are scalar types, not distinct semantic aliases.
     // Canonicalizing them here gives every downstream type boundary the same
     // structured fact while preserving source-significant aliases such as
@@ -806,11 +816,7 @@ pub fn admit_declaration_type(ty: CTypeLike, width_bits: u32, ptr_bits: u32) -> 
         }
         _ => false,
     };
-    if admissible {
-        ty
-    } else {
-        CTypeLike::machine_bits(width_bits)
-    }
+    admissible.then_some(ty)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -889,6 +895,8 @@ pub struct FunctionFacts {
     summary_view: InterprocSummaryView,
     diagnostics: Vec<String>,
     assumption_usage: r2ssa::AssumptionUsageReport,
+    /// What the function returns, decided once where the source enriches this report.
+    return_type: Option<ReturnTypeFact>,
 }
 
 /// Opaque source-owned function facts.
@@ -902,7 +910,6 @@ pub struct SourceOwnedFunctionFacts {
     source: Arc<r2ssa::SsaArtifact>,
     report: FunctionFacts,
     evidence_types: crate::EvidenceTypes,
-    return_type: ReturnTypeFact,
     _callee_signatures: BTreeMap<u64, SourceOwnedCalleeSignature>,
 }
 
@@ -1039,12 +1046,10 @@ impl SourceOwnedFunctionFacts {
             .default_address_bits();
         let evidence_types =
             crate::solve_evidence_types(source.as_ref(), &report.callsite_signatures(), ptr_bits);
-        let return_type = ReturnTypeFact::decide(&source, &report, &evidence_types);
         Some(Self {
             source,
             report,
             evidence_types,
-            return_type,
             _callee_signatures: callee_signatures,
         })
     }
@@ -1071,8 +1076,37 @@ impl SourceOwnedFunctionFacts {
     }
 
     /// What this function returns, decided once for `afi` and every rendering.
-    pub const fn return_type(&self) -> &ReturnTypeFact {
-        &self.return_type
+    pub const fn return_type(&self) -> Option<&ReturnTypeFact> {
+        self.report.return_type()
+    }
+
+    /// The type parameter `slot` is declared with at this width: the signature's where it fits, else the certified entity's.
+    pub fn parameter_declaration(&self, slot: usize, width_bits: u32) -> Option<CTypeLike> {
+        let ptr_bits = self
+            .source
+            .machine_context()
+            .memory_model()
+            .default_address_bits();
+        let signed = self
+            .report
+            .type_facts()
+            .render_authorized_signature()
+            .and_then(|signature| signature.params.get(slot)?.ty.clone());
+        let certified = u32::try_from(slot).ok().and_then(|slot| {
+            match self
+                .report
+                .render()?
+                .certified_entities
+                .get(&r2ssa::SemanticId::Parameter(slot))?
+            {
+                CertifiedEntity::Parameter { ty, .. } => ty.clone(),
+                _ => None,
+            }
+        });
+        signed
+            .into_iter()
+            .chain(certified)
+            .find_map(|ty| admissible_declaration_type(ty, width_bits, ptr_bits))
     }
 
     pub(crate) fn stamp_report_decompile_route(
@@ -1156,14 +1190,12 @@ impl SourceOwnedFunctionFacts {
             .memory_model()
             .default_address_bits();
         enriched.apply_certified_call_argument_type_constraints(ptr_bits);
-        enriched.apply_recovered_evidence_types(source, ptr_bits);
+        let evidence = enriched.apply_recovered_evidence_types(source, ptr_bits);
         // Exact immutable interface evidence outranks advisory propagation.
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
-        // Where the interface carries a type graph the whole signature comes
-        // from it; the return-only projection below then finds it agreeing.
         enriched.apply_exact_source_signature(source);
-        enriched.apply_exact_source_return_type(source);
+        enriched.apply_return_type_fact(source, &evidence);
         // Type constraints may change advisory member/carrier types. Rebuild
         // once more so the sealed render projection is a pure function of the
         // final type facts and the exact retained source.
@@ -1277,6 +1309,7 @@ impl FunctionFacts {
             summary_view: InterprocSummaryView::default(),
             diagnostics: Vec::new(),
             assumption_usage: r2ssa::AssumptionUsageReport::default(),
+            return_type: None,
         }
     }
 
@@ -2833,60 +2866,45 @@ impl FunctionFacts {
         true
     }
 
-    /// Preserve the source-declared logical return type only when every native
-    /// return has the exact SSA certificate for that declared carrier. The
-    /// immutable interface owns the logical type; the return certificates prove
-    /// that this function actually returns a value through that carrier.
-    fn apply_exact_source_return_type(&mut self, source: &r2ssa::SsaArtifact) -> bool {
-        let Some(return_type) = exact_source_return_type(source) else {
-            return false;
-        };
-        let Some(previous_signature) = self.types.merged_signature.clone() else {
-            return false;
-        };
-        let previous_certificate = self.types.signature_certificate.clone();
-        if previous_signature.ret_type.as_ref() == Some(&return_type) {
-            if let Some(mut sources) = previous_certificate
-                .as_ref()
-                .filter(|certificate| certificate.signature == previous_signature)
-                .map(|certificate| certificate.sources.clone())
-            {
-                sources.push(SignatureCertificateSource::SourceReturnType);
-                sources.sort();
-                sources.dedup();
-                if let Some(certificate) =
-                    crate::SignatureCertificate::from_signature(&previous_signature, sources)
-                {
-                    self.types.signature_certificate = Some(certificate);
-                }
+    /// Decide the return type once and make the signature state it, or state none where it is refused.
+    fn apply_return_type_fact(
+        &mut self,
+        source: &r2ssa::SsaArtifact,
+        evidence: &crate::EvidenceTypes,
+    ) {
+        let fact = ReturnTypeFact::decide(source, &self.callsite_signatures(), evidence);
+        let exact = matches!(
+            fact,
+            ReturnTypeFact::Decided {
+                by: ReturnTypeEvidence::ExactSource,
+                ..
             }
-            return false;
+        );
+        if let Some(signature) = self.types.merged_signature.as_mut() {
+            let previous = signature.clone();
+            signature.ret_type = fact.decided().cloned();
+            let mut sources = self
+                .types
+                .signature_certificate
+                .as_ref()
+                .filter(|certificate| certificate.signature == previous)
+                .map(|certificate| certificate.sources.clone());
+            if exact {
+                sources
+                    .get_or_insert_default()
+                    .push(SignatureCertificateSource::SourceReturnType);
+            }
+            // A signature nothing certified before stays uncertified; only its return is restated.
+            self.types.signature_certificate = sources.and_then(|sources| {
+                crate::SignatureCertificate::from_signature(signature, sources)
+            });
         }
-        let Some(signature) = self.types.merged_signature.as_mut() else {
-            return false;
-        };
-        signature.ret_type = Some(return_type);
-        let updated_signature = signature.clone();
-        let mut sources = previous_certificate
-            .as_ref()
-            .filter(|certificate| certificate.signature == previous_signature)
-            .map(|certificate| certificate.sources.clone())
-            .unwrap_or_default();
-        // This evidence proves only the return type. Treating it as general
-        // ExternalContext evidence would also certify unrelated parameter
-        // types and could incorrectly certify a full signature.
-        sources.push(SignatureCertificateSource::SourceReturnType);
-        sources.sort();
-        sources.dedup();
-        let Some(certificate) =
-            crate::SignatureCertificate::from_signature(&updated_signature, sources)
-        else {
-            self.types.merged_signature = Some(previous_signature);
-            self.types.signature_certificate = previous_certificate;
-            return false;
-        };
-        self.types.signature_certificate = Some(certificate);
-        true
+        self.return_type = Some(fact);
+    }
+
+    /// What the function returns, where the source enriched this report.
+    pub const fn return_type(&self) -> Option<&ReturnTypeFact> {
+        self.return_type.as_ref()
     }
 
     /// The prototype each call site reaches, keyed the way the solver needs it.
@@ -2912,15 +2930,18 @@ impl FunctionFacts {
     /// only written where the fact it would replace is storage width rather than
     /// evidence, so a recovered type never overwrites a declared one and a value
     /// the solver did not reach keeps whatever it had.
-    pub fn apply_recovered_evidence_types(&mut self, source: &r2ssa::SsaArtifact, ptr_bits: u32) {
+    pub fn apply_recovered_evidence_types(
+        &mut self,
+        source: &r2ssa::SsaArtifact,
+        ptr_bits: u32,
+    ) -> crate::EvidenceTypes {
         let signatures = self.callsite_signatures();
         let recovered = crate::evidence::solve_evidence_types(source, &signatures, ptr_bits);
-        if recovered.is_empty() {
-            return;
+        if !recovered.is_empty() {
+            self.apply_recovered_parameter_types(source, &recovered, ptr_bits);
+            self.apply_recovered_stack_slot_types(&recovered, ptr_bits);
         }
-        self.apply_recovered_parameter_types(source, &recovered, ptr_bits);
-        self.apply_recovered_return_type(source, &recovered, ptr_bits);
-        self.apply_recovered_stack_slot_types(&recovered, ptr_bits);
+        recovered
     }
 
     /// The type of each exact source parameter value the solver reached.
@@ -2969,53 +2990,6 @@ impl FunctionFacts {
             self.types
                 .certify_current_signature_with_source(SignatureCertificateSource::LocalInference);
         }
-    }
-
-    /// The type of the value the function hands back.
-    ///
-    /// Only a return that is already claimed to carry a value is retyped: a
-    /// function proven to return nothing keeps returning nothing, whatever a
-    /// leftover register happens to hold.
-    fn apply_recovered_return_type(
-        &mut self,
-        source: &r2ssa::SsaArtifact,
-        recovered: &crate::EvidenceTypes,
-        ptr_bits: u32,
-    ) {
-        let type_db = &self.types.external_type_db;
-        let Some(signature) = self.types.merged_signature.as_ref() else {
-            return;
-        };
-        let Some(existing) = signature.ret_type.clone() else {
-            return;
-        };
-        if !crate::facts::is_weak_storage_scalar_type(&existing, ptr_bits) {
-            return;
-        }
-
-        let mut candidate: Option<CTypeLike> = None;
-        for certificate in &source.certificates().returns {
-            let Some(ty) = recovered.value_type(certificate.value) else {
-                return;
-            };
-            match &candidate {
-                None => candidate = Some(ty.clone()),
-                Some(existing) if existing == ty => {}
-                // Two returns that disagree have not agreed on a type.
-                Some(_) => return,
-            }
-        }
-        let Some(candidate) = candidate else {
-            return;
-        };
-        if !recovered_type_outranks(&existing, &candidate, ptr_bits, type_db) {
-            return;
-        }
-        if let Some(signature) = self.types.merged_signature.as_mut() {
-            signature.ret_type = Some(candidate);
-        }
-        self.types
-            .certify_current_signature_with_source(SignatureCertificateSource::CalleeSignature);
     }
 
     /// The type of each stack home the solver reached.

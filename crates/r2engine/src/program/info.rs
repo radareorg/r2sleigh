@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use r2types::{CTypeLike, CertifiedEntity, FunctionFacts, SourceOwnedFunctionFacts};
+use r2types::{CTypeLike, CertifiedEntity, SourceOwnedFunctionFacts};
 
 pub use r2ssa::StackAddressBase as StackBase;
 
@@ -23,7 +23,7 @@ pub struct FunctionInfo {
     pub convention: Option<String>,
     pub arguments: Vec<Argument>,
     pub locals: Vec<Local>,
-    /// What it returns, where a signature is authorized and the return decided.
+    /// What it returns, where r2types decided it.
     pub returns: Option<CTypeLike>,
 }
 
@@ -85,7 +85,7 @@ impl FunctionInfo {
                 .map(|site| site.direct_target)
                 .collect(),
             convention: facts.type_facts().callconv.clone(),
-            arguments: arguments(artifact, facts, &entities),
+            arguments: arguments(artifact, sealed, &entities),
             returns: returns(artifact, sealed),
             locals: locals(artifact, &entities),
         }
@@ -174,13 +174,12 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
     blocks
 }
 
-/// Every certified parameter, typed as the declaration, the signature, or its carrier says.
+/// Every certified parameter, typed as r2types declares that slot, else as storage of its width.
 fn arguments(
     artifact: &r2ssa::SsaArtifact,
-    facts: &FunctionFacts,
+    sealed: &SourceOwnedFunctionFacts,
     entities: &[&CertifiedEntity],
 ) -> Vec<Argument> {
-    let signature = facts.type_facts().render_authorized_signature();
     let graph = artifact.graph();
     let mut arguments = entities
         .iter()
@@ -189,32 +188,29 @@ fn arguments(
                 slot,
                 entry_values,
                 carrier_width,
-                ty,
                 ..
             } = entity
             else {
                 return None;
             };
-            let signed = signature
-                .and_then(|signature| signature.params.get(*slot as usize))
-                .and_then(|param| param.ty.clone());
             // A declared lane of a wider register is a formal of its own, with its own storage.
             let storage = entry_values.iter().find_map(|value| {
                 graph
                     .formal_projection_storage(*value)
                     .or(graph.value(*value)?.canonical_storage)
             });
+            let width_bits = storage.map_or(*carrier_width, |storage| storage.size) * 8;
             Some(Argument {
                 slot: *slot,
                 storage,
-                name: facts
+                name: sealed
+                    .report()
                     .display_names()
                     .parameter(*slot as usize)
                     .map(str::to_owned),
-                ty: ty
-                    .clone()
-                    .or(signed)
-                    .unwrap_or_else(|| CTypeLike::machine_bits(*carrier_width)),
+                ty: sealed
+                    .parameter_declaration(*slot as usize, width_bits)
+                    .unwrap_or_else(|| CTypeLike::machine_bits(width_bits)),
             })
         })
         .collect::<Vec<_>>();
@@ -222,15 +218,14 @@ fn arguments(
     arguments
 }
 
-/// The decided return, spelled as a rendering declares it, where the signature is authorized.
+/// The decided return, spelled as a rendering declares it.
 fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> Option<CTypeLike> {
-    sealed.report().type_facts().render_authorized_signature()?;
     let bits = artifact
         .machine_context()
         .memory_model()
         .default_address_bits();
     Some(r2types::spellable_c_type_like(
-        sealed.return_type().decided()?,
+        sealed.return_type()?.decided()?,
         bits,
     ))
 }

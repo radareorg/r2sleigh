@@ -124,14 +124,13 @@ pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> Infer
         &mut canonical_params,
     );
 
-    let (ret_type, _) =
-        infer_signature_return_type_from_prepared(prepared, &evidence_types, ptr_bits);
+    let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), &evidence_types);
     let mut inferred = build_inferred_signature(
         &function_name,
         arch_name,
         ptr_bits,
         &canonical_params,
-        &ret_type,
+        returns.decided(),
         &HashMap::new(),
     );
     if let Some(interface) = prepared.machine_context().function_interface() {
@@ -834,131 +833,6 @@ pub fn resolve_evidence_driven_signature_type(
     sanitize_signature_type_like(initial_ty, var_size_bytes, ptr_bits)
 }
 
-fn infer_signature_return_type_from_prepared(
-    prepared: &SsaArtifact,
-    evidence_types: &crate::EvidenceTypes,
-    ptr_bits: u32,
-) -> (CTypeLike, SignatureTypeEvidence) {
-    let mut return_values = prepared
-        .facts()
-        .certificates
-        .returns
-        .iter()
-        .map(|certificate| {
-            transparent_return_source_value(prepared, certificate.value)
-                .unwrap_or((certificate.value, None))
-        })
-        .collect::<Vec<_>>();
-    return_values.sort();
-    return_values.dedup();
-    if return_values.is_empty() {
-        return infer_signature_return_type_from_tail_boundaries(prepared, ptr_bits);
-    }
-
-    infer_signature_return_type_from_values(prepared, &return_values, evidence_types, ptr_bits)
-}
-
-/// What a function with no `Return` of its own returns.
-///
-/// A tail call returns its callee's result on this function's behalf, and the
-/// exact boundary at that site says what the callee returns. Reading only the
-/// `Return` certificates scored every tail-only function `void`, so an import
-/// thunk -- `jmp [reloc.fileno]`, the whole of it -- was declared to return
-/// nothing while its body returned `fileno(stream)`, and the declaration
-/// refused the call. Absence of a `Return` is not a fact about the return.
-///
-/// The callee's own logical type is not known here; the boundary proves the
-/// carrier and its width, and that width takes the same default a parameter
-/// of that width takes with no evidence. Tail sites that disagree, or a site
-/// whose interface is missing, leave the type unknown rather than guessed.
-fn infer_signature_return_type_from_tail_boundaries(
-    prepared: &SsaArtifact,
-    ptr_bits: u32,
-) -> (CTypeLike, SignatureTypeEvidence) {
-    let evidence = SignatureTypeEvidence::default();
-    let mut agreed: Option<CTypeLike> = None;
-    let mut saw_tail = false;
-    for certificate in prepared.facts().certificates.callsites.values() {
-        if certificate.transfer != r2ssa::CallSiteTransfer::TailCall {
-            continue;
-        }
-        let Some(interface) = prepared.call_site_interface(certificate.call_site) else {
-            return (CTypeLike::Unknown, evidence);
-        };
-        saw_tail = true;
-        let ty = match interface.result() {
-            r2ssa::SourceCallResult::Void => CTypeLike::Void,
-            r2ssa::SourceCallResult::Register { storage } => {
-                resolve_evidence_driven_signature_type(
-                    CTypeLike::Unknown,
-                    storage.size,
-                    ptr_bits,
-                    &evidence,
-                )
-            }
-        };
-        match &agreed {
-            None => agreed = Some(ty),
-            Some(existing) if *existing == ty => {}
-            Some(_) => return (CTypeLike::Unknown, evidence),
-        }
-    }
-    if !saw_tail {
-        return (boundary_result_type(prepared), evidence);
-    }
-    (agreed.unwrap_or(CTypeLike::Unknown), evidence)
-}
-
-/// What a function with no value-carrying exit returns: void where its boundary proves no result carrier is filled.
-pub(crate) fn boundary_result_type(prepared: &SsaArtifact) -> CTypeLike {
-    let boundary = prepared.machine_context().function_interface();
-    match boundary.map(r2ssa::SourceFunctionInterface::return_kind) {
-        Some(r2ssa::SourceFunctionReturn::Void) => CTypeLike::Void,
-        _ => CTypeLike::Unknown,
-    }
-}
-
-fn transparent_return_source_value(
-    prepared: &SsaArtifact,
-    start: r2ssa::ValueId,
-) -> Option<(r2ssa::ValueId, Option<Signedness>)> {
-    let mut current = start;
-    let mut signedness = None;
-    let mut visited = HashSet::new();
-    while visited.insert(current) {
-        let Some(inst) = prepared
-            .graph()
-            .def_inst(current)
-            .and_then(|inst| prepared.graph().inst(inst))
-        else {
-            return Some((current, signedness));
-        };
-        let r2ssa::InstPayload::Op(op) = &inst.payload else {
-            return Some((current, signedness));
-        };
-        match op {
-            SSAOp::IntZExt { .. } if signedness.is_none() => {
-                signedness = Some(Signedness::Unsigned);
-            }
-            SSAOp::IntSExt { .. } if signedness.is_none() => {
-                signedness = Some(Signedness::Signed);
-            }
-            SSAOp::Copy { .. }
-            | SSAOp::New { .. }
-            | SSAOp::IntZExt { .. }
-            | SSAOp::IntSExt { .. }
-            | SSAOp::Trunc { .. }
-            | SSAOp::Subpiece { offset: 0, .. } => {}
-            _ => return Some((current, signedness)),
-        };
-        let Some(source_value) = inst.inputs.first().copied() else {
-            return Some((current, signedness));
-        };
-        current = source_value;
-    }
-    None
-}
-
 fn exact_signature_type_evidence(ty: &CTypeLike) -> SignatureTypeEvidence {
     let mut evidence = SignatureTypeEvidence::default();
     merge_initial_signature_type_evidence(ty, &mut evidence);
@@ -973,168 +847,6 @@ fn exact_signature_type_evidence(ty: &CTypeLike) -> SignatureTypeEvidence {
         _ => {}
     }
     evidence
-}
-
-fn infer_signature_return_type_from_values(
-    prepared: &SsaArtifact,
-    return_values: &[(r2ssa::ValueId, Option<Signedness>)],
-    evidence_types: &crate::EvidenceTypes,
-    ptr_bits: u32,
-) -> (CTypeLike, SignatureTypeEvidence) {
-    let mut candidates = Vec::new();
-    let mut candidate_evidence = Vec::new();
-    let mut candidate_constants = Vec::new();
-    for (value, signedness) in return_values {
-        let Some(var) = prepared.value_var(*value) else {
-            continue;
-        };
-        let mut initial_ty = evidence_types
-            .value_type(*value)
-            .cloned()
-            .unwrap_or_else(|| fallback_scalar_type_like(var.size, &Default::default(), ptr_bits));
-        if let (CTypeLike::Int { bits, .. }, Some(signedness)) = (&initial_ty, signedness) {
-            initial_ty = CTypeLike::Int {
-                bits: *bits,
-                signedness: *signedness,
-            };
-        }
-        let evidence = exact_signature_type_evidence(&initial_ty);
-        let ty = resolve_evidence_driven_signature_type(initial_ty, var.size, ptr_bits, &evidence);
-        candidates.push(ty);
-        candidate_evidence.push(evidence);
-        candidate_constants.push(var.constant_bits());
-    }
-    choose_signature_return_type(
-        candidates,
-        candidate_evidence,
-        candidate_constants,
-        ptr_bits,
-    )
-}
-
-fn choose_signature_return_type(
-    candidates: Vec<CTypeLike>,
-    candidate_evidence: Vec<SignatureTypeEvidence>,
-    candidate_constants: Vec<Option<u64>>,
-    ptr_bits: u32,
-) -> (CTypeLike, SignatureTypeEvidence) {
-    if candidates.is_empty() {
-        return (CTypeLike::Unknown, SignatureTypeEvidence::default());
-    }
-    let mut meaningful = candidates
-        .iter()
-        .filter(|ty| !matches!(ty, CTypeLike::Unknown))
-        .cloned()
-        .collect::<Vec<_>>();
-    if meaningful.is_empty() {
-        let fallback_evidence = candidate_evidence.into_iter().next().unwrap_or_default();
-        return (
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &fallback_evidence, ptr_bits),
-            fallback_evidence,
-        );
-    }
-    if meaningful.iter().all(|ty| ty == &meaningful[0]) {
-        return (
-            meaningful.remove(0),
-            candidate_evidence.into_iter().next().unwrap_or_default(),
-        );
-    }
-    if let Some(float_ty) = meaningful
-        .iter()
-        .find(|ty| matches!(ty, CTypeLike::Float(_)))
-        .cloned()
-    {
-        let evidence = candidate_evidence
-            .into_iter()
-            .find(|evidence| evidence.width_bits >= 32)
-            .unwrap_or_default();
-        return (float_ty, evidence);
-    }
-    if let Some((ty, evidence)) =
-        scalar_return_type_join(&candidates, &candidate_evidence, &candidate_constants)
-    {
-        return (ty, evidence);
-    }
-    let evidence = candidate_evidence.into_iter().next().unwrap_or_default();
-    (meaningful.remove(0), evidence)
-}
-
-fn scalar_return_type_join(
-    candidates: &[CTypeLike],
-    evidence: &[SignatureTypeEvidence],
-    constants: &[Option<u64>],
-) -> Option<(CTypeLike, SignatureTypeEvidence)> {
-    if candidates.len() != evidence.len() || candidates.len() != constants.len() {
-        return None;
-    }
-
-    let mut semantic_width = candidates
-        .iter()
-        .zip(constants)
-        .filter_map(|(ty, constant)| match (ty, constant) {
-            (CTypeLike::Int { bits, .. }, None) => Some(*bits),
-            _ => None,
-        })
-        .max()?;
-
-    for (ty, constant) in candidates.iter().zip(constants) {
-        let CTypeLike::Int { bits, .. } = ty else {
-            return None;
-        };
-        if *bits > semantic_width
-            && !constant.is_some_and(|value| unsigned_value_fits_bits(value, semantic_width))
-        {
-            semantic_width = *bits;
-        }
-    }
-
-    let mut saw_signed = false;
-    let mut saw_unsigned = false;
-    let mut saw_unknown = false;
-    for (ty, constant) in candidates.iter().zip(constants) {
-        if constant.is_some() {
-            continue;
-        }
-        let CTypeLike::Int { signedness, .. } = ty else {
-            return None;
-        };
-        match signedness {
-            Signedness::Signed => saw_signed = true,
-            Signedness::Unsigned => saw_unsigned = true,
-            Signedness::Unknown => saw_unknown = true,
-        }
-    }
-    let signedness = if saw_signed {
-        Signedness::Signed
-    } else if saw_unknown {
-        Signedness::Unknown
-    } else if saw_unsigned {
-        Signedness::Unsigned
-    } else {
-        return None;
-    };
-
-    let mut joined_evidence = SignatureTypeEvidence::default();
-    for item in evidence {
-        joined_evidence.pointer_proven = joined_evidence.pointer_proven.max(item.pointer_proven);
-        joined_evidence.pointer_likely = joined_evidence.pointer_likely.max(item.pointer_likely);
-        joined_evidence.scalar_proven = joined_evidence.scalar_proven.max(item.scalar_proven);
-        joined_evidence.scalar_likely = joined_evidence.scalar_likely.max(item.scalar_likely);
-        joined_evidence.bool_like = joined_evidence.bool_like.max(item.bool_like);
-    }
-    joined_evidence.width_bits = semantic_width;
-
-    Some((
-        CTypeLike::Int {
-            bits: semantic_width,
-            signedness,
-        },
-        joined_evidence,
-    ))
-}
-
-fn unsigned_value_fits_bits(value: u64, bits: u32) -> bool {
-    bits >= 64 || (bits > 0 && value < (1u64 << bits))
 }
 
 fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
@@ -1292,7 +1004,7 @@ pub(crate) fn build_inferred_signature(
     arch_name: &str,
     ptr_bits: u32,
     params: &[SignatureParamCandidate],
-    ret_type: &CTypeLike,
+    ret_type: Option<&CTypeLike>,
     input_counts: &HashMap<String, u32>,
 ) -> InferredSignature {
     let mut ordered = params.to_vec();
@@ -1331,7 +1043,8 @@ pub(crate) fn build_inferred_signature(
             param_type: render_signature_type(&param.ty, ptr_bits),
         });
     }
-    let rendered_ret = render_signature_type(ret_type, ptr_bits);
+    // An undecided return is spelled as nothing, so no type is read back from it.
+    let rendered_ret = ret_type.map_or_else(String::new, |ty| render_signature_type(ty, ptr_bits));
     let (callconv, _) = compute_callconv_inference(arch_name, input_counts);
     InferredSignature {
         function_name: function_name.to_string(),
@@ -1722,7 +1435,8 @@ mod tests {
         );
         let inferred = infer_signature_from_prepared_ssa(&prepared);
 
-        assert_eq!(inferred.ret_type, "uint32_t");
+        // The certified value is untyped, so no return is claimed, least of all the control target's.
+        assert_eq!(inferred.ret_type, "");
     }
 
     #[test]
@@ -1746,14 +1460,14 @@ mod tests {
             "source-owned-test-cc",
         ));
 
-        assert_eq!(inferred.ret_type, "uint32_t");
+        assert_eq!(inferred.ret_type, "");
         assert_ne!(inferred.ret_type, "float");
         assert_ne!(inferred.ret_type, "double");
     }
 
     #[test]
     fn prepared_signature_does_not_type_a_return_from_program_counter() {
-        // Nothing the program counter holds is returned: void only where the boundary says so, else unknown.
+        // Nothing the program counter holds is returned: void only where the boundary says so, else nothing.
         let arch = x86_return_arch();
         let returning = || {
             let mut block = r2il::R2ILBlock::new(0x1000, 4);
@@ -1764,10 +1478,7 @@ mod tests {
         };
         let unstated =
             SsaArtifact::for_patterns(&[returning()], Some(&arch)).expect("prepared SSA");
-        assert_eq!(
-            infer_signature_from_prepared_ssa(&unstated).ret_type,
-            render_signature_type(&CTypeLike::Unknown, 64)
-        );
+        assert_eq!(infer_signature_from_prepared_ssa(&unstated).ret_type, "");
         let register = |offset| r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
             offset,
@@ -1786,72 +1497,6 @@ mod tests {
         let stated = SsaArtifact::for_decompile_with_interface(&[returning()], Some(&arch), void)
             .expect("prepared void source");
         assert_eq!(infer_signature_from_prepared_ssa(&stated).ret_type, "void");
-    }
-
-    #[test]
-    fn scalar_return_join_narrows_wide_constant_to_nonconstant_semantic_width() {
-        let candidates = vec![
-            CTypeLike::Int {
-                bits: 64,
-                signedness: Signedness::Signed,
-            },
-            CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed,
-            },
-        ];
-        let evidence = vec![
-            SignatureTypeEvidence {
-                scalar_likely: 1,
-                width_bits: 64,
-                ..Default::default()
-            },
-            SignatureTypeEvidence {
-                scalar_proven: 1,
-                width_bits: 32,
-                ..Default::default()
-            },
-        ];
-
-        let (ty, joined_evidence) =
-            scalar_return_type_join(&candidates, &evidence, &[Some(0xffff_ffff), None])
-                .expect("integer return join");
-
-        assert_eq!(
-            ty,
-            CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed,
-            }
-        );
-        assert_eq!(joined_evidence.width_bits, 32);
-        assert_eq!(joined_evidence.scalar_proven, 1);
-    }
-
-    #[test]
-    fn scalar_return_join_keeps_genuine_wide_nonconstant_path() {
-        let candidates = vec![
-            CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed,
-            },
-            CTypeLike::Int {
-                bits: 64,
-                signedness: Signedness::Signed,
-            },
-        ];
-        let evidence = vec![SignatureTypeEvidence::default(); 2];
-
-        let (ty, _) = scalar_return_type_join(&candidates, &evidence, &[None, None])
-            .expect("integer return join");
-
-        assert_eq!(
-            ty,
-            CTypeLike::Int {
-                bits: 64,
-                signedness: Signedness::Signed,
-            }
-        );
     }
 
     #[test]
@@ -1913,7 +1558,7 @@ mod tests {
             "x86-64",
             64,
             &params,
-            &CTypeLike::Void,
+            Some(&CTypeLike::Void),
             &HashMap::new(),
         );
 

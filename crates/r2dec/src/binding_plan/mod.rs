@@ -1499,6 +1499,7 @@ mod construction;
 mod name_resolution;
 mod readers;
 mod rules;
+#[cfg(test)]
 pub(crate) use rules::admit_declaration;
 mod seal;
 

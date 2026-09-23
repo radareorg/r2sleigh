@@ -302,6 +302,11 @@ fn exact_source_param_slots_refuse_missing_interface() {
 }
 
 fn exact_signed_i32_return_source(has_return: bool) -> r2ssa::SsaArtifact {
+    signed_i32_return_source(has_return, true)
+}
+
+/// `eax + 7` returned through `rax`, under an interface whose graph a declaration states when `read`.
+fn signed_i32_return_source(has_return: bool, read: bool) -> r2ssa::SsaArtifact {
     let mut arch = ArchSpec::new("x86-64");
     for (name, offset, size) in [
         ("rax", 0x00, 8),
@@ -408,6 +413,13 @@ fn exact_signed_i32_return_source(has_return: bool) -> r2ssa::SsaArtifact {
     )
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0x28)))
     .and_then(|interface| interface.with_return_address_storage(storage(0x30)))
+    .map(|interface| {
+        if read {
+            interface.with_prototype_from_source_types()
+        } else {
+            interface
+        }
+    })
     .expect("exact signed return interface");
     r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
         .expect("prepared signed return source")
@@ -440,7 +452,14 @@ fn exact_source_return_type_preserves_signed_i32_with_matching_certificate() {
         ),
         ..FunctionTypeFacts::default()
     });
-    assert!(!facts.apply_exact_source_return_type(&source));
+    facts.apply_return_type_fact(&source, &crate::EvidenceTypes::default());
+    assert_eq!(
+        facts.return_type(),
+        Some(&ReturnTypeFact::Decided {
+            ty: signature.ret_type.expect("declared"),
+            by: ReturnTypeEvidence::ExactSource,
+        })
+    );
     assert!(
         facts
             .type_facts()
@@ -3739,5 +3758,122 @@ fn interproc_summary_view_rejects_stale_or_mislabeled_reports() {
                 summary_id,
             }
         )
+    );
+}
+
+/// `rax = zext(t)` returned through an interface that states the carrier and no type for it.
+fn untyped_return_source() -> r2ssa::SsaArtifact {
+    let mut arch = ArchSpec::new("x86-64");
+    arch.add_register(r2il::RegisterDef::new("RAX", 0, 8));
+    arch.add_register(r2il::RegisterDef::new("RIP", 8, 8));
+    arch.add_register(r2il::RegisterDef::new("RSP", 16, 8));
+    let register = |offset| r2ssa::CanonicalStorageId {
+        space: r2ssa::CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    };
+    let interface = r2ssa::SourceFunctionInterface::new_exact(
+        b"untyped-return".to_vec(),
+        "sysv64",
+        [],
+        r2ssa::SourceFunctionReturn::Register {
+            storage: register(0),
+        },
+        [],
+    )
+    .and_then(|interface| interface.with_return_address_storage(register(8)))
+    .and_then(|interface| interface.with_stack_pointer_storage(register(16)))
+    .expect("carrier-only interface");
+    let mut block = R2ILBlock::new(0x1000, 4);
+    block.push(R2ILOp::IntZExt {
+        dst: Varnode::register(0, 8),
+        src: Varnode::unique(0x20, 4),
+    });
+    block.push(R2ILOp::Return {
+        target: Varnode::register(8, 8),
+    });
+    r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+        .expect("prepared untyped return")
+}
+
+#[test]
+fn a_recovered_graph_decides_a_carrier_and_a_read_one_the_exact_type() {
+    let int32 = CTypeLike::Int {
+        bits: 32,
+        signedness: crate::Signedness::Signed,
+    };
+    let decide = |source: &r2ssa::SsaArtifact| {
+        ReturnTypeFact::decide(source, &BTreeMap::new(), &crate::EvidenceTypes::default())
+    };
+    assert_eq!(
+        decide(&signed_i32_return_source(true, true)),
+        ReturnTypeFact::Decided {
+            ty: int32.clone(),
+            by: ReturnTypeEvidence::ExactSource,
+        }
+    );
+    assert_eq!(
+        decide(&signed_i32_return_source(true, false)),
+        ReturnTypeFact::Decided {
+            ty: int32,
+            by: ReturnTypeEvidence::Carrier,
+        }
+    );
+}
+
+#[test]
+fn no_value_is_void_only_where_the_boundary_proves_it() {
+    let arch = {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.add_register(r2il::RegisterDef::new("RIP", 8, 8));
+        arch
+    };
+    let mut block = R2ILBlock::new(0x1000, 4);
+    block.push(R2ILOp::Return {
+        target: Varnode::register(8, 8),
+    });
+    let unstated = r2ssa::SsaArtifact::for_patterns(&[block], Some(&arch)).expect("prepared");
+    assert_eq!(
+        ReturnTypeFact::decide(
+            &unstated,
+            &BTreeMap::new(),
+            &crate::EvidenceTypes::default()
+        ),
+        ReturnTypeFact::Refused(ReturnTypeRefusal::UnprovenBoundary)
+    );
+}
+
+#[test]
+fn a_locally_inferred_signature_does_not_decide_the_return() {
+    // Local inference once spelled every untyped return as a scalar and let the signature win.
+    let source = untyped_return_source();
+    let signature = FunctionSignatureSpec {
+        ret_type: Some(CTypeLike::uint(32)),
+        params: vec![FunctionParamSpec {
+            name: "arg1".to_string(),
+            ty: Some(CTypeLike::uint(64)),
+        }],
+    };
+    let mut facts = FunctionFacts::new(FunctionTypeFacts {
+        merged_signature: Some(signature.clone()),
+        signature_certificate: crate::SignatureCertificate::from_signature(
+            &signature,
+            [crate::SignatureCertificateSource::LocalInference],
+        ),
+        ..FunctionTypeFacts::default()
+    });
+    facts.apply_return_type_fact(&source, &crate::EvidenceTypes::default());
+    assert_eq!(
+        facts.return_type(),
+        Some(&ReturnTypeFact::Refused(ReturnTypeRefusal::UntypedReturn))
+    );
+    let merged = facts
+        .type_facts()
+        .merged_signature
+        .as_ref()
+        .expect("signature");
+    assert_eq!(
+        merged.ret_type, None,
+        "the signature claims a return r2types refused"
     );
 }

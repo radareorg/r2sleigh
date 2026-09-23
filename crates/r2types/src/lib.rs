@@ -74,8 +74,8 @@ pub use function_facts::{
     MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact, PredicateComparisonFact,
     RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal,
     ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
-    StackCallArgumentLocationFact, admit_declaration_type, aggregate_is_definable,
-    declaration_type_width_bits,
+    StackCallArgumentLocationFact, admissible_declaration_type, admit_declaration_type,
+    aggregate_is_definable, declaration_type_width_bits,
 };
 
 pub use model::{Signedness, Type};

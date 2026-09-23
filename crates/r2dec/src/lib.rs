@@ -65,9 +65,11 @@ pub use highlight::highlight_c_ansi;
 use r2ssa::SSAFunction;
 #[cfg(test)]
 use r2ssa::SSAOp;
+use r2types::FunctionFacts;
+#[cfg(test)]
+use r2types::FunctionTypeFacts;
 #[cfg(test)]
 use r2types::{ExternalTypeDb, FunctionType};
-use r2types::{FunctionFacts, FunctionTypeFacts};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -805,6 +807,7 @@ struct DecompilerContext {
 }
 
 impl DecompilerContext {
+    #[cfg(test)]
     fn type_facts(&self) -> &FunctionTypeFacts {
         self.function_facts.type_facts()
     }
@@ -3298,29 +3301,17 @@ impl Decompiler {
                 }
             }
         }
-        let render_signature = self.context.type_facts().render_authorized_signature();
         let params = match binding_names
             .parameters()
             .map(|resolved| {
                 let resolved = resolved?;
-                // The render-authorized signature is the canonical declaration
-                // fact and is already the type authority used while lowering
-                // this parameter's uses. Admit that same fact at the header
-                // boundary only when it describes the certified carrier width;
-                // otherwise this value alone keeps its sealed machine type.
-                let ty = render_signature
-                    .and_then(|signature| {
-                        usize::try_from(resolved.slot)
-                            .ok()
-                            .and_then(|slot| signature.params.get(slot))
-                    })
-                    .and_then(|parameter| parameter.ty.clone())
-                    .map(|ty| {
-                        crate::binding_plan::admit_declaration(
-                            ty,
-                            resolved.width_bits,
-                            self.config.ptr_size,
-                        )
+                // r2types owns what a parameter is declared as; the binding's own type answers only where it declares nothing.
+                let ty = usize::try_from(resolved.slot)
+                    .ok()
+                    .and_then(|slot| {
+                        input
+                            .source_owned_facts()
+                            .parameter_declaration(slot, resolved.width_bits)
                     })
                     .unwrap_or(resolved.declaration_type);
                 Ok(ast::CParam {
@@ -3346,8 +3337,12 @@ impl Decompiler {
             }
         };
         // What the function returns is r2types' one decision; a refused one is spelled as any unknown type is.
-        let return_fact = input.source_owned_facts().return_type();
-        let return_type = return_fact.decided().cloned().unwrap_or(CType::Unknown);
+        let return_type = input
+            .source_owned_facts()
+            .return_type()
+            .and_then(r2types::ReturnTypeFact::decided)
+            .cloned()
+            .unwrap_or(CType::Unknown);
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
