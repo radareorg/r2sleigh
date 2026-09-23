@@ -53,10 +53,10 @@ pub(super) fn over_run(
         return;
     }
     let memory = &answered.memory;
-    let clobbered = answered.clobbered;
+    let call_effect = answered.call_effect;
     // A function listing's run is one block, entered only at its top, so what one line leaves the next reads.
     let carry = work >= Work::Function;
-    let mut named = named_over(run.lifts, carry, clobbered);
+    let mut named = named_over(run.lifts, carry, call_effect);
     // A number the program does not map names nothing in it, whatever it moves with.
     for one in named.iter_mut().flatten() {
         if one
@@ -90,7 +90,7 @@ pub(super) fn over_run(
             let mut after = After {
                 rest: &run.lifts[index + 1..],
                 beyond: &mut *beyond,
-                clobbered,
+                call_effect,
                 graph,
                 parameters: (!relative).then_some(answered.parameters).flatten(),
                 used: None,
@@ -181,7 +181,7 @@ struct Computed {
 fn named_over(
     lifts: &[Option<r2il::R2ILBlock>],
     carry: bool,
-    clobbered: &[CanonicalStorageId],
+    call_effect: Option<&r2ssa::SourceCallEffect>,
 ) -> Vec<Option<Named>> {
     let mut carried = BlockOrigins::default();
     lifts
@@ -194,7 +194,7 @@ fn named_over(
                 carried = BlockOrigins::default();
                 return None;
             };
-            Some(named_by(lift, &mut carried, clobbered))
+            Some(named_by(lift, &mut carried, call_effect))
         })
         .collect()
 }
@@ -203,7 +203,7 @@ fn named_over(
 fn named_by(
     lift: &r2il::R2ILBlock,
     carried: &mut BlockOrigins,
-    clobbered: &[CanonicalStorageId],
+    call_effect: Option<&r2ssa::SourceCallEffect>,
 ) -> Named {
     let before = carried.clone();
     let mut own = BlockOrigins::default();
@@ -215,8 +215,8 @@ fn named_by(
                 touched.push((kind, alone.contains(&kind)));
             }
         }
-        carried.step_under(op, clobbered);
-        own.step_under(op, clobbered);
+        carried.step_under(op, call_effect);
+        own.step_under(op, call_effect);
     }
     // A number the instruction only copies from a register it read was computed where that was.
     let copied = lift
@@ -261,7 +261,7 @@ fn relative_over(
         return vec![false; lines.len()];
     };
     let shifted = super::decode::lift_run(answered, &lines[..=last], &run.windows[..=last], PAGE);
-    let there = named_over(&shifted, carry, answered.clobbered);
+    let there = named_over(&shifted, carry, answered.call_effect);
     lines
         .iter()
         .enumerate()
@@ -376,8 +376,8 @@ struct After<'a, 'r, 'b> {
     rest: &'a [Option<r2il::R2ILBlock>],
     /// The instructions past the run, read as far as a question needs them.
     beyond: &'a mut Lookahead<'r, 'b>,
-    /// The registers the convention says a call leaves undefined.
-    clobbered: &'a [CanonicalStorageId],
+    /// What a call does; without it a call leaves every holder standing.
+    call_effect: Option<&'a r2ssa::SourceCallEffect>,
     /// The function's def-use, where the request paid for it.
     graph: Option<&'a super::records::DefUse<'a>>,
     /// Which parameters of a callee take an address, where the number's use decides whether it is one.
@@ -456,7 +456,7 @@ fn straight_line_fate(
             {
                 after.used = Some(after.used.map_or(support, |held| held.min(support)));
             }
-            match op_fate(op, &mut holders, &mut derived, after.clobbered) {
+            match op_fate(op, &mut holders, &mut derived, after.call_effect) {
                 Some(Fate::Step) if called => return Fate::Unknown,
                 Some(fate) => return fate,
                 None => {}
@@ -503,7 +503,7 @@ fn op_fate(
     op: &R2ILOp,
     holders: &mut Vec<Varnode>,
     derived: &mut Vec<Varnode>,
-    clobbered: &[CanonicalStorageId],
+    call_effect: Option<&r2ssa::SourceCallEffect>,
 ) -> Option<Fate> {
     let inputs = op.inputs();
     let reads = |set: &[Varnode]| {
@@ -514,10 +514,12 @@ fn op_fate(
     let (held, built) = (reads(holders), reads(derived));
     match op {
         R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
+            // A register the convention does not preserve no longer holds the number.
             holders.retain(|held| {
-                !clobbered
-                    .iter()
-                    .any(|storage| covers(&storage_varnode(*storage), held))
+                call_effect.is_none_or(|effect| {
+                    held.space != SpaceId::Register
+                        || effect.preserves(CanonicalStorageId::from_varnode(held))
+                })
             });
             return built.then_some(Fate::Step);
         }
@@ -555,11 +557,6 @@ fn covers(outer: &Varnode, inner: &Varnode) -> bool {
     outer.space == inner.space
         && outer.offset <= inner.offset
         && inner.offset + u64::from(inner.size) <= outer.offset + u64::from(outer.size)
-}
-
-/// A register storage, as the lift spells it.
-fn storage_varnode(storage: CanonicalStorageId) -> Varnode {
-    Varnode::new(SpaceId::Register, storage.offset, storage.size)
 }
 
 /// What the function's def-use says of the value this instruction leaves in `output`.

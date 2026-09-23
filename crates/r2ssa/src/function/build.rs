@@ -79,12 +79,30 @@ impl SSAFunction {
             blocks,
             arch,
             InterfaceQuestions::none(),
-            None,
-            None,
+            &SourceMachineContext::from_blocks(blocks, arch),
             &CalleeBoundaries::default(),
             None,
             control,
         )
+    }
+
+    /// Decompile-prepared SSA under a machine context the test built.
+    #[cfg(test)]
+    pub(crate) fn for_decompile_under(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+        machine_context: &SourceMachineContext,
+    ) -> Option<Self> {
+        Self::from_blocks_for_decompile_with_interface_and_control(
+            blocks,
+            arch,
+            InterfaceQuestions::none(),
+            machine_context,
+            &CalleeBoundaries::default(),
+            None,
+            &UncheckedSsaWorkControl,
+        )
+        .ok()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -94,12 +112,13 @@ impl SSAFunction {
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
         questions: InterfaceQuestions<'_>,
-        call_preserved_carriers: Option<SourceCallPreservedCarriers>,
-        stack_pointer_carrier: Option<CanonicalStorageId>,
+        machine_context: &SourceMachineContext,
         callees: &CalleeBoundaries,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
+        let call_preserved_carriers = machine_context.call_preserved_carriers();
+        let stack_pointer_carrier = machine_context.stack_pointer_carrier();
         // The lifted text as it arrived, for a reader tracing a defect that
         // the SSA may already have folded away; the SSA dump is r2dec's.
         if dump_il() {
@@ -177,6 +196,7 @@ impl SSAFunction {
         let mut func = Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
             arch,
+            machine_context,
             stack_pointer_restored_by_callee,
             callees,
             declared_successors,
@@ -302,6 +322,7 @@ impl SSAFunction {
         Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
             arch,
+            &SourceMachineContext::from_blocks(blocks, arch),
             None,
             &CalleeBoundaries::default(),
             None,
@@ -316,6 +337,7 @@ impl SSAFunction {
     fn from_blocks_raw_for_decompile_with_carriers_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
+        machine_context: &SourceMachineContext,
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
         callees: &CalleeBoundaries,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
@@ -323,8 +345,13 @@ impl SSAFunction {
         promoted: &crate::phi::PromotedStackSlots,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let policy =
-            decompile_call_boundary_config(arch, stack_pointer_restored_by_callee, callees.clone());
+        let policy = decompile_call_boundary_config(
+            blocks,
+            arch,
+            machine_context,
+            stack_pointer_restored_by_callee,
+            callees.clone(),
+        )?;
         Self::from_blocks_raw_with_policy_and_control(
             blocks,
             arch,
@@ -382,8 +409,7 @@ impl SSAFunction {
                     used.push((carrier.offset, carrier.size));
                 }
             }
-            // A convention's clobber list describes what a call does, so it
-            // widens a root only in a function that makes one.
+            // A call's clobbers widen a root only in a function that makes one.
             let calls = cfg.blocks().any(|block| {
                 block
                     .ops
@@ -391,10 +417,8 @@ impl SSAFunction {
                     .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }))
             });
             if let Some(call_boundaries) = call_boundaries.filter(|_| calls) {
-                for reg in &call_boundaries.defined_regs {
-                    if let Some(slot) = families.slot_for_name(&reg.name) {
-                        used.push((slot.offset, reg.size.max(slot.width)));
-                    }
+                for storage in &call_boundaries.clobbered {
+                    used.push((storage.offset, storage.size));
                 }
             }
             Arc::new(families.with_program_roots(used))

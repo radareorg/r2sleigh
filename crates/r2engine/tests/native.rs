@@ -1,7 +1,12 @@
 //! Decompiling from bytes and an address, with no radare2 in the process.
 
-use r2abi::{CompilerSpec, Conventions};
-use r2engine::native::{NativeTarget, Program, decompile};
+use std::collections::BTreeMap;
+
+use r2abi::{CompilerSpec, Conventions, Prototypes};
+use r2engine::native::{NativeTarget, Program, call_effect, decompile};
+use r2sleigh_lift::EmbeddedMachine;
+use r2source::SourceCallEffect;
+use r2ssa::{InstPayload, SSAOp};
 
 const BASE: u64 = 0x1000;
 
@@ -59,6 +64,60 @@ const TABLE_SWITCH: &[u8] = &[
     0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1026
 ];
 
+/// One embedded machine with what the engine reads beside it.
+struct Machine {
+    embedded: EmbeddedMachine,
+    conventions: Conventions,
+    /// What each convention says a call does to this machine's registers.
+    effects: BTreeMap<String, Option<SourceCallEffect>>,
+    compiler: CompilerSpec,
+    prototypes: Prototypes,
+}
+
+impl Machine {
+    fn new(sleigh: &str, family: &str, bits: u32) -> Self {
+        let embedded = r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine");
+        let conventions = Conventions::for_arch(family, bits).expect("conventions");
+        let effects = conventions
+            .names()
+            .map(|name| {
+                let convention = conventions.get(name).expect("named convention");
+                (name.to_owned(), call_effect(&embedded.arch, convention))
+            })
+            .collect();
+        let compiler = CompilerSpec::parse(embedded.compiler_spec);
+        Self {
+            embedded,
+            conventions,
+            effects,
+            compiler,
+            prototypes: Prototypes::embedded(),
+        }
+    }
+
+    /// The machine under its default convention.
+    fn target(&self) -> NativeTarget<'_> {
+        self.under(
+            self.conventions
+                .default_name()
+                .expect("a default convention"),
+        )
+    }
+
+    /// The machine under one named convention.
+    fn under(&self, name: &str) -> NativeTarget<'_> {
+        NativeTarget {
+            arch: &self.embedded.arch,
+            disasm: &self.embedded.disasm,
+            cpu: self.embedded.cpu,
+            convention: self.conventions.get(name).expect("the named convention"),
+            call_effect: self.effects[name].as_ref(),
+            compiler: &self.compiler,
+            prototypes: &self.prototypes,
+        }
+    }
+}
+
 /// One run of bytes mapped at `BASE`, under one name.
 struct Fixture {
     bytes: &'static [u8],
@@ -100,21 +159,10 @@ impl Program for Fixture {
 
 #[test]
 fn a_function_is_decompiled_from_bytes_alone() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    assert_eq!(compiler.stack_pointer.as_deref(), Some("RSP"));
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    assert_eq!(machine.compiler.stack_pointer.as_deref(), Some("RSP"));
 
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let target = machine.target();
     let program = Fixture {
         bytes: ADD_TWO,
         name: "add_two",
@@ -153,19 +201,8 @@ fn a_function_is_decompiled_from_bytes_alone() {
 
 #[test]
 fn an_address_the_program_does_not_map_refuses() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: ADD_TWO,
         name: "add_two",
@@ -176,19 +213,8 @@ fn an_address_the_program_does_not_map_refuses() {
 
 #[test]
 fn a_call_is_rendered_from_the_callee_body() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: CALLER,
         name: "caller",
@@ -214,19 +240,8 @@ fn a_call_is_rendered_from_the_callee_body() {
 
 #[test]
 fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: PC_THUNK,
         name: "pc_caller",
@@ -252,19 +267,8 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
 /// claims something the program does not.
 #[test]
 fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: PC_THUNK,
         name: "pc_thunk",
@@ -328,19 +332,8 @@ impl Program for Importing {
 
 #[test]
 fn a_declared_prototype_gives_an_import_its_arguments() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let response = decompile(&target, &Importing, BASE).expect("decompile");
 
     // strlen takes one argument, the convention says it arrives in rdi, and
@@ -378,22 +371,11 @@ const AARCH64_ADD_ONE: &[u8] = &[
 /// The same route on the other machine it claims.
 #[test]
 fn a_function_is_decompiled_on_aarch64_too() {
-    let machine = r2sleigh_lift::embedded_machine("aarch64").expect("aarch64 machine");
-    let conventions = Conventions::for_arch("aarch64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let machine = Machine::new("aarch64", "aarch64", 64);
     // The stack pointer is the specification's to name on every machine.
-    assert_eq!(compiler.stack_pointer.as_deref(), Some("sp"));
+    assert_eq!(machine.compiler.stack_pointer.as_deref(), Some("sp"));
 
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let target = machine.target();
     let program = Fixture {
         bytes: AARCH64_ADD_ONE,
         name: "add_one",
@@ -438,19 +420,8 @@ const ARM_DEAD_LOAD: &[u8] = &[
 /// rather than disappearing.
 #[test]
 fn a_load_nothing_reads_still_reads() {
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("arm", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
@@ -476,19 +447,8 @@ fn a_load_nothing_reads_still_reads() {
 /// lowering below it, which is the whole reason the tier is printable.
 #[test]
 fn the_medium_tier_is_readable_without_rendering() {
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("arm", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
@@ -509,19 +469,8 @@ fn the_medium_tier_is_readable_without_rendering() {
 /// belongs to the generation below it.
 #[test]
 fn the_structured_tier_is_the_tree_the_c_comes_from() {
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("arm", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
@@ -549,19 +498,8 @@ fn the_structured_tier_is_the_tree_the_c_comes_from() {
 /// text was written from or the two can say different things.
 #[test]
 fn the_c_tier_hands_back_the_tree_the_text_came_from() {
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("arm", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
@@ -588,19 +526,8 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     // value analysis says the dispatch reads four entries from 0x1030, and
     // the engine goes and reads them. Without that the walk stops at the
     // branch and the arms are never seen at all.
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: TABLE_SWITCH,
         name: "pick",
@@ -645,19 +572,8 @@ fn a_machine_operation_the_specification_names_is_called_and_declared() {
         0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
         0x10, 0x80, 0xbd, 0xe8, // pop {r4, pc}
     ];
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("arm", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: BARRIER,
         name: "barrier",
@@ -688,19 +604,8 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
         0x41, 0xe8, 0x00, 0x23, // strex r3, r2, [r1, 0]
         0x10, 0xbd, // pop {r4, pc}
     ];
-    let machine = r2sleigh_lift::embedded_machine("thumb").expect("thumb machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("thumb", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: ATOMIC_INCREMENT,
         name: "increment",
@@ -739,19 +644,8 @@ fn a_leaf_whose_barrier_is_only_a_user_operation_cannot_prove_its_frame() {
         0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
         0x1e, 0xff, 0x2f, 0xe1, // bx lr
     ];
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("arm", "arm", 32);
+    let target = machine.target();
     let program = Fixture {
         bytes: BARRIER_LEAF,
         name: "order",
@@ -795,19 +689,8 @@ const IRREDUCIBLE_COUNTER: &[u8] = &[
 /// the value fixpoint still has to widen on it or it climbs one step per round.
 #[test]
 fn a_loop_with_two_entries_is_decompiled_in_bounded_time() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: IRREDUCIBLE_COUNTER,
         name: "count",
@@ -838,19 +721,8 @@ const REPEATED_SCAN: &[u8] = &[
 /// machine graph and the walk both name, not a contradiction between them.
 #[test]
 fn a_repeated_scan_is_a_loop_on_its_own_instruction() {
-    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
-    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
     let program = Fixture {
         bytes: REPEATED_SCAN,
         name: "scan",
@@ -864,4 +736,118 @@ fn a_repeated_scan_is_a_loop_on_its_own_instruction() {
         response.render_refusal,
         response.output
     );
+}
+
+/// Two values held across a call to an import nothing declares, then stored:
+///
+/// ```text
+///   1000  movsd xmm8, [rip + 0x27]    ; 0x1030
+///   1009  mov   rsi, [rip + 0x28]     ; 0x1038
+///   1010  call  0x1026                ; the import's stub
+///   1015  movsd [rip + 0x22], xmm8    ; 0x1040
+///   101e  mov   [rip + 0x23], rsi     ; 0x1048
+///   1025  ret
+///   1026  jmp   [rip + 0x24]          ; the stub, through its slot at 0x1050
+/// ```
+const HELD_ACROSS_A_CALL: &[u8] = &[
+    0xf2, 0x44, 0x0f, 0x10, 0x05, 0x27, 0x00, 0x00, 0x00, // 1000 movsd xmm8, [rip + 0x27]
+    0x48, 0x8b, 0x35, 0x28, 0x00, 0x00, 0x00, // 1009 mov rsi, [rip + 0x28]
+    0xe8, 0x11, 0x00, 0x00, 0x00, // 1010 call 0x1026
+    0xf2, 0x44, 0x0f, 0x11, 0x05, 0x22, 0x00, 0x00, 0x00, // 1015 movsd [rip + 0x22], xmm8
+    0x48, 0x89, 0x35, 0x23, 0x00, 0x00, 0x00, // 101e mov [rip + 0x23], rsi
+    0xc3, // 1025 ret
+    0xff, 0x25, 0x24, 0x00, 0x00, 0x00, // 1026 jmp [rip + 0x24]
+    0xcc, 0xcc, 0xcc, 0xcc, // 102c padding
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x3f, // 1030 1.5
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // 1038 a word
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 where xmm8 goes
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 where rsi goes
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 the stub's slot
+];
+
+/// Bytes at `BASE` that call an import whose stub is at `stub`.
+struct ImportCaller {
+    bytes: &'static [u8],
+    stub: u64,
+}
+
+impl r2ssa::body::Program for ImportCaller {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = self.bytes.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE || vaddr == self.stub
+    }
+}
+
+impl Program for ImportCaller {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    /// No prototype table declares this name, so nothing says what it touches.
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == self.stub).then(|| "undeclared_import".to_owned())
+    }
+}
+
+/// The operation defining what one instruction stores, through the copies and lane reads between.
+fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp {
+    let graph = artifact.graph();
+    let mut value = graph
+        .insts_for_instruction(instruction)
+        .iter()
+        .find_map(|inst| match &graph.inst(*inst)?.payload {
+            InstPayload::Op(SSAOp::Store { val, .. }) => graph.value_id_for_var(val),
+            _ => None,
+        })
+        .expect("the instruction stores");
+    loop {
+        let inst = graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .expect("the stored value has a definition");
+        match &inst.payload {
+            InstPayload::Op(SSAOp::Copy { src, .. } | SSAOp::Subpiece { src, .. }) => {
+                value = graph.value_id_for_var(src).expect("the copied value");
+            }
+            InstPayload::Op(op) => return op.clone(),
+            InstPayload::Phi { .. } => panic!("a straight line has no merge"),
+        }
+    }
+}
+
+/// A call clobbers what its convention does not preserve: `xmm8` and `rsi` under System V, neither under Microsoft x64.
+#[test]
+fn what_a_call_clobbers_is_what_its_convention_says() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: HELD_ACROSS_A_CALL,
+        stub: 0x1026,
+    };
+    for (convention, clobbered) in [("amd64", true), ("ms", false)] {
+        let prepared = r2engine::native::prepared(&machine.under(convention), &program, BASE)
+            .expect("prepared");
+        for store in [0x1015, 0x101e] {
+            let origin = stored_value_origin(prepared.artifact(), store);
+            assert_eq!(
+                matches!(origin, SSAOp::CallDefine { .. }),
+                clobbered,
+                "{convention}: the store at {store:#x} reads what {origin:?} defined"
+            );
+        }
+    }
 }

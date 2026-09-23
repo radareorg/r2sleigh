@@ -73,8 +73,8 @@ struct LaneState {
 /// Decompiler-safe call boundary policy.
 #[derive(Debug, Clone, Default)]
 pub struct CallBoundaryConfig {
-    /// Registers that must receive a fresh SSA definition after a call.
-    pub defined_regs: Vec<CallBoundaryDef>,
+    /// Registers a call leaves changed in this body, which it defines afresh.
+    pub clobbered: Vec<CanonicalStorageId>,
     /// The carrier the callee puts back where it found it.
     ///
     /// A call instruction's own p-code carries the whole architectural cost of
@@ -934,10 +934,14 @@ fn append_call_boundary_defs(
     };
     let mut retained = Vec::new();
 
-    // Every width the convention names a register at is one family, and the
-    // callee clobbers its root once.
-    let mut clobbered: BTreeSet<RenameIdentity> = BTreeSet::new();
-    for reg in call_boundaries.defined_regs.iter().chain(callee.result) {
+    // A call clobbers each family's root once.
+    let mut clobbered: BTreeSet<RenameIdentity> = call_boundaries
+        .clobbered
+        .iter()
+        .map(|storage| crate::phi::clobber_identity(*storage, reg_names, ctx.families.as_deref()))
+        .collect();
+    // A callee's own result carrier comes back changed whatever the convention says.
+    if let Some(reg) = callee.result {
         let mut actual_identities: BTreeSet<RenameIdentity> = match ctx
             .families
             .as_deref()

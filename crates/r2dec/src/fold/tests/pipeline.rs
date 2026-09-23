@@ -340,11 +340,18 @@ mod tests {
                 })
             })
             .collect();
-        r2ssa::SsaArtifact::for_decompile_with_interfaces(
+        // A call leaves the return address and the stack pointer where it found them.
+        let call_effect = r2ssa::SourceCallEffect::new([], [return_address, stack_pointer])
+            .expect("a call effect");
+        r2ssa::SsaArtifact::for_decompile_with(
             blocks,
-            Some(arch),
-            Some(interface),
-            call_site_interfaces,
+            r2ssa::DecompileInputs {
+                arch: Some(arch),
+                function_interface: Some(interface),
+                call_effect: Some(call_effect),
+                call_site_interfaces,
+                ..Default::default()
+            },
         )
         .expect("prepared SSA should build")
     }

@@ -255,7 +255,8 @@ fn authoritative_source_interface_reaches_prepared_ssa_through_request() {
                 revision, 0x401000, 0, 0x5000,
             )],
         )
-        .expect("source snapshot"),
+        .expect("source snapshot")
+        .with_call_effect(x86_64_result_call_effect()),
     );
     let mut blocks = direct_call_return_blocks(0x401000, 0x5000);
     blocks[0].ops[1] = r2il::R2ILOp::Return {
@@ -383,6 +384,17 @@ fn request_assumptions_produce_one_shared_semantic_artifact() {
     let usage = &response.artifact.ssa_func().facts().assumption_usage;
     assert_eq!(usage.applied.len(), 1);
     assert!(usage.conflicts.is_empty());
+}
+
+/// What a call does on the result arch: rax clobbered, rsp and rip preserved.
+fn x86_64_result_call_effect() -> r2ssa::SourceCallEffect {
+    let storage = |offset| r2ssa::CanonicalStorageId {
+        space: r2ssa::CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    };
+    r2ssa::SourceCallEffect::new([storage(0)], [storage(0x28), storage(0x30)])
+        .expect("a call effect")
 }
 
 fn x86_64_result_arch() -> r2il::ArchSpec {

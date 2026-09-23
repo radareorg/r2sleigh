@@ -33,6 +33,8 @@ struct Assembled {
     /// second instruction set in one program gets its own rather than this one.
     machine: (String, &'static str),
     conventions: r2abi::Conventions,
+    /// What the default convention says a call does; both instruction sets share one register file.
+    call_effect: Option<r2source::SourceCallEffect>,
     compiler: r2abi::CompilerSpec,
     prototypes: r2abi::Prototypes,
     /// The register a call returns through, in the coordinates the lift spells.
@@ -104,9 +106,6 @@ pub struct OpenProgram<S: Source> {
     /// The same instruction set with TMode set, where the architecture has
     /// one. Which functions it decodes is what `modes` says.
     thumb_machine: Option<EmbeddedMachine>,
-    /// The registers the machine's convention says a call leaves undefined;
-    /// ARM and Thumb decode apart but call alike, so one set serves both.
-    clobbered: Box<[r2ssa::CanonicalStorageId]>,
     /// Which parameters of each callee take an address, read once per callee and revision.
     pointers: std::sync::Mutex<pointers::Pointers>,
 }
@@ -155,7 +154,6 @@ impl<S: Source> OpenProgram<S> {
             next: None,
             machine: None,
             thumb_machine: None,
-            clobbered: Box::default(),
             pointers: std::sync::Mutex::default(),
         }
     }
@@ -189,11 +187,6 @@ impl<S: Source> OpenProgram<S> {
                 r2sleigh_lift::embedded_thumb_machine(&self.source.container().arch.name)
                     .transpose()
                     .map_err(|error| error.to_string())?;
-            self.clobbered = self
-                .machine
-                .as_ref()
-                .map(|machine| r2ssa::call_clobbered_storages(&machine.arch))
-                .unwrap_or_default();
         }
         let revision = self.source.byte_revision();
         if self.derived_at == Some(revision) {
@@ -311,6 +304,9 @@ impl<S: Source> OpenProgram<S> {
         let bits = container.arch.bits;
         let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
             .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
+        let call_effect = conventions
+            .default_convention()
+            .and_then(|convention| crate::native::call_effect(&machine.arch, convention));
         let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
         // The specification names the register; the architecture says where it
         // lives, and the lift spells writes to it in those coordinates.
@@ -352,6 +348,7 @@ impl<S: Source> OpenProgram<S> {
         self.assembled = Some(Assembled {
             machine: key,
             conventions,
+            call_effect,
             compiler,
             prototypes,
             link,
@@ -384,6 +381,7 @@ impl<S: Source> OpenProgram<S> {
                 .conventions
                 .default_convention()
                 .ok_or("the convention data names no default")?,
+            call_effect: assembled.call_effect.as_ref(),
             compiler: &assembled.compiler,
             prototypes: &assembled.prototypes,
         })

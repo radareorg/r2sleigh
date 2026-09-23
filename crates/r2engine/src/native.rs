@@ -17,9 +17,9 @@ use r2abi::{CompilerSpec, Convention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2source::{
-    CanonicalStorageId, CanonicalStorageSpace, SourceConventionSlots, SourceDataObject,
-    SourceEndianness, SourceMachineRoles, SourceRoleRegisterNames, SourceStackAllocationContract,
-    SourceStackGrowth,
+    CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect, SourceConventionSlots,
+    SourceDataObject, SourceEndianness, SourceMachineRoles, SourceRoleRegisterNames,
+    SourceStackAllocationContract, SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
 use r2ssa::body::{BodyError, WINDOW};
@@ -91,6 +91,8 @@ pub struct NativeTarget<'a> {
     /// The convention every function is assumed to use, which is the one the
     /// data declares as the default until something says otherwise.
     pub convention: &'a Convention,
+    /// What that convention says a call does here, resolved once by [`call_effect`].
+    pub call_effect: Option<&'a SourceCallEffect>,
     pub compiler: &'a CompilerSpec,
     /// What the library functions this program calls take and return. An
     /// import has no body to read an interface off, so without this a call to
@@ -2276,20 +2278,6 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
                 SourceStackAllocationContract::with_implicit_active_sp_bytes(growth, redzone),
             )
         })
-        // What a call leaves standing is the specification's statement, and it
-        // is asked in the first pass, before an interface exists to hold it.
-        // Without it every function that calls loses the facts about its own
-        // frame: no entry-relative roots, so no certificate that a slot is its
-        // own, so the prologue's save renders as a variable assigned from a
-        // value nothing wrote.
-        .map(|roles| {
-            roles.with_call_preserved_carriers(r2source::SourceCallPreservedCarriers::new(
-                target.compiler.preserves(stack_pointer_name),
-                // No frame pointer is declared, so a call has none of that kind
-                // to disturb. This is the rule the interface fallback states.
-                true,
-            ))
-        })
         .map_err(|_| NativeRefusal::Machine("the carriers are not register storages"))?
         // The names, not only the storages: the trusted lift restates every
         // carrier in its own architecture's numbering, and it looks the
@@ -2326,7 +2314,58 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         endianness,
         roles,
         slots,
+        // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
+        call_effect: target.call_effect.cloned(),
     })
+}
+
+/// What a convention says a call does here; a name the arch lacks costs precision, never soundness.
+pub fn call_effect(arch: &ArchSpec, convention: &Convention) -> Option<SourceCallEffect> {
+    if convention.clobbered.is_empty() && convention.preserved.is_empty() {
+        return None;
+    }
+    // One sorted index, so each name is placed in `O(log R)`.
+    let mut named = BTreeMap::<String, Option<CanonicalStorageId>>::new();
+    for register in arch.registers.iter().filter(|register| {
+        register.size != 0
+            && register
+                .offset
+                .checked_add(u64::from(register.size))
+                .is_some()
+    }) {
+        let storage = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: register.offset,
+            size: register.size,
+        };
+        named
+            .entry(register.name.trim().to_ascii_lowercase())
+            .and_modify(|placed| *placed = None)
+            .or_insert(Some(storage));
+    }
+    let place = |names: &[String]| {
+        names
+            .iter()
+            .filter_map(|name| {
+                let placed = named.get(&name.to_ascii_lowercase()).copied().flatten();
+                if placed.is_none() {
+                    r2il::refusal_evidence!(
+                        "call-effect",
+                        "{}: {} names no single register of {}",
+                        convention.name,
+                        name,
+                        arch.name
+                    );
+                }
+                placed
+            })
+            .collect::<Vec<_>>()
+    };
+    SourceCallEffect::new(place(&convention.clobbered), place(&convention.preserved))
+        .inspect_err(|error| {
+            r2il::refusal_evidence!("call-effect", "{}: {error:?}", convention.name);
+        })
+        .ok()
 }
 
 /// The machine tuple the trusted lift selects a Sleigh profile by.

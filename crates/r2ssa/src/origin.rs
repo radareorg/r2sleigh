@@ -176,13 +176,11 @@ impl BlockOrigins {
         }
     }
 
-    /// Apply one operation where a call writes only `clobbered`, as its convention says.
-    pub fn step_under(&mut self, op: &R2ILOp, clobbered: &[CanonicalStorageId]) {
-        match op {
-            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
-                for storage in clobbered {
-                    self.forget_bytes(storage.space, storage.offset, storage.size.into());
-                }
+    /// Apply one operation where the convention says what a call leaves standing; without one a call forgets everything.
+    pub fn step_under(&mut self, op: &R2ILOp, call_effect: Option<&crate::SourceCallEffect>) {
+        match (op, call_effect) {
+            (R2ILOp::Call { .. } | R2ILOp::CallInd { .. }, Some(effect)) => {
+                self.origins.retain(|storage, _| effect.preserves(*storage));
             }
             _ => self.step(op),
         }
@@ -456,31 +454,31 @@ mod tests {
     }
 
     #[test]
-    fn a_call_under_a_convention_keeps_what_it_preserves() {
-        let (scratch, kept) = (Varnode::register(0, 8), Varnode::register(24, 8));
+    fn a_call_under_a_convention_keeps_only_what_it_preserves() {
+        let register = |offset| Varnode::register(offset, 8);
+        let effect = crate::SourceCallEffect::new(
+            [CanonicalStorageId::from_varnode(&register(0))],
+            [CanonicalStorageId::from_varnode(&register(24))],
+        )
+        .expect("a consistent effect");
         let mut origins = BlockOrigins::default();
-        for op in [
-            R2ILOp::Copy {
-                dst: scratch.clone(),
-                src: Varnode::constant(0x1000, 8),
-            },
-            R2ILOp::Copy {
-                dst: kept.clone(),
-                src: Varnode::constant(0x2000, 8),
-            },
-            R2ILOp::Call {
-                target: Varnode::constant(0x3000, 8),
-            },
-        ] {
-            origins.step_under(
-                &op,
-                &[CanonicalStorageId::from_varnode(&Varnode::register(4, 4))],
-            );
+        for (offset, value) in [(0, 0x1000), (8, 0x2000), (24, 0x3000)] {
+            let op = R2ILOp::Copy {
+                dst: register(offset),
+                src: Varnode::constant(value, 8),
+            };
+            origins.step_under(&op, Some(&effect));
         }
-        assert_eq!(origins.of(&scratch), None);
+        let call = R2ILOp::Call {
+            target: Varnode::constant(0x4000, 8),
+        };
+        origins.step_under(&call, Some(&effect));
+        // Clobbered, and named neither way: both may have changed.
+        assert_eq!(origins.of(&register(0)), None);
+        assert_eq!(origins.of(&register(8)), None);
         assert_eq!(
-            origins.of(&kept).and_then(ValueOrigin::constant),
-            Some(0x2000)
+            origins.of(&register(24)).and_then(ValueOrigin::constant),
+            Some(0x3000)
         );
     }
 

@@ -74,6 +74,8 @@ pub enum SsaPrepareError {
     MalformedInput,
     Cancelled,
     DeadlineExceeded,
+    /// The body calls and its convention states nothing a call leaves standing.
+    NoCallEffect,
 }
 
 impl std::fmt::Display for SsaPrepareError {
@@ -82,6 +84,7 @@ impl std::fmt::Display for SsaPrepareError {
             Self::MalformedInput => "malformed SSA source input",
             Self::Cancelled => "SSA preparation cancelled",
             Self::DeadlineExceeded => "SSA preparation deadline exceeded",
+            Self::NoCallEffect => "the convention states nothing a call leaves standing",
         })
     }
 }

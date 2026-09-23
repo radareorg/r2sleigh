@@ -97,14 +97,14 @@ impl Memory<'_> {
 pub struct Answered<'a> {
     pub decoders: &'a dyn Decoders,
     pub memory: Memory<'a>,
+    /// What a call does, where the program's convention was read.
+    pub call_effect: Option<&'a r2ssa::SourceCallEffect>,
     /// Absent below `Work::Function`, which is what keeps a listing cheap.
     pub facts: Option<&'a r2ssa::SsaArtifact>,
     /// The def-use of the body the run is in, which says whether a number it computes is a step.
     pub fate: Option<&'a DefUse<'a>>,
     /// Whether each line is spelled; the reference index reads only what the lines claim.
     pub spelled: bool,
-    /// The registers a call leaves undefined, a fact of the machine computed once with it.
-    pub clobbered: &'a [r2ssa::CanonicalStorageId],
     /// Which parameters of each callee take an address, where the listing can ask.
     pub parameters: Option<&'a dyn Parameters>,
 }

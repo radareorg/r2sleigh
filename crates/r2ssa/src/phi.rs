@@ -262,6 +262,36 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
     Ok((defs, storage_by_identity))
 }
 
+/// The identity a call's clobber of one register defines: the root its reads are renamed under.
+pub(crate) fn clobber_identity(
+    storage: CanonicalStorageId,
+    reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
+) -> RenameIdentity {
+    let varnode = r2il::Varnode {
+        space: r2il::SpaceId::Register,
+        offset: storage.offset,
+        size: storage.size,
+        meta: None,
+    };
+    RenameIdentity::for_varnode(&varnode, reg_names, families)
+}
+
+/// The clobbers a call makes that this body can observe: those of a register it defines.
+fn observed_clobbers(
+    call_boundaries: &crate::rename::CallBoundaryConfig,
+    reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
+    defs: &DefinitionSitesByIdentity,
+) -> BTreeSet<RenameIdentity> {
+    call_boundaries
+        .clobbered
+        .iter()
+        .map(|storage| clobber_identity(*storage, reg_names, families))
+        .filter(|identity| defs.contains_key(identity))
+        .collect()
+}
+
 /// The rename identities one call-boundary register names.
 ///
 /// Renaming resolves these itself and, doing so per call site, could see an
@@ -325,17 +355,7 @@ pub fn add_call_boundary_def_sites(
     // Only a carrier the body itself mentions. A register that appears
     // nowhere but in the clobber list is read by no statement, so no phi for
     // it can be observed and placing one only invents a live-in value.
-    let resolved = call_boundaries
-        .defined_regs
-        .iter()
-        .map(|reg| {
-            let identities = call_boundary_identities(defs, reg, reg_names, families);
-            identities
-                .into_iter()
-                .filter(|identity| defs.contains_key(identity))
-                .collect::<BTreeSet<_>>()
-        })
-        .collect::<Vec<_>>();
+    let resolved = observed_clobbers(call_boundaries, reg_names, families, defs);
     // The same question for the carrier each callee's own interface names as
     // its result, asked before a def site is added so the answer cannot depend
     // on the order the calls are walked.
@@ -364,7 +384,7 @@ pub fn add_call_boundary_def_sites(
                 .and_then(|target| results.get(&target))
                 .into_iter()
                 .flatten();
-            for identity in resolved.iter().flatten().chain(result) {
+            for identity in resolved.iter().chain(result) {
                 if callee
                     .preserved
                     .is_some_and(|preserved| preserved.contains(&identity.storage))
@@ -397,7 +417,7 @@ pub fn live_in_by_block(
             .filter(|identity| defs.contains_key(identity))
             .collect::<BTreeSet<_>>()
     };
-    let clobbered = resolve(&call_boundaries.defined_regs);
+    let clobbered = observed_clobbers(call_boundaries, reg_names, families, defs);
     let arguments = resolve(&call_boundaries.argument_regs);
     let returned = resolve(&call_boundaries.return_regs);
 

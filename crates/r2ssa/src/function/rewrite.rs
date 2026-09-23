@@ -159,51 +159,62 @@ impl SSAFunction {
         self.decompile_prep_facts = None;
     }
 
-    /// Replace the direction flag's entry value with the zero the convention
-    /// requires of it.
+    /// Replace the direction flag's value on entry, and after every call, with
+    /// the zero the convention requires of it.
     ///
     /// A repeated string instruction reads the flag to decide which way it
     /// walks, and no compiled function sets it -- the corpus contains no `cld`
     /// or `std` at all -- so what it holds where the instruction reads it is
-    /// whatever the caller left. Both x86 ABIs require the caller to leave it
-    /// clear, on entry and at every call, and that is the whole of what makes
-    /// the direction knowable. Substituting the constant here rather than
-    /// reading the fact at the rendering is what lets the arithmetic beside the
+    /// whatever the caller or the last callee left. Both x86 ABIs require it
+    /// clear on entry and on return, and that is the whole of what makes the
+    /// direction knowable. Substituting the constant here rather than reading
+    /// the fact at the rendering is what lets the arithmetic beside the
     /// transfer fold: the instruction's own pointer updates are written over
     /// the flag, and with it a constant they collapse to the extent.
     ///
     /// Nothing is substituted for a convention that states no such thing, or a
     /// machine with no such flag, and a function that writes the flag itself
-    /// has a later version the entry value does not reach.
+    /// has a later version neither boundary value reaches.
     pub(crate) fn apply_convention_cleared_direction_flag(
         &mut self,
         machine_context: &SourceMachineContext,
     ) {
         let clears = machine_context
             .convention_slots()
-            .is_some_and(|slots| slots.abi_class().clears_direction_flag_on_entry());
+            .is_some_and(|slots| slots.abi_class().clears_direction_flag());
         let Some(storage) = machine_context.machine_roles().direction_flag_storage() else {
             return;
         };
         if !clears {
             return;
         }
-        let entry_values = self
+        let on_storage = |var: &SSAVar| self.canonical_storage_by_var.get(var) == Some(&storage);
+        // The entry value, and the value each call's clobber leaves.
+        let boundary_values = self
             .canonical_storage_by_var
-            .iter()
-            .filter(|(var, var_storage)| var.version == 0 && **var_storage == storage)
-            .map(|(var, _)| var.clone())
+            .keys()
+            .filter(|var| var.version == 0 && on_storage(var))
+            .cloned()
+            .chain(
+                self.blocks
+                    .iter()
+                    .flat_map(|block| &block.ops)
+                    .filter_map(|op| match op {
+                        SSAOp::CallDefine { dst } if on_storage(dst) => Some(dst.clone()),
+                        _ => None,
+                    }),
+            )
             .collect::<BTreeSet<_>>();
-        if entry_values.is_empty() {
+        if boundary_values.is_empty() {
             return;
         }
         r2il::refusal_evidence!(
             "direction-flag-cleared",
-            "the convention clears {storage:?} on entry; {} entry reads become zero",
-            entry_values.len()
+            "the convention clears {storage:?} at every boundary; {} boundary values become zero",
+            boundary_values.len()
         );
         let substitute = |var: &SSAVar| {
-            if entry_values.contains(var) {
+            if boundary_values.contains(var) {
                 SSAVar::constant(0, var.size)
             } else {
                 var.clone()
@@ -506,23 +517,7 @@ impl SSAFunction {
         //
         // Operations whose effect the model does not describe are a different
         // matter: nothing says what they leave behind, so they still stop this.
-        // The convention fact the source published, and only then the
-        // interface's copy of it.
-        //
-        // radare2 determines whether a call preserves the frame carriers from
-        // the calling convention, and records it even for a function whose
-        // signature it never linked -- deliberately, so signatureless functions
-        // keep their entry-relative facts. It travels beside the machine roles
-        // because the interface block is withheld for exactly those functions;
-        // when it is withheld the interface still arrives, reconstructed with
-        // both flags defaulted to false. Asking the interface first therefore
-        // asked the answerer that does not know, and every function that calls
-        // lost every fact about its own frame: no stack roots, so no
-        // certificate that a slot is its own, so its dead spills could not be
-        // dropped and rendered as variables set and never used.
-        // Each half asked of the answerer that knows it, so the two questions
-        // cannot drift apart from the one SSA construction already asked about
-        // the stack pointer.
+        // The convention's call effect, stated without a linked signature too, and only then the interface's copy.
         let call_carriers_are_restored =
             stack_pointer_restored_across_calls(self.call_preserved_carriers, function_interface)
                 && frame_pointer_restored_across_calls(

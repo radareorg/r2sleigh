@@ -299,10 +299,10 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
+            call_effect: None,
             facts: None,
             fate: None,
             spelled: true,
-            clobbered: &[],
             parameters: None,
         };
         listing(
@@ -350,10 +350,10 @@ mod tests {
                 program: &Mapped::new(BASE, bytes),
                 endian: Endianness::Little,
             },
+            call_effect: None,
             facts: None,
             fate: None,
             spelled: true,
-            clobbered: &[],
             parameters: None,
         };
         let answer = listing(
@@ -402,7 +402,7 @@ mod tests {
                 facts: None,
                 fate: None,
                 spelled,
-                clobbered: &[],
+                call_effect: None,
                 parameters: None,
             };
             let request = Listing {
@@ -651,7 +651,7 @@ mod tests {
             facts: None,
             fate: None,
             spelled: true,
-            clobbered: &[],
+            call_effect: None,
             parameters: None,
         };
         let listed = |work| {
@@ -700,7 +700,7 @@ mod tests {
             facts: None,
             fate: None,
             spelled: true,
-            clobbered: &[],
+            call_effect: None,
             parameters: None,
         };
         let request = Listing {

@@ -181,6 +181,24 @@ fn test_x86_64_arg_arch() -> ArchSpec {
     arch
 }
 
+/// What a call does on the test arches: these eight-byte registers clobbered, these preserved.
+fn call_effect(clobbered: &[u64], preserved: &[u64]) -> Option<r2ssa::SourceCallEffect> {
+    let storages = |offsets: &[u64]| {
+        offsets
+            .iter()
+            .map(|offset| r2ssa::CanonicalStorageId {
+                space: r2ssa::CanonicalStorageSpace::Register,
+                offset: *offset,
+                size: 8,
+            })
+            .collect::<Vec<_>>()
+    };
+    Some(
+        r2ssa::SourceCallEffect::new(storages(clobbered), storages(preserved))
+            .expect("a call effect"),
+    )
+}
+
 fn test_x86_64_result_arch() -> ArchSpec {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
@@ -245,11 +263,15 @@ fn test_prepared_two_arg_call_artifact() -> SsaArtifact {
         r2ssa::SourceCallResult::Void,
     )
     .expect("exact two-arg callsite interface");
-    SsaArtifact::for_decompile_with_interfaces(
+    SsaArtifact::for_decompile_with(
         &[block],
-        Some(&arch),
-        Some(function_interface),
-        vec![call_interface],
+        r2ssa::DecompileInputs {
+            arch: Some(&arch),
+            function_interface: Some(function_interface),
+            call_effect: call_effect(&[0x10, 0x18], &[0x28, 0x30]),
+            call_site_interfaces: vec![call_interface],
+            ..Default::default()
+        },
     )
     .expect("prepared two-arg call SSA artifact")
 }
@@ -287,8 +309,15 @@ fn test_prepared_stack_owned_call_result_artifact() -> SsaArtifact {
         dst: alias,
         src: loaded,
     });
-    SsaArtifact::for_decompile(&[block], Some(&arch))
-        .expect("prepared stack-owned call result SSA artifact")
+    SsaArtifact::for_decompile_with(
+        &[block],
+        r2ssa::DecompileInputs {
+            arch: Some(&arch),
+            call_effect: call_effect(&[0], &[16, 24]),
+            ..Default::default()
+        },
+    )
+    .expect("prepared stack-owned call result SSA artifact")
 }
 
 /// The one call the fixture makes, found rather than indexed: construction

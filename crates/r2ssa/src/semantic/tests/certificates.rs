@@ -465,10 +465,12 @@ fn stack_geometry_certificate_closes_the_call_restore() {
         block.stamp_instruction(index, 0x60c9);
     }
 
-    let artifact = SsaArtifact::for_decompile_with_interface(
+    let artifact = crate::testing::prepared(
         &[block],
-        Some(&return_boundary_arch()),
-        preserved_stack_interface().with_preserved_call_carriers(true, false),
+        &return_boundary_arch(),
+        Some(preserved_stack_interface()),
+        Vec::new(),
+        [register_storage(16, 8), register_storage(32, 8)],
     )
     .expect("call restore artifact");
     let graph = artifact.graph();

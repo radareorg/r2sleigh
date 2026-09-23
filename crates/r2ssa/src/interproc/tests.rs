@@ -318,11 +318,15 @@ fn exact_untyped_artifact(
         })
         .collect();
 
-    SsaArtifact::for_decompile_with_interfaces(
+    crate::testing::prepared(
         blocks,
-        Some(arch),
+        arch,
         Some(function_interface),
         call_site_interfaces,
+        [
+            register_storage(return_address_offset),
+            register_storage(stack_pointer_offset),
+        ],
     )
     .expect("exact untyped SSA artifact")
 }
@@ -608,7 +612,7 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
     )
     .expect("exact external callsite interface");
     let root = Arc::new(
-        SsaArtifact::for_decompile_with_interfaces(
+        crate::testing::prepared(
             &[block(
                 0x4000,
                 vec![
@@ -616,9 +620,10 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
                     R2ILOp::Return { target: reg(0, 8) },
                 ],
             )],
-            Some(&arch),
+            &arch,
             Some(function_interface),
             vec![call_interface],
+            [storage(16), storage(24)],
         )
         .expect("prepared external-call root"),
     );
@@ -1168,12 +1173,24 @@ fn report_only_summary_does_not_promote_unbound_call_returns() {
         ],
     );
 
-    let alloc = SsaArtifact::for_decompile(&[alloc_block], Some(&arch))
-        .expect("alloc ssa")
-        .with_name("alloc_wrapper");
-    let wrapper = SsaArtifact::for_decompile(&[wrapper_block], Some(&arch))
-        .expect("wrapper ssa")
-        .with_name("wrapper");
+    let alloc = crate::testing::prepared(
+        &[alloc_block],
+        &arch,
+        None,
+        Vec::new(),
+        [register_storage(16), register_storage(24)],
+    )
+    .expect("alloc ssa")
+    .with_name("alloc_wrapper");
+    let wrapper = crate::testing::prepared(
+        &[wrapper_block],
+        &arch,
+        None,
+        Vec::new(),
+        [register_storage(16), register_storage(24)],
+    )
+    .expect("wrapper ssa")
+    .with_name("wrapper");
 
     let mut seeds = BTreeMap::new();
     seeds.insert(
@@ -1230,9 +1247,15 @@ fn report_only_ip_return_requires_exact_call_result_carrier() {
         ],
     );
 
-    let alloc = SsaArtifact::for_decompile(&[alloc_block], Some(&arch))
-        .expect("alloc ssa")
-        .with_name("alloc_wrapper");
+    let alloc = crate::testing::prepared(
+        &[alloc_block],
+        &arch,
+        None,
+        Vec::new(),
+        [register_storage(16), register_storage(24)],
+    )
+    .expect("alloc ssa")
+    .with_name("alloc_wrapper");
 
     let mut seeds = BTreeMap::new();
     seeds.insert(
@@ -2129,7 +2152,7 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
             result,
         )
         .expect("callsite interface");
-        let prepared = SsaArtifact::for_decompile_with_interfaces(
+        let prepared = crate::testing::prepared(
             &[block(
                 0x7000,
                 vec![
@@ -2139,9 +2162,10 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
                     R2ILOp::Return { target: reg(16, 8) },
                 ],
             )],
-            Some(&arch),
+            &arch,
             Some(function_interface()),
             vec![call_interface],
+            [storage(16), storage(24)],
         )
         .unwrap_or_else(|| panic!("{label} prepared SSA"));
         let abi = AbiProfile::from_machine_context(prepared.machine_context())
@@ -2326,18 +2350,20 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
         )
         .expect("callsite interface")
     };
-    let complete = SsaArtifact::for_decompile_with_interfaces(
+    let complete = crate::testing::prepared(
         &blocks,
-        Some(&arch),
+        &arch,
         Some(function_interface()),
         vec![call_interface(true)],
+        [register_storage(16), register_storage(24)],
     )
     .expect("complete call carrier artifact");
-    let incomplete = SsaArtifact::for_decompile_with_interfaces(
+    let incomplete = crate::testing::prepared(
         &blocks,
-        Some(&arch),
+        &arch,
         Some(function_interface()),
         vec![call_interface(false)],
+        [register_storage(16), register_storage(24)],
     )
     .expect("incomplete call carrier artifact");
     let complete_abi =

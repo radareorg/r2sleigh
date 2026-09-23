@@ -398,8 +398,8 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         op_metadata: Default::default(),
     }];
 
-    let prepared =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
+    let prepared = prepared_preserving(&blocks, &arch, &["rbx", "rsp", "rbp"])
+        .expect("prepared SSA should build");
     let alias_var = prepared
         .function()
         .get_block(0x1780)
@@ -513,8 +513,7 @@ fn a_calls_return_address_push_is_refunded_by_the_callee() {
     )
     .and_then(|interface| interface.with_return_address_storage(storage(8)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
-    .expect("interface")
-    .with_preserved_call_carriers(true, false);
+    .expect("interface");
     let mut block = R2ILBlock::new(0x4000, 4);
     for op in [
         R2ILOp::IntSub {
@@ -555,8 +554,9 @@ fn a_calls_return_address_push_is_refunded_by_the_callee() {
     ] {
         block.push(op);
     }
-    let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
-        .expect("artifact");
+    let artifact =
+        crate::testing::prepared(&[block], &arch, Some(interface), Vec::new(), [storage(0)])
+            .expect("artifact");
     assert_eq!(
         artifact.function().promoted_slot_sites().clone(),
         BTreeSet::from([(0x4000, 2), (0x4000, 6)]),
@@ -641,9 +641,8 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
     .and_then(|interface| interface.with_return_address_storage(storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(32, 8)))
     .expect("caller interface");
-    let roles = SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
-        .expect("machine roles")
-        .with_call_preserved_carriers(SourceCallPreservedCarriers::new(true, true));
+    let roles =
+        SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8))).expect("machine roles");
     let identity = SourceCallSiteIdentity::new(0x1008, CanonicalStorageId::from_varnode(&target));
     let call_interface = SourceCallSiteInterface::new(
         b"stack-argument".to_vec(),
@@ -656,12 +655,16 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
         SourceCallResult::Void,
     )
     .expect("callsite interface");
-    let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let artifact = SsaArtifact::for_decompile_with(
         &[block],
-        Some(&arch),
-        Some(interface),
-        roles,
-        vec![call_interface],
+        DecompileInputs {
+            arch: Some(&arch),
+            function_interface: Some(interface),
+            machine_roles: roles,
+            call_effect: preserving([storage(32, 8)]),
+            call_site_interfaces: vec![call_interface],
+            ..Default::default()
+        },
     )
     .expect("artifact");
     let facts = artifact.facts();

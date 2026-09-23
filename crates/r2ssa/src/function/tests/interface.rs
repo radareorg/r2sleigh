@@ -168,11 +168,11 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
     .with_return_address_storage(ra_storage)
     .expect("return-address carrier")
     .with_stack_pointer_storage(sp_storage)
-    .expect("stack-pointer carrier")
-    .with_preserved_call_carriers(true, true);
+    .expect("stack-pointer carrier");
 
-    let prepared = SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-        .expect("prepared SSA should build");
+    let prepared =
+        crate::testing::prepared(&blocks, &arch, Some(interface), Vec::new(), [sp_storage])
+            .expect("prepared SSA should build");
     let function = prepared.function();
     let facts = function.decompile_prep_facts().expect("prep facts");
     let block = function.get_block(0x4000).expect("entry block");
@@ -437,11 +437,12 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
     )
     .expect("exact callsite interface");
 
-    let prepared = SsaArtifact::for_decompile_with_interfaces(
+    let prepared = crate::testing::prepared(
         &blocks,
-        Some(&arch),
+        &arch,
         Some(function_interface),
         vec![call_interface],
+        [stack_pointer_storage],
     )
     .expect("prepared SSA");
     let abi = prepared.machine_context().abi_model();
@@ -558,13 +559,8 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         SourceCallResult::Void,
     )
     .expect("exact callsite interface");
-    let prepared = SsaArtifact::for_decompile_with_interfaces(
-        &blocks,
-        Some(&arch),
-        None,
-        vec![call_interface],
-    )
-    .expect("prepared SSA");
+    let prepared = crate::testing::prepared(&blocks, &arch, None, vec![call_interface], [])
+        .expect("prepared SSA");
     let call = prepared
         .sole_callsite_certificate_in_block(0x1600)
         .expect("callsite certificate");
@@ -682,7 +678,7 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
     let convention =
         SourceConventionSlots::new("amd64", vec![slot(8), slot(16), slot(24)], Some(slot(0)))
             .expect("convention slots");
-    let machine_context = SourceMachineContext::from_blocks_with_interfaces(
+    let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         std::slice::from_ref(&block),
         Some(&arch),
         None,
@@ -690,12 +686,12 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
         Some(convention),
         Vec::new(),
     );
+    machine_context.bind_call_effect(call_preservation_effect(), std::slice::from_ref(&block));
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         std::slice::from_ref(&block),
         Some(&arch),
         InterfaceQuestions::none(),
-        None,
-        None,
+        &machine_context,
         &CalleeBoundaries::default(),
         None,
         &UncheckedSsaWorkControl,
@@ -815,9 +811,9 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
             arch: Some(&arch),
             function_interface: Some(interface),
             machine_roles: SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
-                .expect("machine roles")
-                .with_call_preserved_carriers(SourceCallPreservedCarriers::new(true, true)),
+                .expect("machine roles"),
             convention_slots: Some(convention),
+            call_effect: preserving([storage(32, 8)]),
             ..Default::default()
         },
     )

@@ -18,9 +18,9 @@ use crate::{
     AdvisoryCallSite, AdvisoryCallTransfer, AdvisoryCalleeLinkage, AdvisorySuccessor,
     AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity, FunctionIdentity,
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
-    OwnedFunctionSnapshot, SnapshotValidationError, SourceCodePointerTable, SourceConventionSlots,
-    SourceDataObject, SourceEndianness, SourceFunctionInterface, SourceLoaderRole,
-    SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
+    OwnedFunctionSnapshot, SnapshotValidationError, SourceCallEffect, SourceCodePointerTable,
+    SourceConventionSlots, SourceDataObject, SourceEndianness, SourceFunctionInterface,
+    SourceLoaderRole, SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
 };
 
 /// The machine every function in one capture session runs on.
@@ -32,6 +32,8 @@ pub struct NativeMachine {
     pub endianness: SourceEndianness,
     pub roles: SourceMachineRoles,
     pub slots: SourceConventionSlots,
+    /// What the convention says a call does to the registers, where it says.
+    pub call_effect: Option<SourceCallEffect>,
 }
 
 /// One basic block, as bytes and where control goes from it.
@@ -227,6 +229,7 @@ pub fn capture(
         interface.clone(),
         machine.roles,
         machine.slots.clone(),
+        machine.call_effect.clone(),
         CapturedSourceFields {
             // The walk bounds the function: every block it kept, it decoded.
             bounded_function_image: true,
@@ -311,6 +314,7 @@ mod tests {
             endianness: SourceEndianness::Little,
             roles,
             slots,
+            call_effect: None,
         }
     }
 

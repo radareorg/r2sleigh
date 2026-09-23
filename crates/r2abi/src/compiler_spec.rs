@@ -30,9 +30,6 @@ pub struct CompilerSpec {
     /// The specification states a location, not a register, so the slot is
     /// recorded as one rather than being lost.
     pub return_address_slot: Option<(i64, u32)>,
-    /// The registers a call leaves as it found them, as the default prototype
-    /// declares them.
-    pub unaffected: Vec<String>,
     /// Where the default prototype puts an argument on the stack: the first
     /// one's offset from the stack pointer entering the call, and the step
     /// from each to the next. Both are stated by the specification, so a
@@ -54,16 +51,8 @@ impl CompilerSpec {
             },
             return_address: return_address(text),
             return_address_slot: return_address_slot(text),
-            unaffected: unaffected(text),
             stack_arguments: stack_arguments(text),
         }
-    }
-
-    /// Whether a call leaves this register as it found it.
-    pub fn preserves(&self, register: &str) -> bool {
-        self.unaffected
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(register))
     }
 }
 
@@ -129,29 +118,6 @@ fn return_address_slot(text: &str) -> Option<(i64, u32)> {
             ))
         })
         .flatten()
-}
-
-/// The registers the default prototype says a call does not disturb.
-fn unaffected(text: &str) -> Vec<String> {
-    let Some(start) = text.find("<unaffected>") else {
-        return Vec::new();
-    };
-    let start = start + "<unaffected>".len();
-    let Some(end) = text[start..].find("</unaffected>").map(|end| end + start) else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    let mut rest = &text[start..end];
-    while let Some(index) = rest.find("<register") {
-        let Some(close) = rest[index..].find('>').map(|close| close + index) else {
-            break;
-        };
-        if let Some(name) = attribute(&rest[index..close], "name") {
-            names.push(name.to_owned());
-        }
-        rest = &rest[close..];
-    }
-    names
 }
 
 /// What one `<name>...</name>` pair encloses.
@@ -292,20 +258,6 @@ mod tests {
   </returnaddress>"#,
         );
         assert_eq!(spec.return_address, None);
-    }
-
-    #[test]
-    fn the_registers_a_call_leaves_alone_are_read() {
-        let spec = CompilerSpec::parse(
-            r#"<unaffected>
-    <register name="x29"/>
-    <register name="x30"/>
-    <register name="sp"/>
-  </unaffected>"#,
-        );
-        assert_eq!(spec.unaffected, ["x29", "x30", "sp"]);
-        assert!(spec.preserves("SP"));
-        assert!(!spec.preserves("x0"));
     }
 
     #[test]

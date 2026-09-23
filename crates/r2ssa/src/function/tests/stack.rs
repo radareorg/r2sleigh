@@ -410,8 +410,8 @@ fn prepared_function_refuses_display_named_stack_reload_at_control_return() {
         },
     ];
 
-    let prepared =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
+    let prepared = prepared_preserving(&blocks, &arch, &["rbx", "rsp", "rbp"])
+        .expect("prepared SSA should build");
     let return_op_idx = prepared
         .function()
         .get_block(0x1890)
@@ -613,9 +613,8 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
             .expect("convention slots")
             .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8))
             .with_variadic_tail_on_stack(true);
-    let roles = SourceMachineRoles::new(Some(register(72)), Some(register(64)))
-        .expect("machine roles")
-        .with_call_preserved_carriers(r2source::SourceCallPreservedCarriers::new(true, true));
+    let roles =
+        SourceMachineRoles::new(Some(register(72)), Some(register(64))).expect("machine roles");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&arch),
@@ -624,13 +623,13 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
         Some(convention),
         vec![interface],
     );
+    machine_context.bind_call_effect(preserving([register(64)]), &blocks);
     machine_context.bind_source_string_literals(&[(0x3000, "%d".to_string())]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
         Some(&arch),
         InterfaceQuestions::new(&machine_context),
-        machine_context.machine_roles().call_preserved_carriers(),
-        machine_context.stack_pointer_carrier(),
+        &machine_context,
         &CalleeBoundaries::default(),
         None,
         &UncheckedSsaWorkControl,
@@ -736,8 +735,8 @@ fn prepared_callsite_refuses_display_named_stack_home_arguments() {
         op_metadata: Default::default(),
     }];
 
-    let prepared =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
+    let prepared = prepared_preserving(&blocks, &arch, &["rbx", "rsp", "rbp"])
+        .expect("prepared SSA should build");
     let call = prepared
         .sole_callsite_certificate_in_block(0x1740)
         .expect("callsite certificate");
@@ -1333,9 +1332,14 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
             switch_info: None,
             op_metadata: Default::default(),
         }];
-        let artifact =
-            SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface.clone())
-                .unwrap_or_else(|| panic!("{name} artifact must build"));
+        let artifact = crate::testing::prepared(
+            &blocks,
+            &arch,
+            Some(interface.clone()),
+            Vec::new(),
+            [sp_storage],
+        )
+        .unwrap_or_else(|| panic!("{name} artifact must build"));
         let facts = artifact
             .function()
             .decompile_prep_facts()

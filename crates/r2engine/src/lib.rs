@@ -68,6 +68,8 @@ pub struct EngineSourceSnapshot {
     function_interface: Option<r2ssa::SourceFunctionInterface>,
     machine_roles: r2ssa::SourceMachineRoles,
     call_site_interfaces: Box<[r2ssa::SourceCallSiteInterface]>,
+    /// What the source's convention says a call does, where it says.
+    call_effect: Option<r2ssa::SourceCallEffect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +142,19 @@ impl EngineSourceSnapshot {
             function_interface,
             machine_roles,
             call_site_interfaces: call_site_interfaces.into_boxed_slice(),
+            call_effect: None,
         })
+    }
+
+    /// State what the source's convention says a call does.
+    #[must_use]
+    pub fn with_call_effect(mut self, call_effect: r2ssa::SourceCallEffect) -> Self {
+        self.call_effect = Some(call_effect);
+        self
+    }
+
+    pub const fn call_effect(&self) -> Option<&r2ssa::SourceCallEffect> {
+        self.call_effect.as_ref()
     }
 
     pub const fn revision_identity(&self) -> &[u8] {
@@ -810,6 +824,9 @@ fn ssa_prepare_execution_refusal(
         }
         r2ssa::SsaPrepareError::MalformedInput => {
             "malformed SSA source input during ssa phase".to_string()
+        }
+        r2ssa::SsaPrepareError::NoCallEffect => {
+            "the convention states nothing a call leaves standing".to_string()
         }
     };
     engine_execution_refusal(reason, EnginePhase::Ssa, metrics)
@@ -3484,6 +3501,7 @@ fn build_engine_analysis_from_parts_with_control<C: r2ssa::SsaWorkControl + ?Siz
             source_snapshot.function_interface().cloned(),
             *source_snapshot.machine_roles(),
             source_snapshot.call_site_interfaces().to_vec(),
+            source_snapshot.call_effect().cloned(),
             control,
         )?
         .with_name(function_name),

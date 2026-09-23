@@ -99,12 +99,52 @@ use super::*;
 use crate::semantic::{CallArgumentLocation, SemanticId};
 use crate::{
     CallBoundarySlot, CanonicalStorageSpace, SourceAbiParameterSpec, SourceCallArgumentFact,
-    SourceCallArgumentValue, SourceFunctionReturn, SourceStackSlotSpec, ValueId,
+    SourceCallArgumentValue, SourceCallEffect, SourceFunctionReturn, SourceStackSlotSpec, ValueId,
 };
 use r2il::{R2ILOp, RegisterDef, SpaceId, SwitchCase, SwitchInfo as R2ILSwitchInfo, Varnode};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
+
+/// A call effect naming these registers clobbered and these preserved.
+fn clobbering(
+    clobbered: impl IntoIterator<Item = CanonicalStorageId>,
+    preserved: impl IntoIterator<Item = CanonicalStorageId>,
+) -> Option<SourceCallEffect> {
+    crate::testing::call_effect(clobbered, preserved)
+}
+
+/// A call effect that preserves exactly these registers and clobbers every other.
+fn preserving(preserved: impl IntoIterator<Item = CanonicalStorageId>) -> Option<SourceCallEffect> {
+    clobbering([], preserved)
+}
+
+/// Decompile-prepared SSA under a call effect preserving the named registers.
+fn prepared_preserving(
+    blocks: &[R2ILBlock],
+    arch: &ArchSpec,
+    preserved: &[&str],
+) -> Option<SsaArtifact> {
+    let preserved = preserved.iter().map(|name| {
+        let register = arch
+            .registers
+            .iter()
+            .find(|register| register.name.eq_ignore_ascii_case(name))
+            .expect("a named register");
+        CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: register.offset,
+            size: register.size,
+        }
+    });
+    crate::testing::prepared(
+        blocks,
+        arch,
+        None,
+        Vec::new(),
+        preserved.collect::<Vec<_>>(),
+    )
+}
 
 fn make_const(val: u64, size: u32) -> Varnode {
     Varnode {
@@ -1041,6 +1081,7 @@ fn variadic_format_call_artifact_formed(
         Some(convention),
         vec![interface],
     );
+    machine_context.bind_call_effect(clobbering((0..4).map(slot), []), &blocks);
     if let Some(format) = format {
         machine_context.bind_source_string_literals(&[(0x3000, format.to_string())]);
     }
@@ -1048,8 +1089,7 @@ fn variadic_format_call_artifact_formed(
         &blocks,
         Some(&arch),
         InterfaceQuestions::new(&machine_context),
-        machine_context.machine_roles().call_preserved_carriers(),
-        machine_context.stack_pointer_carrier(),
+        &machine_context,
         &CalleeBoundaries::default(),
         None,
         &UncheckedSsaWorkControl,
@@ -1173,14 +1213,14 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
         Some(convention),
         vec![interface],
     );
+    machine_context.bind_call_effect(clobbering((0..4).map(slot), []), &blocks);
     machine_context
         .bind_source_string_literals(&[(0x3000, first.to_string()), (0x3010, second.to_string())]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
         Some(&arch),
         InterfaceQuestions::new(&machine_context),
-        machine_context.machine_roles().call_preserved_carriers(),
-        machine_context.stack_pointer_carrier(),
+        &machine_context,
         &CalleeBoundaries::default(),
         None,
         &UncheckedSsaWorkControl,
@@ -1338,6 +1378,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         Some(convention),
         vec![interface(first_call_index), interface(second_call_index)],
     );
+    machine_context.bind_call_effect(clobbering((0..4).map(slot), []), &blocks);
     machine_context.bind_source_string_literals(&[
         (0x3000, "%u:%u".to_string()),
         (0x3010, "complete: 100%%".to_string()),
@@ -1346,8 +1387,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         &blocks,
         Some(&arch),
         InterfaceQuestions::new(&machine_context),
-        machine_context.machine_roles().call_preserved_carriers(),
-        machine_context.stack_pointer_carrier(),
+        &machine_context,
         &CalleeBoundaries::default(),
         None,
         &UncheckedSsaWorkControl,
@@ -2263,6 +2303,24 @@ fn call_preservation_arch() -> ArchSpec {
     arch
 }
 
+/// The fixture's call effect: rax, rdi, rsi and rdx clobbered, the register at 32 preserved.
+fn call_preservation_effect() -> Option<SourceCallEffect> {
+    let clobbered = [0, 8, 16, 24].map(|offset| call_preservation_storage(offset, 8));
+    clobbering(clobbered, [call_preservation_storage(32, 8)])
+}
+
+/// The fixture prepared for decompilation under its convention.
+fn call_preservation_artifact(blocks: &[R2ILBlock], arch: &ArchSpec) -> Option<SsaArtifact> {
+    SsaArtifact::for_decompile_with(
+        blocks,
+        DecompileInputs {
+            arch: Some(arch),
+            call_effect: call_preservation_effect(),
+            ..Default::default()
+        },
+    )
+}
+
 fn call_preservation_storage(offset: u64, size: u32) -> CanonicalStorageId {
     CanonicalStorageId {
         space: CanonicalStorageSpace::Register,
@@ -2292,7 +2350,7 @@ fn a_body_that_calls_preserves_nothing_its_own_call_may_touch() {
             target: make_const(0, 8),
         },
     ]);
-    let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("calling artifact");
+    let artifact = call_preservation_artifact(&[block], &arch).expect("calling artifact");
     assert!(
         artifact
             .facts()

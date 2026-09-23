@@ -753,13 +753,8 @@ mod tests {
     #[test]
     fn source_owned_callsite_certificate_drives_call_sink_without_abi_names() {
         let (arch, blocks, call_interface, argument_storage) = exact_call_argument_fixture();
-        let artifact = SsaArtifact::for_decompile_with_interfaces(
-            &blocks,
-            Some(&arch),
-            None,
-            vec![call_interface],
-        )
-        .expect("prepared exact SSA artifact");
+        let artifact = crate::testing::prepared(&blocks, &arch, None, vec![call_interface], [])
+            .expect("prepared exact SSA artifact");
         let policy = DefaultTaintPolicy::all_inputs().with_sink_stores(false);
         let result = TaintAnalysis::from_artifact(&artifact, policy).analyze();
 
@@ -785,7 +780,7 @@ mod tests {
         arch.add_register(RegisterDef::new("rsi", 32, 8));
         arch.add_register(RegisterDef::new("rdi", 56, 8));
 
-        let artifact = SsaArtifact::for_decompile(&blocks, Some(&arch))
+        let artifact = crate::testing::prepared(&blocks, &arch, None, Vec::new(), [])
             .expect("prepared SSA without source interface");
         let policy = DefaultTaintPolicy::all_inputs().with_sink_stores(false);
         let result = TaintAnalysis::from_artifact(&artifact, policy).analyze();

@@ -20,13 +20,14 @@ pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
-    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
-    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection,
-    SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
-    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
-    SourceMachineRolesError, SourceParameterLocation, SourceStackAllocationContract,
-    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeAlias,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeKind, StackAddressBase,
+    SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity,
+    SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
+    SourceCarrierProjection, SourceConventionSlots, SourceFormatParameterRule,
+    SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
+    SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError, SourceParameterLocation,
+    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
+    SourceType, SourceTypeAlias, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
+    StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 25;
@@ -560,10 +561,12 @@ pub struct SourceMachineContext {
     architecture_result_slot: Option<CanonicalStorageId>,
     abi_model: MachineAbiModel,
     register_storages_by_name: BTreeMap<String, CanonicalStorageId>,
-    /// The registers a call may leave changed under this architecture, as
-    /// storages. The same list construction defines after every call, so a
-    /// body that proves one of these untouched at every return is stating a
-    /// fact its callers can consume without translation.
+    /// What the convention says a call does to the registers, where it says.
+    call_effect: Option<SourceCallEffect>,
+    /// The registers a call in this body may leave changed, from the call
+    /// effect. The same set construction defines after every call, so a body
+    /// that proves one of these untouched at every return is stating a fact
+    /// its callers can consume without translation.
     call_clobbered_carriers: Box<[CanonicalStorageId]>,
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
@@ -726,6 +729,18 @@ fn write_parameter_location_identity(
             writer.u32(size_bytes);
             writer.i64(callee_offset);
         }
+    }
+}
+
+fn write_call_effect(writer: &mut MachineContextIdentityWriter, effect: Option<&SourceCallEffect>) {
+    let Some(effect) = effect else {
+        writer.u8(0);
+        return;
+    };
+    writer.u8(1);
+    for storages in [effect.clobbered(), effect.preserved()] {
+        writer.usize(storages.len());
+        storages.iter().for_each(|storage| writer.storage(*storage));
     }
 }
 
@@ -992,6 +1007,29 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
         .collect()
 }
 
+/// What a call in this body may leave changed: the clobber list, and every register it touches unpreserved.
+fn clobbered_by_a_call(
+    effect: &SourceCallEffect,
+    observed: &BTreeSet<RegisterStorage>,
+) -> Box<[CanonicalStorageId]> {
+    let touched = observed
+        .iter()
+        .map(|storage| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: storage.offset,
+            size: storage.size,
+        })
+        .filter(|storage| effect.clobbers(*storage));
+    effect
+        .clobbered()
+        .iter()
+        .copied()
+        .chain(touched)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 impl SourceMachineContext {
     pub(crate) fn from_blocks(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Self {
         Self::from_blocks_with_interfaces(
@@ -1098,9 +1136,6 @@ impl SourceMachineContext {
                     Some((name, *storage))
                 })
                 .collect();
-        let call_clobbered_carriers = arch
-            .map(crate::function::call_clobbered_storages)
-            .unwrap_or_default();
         let (register_geometry_state, register_projections) = match arch {
             None => (MachineRegisterGeometryState::Unavailable, Box::default()),
             Some(arch) => match RegisterProjectionQuery::from_arch(arch) {
@@ -1347,7 +1382,8 @@ impl SourceMachineContext {
             architecture_result_slot,
             abi_model,
             register_storages_by_name,
-            call_clobbered_carriers,
+            call_effect: None,
+            call_clobbered_carriers: Box::default(),
             register_geometry_state,
             register_projections,
             raw_call_sites,
@@ -1552,10 +1588,41 @@ impl SourceMachineContext {
             .map(|(name, _)| name.clone())
     }
 
-    /// The registers a call may leave changed under this architecture's
-    /// convention; empty when the architecture is unknown.
+    /// The registers a call in this body may leave changed; empty without a call effect.
     pub const fn call_clobbered_carriers(&self) -> &[CanonicalStorageId] {
         &self.call_clobbered_carriers
+    }
+
+    /// What the convention says a call does to the registers.
+    pub const fn call_effect(&self) -> Option<&SourceCallEffect> {
+        self.call_effect.as_ref()
+    }
+
+    /// Bind what a call does, and with it what a call in these blocks clobbers.
+    pub(crate) fn bind_call_effect(
+        &mut self,
+        effect: Option<SourceCallEffect>,
+        blocks: &[R2ILBlock],
+    ) {
+        self.call_clobbered_carriers = effect
+            .as_ref()
+            .map(|effect| clobbered_by_a_call(effect, &observed_register_storages(blocks)))
+            .unwrap_or_default();
+        self.call_effect = effect;
+    }
+
+    /// Whether a call leaves the frame carriers where they were, per the call effect.
+    pub fn call_preserved_carriers(&self) -> Option<SourceCallPreservedCarriers> {
+        let effect = self.call_effect()?;
+        let frame_pointer = self
+            .function_interface
+            .as_ref()
+            .and_then(SourceFunctionInterface::frame_pointer_storage);
+        Some(SourceCallPreservedCarriers::new(
+            self.stack_pointer_carrier()
+                .is_some_and(|storage| effect.preserves(storage)),
+            frame_pointer.is_none_or(|storage| effect.preserves(storage)),
+        ))
     }
 
     pub const fn register_storages_by_name(&self) -> &BTreeMap<String, CanonicalStorageId> {
@@ -1732,7 +1799,7 @@ impl SourceMachineContext {
     /// machine/source fact that can affect prepared semantics or certification.
     pub(crate) fn semantic_identity_bytes(&self) -> Box<[u8]> {
         let mut writer = MachineContextIdentityWriter::new();
-        writer.bytes(b"r2ssa-machine-context-semantic-v6");
+        writer.bytes(b"r2ssa-machine-context-semantic-v7");
         writer.u32(self.schema_version);
         writer.u8(match self.architecture_family {
             MachineArchitectureFamily::Unknown => 0,
@@ -1811,6 +1878,7 @@ impl SourceMachineContext {
             }
             None => writer.u8(0),
         }
+        write_call_effect(&mut writer, self.call_effect.as_ref());
 
         let mut register_storages = self
             .register_storages_by_name

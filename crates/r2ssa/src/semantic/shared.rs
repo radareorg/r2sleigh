@@ -1284,8 +1284,8 @@ pub(crate) fn contained_register_storage_offset(
 /// This is deliberately narrower than general alias recovery. Candidates are
 /// only the consecutive `CallDefine` operations emitted for this exact call,
 /// only exact or structurally contained register storage is admitted, and a
-/// tie at the widest observed width refuses. The scan is bounded by the
-/// architecture's call-clobber list rather than by the function size.
+/// tie at the widest observed width refuses. The scan is bounded by what the
+/// convention's call effect clobbers rather than by the function size.
 pub(crate) fn observed_convention_call_result_after_call(
     function: &SSAFunction,
     graph: &SsaGraph,

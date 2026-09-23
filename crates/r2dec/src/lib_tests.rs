@@ -352,12 +352,10 @@ fn a_restored_stack_pointer_renders() {
     )
     .and_then(|i| i.with_return_address_storage(storage(0x30)))
     .and_then(|i| i.with_stack_pointer_storage(storage(0x28)))
-    .expect("interface")
-    .with_preserved_call_carriers(true, true);
-    let prepared =
-        r2ssa::SsaArtifact::for_decompile_with_interface(&blocks, Some(&arch), interface)
-            .expect("prepared")
-            .with_name("restore_demo");
+    .expect("interface");
+    let prepared = prepared_under_test_convention(&blocks, &arch, interface)
+        .expect("prepared")
+        .with_name("restore_demo");
     let restores = prepared
         .function()
         .get_block(0x1008)
@@ -464,15 +462,11 @@ fn an_unused_restored_stack_pointer_renders() {
     )
     .and_then(|i| i.with_return_address_storage(storage(0x30)))
     .and_then(|i| i.with_stack_pointer_storage(storage(0x28)))
-    .expect("interface")
-    .with_preserved_call_carriers(true, true);
-    let prepared = r2ssa::SsaArtifact::for_decompile_with_interface(
-        &[entry, no_call, called, exit],
-        Some(&arch),
-        interface,
-    )
-    .expect("prepared")
-    .with_name("unused_restore_demo");
+    .expect("interface");
+    let prepared =
+        prepared_under_test_convention(&[entry, no_call, called, exit], &arch, interface)
+            .expect("prepared")
+            .with_name("unused_restore_demo");
     let restore_outputs = prepared
         .graph()
         .insts
@@ -513,6 +507,33 @@ fn an_unused_restored_stack_pointer_renders() {
         !output.contains("unaccounted"),
         "the structural elision accounts for the restore operand: {output}"
     );
+}
+
+/// Decompile-prepared SSA where a call clobbers RAX, RDI and RSI and preserves RBP, RSP and RIP.
+fn prepared_under_test_convention(
+    blocks: &[R2ILBlock],
+    arch: &ArchSpec,
+    interface: r2ssa::SourceFunctionInterface,
+) -> Option<r2ssa::SsaArtifact> {
+    let storages = |offsets: [u64; 3]| {
+        offsets.map(|offset| r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        })
+    };
+    let call_effect =
+        r2ssa::SourceCallEffect::new(storages([0x00, 0x10, 0x18]), storages([0x20, 0x28, 0x30]))
+            .expect("a call effect");
+    r2ssa::SsaArtifact::for_decompile_with(
+        blocks,
+        r2ssa::DecompileInputs {
+            arch: Some(arch),
+            function_interface: Some(interface),
+            call_effect: Some(call_effect),
+            ..Default::default()
+        },
+    )
 }
 
 fn test_arch_for_decompile() -> ArchSpec {

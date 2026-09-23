@@ -61,8 +61,7 @@ fn decompile_ssa_models_post_call_arm64_return_register_clobber() {
         op_metadata: Default::default(),
     }];
 
-    let prepared =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
+    let prepared = prepared_preserving(&blocks, &arch, &[]).expect("prepared SSA should build");
     let ops = &prepared.get_block(0x1400).expect("entry block").ops;
     let post_call_x0 = ops
         .iter()
@@ -197,10 +196,11 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
         op_metadata: Default::default(),
     }];
 
-    let first =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("first prepared SSA should build");
-    let second =
-        SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("second prepared SSA should build");
+    let callee_saved = ["rbx", "rsp", "rbp"];
+    let first = prepared_preserving(&blocks, &arch, &callee_saved)
+        .expect("first prepared SSA should build");
+    let second = prepared_preserving(&blocks, &arch, &callee_saved)
+        .expect("second prepared SSA should build");
     assert_eq!(
         first.certificates().call_results,
         second.certificates().call_results,
@@ -241,6 +241,11 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
         offset: 0,
         size: 8,
     };
+    let callee_saved = [8, 16, 24].map(|offset| CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    });
     let convention =
         SourceConventionSlots::new("amd64", [], Some(full_result)).expect("result convention");
     let prepared = SsaArtifact::for_decompile_with(
@@ -248,6 +253,7 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
         DecompileInputs {
             arch: Some(&arch),
             convention_slots: Some(convention),
+            call_effect: clobbering([full_result], callee_saved),
             ..Default::default()
         },
     )
@@ -410,19 +416,14 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
         std::slice::from_ref(&block),
         DecompileInputs {
             arch: Some(&arch),
+            call_effect: call_preservation_effect(),
             callee_preserved_carriers: preserved,
             ..Default::default()
         },
     )
     .expect("artifact with a preserving callee");
-    let without = SsaArtifact::for_decompile_with(
-        std::slice::from_ref(&block),
-        DecompileInputs {
-            arch: Some(&arch),
-            ..Default::default()
-        },
-    )
-    .expect("artifact without callee facts");
+    let without = call_preservation_artifact(std::slice::from_ref(&block), &arch)
+        .expect("artifact without callee facts");
     let call_defines = |artifact: &SsaArtifact, name: &str| {
         artifact
             .function()
@@ -461,8 +462,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
 #[test]
 fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     let mut arch = call_preservation_arch();
-    // Outside the convention's clobber list, which is what makes the
-    // callee's own interface the only thing that can say it is written.
+    // Preserved by the convention, so only the callee's own interface can say it is written.
     arch.add_register(RegisterDef::new("rbx", 32, 8));
     // call 0x2000; *rsi = rbx; return -- rbx holds what the call returned.
     let block = call_preservation_block(vec![
@@ -492,19 +492,14 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
         std::slice::from_ref(&block),
         DecompileInputs {
             arch: Some(&arch),
+            call_effect: call_preservation_effect(),
             callee_interfaces: BTreeMap::from([(0x2000u64, returns_rbx)]),
             ..Default::default()
         },
     )
     .expect("artifact with a callee that returns rbx");
-    let without = SsaArtifact::for_decompile_with(
-        std::slice::from_ref(&block),
-        DecompileInputs {
-            arch: Some(&arch),
-            ..Default::default()
-        },
-    )
-    .expect("artifact without callee facts");
+    let without = call_preservation_artifact(std::slice::from_ref(&block), &arch)
+        .expect("artifact without callee facts");
     let call_defines = |artifact: &SsaArtifact| {
         artifact
             .function()
@@ -552,7 +547,7 @@ fn a_leaf_body_preserves_every_clobbered_register_it_never_writes() {
             target: make_const(0, 8),
         },
     ]);
-    let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("leaf artifact");
+    let artifact = call_preservation_artifact(&[block], &arch).expect("leaf artifact");
     let preserved = &artifact.facts().boundaries.preserved_call_carriers;
     for offset in [8, 16, 24] {
         assert!(
@@ -576,7 +571,7 @@ fn a_body_that_leaves_by_a_jump_claims_no_preserved_register() {
             target: make_ram(0x3000, 8),
         },
     ]);
-    let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("jumping artifact");
+    let artifact = call_preservation_artifact(&[block], &arch).expect("jumping artifact");
     assert!(
         artifact
             .facts()
@@ -585,5 +580,62 @@ fn a_body_that_leaves_by_a_jump_claims_no_preserved_register() {
             .is_empty(),
         "{:?}",
         artifact.facts().boundaries.preserved_call_carriers
+    );
+}
+
+/// A call clobbers the direction flag, and what reads it after reads the zero the convention returns.
+#[test]
+fn a_call_returns_the_direction_flag_clear() {
+    let mut arch = ArchSpec::new("x86-64");
+    arch.addr_size = 8;
+    arch.add_register(RegisterDef::new("rax", 0, 8));
+    arch.add_register(RegisterDef::new("DF", 0x20a, 1));
+    let direction = call_preservation_storage(0x20a, 1);
+    // call 0x2000; rax = zext(DF); return
+    let block = call_preservation_block(vec![
+        R2ILOp::Call {
+            target: make_ram(0x2000, 8),
+        },
+        R2ILOp::IntZExt {
+            dst: make_reg(0, 8),
+            src: make_reg(0x20a, 1),
+        },
+        R2ILOp::Return {
+            target: make_const(0, 8),
+        },
+    ]);
+    let artifact = SsaArtifact::for_decompile_with(
+        &[block],
+        DecompileInputs {
+            arch: Some(&arch),
+            machine_roles: SourceMachineRoles::default()
+                .with_direction_flag_storage(Some(direction)),
+            convention_slots: Some(
+                SourceConventionSlots::new("amd64", [], None).expect("convention slots"),
+            ),
+            call_effect: clobbering([call_preservation_storage(0, 8)], []),
+            ..Default::default()
+        },
+    )
+    .expect("artifact");
+    let graph = artifact.graph();
+    let clobbers = graph
+        .insts
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst.payload,
+                crate::graph::InstPayload::Op(SSAOp::CallDefine { .. })
+            )
+        })
+        .filter(|inst| inst.canonical_storage == Some(direction))
+        .filter_map(|inst| inst.output)
+        .collect::<Vec<_>>();
+    assert_eq!(clobbers.len(), 1, "the call clobbers the direction flag");
+    assert!(
+        clobbers
+            .iter()
+            .all(|value| graph.use_sites(*value).is_empty()),
+        "what follows the call reads the convention's zero, not the clobber"
     );
 }

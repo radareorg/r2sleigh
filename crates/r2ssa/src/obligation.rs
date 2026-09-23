@@ -1810,6 +1810,14 @@ mod tests {
         arch
     }
 
+    /// The call arch's call effect: argument and result registers clobbered, the program counter preserved.
+    fn x86_64_call_effect() -> Option<crate::SourceCallEffect> {
+        crate::testing::call_effect(
+            [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
+            [register_storage(24, 8)],
+        )
+    }
+
     fn register_storage(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {
             space: CanonicalStorageSpace::Register,
@@ -2094,11 +2102,12 @@ mod tests {
                 storage: result_storage,
             },
         );
-        let artifact = SsaArtifact::for_decompile_with_interfaces(
+        let artifact = crate::testing::prepared_under(
             &[block],
-            Some(&x86_64_call_arch()),
+            &x86_64_call_arch(),
             None,
             vec![interface],
+            x86_64_call_effect(),
         )
         .expect("call artifact");
         let boundary = artifact
@@ -2159,8 +2168,14 @@ mod tests {
         unused_block.push(R2ILOp::Call {
             target: target.clone(),
         });
-        let unused = SsaArtifact::for_decompile(&[unused_block], Some(&x86_64_call_arch()))
-            .expect("unused call-define artifact");
+        let unused = crate::testing::prepared_under(
+            &[unused_block],
+            &x86_64_call_arch(),
+            None,
+            Vec::new(),
+            x86_64_call_effect(),
+        )
+        .expect("unused call-define artifact");
         let unused_values = unused
             .obligations()
             .structural_unused_values(unused.graph(), unused.unobserved_merges().unobserved_uses())
@@ -2189,8 +2204,14 @@ mod tests {
             addr: Varnode::constant(0x4300, 8),
             val: Varnode::unique(0x80, 8),
         });
-        let used = SsaArtifact::for_decompile(&[used_block], Some(&x86_64_call_arch()))
-            .expect("used call-define artifact");
+        let used = crate::testing::prepared_under(
+            &[used_block],
+            &x86_64_call_arch(),
+            None,
+            Vec::new(),
+            x86_64_call_effect(),
+        )
+        .expect("used call-define artifact");
         let used_values = used
             .obligations()
             .structural_unused_values(used.graph(), used.unobserved_merges().unobserved_uses())
@@ -2531,8 +2552,14 @@ mod tests {
             target: Varnode::ram(0x3180, 8),
         });
 
-        let artifact = SsaArtifact::for_decompile(&[entry, block], Some(&x86_64_call_arch()))
-            .expect("loop artifact");
+        let artifact = crate::testing::prepared_under(
+            &[entry, block],
+            &x86_64_call_arch(),
+            None,
+            Vec::new(),
+            x86_64_call_effect(),
+        )
+        .expect("loop artifact");
         // The copy writes an argument carrier the call reads on the next turn
         // of the loop, so it is live. Nothing about the boundary being
         // incomplete makes it an unknown effect: the value is one this

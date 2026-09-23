@@ -2523,7 +2523,13 @@ fn a_convention_result_read_only_by_the_return_is_the_call_result() {
     block.push(R2ILOp::Return {
         target: Varnode::register(12, 4),
     });
-    let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("artifact");
+    // cdecl: the three scratch registers are clobbered, the return target is not.
+    let effect = crate::testing::call_effect(
+        [0, 4, 8].map(|offset| register_storage(offset, 4)),
+        [register_storage(12, 4)],
+    );
+    let artifact = crate::testing::prepared_under(&[block], &arch, None, Vec::new(), effect)
+        .expect("artifact");
     let eax = CanonicalStorageId {
         space: CanonicalStorageSpace::Register,
         offset: 0,

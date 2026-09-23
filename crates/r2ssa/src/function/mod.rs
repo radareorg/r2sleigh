@@ -415,6 +415,8 @@ pub struct DecompileInputs<'a> {
     /// them: its prototype names only the fixed arguments, so where argument
     /// `n + 1` would go is a question only the convention answers.
     pub convention_slots: Option<SourceConventionSlots>,
+    /// What a call does to the registers; a body that calls is refused without it.
+    pub call_effect: Option<r2source::SourceCallEffect>,
     pub call_site_interfaces: Vec<SourceCallSiteInterface>,
     /// Call sites the source proved are tail calls, by identity. A tail call
     /// through a relocated slot is a `BranchInd` that only a context knowing
@@ -734,12 +736,13 @@ impl SsaArtifact {
             function_interface,
             machine_roles,
             convention_slots,
+            call_effect,
             call_site_interfaces,
             tail_call_identities,
             callee_preserved_carriers,
             callee_interfaces,
         } = inputs;
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
             arch,
             function_interface,
@@ -748,13 +751,13 @@ impl SsaArtifact {
             call_site_interfaces,
             tail_call_identities,
         );
+        machine_context.bind_call_effect(call_effect, blocks);
         Some(Self::new_with_context(
             SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                 blocks,
                 arch,
                 InterfaceQuestions::new(&machine_context),
-                machine_context.machine_roles().call_preserved_carriers(),
-                machine_context.stack_pointer_carrier(),
+                &machine_context,
                 &CalleeBoundaries::from_interfaces(
                     arch,
                     &callee_preserved_carriers,
@@ -768,17 +771,18 @@ impl SsaArtifact {
         ))
     }
 
-    /// Build controlled decompiler SSA with explicit source interfaces and
-    /// independently source-owned machine roles.
+    /// Build controlled decompiler SSA with explicit source interfaces,
+    /// independently source-owned machine roles, and what a call does.
     pub fn for_decompile_with_interfaces_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
+        call_effect: Option<r2source::SourceCallEffect>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces(
+        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
             blocks,
             arch,
             function_interface,
@@ -786,12 +790,12 @@ impl SsaArtifact {
             None,
             call_site_interfaces,
         );
+        machine_context.bind_call_effect(call_effect, blocks);
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks,
             arch,
             InterfaceQuestions::new(&machine_context),
-            machine_context.machine_roles().call_preserved_carriers(),
-            machine_context.stack_pointer_carrier(),
+            &machine_context,
             &CalleeBoundaries::default(),
             None,
             control,
@@ -839,8 +843,7 @@ impl SsaArtifact {
             blocks.as_slice(),
             Some(arch),
             InterfaceQuestions::new(&machine_context),
-            machine_context.machine_roles().call_preserved_carriers(),
-            machine_context.stack_pointer_carrier(),
+            &machine_context,
             &CalleeBoundaries::default(),
             None,
             control,
@@ -2133,15 +2136,14 @@ impl TrustedSsaArtifact {
                 // the final pass reads; without them every format was unproven.
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
+                provisional_machine_context
+                    .bind_call_effect(source.call_effect().cloned(), &blocks);
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
                         Some(&arch),
                         InterfaceQuestions::none(),
-                        provisional_machine_context
-                            .machine_roles()
-                            .call_preserved_carriers(),
-                        provisional_machine_context.stack_pointer_carrier(),
+                        &provisional_machine_context,
                         &callees,
                         Some(&declared_successors),
                         control,
@@ -2200,6 +2202,7 @@ impl TrustedSsaArtifact {
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
             );
+        machine_context.bind_call_effect(source.call_effect().cloned(), &blocks);
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
@@ -2234,8 +2237,7 @@ impl TrustedSsaArtifact {
             blocks.as_slice(),
             Some(&arch),
             InterfaceQuestions::new(&machine_context),
-            machine_context.machine_roles().call_preserved_carriers(),
-            machine_context.stack_pointer_carrier(),
+            &machine_context,
             &callees,
             Some(&declared_successors),
             control,
@@ -2436,8 +2438,8 @@ pub struct SSAFunction {
     /// Whether a call leaves the carriers that address this frame alone.
     ///
     /// Held here rather than read off the function interface, because the
-    /// source publishes it for functions whose interface it withholds, and
-    /// those are the ones that need it.
+    /// convention states it for functions that have no interface, and those
+    /// are the ones that need it.
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
     /// The lifted memory operations promotion took out of memory.
     ///
@@ -2955,30 +2957,47 @@ impl CalleeBoundaries {
     }
 }
 
-/// What a call boundary does to this architecture's registers.
+/// What a call boundary does to this body's registers.
 ///
 /// `stack_pointer_restored_by_callee` carries the storage only when the source
 /// stated that the convention restores it; see the field's own documentation
 /// for why the caller's stack pointer is otherwise wrong from its first call
 /// onward.
+/// A body that calls under no stated call effect is refused rather than read as if a register survived.
 fn decompile_call_boundary_config(
+    blocks: &[R2ILBlock],
     arch: Option<&ArchSpec>,
+    machine_context: &SourceMachineContext,
     stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
     callees: CalleeBoundaries,
-) -> Option<CallBoundaryConfig> {
-    let arch = arch?;
-    let defined_regs = call_clobbered_register_defs(arch);
-    if defined_regs.is_empty() && stack_pointer_restored_by_callee.is_none() {
-        return None;
+) -> Result<Option<CallBoundaryConfig>, SsaPrepareError> {
+    let calls = blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }));
+    if calls && machine_context.call_effect().is_none() {
+        r2il::refusal_evidence!(
+            "call-effect",
+            "{:#x}: the body calls and its convention states nothing a call leaves standing",
+            blocks.first().map_or(0, |block| block.addr)
+        );
+        return Err(SsaPrepareError::NoCallEffect);
     }
-    Some(CallBoundaryConfig {
-        defined_regs,
+    let Some(arch) = arch else {
+        return Ok(None);
+    };
+    let clobbered = machine_context.call_clobbered_carriers().to_vec();
+    if clobbered.is_empty() && stack_pointer_restored_by_callee.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(CallBoundaryConfig {
+        clobbered,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         result_by_target: callees.results,
         argument_regs: call_argument_register_defs(arch),
         return_regs: return_read_register_defs(arch),
-    })
+    }))
 }
 
 /// The registers a call reads without naming them in an operand: the
@@ -3059,429 +3078,12 @@ fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
     }
 }
 
-/// The registers a call may leave changed under this architecture's
-/// convention: what a caller must treat as freshly defined after a call it
-/// knows nothing more about.
-///
-/// This list has one owner. Construction emits a `CallDefine` for each entry
-/// at every call, and a callee's return boundary tests the same entries to
-/// state which of them its body leaves untouched, so the two sides can never
-/// disagree about which registers are in question.
-/// The registers a call leaves undefined under this architecture's convention, as storages.
-pub fn call_clobbered_storages(arch: &ArchSpec) -> Box<[CanonicalStorageId]> {
-    // Each placeable register by its name, read once; a name two registers share places neither.
-    let mut by_name = BTreeMap::<String, Option<&r2il::RegisterDef>>::new();
-    let placeable = arch.registers.iter().filter(|register| {
-        register.size != 0
-            && register
-                .offset
-                .checked_add(u64::from(register.size))
-                .is_some()
-    });
-    for register in placeable {
-        by_name
-            .entry(register.name.trim().to_ascii_lowercase())
-            .and_modify(|held| *held = None)
-            .or_insert(Some(register));
-    }
-    call_clobbered_register_defs(arch)
-        .into_iter()
-        .filter_map(|def| {
-            let register = (*by_name.get(&def.name.to_ascii_lowercase())?)?;
-            (register.size == def.size).then_some(CanonicalStorageId {
-                space: CanonicalStorageSpace::Register,
-                offset: register.offset,
-                size: register.size,
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn call_clobbered_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
-    let lower = arch.name.to_ascii_lowercase();
-    match lower.as_str() {
-        "x86-64" | "x86_64" | "x64" | "amd64" => vec![
-            CallBoundaryDef {
-                name: "rax".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "eax".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "rdi".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "rsi".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "rdx".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "rcx".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "r8".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "r9".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "r10".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "r11".to_string(),
-                size: 8,
-            },
-        ],
-        "x86" | "x86-32" | "i386" | "i686" => vec![
-            CallBoundaryDef {
-                name: "eax".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "ecx".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "edx".to_string(),
-                size: 4,
-            },
-        ],
-        "arm" if arch.addr_size == 4 => vec![
-            CallBoundaryDef {
-                name: "r0".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "r1".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "r2".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "r3".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "r12".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "lr".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "ip".to_string(),
-                size: 4,
-            },
-        ],
-        "aarch64" | "arm64" => vec![
-            CallBoundaryDef {
-                name: "x0".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w0".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x1".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w1".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x2".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w2".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x3".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w3".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x4".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w4".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x5".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w5".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x6".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w6".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x7".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w7".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x8".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w8".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x9".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w9".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x10".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w10".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x11".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w11".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x12".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w12".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x13".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w13".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x14".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w14".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x15".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w15".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x16".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w16".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x17".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w17".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "x30".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "w30".to_string(),
-                size: 4,
-            },
-        ],
-        "riscv32" | "rv32" | "rv32gc" => vec![
-            CallBoundaryDef {
-                name: "ra".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t0".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t1".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t2".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t3".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t4".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t5".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "t6".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a0".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a1".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a2".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a3".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a4".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a5".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a6".to_string(),
-                size: 4,
-            },
-            CallBoundaryDef {
-                name: "a7".to_string(),
-                size: 4,
-            },
-        ],
-        "riscv64" | "rv64" | "rv64gc" => vec![
-            CallBoundaryDef {
-                name: "ra".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t0".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t1".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t2".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t3".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t4".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t5".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "t6".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a0".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a1".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a2".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a3".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a4".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a5".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a6".to_string(),
-                size: 8,
-            },
-            CallBoundaryDef {
-                name: "a7".to_string(),
-                size: 8,
-            },
-        ],
-        _ => Vec::new(),
-    }
-}
-
 /// Whether the convention puts the stack pointer back after a call.
 ///
-/// The source publishes this beside the machine roles for every function,
-/// including the ones whose signature it never linked; the interface's copy is
-/// the fallback, and it is defaulted to false for exactly those functions, so
-/// asking it first asks the answerer that does not know.
+/// The convention's call effect states this for every function, including the
+/// ones whose signature was never linked; the interface's copy is the fallback,
+/// and it is defaulted to false for exactly those functions, so asking it first
+/// asks the answerer that does not know.
 fn stack_pointer_restored_across_calls(
     carriers: Option<SourceCallPreservedCarriers>,
     function_interface: Option<&SourceFunctionInterface>,

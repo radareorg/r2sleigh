@@ -868,6 +868,8 @@ struct SnapshotState {
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
     convention_slots: SourceConventionSlots,
+    /// What the convention says a call does to the registers, where it says.
+    call_effect: Option<SourceCallEffect>,
     captured_fields: CapturedSourceFields,
     diagnostics: DiagnosticIdentity,
 }
@@ -895,6 +897,7 @@ impl OwnedFunctionSnapshot {
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: SourceConventionSlots,
+        call_effect: Option<SourceCallEffect>,
         captured_fields: CapturedSourceFields,
         diagnostics: DiagnosticIdentity,
     ) -> Result<Self, SnapshotValidationError> {
@@ -1017,6 +1020,7 @@ impl OwnedFunctionSnapshot {
             function_interface,
             machine_roles,
             convention_slots,
+            call_effect,
             captured_fields,
             diagnostics,
         })))
@@ -1096,6 +1100,11 @@ impl OwnedFunctionSnapshot {
         &self.0.convention_slots
     }
 
+    /// What the convention says a call does to the registers, where it says.
+    pub fn call_effect(&self) -> Option<&SourceCallEffect> {
+        self.0.call_effect.as_ref()
+    }
+
     pub fn captured_fields(&self) -> CapturedSourceFields {
         self.0.captured_fields
     }
@@ -1172,6 +1181,7 @@ mod tests {
             None,
             SourceMachineRoles::default(),
             SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            None,
             CapturedSourceFields {
                 bounded_function_image: true,
                 function_interface: false,
@@ -1271,6 +1281,7 @@ mod tests {
                 valid.function_interface().cloned(),
                 *valid.machine_roles(),
                 valid.convention_slots().clone(),
+                valid.call_effect().cloned(),
                 valid.captured_fields(),
                 valid.diagnostic_identity(),
             ),
@@ -1305,6 +1316,7 @@ mod tests {
             Some(interface.clone()),
             exact_machine_roles(),
             SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            None,
             captured_fields,
             valid.diagnostic_identity(),
         )
@@ -1351,6 +1363,7 @@ mod tests {
                 Some(wrong_machine_width),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 narrow_fields,
                 valid.diagnostic_identity()
             ),
@@ -1370,6 +1383,7 @@ mod tests {
                 Some(interface.clone()),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 missing_frame_pointer,
                 valid.diagnostic_identity()
             ),
@@ -1389,6 +1403,7 @@ mod tests {
                 Some(interface.clone()),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 missing_stack_allocation_contract,
                 valid.diagnostic_identity()
             ),
@@ -1428,6 +1443,7 @@ mod tests {
                 Some(interface_without_frame_pointer.clone()),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 captured_fields,
                 valid.diagnostic_identity()
             ),
@@ -1445,6 +1461,7 @@ mod tests {
             Some(interface_without_frame_pointer),
             exact_machine_roles(),
             SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            None,
             fields_without_frame_pointer,
             valid.diagnostic_identity(),
         )
@@ -1469,6 +1486,7 @@ mod tests {
                 Some(interface),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 missing_return_mechanism,
                 valid.diagnostic_identity()
             ),
@@ -1488,6 +1506,7 @@ mod tests {
                 None,
                 SourceMachineRoles::default(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 mechanism_without_interface,
                 valid.diagnostic_identity()
             ),
@@ -1507,6 +1526,7 @@ mod tests {
                 None,
                 SourceMachineRoles::default(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 frame_pointer_without_interface,
                 valid.diagnostic_identity()
             ),
@@ -1537,6 +1557,7 @@ mod tests {
                 Some(wrong_revision),
                 exact_machine_roles(),
                 SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                None,
                 captured_fields,
                 valid.diagnostic_identity()
             ),

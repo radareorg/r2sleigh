@@ -1615,7 +1615,7 @@ mod tests {
             },
         )
         .expect("exact callsite interface");
-        let machine_context = crate::SourceMachineContext::from_blocks_with_interfaces(
+        let mut machine_context = crate::SourceMachineContext::from_blocks_with_interfaces(
             &blocks,
             Some(&arch),
             None,
@@ -1623,7 +1623,10 @@ mod tests {
             Some(candidates()),
             vec![call_interface],
         );
-        let function = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
+        // A call clobbers the argument registers, so the carrier reaches the call only from entry.
+        let clobbered = [register(0, 8), register(8, 8), register(16, 8)];
+        machine_context.bind_call_effect(crate::testing::call_effect(clobbered, []), &blocks);
+        let function = SSAFunction::for_decompile_under(&blocks, Some(&arch), &machine_context)
             .expect("decompile-normalized ssa");
         let recovered =
             recover_interface_with_context(&function, &candidates(), &machine_context, None)

@@ -174,14 +174,24 @@ fn source_owned_from_blocks_with_interface(
     .and_then(|interface| interface.with_return_address_storage(storage(0x30)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0x28)))
     .expect("exact test source interface");
-    let interface = if preserved_calls {
-        interface.with_preserved_call_carriers(true, true)
+    // A call preserves the return address, and the stack pointer where the fixture says so.
+    let preserved = if preserved_calls {
+        vec![storage(0x30), storage(0x28)]
     } else {
-        interface
+        vec![storage(0x30)]
     };
+    let call_effect = r2ssa::SourceCallEffect::new([], preserved).expect("a call effect");
     let source = Arc::new(
-        SsaArtifact::for_decompile_with_interface(blocks, Some(&arch), interface)
-            .expect("test SSA artifact"),
+        SsaArtifact::for_decompile_with(
+            blocks,
+            r2ssa::DecompileInputs {
+                arch: Some(&arch),
+                function_interface: Some(interface),
+                call_effect: Some(call_effect),
+                ..Default::default()
+            },
+        )
+        .expect("test SSA artifact"),
     );
     let request = r2types::TypeAnalysisRequest::new(
         Arc::clone(&source),

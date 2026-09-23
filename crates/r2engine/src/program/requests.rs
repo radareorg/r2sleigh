@@ -119,8 +119,10 @@ impl<S: Source> OpenProgram<S> {
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
         self.start_request();
         self.ensure_decodable()?;
-        // Only a callee's parameters need the assembled machine; a machine it cannot assemble still lists.
-        self.ensure_assembled(request.start).ok();
+        // A machine it cannot assemble still lists, with no callee parameters and nothing saying what a call clobbers.
+        if let Err(reason) = self.ensure_assembled(request.start) {
+            r2il::refusal_evidence!("call-effect", "{:#x}: {reason}", request.start);
+        }
         Ok(crate::query::listing(
             &self.answered(None),
             request,
@@ -189,6 +191,7 @@ impl<S: Source> OpenProgram<S> {
                 decoders: &Walked(machine),
                 fate: Some(&fate),
                 spelled: false,
+                call_effect: target.call_effect,
                 ..program.answered(None)
             };
             let lines = listed_by_block(&answered, &survey.lifted, revision).value;
@@ -296,10 +299,13 @@ impl<S: Source> OpenProgram<S> {
                 program: self,
                 endian: self.endian(),
             },
+            call_effect: self
+                .assembled
+                .as_ref()
+                .and_then(|held| held.call_effect.as_ref()),
             facts,
             fate: None,
             spelled: true,
-            clobbered: &self.clobbered,
             parameters: Some(self),
         }
     }

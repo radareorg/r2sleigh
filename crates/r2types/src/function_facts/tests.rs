@@ -748,8 +748,7 @@ fn prepared_display_name_does_not_create_a_known_signature() {
     block.push(R2ILOp::Call {
         target: Varnode::constant(0x402000, 8),
     });
-    let prepared = r2ssa::SsaArtifact::for_decompile(&[block], Some(&x86_stack_home_arch()))
-        .expect("prepared direct call");
+    let prepared = x86_stack_home_under(&[block], None, Vec::new()).expect("prepared direct call");
     let callsite = CallsiteKey {
         block_addr: 0x401000,
         op_index: 0,
@@ -1362,13 +1361,8 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         },
     )
     .expect("exact call-result interface");
-    let prepared = r2ssa::SsaArtifact::for_decompile_with_interfaces(
-        &[block],
-        Some(&x86_stack_home_arch()),
-        None,
-        vec![call_interface],
-    )
-    .expect("prepared exact call-result fixture");
+    let prepared = x86_stack_home_under(&[block], None, vec![call_interface])
+        .expect("prepared exact call-result fixture");
     let mut facts = FunctionFacts::default();
     facts.attach_prepared_decompile_evidence(&prepared);
 
@@ -1463,13 +1457,8 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     )
     .and_then(|interface| interface.with_exact_callee_interface(callee_interface.clone()))
     .expect("exact callee interface");
-    let prepared = r2ssa::SsaArtifact::for_decompile_with_interfaces(
-        &[block],
-        Some(&x86_stack_home_arch()),
-        Some(function_interface),
-        vec![call_interface],
-    )
-    .expect("prepared implicit-call fixture");
+    let prepared = x86_stack_home_under(&[block], Some(function_interface), vec![call_interface])
+        .expect("prepared implicit-call fixture");
     let parameter = prepared
         .facts()
         .boundaries
@@ -1669,7 +1658,7 @@ fn source_owned_seal_rederives_render_call_and_control_facts() {
         target: Varnode::constant(0x402000, 8),
     });
     let source = Arc::new(
-        r2ssa::SsaArtifact::for_decompile(&[block], Some(&x86_stack_home_arch()))
+        x86_stack_home_under(&[block], None, Vec::new())
             .expect("prepared source-owned seal fixture"),
     );
     let canonical_report = || {
@@ -1985,6 +1974,34 @@ fn x86_stack_home_arch() -> ArchSpec {
     arch
 }
 
+/// The stack-home arch prepared where a call clobbers rax, rdi and rsi and preserves rbp, rsp and rip.
+fn x86_stack_home_under(
+    blocks: &[R2ILBlock],
+    function_interface: Option<r2ssa::SourceFunctionInterface>,
+    call_site_interfaces: Vec<r2ssa::SourceCallSiteInterface>,
+) -> Option<r2ssa::SsaArtifact> {
+    let storages = |offsets: [u64; 3]| {
+        offsets.map(|offset| r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        })
+    };
+    let call_effect =
+        r2ssa::SourceCallEffect::new(storages([0x00, 0x10, 0x18]), storages([0x20, 0x28, 0x30]))
+            .expect("a call effect");
+    r2ssa::SsaArtifact::for_decompile_with(
+        blocks,
+        r2ssa::DecompileInputs {
+            arch: Some(&x86_stack_home_arch()),
+            function_interface,
+            call_effect: Some(call_effect),
+            call_site_interfaces,
+            ..Default::default()
+        },
+    )
+}
+
 fn x86_stack_home_prepared(blocks: &[R2ILBlock]) -> r2ssa::SsaArtifact {
     let register_storage = |offset| r2ssa::CanonicalStorageId {
         space: r2ssa::CanonicalStorageSpace::Register,
@@ -2017,12 +2034,8 @@ fn x86_stack_home_prepared(blocks: &[R2ILBlock]) -> r2ssa::SsaArtifact {
     .and_then(|interface| interface.with_stack_pointer_storage(register_storage(0x28)))
     .and_then(|interface| interface.with_frame_pointer_storage(frame_pointer))
     .expect("exact x86 stack-home interface");
-    r2ssa::SsaArtifact::for_decompile_with_interface(
-        blocks,
-        Some(&x86_stack_home_arch()),
-        interface,
-    )
-    .expect("prepared exact stack-home fixture")
+    x86_stack_home_under(blocks, Some(interface), Vec::new())
+        .expect("prepared exact stack-home fixture")
 }
 
 fn x86_stack_home_param_slots(prepared: &r2ssa::SsaArtifact) -> ParamSlotResolver {

@@ -17,6 +17,44 @@ mod tests {
         .expect("Failed to create x86-64 disassembler")
     }
 
+    /// System V's call effect over the general registers, placed against the lifted arch.
+    fn system_v(arch: &r2il::ArchSpec) -> r2ssa::SourceCallEffect {
+        let place = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| {
+                    let register = arch
+                        .registers
+                        .iter()
+                        .find(|register| register.name.eq_ignore_ascii_case(name))
+                        .expect("a general register");
+                    r2ssa::CanonicalStorageId {
+                        space: r2ssa::CanonicalStorageSpace::Register,
+                        offset: register.offset,
+                        size: register.size,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let clobbered = place(&["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"]);
+        let preserved = place(&["rbx", "rbp", "rsp", "r12", "r13", "r14", "r15"]);
+        r2ssa::SourceCallEffect::new(clobbered, preserved).expect("a call effect")
+    }
+
+    /// Decompile-prepared SSA under System V.
+    fn prepared_under_system_v(blocks: &[r2il::R2ILBlock]) -> r2ssa::SsaArtifact {
+        let arch = r2sleigh_lift::create_x86_64_spec();
+        r2ssa::SsaArtifact::for_decompile_with(
+            blocks,
+            r2ssa::DecompileInputs {
+                arch: Some(&arch),
+                call_effect: Some(system_v(&arch)),
+                ..Default::default()
+            },
+        )
+        .expect("prepared SSA should build")
+    }
+
     /// Pad hex bytes to at least 16 bytes (libsla requirement).
     fn pad_hex(hex: &str) -> Vec<u8> {
         let mut bytes: Vec<u8> = (0..hex.len())
@@ -199,9 +237,8 @@ mod tests {
                 .expect("authenticate exit"),
         ];
 
-        let arch = r2sleigh_lift::create_x86_64_spec();
-        let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
-            .expect("prepared SSA should build");
+        let prepared = prepared_under_system_v(&blocks);
+        let func = prepared.function();
         let entry = func.get_block(0x401379).expect("entry block");
 
         assert!(
@@ -269,9 +306,8 @@ mod tests {
                 .expect("my_strdup exit"),
         ];
 
-        let arch = r2sleigh_lift::create_x86_64_spec();
-        let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
-            .expect("prepared SSA should build");
+        let prepared = prepared_under_system_v(&blocks);
+        let func = prepared.function();
         let entry = func.get_block(0x402272).expect("entry block");
         let copy_arm = func.get_block(0x4022ad).expect("copy arm");
 

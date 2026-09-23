@@ -123,21 +123,20 @@ pub enum SourceAbiClass {
 }
 
 impl SourceAbiClass {
-    /// Classify an exact source spelling without architecture or symbol hints.
     /// Whether this convention requires the direction flag clear on entry and
-    /// at every call.
+    /// on return from every call.
     ///
     /// Both x86 ABIs state it -- System V's psABI in its register usage, and
     /// Microsoft's x64 convention alongside it -- and the 32-bit conventions
     /// inherit it from the same platforms. It is what makes a repeated string
     /// instruction's direction knowable at all: no compiled function in the
     /// corpus executes `cld` or `std`, so the flag's value where the
-    /// instruction reads it is whatever the caller left, and this is what the
-    /// caller was required to leave.
+    /// instruction reads it is whatever the caller or the last callee left,
+    /// and this is what each was required to leave.
     ///
     /// A convention outside the vocabulary states nothing, and a machine
     /// without a direction flag never asks.
-    pub const fn clears_direction_flag_on_entry(self) -> bool {
+    pub const fn clears_direction_flag(self) -> bool {
         matches!(
             self,
             Self::SystemVAMD64
@@ -152,6 +151,7 @@ impl SourceAbiClass {
         )
     }
 
+    /// Classify an exact source spelling without architecture or symbol hints.
     pub fn from_source_spelling(spelling: &str) -> Self {
         let mut normalized = String::with_capacity(spelling.len());
         for ch in spelling.trim().chars() {
@@ -3709,19 +3709,12 @@ pub struct SourceMachineRoles {
     /// register numbering and mean nothing to the lifted architecture.
     role_register_names: SourceRoleRegisterNames,
     stack_allocation_contract: Option<SourceStackAllocationContract>,
-    call_preserved_carriers: Option<SourceCallPreservedCarriers>,
     /// The flag that decides which way a repeated string instruction walks,
     /// placed against the lifted architecture.
     direction_flag_storage: Option<CanonicalStorageId>,
 }
 
-/// Whether a call leaves the carriers that address the frame where they were.
-///
-/// A convention fact, like the stack allocation contract beside it, and the
-/// source publishes it whether or not it recovered a prototype -- which is the
-/// point. Everything entry-relative about a frame depends on it: if a call may
-/// move the stack pointer, no offset taken before one means anything after, so
-/// a function that calls loses every fact about its own frame without it.
+/// Whether a call leaves the frame carriers where they were, as the convention's call effect says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceCallPreservedCarriers {
     stack_pointer: bool,
@@ -3747,6 +3740,86 @@ impl SourceCallPreservedCarriers {
     /// Whether both carriers that can address a frame survive a call.
     pub const fn frame_survives_a_call(self) -> bool {
         self.stack_pointer && self.frame_pointer
+    }
+}
+
+/// What a call does to the registers: one the convention preserves survives it, and no other does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceCallEffect {
+    /// Also what a callee's body is asked to prove it leaves alone.
+    clobbered: Box<[CanonicalStorageId]>,
+    preserved: Box<[CanonicalStorageId]>,
+}
+
+impl SourceCallEffect {
+    /// Refuses a storage that is not a register, and a register named both ways.
+    pub fn new(
+        clobbered: impl IntoIterator<Item = CanonicalStorageId>,
+        preserved: impl IntoIterator<Item = CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let sorted = |storages: Vec<CanonicalStorageId>| {
+            let mut storages = storages;
+            storages.sort_unstable();
+            storages.dedup();
+            storages.into_boxed_slice()
+        };
+        let clobbered = sorted(clobbered.into_iter().collect());
+        let preserved = sorted(preserved.into_iter().collect());
+        if clobbered
+            .iter()
+            .chain(preserved.iter())
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        if clobbered.iter().any(|clobbered| {
+            preserved
+                .iter()
+                .any(|preserved| register_storages_overlap(*clobbered, *preserved))
+        }) {
+            return Err(SourceMachineRolesError::ContradictoryCallEffect);
+        }
+        Ok(Self {
+            clobbered,
+            preserved,
+        })
+    }
+
+    /// The registers the convention names as destroyed, sorted.
+    pub const fn clobbered(&self) -> &[CanonicalStorageId] {
+        &self.clobbered
+    }
+
+    /// The registers the convention names as restored, sorted.
+    pub const fn preserved(&self) -> &[CanonicalStorageId] {
+        &self.preserved
+    }
+
+    /// Whether every byte of a storage lies in registers the convention preserves.
+    pub fn preserves(&self, storage: CanonicalStorageId) -> bool {
+        let Some(end) = storage.offset.checked_add(u64::from(storage.size)) else {
+            return false;
+        };
+        if storage.space != CanonicalStorageSpace::Register || storage.size == 0 {
+            return false;
+        }
+        // One sweep over the preserved ranges in offset order, extending the covered prefix.
+        let mut covered = storage.offset;
+        for preserved in &self.preserved {
+            if preserved.offset > covered {
+                return false;
+            }
+            covered = covered.max(preserved.offset + u64::from(preserved.size));
+            if covered >= end {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether a call may leave this storage changed.
+    pub fn clobbers(&self, storage: CanonicalStorageId) -> bool {
+        !self.preserves(storage)
     }
 }
 
@@ -3901,6 +3974,8 @@ impl SourceConventionSlots {
 pub enum SourceMachineRolesError {
     InvalidRegisterStorage,
     InvalidStackAllocationContract,
+    /// One register named both clobbered and preserved by a call.
+    ContradictoryCallEffect,
 }
 
 impl SourceMachineRoles {
@@ -3920,7 +3995,6 @@ impl SourceMachineRoles {
             stack_pointer_storage,
             role_register_names: SourceRoleRegisterNames::none(),
             stack_allocation_contract: None,
-            call_preserved_carriers: None,
             direction_flag_storage: None,
         })
     }
@@ -3958,22 +4032,6 @@ impl SourceMachineRoles {
         self.return_address_storage = return_address;
         self.stack_pointer_storage = stack_pointer;
         Ok(self)
-    }
-
-    /// Bind what a call leaves the frame carriers holding. Like the allocation
-    /// contract, this is a convention fact and stays available when no exact
-    /// prototype was recovered.
-    #[must_use]
-    pub const fn with_call_preserved_carriers(
-        mut self,
-        carriers: SourceCallPreservedCarriers,
-    ) -> Self {
-        self.call_preserved_carriers = Some(carriers);
-        self
-    }
-
-    pub const fn call_preserved_carriers(&self) -> Option<SourceCallPreservedCarriers> {
-        self.call_preserved_carriers
     }
 
     /// The direction flag, placed against the lifted architecture.
