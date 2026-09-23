@@ -18,11 +18,12 @@ use r2source::{
     AdvisorySuccessorKind, CanonicalStorageId, CanonicalStorageSpace, MachineProfile,
     OwnedFunctionSnapshot, SourceFunctionInterface,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::translate::{self, PcodeSource};
 use crate::{LiftError, Result};
@@ -61,6 +62,26 @@ struct LoadedSpecification {
     /// Present only for a specification loaded from embedded bytes, which are
     /// the only ones that can certify.
     authority: Option<GenuineLiftAuthority>,
+    /// The stamp of the last change to the Sleigh instance's decode state.
+    decode_state: Cell<u64>,
+}
+
+/// Stamps every change to any specification's decode state, so no two changes share one.
+static DECODE_STATES: AtomicU64 = AtomicU64::new(1);
+
+impl LoadedSpecification {
+    /// Stamp a change to the decode state: a cleared cache, a parse, or committed context.
+    fn change_decode_state(&self) {
+        self.decode_state
+            .set(DECODE_STATES.fetch_add(1, Ordering::Relaxed));
+    }
+}
+
+/// Where one decode left its specification's context; only the lifter judges whether the next decode keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Continuation {
+    decode_state: u64,
+    end: u64,
 }
 
 /// A disassembler that uses libsla to lift instructions to r2il.
@@ -75,10 +96,13 @@ pub struct Disassembler {
 }
 
 /// One instruction as a listing spells it and as its P-code says it runs, read from one parse.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Decoded {
     pub syntax: syntax::Syntax,
-    pub lifted: R2ILBlock,
+    /// Refused where Sleigh leaves the constructor `unimpl` or the lifter cannot translate its P-code.
+    pub lifted: Result<R2ILBlock>,
+    /// Present only where Sleigh built the P-code, which is what commits the context.
+    pub continuation: Option<Continuation>,
 }
 
 /// Embedded Sleigh profiles allowed to mint certifying lift authority.
@@ -1466,6 +1490,8 @@ impl LoadedSpecification {
             space_map: extracted.space_map,
             arch,
             authority,
+            // No stamp is zero, so a fresh specification continues nothing.
+            decode_state: Cell::new(0),
         })
     }
 }
@@ -2004,8 +2030,7 @@ impl Disassembler {
         self.lift_canonical(bytes, addr)
     }
 
-    /// Lift the instruction that follows the one just lifted, keeping the
-    /// decoder's context.
+    /// Lift one instruction, keeping the context `after` left where it still holds.
     ///
     /// Some of that context is the meaning of what comes next: Thumb's `it`
     /// sets the condition the following instructions run under, and a decoder
@@ -2014,8 +2039,35 @@ impl Disassembler {
     /// lift that reads the same bytes in a run -- unconditional where the
     /// machine is predicated -- and the two disagreed about where control
     /// goes.
-    pub fn lift_continuing(&self, bytes: &[u8], addr: u64) -> Result<R2ILBlock> {
-        self.lift_canonical(bytes, addr)
+    pub fn lift_after(
+        &self,
+        bytes: &[u8],
+        addr: u64,
+        after: Option<Continuation>,
+    ) -> Result<(R2ILBlock, Continuation)> {
+        self.resume(addr, after)?;
+        let lifted = self.lift_canonical(bytes, addr)?;
+        let end = addr + u64::from(lifted.size);
+        Ok((lifted, self.continuation(end)))
+    }
+
+    /// Keep the context `after` left if it is this specification's last decode and ended at `addr`, else start afresh.
+    fn resume(&self, addr: u64, after: Option<Continuation>) -> Result<()> {
+        let holds = after.is_some_and(|after| {
+            after.end == addr && after.decode_state == self.spec.decode_state.get()
+        });
+        match holds {
+            true => Ok(()),
+            false => self.clear_decode_cache(),
+        }
+    }
+
+    /// The context the decode just made leaves, for an instruction ending at `end`.
+    fn continuation(&self, end: u64) -> Continuation {
+        Continuation {
+            decode_state: self.spec.decode_state.get(),
+            end,
+        }
     }
 
     /// Begin one opaque lift against a caller-provided byte source.
@@ -2025,6 +2077,7 @@ impl Disassembler {
     /// cache is invalidated once here, before another source can observe an
     /// address retained by an earlier caller.
     fn clear_decode_cache(&self) -> Result<()> {
+        self.spec.change_decode_state();
         self.spec
             .sleigh
             .borrow_mut()
@@ -2036,20 +2089,22 @@ impl Disassembler {
     /// normalization required to preserve the instruction's control graph.
     /// No mnemonic, user-op name, or inferred metadata participates.
     fn lift_canonical(&self, bytes: &[u8], addr: u64) -> Result<R2ILBlock> {
+        self.translated(self.pcode(bytes, addr)?, addr)
+    }
+
+    /// Sleigh's P-code for the instruction at `addr`; building it commits the parse's context.
+    fn pcode(&self, bytes: &[u8], addr: u64) -> Result<PcodeDisassembly> {
+        self.spec.change_decode_state();
         let sleigh = self.spec.sleigh.borrow();
-        let code_space = sleigh.default_code_space();
-        let address = Address::new(code_space, addr);
-
-        // Create an instruction loader from the bytes
+        let address = Address::new(sleigh.default_code_space(), addr);
         let loader = ByteLoader::new(bytes, addr);
-
-        // Disassemble to P-code
-        let pcode = sleigh
+        sleigh
             .disassemble_pcode(&loader, address)
-            .map_err(|e| LiftError::Parse(format!("Disassembly failed: {e}")))?;
-        drop(sleigh);
+            .map_err(|e| LiftError::Parse(format!("Disassembly failed: {e}")))
+    }
 
-        // Translate P-code to r2il
+    /// One instruction's P-code as r2il, with its local labels normalized.
+    fn translated(&self, pcode: PcodeDisassembly, addr: u64) -> Result<R2ILBlock> {
         let mut block = self.translate_pcode(pcode, addr)?;
         crate::internal_control::normalize_instruction_local_control(&mut block, &|userop| {
             self.user_op_name(userop).map(str::to_owned)
@@ -2191,27 +2246,23 @@ impl Disassembler {
         Ok((format!("{mnemonic} {body}").trim().to_string(), size))
     }
 
-    /// Disassemble one instruction into the spelling a listing prints.
+    /// Spell and lift one instruction from one Sleigh parse, keeping the context `after` left where it still holds.
     ///
     /// The decoder knows which architecture it decodes and where each number
     /// in the operands is written, so it says both rather than handing out a
     /// line for someone else to parse back apart.
-    pub fn disasm_syntax(&self, bytes: &[u8], addr: u64) -> Result<syntax::Syntax> {
-        let (mnemonic, body, size) = self.disasm_parts(bytes, addr)?;
-        Ok(syntax::radare2(&mnemonic, &body, size, &self.arch_name))
-    }
-
-    /// Spell and lift one instruction from one Sleigh parse; `continuing` keeps the context of a previous decode that ended at `addr`.
-    pub fn decode(&self, bytes: &[u8], addr: u64, continuing: bool) -> Result<Decoded> {
-        if !continuing {
-            self.clear_decode_cache()?;
-        }
+    pub fn decode(&self, bytes: &[u8], addr: u64, after: Option<Continuation>) -> Result<Decoded> {
+        self.resume(addr, after)?;
         let (mnemonic, body, size) = self.native_parts(bytes, addr)?;
-        // The P-code is built from the parse just printed, and building it commits the context the next decode reads.
-        let lifted = self.lift_canonical(bytes, addr)?;
+        let syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        // The P-code is built from the parse just printed, and a finished build is what is known to commit its context.
+        let pcode = self.pcode(bytes, addr);
+        let end = addr + size as u64;
+        let continuation = pcode.is_ok().then(|| self.continuation(end));
         Ok(Decoded {
-            syntax: syntax::radare2(&mnemonic, &body, size, &self.arch_name),
-            lifted,
+            syntax,
+            lifted: pcode.and_then(|pcode| self.translated(pcode, addr)),
+            continuation,
         })
     }
 
@@ -2223,6 +2274,7 @@ impl Disassembler {
 
     /// Sleigh's own spelling of the instruction at `addr`, in whatever context the decoder holds.
     fn native_parts(&self, bytes: &[u8], addr: u64) -> Result<(String, String, usize)> {
+        self.spec.change_decode_state();
         let sleigh = self.spec.sleigh.borrow();
         let code_space = sleigh.default_code_space();
         let address = Address::new(code_space, addr);

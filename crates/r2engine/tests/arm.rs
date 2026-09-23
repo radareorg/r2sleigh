@@ -307,23 +307,25 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
     let thumb = r2sleigh_lift::embedded_machine("arm-thumb").expect("Thumb is compiled in");
     let guarded = ARM + 4;
     // The run the walk decodes: the entry afresh, each instruction after it continuing.
-    let mut continuing = None;
-    for at in [ARM, ARM + 2, guarded] {
-        continuing = Some(
-            thumb
-                .disasm
-                .decode(&window(at), at, at != ARM)
-                .expect("each decodes"),
-        );
+    let mut after = None;
+    for at in [ARM, ARM + 2] {
+        after = thumb
+            .disasm
+            .decode(&window(at), at, after)
+            .expect("each decodes")
+            .continuation;
     }
-    let continuing = continuing.expect("decoded");
+    let continuing = thumb
+        .disasm
+        .decode(&window(guarded), guarded, after)
+        .expect("decodes");
     let fresh = thumb
         .disasm
-        .disasm_syntax(&window(guarded), guarded)
+        .decode(&window(guarded), guarded, None)
         .expect("decodes afresh");
     assert_ne!(
         continuing.syntax.text(),
-        fresh.text(),
+        fresh.syntax.text(),
         "the `it` changed nothing, so this program proves nothing"
     );
 
@@ -350,7 +352,8 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
                 })
         })
         .collect();
-    assert_eq!(walked, continuing.lifted.ops);
+    let lifted = continuing.lifted.as_ref().expect("it lifts");
+    assert_eq!(walked, lifted.ops);
 
     // pd and pdf spell it as that decode does, not as a decoder starting at it.
     let mut mixed = arm_only(&IT_BLOCK, r2il::Endianness::Little);
@@ -372,4 +375,81 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
     assert_eq!(spelled(&pd.value), Some(continuing.syntax.text()), "pd");
     let pdf = program.function_listing(ARM).expect("it lists");
     assert_eq!(spelled(&pdf.value), Some(continuing.syntax.text()), "pdf");
+}
+
+/// One Thumb function spanning the whole of `code`.
+fn thumb_over(code: &'static [u8]) -> OpenProgram<Mixed> {
+    let mut mixed = arm_only(code, r2il::Endianness::Little);
+    mixed.container.symbols[0].thumb = true;
+    OpenProgram::of(mixed)
+}
+
+/// What `pd` lists from the start of the program.
+fn listed(program: &mut OpenProgram<Mixed>, count: usize) -> Vec<r2engine::query::Line> {
+    program
+        .listing(Listing {
+            start: ARM,
+            stop: Stop::After(count),
+        })
+        .expect("it lists")
+        .value
+}
+
+/// Each line's offset, width and spelling.
+fn shapes(lines: &[r2engine::query::Line]) -> Vec<(u64, usize, Option<String>)> {
+    lines
+        .iter()
+        .map(|line| {
+            let spelled = line.syntax.as_ref().map(r2sleigh_lift::Syntax::text);
+            (line.address - ARM, line.bytes.len(), spelled)
+        })
+        .collect()
+}
+
+/// Thumb single-lane `vld2.8 {d0[0],d1[0]},[r0]`, which ARMneon.sinc leaves `unimpl`, then `bx lr`.
+const UNBUILT: [u8; 6] = [0xa0, 0xf9, 0x0f, 0x01, 0x70, 0x47];
+
+#[test]
+fn an_instruction_sleigh_spells_but_cannot_build_is_listed_whole() {
+    let lines = shapes(&listed(&mut thumb_over(&UNBUILT), 2));
+    let spelled = lines[0].2.as_deref().unwrap_or_default();
+    assert!(spelled.starts_with("vld2.8 "), "{lines:?}");
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| (line.0, line.1))
+            .collect::<Vec<_>>(),
+        [(0, 4), (4, 2)],
+        "{lines:?}"
+    );
+    assert_eq!(lines[1].2.as_deref(), Some("bx lr"), "{lines:?}");
+}
+
+/// Thumb `cmp r0, #0; it eq; ldreq r0, [pc, #4]; bx lr`, a word, and the pool word the load reads.
+const PREDICATED_POOL: [u8; 16] = [
+    0x00, 0x28, 0x08, 0xbf, 0x01, 0x48, 0x70, 0x47, //
+    0x00, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12,
+];
+
+#[test]
+fn a_pool_load_an_it_predicates_still_reads_its_pool_word() {
+    let lines = listed(&mut thumb_over(&PREDICATED_POOL), 4);
+    let spelled = shapes(&lines)[2].2.clone().unwrap_or_default();
+    assert!(
+        spelled.starts_with("ldreq"),
+        "the `it` changed nothing, so this program proves nothing: {spelled}"
+    );
+    let pool = ARM + 0xc;
+    let kinds: Vec<_> = lines[2].annotations.iter().map(|one| one.kind).collect();
+    let reads = AnnotationKind::Reads {
+        address: pool,
+        width: 4,
+    };
+    let holds = AnnotationKind::Holds {
+        address: pool,
+        width: 4,
+        value: 0x1234_5678,
+    };
+    assert!(kinds.contains(&reads), "{spelled}: {kinds:?}");
+    assert!(kinds.contains(&holds), "{spelled}: {kinds:?}");
 }

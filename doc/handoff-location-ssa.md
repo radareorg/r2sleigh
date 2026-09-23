@@ -31472,3 +31472,12 @@ the walk lifts it. Open: a run's first line, and each `pdf` block's first line,
 starts afresh, so a listing that begins inside an IT block spells it
 unconditional. radare2 is wrong on the later lines of an IT block (`itt eq;
 addeq; lsrs` on libarm.so 0x18e5e), so those lines are not matched.
+
+Whether a decode continues is the lifter's rule alone: every decode hands back
+a `Continuation`, kept only while no other decode has touched that loaded
+specification and the next instruction starts where it ended. The walk and the
+listing hold the receipt and never judge it. A line Sleigh spells but cannot
+build P-code for (an `unimpl` constructor) is still spelled, with no lift and a
+fresh context after it. Open, found while checking this: `extract_architecture`
+never sets `alignment`, so an undecodable ARM word is stepped one byte and the
+bytes after it are listed as invented instructions (libarm.so 0x1879d).

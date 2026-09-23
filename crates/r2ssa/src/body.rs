@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::R2ILBlock;
-use r2sleigh_lift::Disassembler;
+use r2sleigh_lift::{Continuation, Disassembler};
 use r2source::AdvisorySuccessorKind;
 
 use crate::cfg::{BasicBlock, BlockTerminator};
@@ -197,9 +197,8 @@ struct Walk<'a> {
     tail_calls: BTreeSet<u64>,
     entered_with: BTreeMap<u64, u64>,
     unresolved: Vec<Unresolved>,
-    /// The address the last decoded instruction ended at, so the next one can
-    /// keep the decoder's context where it follows on.
-    continuing_from: Option<u64>,
+    /// Where the last decode left the decoder's context, which the lifter keeps for the next one where it follows on.
+    context: Option<Continuation>,
     /// Whether control comes back from a call to this address.
     never_returns: &'a dyn Fn(u64) -> bool,
 }
@@ -222,7 +221,7 @@ impl<'a> Walk<'a> {
             tail_calls: BTreeSet::new(),
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
-            continuing_from: None,
+            context: None,
             never_returns,
         };
 
@@ -258,13 +257,8 @@ impl<'a> Walk<'a> {
         let mut fetch = window;
         fetch.resize(WINDOW, 0);
 
-        // Continue the decoder's context where this instruction follows the
-        // last one decoded, exactly as a block lift of the same bytes would.
-        let lifted = match self.continuing_from == Some(addr) {
-            true => disasm.lift_continuing(&fetch, addr),
-            false => disasm.lift(&fetch, addr),
-        };
-        let Ok(lifted) = lifted else {
+        // The decoder's context continues where this follows the last decode, exactly as a block lift of the same bytes would.
+        let Ok((lifted, context)) = disasm.lift_after(&fetch, addr, self.context) else {
             return self.stop(addr, UnresolvedReason::Undecodable);
         };
         if lifted.size == 0 {
@@ -278,7 +272,7 @@ impl<'a> Walk<'a> {
         // callee, and the walk of one body cannot hold it.
         let terminator = BasicBlock::from_r2il_continuing(&lifted, true).terminator;
         let bytes = fetch[..lifted.size as usize].to_vec();
-        self.continuing_from = Some(lifted.addr + u64::from(lifted.size));
+        self.context = Some(context);
         Some(Instruction {
             lifted,
             bytes,

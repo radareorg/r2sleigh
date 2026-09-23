@@ -5,7 +5,7 @@
 //! crosses a boundary and kept the decoder it started with decodes the rest of
 //! itself wrongly.
 
-use r2sleigh_lift::EmbeddedMachine;
+use r2sleigh_lift::Continuation;
 
 use super::records::{Answered, Line, Listing, Stop};
 use super::{Answer, Completion, Revision, Work};
@@ -15,7 +15,7 @@ const DECODE_WINDOW: usize = 16;
 
 /// Decode a run of instructions, saying as much about each as `work` allows.
 ///
-/// A line keeps the decoder context of the line that ended where it starts, as the walk does; a run's first line starts afresh.
+/// A line keeps the decoder context the line before it left, as the walk does; a run's first line starts afresh.
 pub fn listing(
     answered: &Answered<'_>,
     request: Listing,
@@ -26,8 +26,8 @@ pub fn listing(
     let mut beyond = Lookahead {
         answered,
         next: run.next,
+        context: run.context,
         open: run.completion == Completion::Complete,
-        straight: Straight::default(),
         tail: Vec::new(),
     };
     let lifted = super::annotate::Run {
@@ -54,6 +54,8 @@ struct Run {
     completion: Completion,
     /// Where reading stopped.
     next: u64,
+    /// Where the last line left the decoder's context.
+    context: Option<Continuation>,
 }
 
 impl Run {
@@ -64,13 +66,13 @@ impl Run {
             windows: Vec::new(),
             completion: Completion::Complete,
             next: request.start,
+            context: None,
         };
-        let mut straight = Straight::default();
         while match request.stop {
             Stop::After(count) => run.lines.len() < count,
             Stop::At(end) => run.next < end,
         } {
-            let Some(one) = decoded(answered, run.next, answered.spelled, &mut straight) else {
+            let Some(one) = decoded(answered, run.next, answered.spelled, run.context) else {
                 run.completion = Completion::Unmapped { at: run.next };
                 break;
             };
@@ -79,6 +81,7 @@ impl Run {
             run.lifts.push(one.lift.filter(|_| work > Work::Decode));
             run.windows.push(one.window);
             run.next = one.next;
+            run.context = one.context;
         }
         run
     }
@@ -91,14 +94,16 @@ struct Decoded {
     /// The decode window it was read from, where it decoded.
     window: Option<Vec<u8>>,
     next: u64,
+    /// Where it left the decoder's context, for the line after it.
+    context: Option<Continuation>,
 }
 
 /// Read the instruction at `pc`, spelled and lifted from one parse or only lifted; `None` where the program maps nothing to read.
-fn decoded<'a>(
-    answered: &Answered<'a>,
+fn decoded(
+    answered: &Answered<'_>,
     pc: u64,
     spell: bool,
-    straight: &mut Straight<'a>,
+    after: Option<Continuation>,
 ) -> Option<Decoded> {
     let machine = answered.decoders.at(pc)?;
     let window = answered.memory.program.read(pc, DECODE_WINDOW)?;
@@ -113,11 +118,16 @@ fn decoded<'a>(
     // The window is the decoder's, not the instruction's: Sleigh reads the
     // whole of it whatever the instruction needs, and handing it only the
     // bytes the instruction occupies fails the decode just performed.
-    let (syntax, lift) = match spell {
-        true => straight
-            .decode(machine, &fetch, pc)
-            .map_or((None, None), |one| (Some(one.syntax), Some(one.lifted))),
-        false => (None, straight.lift(machine, &fetch, pc)),
+    let (syntax, lift, context) = match spell {
+        // A line Sleigh spells is listed whole, lifted or not.
+        true => machine.disasm.decode(&fetch, pc, after).map_or_else(
+            |_| (None, None, None),
+            |one| (Some(one.syntax), one.lifted.ok(), one.continuation),
+        ),
+        false => machine.disasm.lift_after(&fetch, pc, after).map_or_else(
+            |_| (None, None, None),
+            |(lift, context)| (None, Some(lift), Some(context)),
+        ),
     };
     let size = match (&syntax, &lift) {
         (Some(syntax), _) => syntax.size,
@@ -125,7 +135,6 @@ fn decoded<'a>(
         (None, None) => 0,
     };
     if size == 0 || size > available {
-        straight.end = None;
         return Some(Decoded {
             line: Line {
                 address: pc,
@@ -136,6 +145,7 @@ fn decoded<'a>(
             lift: None,
             window: None,
             next: pc + step,
+            context: None,
         });
     }
     Some(Decoded {
@@ -148,59 +158,8 @@ fn decoded<'a>(
         lift,
         window: Some(fetch),
         next: pc + size as u64,
+        context,
     })
-}
-
-/// Where the last decode of one straight line ended, and in which decoder.
-///
-/// A decode that follows on keeps the decoder's context, as the walk's does,
-/// so Thumb's `it` reaches the instructions it predicates; one that does not
-/// starts afresh, which also drops whatever Sleigh cached by address for a
-/// lift at an address the bytes are not at.
-#[derive(Default)]
-struct Straight<'a> {
-    end: Option<(&'a EmbeddedMachine, u64)>,
-}
-
-impl<'a> Straight<'a> {
-    /// Whether a decode at `at` follows on: the context lives in the loaded specification.
-    fn continues(&self, machine: &EmbeddedMachine, at: u64) -> bool {
-        self.end.is_some_and(|(last, end)| {
-            end == at && last.disasm.shares_loaded_specification(&machine.disasm)
-        })
-    }
-
-    fn lift(
-        &mut self,
-        machine: &'a EmbeddedMachine,
-        window: &[u8],
-        at: u64,
-    ) -> Option<r2il::R2ILBlock> {
-        let lifted = match self.continues(machine, at) {
-            true => machine.disasm.lift_continuing(window, at),
-            false => machine.disasm.lift(window, at),
-        }
-        .ok();
-        self.end = lifted
-            .as_ref()
-            .map(|one| (machine, at.wrapping_add(u64::from(one.size))));
-        lifted
-    }
-
-    /// Spell and lift one instruction from one parse.
-    fn decode(
-        &mut self,
-        machine: &'a EmbeddedMachine,
-        window: &[u8],
-        at: u64,
-    ) -> Option<r2sleigh_lift::Decoded> {
-        let continuing = self.continues(machine, at);
-        let decoded = machine.disasm.decode(window, at, continuing).ok();
-        self.end = decoded
-            .as_ref()
-            .map(|one| (machine, at.wrapping_add(one.syntax.size as u64)));
-        decoded
-    }
 }
 
 /// Lift a run's decoded lines as one straight line, `offset` further on than they are.
@@ -210,18 +169,21 @@ pub(super) fn lift_run(
     windows: &[Option<Vec<u8>>],
     offset: u64,
 ) -> Vec<Option<r2il::R2ILBlock>> {
-    let mut straight = Straight::default();
+    let mut context = None;
     lines
         .iter()
         .zip(windows)
         .map(|(line, window)| {
-            let (Some(machine), Some(window)) =
-                (answered.decoders.at(line.address), window.as_deref())
-            else {
-                straight.end = None;
-                return None;
-            };
-            straight.lift(machine, window, line.address.wrapping_add(offset))
+            let lifted = answered
+                .decoders
+                .at(line.address)
+                .zip(window.as_deref())
+                .and_then(|(machine, window)| {
+                    let at = line.address.wrapping_add(offset);
+                    machine.disasm.lift_after(window, at, context).ok()
+                });
+            context = lifted.as_ref().map(|(_, left)| *left);
+            lifted.map(|(lift, _)| lift)
         })
         .collect()
 }
@@ -233,8 +195,9 @@ pub(super) fn lift_run(
 pub(super) struct Lookahead<'r, 'a> {
     answered: &'r Answered<'a>,
     next: u64,
+    /// Where the last instruction read left the decoder's context.
+    context: Option<Continuation>,
     open: bool,
-    straight: Straight<'a>,
     tail: Vec<Option<r2il::R2ILBlock>>,
 }
 
@@ -244,13 +207,14 @@ impl Lookahead<'_, '_> {
         while self.open && self.tail.len() <= index {
             // Another function's entry is not where this one's value goes.
             let one = (!self.answered.memory.program.is_entry(self.next))
-                .then(|| decoded(self.answered, self.next, false, &mut self.straight))
+                .then(|| decoded(self.answered, self.next, false, self.context))
                 .flatten();
             let Some(one) = one else {
                 self.open = false;
                 break;
             };
             self.next = one.next;
+            self.context = one.context;
             self.tail.push(one.lift);
         }
         self.tail.get(index).map(Option::as_ref)

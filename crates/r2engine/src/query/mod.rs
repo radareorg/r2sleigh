@@ -35,7 +35,7 @@ pub use references::{Coverage, Reference, ReferenceKind, References, Unread};
 /// than because a plan named it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Work {
-    /// Read the bytes and spell the instruction. No lifting.
+    /// Spell the instruction; its P-code is built only to commit the decoder context, and not returned.
     Decode,
     /// Lift one instruction and fold within it.
     InstructionLocal,
