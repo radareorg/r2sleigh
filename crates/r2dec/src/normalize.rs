@@ -1,7 +1,6 @@
-use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
+use crate::control::{DecompileExecutionStop, DecompileWorkControl};
 use r2ssa::{
-    BlockId, InstId, SSAFunction, SSAOp, SsaArtifactAuthority, SsaExecutionControl, SsaGraph,
-    UseSite, ValueId,
+    BlockId, InstId, SSAFunction, SSAOp, SsaArtifactAuthority, SsaGraph, UseSite, ValueId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -1310,14 +1309,17 @@ fn is_block_terminator(op: &SSAOp) -> bool {
 /// Other phis remain immutable semantic expressions. Lowering every machine
 /// temporary or flag phi creates artificial C effects and obscures the proof
 /// boundary between SSA values and mutable loop state.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn materialize_certified_loop_carriers<'f>(
     func: &'f SSAFunction,
     prepared: &r2ssa::SsaArtifact,
     render_facts: &r2types::FunctionRenderFacts,
 ) -> Result<(r2ssa::RewrittenFunction<'f>, NormalizationOrigins), NormalizationOriginError> {
-    let execution = SsaExecutionControl::default();
-    let control = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
+    let execution = r2ssa::SsaExecutionControl::default();
+    let control = DecompileWorkControl::new(
+        &execution,
+        crate::control::DecompileWorkPhase::Normalization,
+    );
     match materialize_certified_loop_carriers_with_control(func, prepared, render_facts, control) {
         Ok(result) => Ok(result),
         Err(NormalizationFailure::Origins(error)) => Err(error),
@@ -1595,8 +1597,11 @@ fn materialize_all_phis(func: &SSAFunction) -> r2ssa::RewrittenFunction<'_> {
 fn materialize_all_phis_with_origins(
     func: &SSAFunction,
 ) -> (r2ssa::RewrittenFunction<'_>, NormalizationOrigins, SsaGraph) {
-    let execution = SsaExecutionControl::default();
-    let control = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
+    let execution = r2ssa::SsaExecutionControl::default();
+    let control = DecompileWorkControl::new(
+        &execution,
+        crate::control::DecompileWorkPhase::Normalization,
+    );
     let graph = SsaGraph::from_function(func);
     let (normalized, origins) =
         materialize_phis_where_with_control(func, &graph, None, None, control, |_| true)
@@ -1985,15 +1990,18 @@ fn remove_phi_edge_operation(
 /// initialization before the loop decision replaces redundant copies on the
 /// loop-entry edges, while latch updates remain at their original program
 /// point.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn materialize_certified_loop_carrier_initializers(
     func: &mut r2ssa::RewrittenFunction<'_>,
     origins: &mut NormalizationOrigins,
     prepared: &r2ssa::SsaArtifact,
     render_facts: &r2types::FunctionRenderFacts,
 ) -> Result<(), NormalizationOriginError> {
-    let execution = SsaExecutionControl::default();
-    let control = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
+    let execution = r2ssa::SsaExecutionControl::default();
+    let control = DecompileWorkControl::new(
+        &execution,
+        crate::control::DecompileWorkPhase::Normalization,
+    );
     match materialize_certified_loop_carrier_initializers_with_control(
         func,
         origins,

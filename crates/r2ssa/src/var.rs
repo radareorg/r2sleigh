@@ -626,7 +626,8 @@ mod kani_proofs {
     fn next_version_is_checked_and_monotonic() {
         let version: u32 = kani::any();
         let size: u32 = kani::any();
-        let var = SSAVar::new("rax", version, size);
+        static RAX: InternedName = InternedName::unregistered("rax");
+        let var = SSAVar::from_interned(&RAX, version, size);
         let next = var.next_version();
 
         if version == u32::MAX {

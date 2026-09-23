@@ -485,7 +485,6 @@ impl OwnedFunctionImage {
     /// Structural ingress contract applied before an owned snapshot exists.
     /// Advisory edges are checked for internal consistency here; trusted lift
     /// code must still independently derive and exactly compare machine CFG.
-    #[allow(dead_code)]
     /// Whether the captured image describes one coherent function.
     ///
     /// Each rule says what it rejected. A capture that fails this is a bug in

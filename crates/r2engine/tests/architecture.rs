@@ -149,3 +149,35 @@ fn sources(dir: &Path) -> Vec<std::path::PathBuf> {
     }
     found
 }
+
+#[test]
+fn no_crate_hides_dead_code() {
+    // Nineteen of these hid seven unused types, a context no pass built, a
+    // stack table written and never read, and helpers only tests reached.
+    // Code a test alone needs is `#[cfg(test)]`; code nothing needs is gone.
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut hiding = Vec::new();
+    for entry in fs::read_dir(&crates).expect("the crates directory exists") {
+        let src = entry.expect("the entry is readable").path().join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        for file in sources(&src) {
+            let text = fs::read_to_string(&file).expect("the source is UTF-8");
+            for (index, line) in text.lines().enumerate() {
+                if ["allow(dead_code", "expect(dead_code", "allow(unused)"]
+                    .iter()
+                    .any(|hidden| line.contains(hidden))
+                {
+                    hiding.push(format!("{}:{}", file.display(), index + 1));
+                }
+            }
+        }
+    }
+    hiding.sort();
+    assert!(
+        hiding.is_empty(),
+        "dead code is hidden rather than deleted:\n{}",
+        hiding.join("\n")
+    );
+}

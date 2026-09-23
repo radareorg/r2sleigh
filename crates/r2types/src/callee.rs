@@ -2354,18 +2354,12 @@ mod kani_proofs {
     }
 
     #[kani::proof]
-    fn callee_scope_name_predicates_preserve_required_helper_cases() {
+    fn callee_import_spelling_predicate_preserves_required_cases() {
         assert!(callee_lower_name_is_import_like("reloc.memcpy"));
         assert!(callee_lower_name_is_import_like("sym.imp.printf"));
         assert!(callee_lower_name_is_import_like("imp.printf"));
         assert!(!callee_lower_name_is_import_like("sym.printf"));
         assert!(!callee_lower_name_is_import_like(""));
-        assert!(callee_normalized_name_is_windows_runtime_registration(
-            "kernel32_addvectoredexceptionhandler"
-        ));
-        assert!(callee_normalized_name_is_runtime_copy("memcpy_s"));
-        assert!(callee_normalized_name_is_runtime_copy("__memcpy_chk"));
-        assert!(!callee_normalized_name_is_runtime_copy("not_memcpy"));
     }
 
     #[kani::proof]

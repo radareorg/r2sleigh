@@ -831,13 +831,6 @@ fn run_action_output(
 }
 
 #[cfg(feature = "sleigh-config")]
-#[allow(dead_code)]
-fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
-    let (disasm, _) = get_disassembler_with_spec(arch)?;
-    Ok(disasm)
-}
-
-#[cfg(feature = "sleigh-config")]
 fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpec), String> {
     match arch.to_lowercase().as_str() {
         #[cfg(feature = "x86")]

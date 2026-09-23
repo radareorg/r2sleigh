@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use r2ssa::{FunctionSSABlock, SSAVar, ValueId};
-use r2types::{CalleeFact, CalleeResolutionFacts, InterprocSummaryView, TypeOracle};
 
 use crate::ast::CExpr;
 
@@ -16,49 +15,15 @@ pub(crate) use prepared_semantic::{
     build_prepared_runtime_facts_with_control,
 };
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecompilerFacts {
     pub(crate) use_info: UseInfo,
-    pub(crate) stack_info: StackInfo,
 }
 
 impl DecompilerFacts {
     pub(crate) fn semantic(&self) -> &UseInfo {
         &self.use_info
     }
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-
-pub(crate) struct PassEnv<'a> {
-    /// The one renderer projection from BindingId to SymbolId. Analysis only
-    /// borrows it while translating exact ValueIds into references.
-    pub(crate) binding_names: Option<&'a crate::binding_plan::BindingNameResolution>,
-    pub(crate) ptr_size: u32,
-    pub(crate) sp_name: &'a str,
-    pub(crate) fp_name: &'a str,
-    pub(crate) ret_reg_name: &'a str,
-    #[cfg(test)]
-    pub(crate) function_names: &'a HashMap<u64, String>,
-    #[cfg(test)]
-    pub(crate) strings: &'a HashMap<u64, String>,
-    /// What the binary calls the thing at an address, which is not a name this
-    /// rendering declares.
-    #[cfg(test)]
-    pub(crate) binary_symbols: &'a HashMap<u64, String>,
-    /// String literals the source recorded, for rendering a constant that
-    /// points at text as the text it points at.
-    pub(crate) string_literals: &'a BTreeMap<u64, String>,
-    pub(crate) callee_facts: &'a BTreeMap<u64, CalleeFact>,
-    pub(crate) callee_resolution: Option<&'a CalleeResolutionFacts>,
-    pub(crate) summary_view: Option<&'a InterprocSummaryView>,
-    pub(crate) arg_regs: &'a [String],
-    /// Where a rendered name is written down, so building a reference can mint one.
-    pub(crate) symbols: &'a std::cell::RefCell<crate::symbol::SymbolTable>,
-    pub(crate) caller_saved_regs: &'a HashSet<String>,
-    pub(crate) type_oracle: Option<&'a dyn TypeOracle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -79,100 +44,6 @@ pub(crate) struct UseInfo {
     pub(crate) dropped_unkeyed_fact: Option<&'static str>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ValueRef {
-    pub(crate) value_id: Option<ValueId>,
-    pub(crate) var: SSAVar,
-}
-
-impl ValueRef {
-    pub(crate) fn new(var: SSAVar) -> Self {
-        Self {
-            value_id: None,
-            var,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn value_id(&self) -> Option<ValueId> {
-        self.value_id
-    }
-}
-
-impl From<SSAVar> for ValueRef {
-    fn from(var: SSAVar) -> Self {
-        Self::new(var)
-    }
-}
-
-impl From<&SSAVar> for ValueRef {
-    fn from(var: &SSAVar) -> Self {
-        Self::new(var.clone())
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum BaseRef {
-    Value(ValueRef),
-    StackSlot(i64),
-    Raw(CExpr),
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct NormalizedAddr {
-    pub(crate) base: BaseRef,
-    pub(crate) index: Option<ValueRef>,
-    pub(crate) scale_bytes: i64,
-    pub(crate) offset_bytes: i64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ScalarValue {
-    Root(ValueRef),
-    Expr(CExpr),
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SemanticValue {
-    Scalar(ScalarValue),
-    Address(NormalizedAddr),
-    Load {
-        space: r2il::SpaceId,
-        addr: NormalizedAddr,
-        size: u32,
-    },
-    Unknown,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct FrameSlotMergeSummary {
-    pub(crate) slot_offset: i64,
-    pub(crate) merge_block_addr: u64,
-    pub(crate) load_name: String,
-    pub(crate) incoming: BTreeMap<u64, SemanticValue>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct FrameObjectFieldKey {
-    pub(crate) base_slot_offset: i64,
-    pub(crate) field_offset: i64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct StackInfo {
-    pub(crate) stack_vars: HashMap<i64, String>,
-    pub(crate) definition_overrides: HashMap<String, CExpr>,
-}
-
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValueProvenance {
     pub(crate) source: String,
@@ -360,8 +231,6 @@ impl ExactValueIdentities {
                 .all(|(var, value)| self.by_value.get(value) == Some(var))
     }
 }
-
-impl StackInfo {}
 
 #[cfg(test)]
 mod tests {

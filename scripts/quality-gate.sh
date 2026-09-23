@@ -12,7 +12,7 @@ Phases:
   2. Dependency checks: cargo machete, cargo +nightly udeps
   3. Formatting and Clippy
   4. Local Dylint lint: tools/dylints/r2sleigh_lints
-  5. Focused Kani harnesses already present in the repo
+  5. Every Kani harness in the repo
   6. Targeted cargo mutants for crates/r2ssa/src/var.rs
 
 Environment:
@@ -207,22 +207,12 @@ else
         --all-targets --all-features
 fi
 
-phase "Focused Kani harnesses"
-run cargo kani --manifest-path crates/r2il/Cargo.toml \
-    --harness contains_interval_matches_half_open_math \
-    --output-format terse
-run cargo kani --manifest-path crates/r2ssa/Cargo.toml \
-    --harness next_version_is_checked_and_monotonic \
-    --output-format terse
-run cargo kani --manifest-path crates/r2ssa/Cargo.toml \
-    --harness data_ref_mask_to_bits_is_total_and_bounded \
-    --output-format terse
-run cargo kani --manifest-path crates/r2types/Cargo.toml \
-    --harness integer_meet_shape_is_sound \
-    --output-format terse
-run cargo kani --manifest-path crates/r2types/Cargo.toml \
-    --harness rendered_expression_policy_authority_is_fail_closed_for_unresolved_callsites \
-    --output-format terse
+phase "Kani harnesses"
+# Every harness in every crate that has one. Naming a few let the rest stop
+# compiling unnoticed, and let a named one be renamed out from under the gate.
+for manifest in $(grep -rl "kani::proof" crates/*/src | cut -d/ -f2 | sort -u); do
+    run cargo kani --manifest-path "crates/$manifest/Cargo.toml" --output-format terse
+done
 
 phase "Targeted cargo mutants for r2ssa var"
 mutants_jobs="${R2SLEIGH_MUTANTS_JOBS:-2}"

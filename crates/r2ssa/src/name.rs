@@ -54,6 +54,18 @@ impl InternedName {
     pub const fn register_offset(&self) -> Option<u64> {
         self.register_offset
     }
+    /// A register spelling that never enters the table, for a proof whose
+    /// subject is not the name: the table's lock and hash are not what it
+    /// verifies, and Kani cannot compile them.
+    #[cfg(kani)]
+    pub(crate) const fn unregistered(text: &'static str) -> Self {
+        Self {
+            id: u32::MAX,
+            text,
+            kind: SSAVarNameKind::RegisterAlias,
+            register_offset: None,
+        }
+    }
 }
 
 impl PartialEq for InternedName {

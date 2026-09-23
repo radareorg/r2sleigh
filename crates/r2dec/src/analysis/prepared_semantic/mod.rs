@@ -18,7 +18,7 @@ use r2types::{
     VisibleBindingKind,
 };
 
-use super::{DecompilerFacts, SSABlock, StackInfo, UseInfo, ValueProvenance};
+use super::{DecompilerFacts, SSABlock, UseInfo, ValueProvenance};
 use crate::ast::{BinaryOp, CExpr, UnaryOp};
 use crate::binding_plan::{
     PlannedParameterSymbol, PlannedStackSymbol, PlannedValueSymbol, RenderedIdentityRefusal,
@@ -316,11 +316,6 @@ impl PreparedSemanticView {
             .and_then(|value_id| self.predicate_expr_by_value.get(&value_id))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn predicate_expr_for_value_id(&self, value_id: ValueId) -> Option<&CExpr> {
-        self.predicate_expr_by_value.get(&value_id)
-    }
-
     pub(crate) fn call_view_for_site(&self, site: (u64, usize)) -> Option<&PreparedCallView> {
         self.call_view_by_site.get(&site)
     }
@@ -332,14 +327,6 @@ impl PreparedSemanticView {
     ) -> Option<(u64, usize)> {
         Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.call_result_source_by_value.get(&value_id).copied())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn call_result_source_for_value_id(
-        &self,
-        value_id: ValueId,
-    ) -> Option<(u64, usize)> {
-        self.call_result_source_by_value.get(&value_id).copied()
     }
 
     fn insert_stack_offset(&mut self, prepared: &SsaArtifact, var: &SSAVar, offset: i64) {
@@ -510,22 +497,6 @@ fn prepared_call_site_tuple(
     prepared.inst_op_site(inst_id)
 }
 
-#[allow(dead_code)]
-pub(crate) fn build_prepared_runtime_facts(
-    symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    blocks: &[SSABlock],
-    prepared: &SsaArtifact,
-    view: &PreparedSemanticView,
-) -> DecompilerFacts {
-    let execution = r2ssa::SsaExecutionControl::default();
-    let control =
-        crate::DecompileWorkControl::new(&execution, crate::DecompileWorkPhase::Structuring);
-    let origins =
-        crate::normalize::NormalizationOrigins::for_unchanged(prepared.function(), prepared);
-    build_prepared_runtime_facts_with_control(symbols, blocks, prepared, view, &origins, control)
-        .expect("default decompiler work control cannot stop")
-}
-
 pub(crate) fn build_prepared_runtime_facts_with_control(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     blocks: &[SSABlock],
@@ -536,19 +507,15 @@ pub(crate) fn build_prepared_runtime_facts_with_control(
 ) -> Result<DecompilerFacts, PreparedRuntimeFactsError> {
     control.poll()?;
     let mut use_info = UseInfo::default();
-    let mut stack_info = StackInfo::default();
 
-    seed_prepared_stack_facts(symbols, &mut use_info, &mut stack_info, prepared, view);
+    seed_prepared_stack_facts(&mut use_info, prepared);
     collect_prepared_runtime_facts(&mut use_info, blocks, prepared, view);
     #[cfg(test)]
     pin_prepared_loop_carried_phi_values(&mut use_info, prepared, view);
     populate_prepared_call_runtime_facts(symbols, &mut use_info, blocks, prepared, view, origins);
 
     control.poll()?;
-    Ok(DecompilerFacts {
-        use_info,
-        stack_info,
-    })
+    Ok(DecompilerFacts { use_info })
 }
 
 #[cfg(test)]
@@ -3092,61 +3059,18 @@ fn synthetic_stack_name(offset: i64) -> String {
     }
 }
 
-fn seed_prepared_stack_facts(
-    symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    use_info: &mut UseInfo,
-    _stack_info: &mut StackInfo,
-    prepared: &SsaArtifact,
-    view: &PreparedSemanticView,
-) {
-    #[cfg(not(test))]
-    let _ = symbols;
-    #[cfg(test)]
-    for offset in view.stack_aliases_by_offset.keys() {
-        if let Some(stack_expr) = prepared_stack_alias_expr_for_offset(symbols, view, *offset) {
-            let CExpr::Var(stack_symbol) = stack_expr else {
-                continue;
-            };
-            let name = crate::symbol::spelling(symbols, stack_symbol).to_string();
-            _stack_info
-                .stack_vars
-                .entry(*offset)
-                .or_insert(name.clone());
-        }
-    }
-
+/// Bind every value the prepared objects place on the stack to its identity.
+fn seed_prepared_stack_facts(use_info: &mut UseInfo, prepared: &SsaArtifact) {
     for (key, object_id) in &prepared.objects().value_objects {
         if key.space != r2il::SpaceId::Ram {
             continue;
         }
-        let Some(object) = prepared.objects().object(*object_id) else {
-            continue;
-        };
-        let Some(_offset) = stack_offset_for_object_kind(&object.kind) else {
-            continue;
-        };
-        let Some(value) = prepared_var(prepared, key.value) else {
-            continue;
-        };
-        let value_id = key.value;
-        if use_info.bind_value_id(value, value_id).is_none() {
-            continue;
-        }
-        #[cfg(test)]
-        let test_alias = preferred_stack_alias_name(view, _offset)
-            .map(|name| crate::symbol::var_ref(symbols, name));
-        #[cfg(not(test))]
-        let test_alias = None;
-        if let Some(_stack_expr) = view
-            .admitted_stack_symbol(*object_id)
-            .map(CExpr::Var)
-            .or(test_alias)
-        {
-            #[cfg(test)]
-            _stack_info
-                .definition_overrides
-                .entry(value.display_name())
-                .or_insert_with(|| CExpr::AddrOf(Box::new(_stack_expr.clone())));
+        let on_stack = prepared
+            .objects()
+            .object(*object_id)
+            .is_some_and(|object| stack_offset_for_object_kind(&object.kind).is_some());
+        if let Some(value) = prepared_var(prepared, key.value).filter(|_| on_stack) {
+            use_info.bind_value_id(value, key.value);
         }
     }
 }

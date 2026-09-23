@@ -36,7 +36,7 @@ The current phases are:
 3. Formatting and linting with `cargo fmt --all -- --check` and
    `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 4. Local Dylint linting through `tools/dylints/r2sleigh_lints`.
-5. Focused Kani proofs already present in `r2il`, `r2ssa`, and `r2types`.
+5. Every Kani harness in every crate that has one, so none can stop compiling unnoticed.
 6. Targeted mutation testing for `crates/r2ssa/src/var.rs`.
 7. The 54-cell binding-spine cutover corpus: clean provenance, repeated
    byte-identical generation, exact audit admission, strict raw compilation,
