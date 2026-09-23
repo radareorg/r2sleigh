@@ -188,6 +188,15 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
         "the helper call is missing:\n{}",
         response.output
     );
+    // Control comes back, so the `bx lr` after the transfer is this body's.
+    let listed = program
+        .function_listing(ARM)
+        .expect("it lists")
+        .value
+        .iter()
+        .map(|line| line.address - ARM)
+        .collect::<Vec<_>>();
+    assert_eq!(listed, [0x0, 0x4, 0x8, 0xc]);
 }
 
 #[test]

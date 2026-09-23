@@ -41,6 +41,25 @@ fn every_function_the_container_states_is_found_as_stated() {
 }
 
 #[test]
+fn a_function_handed_to_an_import_through_its_slot_is_found_as_handed() {
+    // `atexit` is declared to take a function; the call reads the slot the
+    // relocation names, and only that says which import is called.
+    let mut program = OpenProgram::of(Literal::new().stripped_of("two").importing("atexit"));
+    // lea rdi, [rip + 9] (two); call qword [rip + 0x7b] (the slot); ret
+    program.source_mut().write(
+        CALLER,
+        &[
+            0x48, 0x8d, 0x3d, 0x09, 0, 0, 0, 0xff, 0x15, 0x7b, 0, 0, 0, 0xc3,
+        ],
+    );
+    assert!(
+        believed(&mut program).contains(&(TWO, Confidence::Handed)),
+        "{:?}",
+        believed(&mut program)
+    );
+}
+
+#[test]
 fn a_data_symbol_or_an_import_s_symbol_states_no_function() {
     let symbol = |name: &str, kind, defined| Symbol {
         name: name.to_owned(),
