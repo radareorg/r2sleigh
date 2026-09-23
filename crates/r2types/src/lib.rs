@@ -64,6 +64,7 @@ pub use facts::{
     FieldAccessCertificate, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
     FunctionTypeFacts, SignatureCertificateSource, VisibleBinding, VisibleBindingKind,
 };
+pub(crate) use function_facts::exact_source_return_type;
 pub use function_facts::{
     ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact, CallResultFact,
     CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact, CertifiedEntity,
@@ -71,9 +72,10 @@ pub use function_facts::{
     FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts,
     FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts, InterprocSummaryView,
     MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact, PredicateComparisonFact,
-    RegisterCallArgumentLocationFact, ReturnValueRenderFact, SourceOwnedCalleeSignature,
-    SourceOwnedFunctionFacts, StackCallArgumentLocationFact, admit_declaration_type,
-    aggregate_is_definable, declaration_type_width_bits, exact_source_return_type,
+    RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal,
+    ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
+    StackCallArgumentLocationFact, admit_declaration_type, aggregate_is_definable,
+    declaration_type_width_bits,
 };
 
 pub use model::{Signedness, Type};

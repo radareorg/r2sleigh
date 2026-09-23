@@ -1,8 +1,10 @@
 mod prepared;
+mod returns;
 #[cfg(test)]
 mod tests;
 
 pub use prepared::*;
+pub use returns::{ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -900,6 +902,7 @@ pub struct SourceOwnedFunctionFacts {
     source: Arc<r2ssa::SsaArtifact>,
     report: FunctionFacts,
     evidence_types: crate::EvidenceTypes,
+    return_type: ReturnTypeFact,
     _callee_signatures: BTreeMap<u64, SourceOwnedCalleeSignature>,
 }
 
@@ -1036,10 +1039,12 @@ impl SourceOwnedFunctionFacts {
             .default_address_bits();
         let evidence_types =
             crate::solve_evidence_types(source.as_ref(), &report.callsite_signatures(), ptr_bits);
+        let return_type = ReturnTypeFact::decide(&source, &report, &evidence_types);
         Some(Self {
             source,
             report,
             evidence_types,
+            return_type,
             _callee_signatures: callee_signatures,
         })
     }
@@ -1063,6 +1068,11 @@ impl SourceOwnedFunctionFacts {
     /// Exact ValueId/ObjectId-keyed type solution for the retained source.
     pub fn evidence_types(&self) -> &crate::EvidenceTypes {
         &self.evidence_types
+    }
+
+    /// What this function returns, decided once for `afi` and every rendering.
+    pub const fn return_type(&self) -> &ReturnTypeFact {
+        &self.return_type
     }
 
     pub(crate) fn stamp_report_decompile_route(
@@ -2880,7 +2890,7 @@ impl FunctionFacts {
     }
 
     /// The prototype each call site reaches, keyed the way the solver needs it.
-    fn callsite_signatures(&self) -> BTreeMap<r2ssa::CallSiteId, crate::FunctionType> {
+    pub(crate) fn callsite_signatures(&self) -> BTreeMap<r2ssa::CallSiteId, crate::FunctionType> {
         let mut signatures = BTreeMap::new();
         for (callsite, arguments) in &self.callsites.by_callsite {
             let Some(signature) = arguments.callee_signature.as_ref().or_else(|| {

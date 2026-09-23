@@ -3345,11 +3345,10 @@ impl Decompiler {
                 ));
             }
         };
-        let inferred_ret_type = r2types::exact_source_return_type(prepared).unwrap_or_else(|| {
-            evidence_return_type(prepared, input.source_owned_facts().evidence_types())
-        });
-        let signature_ret_type = render_signature.and_then(|sig| sig.ret_type.clone());
-        let fold_function_return_type = signature_ret_type.as_ref().or(Some(&inferred_ret_type));
+        // What the function returns is r2types' one decision; a refused one is spelled as any unknown type is.
+        let return_fact = input.source_owned_facts().return_type();
+        let return_type = return_fact.decided().cloned().unwrap_or(CType::Unknown);
+        let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
             arg_regs: self.config.arg_regs.clone(),
@@ -3597,12 +3596,7 @@ impl Decompiler {
                 .collect(),
             // A recovery that reached no return type still has to declare
             // one, and `/* unknown */` is a comment rather than C.
-            ret_type: r2types::spellable_c_type_like(
-                &render_signature
-                    .and_then(|sig| sig.ret_type.clone())
-                    .unwrap_or_else(|| inferred_ret_type.clone()),
-                self.config.ptr_size,
-            ),
+            ret_type: r2types::spellable_c_type_like(&return_type, self.config.ptr_size),
             params,
             // Program locals are introduced only by the final placement pass
             // from surviving, observed BindingId occurrences.
@@ -3918,66 +3912,6 @@ impl Decompiler {
             other => vec![observations.reapply(other)],
         }
     }
-}
-
-fn evidence_return_type(source: &r2ssa::SsaArtifact, evidence: &r2types::EvidenceTypes) -> CType {
-    let mut candidate: Option<CType> = None;
-    let mut saw_return = false;
-    for certificate in &source.certificates().returns {
-        saw_return = true;
-        let Some(ty) = evidence.value_type(certificate.value) else {
-            return CType::Unknown;
-        };
-        let ty = ty.clone();
-        match &candidate {
-            None => candidate = Some(ty),
-            Some(existing) if existing == &ty => {}
-            Some(_) => return CType::Unknown,
-        }
-    }
-    if saw_return {
-        r2il::refusal_evidence!(
-            "return-evidence",
-            "return certificates present; agreed={:?}",
-            candidate
-        );
-        return candidate.unwrap_or(CType::Unknown);
-    }
-    // A function with no `Return` of its own may still return: a tail call
-    // returns its callee's result on this function's behalf, and the exact
-    // boundary at that site says what the callee returns. Reading only the
-    // `Return` certificates scored every tail-only function `void`, and a
-    // thunk's `return fileno(stream);` then had no type to be declared with.
-    let mut tail_candidate: Option<CType> = None;
-    let mut saw_tail = false;
-    for certificate in source.certificates().callsites.values() {
-        if certificate.transfer != r2ssa::CallSiteTransfer::TailCall {
-            continue;
-        }
-        let Some(interface) = source.call_site_interface(certificate.call_site) else {
-            return CType::Unknown;
-        };
-        saw_tail = true;
-        let ty = match interface.result() {
-            r2ssa::SourceCallResult::Void => CType::Void,
-            r2ssa::SourceCallResult::Register { storage } => CType::uint(storage.size * 8),
-        };
-        match &tail_candidate {
-            None => tail_candidate = Some(ty),
-            Some(existing) if existing == &ty => {}
-            Some(_) => return CType::Unknown,
-        }
-    }
-    r2il::refusal_evidence!(
-        "return-evidence",
-        "no return certificate; tail boundaries={} agreed={:?}",
-        saw_tail,
-        tail_candidate
-    );
-    if saw_tail {
-        return tail_candidate.unwrap_or(CType::Unknown);
-    }
-    CType::Void
 }
 
 fn void_function_has_value_return(func: &CFunction) -> bool {

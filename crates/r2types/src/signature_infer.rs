@@ -904,9 +904,18 @@ fn infer_signature_return_type_from_tail_boundaries(
         }
     }
     if !saw_tail {
-        return (CTypeLike::Void, evidence);
+        return (boundary_result_type(prepared), evidence);
     }
     (agreed.unwrap_or(CTypeLike::Unknown), evidence)
+}
+
+/// What a function with no value-carrying exit returns: void where its boundary proves no result carrier is filled.
+pub(crate) fn boundary_result_type(prepared: &SsaArtifact) -> CTypeLike {
+    let boundary = prepared.machine_context().function_interface();
+    match boundary.map(r2ssa::SourceFunctionInterface::return_kind) {
+        Some(r2ssa::SourceFunctionReturn::Void) => CTypeLike::Void,
+        _ => CTypeLike::Unknown,
+    }
 }
 
 fn transparent_return_source_value(
@@ -1010,7 +1019,7 @@ fn choose_signature_return_type(
     ptr_bits: u32,
 ) -> (CTypeLike, SignatureTypeEvidence) {
     if candidates.is_empty() {
-        return (CTypeLike::Void, SignatureTypeEvidence::default());
+        return (CTypeLike::Unknown, SignatureTypeEvidence::default());
     }
     let mut meaningful = candidates
         .iter()
@@ -1743,16 +1752,40 @@ mod tests {
     }
 
     #[test]
-    fn prepared_signature_does_not_type_void_return_from_program_counter() {
+    fn prepared_signature_does_not_type_a_return_from_program_counter() {
+        // Nothing the program counter holds is returned: void only where the boundary says so, else unknown.
         let arch = x86_return_arch();
-        let mut block = r2il::R2ILBlock::new(0x1000, 4);
-        block.push(r2il::R2ILOp::Return {
-            target: r2il::Varnode::register(8, 8),
-        });
-        let prepared = SsaArtifact::for_patterns(&[block], Some(&arch)).expect("prepared SSA");
-        let inferred = infer_signature_from_prepared_ssa(&prepared);
-
-        assert_eq!(inferred.ret_type, "void");
+        let returning = || {
+            let mut block = r2il::R2ILBlock::new(0x1000, 4);
+            block.push(r2il::R2ILOp::Return {
+                target: r2il::Varnode::register(8, 8),
+            });
+            block
+        };
+        let unstated =
+            SsaArtifact::for_patterns(&[returning()], Some(&arch)).expect("prepared SSA");
+        assert_eq!(
+            infer_signature_from_prepared_ssa(&unstated).ret_type,
+            render_signature_type(&CTypeLike::Unknown, 64)
+        );
+        let register = |offset| r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let void = r2ssa::SourceFunctionInterface::new_exact(
+            b"void-return-through-pc".to_vec(),
+            "amd64",
+            [],
+            r2ssa::SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_return_address_storage(register(8)))
+        .and_then(|interface| interface.with_stack_pointer_storage(register(16)))
+        .expect("void interface");
+        let stated = SsaArtifact::for_decompile_with_interface(&[returning()], Some(&arch), void)
+            .expect("prepared void source");
+        assert_eq!(infer_signature_from_prepared_ssa(&stated).ret_type, "void");
     }
 
     #[test]
