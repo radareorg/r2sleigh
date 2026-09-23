@@ -499,7 +499,7 @@ fn prepared_view_prefers_typed_callee_resolution_over_raw_name_maps() {
         .expect("direct callsite should have typed callee identity");
     assert_eq!(identity.display_name.as_deref(), Some("sym.imp.printf"));
     assert_eq!(identity.primary_key(), "printf");
-    assert!(identity.is_imported_name_hint());
+    assert_eq!(identity.class, r2types::CalleeClass::Unknown);
     let resolved =
         CalleeResolutionFacts::resolve_target_policy(r2types::CalleeTargetResolutionRequest {
             identity: CalleeTargetIdentityRequest {
@@ -558,7 +558,7 @@ fn prepared_view_uses_typed_direct_addr_identity_through_callsite_facts() {
         .as_ref()
         .expect("direct-address identity should be certified through callsite facts");
     assert_eq!(identity.display_name.as_deref(), Some("sym.imp.printf"));
-    assert!(identity.is_imported_name_hint());
+    assert_eq!(identity.class, r2types::CalleeClass::Unknown);
     let resolved =
         CalleeResolutionFacts::resolve_target_policy(r2types::CalleeTargetResolutionRequest {
             identity: CalleeTargetIdentityRequest {
@@ -573,7 +573,7 @@ fn prepared_view_uses_typed_direct_addr_identity_through_callsite_facts() {
         .expect("direct-address callee identity should resolve policy");
     assert!(
         !resolved.policy.imported,
-        "direct-address identities built from raw names remain import hints only"
+        "a name spelled as an import is not an import without typed linkage"
     );
 }
 

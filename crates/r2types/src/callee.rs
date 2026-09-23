@@ -8,7 +8,6 @@ use crate::{
     SignatureRegistry,
 };
 
-const CALLEE_IMPORT_PREFIXES: [&str; 3] = ["sym.imp.", "imp.", "reloc."];
 const CALLEE_NAMESPACE_PREFIXES: [&str; 6] = ["sym.imp.", "sym.", "imp.", "reloc.", "dbg.", "fcn."];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CallsiteKey {
@@ -38,9 +37,8 @@ pub enum CalleeIdentityEvidence {
     DirectTarget,
     RawMemoryName,
     RawConstantName,
-    ImportedNameHint,
     ImportLinkage,
-    InternalNameHint,
+    InternalLinkage,
     CalleeFactName,
     KnownSignature,
     FunctionName,
@@ -495,11 +493,8 @@ impl CalleeIdentity {
         let lower = name.trim().to_ascii_lowercase();
         let storage_kind = SSAVarNameKind::classify(&lower);
         let target_addr = parse_raw_address_name(name);
-        let imported_hint = callee_name_is_import_like(&lower);
-        let internal_hint =
-            lower.strip_prefix("fcn.").is_some() || lower.strip_prefix("sym.").is_some();
-        let (class, classification_evidence) =
-            classify_callee_name(storage_kind, imported_hint, internal_hint);
+        // Linkage is a typed fact on the callee, never read off the spelling.
+        let (class, classification_evidence) = classify_callee_name(storage_kind);
         let mut evidence = BTreeSet::new();
         if let Some(classification_evidence) = classification_evidence {
             evidence.insert(classification_evidence);
@@ -600,7 +595,7 @@ impl CalleeIdentity {
             identity.class = CalleeClass::Internal;
             identity
                 .evidence
-                .insert(CalleeIdentityEvidence::InternalNameHint);
+                .insert(CalleeIdentityEvidence::InternalLinkage);
         }
         if let Some(signature) = callee_fact.and_then(|fact| fact.signature.as_ref()) {
             identity.signature = Some(signature.clone());
@@ -647,26 +642,12 @@ impl CalleeIdentity {
             })
     }
 
-    pub fn is_imported_name_hint(&self) -> bool {
-        self.class == CalleeClass::Imported
-            && self
-                .evidence
-                .contains(&CalleeIdentityEvidence::ImportedNameHint)
-    }
-
     pub fn is_import_policy_authorized(&self) -> bool {
         import_policy_authorized_from_evidence(
             self.class,
             self.evidence
                 .contains(&CalleeIdentityEvidence::ImportLinkage),
         )
-    }
-
-    pub fn is_internal_name_hint(&self) -> bool {
-        self.class == CalleeClass::Internal
-            && self
-                .evidence
-                .contains(&CalleeIdentityEvidence::InternalNameHint)
     }
 
     pub fn has_known_signature(&self) -> bool {
@@ -809,22 +790,8 @@ impl CalleeIdentity {
     }
 }
 
-pub fn callee_name_is_import_like(name: &str) -> bool {
-    let normalized = name.trim().to_ascii_lowercase();
-    callee_lower_name_is_import_like(&normalized)
-}
-
-fn callee_lower_name_is_import_like(normalized: &str) -> bool {
-    !normalized.is_empty()
-        && CALLEE_IMPORT_PREFIXES
-            .iter()
-            .any(|prefix| normalized.starts_with(prefix))
-}
-
 fn classify_callee_name(
     storage_kind: SSAVarNameKind,
-    imported_hint: bool,
-    internal_hint: bool,
 ) -> (CalleeClass, Option<CalleeIdentityEvidence>) {
     match storage_kind {
         SSAVarNameKind::Memory => (
@@ -834,14 +801,6 @@ fn classify_callee_name(
         SSAVarNameKind::Constant => (
             CalleeClass::RawAddress,
             Some(CalleeIdentityEvidence::RawConstantName),
-        ),
-        _ if imported_hint => (
-            CalleeClass::Imported,
-            Some(CalleeIdentityEvidence::ImportedNameHint),
-        ),
-        _ if internal_hint => (
-            CalleeClass::Internal,
-            Some(CalleeIdentityEvidence::InternalNameHint),
         ),
         _ => (CalleeClass::Unknown, None),
     }
@@ -1020,18 +979,18 @@ mod tests {
     }
 
     #[test]
-    fn callee_identity_classifies_raw_storage_imports_and_internal_names() {
+    fn callee_identity_class_is_never_read_off_a_namespace_spelling() {
         let cases = [
             ("ram:401000_0", CalleeClass::RawAddress, "addr:401000"),
             ("const:0x401000", CalleeClass::RawAddress, "addr:401000"),
-            ("sym.imp.printf", CalleeClass::Imported, "printf"),
-            ("imp.printf", CalleeClass::Imported, "printf"),
-            ("reloc.memcpy", CalleeClass::Imported, "memcpy"),
-            ("sym.helper", CalleeClass::Internal, "helper"),
+            ("sym.imp.printf", CalleeClass::Unknown, "printf"),
+            ("imp.printf", CalleeClass::Unknown, "printf"),
+            ("reloc.memcpy", CalleeClass::Unknown, "memcpy"),
+            ("sym.helper", CalleeClass::Unknown, "helper"),
             // A name that restates the entry address normalises to the
             // address, so a call the engine spelled `fcn.401000` and one it
             // knew only by its target are one identity rather than two.
-            ("fcn.401000", CalleeClass::Internal, "addr:401000"),
+            ("fcn.401000", CalleeClass::Unknown, "addr:401000"),
             ("helper", CalleeClass::Unknown, "helper"),
         ];
 
@@ -1047,20 +1006,7 @@ mod tests {
                 class == CalleeClass::RawAddress,
                 "{name}",
             );
-            assert_eq!(
-                identity.is_imported_name_hint(),
-                class == CalleeClass::Imported,
-                "{name}",
-            );
-            assert!(
-                !identity.is_import_policy_authorized(),
-                "raw name hints must not authorize imported-call policy for {name}",
-            );
-            assert_eq!(
-                identity.is_internal_name_hint(),
-                class == CalleeClass::Internal,
-                "{name}",
-            );
+            assert!(!identity.is_import_policy_authorized(), "{name}");
         }
     }
 
@@ -1115,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn import_looking_callee_fact_name_without_linkage_is_hint_only() {
+    fn import_looking_callee_fact_name_without_linkage_is_not_an_import() {
         let function_names = HashMap::new();
         let symbols = HashMap::new();
         let callee_facts = BTreeMap::from([(0x401020, callee_fact(0x401020, "sym.imp.printf"))]);
@@ -1125,11 +1071,8 @@ mod tests {
 
         let identity = CalleeIdentity::from_direct_target(0x401020, &ctx);
 
-        assert!(identity.is_imported_name_hint());
-        assert!(
-            !identity.is_import_policy_authorized(),
-            "import-looking callee-fact names are aliases until typed linkage certifies them",
-        );
+        assert_eq!(identity.class(), CalleeClass::Unknown);
+        assert!(!identity.is_import_policy_authorized());
         assert!(
             !identity
                 .evidence
@@ -1174,7 +1117,11 @@ mod tests {
         let identity = CalleeIdentity::from_direct_target(0x40102c, &ctx);
 
         assert_eq!(identity.class(), CalleeClass::Internal);
-        assert!(identity.is_internal_name_hint());
+        assert!(
+            identity
+                .evidence
+                .contains(&CalleeIdentityEvidence::InternalLinkage)
+        );
         assert!(!identity.is_import_policy_authorized());
     }
 
@@ -1190,7 +1137,6 @@ mod tests {
         let identity = CalleeIdentity::from_direct_target(0x40102d, &ctx);
 
         assert_eq!(identity.class(), CalleeClass::Unknown);
-        assert!(!identity.is_internal_name_hint());
         assert!(!identity.is_import_policy_authorized());
     }
 
@@ -1210,19 +1156,6 @@ mod tests {
         let external = CalleeIdentity::from_direct_target(0x40102e, &external_ctx);
 
         assert_eq!(external.class(), CalleeClass::ExternalSymbol);
-
-        let internal_symbols = HashMap::from([(0x40102f, "sym.helper".to_string())]);
-        let internal_ctx = empty_identity_context(
-            &function_names,
-            &internal_symbols,
-            &callee_facts,
-            &known_signatures,
-        );
-
-        let internal = CalleeIdentity::from_direct_target(0x40102f, &internal_ctx);
-
-        assert_eq!(internal.class(), CalleeClass::Internal);
-        assert!(internal.is_internal_name_hint());
     }
 
     #[test]
@@ -2078,7 +2011,7 @@ mod tests {
         assert_eq!(by_site.display_name.as_deref(), Some("sym.imp.printf"));
         assert_eq!(by_site.primary_key(), "printf");
         assert_eq!(by_site.non_variadic_known_arity(), Some(2));
-        assert!(by_site.is_imported_name_hint());
+        assert_eq!(by_site.class(), CalleeClass::Imported);
         assert!(by_site.is_import_policy_authorized());
 
         let by_addr = facts
@@ -2108,7 +2041,7 @@ mod tests {
             .identity_for_name("printf")
             .expect("known signature should be indexed as named identity");
         assert_eq!(printf.non_variadic_known_arity(), Some(1));
-        assert!(printf.is_imported_name_hint());
+        assert_eq!(printf.class(), CalleeClass::Unknown);
         assert!(
             !printf.is_import_policy_authorized(),
             "known signature evidence alone must not authorize import policy"
@@ -2223,11 +2156,7 @@ mod tests {
 
         let mut imported_without_evidence = base.clone();
         imported_without_evidence.class = CalleeClass::Imported;
-        assert!(!imported_without_evidence.is_imported_name_hint());
-
-        let mut internal_without_evidence = base.clone();
-        internal_without_evidence.class = CalleeClass::Internal;
-        assert!(!internal_without_evidence.is_internal_name_hint());
+        assert!(!imported_without_evidence.is_import_policy_authorized());
 
         let mut raw_with_evidence = base;
         raw_with_evidence
@@ -2235,22 +2164,8 @@ mod tests {
             .insert(CalleeIdentityEvidence::RawMemoryName);
         assert!(raw_with_evidence.is_raw_storage_target());
 
-        let mut imported_with_evidence = imported_without_evidence;
-        imported_with_evidence
-            .evidence
-            .insert(CalleeIdentityEvidence::ImportedNameHint);
-        assert!(imported_with_evidence.is_imported_name_hint());
-        assert!(!imported_with_evidence.is_import_policy_authorized());
-
-        let import_policy_authorized = imported_with_evidence.with_import_linkage_evidence();
-        assert!(import_policy_authorized.is_imported_name_hint());
+        let import_policy_authorized = imported_without_evidence.with_import_linkage_evidence();
         assert!(import_policy_authorized.is_import_policy_authorized());
-
-        let mut internal_with_evidence = internal_without_evidence;
-        internal_with_evidence
-            .evidence
-            .insert(CalleeIdentityEvidence::InternalNameHint);
-        assert!(internal_with_evidence.is_internal_name_hint());
     }
 }
 
@@ -2309,12 +2224,10 @@ mod kani_proofs {
     }
 
     #[kani::proof]
-    fn callee_name_classification_precedence_is_total() {
+    fn callee_name_classification_reads_only_storage_kind() {
         let storage_kind = pick_name_kind(kani::any());
-        let imported_hint: bool = kani::any();
-        let internal_hint: bool = kani::any();
 
-        let (class, evidence) = classify_callee_name(storage_kind, imported_hint, internal_hint);
+        let (class, evidence) = classify_callee_name(storage_kind);
 
         match storage_kind {
             SSAVarNameKind::Memory => {
@@ -2324,14 +2237,6 @@ mod kani_proofs {
             SSAVarNameKind::Constant => {
                 assert_eq!(class, CalleeClass::RawAddress);
                 assert_eq!(evidence, Some(CalleeIdentityEvidence::RawConstantName));
-            }
-            _ if imported_hint => {
-                assert_eq!(class, CalleeClass::Imported);
-                assert_eq!(evidence, Some(CalleeIdentityEvidence::ImportedNameHint));
-            }
-            _ if internal_hint => {
-                assert_eq!(class, CalleeClass::Internal);
-                assert_eq!(evidence, Some(CalleeIdentityEvidence::InternalNameHint));
             }
             _ => {
                 assert_eq!(class, CalleeClass::Unknown);
@@ -2351,15 +2256,6 @@ mod kani_proofs {
         assert!(left.matches_identity(&same));
         assert!(!left.matches_identity(&different));
         assert!(!empty_left.matches_identity(&empty_right));
-    }
-
-    #[kani::proof]
-    fn callee_import_spelling_predicate_preserves_required_cases() {
-        assert!(callee_lower_name_is_import_like("reloc.memcpy"));
-        assert!(callee_lower_name_is_import_like("sym.imp.printf"));
-        assert!(callee_lower_name_is_import_like("imp.printf"));
-        assert!(!callee_lower_name_is_import_like("sym.printf"));
-        assert!(!callee_lower_name_is_import_like(""));
     }
 
     #[kani::proof]

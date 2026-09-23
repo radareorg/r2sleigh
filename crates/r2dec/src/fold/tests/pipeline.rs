@@ -635,18 +635,7 @@ mod tests {
     ) {
         let typed_names = HashMap::from([(target_addr, target_name.to_string())]);
         let binary_symbols = HashMap::new();
-        let callee_facts = if r2types::callee_name_is_import_like(target_name) {
-            BTreeMap::from([(
-                target_addr,
-                minimal_callee_fact_with_linkage(
-                    target_addr,
-                    target_name,
-                    r2types::CalleeLinkage::Imported,
-                ),
-            )])
-        } else {
-            BTreeMap::new()
-        };
+        let callee_facts = BTreeMap::new();
         let known_signatures: HashMap<String, r2types::FunctionType> = signature
             .map(|signature| (target_name.to_string(), signature.into()))
             .into_iter()
@@ -667,11 +656,6 @@ mod tests {
             },
         );
         mutate_function_facts(ctx, |function_facts| {
-            if !callee_facts.is_empty() {
-                let mut type_facts = function_facts.type_facts().clone();
-                type_facts.callee_facts = callee_facts;
-                function_facts.replace_type_facts(type_facts);
-            }
             function_facts.set_callee_resolution(resolution);
         });
     }
@@ -680,6 +664,7 @@ mod tests {
         ctx: &mut FoldingContext<'_>,
         source_call: (u64, usize),
         target_name: &str,
+        linkage: r2types::CalleeLinkage,
         signature: Option<FunctionType>,
     ) {
         let key = r2types::CalleeIdentityKey::IndirectSite(r2types::CallsiteKey {
@@ -692,7 +677,7 @@ mod tests {
             .collect();
         let mut identity =
             r2types::CalleeIdentity::from_name(target_name).with_known_signature(&signatures);
-        if r2types::callee_name_is_import_like(target_name) {
+        if linkage.authorizes_import_policy() {
             identity = identity.with_import_linkage_evidence();
         }
         let mut resolution = ctx
@@ -2273,7 +2258,13 @@ mod tests {
     fn fallback_indirect_call_lowering_uses_typed_callsite_identity() {
         let mut ctx = FoldingContext::new(64);
         let source_call = (0x1000, 0);
-        install_indirect_callsite_identity(&mut ctx, source_call, "sym.imp.printf", None);
+        install_indirect_callsite_identity(
+            &mut ctx,
+            source_call,
+            "sym.imp.printf",
+            r2types::CalleeLinkage::Imported,
+            None,
+        );
         ctx.current_block_addr.set(Some(source_call.0));
         ctx.current_op_idx.set(Some(source_call.1));
 
@@ -2328,7 +2319,13 @@ mod tests {
     fn call_with_args_lowering_residualizes_typed_identity_without_callsite_facts() {
         let mut ctx = FoldingContext::new(64);
         let source_call = (0x1000, 0);
-        install_indirect_callsite_identity(&mut ctx, source_call, "sym.imp.printf", None);
+        install_indirect_callsite_identity(
+            &mut ctx,
+            source_call,
+            "sym.imp.printf",
+            r2types::CalleeLinkage::Imported,
+            None,
+        );
 
         assert_eq!(
             ctx.op_to_stmt_with_args(
@@ -2348,7 +2345,13 @@ mod tests {
     fn indirect_call_with_args_lowering_residualizes_typed_identity_without_callsite_facts() {
         let mut ctx = FoldingContext::new(64);
         let source_call = (0x1000, 0);
-        install_indirect_callsite_identity(&mut ctx, source_call, "sym.imp.printf", None);
+        install_indirect_callsite_identity(
+            &mut ctx,
+            source_call,
+            "sym.imp.printf",
+            r2types::CalleeLinkage::Imported,
+            None,
+        );
 
         assert_eq!(
             ctx.op_to_stmt_with_args(
@@ -2412,6 +2415,7 @@ mod tests {
             &mut ctx,
             source_call,
             "sym.local.nonvoid",
+            r2types::CalleeLinkage::Unknown,
             Some(FunctionType {
                 return_type: CType::Int { bits: 32, signedness: r2types::Signedness::Signed },
                 params: Vec::new(),
@@ -2441,6 +2445,7 @@ mod tests {
             &mut ctx,
             source_call,
             "sym.imp.free",
+            r2types::CalleeLinkage::Imported,
             Some(FunctionType {
                 return_type: CType::Void,
                 params: vec![CType::void_ptr()],
