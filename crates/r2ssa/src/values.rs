@@ -5,9 +5,8 @@
 //! question, none of them joining at a merge and none of them following a phi
 //! -- this is the one answer they were all approximating.
 //!
-//! The shape is the worklist `data_ref.rs` already uses for constants: seed
-//! from the literals, transfer at each instruction, and re-queue the readers
-//! of anything that moved. What is different is the domain, and that a merge
+//! The shape is a worklist: seed from the literals, transfer at each
+//! instruction, and re-queue the readers of anything that moved. What is different is the domain, and that a merge
 //! joins rather than giving up.
 //!
 //! Termination comes from widening at loop headers. The lattice has unbounded

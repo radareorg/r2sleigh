@@ -94,39 +94,3 @@ impl MemoryPrefix {
         })
     }
 }
-
-/// What the references query reads: the frame's objects and which loads reload a store.
-pub(crate) struct ReferenceFacts {
-    pub(crate) objects: ObjectModel,
-    pub(crate) stack_reloads: BTreeMap<ValueId, StackReloadSourceCertificate>,
-}
-
-impl ReferenceFacts {
-    /// The memory prefix, and the stack reloads read from it; nothing else.
-    pub(crate) fn collect(
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        machine_context: &SourceMachineContext,
-    ) -> Self {
-        let mut phases = PhaseRecorder::open("references", function);
-        let prefix = MemoryPrefix::collect(
-            function,
-            graph,
-            Some(machine_context),
-            &mut phases,
-            &crate::control::UncheckedSsaWorkControl,
-        )
-        .expect("an unchecked control never stops");
-        let stack_reloads = collect_stack_reload_source_certificates(
-            function,
-            graph,
-            &prefix.objects,
-            &prefix.memory,
-            &prefix.memory_accesses,
-        );
-        Self {
-            objects: prefix.objects,
-            stack_reloads,
-        }
-    }
-}

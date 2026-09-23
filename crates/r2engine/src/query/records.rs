@@ -8,9 +8,10 @@
 
 use r2il::Endianness;
 use r2sleigh_lift::{EmbeddedMachine, NumberSpan, Syntax};
-use r2ssa::body::Program;
 
 use super::Support;
+use super::references::ReferenceKind;
+use crate::native::Program;
 
 /// Which decoder the code at an address is written in.
 ///
@@ -34,6 +35,11 @@ pub struct Memory<'a> {
 }
 
 impl Memory<'_> {
+    /// Whether the program maps this address at all.
+    pub(super) fn maps(&self, address: u64) -> bool {
+        self.program.read(address, 1).is_some()
+    }
+
     /// The value this revision holds at an address, where it holds one.
     pub(super) fn word(&self, address: u64, width: u32) -> Option<u64> {
         let width = usize::try_from(width)
@@ -64,6 +70,41 @@ pub struct Answered<'a> {
     pub memory: Memory<'a>,
     /// Absent below `Work::Function`, which is what keeps a listing cheap.
     pub facts: Option<&'a r2ssa::SsaArtifact>,
+    /// The def-use of the body the run is in, which says whether a number it computes is a step.
+    pub fate: Option<&'a DefUse<'a>>,
+    /// Whether each line is spelled; the reference index reads only what the lines claim.
+    pub spelled: bool,
+    /// The registers a call leaves undefined, a fact of the machine computed once with it.
+    pub clobbered: &'a [r2ssa::CanonicalStorageId],
+}
+
+/// The def-use of one body, built the first time a line's fate needs it.
+pub struct DefUse<'a> {
+    built: std::cell::OnceCell<Option<r2ssa::SsaGraph>>,
+    blocks: &'a [r2il::R2ILBlock],
+    arch: &'a r2il::ArchSpec,
+}
+
+impl<'a> DefUse<'a> {
+    pub fn new(blocks: &'a [r2il::R2ILBlock], arch: &'a r2il::ArchSpec) -> Self {
+        Self {
+            built: std::cell::OnceCell::new(),
+            blocks,
+            arch,
+        }
+    }
+
+    /// The graph, built now if nothing has asked for it yet.
+    pub fn graph(&self) -> Option<&r2ssa::SsaGraph> {
+        self.built
+            .get_or_init(|| r2ssa::def_use_graph(self.blocks, Some(self.arch)))
+            .as_ref()
+    }
+
+    /// Whether a line needed the graph and it did not build.
+    pub fn failed(&self) -> bool {
+        matches!(self.built.get(), Some(None))
+    }
 }
 
 /// A run of instructions: where it starts, and where it stops.
@@ -112,6 +153,8 @@ pub struct Annotation {
     /// them spells it. Two operands holding the same value leave this empty
     /// rather than guessing which was meant.
     pub operand: Option<NumberSpan>,
+    /// Whether the claim names an address of this program, and how; the reference index is these.
+    pub reference: Option<ReferenceKind>,
 }
 
 /// What one annotation claims.
@@ -123,8 +166,11 @@ pub enum AnnotationKind {
     Reads { address: u64, width: u32 },
     /// The instruction writes this many bytes at this address.
     Writes { address: u64, width: u32 },
-    /// The instruction produces this number, and nothing later in the run
-    /// reads it back.
+    /// The instruction computes this address, and nothing later derives another number from it.
+    ///
+    /// Only a number proven to be an address: lifting the instruction a page
+    /// further on moves it by that page, so it is where the program itself is.
+    /// An absolute number is claimed only where it is used as one.
     ///
     /// `lea rdi, 0x4070` computes an address and that is its whole result;
     /// `adrp x17, 0x100008000` computes a page base the next instruction moves

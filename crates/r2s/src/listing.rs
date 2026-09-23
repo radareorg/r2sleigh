@@ -118,17 +118,18 @@ fn stopped(completion: Completion) -> String {
     }
 }
 
-/// How well supported a claim about this number is, where anything claims it.
+/// How well supported the claim that this number is an address of the program is, where the engine makes one.
 ///
-/// A number no annotation claims is a coincidence: the table knows an address
-/// of that value and nothing in the instruction says this is one.
+/// A number no reference claims is a coincidence: the table knows an address
+/// of that value and nothing proves this is one. A range proved for the value
+/// is not that proof, and naming by it put names in `pdf` that `ax` never listed.
 fn claim(
     line: &r2engine::query::Line,
     number: r2engine::NumberSpan,
 ) -> Option<r2engine::query::Support> {
     line.annotations
         .iter()
-        .filter(|annotation| annotation.operand == Some(number))
+        .filter(|annotation| annotation.operand == Some(number) && annotation.reference.is_some())
         .map(|annotation| annotation.support)
         .min()
 }
@@ -237,6 +238,7 @@ mod tests {
                         },
                         support: r2engine::query::Support::Decoded,
                         operand: Some(*number),
+                        reference: Some(r2engine::query::ReferenceKind::Code),
                     })
                 })
                 .collect(),

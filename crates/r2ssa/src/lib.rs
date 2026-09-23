@@ -25,7 +25,6 @@ pub mod body;
 pub mod cfg;
 pub(crate) mod constant;
 pub(crate) mod control;
-pub(crate) mod data_ref;
 pub(crate) mod deadphi;
 pub(crate) mod defuse;
 pub mod domtree;
@@ -81,9 +80,6 @@ pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,
     SsaWorkControl, SsaWorkMeter,
 };
-pub use data_ref::{
-    DataRefFact, DataRefKind, data_refs_from_artifact, data_refs_from_blocks, parse_const_value,
-};
 pub use defuse::{
     BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
 };
@@ -98,7 +94,7 @@ pub use function::{
     GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
     RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction,
     SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
-    StackAddressBase, StackAddressRoot, TrustedSsaArtifact, call_clobbered_storages,
+    StackAddressBase, StackAddressRoot, TrustedSsaArtifact, call_clobbered_storages, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

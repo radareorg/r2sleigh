@@ -112,6 +112,17 @@ impl BlockOrigins {
         };
     }
 
+    /// Forget whatever any of these storages held, as a call leaves them undefined.
+    pub fn forget(&mut self, storages: &[CanonicalStorageId]) {
+        self.origins.retain(|held, _| {
+            !storages.iter().any(|storage| {
+                storage.space == held.space
+                    && storage.offset < held.offset + u64::from(held.size)
+                    && held.offset < storage.offset + u64::from(storage.size)
+            })
+        });
+    }
+
     fn after(&self, op: &R2ILOp) -> Option<ValueOrigin> {
         match op {
             R2ILOp::Copy { src, .. } => self.of(src),

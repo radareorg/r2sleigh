@@ -23,6 +23,9 @@ pub fn listing(
     // instruction's own result is an address or a step towards one is a fact
     // about what the next instruction does with it.
     let mut lifts: Vec<Option<r2il::R2ILBlock>> = Vec::new();
+    // The bytes each line decoded from, which lifting again a page further on reads too.
+    let mut windows: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut straight = Straight::default();
     let mut pc = request.start;
     let mut completion = Completion::Complete;
 
@@ -30,23 +33,32 @@ pub fn listing(
         Stop::After(count) => lines.len() < count,
         Stop::At(end) => pc < end,
     } {
-        let Some(one) = decoded(answered, pc, work) else {
+        let Some(one) = decoded(answered, pc, answered.spelled, &mut straight) else {
             completion = Completion::Unmapped { at: pc };
             break;
         };
         lines.push(one.line);
         lifts.push(one.lift);
+        windows.push(one.window);
         pc = one.next;
+    }
+    // Spelling starts the decoder afresh at every line, so a spelled run is lifted in a pass of its own.
+    if answered.spelled && work > Work::Decode {
+        lifts = lift_run(answered, &lines, &windows, 0);
     }
 
     let mut beyond = Lookahead {
         answered,
-        work,
         next: pc,
         open: completion == Completion::Complete,
+        straight: Straight::default(),
         tail: Vec::new(),
     };
-    super::annotate::over_run(answered, work, &lifts, &mut beyond, &mut lines);
+    let run = super::annotate::Run {
+        lifts: &lifts,
+        windows: &windows,
+    };
+    super::annotate::over_run(answered, work, &run, &mut beyond, &mut lines);
     Answer {
         value: lines,
         revision,
@@ -57,12 +69,20 @@ pub fn listing(
 /// One instruction read at an address, and where the next one begins.
 struct Decoded {
     line: Line,
+    /// Its lift, where the line was read without being spelled.
     lift: Option<r2il::R2ILBlock>,
+    /// The decode window it was read from, where it decoded.
+    window: Option<Vec<u8>>,
     next: u64,
 }
 
-/// Read and spell the instruction at `pc`; `None` where the program maps nothing to read.
-fn decoded(answered: &Answered<'_>, pc: u64, work: Work) -> Option<Decoded> {
+/// Read the instruction at `pc`, spelled or lifted; `None` where the program maps nothing to read.
+fn decoded(
+    answered: &Answered<'_>,
+    pc: u64,
+    spell: bool,
+    straight: &mut Straight,
+) -> Option<Decoded> {
     let machine = answered.decoders.at(pc)?;
     let window = answered.memory.program.read(pc, DECODE_WINDOW)?;
     // Bytes that do not decode are stepped over by the width this machine
@@ -73,12 +93,20 @@ fn decoded(answered: &Answered<'_>, pc: u64, work: Work) -> Option<Decoded> {
     let mut fetch = window;
     fetch.resize(DECODE_WINDOW, 0);
 
-    let decoded = machine
-        .disasm
-        .disasm_syntax(&fetch, pc)
-        .ok()
-        .filter(|syntax| syntax.size != 0 && syntax.size <= available);
-    let Some(syntax) = decoded else {
+    // The window is the decoder's, not the instruction's: Sleigh reads the
+    // whole of it whatever the instruction needs, and handing it only the
+    // bytes the instruction occupies fails the decode just performed.
+    let (syntax, lift) = match spell {
+        true => (machine.disasm.disasm_syntax(&fetch, pc).ok(), None),
+        false => (None, straight.lift(machine, &fetch, pc)),
+    };
+    let size = match (&syntax, &lift) {
+        (Some(syntax), _) => syntax.size,
+        (None, Some(lift)) => usize::try_from(lift.size).unwrap_or(0),
+        (None, None) => 0,
+    };
+    if size == 0 || size > available {
+        straight.end = None;
         return Some(Decoded {
             line: Line {
                 address: pc,
@@ -87,27 +115,77 @@ fn decoded(answered: &Answered<'_>, pc: u64, work: Work) -> Option<Decoded> {
                 annotations: Vec::new(),
             },
             lift: None,
+            window: None,
             next: pc + step,
         });
-    };
-    let size = syntax.size;
-    // The window is the decoder's, not the instruction's: Sleigh reads the
-    // whole of it whatever the instruction needs, and handing it only the
-    // bytes the instruction occupies fails the decode just performed.
-    let lift = match work {
-        Work::Decode => None,
-        _ => machine.disasm.lift(&fetch, pc).ok(),
-    };
+    }
     Some(Decoded {
         line: Line {
             address: pc,
             bytes: fetch[..size].to_vec(),
-            syntax: Some(syntax),
+            syntax,
             annotations: Vec::new(),
         },
         lift,
+        window: Some(fetch),
         next: pc + size as u64,
     })
+}
+
+/// Where the last lift of one straight line ended, and on which decoder.
+///
+/// A lift that follows on keeps the decoder's context, as the walk's does, so
+/// Thumb's `it` reaches the instructions it predicates; one that does not
+/// starts afresh, which also drops whatever Sleigh cached by address for a
+/// lift at an address the bytes are not at.
+#[derive(Default)]
+struct Straight {
+    end: Option<(*const r2sleigh_lift::EmbeddedMachine, u64)>,
+}
+
+impl Straight {
+    fn lift(
+        &mut self,
+        machine: &r2sleigh_lift::EmbeddedMachine,
+        window: &[u8],
+        at: u64,
+    ) -> Option<r2il::R2ILBlock> {
+        let lifted = match self.end == Some((std::ptr::from_ref(machine), at)) {
+            true => machine.disasm.lift_continuing(window, at),
+            false => machine.disasm.lift(window, at),
+        }
+        .ok();
+        self.end = lifted.as_ref().map(|one| {
+            (
+                std::ptr::from_ref(machine),
+                at.wrapping_add(u64::from(one.size)),
+            )
+        });
+        lifted
+    }
+}
+
+/// Lift a run's decoded lines as one straight line, `offset` further on than they are.
+pub(super) fn lift_run(
+    answered: &Answered<'_>,
+    lines: &[Line],
+    windows: &[Option<Vec<u8>>],
+    offset: u64,
+) -> Vec<Option<r2il::R2ILBlock>> {
+    let mut straight = Straight::default();
+    lines
+        .iter()
+        .zip(windows)
+        .map(|(line, window)| {
+            let (Some(machine), Some(window)) =
+                (answered.decoders.at(line.address), window.as_deref())
+            else {
+                straight.end = None;
+                return None;
+            };
+            straight.lift(machine, window, line.address.wrapping_add(offset))
+        })
+        .collect()
 }
 
 /// The instructions after the run's last line, lifted only when a line asks.
@@ -116,9 +194,9 @@ fn decoded(answered: &Answered<'_>, pc: u64, work: Work) -> Option<Decoded> {
 /// number the last line computes is a step is decided by what follows it.
 pub(super) struct Lookahead<'r, 'a> {
     answered: &'r Answered<'a>,
-    work: Work,
     next: u64,
     open: bool,
+    straight: Straight,
     tail: Vec<Option<r2il::R2ILBlock>>,
 }
 
@@ -128,7 +206,7 @@ impl Lookahead<'_, '_> {
         while self.open && self.tail.len() <= index {
             // Another function's entry is not where this one's value goes.
             let one = (!self.answered.memory.program.is_entry(self.next))
-                .then(|| decoded(self.answered, self.next, self.work))
+                .then(|| decoded(self.answered, self.next, false, &mut self.straight))
                 .flatten();
             let Some(one) = one else {
                 self.open = false;
@@ -156,6 +234,12 @@ mod tests {
         bytes: Vec<u8>,
     }
 
+    impl Mapped {
+        fn new(base: u64, bytes: Vec<u8>) -> Self {
+            Self { base, bytes }
+        }
+    }
+
     impl Program for Mapped {
         fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
             let offset = usize::try_from(vaddr.checked_sub(self.base)?).ok()?;
@@ -165,6 +249,20 @@ mod tests {
 
         fn is_entry(&self, _vaddr: u64) -> bool {
             false
+        }
+    }
+
+    impl crate::native::Program for Mapped {
+        fn name_at(&self, _vaddr: u64) -> Option<String> {
+            None
+        }
+
+        fn holds_static_data(&self, _vaddr: u64) -> bool {
+            false
+        }
+
+        fn import_at(&self, _vaddr: u64) -> Option<String> {
+            None
         }
     }
 
@@ -181,10 +279,7 @@ mod tests {
 
     fn answer(bytes: &[u8], count: usize, work: Work) -> Answer<Vec<Line>> {
         let machine = Everywhere(embedded_machine("x86-64").expect("x86-64 is compiled in"));
-        let program = Mapped {
-            base: BASE,
-            bytes: bytes.to_vec(),
-        };
+        let program = Mapped::new(BASE, bytes.to_vec());
         let answered = Answered {
             decoders: &machine,
             memory: Memory {
@@ -192,6 +287,9 @@ mod tests {
                 endian: Endianness::Little,
             },
             facts: None,
+            fate: None,
+            spelled: true,
+            clobbered: &[],
         };
         listing(
             &answered,
@@ -235,10 +333,13 @@ mod tests {
         let answered = Answered {
             decoders: &decoders,
             memory: Memory {
-                program: &Mapped { base: BASE, bytes },
+                program: &Mapped::new(BASE, bytes),
                 endian: Endianness::Little,
             },
             facts: None,
+            fate: None,
+            spelled: true,
+            clobbered: &[],
         };
         let answer = listing(
             &answered,
@@ -385,71 +486,134 @@ mod tests {
             })
     }
 
+    /// `lea rax, [rip + 0x10]`, which computes where the program itself is.
+    const LEA: [u8; 7] = [0x48, 0x8d, 0x05, 0x10, 0x00, 0x00, 0x00];
+    /// What that `lea` computes at `BASE`, inside what `mapped` maps.
+    const LEA_VALUE: u64 = BASE + 7 + 0x10;
+
+    /// The bytes, padded so the numbers these tests compute are addresses the program maps.
+    fn mapped(bytes: &[u8]) -> Vec<u8> {
+        let mut bytes = bytes.to_vec();
+        bytes.resize(0x40, 0xcc);
+        bytes
+    }
+
+    fn after_lea(rest: &[u8]) -> Vec<u8> {
+        mapped(&LEA.iter().chain(rest).copied().collect::<Vec<_>>())
+    }
+
     #[test]
     fn a_transfer_before_any_read_or_overwrite_settles_nothing() {
-        // mov eax, 0x1234; ret -- the caller may read it, and the run cannot see the caller.
-        let answer = answer(&[0xb8, 0x34, 0x12, 0x00, 0x00, 0xc3], 2, Work::BlockLocal);
+        // lea rax, [rip + 0x1234]; ret -- the caller may read it, and the run cannot see the caller.
+        let answer = answer(&after_lea(&[0xc3]), 2, Work::BlockLocal);
         assert_eq!(computes(&answer.value[0]), None);
     }
 
     #[test]
     fn a_run_that_ends_before_any_read_or_overwrite_settles_nothing() {
-        // mov eax, 0x1234, and nothing listed after it.
-        let answer = answer(&[0xb8, 0x34, 0x12, 0x00, 0x00, 0xc3], 1, Work::BlockLocal);
+        // lea rax, [rip + 0x1234], and nothing listed after it.
+        let answer = answer(&after_lea(&[0xc3]), 1, Work::BlockLocal);
         assert_eq!(computes(&answer.value[0]), None);
     }
 
     #[test]
     fn a_number_built_on_by_any_byte_is_a_step_not_a_result() {
-        // mov eax, 0x1234; add bl, ah; mov eax, 5 -- `ah` is the second byte of `rax`, so
+        // lea; add bl, ah; mov eax, 5 -- `ah` is the second byte of `rax`, so
         // the add builds on the value even though no read starts where it does.
-        let answer = answer(
-            &[
-                0xb8, 0x34, 0x12, 0x00, 0x00, 0x00, 0xe3, 0xb8, 0x05, 0x00, 0x00, 0x00,
-            ],
-            3,
-            Work::BlockLocal,
-        );
+        let bytes = after_lea(&[0x00, 0xe3, 0xb8, 0x05, 0x00, 0x00, 0x00]);
+        let answer = answer(&bytes, 3, Work::BlockLocal);
         assert_eq!(computes(&answer.value[0]), None);
     }
 
     #[test]
     fn a_number_copied_and_then_overwritten_everywhere_is_its_result() {
-        // mov eax, 0x1234; mov ecx, eax; cmp ecx, 1; mov eax, 5; mov ecx, 6
-        let answer = answer(
-            &[
-                0xb8, 0x34, 0x12, 0x00, 0x00, 0x89, 0xc1, 0x83, 0xf9, 0x01, 0xb8, 0x05, 0x00, 0x00,
-                0x00, 0xb9, 0x06, 0x00, 0x00, 0x00,
-            ],
-            5,
-            Work::BlockLocal,
-        );
-        assert_eq!(computes(&answer.value[0]), Some(0x1234));
+        // lea; mov ecx, eax; cmp ecx, 1; mov eax, 5; mov ecx, 6
+        let bytes = after_lea(&[
+            0x89, 0xc1, 0x83, 0xf9, 0x01, 0xb8, 0x05, 0x00, 0x00, 0x00, 0xb9, 0x06, 0x00, 0x00,
+            0x00,
+        ]);
+        let answer = answer(&bytes, 5, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), Some(LEA_VALUE));
     }
 
     #[test]
     fn a_number_overwritten_before_any_read_is_still_its_result() {
-        // mov eax, 0x1234; mov eax, 5; mov ebx, eax -- the read is of the 5
-        let answer = answer(
-            &[
-                0xb8, 0x34, 0x12, 0x00, 0x00, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x89, 0xc3,
-            ],
-            3,
-            Work::BlockLocal,
-        );
-        assert_eq!(computes(&answer.value[0]), Some(0x1234));
+        // lea; mov eax, 5; mov ebx, eax -- the read is of the 5
+        let bytes = after_lea(&[0xb8, 0x05, 0x00, 0x00, 0x00, 0x89, 0xc3]);
+        let answer = answer(&bytes, 3, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), Some(LEA_VALUE));
     }
 
     #[test]
     fn a_number_partly_overwritten_and_then_built_on_is_a_step() {
-        // mov eax, 0x1234; mov al, 5; add ebx, eax -- `al` leaves the rest
-        // of the number standing, and the add builds on it.
-        let answer = answer(
-            &[0xb8, 0x34, 0x12, 0x00, 0x00, 0xb0, 0x05, 0x01, 0xc3],
-            3,
-            Work::BlockLocal,
-        );
+        // lea; mov al, 5; add ebx, eax -- `al` leaves the rest of the number
+        // standing, and the add builds on it.
+        let answer = answer(&after_lea(&[0xb0, 0x05, 0x01, 0xc3]), 3, Work::BlockLocal);
         assert_eq!(computes(&answer.value[0]), None);
+    }
+
+    #[test]
+    fn a_number_that_stays_put_when_the_program_moves_is_no_address() {
+        // mov eax, 0x1017; mov eax, 5; mov ebx, eax -- the number the `lea` above
+        // computes, mapped and a result alike, but lifted a page on it is still 0x1017.
+        let bytes = mapped(&[
+            0xb8, 0x17, 0x10, 0x00, 0x00, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x89, 0xc3,
+        ]);
+        let answer = answer(&bytes, 3, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), None);
+    }
+
+    #[test]
+    fn a_page_and_its_offset_are_one_address_only_where_the_block_carries_one_into_the_other() {
+        // adrp x0, 0x2000; add x0, x0, #0x50; ldr x0, [x0]; ret
+        let bytes = [
+            0x00, 0x00, 0x00, 0xb0, 0x00, 0x40, 0x01, 0x91, 0x00, 0x00, 0x40, 0xf9, 0xc0, 0x03,
+            0x5f, 0xd6,
+        ];
+        let machine = Everywhere(embedded_machine("aarch64").expect("AArch64 is compiled in"));
+        // Mapped far enough that the page and the address in it are the program's.
+        let mut image = bytes.to_vec();
+        image.resize(0x1100, 0);
+        let program = Mapped::new(BASE, image);
+        let answered = Answered {
+            decoders: &machine,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            facts: None,
+            fate: None,
+            spelled: true,
+            clobbered: &[],
+        };
+        let listed = |work| {
+            let request = Listing {
+                start: BASE,
+                stop: Stop::After(4),
+            };
+            listing(&answered, request, work, Revision::default()).value
+        };
+        let claims = |lines: &[Line]| {
+            lines
+                .iter()
+                .map(|line| {
+                    let kinds = line.annotations.iter().map(|annotation| annotation.kind);
+                    kinds.collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        // A run entered anywhere knows nothing of `x0` at the add: the page is a step, the rest unknown.
+        let run = claims(&listed(Work::BlockLocal));
+        assert!(run.iter().all(Vec::is_empty), "{run:?}");
+        // A block carries the page into the add, whose sum moves a page with the program and is read through.
+        let block = claims(&listed(Work::Function));
+        let address = 0x2050;
+        assert_eq!(block[0], []);
+        assert_eq!(block[1], [AnnotationKind::Computes { value: address }]);
+        assert!(
+            block[2].contains(&AnnotationKind::Reads { address, width: 8 }),
+            "{block:?}"
+        );
     }
 
     #[test]

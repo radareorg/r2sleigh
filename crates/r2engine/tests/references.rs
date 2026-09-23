@@ -7,10 +7,9 @@
 
 mod common;
 
-use common::{BASE, FORKED, JOINED, Literal, ONE, TWO};
+use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, TWO};
 use r2engine::program::OpenProgram;
-use r2engine::query::Unread;
-use r2ssa::DataRefKind;
+use r2engine::query::{ReferenceKind, Unread};
 use r2ssa::body::{Unresolved, UnresolvedReason};
 
 #[test]
@@ -52,18 +51,54 @@ fn an_index_over_bodies_walked_to_their_end_is_closed() {
 }
 
 #[test]
-fn a_program_linked_low_still_has_references() {
-    // Whether a constant is an address is what the program declares there,
-    // not how large it is: this one is linked at 0x1000.
+fn a_program_linked_low_has_exactly_the_references_its_listing_claims() {
+    // Linked at 0x1000, so a floor under which numbers are no addresses would
+    // leave this empty. Every fact is a use, or a number that moves with the
+    // program; `mov eax, 1` and the return address a call pushes are neither.
     let mut program = common::opened();
     let facts = program.references().expect("the index builds").value.facts;
-    let named = |from: u64, kind: DataRefKind| {
-        facts
-            .iter()
-            .any(|fact| fact.from == from && fact.to == ONE && fact.kind == kind)
-    };
-    assert!(named(FORKED, DataRefKind::Data), "{facts:?}");
-    assert!(named(JOINED + 4, DataRefKind::Data), "{facts:?}");
-    // And a small immediate names nothing the program declares.
-    assert!(facts.iter().all(|fact| fact.to >= BASE), "{facts:?}");
+    let (code, data) = (ReferenceKind::Code, ReferenceKind::Data);
+    let listed = facts
+        .iter()
+        .map(|fact| (fact.from, fact.to, fact.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        [
+            // call one
+            (CALLER, ONE, code),
+            // je L, in forked and in joined
+            (FORKED + 9, FORKED + 0x10, code),
+            (JOINED + 2, JOINED + 0xb, code),
+            // lea rdi, [one], passed as it stands; then call one
+            (PASSES, ONE, data),
+            (PASSES + 7, ONE, code),
+            // add rax, 8 after lea rax, [one], in one block: the sum is what is returned
+            (STEPPED + 7, ONE + 8, data),
+        ]
+    );
+}
+
+#[test]
+fn the_index_is_what_each_function_listing_claims() {
+    // `ax` and `pdf` are one owner's answer: every fact from a function is a
+    // claim a line of its listing makes, and every claim naming this program
+    // is a fact. The ARM program switches instruction set inside one function.
+    for literal in [Literal::new(), Literal::arm_thumb()] {
+        let mut program = OpenProgram::of(literal);
+        let facts = program.references().expect("the index builds").value.facts;
+        let functions = program.functions().expect("discovery runs");
+        let mut claimed = Vec::new();
+        for function in &functions {
+            let lines = program
+                .function_listing(function.address)
+                .expect("it lists")
+                .value;
+            claimed.extend(r2engine::query::references::claimed_by(&lines));
+        }
+        claimed.sort_unstable();
+        claimed.dedup();
+        assert_eq!(claimed, facts);
+        assert!(!facts.is_empty());
+    }
 }

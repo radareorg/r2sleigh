@@ -84,10 +84,6 @@ impl Program for Fixture {
         false
     }
 
-    fn in_loaded_section(&self, _vaddr: u64) -> bool {
-        false
-    }
-
     fn name_at(&self, vaddr: u64) -> Option<String> {
         (vaddr == BASE).then(|| self.name.to_owned())
     }
@@ -305,10 +301,6 @@ impl r2ssa::body::Program for Importing {
 
 impl Program for Importing {
     fn holds_static_data(&self, _vaddr: u64) -> bool {
-        false
-    }
-
-    fn in_loaded_section(&self, _vaddr: u64) -> bool {
         false
     }
 

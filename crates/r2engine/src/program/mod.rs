@@ -101,6 +101,9 @@ pub struct OpenProgram<S: Source> {
     /// The same instruction set with TMode set, where the architecture has
     /// one. Which functions it decodes is what `modes` says.
     thumb_machine: Option<EmbeddedMachine>,
+    /// The registers the machine's convention says a call leaves undefined;
+    /// ARM and Thumb decode apart but call alike, so one set serves both.
+    clobbered: Box<[r2ssa::CanonicalStorageId]>,
 }
 
 impl<S: Source> OpenProgram<S> {
@@ -140,6 +143,7 @@ impl<S: Source> OpenProgram<S> {
             next: None,
             machine: None,
             thumb_machine: None,
+            clobbered: Box::default(),
         }
     }
 
@@ -172,6 +176,11 @@ impl<S: Source> OpenProgram<S> {
                 r2sleigh_lift::embedded_thumb_machine(&self.source.container().arch.name)
                     .transpose()
                     .map_err(|error| error.to_string())?;
+            self.clobbered = self
+                .machine
+                .as_ref()
+                .map(|machine| r2ssa::call_clobbered_storages(&machine.arch))
+                .unwrap_or_default();
         }
         let revision = self.source.byte_revision();
         if self.derived_at == Some(revision) {
@@ -263,7 +272,7 @@ impl<S: Source> OpenProgram<S> {
     fn ensure_decodable(&mut self) -> Result<(), String> {
         self.ensure_current()?;
         if self.thumb_machine.is_some() && self.modes_at != Some(self.source.byte_revision()) {
-            self.surveyed(|_, _| {})?;
+            self.surveyed(|_, _, _| {})?;
         }
         Ok(())
     }
@@ -540,10 +549,6 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
             .any(|section| !section.is_code)
     }
 
-    fn in_loaded_section(&self, vaddr: u64) -> bool {
-        self.loaded_sections_at(vaddr).next().is_some()
-    }
-
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.imports
             .get(&vaddr)
@@ -600,10 +605,6 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
         self.program.holds_static_data(vaddr)
-    }
-
-    fn in_loaded_section(&self, vaddr: u64) -> bool {
-        self.program.in_loaded_section(vaddr)
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {

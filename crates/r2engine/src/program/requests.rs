@@ -11,7 +11,8 @@ use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
 use crate::native::{NativeRefusal, Prepared, Survey};
 use crate::query::{
-    Answer, Answered, Completion, Line, Listing, Memory, References, Stop, Unread, Work,
+    Answer, Answered, Completion, Decoders, DefUse, Line, Listing, Memory, References, Stop,
+    Unread, Work,
 };
 use crate::{EngineDecompileResponse, RenderTier};
 
@@ -21,8 +22,52 @@ pub struct Rendering {
     pub response: EngineDecompileResponse,
 }
 
-/// One walked body with the machine it was lifted for, or why it could not be walked.
-type Walked<'t, 'l> = Result<(&'t crate::native::NativeTarget<'t>, &'l Survey), &'l NativeRefusal>;
+/// One walked body with the target and decoder it was lifted with, or why it could not be walked.
+type Surveyed<'t, 'l> = Result<
+    (
+        &'t crate::native::NativeTarget<'t>,
+        &'t r2sleigh_lift::EmbeddedMachine,
+        &'l Survey,
+    ),
+    &'l NativeRefusal,
+>;
+
+/// The one decoder a body was walked with, whatever the address.
+struct Walked<'m>(&'m r2sleigh_lift::EmbeddedMachine);
+
+impl Decoders for Walked<'_> {
+    fn at(&self, _vaddr: u64) -> Option<&r2sleigh_lift::EmbeddedMachine> {
+        Some(self.0)
+    }
+}
+
+/// A body's blocks listed in address order, each one run folded across its instructions.
+fn listed_by_block(
+    answered: &Answered<'_>,
+    blocks: &[r2il::R2ILBlock],
+    revision: crate::query::Revision,
+) -> Answer<Vec<Line>> {
+    let mut extents = blocks
+        .iter()
+        .filter(|block| block.size > 0)
+        .map(|block| (block.addr, block.addr + u64::from(block.size)))
+        .collect::<Vec<_>>();
+    extents.sort_unstable();
+    extents.dedup();
+    let mut whole = Answer::complete(Vec::new(), revision);
+    for (start, end) in extents {
+        let listing = Listing {
+            start,
+            stop: Stop::At(end),
+        };
+        let answer = crate::query::listing(answered, listing, Work::Function, revision);
+        whole.value.extend(answer.value);
+        if whole.completion == Completion::Complete {
+            whole.completion = answer.completion;
+        }
+    }
+    whole
+}
 
 impl<S: Source> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
@@ -87,55 +132,39 @@ impl<S: Source> OpenProgram<S> {
     ///
     /// By each block's own extent: sweeping from the lowest block to the
     /// highest ran through whatever lay between -- another function's bytes,
-    /// or the whole gap to a cold partition placed far away.
+    /// or the whole gap to a cold partition placed far away. The blocks and the
+    /// def-use are the walked body's, which is what the reference index reads.
     pub fn function_listing(&mut self, entry: u64) -> Result<Answer<Vec<Line>>, String> {
         self.start_request();
         let prepared = self.prepare(entry)?;
-        let artifact = prepared.artifact().artifact();
-        let mut blocks = artifact
-            .function()
-            .blocks()
-            .iter()
-            .filter(|block| block.size > 0)
-            .map(|block| (block.addr, block.addr + u64::from(block.size)))
-            .collect::<Vec<_>>();
-        blocks.sort_unstable();
-        let answered = self.answered(Some(artifact));
-        let mut whole = Answer::complete(Vec::new(), self.revision());
-        for (start, end) in blocks {
-            let answer = crate::query::listing(
-                &answered,
-                Listing {
-                    start,
-                    stop: Stop::At(end),
-                },
-                Work::Function,
-                whole.revision,
-            );
-            whole.value.extend(answer.value);
-            if whole.completion == Completion::Complete {
-                whole.completion = answer.completion;
-            }
-        }
-        Ok(whole)
+        let target = self.target(entry)?;
+        let lifted = prepared.lifted();
+        let fate = DefUse::new(&lifted, target.arch);
+        let answered = Answered {
+            fate: Some(&fate),
+            ..self.answered(Some(prepared.artifact().artifact()))
+        };
+        Ok(listed_by_block(&answered, &lifted, self.revision()))
     }
 
     /// Every function the program has, from what the container states and
     /// what the bodies reach.
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
         self.start_request();
-        self.surveyed(|_, _| {})
+        self.surveyed(|_, _, _| {})
     }
 
     /// Every reference the program makes, from every function discovery
     /// believes, sorted and without repeats, with the coverage it was read over.
     ///
-    /// Read off the lift discovery's own walk saw, so each body is walked once.
+    /// Each body's blocks are listed as `pdf` lists them and the index is what
+    /// those lines claim, in the instruction set discovery walked the body in.
     pub fn references(&mut self) -> Result<Answer<References>, String> {
         self.start_request();
+        let revision = self.revision();
         let mut index = References::default();
-        self.surveyed(|entry, walked| {
-            let (target, survey) = match walked {
+        self.surveyed(|program, entry, walked| {
+            let (target, machine, survey) = match walked {
                 Ok(walked) => walked,
                 Err(refusal) => {
                     index
@@ -151,30 +180,34 @@ impl<S: Source> OpenProgram<S> {
                     .unresolved
                     .insert(entry, survey.unresolved.clone());
             }
-            match r2ssa::data_refs_from_blocks(&survey.lifted, Some(target.arch)) {
-                Some(refs) => {
-                    index.coverage.read.push(entry);
-                    index.facts.extend(refs);
-                }
-                None => {
-                    index.coverage.unread.insert(entry, Unread::NoSsa);
-                }
+            let fate = DefUse::new(&survey.lifted, target.arch);
+            let answered = Answered {
+                decoders: &Walked(machine),
+                fate: Some(&fate),
+                spelled: false,
+                ..program.answered(None)
+            };
+            let lines = listed_by_block(&answered, &survey.lifted, revision).value;
+            // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
+            if fate.failed() {
+                index.coverage.unread.insert(entry, Unread::NoSsa);
+                return;
             }
+            index.coverage.read.push(entry);
+            index
+                .facts
+                .extend(crate::query::references::claimed_by(&lines));
         })?;
-        // A candidate names this program only where a section it loads holds it, however low it is linked.
-        index
-            .facts
-            .retain(|fact| crate::native::Program::in_loaded_section(&*self, fact.to));
         index.coverage.read.sort_unstable();
         index.facts.sort_unstable();
         index.facts.dedup();
-        Ok(Answer::complete(index, self.revision()))
+        Ok(Answer::complete(index, revision))
     }
 
     /// Discovery, handing `read` the lift of each body it walked.
     pub(super) fn surveyed(
         &mut self,
-        mut read: impl FnMut(u64, Walked<'_, '_>),
+        mut read: impl FnMut(&Self, u64, Surveyed<'_, '_>),
     ) -> Result<Vec<Discovered>, String> {
         self.ensure_current()?;
         let seeds = self.stated_functions();
@@ -191,12 +224,16 @@ impl<S: Source> OpenProgram<S> {
             None => None,
         };
         let found = crate::discovery::functions(program, seeds, |entry, in_thumb| {
-            let target = match (in_thumb, &thumb) {
-                (true, Some(thumb)) => thumb,
-                _ => &primary,
+            let (target, machine) = match (in_thumb, &thumb, program.machine_in(true)) {
+                (true, Some(thumb), Some(machine)) => (thumb, machine),
+                _ => (&primary, program.machine_in(false)?),
             };
             let survey = crate::native::surveyed(target, program, entry);
-            read(entry, survey.as_ref().map(|survey| (target, survey)));
+            read(
+                program,
+                entry,
+                survey.as_ref().map(|survey| (target, machine, survey)),
+            );
             let mut survey = survey.ok()?;
             let transfers = &mut survey.transfers;
             if thumb.is_some() {
@@ -256,6 +293,9 @@ impl<S: Source> OpenProgram<S> {
                 endian: self.endian(),
             },
             facts,
+            fate: None,
+            spelled: true,
+            clobbered: &self.clobbered,
         }
     }
 }

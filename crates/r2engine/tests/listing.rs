@@ -59,9 +59,12 @@ fn the_function_listing_refines_the_run_and_never_contradicts_it() {
             }
         }
     }
-    // mov eax, 1; ret -- the run cannot see past the return; the def-use says nothing reads it.
+    // mov eax, 1; ret -- nothing reads it, but lifted a page on it is still 1, so it is no address.
     assert_eq!(pd(ONE, 2)[0], (ONE, None));
-    assert_eq!(pdf(ONE)[0], (ONE, Some(1)));
+    assert_eq!(pdf(ONE)[0], (ONE, None));
+    // lea rax, [one]; add rax, 8; ret -- the block carries the lea into the add, whose sum is returned.
+    assert_eq!(pd(STEPPED, 3)[1], (STEPPED + 7, None));
+    assert_eq!(pdf(STEPPED)[1], (STEPPED + 7, Some(ONE + 8)));
 }
 
 #[test]

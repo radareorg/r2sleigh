@@ -21,8 +21,10 @@ pub mod references;
 
 pub use decode::listing;
 pub use memo::{Memo, MemoStats};
-pub use records::{Annotation, AnnotationKind, Answered, Decoders, Line, Listing, Memory, Stop};
-pub use references::{Coverage, References, Unread};
+pub use records::{
+    Annotation, AnnotationKind, Answered, Decoders, DefUse, Line, Listing, Memory, Stop,
+};
+pub use references::{Coverage, Reference, ReferenceKind, References, Unread};
 
 /// How much work a request permits.
 ///
@@ -36,12 +38,14 @@ pub enum Work {
     Decode,
     /// Lift one instruction and fold within it.
     InstructionLocal,
-    /// Fold across a run of instructions, which is what an address built over
-    /// three of them needs, and what says whether a number one instruction
-    /// computes is an address or a step towards one.
+    /// Follow the run after each instruction, which says whether a number one
+    /// instruction computes is an address or a step towards one. A run may be
+    /// entered anywhere, so nothing is folded across its instructions.
     BlockLocal,
-    /// Walk the function and prepare it, so a line can carry what was proved
-    /// about the values it defines.
+    /// List the function block by block: each block is entered only at its
+    /// top, so an address built over several of its instructions folds, and
+    /// the body's def-use settles what the run cannot; a prepared function
+    /// adds what was proved about the values each line defines.
     Function,
 }
 

@@ -251,27 +251,6 @@ impl SSAFunction {
         Ok(func)
     }
 
-    /// Build SSA for data-reference recovery.
-    ///
-    /// This keeps memory reads intact and applies a single SCCP pass to
-    /// recover cross-block constant targets without paying the extra
-    /// subregister normalization and decompile-prep cost.
-    pub fn from_blocks_for_data_refs(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-    ) -> Option<Self> {
-        let mut func = Self::from_blocks_raw(blocks, arch)?;
-        let cfg = crate::optimize::OptimizationConfig {
-            max_iterations: 1,
-            enable_sccp: true,
-            enable_inst_combine: false,
-            preserve_memory_reads: true,
-        };
-        func.optimize(&cfg);
-        validate_ssa_function(&func).ok()?;
-        Some(func)
-    }
-
     /// Build an SSA function from blocks without running optimization passes.
     ///
     /// This performs raw SSA construction:

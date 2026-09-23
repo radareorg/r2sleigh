@@ -12,7 +12,7 @@ use common::{
 };
 use r2engine::discovery::Confidence;
 use r2engine::program::{OpenProgram, Symbol, SymbolKind};
-use r2engine::query::{Listing, Stop};
+use r2engine::query::{Listing, ReferenceKind, Stop};
 
 fn believed(program: &mut OpenProgram<Literal>) -> Vec<(u64, Confidence)> {
     program
@@ -106,8 +106,8 @@ fn every_reference_every_believed_body_makes_is_indexed_once_in_order() {
     assert_eq!(
         read,
         [
-            (ONE, STEPPED + 8, r2ssa::DataRefKind::Data),
-            (TWO, STEPPED, r2ssa::DataRefKind::Data)
+            (ONE, STEPPED + 8, ReferenceKind::Data),
+            (TWO, STEPPED, ReferenceKind::Data)
         ]
     );
 }

@@ -14,6 +14,21 @@ use super::Support;
 use super::Work;
 use super::decode::Lookahead;
 use super::records::{Annotation, AnnotationKind, Answered, Line, Memory};
+use super::references::ReferenceKind;
+
+/// How far on a run is lifted again to see which numbers move with it.
+///
+/// A multiple of every rounding a specification applies to the program
+/// counter, so a number the program computes from its own position moves by
+/// exactly this much: AArch64's `adrp` rounds to a four-kilobyte page, the
+/// widest there is, and Thumb's aligned `pc` rounds to four bytes.
+const PAGE: u64 = 0x1000;
+
+/// The lifts of a run of lines, and the bytes each lift read.
+pub(super) struct Run<'a> {
+    pub lifts: &'a [Option<r2il::R2ILBlock>],
+    pub windows: &'a [Option<Vec<u8>>],
+}
 
 /// Say what each line's own lift says, and what the run says about it.
 ///
@@ -23,10 +38,14 @@ use super::records::{Annotation, AnnotationKind, Answered, Line, Memory};
 /// next instruction does with it: `adrp x17, 0x100008000` computes a page
 /// base, and only the `add` after it says the address is fifty bytes further
 /// on.
+///
+/// This is the one place a number becomes an address claim, and `referenced`
+/// the one place a claim becomes a reference, so the index `ax` reads is
+/// exactly what these lines claim.
 pub(super) fn over_run(
     answered: &Answered<'_>,
     work: Work,
-    lifts: &[Option<r2il::R2ILBlock>],
+    run: &Run<'_>,
     beyond: &mut Lookahead<'_, '_>,
     lines: &mut [Line],
 ) {
@@ -34,54 +53,232 @@ pub(super) fn over_run(
         return;
     }
     let memory = &answered.memory;
-    // One convention per run: ARM and Thumb decode apart but call alike.
-    let clobbered = lines
-        .first()
-        .and_then(|line| answered.decoders.at(line.address))
-        .map(|machine| r2ssa::call_clobbered_storages(&machine.arch))
-        .unwrap_or_default();
+    let clobbered = answered.clobbered;
+    // A function listing's run is one block, entered only at its top, so what one line leaves the next reads.
+    let carry = work >= Work::Function;
+    let mut named = named_over(run.lifts, carry, clobbered);
+    // A number the program does not map names nothing in it, whatever it moves with.
+    for one in named.iter_mut().flatten() {
+        if one
+            .computed
+            .as_ref()
+            .is_some_and(|computed| !memory.maps(computed.value))
+        {
+            one.computed = None;
+        }
+    }
+    let relative = relative_over(answered, run, lines, &named, carry);
+    let graph = (work >= Work::Function).then_some(answered.fate).flatten();
     for (index, line) in lines.iter_mut().enumerate() {
-        let (Some(lift), Some(syntax)) = (lifts.get(index).and_then(Option::as_ref), &line.syntax)
-        else {
+        let (Some(lift), Some(Some(named))) = (
+            run.lifts.get(index).and_then(Option::as_ref),
+            named.get(index),
+        ) else {
             continue;
         };
-        let mut kinds = touched_by(lift);
-        if work >= Work::BlockLocal {
-            let graph = (work >= Work::Function)
-                .then_some(answered.facts)
-                .flatten()
-                .map(r2ssa::SsaArtifact::graph);
+        let mut claims = named
+            .touched
+            .iter()
+            .map(|(kind, own)| (*kind, folded_support(*own)))
+            .collect::<Vec<_>>();
+        if work >= Work::BlockLocal
+            && let Some(computed) = &named.computed
+            && relative.get(index).copied() == Some(true)
+        {
             let mut after = After {
-                rest: &lifts[index + 1..],
+                rest: &run.lifts[index + 1..],
                 beyond: &mut *beyond,
-                clobbered: &clobbered,
+                clobbered,
                 graph,
             };
-            kinds.extend(computed_by(lift, &mut after, line.address));
+            if fate_of(lift, &mut after, &computed.output, line.address) == Fate::Result {
+                let kind = AnnotationKind::Computes {
+                    value: computed.value,
+                };
+                claims.push((kind, folded_support(computed.own)));
+            }
         }
-        kinds.extend(held_at(memory, &kinds));
+        let held = held_at(memory, &claims);
+        claims.extend(held.into_iter().map(|kind| (kind, Support::Folded)));
         if work >= Work::Function {
-            kinds.extend(proved_about(answered, line.address));
+            let proved = proved_about(answered, line.address);
+            claims.extend(proved.into_iter().map(|kind| (kind, Support::Solved)));
         }
-        line.annotations = kinds
+        line.annotations = claims
             .into_iter()
-            .map(|kind| Annotation {
-                support: support_for(kind),
-                operand: sole_operand(syntax, kind.address()),
+            .map(|(kind, support)| Annotation {
                 kind,
+                support,
+                operand: line
+                    .syntax
+                    .as_ref()
+                    .and_then(|syntax| sole_operand(syntax, kind.address())),
+                reference: referenced(memory, kind),
             })
             .collect();
     }
+}
+
+/// Whether a claim names an address of this program.
+///
+/// An address the instruction transfers to or accesses is used as one, and a
+/// number it computes is claimed at all only where it moves with the program;
+/// either names this program wherever the program maps it. What a read holds
+/// is data, and a pool word is a pc-relative or thread offset as often as a
+/// pointer, so the read is the reference and the word it holds is not.
+fn referenced(memory: &Memory<'_>, kind: AnnotationKind) -> Option<ReferenceKind> {
+    match kind {
+        AnnotationKind::Target { address, .. } => {
+            memory.maps(address).then_some(ReferenceKind::Code)
+        }
+        AnnotationKind::Reads { address, .. }
+        | AnnotationKind::Writes { address, .. }
+        | AnnotationKind::Computes { value: address } => {
+            memory.maps(address).then_some(ReferenceKind::Data)
+        }
+        AnnotationKind::Holds { .. } | AnnotationKind::Bounds { .. } => None,
+    }
+}
+
+/// Decoded where the instruction's own operations fold the number, folded where the block before it had to.
+fn folded_support(own: bool) -> Support {
+    match own {
+        true => Support::Decoded,
+        false => Support::Folded,
+    }
+}
+
+/// What one instruction names, folded as far as its run allows.
+struct Named {
+    /// Every address its operations transfer to or access, and whether its own operations fold it.
+    touched: Vec<(AnnotationKind, bool)>,
+    /// The number it leaves, where it computes one rather than copying one it read.
+    computed: Option<Computed>,
+}
+
+/// A number one instruction leaves, where it leaves it, and whether its own operations fold it.
+struct Computed {
+    value: u64,
+    output: Varnode,
+    own: bool,
+}
+
+/// Name each line of a run, carrying what one line leaves into the next where the run is one block.
+fn named_over(
+    lifts: &[Option<r2il::R2ILBlock>],
+    carry: bool,
+    clobbered: &[CanonicalStorageId],
+) -> Vec<Option<Named>> {
+    let mut carried = BlockOrigins::default();
+    lifts
+        .iter()
+        .map(|lift| {
+            if !carry {
+                carried = BlockOrigins::default();
+            }
+            let Some(lift) = lift else {
+                carried = BlockOrigins::default();
+                return None;
+            };
+            Some(named_by(lift, &mut carried, clobbered))
+        })
+        .collect()
+}
+
+/// What one instruction names, from what the block held before it.
+fn named_by(
+    lift: &r2il::R2ILBlock,
+    carried: &mut BlockOrigins,
+    clobbered: &[CanonicalStorageId],
+) -> Named {
+    let before = carried.clone();
+    let mut own = BlockOrigins::default();
+    let mut touched: Vec<(AnnotationKind, bool)> = Vec::new();
+    for op in &lift.ops {
+        let alone = touched_at(&own, op);
+        for kind in touched_at(carried, op) {
+            if !touched.iter().any(|(held, _)| *held == kind) {
+                touched.push((kind, alone.contains(&kind)));
+            }
+        }
+        carried.step(op);
+        own.step(op);
+        if matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }) {
+            carried.forget(clobbered);
+        }
+    }
+    // A number the instruction only copies from a register it read was computed where that was.
+    let copied = lift
+        .ops
+        .iter()
+        .flat_map(R2ILOp::inputs)
+        .filter(|input| input.space == SpaceId::Register)
+        .filter_map(|input| before.of(input).and_then(ValueOrigin::constant))
+        .collect::<BTreeSet<_>>();
+    // An address fills a register, so of the registers left holding a number the widest is the result; a flag is one bit.
+    let computed = lift
+        .ops
+        .iter()
+        .filter_map(R2ILOp::output)
+        .filter(|output| output.space == SpaceId::Register)
+        .filter_map(|output| Some((output, carried.of(output)?.constant()?)))
+        .filter(|(_, value)| !copied.contains(value))
+        .max_by_key(|(output, _)| output.size)
+        .map(|(output, value)| Computed {
+            value,
+            output: output.clone(),
+            own: own.of(output).and_then(ValueOrigin::constant) == Some(value),
+        });
+    Named { touched, computed }
+}
+
+/// The number one named line computes, where it computes one.
+fn computed(one: &Option<Named>) -> Option<&Computed> {
+    one.as_ref().and_then(|one| one.computed.as_ref())
+}
+
+/// Whether each line's computed number moves with the program: lifted a page on, it is a page further.
+fn relative_over(
+    answered: &Answered<'_>,
+    run: &Run<'_>,
+    lines: &[Line],
+    named: &[Option<Named>],
+    carry: bool,
+) -> Vec<bool> {
+    // Only as far as the last number that needs it: what the block carries runs forward.
+    let Some(last) = named.iter().rposition(|one| computed(one).is_some()) else {
+        return vec![false; lines.len()];
+    };
+    let shifted = super::decode::lift_run(answered, &lines[..=last], &run.windows[..=last], PAGE);
+    let there = named_over(&shifted, carry, answered.clobbered);
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let (Some(here), Some(there)) = (
+                named.get(index).and_then(computed),
+                there.get(index).and_then(computed),
+            ) else {
+                return false;
+            };
+            let bits = answered
+                .decoders
+                .at(line.address)
+                .map_or(64, |machine| machine.arch.addr_size.saturating_mul(8));
+            let mask = u64::MAX >> 64u32.saturating_sub(bits).min(63);
+            there.value.wrapping_sub(here.value) & mask == PAGE & mask
+        })
+        .collect()
 }
 
 /// What this revision holds wherever the instruction reads.
 ///
 /// Said beside the read rather than folded into it: the bytes there are a fact
 /// about this revision, and the load is a fact about the instruction.
-fn held_at(memory: &Memory<'_>, kinds: &[AnnotationKind]) -> Vec<AnnotationKind> {
-    kinds
+fn held_at(memory: &Memory<'_>, claims: &[(AnnotationKind, Support)]) -> Vec<AnnotationKind> {
+    claims
         .iter()
-        .filter_map(|kind| match kind {
+        .filter_map(|(kind, _)| match kind {
             AnnotationKind::Reads { address, width } => Some(AnnotationKind::Holds {
                 address: *address,
                 width: *width,
@@ -162,35 +359,6 @@ fn bounded_beyond_its_operation(
     }
 }
 
-/// How well supported a claim of this shape is.
-fn support_for(kind: AnnotationKind) -> Support {
-    match kind {
-        // The instruction's own operands say it transfers there or reads it.
-        AnnotationKind::Target { .. }
-        | AnnotationKind::Reads { .. }
-        | AnnotationKind::Writes { .. } => Support::Decoded,
-        // Folded, either within the instruction or across the run.
-        AnnotationKind::Computes { .. } | AnnotationKind::Holds { .. } => Support::Folded,
-        // An over-approximation an analysis over the function established.
-        AnnotationKind::Bounds { .. } => Support::Solved,
-    }
-}
-
-/// Every address one instruction's operations name.
-fn touched_by(lift: &r2il::R2ILBlock) -> Vec<AnnotationKind> {
-    let mut origins = BlockOrigins::default();
-    let mut kinds: Vec<AnnotationKind> = Vec::new();
-    for op in &lift.ops {
-        for kind in touched(&origins, op) {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-        origins.step(op);
-    }
-    kinds
-}
-
 /// What can be known of the program after one instruction.
 struct After<'a, 'r, 'b> {
     /// The lifts of the lines that follow it in the run.
@@ -200,33 +368,28 @@ struct After<'a, 'r, 'b> {
     /// The registers the convention says a call leaves undefined.
     clobbered: &'a [CanonicalStorageId],
     /// The function's def-use, where the request paid for it.
-    graph: Option<&'a SsaGraph>,
+    graph: Option<&'a super::records::DefUse<'a>>,
 }
 
-/// The number this instruction produces, where nothing derives another from it.
+/// Whether the number an instruction leaves in `output` is a step or its result.
 ///
 /// A value a later instruction builds a number on is a step towards an address
 /// rather than one: spelling `adrp x17, reloc.humanize_number` named the page
 /// base the `add` after it was about to move fifty bytes past. Copying, storing,
 /// comparing, loading through or passing the number is using it as it stands.
-fn computed_by(
+fn fate_of(
     lift: &r2il::R2ILBlock,
     after: &mut After<'_, '_, '_>,
+    output: &Varnode,
     address: u64,
-) -> Option<AnnotationKind> {
-    let mut origins = BlockOrigins::default();
-    for op in &lift.ops {
-        origins.step(op);
-    }
-    let output = lift.ops.iter().rev().find_map(r2il::R2ILOp::output)?;
-    let value = origins.of(output)?.constant()?;
-    let fate = match straight_line_fate(lift, after, output) {
+) -> Fate {
+    match straight_line_fate(lift, after, output) {
         Fate::Unknown => after
             .graph
+            .and_then(super::records::DefUse::graph)
             .map_or(Fate::Unknown, |graph| defined_fate(graph, address, output)),
         settled => settled,
-    };
-    (fate == Fate::Result).then_some(AnnotationKind::Computes { value })
+    }
 }
 
 /// Whether a number an instruction leaves is a step, and who can tell.
@@ -410,7 +573,7 @@ fn derived_from(graph: &SsaGraph, defined: ValueId) -> bool {
 }
 
 /// The addresses one operation names, as far as the block so far shows.
-fn touched(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
+fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
     let folded = |addr: &Varnode| origins.of(addr).and_then(ValueOrigin::constant);
     let mut found = Vec::new();
     match op {

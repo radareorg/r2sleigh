@@ -456,6 +456,17 @@ pub(crate) fn prepare_graph(
     Ok(graph)
 }
 
+/// The def-use of one body as it was lifted, with no pass that folds a use away.
+///
+/// Which listed number is a step towards another is read off this, so the listing and the
+/// reference index answer it from the same graph.
+pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<SsaGraph> {
+    let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
+    let mut machine_context = SourceMachineContext::from_blocks(blocks, arch);
+    let graph = prepare_graph(&mut function, &mut machine_context).ok()?;
+    (!graph.blocks.is_empty()).then_some(graph)
+}
+
 impl SsaArtifact {
     #[cfg(test)]
     fn new(function: SSAFunction) -> Self {
@@ -888,13 +899,6 @@ impl SsaArtifact {
             SourceMachineContext::from_blocks(blocks, arch),
             control,
         )
-    }
-
-    pub fn for_data_refs(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
-        Some(Self::new_with_context(
-            SSAFunction::from_blocks_for_data_refs(blocks, arch)?,
-            SourceMachineContext::from_blocks(blocks, arch),
-        ))
     }
 
     pub fn for_symbolic(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
@@ -3065,19 +3069,26 @@ fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
 /// disagree about which registers are in question.
 /// The registers a call leaves undefined under this architecture's convention, as storages.
 pub fn call_clobbered_storages(arch: &ArchSpec) -> Box<[CanonicalStorageId]> {
+    // Each placeable register by its name, read once; a name two registers share places neither.
+    let mut by_name = BTreeMap::<String, Option<&r2il::RegisterDef>>::new();
+    let placeable = arch.registers.iter().filter(|register| {
+        register.size != 0
+            && register
+                .offset
+                .checked_add(u64::from(register.size))
+                .is_some()
+    });
+    for register in placeable {
+        by_name
+            .entry(register.name.trim().to_ascii_lowercase())
+            .and_modify(|held| *held = None)
+            .or_insert(Some(register));
+    }
     call_clobbered_register_defs(arch)
         .into_iter()
         .filter_map(|def| {
-            let mut declared = arch.registers.iter().filter(|register| {
-                register.size != 0
-                    && register
-                        .offset
-                        .checked_add(u64::from(register.size))
-                        .is_some()
-                    && register.name.trim().eq_ignore_ascii_case(&def.name)
-            });
-            let register = declared.next()?;
-            (declared.next().is_none() && register.size == def.size).then_some(CanonicalStorageId {
+            let register = (*by_name.get(&def.name.to_ascii_lowercase())?)?;
+            (register.size == def.size).then_some(CanonicalStorageId {
                 space: CanonicalStorageSpace::Register,
                 offset: register.offset,
                 size: register.size,
