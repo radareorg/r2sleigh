@@ -314,24 +314,16 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
-/// What one walk of a body says, for the two consumers that ask about it.
-///
-/// Discovery wants where control goes and the reverse index wants every
-/// address the body names. Asked separately, each walked and lifted the same
-/// function, so the cross-reference command walked every discovered body twice
-/// -- 0.33 seconds against 0.05 for the discovery alone on `/bin/ls`.
+/// One walk of a body: where control goes, and the lift the reverse index reads.
 pub struct Survey {
     pub transfers: crate::discovery::Transfers,
-    /// What the body names, or `None` where its SSA did not build.
-    pub data_refs: Option<Vec<r2ssa::DataRefFact>>,
+    /// The body's own lift, which the reverse index reads.
+    pub lifted: Vec<r2il::R2ILBlock>,
     /// Where the walk stopped without knowing where control went.
     pub unresolved: Vec<r2ssa::body::Unresolved>,
 }
 
-/// Both answers from one walk, or why the body could not be walked.
-///
-/// Discovery asks this of every address it believes; walking is the cheap
-/// half, and a body that refuses to prepare still says who it calls.
+/// Where one body transfers, walked but not prepared, or why it could not be walked.
 pub fn surveyed(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -344,13 +336,6 @@ pub fn surveyed(
         control: program.control().ssa_execution_control(),
     };
     let walked = native.walk(entry)?;
-    let blocks = walked
-        .body
-        .blocks
-        .iter()
-        .map(|block| block.lifted.clone())
-        .collect::<Vec<_>>();
-    let data_refs = r2ssa::data_refs_from_blocks(&blocks, Some(target.arch));
     let mut transfers = crate::discovery::Transfers::from(&walked.body);
     // Preparing a body costs far more than walking one, so it is done only
     // where the typed rule could fire at all: this function has to call
@@ -365,10 +350,12 @@ pub fn surveyed(
             ),
         }
     }
+    let body = walked.body;
+    let lifted = body.blocks.into_iter().map(|block| block.lifted).collect();
     Ok(Survey {
         transfers,
-        data_refs,
-        unresolved: walked.body.unresolved,
+        lifted,
+        unresolved: body.unresolved,
     })
 }
 

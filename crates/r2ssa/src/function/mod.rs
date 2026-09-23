@@ -428,6 +428,34 @@ pub struct DecompileInputs<'a> {
     pub callee_interfaces: BTreeMap<u64, SourceFunctionInterface>,
 }
 
+/// The graph every preparation reads, built from a validated function with the source's formals minted.
+pub(crate) fn prepare_graph(
+    function: &mut SSAFunction,
+    machine_context: &mut SourceMachineContext,
+) -> Result<SsaGraph, SsaPrepareError> {
+    // The validator answers with a typed integrity error naming the block
+    // and the edge it disagreed about; discarding it left the reader with
+    // "malformed SSA source input" and nothing to look at.
+    validate_ssa_function(function).map_err(|error| {
+        r2il::refusal_evidence!("ssa-integrity", "{error:?}");
+        malformed_ssa_input()
+    })?;
+    function.apply_convention_cleared_direction_flag(machine_context);
+    function.mint_entry_lane_projections(machine_context);
+    // Before the graph, so every fact built from it counts readers of a
+    // copied value where they are, not where the copy was. It rewrites
+    // reads to variables the validated function already defines, so the
+    // validation above still holds; the minted lanes could not pass it.
+    function.forward_copies();
+    machine_context.remap_memory_sites_to_prepared(function);
+    let mut graph = SsaGraph::from_function_with_storage(function);
+    crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
+    let formal_parameters =
+        crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
+    function.install_exact_formal_parameters(&graph, &formal_parameters);
+    Ok(graph)
+}
+
 impl SsaArtifact {
     #[cfg(test)]
     fn new(function: SSAFunction) -> Self {
@@ -460,26 +488,7 @@ impl SsaArtifact {
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
-        // The validator answers with a typed integrity error naming the block
-        // and the edge it disagreed about; discarding it left the reader with
-        // "malformed SSA source input" and nothing to look at.
-        validate_ssa_function(&function).map_err(|error| {
-            r2il::refusal_evidence!("ssa-integrity", "{error:?}");
-            malformed_ssa_input()
-        })?;
-        function.apply_convention_cleared_direction_flag(&machine_context);
-        function.mint_entry_lane_projections(&machine_context);
-        // Before the graph, so every fact built from it counts readers of a
-        // copied value where they are, not where the copy was. It rewrites
-        // reads to variables the validated function already defines, so the
-        // validation above still holds; the minted lanes could not pass it.
-        function.forward_copies();
-        machine_context.remap_memory_sites_to_prepared(&function);
-        let mut graph = SsaGraph::from_function_with_storage(&function);
-        crate::semantic::ensure_source_formal_parameter_values(&mut graph, &machine_context);
-        let formal_parameters =
-            crate::semantic::collect_source_formal_parameter_facts(&graph, &machine_context);
-        function.install_exact_formal_parameters(&graph, &formal_parameters);
+        let graph = prepare_graph(&mut function, &mut machine_context)?;
         let return_storages = machine_context
             .abi_model()
             .return_registers()

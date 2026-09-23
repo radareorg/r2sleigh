@@ -13,6 +13,7 @@ mod facts;
 mod loops;
 mod objects;
 mod predicates;
+mod prefix;
 mod private_objects;
 mod shared;
 mod structured;
@@ -29,6 +30,7 @@ pub use facts::*;
 pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;
+pub(crate) use prefix::*;
 pub(crate) use private_objects::*;
 pub(crate) use shared::*;
 pub(crate) use structured::*;
@@ -241,28 +243,24 @@ impl PreparedFunctionFacts {
             site,
         } = over;
         let mut phases = PhaseRecorder::open(site, function);
+        let MemoryPrefix {
+            addresses,
+            call_sites,
+            declared_slots,
+            predicates,
+            latches_by_header,
+            values,
+            objects,
+            memory,
+            memory_accesses,
+            member_run_stores,
+        } = MemoryPrefix::collect(function, graph, machine_context, &mut phases, control)?;
         macro_rules! phase {
             ($name:literal, $size:expr) => {{
                 phases.mark($name, $size);
                 control.poll()?;
             }};
         }
-        let addresses = collect_address_provenance(function, graph, machine_context);
-        phase!("addresses", graph.insts.len());
-        let call_sites = collect_call_sites(
-            function,
-            graph,
-            function.decompile_prep_facts(),
-            machine_context,
-        );
-        phase!("call_sites", call_sites.by_id.len());
-        let declared_slots = collect_declared_stack_slots(machine_context);
-        // The loops come before the objects: what a counted loop's counter
-        // reaches says how far a buffer it indexes extends, and that has to be
-        // known while the frame's objects are still being decided. Nothing in
-        // this subtree reads the object model.
-        let mut predicates = collect_predicate_facts(function, graph);
-        phase!("predicates", 0);
         let return_storages = machine_context
             .into_iter()
             .flat_map(|context| context.abi_model().return_registers())
@@ -270,60 +268,29 @@ impl PreparedFunctionFacts {
             .collect::<Vec<_>>();
         let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
         let loops = collect_structured_loop_facts(
-            function,
-            graph,
+            Body {
+                function,
+                graph,
+                machine_context,
+            },
             &predicates,
+            &latches_by_header,
             &live_out,
             storage_spans,
-            machine_context,
         );
         let inductions = collect_induction_facts(graph, &loops);
         phase!("loops", loops.len());
-        // What every value can be, once, where nine walks used to each answer
-        // a bound for their own question. The loops above say where the
-        // fixpoint has to widen to terminate, which is why it runs here.
-        let widen_at = loops
-            .values()
-            .map(|fact| fact.header)
-            .collect::<std::collections::BTreeSet<_>>();
-        let values = crate::values::solve_value_ranges(graph, function, &predicates, &widen_at);
-        // What a table dispatch switches on is what the read of that table is
-        // indexed by, which is only knowable now.
-        for (block_addr, selector) in crate::indirect::dispatch_selectors(function, graph, &values)
-        {
-            if let Some(fact) = predicates.switches.get_mut(&block_addr) {
-                fact.selector.get_or_insert(selector);
-            }
-        }
-        let (bounded, total) = values.bounded();
-        r2il::refusal_evidence!("value-ranges", "{bounded} of {total} values bounded");
-        phase!("values", bounded);
-        let (objects, memory) = collect_object_and_memory_facts(
-            function,
-            graph,
-            &addresses,
-            &call_sites,
-            machine_context,
-            &declared_slots,
-            &values,
-        );
-        phase!("objects", objects.objects.len());
         let boundaries =
             collect_source_boundary_facts(function, graph, &call_sites, machine_context, &live_out);
         phase!("boundaries", boundaries.calls.len());
-        let structured = collect_structured_dataflow_facts(
-            function,
-            graph,
-            loops,
+        let structured = StructuredDataflowFacts {
+            unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
             inductions,
-            StructuredCollectionInputs {
-                objects: &objects,
-                memory: &memory,
-                call_sites: &call_sites,
-                machine_context,
-                declared_slots: &declared_slots,
-            },
-        );
+            loops,
+            memory_accesses,
+            member_run_stores,
+            recursive_calls: collect_structured_recursive_call_facts(function, graph, &call_sites),
+        };
         phase!("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
         phase!("control_domains", 0);

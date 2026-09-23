@@ -13,8 +13,7 @@ use crate::native::{NativeRefusal, Prepared, Survey};
 use crate::query::{
     Answer, Answered, Completion, Line, Listing, Memory, References, Stop, Unread, Work,
 };
-use crate::{DataRefFact, EngineDecompileResponse, RenderTier};
-use r2ssa::body::Unresolved;
+use crate::{EngineDecompileResponse, RenderTier};
 
 /// A function rendered at one tier, and the analysis it was rendered from.
 pub struct Rendering {
@@ -22,43 +21,8 @@ pub struct Rendering {
     pub response: EngineDecompileResponse,
 }
 
-/// What discovery found, and what each body it believes said about references.
-type Surveyed = (Vec<Discovered>, BTreeMap<u64, Walk>);
-
-/// What one function's walk says about the references its body makes.
-pub(super) struct Walk {
-    data_refs: Result<Vec<DataRefFact>, Unread>,
-    unresolved: Vec<Unresolved>,
-}
-
-impl Walk {
-    /// What the index keeps of a survey, and what discovery keeps of it.
-    fn of(survey: Result<Survey, NativeRefusal>) -> (Self, Option<Survey>) {
-        let mut survey = match survey {
-            Ok(survey) => survey,
-            Err(refusal) => {
-                let data_refs = Err(Unread::Refused(refusal));
-                let unresolved = Vec::new();
-                return (
-                    Self {
-                        data_refs,
-                        unresolved,
-                    },
-                    None,
-                );
-            }
-        };
-        let data_refs = survey.data_refs.take().ok_or(Unread::NoSsa);
-        let unresolved = std::mem::take(&mut survey.unresolved);
-        (
-            Self {
-                data_refs,
-                unresolved,
-            },
-            Some(survey),
-        )
-    }
-}
+/// One walked body with the machine it was lifted for, or why it could not be walked.
+type Walked<'t, 'l> = Result<(&'t crate::native::NativeTarget<'t>, &'l Survey), &'l NativeRefusal>;
 
 impl<S: Source> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
@@ -160,39 +124,54 @@ impl<S: Source> OpenProgram<S> {
     /// what the bodies reach.
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
         self.start_request();
-        Ok(self.surveyed()?.0)
+        self.surveyed(|_, _| {})
     }
 
     /// Every reference the program makes, from every function discovery
     /// believes, sorted and without repeats, with the coverage it was read over.
     ///
-    /// Discovery walks every body it believes and the index wants what that
-    /// same walk saw, so both come from one walk per function.
+    /// Read off the lift discovery's own walk saw, so each body is walked once.
     pub fn references(&mut self) -> Result<Answer<References>, String> {
         self.start_request();
-        let (_, seen) = self.surveyed()?;
         let mut index = References::default();
-        for (entry, walk) in seen {
-            if !walk.unresolved.is_empty() {
-                index.coverage.unresolved.insert(entry, walk.unresolved);
+        self.surveyed(|entry, walked| {
+            let (target, survey) = match walked {
+                Ok(walked) => walked,
+                Err(refusal) => {
+                    index
+                        .coverage
+                        .unread
+                        .insert(entry, Unread::Refused(refusal.clone()));
+                    return;
+                }
+            };
+            if !survey.unresolved.is_empty() {
+                index
+                    .coverage
+                    .unresolved
+                    .insert(entry, survey.unresolved.clone());
             }
-            match walk.data_refs {
-                Ok(refs) => {
+            match r2ssa::data_refs_from_blocks(&survey.lifted, Some(target.arch)) {
+                Some(refs) => {
                     index.coverage.read.push(entry);
                     index.facts.extend(refs);
                 }
-                Err(why) => {
-                    index.coverage.unread.insert(entry, why);
+                None => {
+                    index.coverage.unread.insert(entry, Unread::NoSsa);
                 }
             }
-        }
+        })?;
+        index.coverage.read.sort_unstable();
         index.facts.sort_unstable();
         index.facts.dedup();
         Ok(Answer::complete(index, self.revision()))
     }
 
-    /// Discovery, and the references each body it walked makes.
-    pub(super) fn surveyed(&mut self) -> Result<Surveyed, String> {
+    /// Discovery, handing `read` the lift of each body it walked.
+    pub(super) fn surveyed(
+        &mut self,
+        mut read: impl FnMut(u64, Walked<'_, '_>),
+    ) -> Result<Vec<Discovered>, String> {
         self.ensure_current()?;
         let seeds = self.stated_functions();
         let Some(&(first, _, _)) = seeds.first() else {
@@ -207,15 +186,14 @@ impl<S: Source> OpenProgram<S> {
             Some(machine) => Some(program.target_of(machine)?),
             None => None,
         };
-        let mut seen = BTreeMap::new();
         let found = crate::discovery::functions(program, seeds, |entry, in_thumb| {
             let target = match (in_thumb, &thumb) {
                 (true, Some(thumb)) => thumb,
                 _ => &primary,
             };
-            let (walk, survey) = Walk::of(crate::native::surveyed(target, program, entry));
-            seen.insert(entry, walk);
-            let mut survey = survey?;
+            let survey = crate::native::surveyed(target, program, entry);
+            read(entry, survey.as_ref().map(|survey| (target, survey)));
+            let mut survey = survey.ok()?;
             let transfers = &mut survey.transfers;
             if thumb.is_some() {
                 interworking(transfers);
@@ -241,7 +219,7 @@ impl<S: Source> OpenProgram<S> {
             self.modes = modes;
             self.modes_at = Some(self.source.byte_revision());
         }
-        Ok((found, seen))
+        Ok(found)
     }
 
     /// Where the program states a function begins, and whether it states the

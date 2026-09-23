@@ -471,35 +471,50 @@ where
 /// canonical block address is used. No variable display spelling participates
 /// in identity or propagation.
 pub fn data_refs_from_artifact(artifact: &SsaArtifact) -> Vec<DataRefFact> {
-    collect_graph_refs(artifact.graph(), |inst, output, op| {
+    refs_over(
+        artifact.graph(),
+        artifact.objects(),
+        &artifact.facts().certificates.stack_reloads,
+    )
+}
+
+/// References over one graph, a load reading a stored constant through its reload certificate.
+fn refs_over(
+    graph: &SsaGraph,
+    objects: &crate::ObjectModel,
+    stack_reloads: &std::collections::BTreeMap<
+        ValueId,
+        crate::semantic::StackReloadSourceCertificate,
+    >,
+) -> Vec<DataRefFact> {
+    collect_graph_refs(graph, |inst, output, op| {
         let SSAOp::Load { space, .. } = op else {
             return None;
         };
-        let cert = artifact.stack_reload_certificate_for_value(output)?;
+        let cert = stack_reloads.get(&output)?;
         let address = inst.inputs.first().copied()?;
         (cert.value == output
             && cert.reload == output
             && cert.load_inst == inst.id
-            && artifact.objects().object(cert.object).is_some()
-            && artifact.objects().object_for_value(address, *space) == Some(cert.object))
+            && objects.object(cert.object).is_some()
+            && objects.object_for_value(address, *space) == Some(cert.object))
         .then_some(cert.canonical_source)
     })
 }
 
-/// Every reference one body makes, read off the lift.
-///
-/// The cross-reference question is a query over the IL rather than a scanner
-/// of its own: a body that names an address names it in an operation, and the
-/// artifact this builds is what says which.
+/// Every reference one body makes, prepared only as far as references read: graph, memory prefix, stack reloads.
 pub fn data_refs_from_blocks(
     blocks: &[R2ILBlock],
     arch: Option<&ArchSpec>,
 ) -> Option<Vec<DataRefFact>> {
-    let artifact = SsaArtifact::for_data_refs(blocks, arch)?;
-    if artifact.graph().blocks.is_empty() {
+    let mut function = crate::SSAFunction::from_blocks_for_data_refs(blocks, arch)?;
+    let mut machine_context = crate::SourceMachineContext::from_blocks(blocks, arch);
+    let graph = crate::function::prepare_graph(&mut function, &mut machine_context).ok()?;
+    if graph.blocks.is_empty() {
         return None;
     }
-    Some(data_refs_from_artifact(&artifact))
+    let facts = crate::semantic::ReferenceFacts::collect(&function, &graph, &machine_context);
+    Some(refs_over(&graph, &facts.objects, &facts.stack_reloads))
 }
 
 #[cfg(test)]
@@ -739,6 +754,8 @@ mod tests {
         let refs = data_refs_from_artifact(&artifact);
         assert!(refs.contains(&DataRefFact::data(0x40400c, 0x404e08, SpaceId::Ram)));
         assert!(refs.contains(&DataRefFact::data(0x404010, 0x404e08, SpaceId::Ram)));
+        // The reduced preparation answers exactly what the full artifact does.
+        assert_eq!(data_refs_from_blocks(&blocks, None), Some(refs));
     }
 
     #[test]

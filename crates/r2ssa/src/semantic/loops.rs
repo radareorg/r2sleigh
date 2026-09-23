@@ -49,14 +49,8 @@ pub(crate) fn collect_induction_facts(
     inductions
 }
 
-pub(crate) fn collect_structured_loop_facts(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    predicates: &PredicateFacts,
-    live_out: &crate::liveout::FunctionLiveOut,
-    storage_spans: &StorageSpans,
-    machine_context: Option<&SourceMachineContext>,
-) -> BTreeMap<LoopId, StructuredLoopFact> {
+/// Each loop header with the blocks that branch back to it: one natural loop per header.
+pub(crate) fn latches_by_header(function: &SSAFunction) -> BTreeMap<u64, BTreeSet<u64>> {
     let mut latches_by_header = BTreeMap::<u64, BTreeSet<u64>>::new();
     for &block_addr in function.block_addrs() {
         for succ in function.successors(block_addr) {
@@ -68,30 +62,33 @@ pub(crate) fn collect_structured_loop_facts(
             }
         }
     }
+    latches_by_header
+}
 
+pub(crate) fn collect_structured_loop_facts(
+    code: Body<'_>,
+    predicates: &PredicateFacts,
+    latches_by_header: &BTreeMap<u64, BTreeSet<u64>>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    storage_spans: &StorageSpans,
+) -> BTreeMap<LoopId, StructuredLoopFact> {
+    let Body {
+        function, graph, ..
+    } = code;
     let mut loops = BTreeMap::new();
-    for (idx, (header, latches)) in latches_by_header.into_iter().enumerate() {
+    for (idx, (&header, latches)) in latches_by_header.iter().enumerate() {
         let id = LoopId(idx as u32);
-        let body_set = natural_loop_body(function, header, &latches);
+        let body_set = natural_loop_body(function, header, latches);
         let body = body_set.iter().copied().collect::<Vec<_>>();
         let exits = loop_exits(function, &body_set);
         let condition = loop_condition(predicates, header, &body_set, &exits);
         let loop_ = NaturalLoop {
             id,
             header,
-            latches: &latches,
+            latches,
             body: &body_set,
         };
-        let carriers = loop_carrier_facts(
-            Body {
-                function,
-                graph,
-                machine_context,
-            },
-            loop_,
-            live_out,
-            storage_spans,
-        );
+        let carriers = loop_carrier_facts(code, loop_, live_out, storage_spans);
         let (induction_phi, induction_init, induction_update) =
             loop_induction_values(graph, predicates, condition, loop_);
         let bound = loop_bound_value(

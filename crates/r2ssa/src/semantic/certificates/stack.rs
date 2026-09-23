@@ -1159,13 +1159,13 @@ pub(crate) fn collect_stack_reload_source_certificates(
     graph: &SsaGraph,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
-    structured: &StructuredDataflowFacts,
+    accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<ValueId, StackReloadSourceCertificate> {
-    let store_sources = collect_stack_store_sources(function, graph, objects, memory, structured);
+    let store_sources = collect_stack_store_sources(function, graph, objects, memory, accesses);
     let mut certificates = BTreeMap::new();
     let mut ready = VecDeque::new();
 
-    for access in structured.memory_accesses.values().filter(|access| {
+    for access in accesses.values().filter(|access| {
         !access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
     }) {
         let Some(value) = access.value else {
@@ -1251,10 +1251,10 @@ pub(crate) fn collect_stack_store_sources(
     graph: &SsaGraph,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
-    structured: &StructuredDataflowFacts,
+    accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<MemoryVersion, StackStoreSource> {
     let mut sources = BTreeMap::new();
-    for access in structured.memory_accesses.values().filter(|access| {
+    for access in accesses.values().filter(|access| {
         access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
     }) {
         let Some(value) = access.value else {

@@ -21,43 +21,6 @@ pub(crate) fn code_pointer_run_stride(
     ))
 }
 
-pub(crate) struct StructuredCollectionInputs<'a> {
-    pub(crate) objects: &'a ObjectModel,
-    pub(crate) memory: &'a MemorySSAFacts,
-    pub(crate) call_sites: &'a CallSiteFacts,
-    pub(crate) machine_context: Option<&'a SourceMachineContext>,
-    pub(crate) declared_slots: &'a DeclaredStackSlots,
-}
-
-pub(crate) fn collect_structured_dataflow_facts(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    loops: BTreeMap<LoopId, StructuredLoopFact>,
-    inductions: BTreeMap<ValueId, InductionFact>,
-    inputs: StructuredCollectionInputs<'_>,
-) -> StructuredDataflowFacts {
-    let (memory_accesses, member_run_stores) = collect_structured_memory_access_facts(
-        function,
-        graph,
-        inputs.objects,
-        inputs.memory,
-        inputs.machine_context,
-        inputs.declared_slots,
-    );
-    StructuredDataflowFacts {
-        unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
-        inductions,
-        loops,
-        memory_accesses,
-        member_run_stores,
-        recursive_calls: collect_structured_recursive_call_facts(
-            function,
-            graph,
-            inputs.call_sites,
-        ),
-    }
-}
-
 /// The aggregate a source type identifies, when it is one.
 /// How the parts of an object a wide store covers are addressed.
 ///

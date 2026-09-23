@@ -1154,8 +1154,13 @@ pub(crate) fn collect_prepared_function_certificates(
 
     let (call_results, call_results_by_inst, call_results_by_callsite) =
         collect_call_result_certificates(body, derived);
-    let stack_reloads =
-        collect_stack_reload_source_certificates(function, graph, objects, memory, structured);
+    let stack_reloads = collect_stack_reload_source_certificates(
+        function,
+        graph,
+        objects,
+        memory,
+        &structured.memory_accesses,
+    );
     let mut stack_slots: BTreeMap<ObjectId, StackSlotCertificate> = stack_slots;
     // A full-width read of a private slot is the slot's value, whatever store
     // put it there. Requiring one reaching store as well would exclude every

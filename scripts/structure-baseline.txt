@@ -1,5 +1,5 @@
-too_many_arguments 154
-too_many_lines 434
+too_many_arguments 153
+too_many_lines 433
 cognitive_complexity 53
 excessive_nesting 986
 redundant_clone 0

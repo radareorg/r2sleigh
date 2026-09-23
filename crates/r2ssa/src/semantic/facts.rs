@@ -2073,8 +2073,7 @@ impl DeclaredStackSlots {
 ///
 /// The three are read by nearly every collector in this file and are never
 /// apart, so they are one thing rather than three parameters each collector
-/// repeats. `StructuredCollectionInputs` already groups the derived facts this
-/// way for one stage; these do it for the rest.
+/// repeats.
 #[derive(Clone, Copy)]
 pub(crate) struct Body<'a> {
     pub(crate) function: &'a SSAFunction,

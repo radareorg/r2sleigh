@@ -263,7 +263,7 @@ impl<S: Source> OpenProgram<S> {
     fn ensure_decodable(&mut self) -> Result<(), String> {
         self.ensure_current()?;
         if self.thumb_machine.is_some() && self.modes_at != Some(self.source.byte_revision()) {
-            self.surveyed()?;
+            self.surveyed(|_, _| {})?;
         }
         Ok(())
     }
