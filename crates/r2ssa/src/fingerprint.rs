@@ -223,6 +223,10 @@ fn hash_op(writer: &mut FingerprintWriter, op: &SSAOp) {
             writer.tag(match kind {
                 r2il::BlockTransferKind::Move => 0,
                 r2il::BlockTransferKind::Fill => 1,
+                r2il::BlockTransferKind::Scan(r2il::BlockStop::Equal) => 2,
+                r2il::BlockTransferKind::Scan(r2il::BlockStop::Unequal) => 3,
+                r2il::BlockTransferKind::Compare(r2il::BlockStop::Equal) => 4,
+                r2il::BlockTransferKind::Compare(r2il::BlockStop::Unequal) => 5,
             });
             writer.tag(u16::try_from(*element_size).unwrap_or(u16::MAX));
         }

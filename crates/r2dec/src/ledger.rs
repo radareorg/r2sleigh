@@ -183,6 +183,8 @@ pub enum ElisionReason {
     /// operand that chose it is not a C expression, in the same way a branch's
     /// target is not one where the structure already expresses the transfer.
     BlockTransferDirection,
+    /// A scan's or a compare's whole answer, and each part's read of it: the statement assigns the parts.
+    BlockAnswerPart,
     /// A removed merge input already names the merge result, so its edge copy
     /// would be the identity assignment `x = x`.
     RedundantPhiEdge,
@@ -225,6 +227,7 @@ impl std::fmt::Display for ElisionReason {
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
             Self::CallClobberedDeclaration => "call-clobbered-declaration",
             Self::BlockTransferDirection => "block-transfer-direction",
+            Self::BlockAnswerPart => "block-answer-part",
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
             Self::DecomposedWideStore => "decomposed-wide-store",

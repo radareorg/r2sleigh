@@ -24,18 +24,14 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
                 vn(addr)
             )
         }
-        BlockTransfer {
-            kind,
-            destination,
-            source,
-            count,
-            element_size,
-            ..
-        } => format!(
-            "BlockTransfer {{ kind: {kind:?}, destination: {}, source: {}, count: {}, element_size: {element_size} }}",
-            vn(destination),
-            vn(source),
-            vn(count)
+        BlockTransfer(transfer) => format!(
+            "BlockTransfer {{ kind: {:?}, destination: {}, source: {}, count: {}, element_size: {}, answer: {} }}",
+            transfer.kind,
+            vn(&transfer.destination),
+            vn(&transfer.source),
+            vn(&transfer.count),
+            transfer.element_size,
+            transfer.answer.as_ref().map_or_else(|| "-".to_string(), vn)
         ),
         Store { space, addr, val } => {
             format!(
@@ -760,7 +756,7 @@ fn op_esil_with(disasm: &Disassembler, op: &R2ILOp, subst: &Substitutions) -> Op
         }
         // ESIL has no block operation, and spelling one as a single store
         // would claim the wrong extent.
-        BlockTransfer { .. } => OpEsil::Unmodelled,
+        BlockTransfer(_) => OpEsil::Unmodelled,
         Fence { .. } => OpEsil::Empty,
         LoadLinked { dst, addr, .. } => {
             let sz = size_suffix(dst.size);

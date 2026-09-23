@@ -693,6 +693,21 @@ impl Builder<'_> {
                 }
                 CValue::Typed(own)
             }
+            // The walk casts its addresses to the element it reads and counts in the counter's width.
+            MachineExprKind::BlockAnswer {
+                destination,
+                source,
+                count,
+                direction,
+                ..
+            } => {
+                for operand in [destination, source, direction] {
+                    self.produced(*operand);
+                }
+                self.produced(*count);
+                self.require(id, 2, unsigned(self.width(*count)));
+                CValue::Typed(own)
+            }
         }
     }
 }

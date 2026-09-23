@@ -717,24 +717,106 @@ const REPEATED_SCAN: &[u8] = &[
     0xc3, // 0x100f ret
 ];
 
-/// A repeated instruction that branches back to its own start is a loop the
-/// machine graph and the walk both name, not a contradiction between them.
-#[test]
-fn a_repeated_scan_is_a_loop_on_its_own_instruction() {
+/// The inline `memcmp` sign, read from the flags of the last pair compared.
+const REPEATED_COMPARE: &[u8] = &[
+    0x31, 0xc0, // 0x1000 xor eax, eax
+    0x48, 0x89, 0xd1, // 0x1002 mov rcx, rdx
+    0xf3, 0xa6, // 0x1005 repe cmpsb
+    0x0f, 0x97, 0xc0, // 0x1007 seta al
+    0x1c, 0x00, // 0x100a sbb al, 0
+    0x0f, 0xbe, 0xc0, // 0x100c movsx eax, al
+    0xc3, // 0x100f ret
+];
+
+/// Render x86-64 bytes mapped at `BASE`, refusing nothing.
+fn rendered(bytes: &'static [u8], name: &'static str) -> String {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    let program = Fixture {
-        bytes: REPEATED_SCAN,
-        name: "scan",
-    };
-    let response = decompile(&target, &program, BASE).expect("the two graphs agree");
-    let text = response.output.text();
-    // Until the scan has a lowering, its zero-count guard is the named gap.
+    let response = decompile(&target, &Fixture { bytes, name }, BASE).expect("decompile");
+    let text = response.output.text().to_string();
+    assert!(response.render_refusal.is_none(), "{text}");
+    text
+}
+
+/// Compile the rendered function under a C harness and run it; the harness exits zero when every check holds.
+fn run_rendered(name: &str, function: &str, harness: &str) {
+    let dir = std::env::temp_dir().join(format!("r2engine-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    let source = dir.join("rendered.c");
+    let binary = dir.join("rendered");
+    std::fs::write(
+        &source,
+        format!("#include <stdint.h>\n#include <string.h>\n{function}\n{harness}\n"),
+    )
+    .expect("write the rendering");
+    let compiled = std::process::Command::new("cc")
+        .args(["-std=c11", "-w", "-o"])
+        .arg(&binary)
+        .arg(&source)
+        .output()
+        .expect("a C compiler");
     assert!(
-        response.render_refusal.is_none() || text.contains("0x1006"),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
+        compiled.status.success(),
+        "{}\n{function}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = std::process::Command::new(&binary)
+        .status()
+        .expect("run the rendering");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        ran.code(),
+        Some(0),
+        "check {:?} failed:\n{function}",
+        ran.code()
+    );
+}
+
+/// A repeated scan renders as the walk it is, and the walk is `strlen`.
+#[test]
+fn a_repeated_scan_renders_as_the_walk_it_is() {
+    let text = rendered(REPEATED_SCAN, "scan");
+    assert!(text.contains("while (reached != "), "{text}");
+    assert!(text.contains("break;"), "{text}");
+    run_rendered(
+        "scan",
+        &text,
+        r#"int main(void) {
+    const char *words[] = {"", "a", "hello", "bash"};
+    for (int i = 0; i < 4; i++) {
+        if (scan((uint64_t)(uintptr_t)words[i]) != strlen(words[i])) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// A repeated compare leaves the flags of its last pair, or of the `xor` where the count is zero.
+#[test]
+fn a_repeated_compare_leaves_the_flags_of_its_last_pair() {
+    let text = rendered(REPEATED_COMPARE, "compare");
+    assert!(text.contains("if (other != element)"), "{text}");
+    run_rendered(
+        "compare",
+        &text,
+        r#"static int sign(int value) { return (value > 0) - (value < 0); }
+int main(void) {
+    const struct { const char *dst, *src; uint64_t n; } cases[] = {
+        {"abc", "abc", 3}, {"abc", "abd", 3}, {"abd", "abc", 3}, {"abc", "xyz", 0},
+        {"\x80", "\x01", 1}, {"xa", "ya", 2}, {"ab", "ab", 1},
+    };
+    for (int i = 0; i < 7; i++) {
+        int want = sign(memcmp(cases[i].src, cases[i].dst, cases[i].n));
+        int got = (int32_t)compare((uint64_t)(uintptr_t)cases[i].dst,
+                                   (uint64_t)(uintptr_t)cases[i].src, cases[i].n);
+        if (got != want) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
     );
 }
 

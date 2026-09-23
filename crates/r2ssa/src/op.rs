@@ -37,9 +37,7 @@ pub enum SSAOp {
         val: SSAVar,
     },
 
-    /// One repeated string operation, as the block it is
-    /// (`r2il::R2ILOp::BlockTransfer`). It writes only memory; the register
-    /// updates the instruction also performs are ordinary operations beside it.
+    /// One repeated string operation, as the block it is (`r2il::R2ILOp::BlockTransfer`).
     BlockTransfer(Box<BlockTransferOp>),
 
     /// Memory fence/barrier.
@@ -401,7 +399,7 @@ pub enum SSAOp {
     Select(Box<SelectOp>),
 }
 
-/// A repeated string operation, as one block move.
+/// A repeated string operation, as one block operation.
 ///
 /// Held out of line for the same reason as [`SelectOp`]: four variables.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,6 +411,13 @@ pub struct BlockTransferOp {
     pub count: SSAVar,
     pub direction: SSAVar,
     pub element_size: u32,
+    /// A scan's or a compare's count reached and the last element or pair it compared.
+    pub answer: Option<SSAVar>,
+}
+
+impl BlockTransferOp {
+    /// The direction's position among the inputs, after the destination, the source and the count.
+    pub const DIRECTION_INPUT: usize = 3;
 }
 
 /// A compare-and-swap on one memory cell.
@@ -451,6 +456,21 @@ pub struct SelectOp {
     pub cond: SSAVar,
     pub if_true: SSAVar,
     pub if_false: SSAVar,
+}
+
+/// The name a block operation is printed under, and the comparison that stops it.
+pub(crate) const fn block_transfer_spelling(
+    kind: r2il::BlockTransferKind,
+) -> (&'static str, &'static str) {
+    use r2il::{BlockStop, BlockTransferKind};
+    match kind {
+        BlockTransferKind::Move => ("MOVE", ""),
+        BlockTransferKind::Fill => ("FILL", ""),
+        BlockTransferKind::Scan(BlockStop::Equal) => ("SCAN", " until equal"),
+        BlockTransferKind::Scan(BlockStop::Unequal) => ("SCAN", " until unequal"),
+        BlockTransferKind::Compare(BlockStop::Equal) => ("COMPARE", " until equal"),
+        BlockTransferKind::Compare(BlockStop::Unequal) => ("COMPARE", " until unequal"),
+    }
 }
 
 impl SSAOp {
@@ -546,9 +566,9 @@ impl SSAOp {
             Select(select) => Some(&select.dst),
 
             CallOther { output, .. } | StoreConditional { result: output, .. } => output.as_ref(),
+            BlockTransfer(transfer) => transfer.answer.as_ref(),
 
             Store { .. }
-            | BlockTransfer { .. }
             | Fence { .. }
             | StoreGuarded { .. }
             | CallUse { .. }
@@ -811,7 +831,7 @@ impl SSAOp {
                 | SSAOp::LoadLinked { .. }
                 | SSAOp::LoadGuarded { .. }
                 | SSAOp::AtomicCAS { .. }
-        )
+        ) || matches!(self, SSAOp::BlockTransfer(transfer) if transfer.kind.reads_memory())
     }
 
     /// Returns true if this operation writes to memory.
@@ -819,11 +839,10 @@ impl SSAOp {
         matches!(
             self,
             SSAOp::Store { .. }
-                | SSAOp::BlockTransfer { .. }
                 | SSAOp::StoreConditional { .. }
                 | SSAOp::StoreGuarded { .. }
                 | SSAOp::AtomicCAS { .. }
-        )
+        ) || matches!(self, SSAOp::BlockTransfer(transfer) if transfer.kind.writes_memory())
     }
 
     /// Returns true when removing this operation can change observable behavior.
@@ -835,9 +854,13 @@ impl SSAOp {
         if self.is_control_flow() || self.is_memory_write() {
             return true;
         }
+        // A block operation reads a whole extent, and how far it reached is data dependent.
         if matches!(
             self,
-            SSAOp::Fence { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+            SSAOp::Fence { .. }
+                | SSAOp::LoadLinked { .. }
+                | SSAOp::LoadGuarded { .. }
+                | SSAOp::BlockTransfer(_)
         ) {
             return true;
         }
@@ -880,22 +903,21 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Load { dst, space, addr } => write!(f, "{} = LOAD [{}]{}", dst, space, addr),
             SSAOp::Store { space, addr, val } => write!(f, "STORE [{}]{} = {}", space, addr, val),
             SSAOp::BlockTransfer(transfer) => {
-                let (space, kind, destination, source, count, element_size, direction) = (
+                let (space, destination, source, count, element_size, direction) = (
                     &transfer.space,
-                    &transfer.kind,
                     &transfer.destination,
                     &transfer.source,
                     &transfer.count,
                     &transfer.element_size,
                     &transfer.direction,
                 );
+                if let Some(answer) = &transfer.answer {
+                    write!(f, "{answer} = ")?;
+                }
+                let (name, stop) = block_transfer_spelling(transfer.kind);
                 write!(
                     f,
-                    "BLOCK{} [{space}]{destination} <- {source} x {count} ({element_size} bytes each, direction {direction})",
-                    match kind {
-                        r2il::BlockTransferKind::Move => "MOVE",
-                        r2il::BlockTransferKind::Fill => "FILL",
-                    }
+                    "BLOCK{name} [{space}]{destination} <- {source} x {count}{stop} ({element_size} bytes each, direction {direction})"
                 )
             }
             SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),

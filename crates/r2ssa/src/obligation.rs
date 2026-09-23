@@ -1367,18 +1367,17 @@ fn seed_direct_obligations(
 
     match op {
         SSAOp::Load { .. } | SSAOp::Store { .. } => {}
-        // A block operation is not a structured access, so nothing else
-        // answers for its memory: it owns the write over its whole extent
-        // here, and a move owns the read it copies from as well.
+        // A block operation is not a structured access, so it owns what it reads and writes over its extent.
         SSAOp::BlockTransfer(transfer) => {
-            let kind = &transfer.kind;
-            seed_instruction(
-                inst.id,
-                Kind::ObservableMemoryWrite,
-                Component::Whole,
-                required,
-            );
-            if *kind == r2il::BlockTransferKind::Move {
+            if transfer.kind.writes_memory() {
+                seed_instruction(
+                    inst.id,
+                    Kind::ObservableMemoryWrite,
+                    Component::Whole,
+                    required,
+                );
+            }
+            if transfer.kind.reads_memory() {
                 seed_instruction(
                     inst.id,
                     Kind::ObservableMemoryRead,

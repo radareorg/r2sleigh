@@ -654,6 +654,8 @@ impl Importer<'_> {
             // say anything about: it is not a function of the operands, so
             // nothing it could be rewritten into would mean the same.
             | MachineExprKind::ExclusiveStoreSucceeded { .. }
+            // How far a block operation reached depends on what it read.
+            | MachineExprKind::BlockAnswer { .. }
             // A read that happens only under a condition is not a term over
             // its address: rewriting it would move a read the program makes
             // conditionally to somewhere it is made always.

@@ -10,7 +10,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use r2il::{BlockTransferKind, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode};
+use r2il::{
+    BlockStop, BlockTransfer, BlockTransferKind, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode,
+};
 
 pub(crate) fn normalize_instruction_local_control(
     block: &mut R2ILBlock,
@@ -20,10 +22,10 @@ pub(crate) fn normalize_instruction_local_control(
     // specification writes a block operation. Recognising it first is what
     // keeps the guard below from turning the whole instruction into
     // `Unimplemented`, which is all it could otherwise do with a backward edge.
+    // A scan or a compare leaves one local skip behind, over its last pass, for the loop below.
     if let Some(rewritten) = block_transfer_from_repeat(block) {
         block.ops = rewritten;
         block.op_metadata = BTreeMap::new();
-        return;
     }
     // A conditional store is the other idiom the guard below cannot keep: it
     // skips over a store, which is not a value operation and cannot be
@@ -163,23 +165,27 @@ fn pointer_step(ops: &[R2ILOp], at: usize) -> Option<(PointerStep, usize)> {
     ))
 }
 
-/// The block operation a repeated string instruction performs, with the
-/// register updates it also performs written beside it.
-///
-/// The shape proved here is the whole of it: a guard leaving the instruction
-/// when the counter is zero, a decrement of that counter by one, one or two
-/// pointer steps of the same width in the same direction, the transfer itself,
-/// and a backward branch to this instruction. Anything else is not this
-/// operation and is left to the general normalization.
-fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
-    let ops = &block.ops;
-    let last = ops.len().checked_sub(1)?;
-    let R2ILOp::Branch { target } = &ops[last] else {
-        return None;
-    };
-    if target.space != SpaceId::Ram || target.offset != block.addr {
-        return None;
+/// A repeated string instruction's loop: a zero-count guard, a decrement, and one or two equal pointer steps.
+struct Repeat<'a> {
+    ops: &'a [R2ILOp],
+    counter: &'a Varnode,
+    destination: PointerStep,
+    source: Option<PointerStep>,
+    /// Where the element work begins, after the steps.
+    body: usize,
+}
+
+impl Repeat<'_> {
+    fn steps(&self) -> impl Iterator<Item = &PointerStep> {
+        [Some(&self.destination), self.source.as_ref()]
+            .into_iter()
+            .flatten()
     }
+}
+
+/// The guard, the decrement and the steps every repeated string instruction opens with.
+fn repeat_prologue(block: &R2ILBlock) -> Option<Repeat<'_>> {
+    let ops = block.ops.as_slice();
     let [
         R2ILOp::IntEqual {
             dst: guard,
@@ -187,7 +193,12 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
             b: zero,
         },
         R2ILOp::CBranch { target: exit, cond },
-    ] = ops.get(0..2)?
+        R2ILOp::IntSub {
+            dst: decremented,
+            a: decrement_base,
+            b: one,
+        },
+    ] = ops.get(0..3)?
     else {
         return None;
     };
@@ -196,38 +207,62 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
         || !same(guard, cond)
         || exit.space != SpaceId::Ram
         || exit.offset != fallthrough
+        || !same(counter, decremented)
+        || !same(counter, decrement_base)
+        || constant_value(one)? != 1
     {
         return None;
     }
-    let R2ILOp::IntSub {
-        dst: decremented,
-        a: decrement_base,
-        b: one,
-    } = &ops[2]
-    else {
-        return None;
-    };
-    if !same(counter, decremented) || !same(counter, decrement_base) || constant_value(one)? != 1 {
-        return None;
-    }
-
-    let (destination, mut cursor) = pointer_step(ops, 3)?;
-    let source = match pointer_step(ops, cursor) {
+    let (destination, mut body) = pointer_step(ops, 3)?;
+    let source = match pointer_step(ops, body) {
         Some((step, next)) => {
-            cursor = next;
+            body = next;
             Some(step)
         }
         None => None,
     };
-    if let Some(source) = &source
-        && (source.width != destination.width || !same(&source.direction, &destination.direction))
-    {
+    let repeat = Repeat {
+        ops,
+        counter,
+        destination,
+        source,
+        body,
+    };
+    // The extent is counted in the counter's width, so every pointer must share it.
+    if repeat.steps().any(|step| {
+        step.pointer.size != counter.size
+            || step.width != repeat.destination.width
+            || !same(&step.direction, &repeat.destination.direction)
+    }) {
         return None;
     }
+    Some(repeat)
+}
 
-    // The transfer. A move loads through the saved source pointer and stores
-    // through the saved destination; a fill stores a register's value.
-    let (kind, transferred) = match ops.get(cursor..last)? {
+/// The block operation a repeated string instruction performs, with its register and flag updates beside it.
+fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
+    let repeat = repeat_prologue(block)?;
+    let last = repeat.ops.len().checked_sub(1)?;
+    match &repeat.ops[last] {
+        R2ILOp::Branch { target }
+            if target.space == SpaceId::Ram && target.offset == block.addr =>
+        {
+            transfer_from_repeat(&repeat, last)
+        }
+        R2ILOp::CBranch { target, cond }
+            if target.space == SpaceId::Ram && target.offset == block.addr =>
+        {
+            comparison_from_repeat(&repeat, last, cond)
+        }
+        _ => None,
+    }
+}
+
+/// A move or a fill writes every element, leaving the counter zero and each pointer past the extent.
+fn transfer_from_repeat(repeat: &Repeat<'_>, last: usize) -> Option<Vec<R2ILOp>> {
+    let (destination, source) = (&repeat.destination, repeat.source.as_ref());
+    // A move loads through the saved source and stores through the saved destination; a fill stores a value.
+    let (kind, transferred) = match repeat.ops.get(repeat.body..last)? {
         [
             R2ILOp::Load {
                 dst: loaded,
@@ -244,7 +279,7 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
                 val,
             },
         ] => {
-            let source = source.as_ref()?;
+            let source = source?;
             if !same(addr, &source.saved)
                 || !same(loaded, staging_source)
                 || !same(staged, val)
@@ -277,32 +312,46 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
         }
         _ => return None,
     };
-
-    let element_size = u32::try_from(destination.width).ok()?;
-    let mut rewritten = vec![R2ILOp::BlockTransfer {
+    let counter = repeat.counter;
+    let mut allocator = InstructionTempAllocator::for_ops(repeat.ops);
+    let mut rewritten = vec![R2ILOp::BlockTransfer(Box::new(BlockTransfer {
         space: SpaceId::Ram,
         kind,
         destination: destination.pointer.clone(),
         source: transferred,
         count: counter.clone(),
         direction: destination.direction.clone(),
-        element_size,
-    }];
-    // The instruction advances both pointers by the whole extent and leaves the
-    // counter at zero. Those are its writes, and they are ordinary operations.
-    let mut allocator = InstructionTempAllocator::for_ops(ops);
-    let extent = allocator.allocate(counter.size)?;
-    let widened_direction = allocator.allocate(counter.size)?;
-    let signed_extent = allocator.allocate(counter.size)?;
-    let twice_extent = allocator.allocate(counter.size)?;
+        element_size: u32::try_from(destination.width).ok()?,
+        answer: None,
+    }))];
+    advance_pointers(repeat, counter, &mut allocator, &mut rewritten)?;
+    rewritten.push(R2ILOp::Copy {
+        dst: counter.clone(),
+        src: Varnode::constant(0, counter.size),
+    });
+    Some(rewritten)
+}
+
+/// Advance every pointer by `reached` elements in the walk's direction.
+fn advance_pointers(
+    repeat: &Repeat<'_>,
+    reached: &Varnode,
+    allocator: &mut InstructionTempAllocator,
+    rewritten: &mut Vec<R2ILOp>,
+) -> Option<()> {
+    let size = repeat.counter.size;
+    let extent = allocator.allocate(size)?;
+    let widened_direction = allocator.allocate(size)?;
+    let signed_extent = allocator.allocate(size)?;
+    let twice_extent = allocator.allocate(size)?;
     rewritten.push(R2ILOp::IntMult {
         dst: extent.clone(),
-        a: counter.clone(),
-        b: Varnode::constant(destination.width, counter.size),
+        a: reached.clone(),
+        b: Varnode::constant(repeat.destination.width, size),
     });
     rewritten.push(R2ILOp::IntZExt {
         dst: widened_direction.clone(),
-        src: destination.direction.clone(),
+        src: repeat.destination.direction.clone(),
     });
     rewritten.push(R2ILOp::IntMult {
         dst: twice_extent.clone(),
@@ -312,25 +361,254 @@ fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
     rewritten.push(R2ILOp::IntMult {
         dst: twice_extent.clone(),
         a: twice_extent.clone(),
-        b: Varnode::constant(2, counter.size),
+        b: Varnode::constant(2, size),
     });
     rewritten.push(R2ILOp::IntSub {
         dst: signed_extent.clone(),
         a: extent,
         b: twice_extent,
     });
-    for pointer in [Some(&destination), source.as_ref()].into_iter().flatten() {
+    for step in repeat.steps() {
         rewritten.push(R2ILOp::IntAdd {
-            dst: pointer.pointer.clone(),
-            a: pointer.pointer.clone(),
+            dst: step.pointer.clone(),
+            a: step.pointer.clone(),
             b: signed_extent.clone(),
         });
     }
-    rewritten.push(R2ILOp::Copy {
-        dst: counter.clone(),
-        src: Varnode::constant(0, counter.size),
+    Some(())
+}
+
+/// Where one side of the loop's comparison comes from.
+enum Compared {
+    /// The element read through the saved destination pointer.
+    Destination,
+    /// The element read through the saved source pointer.
+    Source,
+    /// A value nothing in the instruction writes, the same on every pass.
+    Value(Varnode),
+}
+
+fn overlaps(a: &Varnode, b: &Varnode) -> bool {
+    a.space == b.space
+        && a.offset < b.offset.saturating_add(u64::from(b.size))
+        && b.offset < a.offset.saturating_add(u64::from(a.size))
+}
+
+/// The last operation before `before` that writes any part of `varnode`.
+fn last_writer(ops: &[R2ILOp], before: usize, varnode: &Varnode) -> Option<usize> {
+    (0..before).rev().find(|index| {
+        ops[*index]
+            .output()
+            .is_some_and(|output| overlaps(output, varnode))
+    })
+}
+
+/// What one operand of the comparison is, traced through the copies that stage it.
+fn compared(
+    repeat: &Repeat<'_>,
+    body: &[R2ILOp],
+    before: usize,
+    operand: &Varnode,
+) -> Option<Compared> {
+    let (mut operand, mut before) = (operand.clone(), before);
+    loop {
+        let Some(at) = last_writer(body, before, &operand) else {
+            let written = repeat.ops[..repeat.body]
+                .iter()
+                .filter_map(R2ILOp::output)
+                .any(|output| overlaps(output, &operand));
+            return (!written && operand.space != SpaceId::Const)
+                .then_some(Compared::Value(operand));
+        };
+        match &body[at] {
+            R2ILOp::Copy { dst, src } if same(dst, &operand) => {
+                (operand, before) = (src.clone(), at)
+            }
+            R2ILOp::Load { dst, addr, .. } if same(dst, &operand) => {
+                if same(addr, &repeat.destination.saved) {
+                    return Some(Compared::Destination);
+                }
+                let source = repeat.source.as_ref()?;
+                return same(addr, &source.saved).then_some(Compared::Source);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// A scan or a compare, whose test `x - y == 0` is exactly `x == y`; the flags are its last pass over the answered pair.
+fn comparison_from_repeat(
+    repeat: &Repeat<'_>,
+    last: usize,
+    continues: &Varnode,
+) -> Option<Vec<R2ILOp>> {
+    let ops = repeat.ops;
+    // The branch back is taken while the pair is equal, or while it is not.
+    let (tail, equal, runs_while_equal) = match &ops[last - 1] {
+        R2ILOp::BoolNot { dst, src } if same(dst, continues) => (last - 1, src.clone(), false),
+        _ => (last, continues.clone(), true),
+    };
+    let body = ops.get(repeat.body..tail)?;
+    if !body_is_one_pass(repeat, body) {
+        return None;
+    }
+    let test_at = last_writer(body, body.len(), &equal)?;
+    let R2ILOp::IntEqual { dst, a, b } = &body[test_at] else {
+        return None;
+    };
+    let difference = match (constant_value(a), constant_value(b)) {
+        (_, Some(0)) => a,
+        (Some(0), _) => b,
+        _ => return None,
+    };
+    let difference_at = last_writer(body, test_at, difference)?;
+    let R2ILOp::IntSub {
+        dst: subtracted,
+        a: minuend,
+        b: subtrahend,
+    } = &body[difference_at]
+    else {
+        return None;
+    };
+    let width = repeat.destination.width;
+    if !same(dst, &equal) || !same(subtracted, difference) || u64::from(difference.size) != width {
+        return None;
+    }
+    let stop = match runs_while_equal {
+        true => BlockStop::Unequal,
+        false => BlockStop::Equal,
+    };
+    let pair = (
+        compared(repeat, body, difference_at, minuend)?,
+        compared(repeat, body, difference_at, subtrahend)?,
+    );
+    let (kind, operand) = match (pair, repeat.source.as_ref()) {
+        ((Compared::Value(value), Compared::Destination), None)
+        | ((Compared::Destination, Compared::Value(value)), None)
+            if u64::from(value.size) == width =>
+        {
+            (BlockTransferKind::Scan(stop), value)
+        }
+        ((Compared::Source, Compared::Destination), Some(source))
+        | ((Compared::Destination, Compared::Source), Some(source)) => {
+            (BlockTransferKind::Compare(stop), source.pointer.clone())
+        }
+        _ => return None,
+    };
+
+    let counter = repeat.counter;
+    let mut allocator = InstructionTempAllocator::for_ops(ops);
+    // The answer is how far the walk reached, then the element or pair it compared last.
+    let parts = u32::try_from(repeat.steps().count()).ok()?;
+    let element = u32::try_from(width).ok()?;
+    let answer = allocator.allocate(counter.size.checked_add(parts.checked_mul(element)?)?)?;
+    let mut rewritten = vec![R2ILOp::BlockTransfer(Box::new(BlockTransfer {
+        space: SpaceId::Ram,
+        kind,
+        destination: repeat.destination.pointer.clone(),
+        source: operand,
+        count: counter.clone(),
+        direction: repeat.destination.direction.clone(),
+        element_size: element,
+        answer: Some(answer.clone()),
+    }))];
+    let consumed = allocator.allocate(counter.size)?;
+    rewritten.push(R2ILOp::Subpiece {
+        dst: consumed.clone(),
+        src: answer.clone(),
+        offset: 0,
     });
+    // The destination's element first, then the source's, each where its saved pointer read.
+    let mut last = Vec::<(Varnode, Varnode)>::new();
+    for (index, step) in (0u32..).zip(repeat.steps()) {
+        let part = allocator.allocate(element)?;
+        rewritten.push(R2ILOp::Subpiece {
+            dst: part.clone(),
+            src: answer.clone(),
+            offset: counter.size + index * element,
+        });
+        last.push((step.saved.clone(), part));
+    }
+    advance_pointers(repeat, &consumed, &mut allocator, &mut rewritten)?;
+    rewritten.push(R2ILOp::IntSub {
+        dst: counter.clone(),
+        a: counter.clone(),
+        b: consumed.clone(),
+    });
+    // The last pass reads what the walk compared last, which the answer already holds.
+    let mut last_pass = Vec::with_capacity(body.len());
+    for op in body {
+        let R2ILOp::Load { dst, addr, .. } = op else {
+            last_pass.push(op.clone());
+            continue;
+        };
+        let (_, part) = last.iter().find(|(saved, _)| same(saved, addr))?;
+        last_pass.push(R2ILOp::Copy {
+            dst: dst.clone(),
+            src: part.clone(),
+        });
+    }
+    // A zero count reaches no element, and the skip is the guard the last pass runs under.
+    let skipped = allocator.allocate(1)?;
+    rewritten.push(R2ILOp::IntEqual {
+        dst: skipped.clone(),
+        a: consumed,
+        b: Varnode::constant(0, counter.size),
+    });
+    let distance = u64::try_from(last_pass.len() + 1).ok()?;
+    rewritten.push(R2ILOp::CBranch {
+        target: Varnode::constant(distance, 8),
+        cond: skipped,
+    });
+    rewritten.extend(last_pass);
     Some(rewritten)
+}
+
+/// Whether every pass computes alike, so the last pass run once after the block is the machine's last pass.
+fn body_is_one_pass(repeat: &Repeat<'_>, body: &[R2ILOp]) -> bool {
+    let reaches_last_pass = |input: &Varnode| {
+        same(input, repeat.counter) || repeat.steps().any(|step| same(input, &step.pointer))
+    };
+    let prologue = &repeat.ops[..repeat.body];
+    let mut this_pass = Vec::<&Varnode>::new();
+    for op in body {
+        match op {
+            // A read through a saved pointer is the element the walk compares.
+            R2ILOp::Load {
+                dst,
+                space: SpaceId::Ram,
+                addr,
+            } => {
+                if !repeat.steps().any(|step| same(addr, &step.saved))
+                    || u64::from(dst.size) != repeat.destination.width
+                {
+                    return false;
+                }
+                this_pass.push(dst);
+                continue;
+            }
+            op if !op.is_speculatable_value() => return false,
+            _ => {}
+        }
+        for input in op.inputs() {
+            if input.space == SpaceId::Const || this_pass.iter().any(|output| same(output, input)) {
+                continue;
+            }
+            // Only the counter and the pointers carry into the last pass.
+            let written_before = body
+                .iter()
+                .chain(prologue)
+                .filter_map(R2ILOp::output)
+                .any(|output| overlaps(output, input));
+            if written_before && !reaches_last_pass(input) {
+                return false;
+            }
+        }
+        if let Some(output) = op.output() {
+            this_pass.push(output);
+        }
+    }
+    true
 }
 
 #[derive(Debug)]

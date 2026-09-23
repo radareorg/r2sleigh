@@ -467,8 +467,9 @@ impl Walker<'_> {
                 cond: None, body, ..
             } => self.walk_infinite_loop(body, open),
             CStmt::While { body, .. } | CStmt::For { body, .. } => {
+                // Its `if` and `break` are the operation's own, not edges between blocks.
                 if self.body_owns_no_block(body) {
-                    return self.walk(body, open);
+                    return open;
                 }
                 self.walk_pre_test_loop(body, open)
             }
@@ -539,6 +540,10 @@ impl Walker<'_> {
                     if let Some(default) = default.as_deref() {
                         stack.extend(default.iter());
                     }
+                }
+                // A body that leaves by anything but its own `break` transfers somewhere.
+                CStmt::Goto(_) | CStmt::Label(_) | CStmt::Return(_) | CStmt::Continue => {
+                    return false;
                 }
                 _ => {}
             }

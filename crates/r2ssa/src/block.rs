@@ -236,22 +236,16 @@ fn convert_op(
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
         },
-        BlockTransfer {
-            space,
-            kind,
-            destination,
-            source,
-            count,
-            direction,
-            element_size,
-        } => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
-            space: *space,
-            kind: *kind,
-            destination: read_var(destination, disasm, ctx),
-            source: read_var(source, disasm, ctx),
-            count: read_var(count, disasm, ctx),
-            direction: read_var(direction, disasm, ctx),
-            element_size: *element_size,
+        BlockTransfer(transfer) => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
+            space: transfer.space,
+            kind: transfer.kind,
+            destination: read_var(&transfer.destination, disasm, ctx),
+            source: read_var(&transfer.source, disasm, ctx),
+            count: read_var(&transfer.count, disasm, ctx),
+            direction: read_var(&transfer.direction, disasm, ctx),
+            element_size: transfer.element_size,
+            // Written after every read, as the fields are evaluated in order.
+            answer: transfer.answer.as_ref().map(|v| write_var(v, disasm, ctx)),
         })),
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,

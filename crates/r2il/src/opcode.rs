@@ -24,13 +24,65 @@ pub enum ValueUse {
     Consumes,
 }
 
-/// Whether a block operation reads its elements from memory or repeats a value.
+/// What a block operation does with each element it reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BlockTransferKind {
     /// Each element is read from `source` and written at `destination`.
     Move,
     /// Every element is the value `source` holds.
     Fill,
+    /// Each element at `destination` is compared with the value `source` holds.
+    Scan(BlockStop),
+    /// Each element at `source` is compared with the element at `destination`.
+    Compare(BlockStop),
+}
+
+/// Which comparison ends a scan or a compare early, after the element it compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BlockStop {
+    /// The operation stops after a pair that is equal.
+    Equal,
+    /// The operation stops after a pair that differs.
+    Unequal,
+}
+
+impl BlockTransferKind {
+    /// Whether the operation reads memory, at `destination` or at `source`.
+    pub const fn reads_memory(self) -> bool {
+        !matches!(self, Self::Fill)
+    }
+
+    /// Whether the operation writes the elements at `destination`.
+    pub const fn writes_memory(self) -> bool {
+        matches!(self, Self::Move | Self::Fill)
+    }
+
+    /// Whether `source` is an address the operation reads through, rather than a value.
+    pub const fn source_is_address(self) -> bool {
+        matches!(self, Self::Move | Self::Compare(_))
+    }
+
+    /// The comparison that ends the operation early, where it has one.
+    pub const fn stop(self) -> Option<BlockStop> {
+        match self {
+            Self::Scan(stop) | Self::Compare(stop) => Some(stop),
+            Self::Move | Self::Fill => None,
+        }
+    }
+}
+
+/// One repeated string operation over up to `count` elements, ascending when `direction` is zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransfer {
+    pub space: SpaceId,
+    pub kind: BlockTransferKind,
+    pub destination: Varnode,
+    pub source: Varnode,
+    pub count: Varnode,
+    pub direction: Varnode,
+    pub element_size: u32,
+    /// A scan's or a compare's count reached, then the destination's and any source's last element (zero where none).
+    pub answer: Option<Varnode>,
 }
 
 /// An r2il operation representing a single semantic action.
@@ -64,24 +116,8 @@ pub enum R2ILOp {
         val: Varnode,
     },
 
-    /// One repeated string operation, as the block it is.
-    ///
-    /// x86 spells `rep movs` and `rep stos` as a loop inside one instruction,
-    /// because p-code has no block-operation vocabulary; the loop is how the
-    /// specification writes something the machine performs as a block. The
-    /// operation reads `count` elements of `element_size` bytes from `source`
-    /// and writes them at `destination`, ascending when `direction` is zero.
-    /// The register updates the instruction also performs are ordinary
-    /// operations emitted beside it, so this one writes only memory.
-    BlockTransfer {
-        space: SpaceId,
-        kind: BlockTransferKind,
-        destination: Varnode,
-        source: Varnode,
-        count: Varnode,
-        direction: Varnode,
-        element_size: u32,
-    },
+    /// One repeated string operation, held out of line so it does not widen every operation.
+    BlockTransfer(Box<BlockTransfer>),
 
     /// Memory fence/barrier with ordering semantics.
     Fence { ordering: MemoryOrdering },
@@ -617,7 +653,7 @@ impl R2ILOp {
                 | R2ILOp::LoadLinked { .. }
                 | R2ILOp::LoadGuarded { .. }
                 | R2ILOp::AtomicCAS { .. }
-        )
+        ) || matches!(self, R2ILOp::BlockTransfer(transfer) if transfer.kind.reads_memory())
     }
 
     /// Returns true if this operation writes to memory.
@@ -625,11 +661,10 @@ impl R2ILOp {
         matches!(
             self,
             R2ILOp::Store { .. }
-                | R2ILOp::BlockTransfer { .. }
                 | R2ILOp::StoreConditional { .. }
                 | R2ILOp::StoreGuarded { .. }
                 | R2ILOp::AtomicCAS { .. }
-        )
+        ) || matches!(self, R2ILOp::BlockTransfer(transfer) if transfer.kind.writes_memory())
     }
 
     /// Returns true when this value operation may be evaluated speculatively.
@@ -722,6 +757,7 @@ impl R2ILOp {
             | R2ILOp::Select { dst, .. } => Some(dst),
             R2ILOp::StoreConditional { result, .. } => result.as_ref(),
             R2ILOp::CallOther { output, .. } => output.as_ref(),
+            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_ref(),
             _ => None,
         }
     }
@@ -800,6 +836,7 @@ impl R2ILOp {
             | R2ILOp::Select { dst, .. } => Some(dst),
             R2ILOp::StoreConditional { result, .. } => result.as_mut(),
             R2ILOp::CallOther { output, .. } => output.as_mut(),
+            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_mut(),
             _ => None,
         }
     }
@@ -814,13 +851,12 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
-            R2ILOp::BlockTransfer {
-                destination,
-                source,
-                count,
-                direction,
-                ..
-            } => vec![destination, source, count, direction],
+            R2ILOp::BlockTransfer(transfer) => vec![
+                &transfer.destination,
+                &transfer.source,
+                &transfer.count,
+                &transfer.direction,
+            ],
             R2ILOp::Fence { .. } => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
@@ -945,13 +981,16 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
-            R2ILOp::BlockTransfer {
-                destination,
-                source,
-                count,
-                direction,
-                ..
-            } => vec![destination, source, count, direction],
+            R2ILOp::BlockTransfer(transfer) => {
+                let BlockTransfer {
+                    destination,
+                    source,
+                    count,
+                    direction,
+                    ..
+                } = transfer.as_mut();
+                vec![destination, source, count, direction]
+            }
             R2ILOp::Fence { .. } => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
@@ -1073,28 +1112,33 @@ impl std::fmt::Display for R2ILOp {
         match self {
             // Data movement
             R2ILOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
-            R2ILOp::BlockTransfer {
-                space,
-                kind,
-                destination,
-                source,
-                count,
-                direction,
-                element_size,
-            } => write!(
-                f,
-                "BLOCK{} [{}]{} <- {} x {} ({} bytes each, direction {})",
-                match kind {
-                    BlockTransferKind::Move => "MOVE",
-                    BlockTransferKind::Fill => "FILL",
-                },
-                space,
-                destination,
-                source,
-                count,
-                element_size,
-                direction
-            ),
+            R2ILOp::BlockTransfer(transfer) => {
+                let BlockTransfer {
+                    space,
+                    kind,
+                    destination,
+                    source,
+                    count,
+                    direction,
+                    element_size,
+                    answer,
+                } = transfer.as_ref();
+                if let Some(answer) = answer {
+                    write!(f, "{answer} = ")?;
+                }
+                let (name, stop) = match kind {
+                    BlockTransferKind::Move => ("MOVE", ""),
+                    BlockTransferKind::Fill => ("FILL", ""),
+                    BlockTransferKind::Scan(BlockStop::Equal) => ("SCAN", " until equal"),
+                    BlockTransferKind::Scan(BlockStop::Unequal) => ("SCAN", " until unequal"),
+                    BlockTransferKind::Compare(BlockStop::Equal) => ("COMPARE", " until equal"),
+                    BlockTransferKind::Compare(BlockStop::Unequal) => ("COMPARE", " until unequal"),
+                };
+                write!(
+                    f,
+                    "BLOCK{name} [{space}]{destination} <- {source} x {count}{stop} ({element_size} bytes each, direction {direction})"
+                )
+            }
             R2ILOp::Load { dst, space, addr } => {
                 write!(f, "{} = LOAD [{}]{}", dst, space, addr)
             }

@@ -1301,22 +1301,19 @@ fn rename_op(
                 space: *space,
             }
         }
-        BlockTransfer {
-            space,
-            kind,
-            destination,
-            source,
-            count,
-            direction,
-            element_size,
-        } => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
-            space: *space,
-            kind: *kind,
-            destination: read_varnode(destination, ctx, reg_names),
-            source: read_varnode(source, ctx, reg_names),
-            count: read_varnode(count, ctx, reg_names),
-            direction: read_varnode(direction, ctx, reg_names),
-            element_size: *element_size,
+        BlockTransfer(transfer) => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
+            space: transfer.space,
+            kind: transfer.kind,
+            destination: read_varnode(&transfer.destination, ctx, reg_names),
+            source: read_varnode(&transfer.source, ctx, reg_names),
+            count: read_varnode(&transfer.count, ctx, reg_names),
+            direction: read_varnode(&transfer.direction, ctx, reg_names),
+            element_size: transfer.element_size,
+            // Written after every read, as the fields are evaluated in order.
+            answer: transfer
+                .answer
+                .as_ref()
+                .map(|v| write_varnode(v, ctx, defined_vars, reg_names)),
         })),
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,

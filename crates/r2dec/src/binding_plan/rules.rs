@@ -750,6 +750,7 @@ pub(super) fn unread_defined_values(facts: PlanFacts<'_>) -> BTreeSet<ValueId> {
                 reason,
                 crate::ledger::ElisionReason::CallBoundaryCarrier
                     | crate::ledger::ElisionReason::UnobservedMerge
+                    | crate::ledger::ElisionReason::BlockAnswerPart
             )
         })
         .map(|(site, _)| site)
@@ -2547,6 +2548,7 @@ fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
         | Kind::Divide { .. }
         | Kind::Remainder { .. }
         | Kind::ExclusiveStoreSucceeded { .. }
+        | Kind::BlockAnswer { .. }
         | Kind::GuardedRead { .. } => false,
     }
 }
@@ -2731,20 +2733,30 @@ pub(crate) fn certificate_elided_cells(
         let r2ssa::InstPayload::Op(r2ssa::SSAOp::BlockTransfer(transfer)) = &inst.payload else {
             continue;
         };
-        let Some(direction) = graph.value_id_for_var(&transfer.direction) else {
+        // By position: another operand may be the very same constant.
+        let input_idx = r2ssa::BlockTransferOp::DIRECTION_INPUT;
+        if inst.inputs.get(input_idx) == graph.value_id_for_var(&transfer.direction).as_ref() {
+            insert_elided_use(
+                &mut uses,
+                r2ssa::UseSite {
+                    inst: inst.id,
+                    input_idx,
+                },
+                ElisionReason::BlockTransferDirection,
+            )?;
+        }
+    }
+    // A block operation's answer has no object: its statement assigns the parts.
+    for inst in &graph.insts {
+        let r2ssa::InstPayload::Op(r2ssa::SSAOp::BlockTransfer(transfer)) = &inst.payload else {
             continue;
         };
-        for (input_idx, input) in inst.inputs.iter().enumerate() {
-            if *input == direction {
-                insert_elided_use(
-                    &mut uses,
-                    r2ssa::UseSite {
-                        inst: inst.id,
-                        input_idx,
-                    },
-                    ElisionReason::BlockTransferDirection,
-                )?;
-            }
+        let (Some(_), Some(answer)) = (&transfer.answer, inst.output) else {
+            continue;
+        };
+        insert_elided_write(&mut writes, inst.id, ElisionReason::BlockAnswerPart)?;
+        for site in graph.use_sites(answer) {
+            insert_elided_use(&mut uses, *site, ElisionReason::BlockAnswerPart)?;
         }
     }
     // The reads a call boundary makes. `SSAOp::CallUse` says what the call

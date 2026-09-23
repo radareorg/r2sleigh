@@ -846,6 +846,25 @@ impl MachineBuilder {
                     },
                 ))
             }
+            // How far a scan or a compare reached is stated over its operands, not derived.
+            SSAOp::BlockTransfer(transfer) if transfer.answer.is_some() => {
+                let [destination, source, count, direction] =
+                    self.operand_nodes(graph, inst, 4)?[..]
+                else {
+                    unreachable!("operand_nodes checked the count")
+                };
+                Ok((
+                    unsigned,
+                    MachineExprKind::BlockAnswer {
+                        kind: transfer.kind,
+                        element_bits: transfer.element_size.saturating_mul(8),
+                        destination,
+                        source,
+                        count,
+                        direction,
+                    },
+                ))
+            }
             // A call's definition of a register is not computed here. The
             // callee wrote it, and what this function knows is the machine
             // location it arrived in -- which is what `Source` says, and what

@@ -1609,100 +1609,272 @@ impl<'a> FoldingContext<'a> {
     /// A direction the convention did not settle has no spelling at all --
     /// `for` cannot walk both ways at once -- so an unproven direction declines
     /// and the operation stands as a marked gap.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the operation's own fields, passed through rather than re-matched"
-    )]
     fn block_transfer_stmt(
         &self,
         frame: &LowerFrame,
-        space: r2il::SpaceId,
-        kind: r2il::BlockTransferKind,
-        destination: &SSAVar,
-        source: &SSAVar,
-        count: &SSAVar,
-        direction: &SSAVar,
-        element_size: u32,
+        transfer: &r2ssa::BlockTransferOp,
     ) -> OpLoweringResult<Option<CStmt>> {
-        if space != r2il::SpaceId::Ram {
+        if transfer.space != r2il::SpaceId::Ram {
             return Ok(Some(self.certified_residual_comment(format!(
-                "unsupported block transfer space {space}"
+                "unsupported block transfer space {}",
+                transfer.space
             ))));
         }
-        if direction.constant_bits() != Some(0) {
+        if transfer.direction.constant_bits() != Some(0) {
             r2il::refusal_evidence!(
                 "block-transfer",
-                "the direction of the transfer at {:#x}:{} is not a settled zero, so neither                  walk can be spelled",
+                "the direction of the transfer at {:#x}:{} is not a settled zero, so neither walk can be spelled",
                 self.current_block_addr.get().unwrap_or_default(),
                 self.current_op_idx.get().unwrap_or_default()
             );
             return Err(OpLoweringRefusal::missing_machine_projection());
         }
-        let element = uint_type_from_size(element_size);
-        let pointer = crate::ast::CType::Pointer(Box::new(element));
-        let cursor_type = uint_type_from_size(count.size);
-        let cursor = self.symbols.borrow_mut().declare(
-            "transferred",
-            cursor_type.clone(),
-            crate::symbol::SymbolRole::RenderCursor,
-        );
-        // The walk writes through its own pointer, as a callee writes through an address it was handed.
-        let to = self.symbols.borrow_mut().declare(
-            "to",
-            pointer.clone(),
-            crate::symbol::SymbolRole::RenderCursor,
-        );
-        let address = CExpr::cast(
-            pointer.clone(),
-            self.observed_input(frame, 0, self.get_expr(destination)?),
-        );
-        let written = CExpr::Subscript {
-            base: Box::new(CExpr::Var(to)),
-            index: Box::new(CExpr::Var(cursor)),
-        };
-        let read = match kind {
-            r2il::BlockTransferKind::Move => CExpr::Subscript {
-                base: Box::new(CExpr::cast(
-                    pointer.clone(),
-                    self.observed_input(frame, 1, self.get_expr(source)?),
-                )),
-                index: Box::new(CExpr::Var(cursor)),
+        let cursor_type = uint_type_from_size(transfer.count.size);
+        let cursor = self.declare_render_cursor(
+            match transfer.kind.stop() {
+                Some(_) => "reached",
+                None => "transferred",
             },
-            r2il::BlockTransferKind::Fill => {
-                self.observed_input(frame, 1, self.get_expr(source)?)
-            }
+            &cursor_type,
+        );
+        let walk = match transfer.kind.stop() {
+            None => self.transfer_walk(frame, transfer, cursor)?,
+            Some(stop) => self.comparison_walk(frame, transfer, cursor, stop)?,
         };
-        let step = CStmt::expr(CExpr::assign(
+        let mut statements = vec![CStmt::Decl {
+            ty: cursor_type,
+            name: cursor,
+            init: Some(CExpr::UIntLit(0)),
+        }];
+        statements.extend(walk.declarations);
+        statements.push(CStmt::While {
+            cond: CExpr::binary(
+                crate::ast::BinaryOp::Ne,
+                CExpr::Var(cursor),
+                self.observed_input(frame, 2, self.get_expr(&transfer.count)?),
+            ),
+            body: Box::new(CStmt::Block(walk.body)),
+        });
+        for (symbol, site, value) in walk.parts {
+            statements.push(self.block_answer_part_stmt(symbol, site, value));
+        }
+        Ok(Some(CStmt::Block(statements)))
+    }
+
+    fn declare_render_cursor(
+        &self,
+        name: &str,
+        ty: &crate::ast::CType,
+    ) -> crate::symbol::SymbolId {
+        self.symbols
+            .borrow_mut()
+            .declare(name, ty.clone(), crate::symbol::SymbolRole::RenderCursor)
+    }
+
+    /// One element of a block operation's operand, read through the address at `input_idx`.
+    fn block_element(
+        &self,
+        frame: &LowerFrame,
+        transfer: &r2ssa::BlockTransferOp,
+        input_idx: usize,
+        index: CExpr,
+    ) -> OpLoweringResult<CExpr> {
+        let address = match input_idx {
+            0 => &transfer.destination,
+            _ => &transfer.source,
+        };
+        let pointer = crate::ast::CType::Pointer(Box::new(uint_type_from_size(
+            transfer.element_size,
+        )));
+        Ok(CExpr::Subscript {
+            base: Box::new(CExpr::cast(
+                pointer,
+                self.observed_input(frame, input_idx, self.get_expr(address)?),
+            )),
+            index: Box::new(index),
+        })
+    }
+
+    fn cursor_step(cursor: crate::symbol::SymbolId) -> CStmt {
+        CStmt::expr(CExpr::assign(
             CExpr::Var(cursor),
             CExpr::binary(
                 crate::ast::BinaryOp::Add,
                 CExpr::Var(cursor),
                 CExpr::UIntLit(1),
             ),
-        ));
-        Ok(Some(CStmt::Block(vec![
-            CStmt::Decl {
-                ty: cursor_type,
-                name: cursor,
-                init: Some(CExpr::UIntLit(0)),
-            },
-            CStmt::Decl {
-                ty: pointer,
+        ))
+    }
+
+    /// A move or a fill: each element written, then the step.
+    fn transfer_walk(
+        &self,
+        frame: &LowerFrame,
+        transfer: &r2ssa::BlockTransferOp,
+        cursor: crate::symbol::SymbolId,
+    ) -> OpLoweringResult<BlockWalk> {
+        let read = match transfer.kind {
+            r2il::BlockTransferKind::Move => {
+                self.block_element(frame, transfer, 1, CExpr::Var(cursor))?
+            }
+            _ => self.observed_input(frame, 1, self.get_expr(&transfer.source)?),
+        };
+        // The walk writes through its own pointer, as a callee writes through an address it was handed.
+        let pointer = crate::ast::CType::Pointer(Box::new(uint_type_from_size(
+            transfer.element_size,
+        )));
+        let to = self.declare_render_cursor("to", &pointer);
+        let address = self.observed_input(frame, 0, self.get_expr(&transfer.destination)?);
+        let written = CExpr::Subscript {
+            base: Box::new(CExpr::Var(to)),
+            index: Box::new(CExpr::Var(cursor)),
+        };
+        Ok(BlockWalk {
+            declarations: vec![CStmt::Decl {
+                ty: pointer.clone(),
                 name: to,
-                init: Some(address),
-            },
-            CStmt::While {
-                cond: CExpr::binary(
-                    crate::ast::BinaryOp::Ne,
-                    CExpr::Var(cursor),
-                    self.observed_input(frame, 2, self.get_expr(count)?),
-                ),
-                body: Box::new(CStmt::Block(vec![
-                    CStmt::expr(CExpr::assign(written, read)),
-                    step,
-                ])),
-            },
-        ])))
+                init: Some(CExpr::cast(pointer, address)),
+            }],
+            body: vec![
+                CStmt::expr(CExpr::assign(written, read)),
+                Self::cursor_step(cursor),
+            ],
+            ..BlockWalk::default()
+        })
+    }
+
+    /// A scan or a compare: each element counted, then compared, and the walk left where the stop holds.
+    fn comparison_walk(
+        &self,
+        frame: &LowerFrame,
+        transfer: &r2ssa::BlockTransferOp,
+        cursor: crate::symbol::SymbolId,
+        stop: r2il::BlockStop,
+    ) -> OpLoweringResult<BlockWalk> {
+        let mut walk = BlockWalk {
+            answered: self.block_answer_parts(transfer.count.size, transfer.element_size),
+            ..BlockWalk::default()
+        };
+        let element =
+            self.compared_element(frame, transfer, (BlockAnswerPart::Destination, cursor), &mut walk)?;
+        let compared = match transfer.kind {
+            r2il::BlockTransferKind::Compare(_) => {
+                self.compared_element(frame, transfer, (BlockAnswerPart::Source, cursor), &mut walk)?
+            }
+            _ => self.observed_input(frame, 1, self.get_expr(&transfer.source)?),
+        };
+        if let Some((symbol, site)) = walk.answered.get(&BlockAnswerPart::Reached).copied() {
+            walk.parts.insert(0, (symbol, site, CExpr::Var(cursor)));
+        }
+        let op = match stop {
+            r2il::BlockStop::Equal => crate::ast::BinaryOp::Eq,
+            r2il::BlockStop::Unequal => crate::ast::BinaryOp::Ne,
+        };
+        // The cursor counts an element before comparing it, so a stop leaves it at the count reached.
+        walk.body.push(Self::cursor_step(cursor));
+        walk.body.push(CStmt::If {
+            cond: CExpr::binary(op, compared, element),
+            then_body: Box::new(CStmt::Block(vec![CStmt::Break])),
+            else_body: None,
+        });
+        Ok(walk)
+    }
+
+    /// One compared element: held before the step where its part is read, otherwise read in the test after it.
+    fn compared_element(
+        &self,
+        frame: &LowerFrame,
+        transfer: &r2ssa::BlockTransferOp,
+        (part, cursor): (BlockAnswerPart, crate::symbol::SymbolId),
+        walk: &mut BlockWalk,
+    ) -> OpLoweringResult<CExpr> {
+        let input_idx = part.input();
+        let Some((symbol, site)) = walk.answered.get(&part).copied() else {
+            let last = CExpr::binary(
+                crate::ast::BinaryOp::Sub,
+                CExpr::Var(cursor),
+                CExpr::UIntLit(1),
+            );
+            return self.block_element(frame, transfer, input_idx, last);
+        };
+        let read = self.block_element(frame, transfer, input_idx, CExpr::Var(cursor))?;
+        let element_type = uint_type_from_size(transfer.element_size);
+        let held = self.declare_render_cursor(part.name(), &element_type);
+        walk.declarations.push(CStmt::Decl {
+            ty: element_type,
+            name: held,
+            init: Some(CExpr::UIntLit(0)),
+        });
+        walk.body
+            .push(CStmt::expr(CExpr::assign(CExpr::Var(held), read)));
+        walk.parts.push((symbol, site, CExpr::Var(held)));
+        Ok(CExpr::Var(held))
+    }
+
+    /// A part's assignment, carrying its own operation's write and the effects it owes.
+    fn block_answer_part_stmt(
+        &self,
+        symbol: crate::symbol::SymbolId,
+        (block_addr, op_idx): (u64, usize),
+        value: CExpr,
+    ) -> CStmt {
+        let assignment = CStmt::expr(CExpr::assign(CExpr::Var(symbol), value));
+        let assignment = self.observe_normalized_output_stmt(block_addr, op_idx, assignment);
+        let obligations = self
+            .inputs
+            .prepared_ssa
+            .map(|prepared| prepared.graph())
+            .and_then(|graph| graph.inst(graph.inst_id_for_op_site(block_addr, op_idx)?))
+            .and_then(|inst| match &inst.payload {
+                r2ssa::InstPayload::Op(op) => Some(op),
+                r2ssa::InstPayload::Phi { .. } => None,
+            })
+            .map(|op| self.exact_normalized_op_effects(op, block_addr, op_idx))
+            .unwrap_or_default();
+        self.observe_effect_stmt(&obligations, assignment)
+    }
+
+    /// Each read part of the current block operation's answer, with its symbol and extracting site.
+    fn block_answer_parts(&self, count_size: u32, element_size: u32) -> BlockAnswerParts {
+        let mut parts = BlockAnswerParts::new();
+        let (Some(block_addr), Some(op_idx), Some(prepared), Some(names)) = (
+            self.current_block_addr.get(),
+            self.current_op_idx.get(),
+            self.inputs.prepared_ssa,
+            self.inputs.binding_names,
+        ) else {
+            return parts;
+        };
+        let graph = prepared.graph();
+        let Some(answer) = graph
+            .inst_id_for_op_site(block_addr, op_idx)
+            .and_then(|inst| graph.inst(inst))
+            .and_then(|inst| inst.output)
+        else {
+            return parts;
+        };
+        for site in graph.use_sites(answer) {
+            let Some(inst) = graph.inst(site.inst) else {
+                continue;
+            };
+            let r2ssa::InstPayload::Op(SSAOp::Subpiece { offset, dst, .. }) = &inst.payload else {
+                continue;
+            };
+            let Some(part) = BlockAnswerPart::at(*offset, count_size, element_size) else {
+                continue;
+            };
+            let Some(Ok(crate::binding_plan::PlannedValueSymbol::Bound(symbol))) = inst
+                .output
+                .filter(|_| !self.is_dead(dst))
+                .map(|value| names.require_value(value))
+            else {
+                continue;
+            };
+            if let Some(site) = graph.op_site_for_inst(inst.id) {
+                parts.insert(part, (symbol, site));
+            }
+        }
+        parts
     }
 
     fn op_to_stmt_impl(&self, op: &SSAOp, frame: &LowerFrame) -> OpLoweringResult<Option<CStmt>> {
@@ -1817,16 +1989,7 @@ impl<'a> FoldingContext<'a> {
                     })),
                 }
             }
-            SSAOp::BlockTransfer(transfer) => self.block_transfer_stmt(
-                frame,
-                transfer.space,
-                transfer.kind,
-                &transfer.destination,
-                &transfer.source,
-                &transfer.count,
-                &transfer.direction,
-                transfer.element_size,
-            )?,
+            SSAOp::BlockTransfer(transfer) => self.block_transfer_stmt(frame, transfer)?,
             SSAOp::Store { addr, val, space } => {
                 // A store the journal sealed as saying nothing: the object already holds it.
                 if self.current_copy_has_coalesced_carrier_elision() {
@@ -2954,3 +3117,56 @@ fn unsigned_flag_formulas_match_exhaustive_i8_arithmetic() {
 mod lowering_tests;
 
 include!("../tests/pipeline.rs");
+
+/// Which part of a scan's or a compare's answer a value extracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BlockAnswerPart {
+    /// How many elements the walk reached.
+    Reached,
+    /// The element it compared last at the destination.
+    Destination,
+    /// The element it compared last at the source.
+    Source,
+}
+
+impl BlockAnswerPart {
+    /// The part a byte offset into the answer names: the count, then the destination's element, then the source's.
+    fn at(offset: u32, count_size: u32, element_size: u32) -> Option<Self> {
+        match offset.checked_sub(count_size) {
+            _ if offset == 0 => Some(Self::Reached),
+            Some(0) => Some(Self::Destination),
+            Some(past) if past == element_size => Some(Self::Source),
+            _ => None,
+        }
+    }
+
+    /// The input the part's element is read through: the destination, or the source.
+    const fn input(self) -> usize {
+        match self {
+            Self::Source => 1,
+            Self::Reached | Self::Destination => 0,
+        }
+    }
+
+    /// The name the walk's own variable for this part is declared under.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Reached => "reached",
+            Self::Destination => "element",
+            Self::Source => "other",
+        }
+    }
+}
+
+/// The read parts of a block operation's answer, each with its symbol and extracting site.
+type BlockAnswerParts =
+    std::collections::BTreeMap<BlockAnswerPart, (crate::symbol::SymbolId, (u64, usize))>;
+
+/// What a block operation's loop declares, runs, and hands back as the parts of its answer.
+#[derive(Default)]
+struct BlockWalk {
+    answered: BlockAnswerParts,
+    declarations: Vec<CStmt>,
+    body: Vec<CStmt>,
+    parts: Vec<(crate::symbol::SymbolId, (u64, usize), CExpr)>,
+}

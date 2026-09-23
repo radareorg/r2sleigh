@@ -1067,6 +1067,15 @@ pub enum MachineExprKind {
         address: MachineExprId,
         value: MachineExprId,
     },
+    /// A scan's or a compare's answer, stated over its operands: how far it reached, then the pair it compared last.
+    BlockAnswer {
+        kind: r2il::BlockTransferKind,
+        element_bits: u32,
+        destination: MachineExprId,
+        source: MachineExprId,
+        count: MachineExprId,
+        direction: MachineExprId,
+    },
 }
 
 impl MachineExprKind {
@@ -1111,6 +1120,13 @@ impl MachineExprKind {
             } => vec![*condition, *if_true, *if_false],
             Self::GuardedRead { address, guard, .. } => vec![*address, *guard],
             Self::ExclusiveStoreSucceeded { address, value } => vec![*address, *value],
+            Self::BlockAnswer {
+                destination,
+                source,
+                count,
+                direction,
+                ..
+            } => vec![*destination, *source, *count, *direction],
             Self::Phi { inputs } => inputs.to_vec(),
         }
     }
@@ -3037,6 +3053,27 @@ impl MachineFunction {
                     && child(*value).is_ok()
                     && matches!(expr.ty, MachineType::Bool { .. })
             }
+            MachineExprKind::BlockAnswer {
+                kind,
+                destination,
+                source,
+                count,
+                direction,
+                element_bits,
+            } => {
+                let compared = match kind {
+                    r2il::BlockTransferKind::Compare(_) => 2,
+                    _ => 1,
+                };
+                kind.stop().is_some()
+                    && [destination, source, direction]
+                        .into_iter()
+                        .all(|operand| child(*operand).is_ok())
+                    && child(*count).is_ok_and(|count| {
+                        count.ty.width_bits().checked_add(compared * *element_bits)
+                            == Some(expr.ty.width_bits())
+                    })
+            }
         };
         if valid {
             Ok(())
@@ -3945,10 +3982,12 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
         ) | (
             SSAOp::StoreConditional { .. },
             MachineExprKind::ExclusiveStoreSucceeded { .. }
-        ) | (
-            SSAOp::LoadGuarded { .. },
-            MachineExprKind::GuardedRead { .. }
-        ) | (SSAOp::CallDefine { .. }, MachineExprKind::Source { .. })
+        ) | (SSAOp::BlockTransfer(_), MachineExprKind::BlockAnswer { .. })
+            | (
+                SSAOp::LoadGuarded { .. },
+                MachineExprKind::GuardedRead { .. }
+            )
+            | (SSAOp::CallDefine { .. }, MachineExprKind::Source { .. })
             | (SSAOp::Copy { .. }, MachineExprKind::Copy { .. })
             | (SSAOp::CallRestore { .. }, MachineExprKind::Copy { .. })
             | (
@@ -4361,6 +4400,7 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         SSAOp::Load { .. }
         | SSAOp::LoadLinked { .. }
         | SSAOp::LoadGuarded { .. }
+        | SSAOp::BlockTransfer(_)
         | SSAOp::Copy { .. }
         | SSAOp::CallRestore { .. }
         | SSAOp::IntAdd { .. }

@@ -188,7 +188,7 @@ impl<'a> FoldingContext<'a> {
             })
     }
 
-    fn exact_normalized_op_effects(
+    pub(super) fn exact_normalized_op_effects(
         &self,
         op: &SSAOp,
         block_addr: u64,
@@ -1875,6 +1875,27 @@ impl<'a> FoldingContext<'a> {
         self.finish_lowering_transaction(lowered)
     }
 
+    /// Whether this extracts a part of a scan's or a compare's answer.
+    fn is_block_answer_part(&self, op: &SSAOp) -> bool {
+        let SSAOp::Subpiece { src, .. } = op else {
+            return false;
+        };
+        let Some(prepared) = self.inputs.prepared_ssa else {
+            return false;
+        };
+        let graph = prepared.graph();
+        graph
+            .value_id_for_var(src)
+            .and_then(|value| graph.def_inst(value))
+            .and_then(|inst| graph.inst(inst))
+            .is_some_and(|inst| {
+                matches!(
+                    &inst.payload,
+                    r2ssa::InstPayload::Op(SSAOp::BlockTransfer(transfer)) if transfer.answer.is_some()
+                )
+            })
+    }
+
     fn finish_lowering_transaction(&self, lowered: LoweredOp) -> OpLoweringResult<LoweredOp> {
         match self.pending_lowering_refusal.take() {
             Some(refusal) => {
@@ -1894,6 +1915,10 @@ impl<'a> FoldingContext<'a> {
         block_addr: u64,
         op_idx: usize,
     ) -> OpLoweringResult<Option<CStmt>> {
+        // A part of a block operation's answer is assigned by that operation's statement.
+        if self.is_block_answer_part(op) {
+            return Ok(None);
+        }
         let source_site = self.source_op_site_for_normalized_op(block_addr, op_idx);
         let carries_callsite = matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
             || matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. })
@@ -1937,7 +1962,8 @@ impl<'a> FoldingContext<'a> {
 
         let obligations = self.exact_normalized_op_effects(op, block_addr, op_idx);
         let rendered = !matches!(stmt.unobserved(), CStmt::Comment(_) | CStmt::Empty);
-        let stmt = if op.dst().is_some() && rendered {
+        // A block operation's answer has no object; its statement observes the parts it assigns.
+        let stmt = if op.dst().is_some() && rendered && !matches!(op, SSAOp::BlockTransfer(_)) {
             let mut stmt = self.observe_normalized_output_stmt(block_addr, op_idx, stmt);
             if let Some((value, definition, absorbed)) = canonical {
                 stmt = self.observe_canonical_assignment_stmt(

@@ -199,14 +199,17 @@ impl RenderedReaders {
         let boundary_reads = facts.boundary;
         let unobserved = source.unobserved_values();
         let unobserved_uses = source.unobserved_merges().unobserved_uses();
+        // An instruction that owns a memory effect renders for the effect, reading its operands, whatever reads its value.
+        let effectful = super::rules::effectful_definition_values(source);
         let renders_nothing = |inst: InstId| {
             graph
                 .inst(inst)
                 .and_then(|node| node.output)
                 .is_some_and(|output| {
-                    dead.contains(&output)
-                        || unrendered.contains(&output)
-                        || unobserved.contains(&output)
+                    !effectful.contains(&output)
+                        && (dead.contains(&output)
+                            || unrendered.contains(&output)
+                            || unobserved.contains(&output))
                 })
         };
         let mut by_value = BTreeMap::new();

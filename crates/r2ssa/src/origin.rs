@@ -137,8 +137,10 @@ impl BlockOrigins {
                 replacement,
                 ..
             } => (*space, Some(addr), replacement.size),
-            // Its extent turns on a count and a direction, so it may write anywhere in its space.
-            R2ILOp::BlockTransfer { space, .. } => (*space, None, 0),
+            // Its extent turns on a count and a direction, so it may write anywhere in its space; a scan or a compare writes none.
+            R2ILOp::BlockTransfer(transfer) if transfer.kind.writes_memory() => {
+                (transfer.space, None, 0)
+            }
             _ => return,
         };
         let space = CanonicalStorageId::from_varnode(&Varnode::new(space, 0, 0)).space;

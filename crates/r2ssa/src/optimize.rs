@@ -2146,6 +2146,7 @@ where
             count: map(&transfer.count),
             direction: map(&transfer.direction),
             element_size: transfer.element_size,
+            answer: transfer.answer.clone(),
         })),
         Fence { ordering } => Fence {
             ordering: *ordering,
