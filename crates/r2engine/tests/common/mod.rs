@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Format, OpenProgram, Section, Source, Symbol, SymbolKind,
+    Arch, Container, Format, Mapping, OpenProgram, Section, Source, Symbol, SymbolKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -78,8 +78,44 @@ const CODE: [u8; 0x70] = {
     code
 };
 
+/// An ARM function the container states: `blx thumb; bx lr`.
+pub const ARM_ENTRY: u64 = BASE;
+/// A Thumb function nothing states, reached only by that `blx`:
+/// `push {r4, lr}; bl leaf; pop {r4, pc}`.
+pub const THUMB_CALLED: u64 = BASE + 0x10;
+/// A Thumb function reached only by the Thumb `bl`: `movs r0, 1; bx lr`.
+pub const THUMB_LEAF: u64 = BASE + 0x20;
+/// A stated Thumb veneer whose mapping symbols switch it to ARM halfway:
+/// `bx pc; mov r8, r8` then `bx lr`.
+pub const VENEER: u64 = BASE + 0x24;
+
+const ARM_THUMB: [u8; 0x30] = {
+    let mut code = [0; 0x30];
+    let runs: [(usize, &[u8]); 7] = [
+        (0x00, &[0x02, 0x00, 0x00, 0xfa]), // blx 0x1010
+        (0x04, &[0x1e, 0xff, 0x2f, 0xe1]), // bx lr
+        (0x10, &[0x10, 0xb5, 0x00, 0xf0]), // push {r4, lr}; bl 0x1020 (first half)
+        (0x14, &[0x05, 0xf8, 0x10, 0xbd]), // bl (second half); pop {r4, pc}
+        (0x20, &[0x01, 0x20, 0x70, 0x47]), // movs r0, 1; bx lr
+        (0x24, &[0x78, 0x47, 0xc0, 0x46]), // bx pc; mov r8, r8
+        (0x28, &[0x1e, 0xff, 0x2f, 0xe1]), // bx lr
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            code[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    code
+};
+
 /// The bytes, the container's statement about them, and what has been written.
 pub struct Literal {
+    code: &'static [u8],
     patches: BTreeMap<u64, u8>,
     written: Vec<(u64, Range<u64>)>,
     revision: u64,
@@ -97,6 +133,7 @@ impl Literal {
             thumb: false,
         };
         Self {
+            code: &CODE,
             patches: BTreeMap::new(),
             written: Vec::new(),
             revision: 0,
@@ -126,6 +163,34 @@ impl Literal {
         }
     }
 
+    /// A little-endian ARM program: a stated ARM function that calls into
+    /// Thumb code nothing states, and a stated veneer that switches to ARM.
+    pub fn arm_thumb() -> Self {
+        let mut program = Self::new();
+        program.code = &ARM_THUMB;
+        program.container.arch = Arch {
+            name: "arm".to_owned(),
+            bits: 32,
+            endian: r2il::Endianness::Little,
+        };
+        program.container.sections[0].vsize = ARM_THUMB.len() as u64;
+        let symbol = |name: &str, vaddr, kind, thumb| Symbol {
+            name: name.to_owned(),
+            vaddr,
+            size: 0,
+            kind,
+            defined: true,
+            thumb,
+        };
+        program.container.symbols = vec![
+            symbol("entry", ARM_ENTRY, SymbolKind::Function, false),
+            symbol("veneer", VENEER, SymbolKind::Function, true),
+            symbol("$t", VENEER, SymbolKind::Mapping(Mapping::Thumb), false),
+            symbol("$a", VENEER + 4, SymbolKind::Mapping(Mapping::Arm), false),
+        ];
+        program
+    }
+
     /// The same program with one symbol stripped from the container.
     pub fn stripped_of(mut self, name: &str) -> Self {
         self.container.symbols.retain(|symbol| symbol.name != name);
@@ -146,7 +211,7 @@ impl Literal {
 impl Source for Literal {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
-        let rest = CODE.get(offset..).filter(|rest| !rest.is_empty())?;
+        let rest = self.code.get(offset..).filter(|rest| !rest.is_empty())?;
         Some(
             rest.iter()
                 .take(max)

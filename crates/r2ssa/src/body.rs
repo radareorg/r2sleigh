@@ -48,6 +48,12 @@ pub trait Program {
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         None
     }
+
+    /// The register a call writes to say which instruction set its target is
+    /// in, where the machine has more than one: Sleigh's `ISAModeSwitch`.
+    fn mode_register(&self) -> Option<r2il::Varnode> {
+        None
+    }
 }
 
 /// A function body: its blocks, who it calls, and what it could not follow.
@@ -63,6 +69,10 @@ pub struct Body {
     /// Functions this body leaves for without returning, by branching straight
     /// to their entry. A tail call is a call whose result is this function's.
     pub tail_calls: Vec<u64>,
+    /// The instruction set each call target is entered in, where the calling
+    /// instruction wrote the mode register; a call that writes none keeps
+    /// the caller's.
+    pub entered_with: BTreeMap<u64, u64>,
     /// Every place the walk stopped without knowing where control went.
     pub unresolved: Vec<Unresolved>,
 }
@@ -185,6 +195,7 @@ struct Walk<'a> {
     leaders: BTreeSet<u64>,
     calls: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
+    entered_with: BTreeMap<u64, u64>,
     unresolved: Vec<Unresolved>,
     /// The address the last decoded instruction ended at, so the next one can
     /// keep the decoder's context where it follows on.
@@ -209,6 +220,7 @@ impl<'a> Walk<'a> {
             leaders: BTreeSet::from([entry]),
             calls: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
+            entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
             continuing_from: None,
             never_returns,
@@ -300,6 +312,19 @@ impl<'a> Walk<'a> {
         false
     }
 
+    /// The constant an instruction writes to the mode register, if any.
+    fn mode_written(&self, ops: &[r2il::R2ILOp]) -> Option<u64> {
+        let mode = self.program.mode_register()?;
+        ops.iter().rev().find_map(|op| match op {
+            r2il::R2ILOp::Copy { dst, src }
+                if dst.space == mode.space && dst.offset == mode.offset =>
+            {
+                (src.space == r2il::SpaceId::Const).then_some(src.offset)
+            }
+            _ => None,
+        })
+    }
+
     fn stop(&mut self, addr: u64, reason: UnresolvedReason) -> Option<Instruction> {
         r2il::refusal_evidence!("body-walk", "stopping at {:#x}: {:?}", addr, reason);
         self.unresolved.push(Unresolved { addr, reason });
@@ -363,6 +388,9 @@ impl<'a> Walk<'a> {
                 fallthrough,
             } => {
                 self.calls.insert(target);
+                if let Some(mode) = self.mode_written(&instruction.lifted.ops) {
+                    self.entered_with.entry(target).or_insert(mode);
+                }
                 // A call the declarations say never returns ends the walk
                 // here: the bytes after it are the next function's.
                 if !(self.never_returns)(target) {
@@ -436,6 +464,7 @@ impl<'a> Walk<'a> {
             blocks,
             calls: self.calls.into_iter().collect(),
             tail_calls: self.tail_calls.into_iter().collect(),
+            entered_with: self.entered_with,
             unresolved: self.unresolved,
         }
     }

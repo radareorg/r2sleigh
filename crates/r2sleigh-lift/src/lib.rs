@@ -40,7 +40,9 @@ pub use disasm::{
     GenuineLiftedFunctionAuthority, SemanticMetadataOptions, SemanticMetadataPrecision,
     TrustedLiftedFunction, TrustedSleighProfile,
 };
-pub use disasm::{EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine};
+pub use disasm::{
+    EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
+};
 pub use esil::{OpEsil, block_to_esil, format_op, op_esil, op_to_esil};
 use r2il::ArchSpec;
 use r2il::Endianness;

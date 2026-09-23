@@ -53,7 +53,7 @@ pub fn of(source: &impl Source) -> NameDb {
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,
                     // An untyped symbol names a place, not an object, which is the difference `loc.` carries.
-                    SymbolKind::Other => Namespace::Label,
+                    SymbolKind::Other | SymbolKind::Mapping(_) => Namespace::Label,
                 },
                 size: symbol.size,
                 confidence: Confidence::Stated,

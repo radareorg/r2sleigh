@@ -58,6 +58,8 @@ pub enum Confidence {
 pub struct Discovered {
     pub address: u64,
     pub confidence: Confidence,
+    /// Whether its code is Thumb rather than the image's own instruction set.
+    pub thumb: bool,
     /// What the program calls it, where anything does. Presentation only.
     pub name: Option<String>,
 }
@@ -65,58 +67,83 @@ pub struct Discovered {
 /// Every function in the program, from what the image states and what the
 /// bodies reach.
 ///
-/// `walk` answers with the transfers one body makes, or `None` where the body
-/// could not be walked at all; a body that cannot be walked contributes no
-/// successors and is still a function, because something stated or called it.
+/// Each seed carries the instruction set the image states it is written in.
+/// `walk` is told the one each address is entered in and answers with the
+/// transfers that body makes, or `None` where it could not be walked at all; a
+/// body that cannot be walked contributes no successors and is still a
+/// function, because something stated or called it.
 pub fn functions(
     program: &dyn Program,
-    seeds: impl IntoIterator<Item = (u64, Confidence)>,
-    mut walk: impl FnMut(u64) -> Option<Transfers>,
+    seeds: impl IntoIterator<Item = (u64, Confidence, bool)>,
+    mut walk: impl FnMut(u64, bool) -> Option<Transfers>,
 ) -> Vec<Discovered> {
-    let mut believed = BTreeMap::<u64, Confidence>::new();
+    let mut believed = BTreeMap::<u64, (Confidence, bool)>::new();
     let mut pending = Vec::new();
-    let offer = |believed: &mut BTreeMap<u64, Confidence>,
+    // The first reason decides the instruction set: the seeds, which state
+    // it, are offered before anything is walked.
+    let offer = |believed: &mut BTreeMap<u64, (Confidence, bool)>,
                  pending: &mut Vec<u64>,
                  address: u64,
-                 confidence: Confidence| {
-        match believed.get(&address) {
+                 confidence: Confidence,
+                 thumb: bool| {
+        match believed.get_mut(&address) {
             // Already believed at least this strongly, and already queued.
-            Some(held) if *held <= confidence => {}
-            Some(_) => {
-                believed.insert(address, confidence);
-            }
+            Some((held, _)) if *held <= confidence => {}
+            Some((held, _)) => *held = confidence,
             None => {
-                believed.insert(address, confidence);
+                believed.insert(address, (confidence, thumb));
                 pending.push(address);
             }
         }
     };
-    for (address, confidence) in seeds {
-        offer(&mut believed, &mut pending, address, confidence);
+    for (address, confidence, thumb) in seeds {
+        offer(&mut believed, &mut pending, address, confidence, thumb);
     }
     let mut walked = BTreeSet::new();
     while let Some(address) = pending.pop() {
         if !walked.insert(address) {
             continue;
         }
-        let Some(transfers) = walk(address) else {
+        let thumb = believed[&address].1;
+        let Some(transfers) = walk(address, thumb) else {
             continue;
         };
-        for target in transfers.calls {
-            offer(&mut believed, &mut pending, target, Confidence::Called);
+        // A transfer that states no instruction set keeps this body's.
+        let entered = |target: u64| transfers.entered_in.get(&target).copied().unwrap_or(thumb);
+        for &target in &transfers.calls {
+            offer(
+                &mut believed,
+                &mut pending,
+                target,
+                Confidence::Called,
+                entered(target),
+            );
         }
-        for target in transfers.handed {
-            offer(&mut believed, &mut pending, target, Confidence::Handed);
+        for &target in &transfers.handed {
+            offer(
+                &mut believed,
+                &mut pending,
+                target,
+                Confidence::Handed,
+                entered(target),
+            );
         }
-        for target in transfers.tail_calls {
-            offer(&mut believed, &mut pending, target, Confidence::Reached);
+        for &target in &transfers.tail_calls {
+            offer(
+                &mut believed,
+                &mut pending,
+                target,
+                Confidence::Reached,
+                entered(target),
+            );
         }
     }
     believed
         .into_iter()
-        .map(|(address, confidence)| Discovered {
+        .map(|(address, (confidence, thumb))| Discovered {
             address,
             confidence,
+            thumb,
             name: program.name_at(address),
         })
         .collect()
@@ -132,6 +159,8 @@ pub struct Transfers {
     /// function. The walk cannot see these: they are constants in argument
     /// slots, not targets of any instruction.
     pub handed: Vec<u64>,
+    /// Whether each target is entered in Thumb, where the transfer states it.
+    pub entered_in: BTreeMap<u64, bool>,
 }
 
 impl From<&r2ssa::body::Body> for Transfers {
@@ -140,6 +169,12 @@ impl From<&r2ssa::body::Body> for Transfers {
             calls: body.calls.clone(),
             tail_calls: body.tail_calls.clone(),
             handed: Vec::new(),
+            // Sleigh's `ISAModeSwitch` holds the Thumb bit a call enters with.
+            entered_in: body
+                .entered_with
+                .iter()
+                .map(|(target, mode)| (*target, *mode != 0))
+                .collect(),
         }
     }
 }
@@ -176,13 +211,17 @@ mod tests {
 
     #[test]
     fn a_call_reaches_a_function_the_image_never_named() {
-        let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
-            (address == 0x1000).then(|| Transfers {
-                calls: vec![0x2000],
-                tail_calls: vec![0x3000],
-                handed: Vec::new(),
-            })
-        });
+        let found = functions(
+            &Named,
+            [(0x1000, Confidence::Stated, false)],
+            |address, _| {
+                (address == 0x1000).then(|| Transfers {
+                    calls: vec![0x2000],
+                    tail_calls: vec![0x3000],
+                    ..Transfers::default()
+                })
+            },
+        );
         let seen = found
             .iter()
             .map(|one| (one.address, one.confidence))
@@ -204,12 +243,14 @@ mod tests {
         // must not decide how far a fact can be trusted.
         let found = functions(
             &Named,
-            [(0x2000, Confidence::Stated), (0x1000, Confidence::Stated)],
-            |address| {
+            [
+                (0x2000, Confidence::Stated, false),
+                (0x1000, Confidence::Stated, false),
+            ],
+            |address, _| {
                 (address == 0x1000).then(|| Transfers {
-                    calls: Vec::new(),
                     tail_calls: vec![0x2000],
-                    handed: Vec::new(),
+                    ..Transfers::default()
                 })
             },
         );
@@ -226,13 +267,18 @@ mod tests {
     fn an_address_handed_to_a_declared_function_parameter_is_believed() {
         // Nothing transfers to it: it was put in an argument register and the
         // callee's declaration says that parameter is a function.
-        let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
-            (address == 0x1000).then(|| Transfers {
-                calls: Vec::new(),
-                tail_calls: Vec::new(),
-                handed: vec![0x4000],
-            })
-        });
+        let found = functions(
+            &Named,
+            [(0x1000, Confidence::Stated, false)],
+            |address, _| {
+                (address == 0x1000).then(|| Transfers {
+                    calls: Vec::new(),
+                    tail_calls: Vec::new(),
+                    handed: vec![0x4000],
+                    ..Transfers::default()
+                })
+            },
+        );
         let seen = found
             .iter()
             .map(|one| (one.address, one.confidence))
@@ -246,13 +292,18 @@ mod tests {
     #[test]
     fn a_call_outranks_a_handoff_for_the_same_address() {
         // Both are true; the stronger reason is the one the machine makes.
-        let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
-            (address == 0x1000).then(|| Transfers {
-                calls: vec![0x4000],
-                tail_calls: Vec::new(),
-                handed: vec![0x4000],
-            })
-        });
+        let found = functions(
+            &Named,
+            [(0x1000, Confidence::Stated, false)],
+            |address, _| {
+                (address == 0x1000).then(|| Transfers {
+                    calls: vec![0x4000],
+                    tail_calls: Vec::new(),
+                    handed: vec![0x4000],
+                    ..Transfers::default()
+                })
+            },
+        );
         assert_eq!(
             found
                 .iter()
@@ -264,22 +315,26 @@ mod tests {
 
     #[test]
     fn a_cycle_of_calls_terminates() {
-        let found = functions(&Named, [(0x1000, Confidence::Stated)], |address| {
-            Some(Transfers {
-                calls: vec![match address {
-                    0x1000 => 0x2000,
-                    _ => 0x1000,
-                }],
-                tail_calls: Vec::new(),
-                handed: Vec::new(),
-            })
-        });
+        let found = functions(
+            &Named,
+            [(0x1000, Confidence::Stated, false)],
+            |address, _| {
+                Some(Transfers {
+                    calls: vec![match address {
+                        0x1000 => 0x2000,
+                        _ => 0x1000,
+                    }],
+                    tail_calls: Vec::new(),
+                    ..Transfers::default()
+                })
+            },
+        );
         assert_eq!(found.len(), 2);
     }
 
     #[test]
     fn a_body_that_cannot_be_walked_is_still_a_function() {
-        let found = functions(&Named, [(0x1000, Confidence::Stated)], |_| None);
+        let found = functions(&Named, [(0x1000, Confidence::Stated, false)], |_, _| None);
         assert_eq!(found.len(), 1);
     }
 }

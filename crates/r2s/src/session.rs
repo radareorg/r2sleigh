@@ -6,8 +6,8 @@
 //! defined where -- is the engine's.
 
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, OpenProgram, Relocation, Section, Source, Symbol,
-    SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Relocation, Section, Source,
+    Symbol, SymbolKind,
 };
 use r2image::Image;
 
@@ -119,6 +119,11 @@ fn container_of(image: &Image) -> Container {
                     r2image::SymbolKind::Data => SymbolKind::Data,
                     r2image::SymbolKind::Section => SymbolKind::Section,
                     r2image::SymbolKind::Other => SymbolKind::Other,
+                    r2image::SymbolKind::Mapping(mapping) => SymbolKind::Mapping(match mapping {
+                        r2image::Mapping::Arm => Mapping::Arm,
+                        r2image::Mapping::Thumb => Mapping::Thumb,
+                        r2image::Mapping::Data => Mapping::Data,
+                    }),
                 },
                 defined: symbol.defined,
                 thumb: symbol.thumb,

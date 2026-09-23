@@ -66,6 +66,12 @@ pub trait Program: r2ssa::body::Program {
     /// string at address eighty, which is two bytes of the ELF header and in
     /// no section at all.
     fn holds_static_data(&self, vaddr: u64) -> bool;
+
+    /// The machine the function at this address is written in, where the
+    /// program has more than one; `None` keeps the caller's.
+    fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {
+        None
+    }
 }
 
 /// Everything about the machine that does not change between functions.
@@ -553,6 +559,16 @@ fn read_callees(
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
+        // A callee in the other instruction set is walked and captured in it.
+        let own = native
+            .program
+            .target_at(*address)
+            .filter(|own| own.cpu != target.cpu);
+        let switched = own.as_ref().and_then(|own| native.in_target(own));
+        let (native, target) = match (&switched, &own) {
+            (Some(switched), Some(own)) => (switched, own),
+            _ => (native, target),
+        };
         let Ok(walked) = native.walk(*address) else {
             unread.push(Unread {
                 address: *address,
@@ -1503,6 +1519,16 @@ struct Native<'a> {
 }
 
 impl Native<'_> {
+    /// The same request over another machine of this program.
+    fn in_target<'b>(&'b self, target: &'b NativeTarget<'b>) -> Option<Native<'b>> {
+        Some(Native {
+            target,
+            program: self.program,
+            machine: machine(target).ok()?,
+            control: self.control.clone(),
+        })
+    }
+
     fn walk(&self, entry: u64) -> Result<Walked, NativeRefusal> {
         self.walk_dispatched(entry, &BTreeMap::new())
     }
@@ -1635,16 +1661,7 @@ impl Native<'_> {
     /// Whether an instruction lives at an address, which is what makes a table
     /// entry a place control can go.
     fn decodes(&self, target: u64) -> bool {
-        let Some(bytes) = self.program.read(target, WINDOW) else {
-            return false;
-        };
-        let mut fetch = bytes;
-        let available = fetch.len();
-        fetch.resize(WINDOW, 0);
-        self.target
-            .disasm
-            .lift(&fetch, target)
-            .is_ok_and(|lifted| lifted.size != 0 && lifted.size as usize <= available)
+        decodes(self.target.disasm, self.program, target)
     }
 
     /// The text a prepared body points at.
@@ -2050,7 +2067,8 @@ impl Native<'_> {
     /// calls `__libc_start_main`, whose prototype spells that parameter
     /// `func`, so the address is a function on the declaration's authority.
     /// Nothing here guesses: a constant is believed only where a declared type
-    /// says that slot holds a function and the constant decodes.
+    /// says that slot holds a function, and the caller checks it decodes in
+    /// the instruction set the pointer names.
     fn handed_functions(&self, artifact: &TrustedSsaArtifact, walked: &Walked) -> Vec<u64> {
         let prepared = artifact.shared_artifact();
         let sites = call_sites(&walked.body, self.program);
@@ -2077,7 +2095,7 @@ impl Native<'_> {
                     else {
                         continue;
                     };
-                    if address != 0 && self.decodes(address) {
+                    if address != 0 {
                         r2il::refusal_evidence!(
                             "handed-function",
                             "{instruction:#x}: {} argument {index} is {address:#x}",
@@ -2098,6 +2116,18 @@ impl Native<'_> {
         let bytes = self.program.read(address, crate::names::LITERAL_LIMIT)?;
         crate::names::text_in(&bytes).map(str::to_owned)
     }
+}
+
+/// Whether an instruction decodes at an address.
+pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> bool {
+    let Some(mut fetch) = program.read(at, WINDOW) else {
+        return false;
+    };
+    let available = fetch.len();
+    fetch.resize(WINDOW, 0);
+    disasm
+        .lift(&fetch, at)
+        .is_ok_and(|lifted| lifted.size != 0 && lifted.size as usize <= available)
 }
 
 /// Every address this body names as a constant.

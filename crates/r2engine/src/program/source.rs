@@ -83,6 +83,17 @@ pub enum SymbolKind {
     Data,
     Section,
     Other,
+    /// An ARM mapping symbol: where the bytes become code of one instruction
+    /// set, or data.
+    Mapping(Mapping),
+}
+
+/// What an ARM mapping symbol says the bytes from it are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mapping {
+    Arm,
+    Thumb,
+    Data,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

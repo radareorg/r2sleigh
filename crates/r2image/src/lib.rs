@@ -112,6 +112,32 @@ pub enum SymbolKind {
     Data,
     Section,
     Other,
+    /// An ARM mapping symbol: where the bytes become code of one instruction
+    /// set, or data.
+    Mapping(Mapping),
+}
+
+/// What an ARM mapping symbol (`$a`, `$t`, `$d`) says the bytes from it are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mapping {
+    Arm,
+    Thumb,
+    Data,
+}
+
+/// The mapping a symbol name states, per the ARM ELF ABI: `$a`, `$t` or `$d`,
+/// optionally followed by `.` and anything.
+fn mapping(name: &str) -> Option<Mapping> {
+    let (tag, rest) = name.split_at_checked(2)?;
+    if !(rest.is_empty() || rest.starts_with('.')) {
+        return None;
+    }
+    match tag {
+        "$a" => Some(Mapping::Arm),
+        "$t" => Some(Mapping::Thumb),
+        "$d" => Some(Mapping::Data),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -684,6 +710,7 @@ impl Image {
                     .filter(|_| relocatable)
                     .and_then(|index| file.section_by_index(index).ok())
                     .map_or(0, |section| placed(&section));
+            let mapped = is_arm32(&arch).then(|| mapping(name)).flatten();
             Some(Symbol {
                 name: name.to_owned(),
                 vaddr: match symbol.kind() {
@@ -691,14 +718,15 @@ impl Image {
                     _ => address,
                 },
                 size: symbol.size(),
-                kind: match symbol.kind() {
+                kind: match (mapped, symbol.kind()) {
+                    (Some(mapped), _) => SymbolKind::Mapping(mapped),
                     // A name in code is a function; `__mh_execute_header` is
                     // typed as code and sits at the Mach-O header, where no
                     // instruction begins, so discovery walked the header.
-                    object::SymbolKind::Text if executable(address) => SymbolKind::Function,
-                    object::SymbolKind::Data => SymbolKind::Data,
-                    object::SymbolKind::Section => SymbolKind::Section,
-                    _ => SymbolKind::Other,
+                    (None, object::SymbolKind::Text) if executable(address) => SymbolKind::Function,
+                    (None, object::SymbolKind::Data) => SymbolKind::Data,
+                    (None, object::SymbolKind::Section) => SymbolKind::Section,
+                    (None, _) => SymbolKind::Other,
                 },
                 // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
                 // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
@@ -1251,6 +1279,22 @@ fn map_architecture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mapping_symbol_is_read_by_its_abi_name() {
+        let read = ["$a", "$t.f", "$d", "$ta", "$x", "main"].map(mapping);
+        assert_eq!(
+            read,
+            [
+                Some(Mapping::Arm),
+                Some(Mapping::Thumb),
+                Some(Mapping::Data),
+                None,
+                None,
+                None
+            ]
+        );
+    }
 
     fn image_with(segments: Vec<Segment>, data: Vec<u8>) -> Image {
         Image {

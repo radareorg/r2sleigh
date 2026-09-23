@@ -374,6 +374,7 @@ fn symbols(session: &Session) -> Result<String, String> {
                 r2image::SymbolKind::Data => "OBJ",
                 r2image::SymbolKind::Section => "SECT",
                 r2image::SymbolKind::Other => "NOTY",
+                r2image::SymbolKind::Mapping(_) => "SPCL",
             },
             symbol.name
         ));

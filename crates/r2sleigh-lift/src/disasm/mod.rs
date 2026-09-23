@@ -1585,6 +1585,15 @@ pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
     })
 }
 
+/// The Thumb decoder of an architecture that has one: ARM's second processor
+/// context, which Ghidra ships as the same language with TMode set.
+pub fn embedded_thumb_machine(arch_name: &str) -> Option<Result<EmbeddedMachine>> {
+    match arch_name.to_ascii_lowercase().as_str() {
+        "arm" | "arm32" => Some(embedded_machine("arm-thumb")),
+        _ => None,
+    }
+}
+
 /// The embedded data one lower-cased architecture name selects, if any is
 /// compiled in for it.
 type EmbeddedSpecification = (

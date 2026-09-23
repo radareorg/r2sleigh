@@ -25,6 +25,7 @@ type Surveyed = (Vec<Discovered>, BTreeMap<u64, Vec<DataRefFact>>);
 impl<S: Source> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
     pub fn prepared(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
+        self.ensure_decodable()?;
         self.ensure_assembled(entry)?;
         let target = self.target(entry)?;
         self.analysed(&target, entry)
@@ -41,6 +42,7 @@ impl<S: Source> OpenProgram<S> {
 
     /// The operations Sleigh produced for one function, before any analysis.
     pub fn lifted(&mut self, entry: u64) -> Result<String, String> {
+        self.ensure_decodable()?;
         self.ensure_assembled(entry)?;
         crate::native::lifted(&self.target(entry)?, self, entry)
             .map_err(|refusal| refusal.to_string())
@@ -49,7 +51,7 @@ impl<S: Source> OpenProgram<S> {
     /// A run of instructions, each carrying what its own run of neighbours
     /// shows. Nothing is walked or prepared.
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
-        self.ensure_current()?;
+        self.ensure_decodable()?;
         Ok(crate::query::listing(
             &self.answered(None),
             request,
@@ -119,46 +121,76 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Discovery, and the references each body it walked makes.
-    fn surveyed(&mut self) -> Result<Surveyed, String> {
+    pub(super) fn surveyed(&mut self) -> Result<Surveyed, String> {
         self.ensure_current()?;
         let seeds = self.stated_functions();
-        let Some(&(first, _)) = seeds.first() else {
+        let Some(&(first, _, _)) = seeds.first() else {
             return Ok(Default::default());
         };
-        // One decoder for the whole walk, the one the declared entry is written
-        // in. Which instruction set a called function is in is the call's to
-        // say, and no transfer carries that yet; guessing it from the nearest
-        // symbol decoded Thumb bodies as ARM wherever that symbol was data.
+        // Both instruction sets share one convention and one compiler
+        // specification, so one assembly serves either decoder.
         self.ensure_assembled(first)?;
         let program = &*self;
-        let target = program.target(first)?;
+        let primary = program.target_of(program.machine_in(false).ok_or("no machine")?)?;
+        let thumb = match program.machine_in(true) {
+            Some(machine) => Some(program.target_of(machine)?),
+            None => None,
+        };
         let mut seen = BTreeMap::new();
-        let found = crate::discovery::functions(program, seeds, |entry| {
-            let survey = crate::native::surveyed(&target, program, entry)?;
+        let found = crate::discovery::functions(program, seeds, |entry, in_thumb| {
+            let target = match (in_thumb, &thumb) {
+                (true, Some(thumb)) => thumb,
+                _ => &primary,
+            };
+            let mut survey = crate::native::surveyed(target, program, entry)?;
             seen.insert(entry, survey.data_refs);
+            let transfers = &mut survey.transfers;
+            if thumb.is_some() {
+                interworking(transfers);
+            }
+            // A handed constant is a function only where it decodes, in the
+            // instruction set it is entered in.
+            let entered_in = &transfers.entered_in;
+            transfers.handed.retain(|address| {
+                let target = match (entered_in.get(address), &thumb) {
+                    (Some(true), Some(thumb)) => thumb,
+                    _ => &primary,
+                };
+                crate::native::decodes(target.disasm, program, *address)
+            });
             Some(survey.transfers)
         });
+        if self.thumb_machine.is_some() {
+            let modes = found
+                .iter()
+                .map(|one| (one.address, one.thumb))
+                .collect::<BTreeMap<_, _>>();
+            self.entries_revision += u64::from(modes != self.modes);
+            self.modes = modes;
+            self.modes_at = Some(self.source.byte_revision());
+        }
         Ok((found, seen))
     }
 
-    /// Where the program states a function begins: its entry points, the
-    /// symbols it types as functions, and a linkage stub per import, which
-    /// the loader's own table places.
-    fn stated_functions(&self) -> Vec<(u64, Confidence)> {
+    /// Where the program states a function begins, and whether it states the
+    /// code there is Thumb: its entry points, the symbols it types as
+    /// functions, and a linkage stub per import, which the loader's own table
+    /// places.
+    fn stated_functions(&self) -> Vec<(u64, Confidence, bool)> {
         let container = self.source.container();
         container
             .entries
             .iter()
-            .map(|entry| entry.vaddr)
+            .map(|entry| (entry.vaddr, entry.thumb))
             .chain(
                 container
                     .symbols
                     .iter()
                     .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
-                    .map(|symbol| symbol.vaddr),
+                    .map(|symbol| (symbol.vaddr, symbol.thumb)),
             )
-            .chain(self.imports.keys().copied())
-            .map(|vaddr| (vaddr, Confidence::Stated))
+            .chain(self.imports.keys().map(|vaddr| (*vaddr, false)))
+            .map(|(vaddr, thumb)| (vaddr, Confidence::Stated, thumb))
             .collect()
     }
 
@@ -171,5 +203,15 @@ impl<S: Source> OpenProgram<S> {
             },
             facts,
         }
+    }
+}
+
+/// A handed function pointer states its instruction set in its low bit, as
+/// `bx` reads it, so the function is at the pointer with that bit clear.
+fn interworking(transfers: &mut crate::discovery::Transfers) {
+    for pointer in &mut transfers.handed {
+        let thumb = *pointer & 1 == 1;
+        *pointer &= !1;
+        transfers.entered_in.insert(*pointer, thumb);
     }
 }

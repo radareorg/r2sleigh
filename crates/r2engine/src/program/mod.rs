@@ -13,7 +13,8 @@ pub mod source;
 pub use requests::Rendering;
 
 pub use source::{
-    Arch, Container, Entry, EntryKind, Format, Relocation, Section, Source, Symbol, SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, Relocation, Section, Source, Symbol,
+    SymbolKind,
 };
 
 use std::collections::BTreeMap;
@@ -23,15 +24,6 @@ use r2sleigh_lift::EmbeddedMachine;
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
 use crate::query::{Decoders, Memo, Revision};
-
-/// What the binary defines at one address.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Definition {
-    /// Whether a function begins here, which is what bounds a body.
-    function: bool,
-    /// Whether this function's code is Thumb rather than ARM.
-    thumb: bool,
-}
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
@@ -43,6 +35,8 @@ struct Assembled {
     prototypes: r2abi::Prototypes,
     /// The register a call returns through, in the coordinates the lift spells.
     link: Option<r2il::Varnode>,
+    /// The register a call writes the instruction set of its target to.
+    mode: Option<r2il::Varnode>,
 }
 
 /// One open program: its source, its decoders, and the tables read out of both.
@@ -56,13 +50,26 @@ pub struct OpenProgram<S: Source> {
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
     slots: BTreeMap<u64, String>,
-    /// What this binary defines at each address, indexed once.
+    /// Whether a function begins at each address the binary defines, indexed
+    /// once.
     ///
     /// The engine asks this per call target and per branch target of every
     /// body it walks, and answering it by scanning the symbol table made the
     /// walk cost one pass over every symbol per edge. Read from the container
     /// alone, so no write moves it.
-    defined: BTreeMap<u64, Definition>,
+    defined: BTreeMap<u64, bool>,
+    /// Whether each function discovery found is Thumb, by its entry.
+    ///
+    /// Derived from the whole program, since a function nothing states is in
+    /// the instruction set its callers enter it in; only a program with a
+    /// second decoder pays for it.
+    modes: BTreeMap<u64, bool>,
+    /// Whether the code from each ARM mapping symbol on is Thumb, as the
+    /// container states it; this can switch inside one function, as a veneer
+    /// does.
+    mapped: BTreeMap<u64, bool>,
+    /// Which revision of the bytes `modes` was discovered at.
+    modes_at: Option<u64>,
     /// Which revision of the bytes the names and the imports were derived at.
     ///
     /// Both are read out of the bytes, and the imports are *decoded* from
@@ -94,9 +101,8 @@ pub struct OpenProgram<S: Source> {
     /// request runs, which is the whole point of having one.
     control: crate::EngineExecutionControl,
     machine: Option<EmbeddedMachine>,
-    /// The same instruction set with TMode set. ARM states the mode per
-    /// function in the low bit of its symbol, so both decoders are needed at
-    /// once and neither is the image's.
+    /// The same instruction set with TMode set, where the architecture has
+    /// one. Which functions it decodes is what `modes` says.
     thumb_machine: Option<EmbeddedMachine>,
 }
 
@@ -116,6 +122,18 @@ impl<S: Source> OpenProgram<S> {
                 .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
                 .collect(),
             defined: definitions(container),
+            modes: BTreeMap::new(),
+            mapped: container
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.defined)
+                .filter_map(|symbol| match symbol.kind {
+                    SymbolKind::Mapping(Mapping::Arm) => Some((symbol.vaddr, false)),
+                    SymbolKind::Mapping(Mapping::Thumb) => Some((symbol.vaddr, true)),
+                    _ => None,
+                })
+                .collect(),
+            modes_at: None,
             source,
             // The import table needs a decoder, so nothing here is derived yet.
             derived_at: None,
@@ -153,11 +171,12 @@ impl<S: Source> OpenProgram<S> {
                 r2sleigh_lift::embedded_machine(&self.source.container().arch.name)
                     .map_err(|error| error.to_string())?,
             );
-            // Only where a function says it is Thumb, so a machine with no
-            // Thumb code pays nothing for the second specification.
-            if self.defined.values().any(|definition| definition.thumb) {
-                self.thumb_machine = r2sleigh_lift::embedded_machine("arm-thumb").ok();
-            }
+            // Whether any function is Thumb is discovery's answer, so the
+            // decoder is loaded wherever the architecture has one.
+            self.thumb_machine =
+                r2sleigh_lift::embedded_thumb_machine(&self.source.container().arch.name)
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
         }
         let revision = self.source.byte_revision();
         if self.derived_at == Some(revision) {
@@ -239,13 +258,25 @@ impl<S: Source> OpenProgram<S> {
         &self.imports
     }
 
+    /// Make current which instruction set each function is written in, which
+    /// every decode reads.
+    ///
+    /// Discovery answers it for the whole program, so a function reached only
+    /// by a call decodes the same whichever command asked first.
+    fn ensure_decodable(&mut self) -> Result<(), String> {
+        self.ensure_current()?;
+        if self.thumb_machine.is_some() && self.modes_at != Some(self.source.byte_revision()) {
+            self.surveyed()?;
+        }
+        Ok(())
+    }
+
     /// Assemble what a native request needs, once per program and machine.
     ///
     /// All of it is constant while one program is open, and rebuilding it per
     /// command cost two milliseconds -- almost all of it parsing the embedded
     /// prototype table -- on every `pdd`, `pdil`, `afl` and `ax`.
     fn ensure_assembled(&mut self, addr: u64) -> Result<(), String> {
-        self.ensure_current()?;
         let machine = self
             .machine_at(addr)
             .ok_or("no Sleigh specification for this architecture")?;
@@ -277,6 +308,17 @@ impl<S: Source> OpenProgram<S> {
                     meta: None,
                 })
         });
+        let mode = machine
+            .arch
+            .registers
+            .iter()
+            .find(|register| register.name == "ISAModeSwitch")
+            .map(|register| r2il::Varnode {
+                space: r2il::SpaceId::Register,
+                offset: register.offset,
+                size: register.size,
+                meta: None,
+            });
         // The format says which platform's own declarations apply: `_Exit` is
         // declared by the platform, not by the table every target shares.
         let mut prototypes = r2abi::Prototypes::embedded_for(match container.format {
@@ -294,6 +336,7 @@ impl<S: Source> OpenProgram<S> {
             compiler,
             prototypes,
             link,
+            mode,
         });
         Ok(())
     }
@@ -303,9 +346,13 @@ impl<S: Source> OpenProgram<S> {
     /// Assembled once and handed out, so a caller holds one description of the
     /// program rather than building its own from the parts.
     fn target(&self, addr: u64) -> Result<NativeTarget<'_>, String> {
-        let machine = self
-            .machine_at(addr)
-            .ok_or("no Sleigh specification for this architecture")?;
+        self.target_of(
+            self.machine_at(addr)
+                .ok_or("no Sleigh specification for this architecture")?,
+        )
+    }
+
+    fn target_of<'a>(&'a self, machine: &'a EmbeddedMachine) -> Result<NativeTarget<'a>, String> {
         let assembled = self
             .assembled
             .as_ref()
@@ -408,23 +455,26 @@ impl<S: Source> OpenProgram<S> {
         }
     }
 
-    /// The decoder the code at this address is written in.
-    ///
-    /// ARM states the mode per function, in the low bit of the symbol that
-    /// names it, so the image has no single answer and the address decides.
+    /// The decoder the code at this address is written in: whichever is
+    /// nearest below it of a mapping symbol and a function discovery placed,
+    /// the container's statement winning a tie.
     fn machine_at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
-        match self.thumb_at(vaddr) {
-            true => self.thumb_machine.as_ref().or(self.machine.as_ref()),
-            false => self.machine.as_ref(),
-        }
+        let stated = self.mapped.range(..=vaddr).next_back();
+        let derived = self.modes.range(..=vaddr).next_back();
+        let thumb = match (stated, derived) {
+            (Some((at, thumb)), Some((from, _))) if at >= from => *thumb,
+            (_, Some((_, thumb))) | (Some((_, thumb)), None) => *thumb,
+            (None, None) => false,
+        };
+        self.machine_in(thumb)
     }
 
-    /// Whether the function containing this address is Thumb.
-    fn thumb_at(&self, vaddr: u64) -> bool {
-        self.defined
-            .range(..=vaddr)
-            .next_back()
-            .is_some_and(|(_, definition)| definition.function && definition.thumb)
+    /// The decoder for one instruction set.
+    fn machine_in(&self, thumb: bool) -> Option<&EmbeddedMachine> {
+        match thumb {
+            true => self.thumb_machine.as_ref(),
+            false => self.machine.as_ref(),
+        }
     }
 
     /// How this program spells a word in memory.
@@ -460,14 +510,15 @@ impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
         // A stub is a function of the program's as much as a body is: control
         // that reaches one has left the function it came from.
         self.imports.contains_key(&vaddr)
-            || self
-                .defined
-                .get(&vaddr)
-                .is_some_and(|definition| definition.function)
+            || self.defined.get(&vaddr).is_some_and(|function| *function)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.assembled.as_ref().and_then(|held| held.link.clone())
+    }
+
+    fn mode_register(&self) -> Option<r2il::Varnode> {
+        self.assembled.as_ref().and_then(|held| held.mode.clone())
     }
 }
 
@@ -505,32 +556,30 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
             .or_else(|| self.slots.get(&vaddr))
             .cloned()
     }
+
+    fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
+        self.target(vaddr).ok()
+    }
 }
 
-/// What the binary defines at each address, indexed by where it is.
+/// Whether a function begins at each address the binary defines.
 ///
-/// Names live in the name table; this answers the two questions a walk asks
-/// of an address and a name cannot: whether a function begins here, and which
-/// instruction set it is written in. The first symbol at an address wins, so
-/// the index answers the same way twice over.
-fn definitions(container: &Container) -> BTreeMap<u64, Definition> {
+/// Names live in the name table; this answers the question a walk asks of an
+/// address and a name cannot. The first symbol at an address wins, so the
+/// index answers the same way twice over.
+fn definitions(container: &Container) -> BTreeMap<u64, bool> {
     let mut defined = BTreeMap::new();
-    // The format's own entry first: a stripped ARM binary has no symbol there,
-    // and `e_entry`'s low bit is the only thing that says the entry is Thumb.
+    // The format's own entry first: a stripped binary has no symbol there.
     for entry in &container.entries {
-        defined.entry(entry.vaddr).or_insert_with(|| Definition {
-            function: true,
-            thumb: entry.thumb,
-        });
+        defined.entry(entry.vaddr).or_insert(true);
     }
     for symbol in &container.symbols {
         if !symbol.defined || symbol.name.is_empty() {
             continue;
         }
-        defined.entry(symbol.vaddr).or_insert_with(|| Definition {
-            function: symbol.kind == SymbolKind::Function,
-            thumb: symbol.thumb,
-        });
+        defined
+            .entry(symbol.vaddr)
+            .or_insert(symbol.kind == SymbolKind::Function);
     }
     defined
 }
