@@ -1,0 +1,18 @@
+[package]
+name = "late_bound_locations"
+version = "0.1.0"
+edition = "2021"
+description = "POC: late-bound typed locations as sections of a bundle over the execution timeline"
+
+# Standalone workspace root so this POC does NOT attach to the r2sleigh
+# workspace and cannot perturb the main build. Dependency-free (std only),
+# so it builds and tests fully offline.
+[workspace]
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[lib]
+name = "late_bound_locations"
+path = "src/lib.rs"

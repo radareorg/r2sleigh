@@ -20,6 +20,12 @@ typed location** with an explicit temporal validity domain.
 This is a design note, not an implementation commitment. It exists to keep the
 reasoning durable and to give later work a fixed target.
 
+A runnable, dependency-free proof-of-concept of the location model lives in
+[`poc/late_bound_locations/`](poc/late_bound_locations/): `cargo test` there
+discharges each claim below (10 tests), and `poc/late_bound_locations/MATH.md`
+gives the higher-dimensional-algebra formalization (address torsor, execution
+timeline as base space, locations as sections, the staleness-safety theorem).
+
 
 The Question
 ------------
