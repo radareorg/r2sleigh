@@ -77,6 +77,13 @@ pub struct Disassembler {
     trusted_profile: Option<TrustedSleighProfile>,
 }
 
+/// One instruction as a listing spells it and as its P-code says it runs, read from one parse.
+#[derive(Debug, Clone)]
+pub struct Decoded {
+    pub syntax: syntax::Syntax,
+    pub lifted: R2ILBlock,
+}
+
 /// Embedded Sleigh profiles allowed to mint certifying lift authority.
 ///
 /// Arbitrary caller-supplied SLA/pspec bytes remain useful for analysis, but
@@ -2246,9 +2253,28 @@ impl Disassembler {
         Ok(syntax::radare2(&mnemonic, &body, size, &self.arch_name))
     }
 
+    /// Spell and lift one instruction from one Sleigh parse; `continuing` keeps the context of a previous decode that ended at `addr`.
+    pub fn decode(&self, bytes: &[u8], addr: u64, continuing: bool) -> Result<Decoded> {
+        if !continuing {
+            self.clear_decode_cache()?;
+        }
+        let (mnemonic, body, size) = self.native_parts(bytes, addr)?;
+        // The P-code is built from the parse just printed, and building it commits the context the next decode reads.
+        let lifted = self.lift_canonical(bytes, addr)?;
+        Ok(Decoded {
+            syntax: syntax::radare2(&mnemonic, &body, size, &self.arch_name),
+            lifted,
+        })
+    }
+
     /// One instruction's operation and operands, as Sleigh itself spells them.
     fn disasm_parts(&self, bytes: &[u8], addr: u64) -> Result<(String, String, usize)> {
         self.clear_decode_cache()?;
+        self.native_parts(bytes, addr)
+    }
+
+    /// Sleigh's own spelling of the instruction at `addr`, in whatever context the decoder holds.
+    fn native_parts(&self, bytes: &[u8], addr: u64) -> Result<(String, String, usize)> {
         let sleigh = self.spec.sleigh.borrow();
         let code_space = sleigh.default_code_space();
         let address = Address::new(code_space, addr);

@@ -276,3 +276,100 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
         ]
     );
 }
+
+/// Thumb: `cmp r0, #0; it eq; moveq r0, #1; bx lr`.
+const IT_BLOCK: [u8; 8] = [0x00, 0x28, 0x08, 0xbf, 0x01, 0x20, 0x70, 0x47];
+
+/// The bytes of one function and nothing else, as the body walk reads them.
+struct Walked(&'static [u8]);
+
+impl r2ssa::body::Program for Walked {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(ARM)?).ok()?;
+        let rest = self.0.get(offset..).filter(|rest| !rest.is_empty())?;
+        Some(rest[..max.min(rest.len())].to_vec())
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+}
+
+/// Sleigh's decode window, zero past the function's bytes.
+fn window(at: u64) -> Vec<u8> {
+    let mut fetch = IT_BLOCK[usize::try_from(at - ARM).expect("inside")..].to_vec();
+    fetch.resize(16, 0);
+    fetch
+}
+
+#[test]
+fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
+    let thumb = r2sleigh_lift::embedded_machine("arm-thumb").expect("Thumb is compiled in");
+    let guarded = ARM + 4;
+    // The run the walk decodes: the entry afresh, each instruction after it continuing.
+    let mut continuing = None;
+    for at in [ARM, ARM + 2, guarded] {
+        continuing = Some(
+            thumb
+                .disasm
+                .decode(&window(at), at, at != ARM)
+                .expect("each decodes"),
+        );
+    }
+    let continuing = continuing.expect("decoded");
+    let fresh = thumb
+        .disasm
+        .disasm_syntax(&window(guarded), guarded)
+        .expect("decodes afresh");
+    assert_ne!(
+        continuing.syntax.text(),
+        fresh.text(),
+        "the `it` changed nothing, so this program proves nothing"
+    );
+
+    // The walk's lift of the guarded instruction is the continuing decode's.
+    let body = r2ssa::body::lift_body(
+        ARM,
+        &thumb.disasm,
+        &Walked(&IT_BLOCK),
+        &std::collections::BTreeMap::new(),
+    )
+    .expect("the body walks");
+    let walked: Vec<_> = body
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .lifted
+                .ops
+                .iter()
+                .enumerate()
+                .filter_map(|(index, op)| {
+                    (block.lifted.op_metadata(index)?.instruction_addr == Some(guarded))
+                        .then_some(op.clone())
+                })
+        })
+        .collect();
+    assert_eq!(walked, continuing.lifted.ops);
+
+    // pd and pdf spell it as that decode does, not as a decoder starting at it.
+    let mut mixed = arm_only(&IT_BLOCK, r2il::Endianness::Little);
+    mixed.container.symbols[0].thumb = true;
+    let mut program = OpenProgram::of(mixed);
+    let spelled = |lines: &[r2engine::query::Line]| {
+        lines
+            .iter()
+            .find(|line| line.address == guarded)
+            .and_then(|line| line.syntax.as_ref())
+            .map(r2sleigh_lift::Syntax::text)
+    };
+    let pd = program
+        .listing(Listing {
+            start: ARM,
+            stop: Stop::After(4),
+        })
+        .expect("it lists");
+    assert_eq!(spelled(&pd.value), Some(continuing.syntax.text()), "pd");
+    let pdf = program.function_listing(ARM).expect("it lists");
+    assert_eq!(spelled(&pdf.value), Some(continuing.syntax.text()), "pdf");
+}

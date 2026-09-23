@@ -5,6 +5,8 @@
 //! crosses a boundary and kept the decoder it started with decodes the rest of
 //! itself wrongly.
 
+use r2sleigh_lift::EmbeddedMachine;
+
 use super::records::{Answered, Line, Listing, Stop};
 use super::{Answer, Completion, Revision, Work};
 
@@ -12,76 +14,91 @@ use super::{Answer, Completion, Revision, Work};
 const DECODE_WINDOW: usize = 16;
 
 /// Decode a run of instructions, saying as much about each as `work` allows.
+///
+/// A line keeps the decoder context of the line that ended where it starts, as the walk does; a run's first line starts afresh.
 pub fn listing(
     answered: &Answered<'_>,
     request: Listing,
     work: Work,
     revision: Revision,
 ) -> Answer<Vec<Line>> {
-    let mut lines = Vec::new();
-    // The lift of each line, kept until the run has been read: whether an
-    // instruction's own result is an address or a step towards one is a fact
-    // about what the next instruction does with it.
-    let mut lifts: Vec<Option<r2il::R2ILBlock>> = Vec::new();
-    // The bytes each line decoded from, which lifting again a page further on reads too.
-    let mut windows: Vec<Option<Vec<u8>>> = Vec::new();
-    let mut straight = Straight::default();
-    let mut pc = request.start;
-    let mut completion = Completion::Complete;
-
-    while match request.stop {
-        Stop::After(count) => lines.len() < count,
-        Stop::At(end) => pc < end,
-    } {
-        let Some(one) = decoded(answered, pc, answered.spelled, &mut straight) else {
-            completion = Completion::Unmapped { at: pc };
-            break;
-        };
-        lines.push(one.line);
-        lifts.push(one.lift);
-        windows.push(one.window);
-        pc = one.next;
-    }
-    // Spelling starts the decoder afresh at every line, so a spelled run is lifted in a pass of its own.
-    if answered.spelled && work > Work::Decode {
-        lifts = lift_run(answered, &lines, &windows, 0);
-    }
-
+    let mut run = Run::read(answered, request, work);
     let mut beyond = Lookahead {
         answered,
-        next: pc,
-        open: completion == Completion::Complete,
+        next: run.next,
+        open: run.completion == Completion::Complete,
         straight: Straight::default(),
         tail: Vec::new(),
     };
-    let run = super::annotate::Run {
-        lifts: &lifts,
-        windows: &windows,
+    let lifted = super::annotate::Run {
+        lifts: &run.lifts,
+        windows: &run.windows,
     };
-    super::annotate::over_run(answered, work, &run, &mut beyond, &mut lines);
+    super::annotate::over_run(answered, work, &lifted, &mut beyond, &mut run.lines);
     Answer {
-        value: lines,
+        value: run.lines,
         revision,
-        completion,
+        completion: run.completion,
+    }
+}
+
+/// The lines of one run, before anything is said about them.
+struct Run {
+    lines: Vec<Line>,
+    /// The lift of each line, kept until the run has been read: whether an
+    /// instruction's own result is an address or a step towards one is a fact
+    /// about what the next instruction does with it.
+    lifts: Vec<Option<r2il::R2ILBlock>>,
+    /// The bytes each line decoded from, which lifting again a page further on reads too.
+    windows: Vec<Option<Vec<u8>>>,
+    completion: Completion,
+    /// Where reading stopped.
+    next: u64,
+}
+
+impl Run {
+    fn read(answered: &Answered<'_>, request: Listing, work: Work) -> Self {
+        let mut run = Self {
+            lines: Vec::new(),
+            lifts: Vec::new(),
+            windows: Vec::new(),
+            completion: Completion::Complete,
+            next: request.start,
+        };
+        let mut straight = Straight::default();
+        while match request.stop {
+            Stop::After(count) => run.lines.len() < count,
+            Stop::At(end) => run.next < end,
+        } {
+            let Some(one) = decoded(answered, run.next, answered.spelled, &mut straight) else {
+                run.completion = Completion::Unmapped { at: run.next };
+                break;
+            };
+            run.lines.push(one.line);
+            // A decode-only request lifts only to commit the context the next line reads.
+            run.lifts.push(one.lift.filter(|_| work > Work::Decode));
+            run.windows.push(one.window);
+            run.next = one.next;
+        }
+        run
     }
 }
 
 /// One instruction read at an address, and where the next one begins.
 struct Decoded {
     line: Line,
-    /// Its lift, where the line was read without being spelled.
     lift: Option<r2il::R2ILBlock>,
     /// The decode window it was read from, where it decoded.
     window: Option<Vec<u8>>,
     next: u64,
 }
 
-/// Read the instruction at `pc`, spelled or lifted; `None` where the program maps nothing to read.
-fn decoded(
-    answered: &Answered<'_>,
+/// Read the instruction at `pc`, spelled and lifted from one parse or only lifted; `None` where the program maps nothing to read.
+fn decoded<'a>(
+    answered: &Answered<'a>,
     pc: u64,
     spell: bool,
-    straight: &mut Straight,
+    straight: &mut Straight<'a>,
 ) -> Option<Decoded> {
     let machine = answered.decoders.at(pc)?;
     let window = answered.memory.program.read(pc, DECODE_WINDOW)?;
@@ -97,7 +114,9 @@ fn decoded(
     // whole of it whatever the instruction needs, and handing it only the
     // bytes the instruction occupies fails the decode just performed.
     let (syntax, lift) = match spell {
-        true => (machine.disasm.disasm_syntax(&fetch, pc).ok(), None),
+        true => straight
+            .decode(machine, &fetch, pc)
+            .map_or((None, None), |one| (Some(one.syntax), Some(one.lifted))),
         false => (None, straight.lift(machine, &fetch, pc)),
     };
     let size = match (&syntax, &lift) {
@@ -132,36 +151,55 @@ fn decoded(
     })
 }
 
-/// Where the last lift of one straight line ended, and on which decoder.
+/// Where the last decode of one straight line ended, and in which decoder.
 ///
-/// A lift that follows on keeps the decoder's context, as the walk's does, so
-/// Thumb's `it` reaches the instructions it predicates; one that does not
+/// A decode that follows on keeps the decoder's context, as the walk's does,
+/// so Thumb's `it` reaches the instructions it predicates; one that does not
 /// starts afresh, which also drops whatever Sleigh cached by address for a
 /// lift at an address the bytes are not at.
 #[derive(Default)]
-struct Straight {
-    end: Option<(*const r2sleigh_lift::EmbeddedMachine, u64)>,
+struct Straight<'a> {
+    end: Option<(&'a EmbeddedMachine, u64)>,
 }
 
-impl Straight {
+impl<'a> Straight<'a> {
+    /// Whether a decode at `at` follows on: the context lives in the loaded specification.
+    fn continues(&self, machine: &EmbeddedMachine, at: u64) -> bool {
+        self.end.is_some_and(|(last, end)| {
+            end == at && last.disasm.shares_loaded_specification(&machine.disasm)
+        })
+    }
+
     fn lift(
         &mut self,
-        machine: &r2sleigh_lift::EmbeddedMachine,
+        machine: &'a EmbeddedMachine,
         window: &[u8],
         at: u64,
     ) -> Option<r2il::R2ILBlock> {
-        let lifted = match self.end == Some((std::ptr::from_ref(machine), at)) {
+        let lifted = match self.continues(machine, at) {
             true => machine.disasm.lift_continuing(window, at),
             false => machine.disasm.lift(window, at),
         }
         .ok();
-        self.end = lifted.as_ref().map(|one| {
-            (
-                std::ptr::from_ref(machine),
-                at.wrapping_add(u64::from(one.size)),
-            )
-        });
+        self.end = lifted
+            .as_ref()
+            .map(|one| (machine, at.wrapping_add(u64::from(one.size))));
         lifted
+    }
+
+    /// Spell and lift one instruction from one parse.
+    fn decode(
+        &mut self,
+        machine: &'a EmbeddedMachine,
+        window: &[u8],
+        at: u64,
+    ) -> Option<r2sleigh_lift::Decoded> {
+        let continuing = self.continues(machine, at);
+        let decoded = machine.disasm.decode(window, at, continuing).ok();
+        self.end = decoded
+            .as_ref()
+            .map(|one| (machine, at.wrapping_add(one.syntax.size as u64)));
+        decoded
     }
 }
 
@@ -196,7 +234,7 @@ pub(super) struct Lookahead<'r, 'a> {
     answered: &'r Answered<'a>,
     next: u64,
     open: bool,
-    straight: Straight,
+    straight: Straight<'a>,
     tail: Vec<Option<r2il::R2ILBlock>>,
 }
 
@@ -366,6 +404,58 @@ mod tests {
         assert_eq!(answer.value[0].bytes.len(), 4);
         assert_eq!(answer.value[1].address, BASE + 4);
         assert_eq!(answer.value[1].bytes.len(), 2);
+    }
+
+    #[test]
+    fn every_line_is_lifted_as_the_body_walk_lifts_it() {
+        // cmp r0, #0; it eq; moveq r0, #1; bx lr -- the `it` predicates the move.
+        let mut bytes = vec![0x00, 0x28, 0x08, 0xbf, 0x01, 0x20, 0x70, 0x47];
+        bytes.resize(32, 0);
+        let program = Mapped::new(BASE, bytes);
+        let thumb = Everywhere(embedded_machine("arm-thumb").expect("Thumb is compiled in"));
+        let body = r2ssa::body::lift_body(BASE, &thumb.0.disasm, &program, &Default::default())
+            .expect("the body walks");
+        let mut walked = std::collections::BTreeMap::<u64, Vec<r2il::R2ILOp>>::new();
+        for lifted in body.blocks.iter().map(|block| &block.lifted) {
+            for (index, op) in lifted.ops.iter().enumerate() {
+                let at = lifted
+                    .op_metadata(index)
+                    .and_then(|meta| meta.instruction_addr);
+                walked
+                    .entry(at.expect("stamped"))
+                    .or_default()
+                    .push(op.clone());
+            }
+        }
+        // A spelled run and a lift-only run read the same context.
+        for spelled in [true, false] {
+            let answered = Answered {
+                decoders: &thumb,
+                memory: Memory {
+                    program: &program,
+                    endian: Endianness::Little,
+                },
+                facts: None,
+                fate: None,
+                spelled,
+                clobbered: &[],
+                parameters: None,
+            };
+            let request = Listing {
+                start: BASE,
+                stop: Stop::After(4),
+            };
+            let run = Run::read(&answered, request, Work::InstructionLocal);
+            for (line, lift) in run.lines.iter().zip(&run.lifts) {
+                let listed: &Vec<r2il::R2ILOp> = &lift.as_ref().expect("each lifts").ops;
+                assert_eq!(
+                    Some(listed),
+                    walked.get(&line.address),
+                    "{:#x}, spelled: {spelled}",
+                    line.address
+                );
+            }
+        }
     }
 
     #[test]

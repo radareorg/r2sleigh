@@ -69,7 +69,6 @@ pub fn radare2(mnemonic: &str, body: &str, size: usize, arch: &str) -> Syntax {
 /// this decoder prints a literal in; a bare decimal in a body is part of a
 /// register name or a shift count, and neither is an address.
 pub fn number_spans(body: &str) -> Vec<NumberSpan> {
-    let bytes = body.as_bytes();
     let mut spans = Vec::new();
     let mut at = 0;
     while let Some(found) = body[at..].find("0x") {
@@ -81,15 +80,19 @@ pub fn number_spans(body: &str) -> Vec<NumberSpan> {
         let Ok(magnitude) = u64::from_str_radix(&body[start + 2..at], 16) else {
             continue;
         };
-        // A minus written against the digits is part of the number, and a
-        // negative one names no address however well its magnitude matches.
-        let negative = start > 0 && bytes[start - 1] == b'-';
+        // A minus against the digits, or radare2's `- 0x4` for Sleigh's `+ -0x4`, is the number's sign.
+        let before = &body[..start];
+        let sign = match (before.ends_with('-'), before.ends_with(" - ")) {
+            (true, _) => 1,
+            (_, true) => 2,
+            _ => 0,
+        };
         spans.push(NumberSpan {
-            start: start - usize::from(negative),
+            start: start - sign,
             end: at,
-            value: match negative {
-                true => -i128::from(magnitude),
-                false => i128::from(magnitude),
+            value: match sign {
+                0 => i128::from(magnitude),
+                _ => -i128::from(magnitude),
             },
         });
     }
@@ -117,9 +120,26 @@ fn radare2_text(text: &str, arch: &str) -> String {
     let out = out.replace(" ptr [", " [").replace("+ -", "- ");
     let out = bare_effective_address(&out);
     if arch == "ARM" {
-        arm_alias(&arm_role_registers(&out))
+        arm_alias(&arm_it_condition(&arm_role_registers(&out)))
     } else {
         x86_condition_alias(&out)
+    }
+}
+
+/// Sleigh spells a Thumb `it`-predicated operation `add.eq`, where radare2 and Sleigh's own ARM mode write `addeq`.
+fn arm_it_condition(text: &str) -> String {
+    const CONDITIONS: [&str; 16] = [
+        "eq", "ne", "cs", "cc", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt",
+        "le",
+    ];
+    let head = text.split_whitespace().next().unwrap_or_default();
+    let Some((operation, rest)) = head.split_once('.') else {
+        return text.to_owned();
+    };
+    let condition = rest.split('.').next().unwrap_or_default();
+    match CONDITIONS.contains(&condition) {
+        true => format!("{operation}{rest}{}", &text[head.len()..]),
+        false => text.to_owned(),
     }
 }
 
@@ -250,11 +270,31 @@ mod tests {
     }
 
     #[test]
+    fn an_it_predicated_operation_takes_its_condition_as_a_suffix() {
+        assert_eq!(
+            radare2("add.eq", "r3,r1,#0x1", 2, "ARM").text(),
+            "addeq r3, r1, 0x1"
+        );
+        assert_eq!(
+            radare2("pop.eq.w", "{r8,r9,r11}", 4, "ARM").text(),
+            "popeq.w {r8, r9, fp}"
+        );
+        // A vector element type and an AArch64 condition are not an `it` predicate.
+        assert_eq!(
+            radare2("vadd.i32", "d0,d1,d2", 4, "ARM").text(),
+            "vadd.i32 d0, d1, d2"
+        );
+        assert_eq!(radare2("b.eq", "0x10", 4, "aarch64").text(), "b.eq 0x10");
+    }
+
+    #[test]
     fn a_displacement_carries_its_sign_into_the_span() {
         let syntax = radare2("MOV", "EAX,dword ptr [RBP + -0x4]", 3, "x86-64");
         assert_eq!(syntax.body, "eax, dword [rbp - 0x4]");
         let spans: Vec<i128> = syntax.numbers.iter().map(|span| span.value).collect();
-        assert_eq!(spans, vec![4]);
+        assert_eq!(spans, vec![-4]);
+        let span = syntax.numbers[0];
+        assert_eq!(&syntax.body[span.start..span.end], "- 0x4");
     }
 
     #[test]
