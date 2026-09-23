@@ -1,0 +1,85 @@
+//! Whether a listed number is a result or a step, as `pd` and `pdf` each answer it.
+
+mod common;
+
+use common::{FORKED, JOINED, ONE, opened};
+use r2engine::query::{AnnotationKind, Line, Listing, Stop};
+
+/// The result each line claims, by address.
+fn computes(lines: &[Line]) -> Vec<(u64, Option<u64>)> {
+    lines
+        .iter()
+        .map(|line| {
+            let value = line
+                .annotations
+                .iter()
+                .find_map(|annotation| match annotation.kind {
+                    AnnotationKind::Computes { value } => Some(value),
+                    _ => None,
+                });
+            (line.address, value)
+        })
+        .collect()
+}
+
+fn pd(entry: u64, count: usize) -> Vec<(u64, Option<u64>)> {
+    let answer = opened()
+        .listing(Listing {
+            start: entry,
+            stop: Stop::After(count),
+        })
+        .expect("it lists");
+    computes(&answer.value)
+}
+
+fn pdf(entry: u64) -> Vec<(u64, Option<u64>)> {
+    computes(&opened().function_listing(entry).expect("it lists").value)
+}
+
+#[test]
+fn an_address_read_back_past_a_branch_is_not_claimed_a_result() {
+    // The overwrite is skipped on the taken path, and the read at L sees the address.
+    assert_eq!(pd(FORKED, 6)[0], (FORKED, None));
+    assert_eq!(pdf(FORKED)[0], (FORKED, None));
+}
+
+#[test]
+fn the_function_listing_refines_the_run_and_never_contradicts_it() {
+    // lea rax, [one] falls through into L, which the branch also enters, and L reads it.
+    let lea = JOINED + 4;
+    assert_eq!(pd(JOINED, 5)[2], (lea, None));
+    assert_eq!(pdf(JOINED)[2], (lea, None));
+    // Every result the run claims, the function claims too.
+    for entry in [FORKED, JOINED, ONE] {
+        let whole = pdf(entry);
+        for (address, claimed) in pd(entry, whole.len()) {
+            if claimed.is_some() {
+                assert!(whole.contains(&(address, claimed)), "{address:#x}");
+            }
+        }
+    }
+    // mov eax, 1; ret -- the run cannot see past the return; the def-use says nothing reads it.
+    assert_eq!(pd(ONE, 2)[0], (ONE, None));
+    assert_eq!(pdf(ONE)[0], (ONE, Some(1)));
+}
+
+#[test]
+fn a_value_the_prelude_mints_leaves_every_line_its_own_definitions() {
+    // The entry block reads `edi`, so a projection is minted ahead of the lea without taking its place.
+    let rax = |kind: &AnnotationKind| match kind {
+        AnnotationKind::Bounds {
+            storage, low, high, ..
+        } => (storage.offset == 0 && storage.size == 8).then_some((*low, *high)),
+        _ => None,
+    };
+    let lines = opened().function_listing(FORKED).expect("it lists").value;
+    let proved = |address: u64| {
+        let line = lines.iter().find(|line| line.address == address);
+        line.into_iter()
+            .flat_map(|line| &line.annotations)
+            .filter_map(|annotation| rax(&annotation.kind))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(proved(FORKED), [(ONE, ONE)]);
+    assert_eq!(proved(FORKED + 7), []);
+}

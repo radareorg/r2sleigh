@@ -151,10 +151,12 @@ impl SSAFunction {
                 }
             }
         }
-        if let Some(entry) = self.get_block_mut(self.entry) {
-            entry.ops.splice(0..0, minted);
-        }
-        self.invalidate_query_index();
+        self.insert_ops(
+            self.entry,
+            0,
+            minted.into_iter().map(|op| (op, None)).collect(),
+        );
+        self.decompile_prep_facts = None;
     }
 
     /// Replace the direction flag's entry value with the zero the convention
@@ -483,10 +485,11 @@ impl SSAFunction {
                 }
             }
         }
-        if let Some(entry) = block_at_mut(&self.block_index, &mut self.blocks, self.entry) {
-            entry.ops.splice(0..0, minted);
-        }
-        self.invalidate_query_index();
+        self.insert_ops(
+            self.entry,
+            0,
+            minted.into_iter().map(|op| (op, None)).collect(),
+        );
     }
 
     pub(crate) fn collect_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(

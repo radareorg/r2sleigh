@@ -1366,21 +1366,25 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         let hoisted = fusion
             .links
             .iter()
-            .filter_map(|link| func.get_block(*link))
-            .flat_map(|block| {
+            .filter_map(|link| Some((*link, func.get_block(*link)?)))
+            .flat_map(|(link, block)| {
                 block.ops[..block.ops.len().saturating_sub(1)]
                     .iter()
-                    .filter(|op| !matches!(op, SSAOp::Nop))
-                    .cloned()
+                    .enumerate()
+                    .filter(|(_, op)| !matches!(op, SSAOp::Nop))
+                    .map(|(index, op)| (op.clone(), func.instruction_at(link, index)))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        if let Some(block) = func.get_block_mut(fusion.block) {
+        let terminator = func.get_block_mut(fusion.block).map(|block| {
             let terminator = block.ops.len() - 1;
             block.ops[terminator] = SSAOp::Switch {
                 selector: fusion.selector.clone(),
             };
-            block.ops.splice(terminator..terminator, hoisted);
+            terminator
+        });
+        if let Some(terminator) = terminator {
+            func.insert_ops(fusion.block, terminator, hoisted);
         }
         let targets = fusion
             .cases

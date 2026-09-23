@@ -1,6 +1,6 @@
 //! A program built from byte literals, for the tests that need an open one.
 //!
-//! Three x86-64 functions in one run of bytes, a container that says where they
+//! Five x86-64 functions in one run of bytes, a container that says where they
 //! are, and a patch layer, which is everything `Source` asks for. No binary on
 //! disk: the engine never knows what a file is, so its tests need not either.
 
@@ -20,9 +20,13 @@ pub const ONE: u64 = BASE;
 pub const CALLER: u64 = BASE + 0x10;
 /// `mov eax, 2; ret`
 pub const TWO: u64 = BASE + 0x20;
+/// `lea rax, [one]; test edi, edi; je L; mov eax, 5; L: mov rdi, rax; ret`
+pub const FORKED: u64 = BASE + 0x30;
+/// `test edi, edi; je L; lea rax, [one]; L: mov rdi, rax; ret`
+pub const JOINED: u64 = BASE + 0x50;
 
-const CODE: [u8; 0x30] = {
-    let mut code = [0xcc; 0x30];
+const CODE: [u8; 0x70] = {
+    let mut code = [0xcc; 0x70];
     // one: mov eax, 1; ret
     code[0x00] = 0xb8;
     code[0x01] = 0x01;
@@ -44,6 +48,33 @@ const CODE: [u8; 0x30] = {
     code[0x23] = 0x00;
     code[0x24] = 0x00;
     code[0x25] = 0xc3;
+    // forked: the address is read back only on the path that skips the overwrite
+    let forked = [
+        0x48, 0x8d, 0x05, 0xc9, 0xff, 0xff, 0xff, // lea rax, [rip - 0x37]
+        0x85, 0xff, // test edi, edi
+        0x74, 0x05, // je 0x1040
+        0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5
+        0x48, 0x89, 0xc7, // mov rdi, rax
+        0xc3, // ret
+    ];
+    let mut at = 0;
+    while at < forked.len() {
+        code[0x30 + at] = forked[at];
+        at += 1;
+    }
+    // joined: the address falls through into a block another path also enters
+    let joined = [
+        0x85, 0xff, // test edi, edi
+        0x74, 0x07, // je 0x105b
+        0x48, 0x8d, 0x05, 0xa5, 0xff, 0xff, 0xff, // lea rax, [rip - 0x5b]
+        0x48, 0x89, 0xc7, // mov rdi, rax
+        0xc3, // ret
+    ];
+    let mut at = 0;
+    while at < joined.len() {
+        code[0x50 + at] = joined[at];
+        at += 1;
+    }
     code
 };
 
@@ -57,10 +88,10 @@ pub struct Literal {
 
 impl Literal {
     pub fn new() -> Self {
-        let function = |name: &str, vaddr| Symbol {
+        let function = |name: &str, vaddr, size| Symbol {
             name: name.to_owned(),
             vaddr,
-            size: 6,
+            size,
             kind: SymbolKind::Function,
             defined: true,
             thumb: false,
@@ -84,9 +115,11 @@ impl Literal {
                     loaded: true,
                 }],
                 symbols: vec![
-                    function("one", ONE),
-                    function("caller", CALLER),
-                    function("two", TWO),
+                    function("one", ONE, 6),
+                    function("caller", CALLER, 6),
+                    function("two", TWO, 6),
+                    function("forked", FORKED, 0x14),
+                    function("joined", JOINED, 0xf),
                 ],
                 ..Container::default()
             },

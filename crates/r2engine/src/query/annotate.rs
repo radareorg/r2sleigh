@@ -6,6 +6,8 @@
 use r2il::{R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::{NumberSpan, Syntax};
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
+use r2ssa::{CanonicalStorageId, InstPayload, SsaGraph, ValueId};
+use std::collections::BTreeSet;
 
 use super::Support;
 use super::Work;
@@ -36,7 +38,11 @@ pub(super) fn over_run(
         };
         let mut kinds = touched_by(lift);
         if work >= Work::BlockLocal {
-            kinds.extend(computed_by(lift, &lifts[index + 1..]));
+            let graph = (work >= Work::Function)
+                .then_some(answered.facts)
+                .flatten()
+                .map(r2ssa::SsaArtifact::graph);
+            kinds.extend(computed_by(lift, &lifts[index + 1..], graph, line.address));
         }
         kinds.extend(held_at(memory, &kinds));
         if work >= Work::Function {
@@ -134,21 +140,48 @@ fn touched_by(lift: &r2il::R2ILBlock) -> Vec<AnnotationKind> {
     kinds
 }
 
-/// The number this instruction produces, where the run leaves it standing.
+/// The number this instruction produces, where nothing reads it back.
 ///
 /// A value a later instruction reads back is a step towards an address rather
 /// than one: spelling `adrp x17, reloc.humanize_number` named the page base
 /// the `add` after it was about to move fifty bytes past.
-fn computed_by(lift: &r2il::R2ILBlock, rest: &[Option<r2il::R2ILBlock>]) -> Option<AnnotationKind> {
+fn computed_by(
+    lift: &r2il::R2ILBlock,
+    rest: &[Option<r2il::R2ILBlock>],
+    graph: Option<&SsaGraph>,
+    address: u64,
+) -> Option<AnnotationKind> {
     let mut origins = BlockOrigins::default();
     for op in &lift.ops {
         origins.step(op);
     }
     let output = lift.ops.iter().rev().find_map(r2il::R2ILOp::output)?;
     let value = origins.of(output)?.constant()?;
-    // Forward until something reads any byte of it, or overwrites all of it.
-    // Comparing the starting offset alone missed `ah` read out of an `rax`
-    // just written, and named a step as though it were the result.
+    let fate = match straight_line_fate(lift, rest, output) {
+        Fate::Unknown => graph.map_or(Fate::Unknown, |graph| defined_fate(graph, address, output)),
+        settled => settled,
+    };
+    (fate == Fate::Result).then_some(AnnotationKind::Computes { value })
+}
+
+/// Whether a number an instruction leaves is read back, and who can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fate {
+    /// Something reads a byte of it: a step towards what that reader computes.
+    Step,
+    /// Nothing reads it before all of it is overwritten or it leaves the function unread.
+    Result,
+    /// The evidence at hand does not reach far enough to say.
+    Unknown,
+}
+
+/// What the run after an instruction says, as far as it is one straight line.
+fn straight_line_fate(
+    lift: &r2il::R2ILBlock,
+    rest: &[Option<r2il::R2ILBlock>],
+    output: &Varnode,
+) -> Fate {
+    // Comparing the starting offset alone missed `ah` read out of an `rax` just written.
     let covers = |varnode: &Varnode| {
         varnode.space == output.space
             && varnode.offset <= output.offset
@@ -159,18 +192,64 @@ fn computed_by(lift: &r2il::R2ILBlock, rest: &[Option<r2il::R2ILBlock>]) -> Opti
             && varnode.offset < output.offset + u64::from(output.size)
             && output.offset < varnode.offset + u64::from(varnode.size)
     };
-    let read_later = rest
-        .iter()
-        .flatten()
-        .flat_map(|block| block.ops.iter())
-        .find_map(|op| {
+    // Past a transfer the run is no longer every path the value takes, so it settles nothing.
+    if lift.ops.iter().any(R2ILOp::is_control_flow) {
+        return Fate::Unknown;
+    }
+    for block in rest {
+        let Some(block) = block else {
+            return Fate::Unknown;
+        };
+        for op in &block.ops {
             if op.inputs().into_iter().any(&overlaps) {
-                return Some(true);
+                return Fate::Step;
             }
-            op.output().filter(|written| covers(written)).map(|_| false)
-        })
-        .unwrap_or(false);
-    (!read_later).then_some(AnnotationKind::Computes { value })
+            if op.is_control_flow() {
+                return Fate::Unknown;
+            }
+            if op.output().is_some_and(&covers) {
+                return Fate::Result;
+            }
+        }
+    }
+    Fate::Unknown
+}
+
+/// What the function's def-use says of the value this instruction leaves in `output`.
+fn defined_fate(graph: &SsaGraph, address: u64, output: &Varnode) -> Fate {
+    let storage = CanonicalStorageId::from_varnode(output);
+    let defined = graph
+        .insts_for_instruction(address)
+        .iter()
+        .rev()
+        .filter_map(|inst| graph.inst(*inst))
+        .find(|inst| inst.canonical_storage == Some(storage))
+        .and_then(|inst| inst.output);
+    match defined {
+        Some(defined) if read_through_merges(graph, defined) => Fate::Step,
+        Some(_) => Fate::Result,
+        None => Fate::Unknown,
+    }
+}
+
+/// Whether an operation reads this value, directly or through the merges it flows into.
+fn read_through_merges(graph: &SsaGraph, defined: ValueId) -> bool {
+    let mut seen = BTreeSet::from([defined]);
+    let mut pending = vec![defined];
+    while let Some(value) = pending.pop() {
+        let users = graph
+            .use_sites(value)
+            .iter()
+            .filter_map(|site| graph.inst(site.inst));
+        for user in users {
+            // A merge only passes the value on; any other operation reads it.
+            let InstPayload::Phi { .. } = user.payload else {
+                return true;
+            };
+            pending.extend(user.output.filter(|merged| seen.insert(*merged)));
+        }
+    }
+    false
 }
 
 /// The addresses one operation names, as far as the block so far shows.

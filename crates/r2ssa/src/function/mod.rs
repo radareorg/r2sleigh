@@ -2545,6 +2545,42 @@ impl SSAFunction {
             .get(&(block_addr, op_idx))
             .copied()
     }
+
+    /// Insert operations at one index of a block; every later operation keeps its own instruction.
+    pub(crate) fn insert_ops(
+        &mut self,
+        block_addr: u64,
+        at: usize,
+        ops: Vec<(SSAOp, Option<u64>)>,
+    ) {
+        let Some(block) = block_at_mut(&self.block_index, &mut self.blocks, block_addr) else {
+            return;
+        };
+        let at = at.min(block.ops.len());
+        let count = ops.len();
+        let (ops, from): (Vec<_>, Vec<_>) = ops.into_iter().unzip();
+        block.ops.splice(at..at, ops);
+        let moved = self
+            .op_instruction_addrs
+            .range((block_addr, at)..=(block_addr, usize::MAX))
+            .map(|(site, addr)| (site.1, *addr))
+            .collect::<Vec<_>>();
+        for (index, _) in &moved {
+            self.op_instruction_addrs.remove(&(block_addr, *index));
+        }
+        let placed = moved
+            .into_iter()
+            .map(|(index, addr)| (index + count, addr))
+            .chain(
+                from.into_iter()
+                    .enumerate()
+                    .filter_map(|(offset, addr)| Some((at + offset, addr?))),
+            );
+        for (index, addr) in placed {
+            self.op_instruction_addrs.insert((block_addr, index), addr);
+        }
+        self.invalidate_query_index();
+    }
 }
 
 /// Where each block sits in a reverse-postorder block vector.

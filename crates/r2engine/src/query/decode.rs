@@ -301,10 +301,17 @@ mod tests {
     }
 
     #[test]
-    fn a_number_an_instruction_leaves_standing_is_its_result() {
-        // mov eax, 0x1234; ret
+    fn a_transfer_before_any_read_or_overwrite_settles_nothing() {
+        // mov eax, 0x1234; ret -- the caller may read it, and the run cannot see the caller.
         let answer = answer(&[0xb8, 0x34, 0x12, 0x00, 0x00, 0xc3], 2, Work::BlockLocal);
-        assert_eq!(computes(&answer.value[0]), Some(0x1234));
+        assert_eq!(computes(&answer.value[0]), None);
+    }
+
+    #[test]
+    fn a_run_that_ends_before_any_read_or_overwrite_settles_nothing() {
+        // mov eax, 0x1234, and nothing listed after it.
+        let answer = answer(&[0xb8, 0x34, 0x12, 0x00, 0x00, 0xc3], 1, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), None);
     }
 
     #[test]
