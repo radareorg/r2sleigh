@@ -401,6 +401,9 @@ impl Literal {
             is_code,
             loaded: true,
         };
+        // The code before the stub is the program's own; the stub and its slot are the loader's.
+        let code = &mut self.container.sections[0];
+        code.vsize = code.vsize.min(STUB - code.vaddr);
         self.container.sections.extend([
             section(".plt", STUB, 6, true),
             section(".got", SLOT, 8, false),

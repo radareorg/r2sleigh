@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{ARM_ENTRY, Literal, ONE, STUB, TEXT, THUMB_CALLED, THUMB_LEAF, TWO, opened};
+use common::{ARM_ENTRY, CALLER, Literal, ONE, STUB, TEXT, THUMB_CALLED, THUMB_LEAF, TWO, opened};
 use r2engine::program::OpenProgram;
 
 #[test]
@@ -285,4 +285,30 @@ fn a_data_object_type_stays_with_the_program_that_stated_it() {
         fresh,
         "a type another program stated reached this one"
     );
+}
+
+#[test]
+fn a_patch_that_stops_a_callee_s_callee_returning_makes_the_caller_stale() {
+    // `caller` calls `two`, which calls `one`; the caller's analysis reads `two` and asks only whether `one` returns.
+    let mut program = opened();
+    program
+        .source_mut()
+        .write(TWO, &[0xe8, 0xdb, 0xff, 0xff, 0xff, 0xc3]);
+    program
+        .source_mut()
+        .write(CALLER, &[0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3]);
+    let ends = |program: &mut OpenProgram<Literal>| {
+        let prepared = program.prepared(CALLER).expect("it prepares");
+        let blocks = prepared.lifted();
+        blocks
+            .iter()
+            .map(|block| block.addr + u64::from(block.size))
+            .max()
+    };
+    assert_eq!(ends(&mut program), Some(CALLER + 6));
+    // `one` becomes `jmp one`, a byte the caller's analysis never read.
+    program.source_mut().write(ONE, &[0xeb, 0xfe]);
+    assert_eq!(ends(&mut program), Some(CALLER + 5));
+    let stats = program.memo_stats();
+    assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
 }

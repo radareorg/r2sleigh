@@ -21,7 +21,7 @@ pub mod records;
 pub mod references;
 
 pub use decode::listing;
-pub use memo::{Memo, MemoStats};
+pub use memo::{Consulted, Memo, MemoStats, Moved};
 pub use records::{
     Annotation, AnnotationKind, Answered, Callee, Decoders, Line, Listing, Memory, Parameters,
     Stop, WalkedBody,

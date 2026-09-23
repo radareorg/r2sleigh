@@ -42,6 +42,11 @@ pub trait Program {
     /// knows its own functions can.
     fn is_entry(&self, vaddr: u64) -> bool;
 
+    /// Whether control comes back from a call to this address, which one body's walk cannot establish; unproven, it does.
+    fn returns(&self, _callee: u64) -> bool {
+        true
+    }
+
     /// The register a call leaves the return address in, where the machine
     /// names one. The compiler specification states it; the walk reads the
     /// bytes and cannot know it, which is why it is asked for here.
@@ -127,40 +132,24 @@ impl std::fmt::Display for BodyError {
 
 impl std::error::Error for BodyError {}
 
-/// Lift the body of the function at `entry`.
+/// Lift the body of the function at `entry`, past a call only where the program says control comes back from it.
 ///
-/// `read` answers with as many bytes as the program maps at an address, up to
-/// the length asked for, and `None` where nothing is mapped.
+/// A call assumed to return runs the walk straight into whatever follows. On
+/// `/bin/ls` five adjacent `err(1, ...)` stubs became one 260-byte function
+/// that claimed the four after it, and the interprocedural summary then
+/// refused all six for overlapping ranges.
 pub fn lift_body(
     entry: u64,
     disasm: &Disassembler,
     program: &dyn Program,
     dispatched: &BTreeMap<u64, Vec<u64>>,
 ) -> Result<Body, BodyError> {
-    lift_body_where(entry, disasm, program, dispatched, &|_| false)
-}
-
-/// The same lift, told which call targets control never comes back from.
-///
-/// A call is otherwise assumed to return, and where it does not the walk runs
-/// straight into whatever follows. On `/bin/ls` five adjacent `err(1, ...)`
-/// stubs became one 260-byte function that claimed the four after it, and the
-/// interprocedural summary then refused all six for overlapping ranges.
-///
-/// Whether a call returns is a fact about the callee, which the walk of one
-/// body cannot establish -- but the caller can, from the declarations, and
-/// that is what this takes.
-pub fn lift_body_where(
-    entry: u64,
-    disasm: &Disassembler,
-    program: &dyn Program,
-    dispatched: &BTreeMap<u64, Vec<u64>>,
-    never_returns: &dyn Fn(u64) -> bool,
-) -> Result<Body, BodyError> {
-    Walk::run(entry, disasm, program, dispatched, never_returns).map(Walk::into_body)
+    let lifting = Walk::start(entry, disasm, program, dispatched.clone(), true);
+    lifting.map(Walk::into_body)
 }
 
 /// One instruction the walk decoded, and where control goes after it.
+#[derive(Debug, Clone)]
 struct Instruction {
     lifted: R2ILBlock,
     bytes: Vec<u8>,
@@ -172,83 +161,176 @@ impl Instruction {
     fn end(&self) -> u64 {
         self.lifted.addr + self.lifted.size as u64
     }
+}
 
-    /// Whether control leaves this instruction for somewhere other than the
-    /// next one, which is what ends a basic block.
-    fn ends_block(&self) -> bool {
-        !matches!(
-            self.terminator,
-            BlockTerminator::Fallthrough { .. }
-                | BlockTerminator::Call { .. }
-                | BlockTerminator::IndirectCall { .. }
-        )
+/// Whether control leaves an instruction ending this way for somewhere other
+/// than the next one, which is what ends a basic block.
+fn ends_block(terminator: &BlockTerminator) -> bool {
+    !matches!(
+        terminator,
+        BlockTerminator::Fallthrough { .. }
+            | BlockTerminator::Call { .. }
+            | BlockTerminator::IndirectCall { .. }
+    )
+}
+
+/// What a walk keeps of one decoded instruction unless it keeps the lift.
+#[derive(Debug, Clone)]
+struct Decoded {
+    size: u32,
+    /// Every constant it leaves in the link register.
+    return_addresses: Vec<u64>,
+}
+
+/// What a walk reached that it had not reached before it was last asked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reached {
+    /// Direct call targets, each the first time a call to it is seen.
+    pub calls: Vec<u64>,
+    /// Tail call targets, each the first time.
+    pub tail_calls: Vec<u64>,
+    /// Callees whose call now holds a fallthrough closed, each the first time.
+    pub gated: Vec<u64>,
+    /// Whether control reached a return, a predicated exit or a stop the walk cannot see past.
+    pub leaves: bool,
+}
+
+/// A walk that keeps where control goes and not what it lifted, continued past a call once its callee is known to return.
+#[derive(Debug, Clone)]
+pub struct Trace(Walk);
+
+impl Trace {
+    /// Walk the body at `entry`, past every call the program says returns.
+    pub fn start(
+        entry: u64,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) -> Result<Self, BodyError> {
+        Walk::start(entry, disasm, program, BTreeMap::new(), false).map(Self)
+    }
+
+    /// Continue past every call to `callee`, visiting only what is not yet decoded.
+    pub fn open(&mut self, callee: u64, disasm: &Disassembler, program: &dyn Program) {
+        self.0.open(callee, disasm, program);
+    }
+
+    /// What the walk reached since it was last asked.
+    pub fn reached(&mut self) -> Reached {
+        std::mem::take(&mut self.0.reached)
+    }
+
+    /// The instruction set each call target is entered in, where the call wrote the mode register.
+    pub const fn entered_with(&self) -> &BTreeMap<u64, u64> {
+        &self.0.entered_with
+    }
+
+    /// Every direct call target.
+    pub const fn calls(&self) -> &BTreeSet<u64> {
+        &self.0.calls
+    }
+
+    /// Every function it leaves for by branching to its entry.
+    pub const fn tail_calls(&self) -> &BTreeSet<u64> {
+        &self.0.tail_calls
+    }
+
+    /// Every address a load reads that its lift states as a constant.
+    pub const fn loads(&self) -> &BTreeSet<u64> {
+        &self.0.loads
     }
 }
 
-struct Walk<'a> {
+/// One walk of a body, lifting it or only tracing it.
+#[derive(Debug, Clone)]
+struct Walk {
     entry: u64,
-    program: &'a dyn Program,
     /// Where a dispatch a previous pass resolved goes, by the address of the
     /// instruction that makes it.
-    dispatched: &'a BTreeMap<u64, Vec<u64>>,
-    decoded: BTreeMap<u64, Instruction>,
+    dispatched: BTreeMap<u64, Vec<u64>>,
+    /// The register a call leaves its return address in, where there is one.
+    link: Option<r2il::Varnode>,
+    /// The register a call writes its target's instruction set to.
+    mode: Option<r2il::Varnode>,
+    decoded: BTreeMap<u64, Decoded>,
+    /// The lift of each instruction, where the walk keeps it.
+    lifted: Option<BTreeMap<u64, Instruction>>,
     leaders: BTreeSet<u64>,
     calls: BTreeSet<u64>,
+    loads: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
     entered_with: BTreeMap<u64, u64>,
     unresolved: Vec<Unresolved>,
+    /// Calls not known to return, by callee: each call instruction and the address after it.
+    gated: BTreeMap<u64, Vec<(u64, u64)>>,
     /// Where the last decode left the decoder's context, which the lifter keeps for the next one where it follows on.
     context: Option<Continuation>,
-    /// Whether control comes back from a call to this address.
-    never_returns: &'a dyn Fn(u64) -> bool,
+    reached: Reached,
 }
 
-impl<'a> Walk<'a> {
-    fn run(
+impl Walk {
+    /// Walk the body at `entry`, past every call the program says returns, keeping each lift where `lifting`.
+    fn start(
         entry: u64,
         disasm: &Disassembler,
-        program: &'a dyn Program,
-        dispatched: &'a BTreeMap<u64, Vec<u64>>,
-        never_returns: &'a dyn Fn(u64) -> bool,
+        program: &dyn Program,
+        dispatched: BTreeMap<u64, Vec<u64>>,
+        lifting: bool,
     ) -> Result<Self, BodyError> {
         let mut walk = Self {
             entry,
-            program,
             dispatched,
+            link: program.return_address_register(),
+            mode: program.mode_register(),
             decoded: BTreeMap::new(),
+            lifted: lifting.then(BTreeMap::new),
             leaders: BTreeSet::from([entry]),
             calls: BTreeSet::new(),
+            loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
+            gated: BTreeMap::new(),
             context: None,
-            never_returns,
+            reached: Reached::default(),
         };
-
-        let mut pending = vec![entry];
-        while let Some(addr) = pending.pop() {
-            if walk.decoded.contains_key(&addr) {
-                continue;
-            }
-            let instruction = match walk.decode(addr, disasm) {
-                Some(instruction) => instruction,
-                None if addr == entry => {
-                    return Err(match walk.unresolved.last().map(|stop| stop.reason) {
-                        Some(UnresolvedReason::Unmapped) => BodyError::EntryUnmapped(entry),
-                        _ => BodyError::EntryUndecodable(entry),
-                    });
-                }
-                None => continue,
-            };
-            pending.extend(walk.record(instruction));
-        }
-
+        let Some(first) = walk.decode(entry, disasm, program) else {
+            return Err(match walk.unresolved.last().map(|stop| stop.reason) {
+                Some(UnresolvedReason::Unmapped) => BodyError::EntryUnmapped(entry),
+                _ => BodyError::EntryUndecodable(entry),
+            });
+        };
+        let pending = walk.record(first, program);
+        walk.run(pending, disasm, program);
         Ok(walk)
     }
 
+    fn open(&mut self, callee: u64, disasm: &Disassembler, program: &dyn Program) {
+        let mut pending = Vec::new();
+        for (_, next) in self.gated.remove(&callee).unwrap_or_default() {
+            self.continues(Some(next), &mut pending, program);
+        }
+        self.run(pending, disasm, program);
+    }
+
+    fn run(&mut self, mut pending: Vec<u64>, disasm: &Disassembler, program: &dyn Program) {
+        while let Some(addr) = pending.pop() {
+            if self.decoded.contains_key(&addr) {
+                continue;
+            }
+            if let Some(instruction) = self.decode(addr, disasm, program) {
+                pending.extend(self.record(instruction, program));
+            }
+        }
+    }
+
     /// Decode one instruction, or record why control stops here.
-    fn decode(&mut self, addr: u64, disasm: &Disassembler) -> Option<Instruction> {
-        let Some(window) = self.program.read(addr, WINDOW) else {
+    fn decode(
+        &mut self,
+        addr: u64,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) -> Option<Instruction> {
+        let Some(window) = program.read(addr, WINDOW) else {
             return self.stop(addr, UnresolvedReason::Unmapped);
         };
         let available = window.len();
@@ -268,8 +350,7 @@ impl<'a> Walk<'a> {
             return self.stop(addr, UnresolvedReason::Truncated);
         }
 
-        // A call is assumed to come back. Whether it does is a fact about the
-        // callee, and the walk of one body cannot hold it.
+        // Whether a call comes back is the callee's fact, decided where it is recorded.
         let terminator = BasicBlock::from_r2il_continuing(&lifted, true).terminator;
         let bytes = fetch[..lifted.size as usize].to_vec();
         self.context = Some(context);
@@ -287,15 +368,12 @@ impl<'a> Walk<'a> {
     /// the block: a return address written further back, across a join, is not
     /// this instruction's.
     fn returns_after(&self, addr: u64, next: u64) -> bool {
-        let Some(link) = self.program.return_address_register() else {
-            return false;
-        };
         let mut at = addr;
-        while let Some((start, instruction)) = self.decoded.range(..at).next_back() {
-            if instruction.end() != at {
+        while let Some((start, decoded)) = self.decoded.range(..at).next_back() {
+            if start + u64::from(decoded.size) != at {
                 return false;
             }
-            if r2il::returns_to(&instruction.lifted.ops, next, &link) {
+            if decoded.return_addresses.contains(&next) {
                 return true;
             }
             if self.leaders.contains(start) {
@@ -308,7 +386,7 @@ impl<'a> Walk<'a> {
 
     /// The constant an instruction writes to the mode register, if any.
     fn mode_written(&self, ops: &[r2il::R2ILOp]) -> Option<u64> {
-        let mode = self.program.mode_register()?;
+        let mode = self.mode.as_ref()?;
         ops.iter().rev().find_map(|op| match op {
             r2il::R2ILOp::Copy { dst, src }
                 if dst.space == mode.space && dst.offset == mode.offset =>
@@ -322,6 +400,7 @@ impl<'a> Walk<'a> {
     fn stop(&mut self, addr: u64, reason: UnresolvedReason) -> Option<Instruction> {
         r2il::refusal_evidence!("body-walk", "stopping at {:#x}: {:?}", addr, reason);
         self.unresolved.push(Unresolved { addr, reason });
+        self.reached.leaves = true;
         None
     }
 
@@ -329,13 +408,13 @@ impl<'a> Walk<'a> {
     /// function.
     ///
     /// Every way out of a block asks this: a conditional branch to another
-    /// entry is a tail call on one arm, and a call to a function that never
-    /// returns falls through into whatever the linker put next. Its own entry
-    /// is not a boundary, because a function that jumps to its own start is a
-    /// loop.
-    fn transfer(&mut self, target: u64, successors: &mut Vec<u64>) {
-        if target != self.entry && self.program.is_entry(target) {
-            self.tail_calls.insert(target);
+    /// entry is a tail call on one arm. Its own entry is not a boundary,
+    /// because a function that jumps to its own start is a loop.
+    fn transfer(&mut self, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
+        if target != self.entry && program.is_entry(target) {
+            if self.tail_calls.insert(target) {
+                self.reached.tail_calls.push(target);
+            }
             return;
         }
         self.leaders.insert(target);
@@ -344,113 +423,147 @@ impl<'a> Walk<'a> {
 
     /// Continue to the address after an instruction, where the next function
     /// does not begin there.
-    fn continues(&mut self, next: Option<u64>, successors: &mut Vec<u64>) {
+    fn continues(&mut self, next: Option<u64>, successors: &mut Vec<u64>, program: &dyn Program) {
         let Some(next) = next else {
             return;
         };
-        if next != self.entry && self.program.is_entry(next) {
+        if next != self.entry && program.is_entry(next) {
             return;
         }
         successors.push(next);
     }
 
     /// Keep an instruction, and answer where the walk goes next.
-    fn record(&mut self, instruction: Instruction) -> Vec<u64> {
+    fn record(&mut self, instruction: Instruction, program: &dyn Program) -> Vec<u64> {
         let addr = instruction.lifted.addr;
         let next = instruction.end();
         let mut successors = Vec::new();
+        self.loads.extend(constant_loads(&instruction.lifted.ops));
 
         match instruction.terminator {
             BlockTerminator::Fallthrough { next: after } => {
-                self.continues(Some(after), &mut successors)
+                self.continues(Some(after), &mut successors, program)
             }
-            BlockTerminator::Branch { target } => self.transfer(target, &mut successors),
-            // The arm that leaves is this instruction's own transfer; only the
-            // arm that stays has anywhere for the walk to go.
+            BlockTerminator::Branch { target } => self.transfer(target, &mut successors, program),
+            // The arm that leaves is a return or an indirect transfer, either of which may hand control back.
             BlockTerminator::ConditionalExit { next: after } => {
-                self.continues(Some(after), &mut successors)
+                self.reached.leaves = true;
+                self.continues(Some(after), &mut successors, program)
             }
             BlockTerminator::ConditionalBranch {
                 true_target,
                 false_target,
             } => {
-                self.transfer(true_target, &mut successors);
-                self.transfer(false_target, &mut successors);
+                self.transfer(true_target, &mut successors, program);
+                self.transfer(false_target, &mut successors, program);
             }
             BlockTerminator::Call {
                 target,
                 fallthrough,
             } => {
-                self.calls.insert(target);
+                if self.calls.insert(target) {
+                    self.reached.calls.push(target);
+                }
                 if let Some(mode) = self.mode_written(&instruction.lifted.ops) {
                     self.entered_with.entry(target).or_insert(mode);
                 }
-                // A call the declarations say never returns ends the walk
-                // here: the bytes after it are the next function's.
-                if !(self.never_returns)(target) {
-                    self.continues(fallthrough, &mut successors);
+                match (program.returns(target), fallthrough) {
+                    (true, _) => self.continues(fallthrough, &mut successors, program),
+                    // The bytes after a call not known to return may be the next function's.
+                    (false, Some(after)) => self.gate(target, addr, after),
+                    (false, None) => {}
                 }
             }
+            // A call through a register is opaque, so it is assumed to come back.
             BlockTerminator::IndirectCall { fallthrough } => {
-                self.continues(fallthrough, &mut successors)
+                self.continues(fallthrough, &mut successors, program)
             }
             // A switch is an indirect branch through a table, so it is one
             // case rather than two: both go wherever a previous pass proved
             // the dispatch reads, and both stop where nothing did.
             BlockTerminator::IndirectBranch | BlockTerminator::Switch { .. } => {
-                // A machine with no indirect call instruction spells one by
-                // leaving the return address in the link register and then
-                // branching. Control comes back, so the walk does too.
-                match self.dispatched.get(&addr) {
-                    _ if self.returns_after(addr, next) => {
-                        self.continues(Some(next), &mut successors)
-                    }
-                    Some(targets) => {
-                        for target in targets.iter().copied().collect::<BTreeSet<_>>() {
-                            self.transfer(target, &mut successors);
-                        }
-                    }
-                    None => {
-                        self.stop(addr, UnresolvedReason::IndirectBranch);
-                    }
-                }
+                self.dispatch(addr, next, &mut successors, program)
             }
-            // A return and a terminal block have nowhere to go.
-            BlockTerminator::Return | BlockTerminator::None => {}
+            BlockTerminator::Return => self.reached.leaves = true,
+            // A trap has nowhere to go.
+            BlockTerminator::None => {}
         }
 
-        if instruction.ends_block() {
+        if ends_block(&instruction.terminator) {
             self.leaders.insert(next);
         }
-        self.decoded.insert(addr, instruction);
+        let return_addresses = match &self.link {
+            Some(link) => r2il::return_addresses(&instruction.lifted.ops, link).collect(),
+            None => Vec::new(),
+        };
+        let decoded = Decoded {
+            size: instruction.lifted.size,
+            return_addresses,
+        };
+        self.decoded.insert(addr, decoded);
+        if let Some(lifted) = &mut self.lifted {
+            lifted.insert(addr, instruction);
+        }
         successors
+    }
+
+    /// Follow an indirect branch to the arms a previous pass read, or on past it where it is a call; stop where neither.
+    fn dispatch(&mut self, addr: u64, next: u64, successors: &mut Vec<u64>, program: &dyn Program) {
+        // A machine with no indirect call instruction leaves the return address in the link register and branches: an opaque call.
+        if self.returns_after(addr, next) {
+            return self.continues(Some(next), successors, program);
+        }
+        let Some(arms) = self.dispatched.get(&addr).cloned() else {
+            self.stop(addr, UnresolvedReason::IndirectBranch);
+            return;
+        };
+        for target in arms.into_iter().collect::<BTreeSet<_>>() {
+            self.transfer(target, successors, program);
+        }
+    }
+
+    /// Hold the fallthrough of a call to `callee` closed until the callee is known to return.
+    fn gate(&mut self, callee: u64, call: u64, after: u64) {
+        let held = self.gated.entry(callee).or_default();
+        if held.is_empty() {
+            self.reached.gated.push(callee);
+        }
+        held.push((call, after));
     }
 
     /// Gather the decoded instructions into basic blocks.
     ///
     /// A block runs from a leader until control leaves it, until the next
     /// instruction is a leader, or until the instructions stop being
-    /// contiguous, which is where an unresolved transfer left a hole.
+    /// contiguous, which is where an unresolved transfer left a hole. A call
+    /// whose fallthrough is still closed ends its block with no successor.
     fn into_body(self) -> Body {
-        let link = self.program.return_address_register();
+        let closed = self
+            .gated
+            .values()
+            .flatten()
+            .map(|(call, _)| *call)
+            .collect::<BTreeSet<_>>();
+        let link = self.link.as_ref();
         let mut blocks: Vec<BodyBlock> = Vec::new();
         let mut parts: Vec<Instruction> = Vec::new();
 
-        for (addr, instruction) in self.decoded {
+        for (addr, instruction) in self.lifted.unwrap_or_default() {
             let broken = parts
                 .last()
                 .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
             if broken {
-                blocks.push(finish(&mut parts, link.as_ref(), self.dispatched));
+                blocks.push(finish(&mut parts, link, &self.dispatched, false));
             }
-            let ends = instruction.ends_block();
+            let ends = closed.contains(&addr);
+            let ends_block = ends || ends_block(&instruction.terminator);
             parts.push(instruction);
-            if ends {
-                blocks.push(finish(&mut parts, link.as_ref(), self.dispatched));
+            if ends_block {
+                blocks.push(finish(&mut parts, link, &self.dispatched, ends));
             }
         }
         if !parts.is_empty() {
-            blocks.push(finish(&mut parts, link.as_ref(), self.dispatched));
+            blocks.push(finish(&mut parts, link, &self.dispatched, false));
         }
 
         Body {
@@ -464,14 +577,28 @@ impl<'a> Walk<'a> {
     }
 }
 
+/// Every address a load reads that the operations state as a constant.
+fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
+    ops.iter().filter_map(|op| match op {
+        r2il::R2ILOp::Load { space, addr, .. }
+            if *space == r2il::SpaceId::Ram && addr.space == r2il::SpaceId::Const =>
+        {
+            Some(addr.offset)
+        }
+        _ => None,
+    })
+}
+
 /// One block from the instructions collected for it.
 ///
 /// The successors are the last instruction's, because that is the only
-/// instruction in a basic block that control can leave by.
+/// instruction in a basic block that control can leave by; a call whose
+/// fallthrough is `closed` has none.
 fn finish(
     parts: &mut Vec<Instruction>,
     link: Option<&r2il::Varnode>,
     dispatched: &BTreeMap<u64, Vec<u64>>,
+    closed: bool,
 ) -> BodyBlock {
     let start = parts[0].lifted.addr;
     let last = parts
@@ -491,9 +618,10 @@ fn finish(
         .get(&last.lifted.addr)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let successors = match returns {
-        true => vec![(AdvisorySuccessorKind::Fallthrough, end)],
-        false => successors_of(&last.terminator, end, arms),
+    let successors = match (closed, returns) {
+        (true, _) => Vec::new(),
+        (false, true) => vec![(AdvisorySuccessorKind::Fallthrough, end)],
+        (false, false) => successors_of(&last.terminator, end, arms),
     };
     let size = u32::try_from(end - start).unwrap_or(u32::MAX);
     let mut bytes = Vec::with_capacity(size as usize);

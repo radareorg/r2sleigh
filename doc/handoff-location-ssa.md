@@ -31540,3 +31540,28 @@ bins (every ARM, Thumb and AArch64 one in the corpus, plus x86): identical. A
 `movw`/`movt` import stub is now named from its slot (`tests/imports.rs`).
 `table_dispatch_pdf` pins the fold; its table load states no value, because
 dyld rebases that chained fixup to 0x100000400 while the file holds 0x400.
+
+## Whether a call returns is a whole-program fixpoint, not a name
+
+`discovery` computes MayReturn, the least set of functions whose walk reaches
+a return, a stop it cannot see past, or a tail call into a member, following a
+call's fallthrough only into a member or an opaque callee. An import is opaque
+unless its own declaration says noreturn; a defined function's name is never
+read. Walks are bounded by the stated entries, fixed per revision, so the
+fixpoint is monotone and one. `r2ssa::body::Trace` keeps only where control
+goes (holding every lift cost 1.6 GB on `vim`); `lift_body` asks
+`Program::returns`, which `OpenProgram` answers from a table per byte revision,
+whole for `afl` and demand-driven per callee otherwise. The memo records each
+answer a walk consulted and misses when one changed. Measured on this tree:
+`vim` `afl` 15.5 s user and 124 MB (base 14.9 s, 128 MB); `afi @ main` 9.7 s
+(base 9.0 s) and `mainerr`/`mch_exit` are now proven noreturn, which radare2
+misses. All seven calls to a defined `exit` in `arm1.bin`, `calc.file`,
+`ifunc_rel64` and `level01` keep their cut, since each `exit` body is proven
+noreturn; four had kept a CFG edge the old name rule stopped walking but never
+removed. `armeb_hello_static` is stripped, so no name rule ever fired there,
+and 10 of its 245 functions are now proven noreturn.
+
+Open: a call through an import's GOT slot (`call [exit@GOT]`, `-fno-plt`) and a
+call through the link register stay opaque, so their fallthrough is followed.
+A callee reached only through a dispatch-table arm is not in discovery, and its
+answer is derived on demand when a prepare walk asks.

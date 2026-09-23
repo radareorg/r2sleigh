@@ -16,6 +16,8 @@
 //! trusted -- an entry point is the format's own statement and a tail jump's
 //! target is this engine's reading of one instruction, and a consumer that
 //! cannot tell them apart has to treat both as the weaker.
+//!
+//! Which functions can return is the least fixpoint over the same walks; a defined function's name is never proof.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,119 +66,308 @@ pub struct Discovered {
     pub name: Option<String>,
 }
 
-/// Every function in the program, from what the image states and what the
-/// bodies reach.
-///
-/// Each seed carries the instruction set the image states it is written in.
-/// `walk` is told the one each address is entered in and answers with the
-/// transfers that body makes, or `None` where it could not be walked at all; a
-/// body that cannot be walked contributes no successors and is still a
-/// function, because something stated or called it.
-pub fn functions(
-    program: &dyn Program,
-    seeds: impl IntoIterator<Item = (u64, Confidence, bool)>,
-    mut walk: impl FnMut(u64, bool) -> Option<Transfers>,
-) -> Vec<Discovered> {
-    let mut believed = BTreeMap::<u64, (Confidence, bool)>::new();
-    let mut pending = Vec::new();
-    // The first reason decides the instruction set: the seeds, which state
-    // it, are offered before anything is walked.
-    let offer = |believed: &mut BTreeMap<u64, (Confidence, bool)>,
-                 pending: &mut Vec<u64>,
-                 address: u64,
-                 confidence: Confidence,
-                 thumb: bool| {
-        match believed.get_mut(&address) {
-            // Already believed at least this strongly, and already queued.
-            Some((held, _)) if *held <= confidence => {}
-            Some((held, _)) => *held = confidence,
-            None => {
-                believed.insert(address, (confidence, thumb));
-                pending.push(address);
-            }
-        }
-    };
-    for (address, confidence, thumb) in seeds {
-        offer(&mut believed, &mut pending, address, confidence, thumb);
-    }
-    let mut walked = BTreeSet::new();
-    while let Some(address) = pending.pop() {
-        if !walked.insert(address) {
-            continue;
-        }
-        let thumb = believed[&address].1;
-        let Some(transfers) = walk(address, thumb) else {
-            continue;
-        };
-        // A transfer that states no instruction set keeps this body's.
-        let entered = |target: u64| transfers.entered_in.get(&target).copied().unwrap_or(thumb);
-        for &target in &transfers.calls {
-            offer(
-                &mut believed,
-                &mut pending,
-                target,
-                Confidence::Called,
-                entered(target),
-            );
-        }
-        for &target in &transfers.handed {
-            offer(
-                &mut believed,
-                &mut pending,
-                target,
-                Confidence::Handed,
-                entered(target),
-            );
-        }
-        for &target in &transfers.tail_calls {
-            offer(
-                &mut believed,
-                &mut pending,
-                target,
-                Confidence::Reached,
-                entered(target),
-            );
-        }
-    }
-    believed
-        .into_iter()
-        .map(|(address, (confidence, thumb))| Discovered {
-            address,
-            confidence,
-            thumb,
-            name: program.name_at(address),
-        })
-        .collect()
-}
-
-/// Where one body transfers, which is the whole of what discovery reads from
-/// it.
+/// What one stretch of a body's walk reached, which is the whole of what discovery reads from a body.
 #[derive(Debug, Clone, Default)]
 pub struct Transfers {
     pub calls: Vec<u64>,
     pub tail_calls: Vec<u64>,
-    /// Addresses this body passed to a parameter a declaration calls a
-    /// function. The walk cannot see these: they are constants in argument
-    /// slots, not targets of any instruction.
-    pub handed: Vec<u64>,
+    /// Callees a call to which holds a fallthrough closed until they are known to return.
+    pub gated: Vec<u64>,
+    /// Whether the walk reached a return, or a stop it cannot see past.
+    pub leaves: bool,
     /// Whether each target is entered in Thumb, where the transfer states it.
     pub entered_in: BTreeMap<u64, bool>,
 }
 
-impl From<&r2ssa::body::Body> for Transfers {
-    fn from(body: &r2ssa::body::Body) -> Self {
+/// How discovery reads bodies: walked once, and continued past a call once that call is known to come back.
+pub trait Walker {
+    type Walk;
+    type Refusal;
+
+    /// Walk the body at `address`, in Thumb where `thumb`, past every call `returns` says comes back.
+    fn walk(
+        &self,
+        address: u64,
+        thumb: bool,
+        returns: &dyn Fn(u64) -> bool,
+    ) -> Result<(Self::Walk, Transfers), Self::Refusal>;
+
+    /// Continue a walk past every call to `callee`, which is now known to come back.
+    fn open(&self, walk: &mut Self::Walk, callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers;
+
+    /// Where a finished body hands a function to a parameter declared to take one, and whether each is Thumb.
+    fn handed(&self, walk: &Self::Walk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)>;
+
+    /// Whether control comes back from the import at this address, as its own declaration says; `None` for anything else.
+    fn declared(&self, address: u64) -> Option<bool>;
+}
+
+/// Every function in the program, whether control can come back from each, and each body as the fixpoint left it.
+pub struct Discovery<T, E> {
+    pub functions: Vec<Discovered>,
+    pub returns: BTreeMap<u64, bool>,
+    pub walks: BTreeMap<u64, Result<T, E>>,
+}
+
+/// Every function in the program, from what the image states and what the
+/// bodies reach.
+///
+/// Each seed carries the instruction set the image states it is written in.
+/// A body that cannot be walked contributes no successors and is still a
+/// function, because something stated or called it.
+pub fn functions<W: Walker>(
+    program: &dyn Program,
+    seeds: impl IntoIterator<Item = (u64, Confidence, bool)>,
+    walker: &W,
+) -> Discovery<W::Walk, W::Refusal> {
+    let unknown = |_| None;
+    let mut fixpoint = Fixpoint::new(walker, &unknown, None);
+    for (address, confidence, thumb) in seeds {
+        fixpoint.offer(address, confidence, thumb);
+    }
+    fixpoint.run();
+    let returns = fixpoint
+        .believed
+        .keys()
+        .map(|address| (*address, fixpoint.comes_back(*address)))
+        .collect();
+    Discovery {
+        functions: fixpoint
+            .believed
+            .into_iter()
+            .map(|(address, (confidence, thumb))| Discovered {
+                address,
+                confidence,
+                thumb,
+                name: program.name_at(address),
+            })
+            .collect(),
+        returns,
+        walks: fixpoint.walks,
+    }
+}
+
+/// Whether control can come back from `seed` and from each function walked to decide it, walking a callee only while an undecided caller waits on it.
+pub fn returns<W: Walker>(
+    seed: u64,
+    known: &dyn Fn(u64) -> Option<bool>,
+    walker: &W,
+) -> BTreeMap<u64, bool> {
+    let mut fixpoint = Fixpoint::new(walker, known, Some(seed));
+    fixpoint.pending.push(seed);
+    fixpoint.run();
+    fixpoint
+        .walks
+        .keys()
+        .map(|address| (*address, fixpoint.returning.contains(address)))
+        .collect()
+}
+
+/// What a caller waits on a callee for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Wait {
+    /// The bytes after a call to it.
+    Fallthrough,
+    /// Whether the caller returns, which its tail call to it decides.
+    TailCall,
+}
+
+/// The joint least fixpoint of the believed functions and those that can return, one whatever the order because walks are bounded by fixed stated entries.
+struct Fixpoint<'w, W: Walker> {
+    walker: &'w W,
+    /// What an earlier run settled, which this one neither walks nor revises.
+    known: &'w dyn Fn(u64) -> Option<bool>,
+    /// The one function whose return is asked, where discovery is not walking every believed body.
+    seed: Option<u64>,
+    believed: BTreeMap<u64, (Confidence, bool)>,
+    pending: Vec<u64>,
+    walks: BTreeMap<u64, Result<W::Walk, W::Refusal>>,
+    /// The functions shown to return so far.
+    returning: BTreeSet<u64>,
+    /// Functions that joined `returning` whose waiters have not been told.
+    joined: Vec<u64>,
+    /// Who waits on each callee, and for what.
+    waiting: BTreeMap<u64, BTreeSet<(u64, Wait)>>,
+    /// Bodies already read for the functions they hand on.
+    read: BTreeSet<u64>,
+}
+
+impl<'w, W: Walker> Fixpoint<'w, W> {
+    fn new(walker: &'w W, known: &'w dyn Fn(u64) -> Option<bool>, seed: Option<u64>) -> Self {
         Self {
-            calls: body.calls.clone(),
-            tail_calls: body.tail_calls.clone(),
-            handed: Vec::new(),
-            // Sleigh's `ISAModeSwitch` holds the Thumb bit a call enters with.
-            entered_in: body
-                .entered_with
-                .iter()
-                .map(|(target, mode)| (*target, *mode != 0))
-                .collect(),
+            walker,
+            known,
+            seed,
+            believed: BTreeMap::new(),
+            pending: Vec::new(),
+            walks: BTreeMap::new(),
+            returning: BTreeSet::new(),
+            joined: Vec::new(),
+            waiting: BTreeMap::new(),
+            read: BTreeSet::new(),
         }
     }
+
+    fn run(&mut self) {
+        loop {
+            if let Some(callee) = self.joined.pop() {
+                self.tell(callee);
+            } else if let Some(address) = self.pending.pop() {
+                self.walk(address);
+            } else if !self.hand_on() {
+                return;
+            }
+        }
+    }
+
+    /// Whether a body still needs walking: every one in discovery, else the seed and what an undecided caller waits on.
+    fn demanded(&self, address: u64) -> bool {
+        let undecided = |(caller, _): &(u64, Wait)| !self.returning.contains(caller);
+        let waited = self.waiting.get(&address);
+        self.seed.is_none_or(|seed| seed == address)
+            || waited.is_some_and(|waiters| waiters.iter().any(undecided))
+    }
+
+    /// A status no walk here decides: an earlier run's, or an import's declaration.
+    fn settled(&self, address: u64) -> Option<bool> {
+        settled(self.walker, self.known, address)
+    }
+
+    fn comes_back(&self, address: u64) -> bool {
+        comes_back(self.walker, self.known, &self.returning, address)
+    }
+
+    /// Believe an address for a reason, keeping the stronger one; the first reason decides the instruction set.
+    fn offer(&mut self, address: u64, confidence: Confidence, thumb: bool) {
+        match self.believed.get_mut(&address) {
+            Some((held, _)) => *held = (*held).min(confidence),
+            None => {
+                self.believed.insert(address, (confidence, thumb));
+                if self.seed.is_none() {
+                    self.pending.push(address);
+                }
+            }
+        }
+    }
+
+    fn walk(&mut self, address: u64) {
+        if self.walks.contains_key(&address) || !self.demanded(address) {
+            return;
+        }
+        let thumb = self.believed.get(&address).is_some_and(|(_, thumb)| *thumb);
+        let (walker, known, returning) = (self.walker, self.known, &self.returning);
+        let returns = |callee| comes_back(walker, known, returning, callee);
+        match walker.walk(address, thumb, &returns) {
+            Ok((walk, transfers)) => {
+                self.walks.insert(address, Ok(walk));
+                self.absorb(address, thumb, transfers);
+            }
+            // Nothing proves a body that cannot be walked never returns.
+            Err(refusal) => {
+                self.walks.insert(address, Err(refusal));
+                self.join(address);
+            }
+        }
+    }
+
+    fn absorb(&mut self, address: u64, thumb: bool, transfers: Transfers) {
+        // A transfer that states no instruction set keeps this body's.
+        let entered = |target: u64| transfers.entered_in.get(&target).copied().unwrap_or(thumb);
+        for &target in &transfers.calls {
+            self.offer(target, Confidence::Called, entered(target));
+        }
+        for &target in &transfers.tail_calls {
+            self.offer(target, Confidence::Reached, entered(target));
+            self.wait(address, target, Wait::TailCall);
+        }
+        for &callee in &transfers.gated {
+            self.wait(address, callee, Wait::Fallthrough);
+        }
+        if transfers.leaves {
+            self.join(address);
+        }
+    }
+
+    /// Make `caller` wait on `callee`, told at once where the callee already returns.
+    fn wait(&mut self, caller: u64, callee: u64, wait: Wait) {
+        self.waiting
+            .entry(callee)
+            .or_default()
+            .insert((caller, wait));
+        let unwalked = !self.walks.contains_key(&callee) && self.settled(callee).is_none();
+        if self.comes_back(callee) {
+            self.joined.push(callee);
+        } else if self.seed.is_some() && unwalked {
+            self.pending.push(callee);
+        }
+    }
+
+    fn join(&mut self, address: u64) {
+        if self.settled(address).is_none() && self.returning.insert(address) {
+            self.joined.push(address);
+        }
+    }
+
+    /// Tell everything waiting on `callee` that it returns.
+    fn tell(&mut self, callee: u64) {
+        for (caller, wait) in self.waiting.remove(&callee).unwrap_or_default() {
+            match wait {
+                Wait::TailCall => self.join(caller),
+                Wait::Fallthrough => self.open(caller, callee),
+            }
+        }
+    }
+
+    fn open(&mut self, caller: u64, callee: u64) {
+        let Some(Ok(walk)) = self.walks.get_mut(&caller) else {
+            return;
+        };
+        let (walker, known, returning) = (self.walker, self.known, &self.returning);
+        let returns = |callee| comes_back(walker, known, returning, callee);
+        let transfers = walker.open(walk, callee, &returns);
+        let thumb = self.believed.get(&caller).is_some_and(|(_, thumb)| *thumb);
+        self.absorb(caller, thumb, transfers);
+    }
+
+    /// Read each body, final once every callee is walked, for the functions it hands on; answer whether any need walking.
+    fn hand_on(&mut self) -> bool {
+        if self.seed.is_some() {
+            return false;
+        }
+        let (walker, known, returning) = (self.walker, self.known, &self.returning);
+        let returns = |callee| comes_back(walker, known, returning, callee);
+        let unread = self
+            .walks
+            .iter()
+            .filter(|(address, _)| !self.read.contains(address))
+            .filter_map(|(address, walk)| Some((*address, walk.as_ref().ok()?)))
+            .map(|(address, walk)| (address, walker.handed(walk, &returns)))
+            .collect::<Vec<_>>();
+        self.read.extend(self.walks.keys().copied());
+        for (_, handed) in unread {
+            for (target, thumb) in handed {
+                self.offer(target, Confidence::Handed, thumb);
+            }
+        }
+        !self.pending.is_empty()
+    }
+}
+
+fn settled<W: Walker>(
+    walker: &W,
+    known: &dyn Fn(u64) -> Option<bool>,
+    address: u64,
+) -> Option<bool> {
+    known(address).or_else(|| walker.declared(address))
+}
+
+fn comes_back<W: Walker>(
+    walker: &W,
+    known: &dyn Fn(u64) -> Option<bool>,
+    returning: &BTreeSet<u64>,
+    address: u64,
+) -> bool {
+    settled(walker, known, address).unwrap_or_else(|| returning.contains(&address))
 }
 
 #[cfg(test)]
@@ -219,132 +410,196 @@ mod tests {
         }
     }
 
+    /// One thing a straight-line body does.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        Call(u64),
+        Tail(u64),
+        Hand(u64),
+        Return,
+    }
+
+    /// Straight-line bodies by entry; an address with none cannot be walked.
+    struct Bodies(BTreeMap<u64, Vec<Step>>);
+
+    /// A body walked up to a step.
+    struct At {
+        address: u64,
+        next: usize,
+    }
+
+    impl Bodies {
+        fn of(bodies: &[(u64, &[Step])]) -> Self {
+            Self(
+                bodies
+                    .iter()
+                    .map(|(address, steps)| (*address, steps.to_vec()))
+                    .collect(),
+            )
+        }
+
+        fn go(&self, at: &mut At, returns: &dyn Fn(u64) -> bool) -> Transfers {
+            let mut transfers = Transfers::default();
+            let steps = &self.0[&at.address][at.next..];
+            let stopped = steps
+                .iter()
+                .position(|step| !taken(*step, &mut transfers, returns));
+            at.next += stopped.unwrap_or(steps.len());
+            transfers
+        }
+    }
+
+    /// Record one step, and answer whether the walk goes on past it.
+    fn taken(step: Step, transfers: &mut Transfers, returns: &dyn Fn(u64) -> bool) -> bool {
+        match step {
+            Step::Call(callee) => {
+                transfers.calls.push(callee);
+                let back = returns(callee);
+                if !back {
+                    transfers.gated.push(callee);
+                }
+                back
+            }
+            Step::Tail(target) => {
+                transfers.tail_calls.push(target);
+                false
+            }
+            Step::Hand(_) => true,
+            Step::Return => {
+                transfers.leaves = true;
+                false
+            }
+        }
+    }
+
+    impl Walker for Bodies {
+        type Walk = At;
+        type Refusal = ();
+
+        fn walk(
+            &self,
+            address: u64,
+            _thumb: bool,
+            returns: &dyn Fn(u64) -> bool,
+        ) -> Result<(At, Transfers), ()> {
+            self.0.get(&address).ok_or(())?;
+            let mut at = At { address, next: 0 };
+            let transfers = self.go(&mut at, returns);
+            Ok((at, transfers))
+        }
+
+        fn open(&self, walk: &mut At, _callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers {
+            walk.next += 1;
+            self.go(walk, returns)
+        }
+
+        fn handed(&self, walk: &At, _returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)> {
+            let handed = self.0[&walk.address].iter().filter_map(|step| match step {
+                Step::Hand(target) => Some((*target, false)),
+                _ => None,
+            });
+            handed.collect()
+        }
+
+        fn declared(&self, _address: u64) -> Option<bool> {
+            None
+        }
+    }
+
+    fn found(bodies: &[(u64, &[Step])], seeds: &[u64]) -> Discovery<At, ()> {
+        let seeds = seeds.iter().map(|seed| (*seed, Confidence::Stated, false));
+        functions(&Named, seeds, &Bodies::of(bodies))
+    }
+
+    fn seen(discovery: &Discovery<At, ()>) -> Vec<(u64, Confidence)> {
+        let functions = discovery.functions.iter();
+        functions.map(|one| (one.address, one.confidence)).collect()
+    }
+
     #[test]
     fn a_call_reaches_a_function_the_image_never_named() {
-        let found = functions(
-            &Named,
-            [(0x1000, Confidence::Stated, false)],
-            |address, _| {
-                (address == 0x1000).then(|| Transfers {
-                    calls: vec![0x2000],
-                    tail_calls: vec![0x3000],
-                    ..Transfers::default()
-                })
-            },
+        let found = found(
+            &[(0x1000, &[Step::Call(0x2000), Step::Tail(0x3000)])],
+            &[0x1000],
         );
-        let seen = found
-            .iter()
-            .map(|one| (one.address, one.confidence))
-            .collect::<Vec<_>>();
         assert_eq!(
-            seen,
+            seen(&found),
             [
                 (0x1000, Confidence::Stated),
                 (0x2000, Confidence::Called),
                 (0x3000, Confidence::Reached),
             ]
         );
-        assert_eq!(found[0].name.as_deref(), Some("entry"));
+        assert_eq!(found.functions[0].name.as_deref(), Some("entry"));
     }
 
     #[test]
     fn an_address_found_twice_keeps_the_stronger_reason() {
         // Reached first and stated second: the order a walk happens to take
         // must not decide how far a fact can be trusted.
-        let found = functions(
-            &Named,
-            [
-                (0x2000, Confidence::Stated, false),
-                (0x1000, Confidence::Stated, false),
-            ],
-            |address, _| {
-                (address == 0x1000).then(|| Transfers {
-                    tail_calls: vec![0x2000],
-                    ..Transfers::default()
-                })
-            },
-        );
-        assert_eq!(
-            found
-                .iter()
-                .find(|one| one.address == 0x2000)
-                .map(|one| one.confidence),
-            Some(Confidence::Stated)
-        );
+        let found = found(&[(0x1000, &[Step::Tail(0x2000)])], &[0x2000, 0x1000]);
+        assert!(seen(&found).contains(&(0x2000, Confidence::Stated)));
     }
 
     #[test]
     fn an_address_handed_to_a_declared_function_parameter_is_believed() {
         // Nothing transfers to it: it was put in an argument register and the
         // callee's declaration says that parameter is a function.
-        let found = functions(
-            &Named,
-            [(0x1000, Confidence::Stated, false)],
-            |address, _| {
-                (address == 0x1000).then(|| Transfers {
-                    calls: Vec::new(),
-                    tail_calls: Vec::new(),
-                    handed: vec![0x4000],
-                    ..Transfers::default()
-                })
-            },
-        );
-        let seen = found
-            .iter()
-            .map(|one| (one.address, one.confidence))
-            .collect::<Vec<_>>();
+        let found = found(&[(0x1000, &[Step::Hand(0x4000), Step::Return])], &[0x1000]);
         assert_eq!(
-            seen,
-            vec![(0x1000, Confidence::Stated), (0x4000, Confidence::Handed)]
+            seen(&found),
+            [(0x1000, Confidence::Stated), (0x4000, Confidence::Handed)]
         );
     }
 
     #[test]
     fn a_call_outranks_a_handoff_for_the_same_address() {
-        // Both are true; the stronger reason is the one the machine makes.
-        let found = functions(
-            &Named,
-            [(0x1000, Confidence::Stated, false)],
-            |address, _| {
-                (address == 0x1000).then(|| Transfers {
-                    calls: vec![0x4000],
-                    tail_calls: Vec::new(),
-                    handed: vec![0x4000],
-                    ..Transfers::default()
-                })
-            },
+        let body = [Step::Hand(0x4000), Step::Call(0x4000), Step::Return];
+        let found = found(&[(0x1000, &body), (0x4000, &[Step::Return])], &[0x1000]);
+        assert!(seen(&found).contains(&(0x4000, Confidence::Called)));
+    }
+
+    #[test]
+    fn a_cycle_of_calls_that_never_reaches_a_return_never_returns() {
+        // Each call's fallthrough waits on the other, and nothing else opens it.
+        let found = found(
+            &[
+                (0x1000, &[Step::Call(0x2000), Step::Return]),
+                (0x2000, &[Step::Call(0x1000), Step::Return]),
+            ],
+            &[0x1000],
         );
+        assert_eq!(seen(&found).len(), 2);
         assert_eq!(
-            found
-                .iter()
-                .find(|one| one.address == 0x4000)
-                .map(|one| one.confidence),
-            Some(Confidence::Called)
+            found.returns,
+            BTreeMap::from([(0x1000, false), (0x2000, false)])
         );
     }
 
     #[test]
-    fn a_cycle_of_calls_terminates() {
-        let found = functions(
-            &Named,
-            [(0x1000, Confidence::Stated, false)],
-            |address, _| {
-                Some(Transfers {
-                    calls: vec![match address {
-                        0x1000 => 0x2000,
-                        _ => 0x1000,
-                    }],
-                    tail_calls: Vec::new(),
-                    ..Transfers::default()
-                })
-            },
+    fn a_body_that_cannot_be_walked_is_still_a_function_that_may_return() {
+        let found = found(&[(0x1000, &[Step::Call(0x2000), Step::Return])], &[0x1000]);
+        assert_eq!(seen(&found).len(), 2);
+        assert_eq!(
+            found.returns,
+            BTreeMap::from([(0x1000, true), (0x2000, true)])
         );
-        assert_eq!(found.len(), 2);
     }
 
     #[test]
-    fn a_body_that_cannot_be_walked_is_still_a_function() {
-        let found = functions(&Named, [(0x1000, Confidence::Stated, false)], |_, _| None);
-        assert_eq!(found.len(), 1);
+    fn a_tail_call_returns_what_its_target_returns_whatever_the_order() {
+        let bodies: [(u64, &[Step]); 3] = [
+            (0x1000, &[Step::Tail(0x2000)]),
+            (0x2000, &[Step::Call(0x3000), Step::Return]),
+            (0x3000, &[Step::Tail(0x3000)]),
+        ];
+        let forward = found(&bodies, &[0x1000, 0x2000, 0x3000]);
+        let backward = found(&bodies, &[0x3000, 0x2000, 0x1000]);
+        assert_eq!(forward.returns, backward.returns);
+        assert!(forward.returns.values().all(|returns| !returns));
+        // The same walks, asked of one function against what an earlier run settled.
+        let settled = |address| (address == 0x3000).then_some(true);
+        let from = returns(0x1000, &settled, &Bodies::of(&bodies));
+        assert_eq!(from, BTreeMap::from([(0x1000, true), (0x2000, true)]));
     }
 }

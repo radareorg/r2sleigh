@@ -51,14 +51,31 @@ pub struct MemoStats {
     pub sealed: u64,
 }
 
+/// What deriving one analysis consulted of the program.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Consulted {
+    /// Which bytes it read.
+    pub read: Vec<std::ops::Range<u64>>,
+    /// Whether control comes back from each callee a walk asked about, as answered then.
+    pub returns: Vec<(u64, bool)>,
+}
+
+/// How to tell whether what a held analysis consulted has moved since.
+pub struct Moved<'a> {
+    /// Whether anything in a range has been written since a byte revision.
+    pub written: &'a dyn Fn(u64, &std::ops::Range<u64>) -> bool,
+    /// Whether control comes back from a callee now.
+    pub returns: &'a dyn Fn(u64) -> bool,
+}
+
 /// The one analysis a session holds, and what identifies it.
 struct Held<T, S> {
     revision: Revision,
     entry: u64,
     analysis: Arc<T>,
-    /// Which bytes deriving it read. A write that missed every one of them --
-    /// a patch to another function -- leaves this answer about this program.
-    read: Vec<std::ops::Range<u64>>,
+    /// What deriving it consulted. A write that moved none of it -- a patch to
+    /// another function -- leaves this answer about this program.
+    consulted: Consulted,
     /// The type analysis sealed from exactly this analysis, once a request sealed it.
     sealed: Option<S>,
 }
@@ -84,57 +101,60 @@ impl<T, S> Default for Memo<T, S> {
 impl<T, S> Memo<T, S> {
     /// The held answer, where the program has not moved under it.
     ///
-    /// `written_since` says whether anything in a range has been written since
-    /// a revision. A write that missed every byte the derivation read leaves
-    /// the answer standing, which is what a patch to another function is; the
-    /// name and entry tables are compared whole, because a walk consults them
-    /// about addresses it never read.
+    /// A write that missed every byte the derivation read and changed no answer
+    /// it was given about a callee leaves it standing, which is what a patch
+    /// to another function is; the name and entry tables are compared whole,
+    /// because a walk consults them about addresses it never read.
     ///
-    /// `derive` answers with the analysis and the bytes it read, together, so
-    /// the read set held is always the one that derivation made. Recorded by a
+    /// `derive` answers with the analysis and what it consulted, together, so
+    /// the set held is always the one that derivation made. Recorded by a
     /// second call, a hit -- which reads nothing -- wrote an empty set over it,
     /// and the answer then stood against every later write.
     pub fn analysed_since(
         &self,
         revision: Revision,
         entry: u64,
-        written_since: &dyn Fn(u64, &std::ops::Range<u64>) -> bool,
-        derive: impl FnOnce() -> Result<(T, Vec<std::ops::Range<u64>>), NativeRefusal>,
+        moved: &Moved<'_>,
+        derive: impl FnOnce() -> Result<(T, Consulted), NativeRefusal>,
     ) -> Result<Arc<T>, NativeRefusal> {
-        if let Some(held) = self.lookup_against(revision, entry, written_since) {
+        if let Some(held) = self.lookup_against(revision, entry, moved) {
             return Ok(held);
         }
-        let (analysis, read) = derive()?;
+        let (analysis, mut consulted) = derive()?;
+        consulted.read = coalesced(consulted.read);
+        consulted.returns.sort_unstable();
+        consulted.returns.dedup();
         let analysis = Arc::new(analysis);
         let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
         *held = Some(Held {
             revision,
             entry,
             analysis: Arc::clone(&analysis),
-            read: coalesced(read),
+            consulted,
             sealed: None,
         });
         Ok(analysis)
     }
 
-    fn lookup_against(
-        &self,
-        revision: Revision,
-        entry: u64,
-        written_since: &dyn Fn(u64, &std::ops::Range<u64>) -> bool,
-    ) -> Option<Arc<T>> {
+    fn lookup_against(&self, revision: Revision, entry: u64, moved: &Moved<'_>) -> Option<Arc<T>> {
         let held = self.held.lock().unwrap_or_else(|held| held.into_inner());
         let mut stats = self.stats.lock().unwrap_or_else(|stats| stats.into_inner());
+        let standing = |held: &Held<T, S>| {
+            let consulted = &held.consulted;
+            let written = |range| (moved.written)(held.revision.bytes, range);
+            !consulted.read.iter().any(written)
+                && consulted
+                    .returns
+                    .iter()
+                    .all(|(callee, answer)| (moved.returns)(*callee) == *answer)
+        };
         match held.as_ref() {
             Some(held)
                 if held.entry == entry
                     && held.revision.program == revision.program
                     && held.revision.names == revision.names
                     && held.revision.entries == revision.entries
-                    && !held
-                        .read
-                        .iter()
-                        .any(|range| written_since(held.revision.bytes, range)) =>
+                    && standing(held) =>
             {
                 stats.hits += 1;
                 Some(Arc::clone(&held.analysis))
@@ -229,23 +249,29 @@ mod tests {
         Memo::default()
     }
 
-    /// Nothing has been written at all.
-    fn untouched(_since: u64, _range: &std::ops::Range<u64>) -> bool {
-        false
-    }
+    /// Nothing has been written at all, and every callee returns.
+    const UNTOUCHED: Moved<'static> = Moved {
+        written: &|_, _| false,
+        returns: &|_| true,
+    };
 
     /// Everything the answer read has been written over.
-    fn overwritten(_since: u64, _range: &std::ops::Range<u64>) -> bool {
-        true
-    }
+    const OVERWRITTEN: Moved<'static> = Moved {
+        written: &|_, _| true,
+        returns: &|_| true,
+    };
 
-    /// An answer, and the bytes deriving it read.
-    fn reading(value: u32) -> Result<(u32, Vec<std::ops::Range<u64>>), NativeRefusal> {
-        Ok((value, std::iter::once(0x1000..0x1010).collect()))
+    /// An answer, the bytes deriving it read, and that the callee at 0x2000 returns.
+    fn reading(value: u32) -> Result<(u32, Consulted), NativeRefusal> {
+        let consulted = Consulted {
+            read: std::iter::once(0x1000..0x1010).collect(),
+            returns: vec![(0x2000, true)],
+        };
+        Ok((value, consulted))
     }
 
     fn derived(memo: &Memo<u32, u64>, revision: Revision, value: u32) -> Arc<u32> {
-        memo.analysed_since(revision, 0x1000, &untouched, || reading(value))
+        memo.analysed_since(revision, 0x1000, &UNTOUCHED, || reading(value))
             .expect("derived")
     }
 
@@ -254,7 +280,7 @@ mod tests {
         let memo = memo();
         assert_eq!(*derived(&memo, at(0), 99), 99);
         let again = memo
-            .analysed_since(at(0), 0x1000, &untouched, || {
+            .analysed_since(at(0), 0x1000, &UNTOUCHED, || {
                 panic!("the held analysis answers")
             })
             .expect("held");
@@ -290,7 +316,7 @@ mod tests {
         let memo = memo();
         derived(&memo, at(0), 99);
         let value = memo
-            .analysed_since(at(1), 0x1000, &overwritten, || reading(100))
+            .analysed_since(at(1), 0x1000, &OVERWRITTEN, || reading(100))
             .expect("derived");
         assert_eq!(*value, 100);
         assert_eq!((memo.stats().hits, memo.stats().replacements), (0, 1));
@@ -304,12 +330,28 @@ mod tests {
         let memo = memo();
         derived(&memo, at(0), 99);
         let held = memo
-            .analysed_since(at(1), 0x1000, &untouched, || {
+            .analysed_since(at(1), 0x1000, &UNTOUCHED, || {
                 panic!("the held analysis answers")
             })
             .expect("held");
         assert_eq!(*held, 99);
         assert_eq!(memo.stats().hits, 1);
+    }
+
+    #[test]
+    fn a_callee_that_no_longer_returns_is_a_replacement() {
+        // Its bytes were never read here: the walk only asked whether it returns.
+        let memo = memo();
+        derived(&memo, at(0), 99);
+        let never = Moved {
+            written: &|_, _| false,
+            returns: &|callee| callee != 0x2000,
+        };
+        let value = memo
+            .analysed_since(at(1), 0x1000, &never, || reading(100))
+            .expect("derived");
+        assert_eq!(*value, 100);
+        assert_eq!(memo.stats().replacements, 1);
     }
 
     #[test]
@@ -326,7 +368,7 @@ mod tests {
             let memo = memo();
             derived(&memo, at(0), 99);
             let value = memo
-                .analysed_since(moved, 0x1000, &untouched, || reading(100))
+                .analysed_since(moved, 0x1000, &UNTOUCHED, || reading(100))
                 .expect("derived");
             assert_eq!(*value, 100);
         }
@@ -349,7 +391,7 @@ mod tests {
     fn another_function_is_a_plain_miss() {
         let memo = memo();
         derived(&memo, at(0), 99);
-        memo.analysed_since(at(0), 0x2000, &untouched, || reading(100))
+        memo.analysed_since(at(0), 0x2000, &UNTOUCHED, || reading(100))
             .expect("derived");
         let stats = memo.stats();
         assert_eq!((stats.misses, stats.replacements), (2, 0));
@@ -361,7 +403,7 @@ mod tests {
         // that is a fact about the request. Holding one would serve somebody
         // else's timeout as this program's answer.
         let memo = memo();
-        let refused = memo.analysed_since(at(0), 0x1000, &untouched, || {
+        let refused = memo.analysed_since(at(0), 0x1000, &UNTOUCHED, || {
             Err(NativeRefusal::NoStackPointer)
         });
         assert_eq!(refused.unwrap_err(), NativeRefusal::NoStackPointer);

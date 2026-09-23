@@ -36,6 +36,10 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("maxaddr: {:#010x}", info.max_addr()),
         format!("is-lineal: {}", info.is_lineal()),
         format!("end-bbs: {}", info.exits()),
+    ]);
+    // Only a proof is printed: a function nothing proves never returns may still never return.
+    out.extend(info.noreturn.then(|| "noreturn: true".to_owned()));
+    out.extend([
         format!("recursive: {}", info.is_recursive()),
         format!("out-degree: {}", info.direct_calls()),
         format!("locals: {}", info.locals.len()),

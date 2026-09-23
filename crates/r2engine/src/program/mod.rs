@@ -10,6 +10,7 @@ pub mod info;
 pub mod naming;
 mod pointers;
 mod requests;
+mod returns;
 pub mod source;
 
 pub use requests::Rendering;
@@ -25,7 +26,7 @@ use r2sleigh_lift::EmbeddedMachine;
 
 use crate::names::NameDb;
 use crate::native::{NativeRefusal, NativeTarget, Prepared};
-use crate::query::{Decoders, Memo, Revision};
+use crate::query::{Consulted, Decoders, Memo, Moved, Revision};
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
@@ -108,6 +109,8 @@ pub struct OpenProgram<S: Source> {
     thumb_machine: Option<EmbeddedMachine>,
     /// Which parameters of each callee take an address, read once per callee and revision.
     pointers: std::sync::Mutex<pointers::Pointers>,
+    /// Whether control comes back from each function, derived on first use per state of the bytes.
+    returns: std::sync::Mutex<returns::Returns>,
 }
 
 impl<S: Source> OpenProgram<S> {
@@ -155,6 +158,7 @@ impl<S: Source> OpenProgram<S> {
             machine: None,
             thumb_machine: None,
             pointers: std::sync::Mutex::default(),
+            returns: std::sync::Mutex::default(),
         }
     }
 
@@ -278,7 +282,7 @@ impl<S: Source> OpenProgram<S> {
     fn ensure_decodable(&mut self) -> Result<(), String> {
         self.ensure_current()?;
         if self.thumb_machine.is_some() && self.modes_at != Some(self.source.byte_revision()) {
-            self.surveyed(|_, _, _| {})?;
+            self.surveyed()?;
         }
         Ok(())
     }
@@ -397,19 +401,19 @@ impl<S: Source> OpenProgram<S> {
         target: &NativeTarget<'_>,
         entry: u64,
     ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
-        self.memo.analysed_since(
-            self.revision(),
-            entry,
-            &|since, range| self.source.written_since(since, range),
-            || {
+        let moved = Moved {
+            written: &|since, range| self.source.written_since(since, range),
+            returns: &|callee| self.comes_back(callee),
+        };
+        self.memo
+            .analysed_since(self.revision(), entry, &moved, || {
                 let recording = Recording {
                     program: self,
-                    read: std::cell::RefCell::new(Vec::new()),
+                    consulted: std::cell::RefCell::default(),
                 };
                 let analysis = crate::native::analysed(target, &recording, entry);
-                analysis.map(|analysis| (analysis, recording.read.into_inner()))
-            },
-        )
+                analysis.map(|analysis| (analysis, recording.consulted.into_inner()))
+            })
     }
 
     /// The control the request in hand runs under, or the last one ran under.
@@ -469,14 +473,18 @@ impl<S: Source> OpenProgram<S> {
     /// nearest below it of a mapping symbol and a function discovery placed,
     /// the container's statement winning a tie.
     fn machine_at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
+        self.machine_in(self.thumb_at(vaddr))
+    }
+
+    /// Whether the code at this address is Thumb, as `machine_at` decides it.
+    fn thumb_at(&self, vaddr: u64) -> bool {
         let stated = self.mapped.range(..=vaddr).next_back();
         let derived = self.modes.range(..=vaddr).next_back();
-        let thumb = match (stated, derived) {
+        match (stated, derived) {
             (Some((at, thumb)), Some((from, _))) if at >= from => *thumb,
             (_, Some((_, thumb))) | (Some((_, thumb)), None) => *thumb,
             (None, None) => false,
-        };
-        self.machine_in(thumb)
+        }
     }
 
     /// The decoder for one instruction set.
@@ -525,6 +533,10 @@ impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
         // that reaches one has left the function it came from.
         self.imports.contains_key(&vaddr)
             || self.defined.get(&vaddr).is_some_and(|function| *function)
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        self.comes_back(callee)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
@@ -580,28 +592,36 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     }
 }
 
-/// The program as one derivation reads it, logging which bytes it read.
+/// The program as one derivation reads it, logging which bytes it read and
+/// what it was told about which calls return.
 ///
 /// An answer that recorded this can be kept across a write that missed every
 /// one of them, which is what a patch to another function is. The log lives
 /// for one derivation only, so nothing else reads through it.
 struct Recording<'a, S: Source> {
     program: &'a OpenProgram<S>,
-    read: std::cell::RefCell<Vec<std::ops::Range<u64>>>,
+    consulted: std::cell::RefCell<Consulted>,
 }
 
 impl<S: Source> r2ssa::body::Program for Recording<'_, S> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let read = self.program.source.read(vaddr, max)?;
         // Only what is mapped: no write can land in the unmapped rest.
-        self.read
+        self.consulted
             .borrow_mut()
+            .read
             .push(vaddr..vaddr.saturating_add(read.len() as u64));
         Some(read)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
         r2ssa::body::Program::is_entry(self.program, vaddr)
+    }
+
+    fn returns(&self, callee: u64) -> bool {
+        let answer = self.program.comes_back(callee);
+        self.consulted.borrow_mut().returns.push((callee, answer));
+        answer
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

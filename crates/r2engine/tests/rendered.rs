@@ -44,7 +44,11 @@ fn a_call_to_an_import_declared_never_to_return_ends_the_function() {
     program.source_mut().write(TWO, &code);
     let c = c_of(&mut program, TWO);
     assert!(c.contains("exit(1)"), "{c}");
-    assert!(!c.contains("return"), "{c}");
+    assert!(c.contains("__attribute__((noreturn)) void exit("), "{c}");
+    let returns = c
+        .lines()
+        .any(|line| line.trim_start().starts_with("return"));
+    assert!(!returns, "{c}");
 }
 
 #[test]

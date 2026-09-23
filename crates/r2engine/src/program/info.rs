@@ -25,6 +25,8 @@ pub struct FunctionInfo {
     pub locals: Vec<Local>,
     /// What it returns, where r2types decided it.
     pub returns: Option<CTypeLike>,
+    /// Whether the whole program proves control never comes back from it.
+    pub noreturn: bool,
 }
 
 /// One basic block.
@@ -69,6 +71,7 @@ impl FunctionInfo {
         entry: u64,
         artifact: &r2ssa::SsaArtifact,
         sealed: &SourceOwnedFunctionFacts,
+        noreturn: bool,
     ) -> Self {
         let facts = sealed.report();
         let certificates = artifact.certificates();
@@ -88,6 +91,7 @@ impl FunctionInfo {
             arguments: arguments(artifact, sealed, &entities),
             returns: returns(artifact, sealed),
             locals: locals(artifact, &entities),
+            noreturn,
         }
     }
 

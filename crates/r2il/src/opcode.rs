@@ -1439,18 +1439,26 @@ pub struct R2ILBlock {
 /// addition or subtraction of two constants, which is how a program counter
 /// read becomes a literal. Anything else is not recognised here.
 pub fn returns_to(ops: &[R2ILOp], next: u64, link: &Varnode) -> bool {
+    return_addresses(ops, link).any(|address| address == next)
+}
+
+/// Every constant these operations leave in `link`, folded as [`returns_to`] folds them.
+pub fn return_addresses<'a>(
+    ops: &'a [R2ILOp],
+    link: &'a Varnode,
+) -> impl Iterator<Item = u64> + 'a {
     let same =
         |a: &Varnode, b: &Varnode| a.space == b.space && a.offset == b.offset && a.size == b.size;
     let literal = |vn: &Varnode| (vn.space == SpaceId::Const).then_some(vn.offset);
-    ops.iter().any(|op| match op {
-        R2ILOp::Copy { dst, src } if same(dst, link) => literal(src) == Some(next),
+    ops.iter().filter_map(move |op| match op {
+        R2ILOp::Copy { dst, src } if same(dst, link) => literal(src),
         R2ILOp::IntAdd { dst, a, b } if same(dst, link) => {
-            matches!((literal(a), literal(b)), (Some(a), Some(b)) if a.wrapping_add(b) == next)
+            Some(literal(a)?.wrapping_add(literal(b)?))
         }
         R2ILOp::IntSub { dst, a, b } if same(dst, link) => {
-            matches!((literal(a), literal(b)), (Some(a), Some(b)) if a.wrapping_sub(b) == next)
+            Some(literal(a)?.wrapping_sub(literal(b)?))
         }
-        _ => false,
+        _ => None,
     })
 }
 

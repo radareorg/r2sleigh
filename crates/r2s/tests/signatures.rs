@@ -6,14 +6,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// A GCC-built x86-64 ELF carried in the tree, not stripped.
-fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned/hashes_gcc_x64_O2")
+fn pinned(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/coverage/pinned")
+        .join(name)
 }
 
 fn r2s(script: &str) -> String {
+    r2s_on("hashes_gcc_x64_O2", script)
+}
+
+fn r2s_on(fixture: &str, script: &str) -> String {
     let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
         .args(["-q", "-c", script])
-        .arg(fixture())
+        .arg(pinned(fixture))
         .output()
         .expect("the shell runs");
     assert!(
@@ -59,5 +65,16 @@ fn afi_states_the_signature_pdd_declares() {
         header_types(signature.trim_end_matches(';')),
         header_types(header),
         "afi and pdd disagree about what fnv1a32 takes and returns"
+    );
+}
+
+#[test]
+fn afi_says_noreturn_only_where_the_program_proves_it() {
+    let stub = r2s_on("branchy_gcc_x64_O0", "afi @ sym.imp.__stack_chk_fail");
+    assert!(stub.lines().any(|line| line == "noreturn: true"), "{stub}");
+    let body = r2s("afi @ 0x401330");
+    assert!(
+        !body.lines().any(|line| line.starts_with("noreturn")),
+        "{body}"
     );
 }

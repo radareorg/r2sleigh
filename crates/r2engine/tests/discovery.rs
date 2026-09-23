@@ -7,8 +7,8 @@
 mod common;
 
 use common::{
-    ARM_ENTRY, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, THUMB_CALLED, THUMB_LEAF,
-    TWO, VENEER,
+    ARM_ENTRY, BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, THUMB_CALLED,
+    THUMB_LEAF, TWO, VENEER,
 };
 use r2engine::discovery::Confidence;
 use r2engine::program::{OpenProgram, Symbol, SymbolKind};
@@ -182,4 +182,104 @@ fn a_function_reached_only_by_a_call_is_in_the_instruction_set_the_call_enters()
     // The ARM caller reads its Thumb callee's body in Thumb.
     let prepared = cold.prepared(ARM_ENTRY).expect("prepared");
     assert_eq!(prepared.unread(), [], "{:?}", prepared.unread());
+}
+
+/// `wrap: mov edi, 1; call exit`, then `user: call wrap`, then `next`, which only `other` calls.
+const WRAPPED: [u8; 0xa0] = {
+    let mut code = [0xcc; 0xa0];
+    let runs: [(usize, &[u8]); 5] = [
+        (0x00, &[0xbf, 0x01, 0, 0, 0, 0xe8, 0x86, 0, 0, 0]), // wrap: mov edi, 1; call the stub
+        (0x0a, &[0xe8, 0xf1, 0xff, 0xff, 0xff]),             // user: call wrap
+        (0x0f, &[0xb8, 0x02, 0, 0, 0, 0xc3]),                // next: mov eax, 2; ret
+        (0x15, &[0xe8, 0xf5, 0xff, 0xff, 0xff, 0xc3]),       // other: call next; ret
+        (0x90, &[0xff, 0x25, 0x02, 0, 0, 0]),                // the stub: jmp qword [rip + 2]
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            code[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    code
+};
+
+/// `spin: jmp spin`, then `caller: call spin; mov eax, 1; ret`.
+const SPINS: &[u8] = &[
+    0xeb, 0xfe, 0xe8, 0xf9, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+/// A defined `exit: ret`, then `caller: call exit; mov eax, 1; ret`.
+const DEFINES_EXIT: &[u8] = &[0xc3, 0xe8, 0xfa, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3];
+/// `ind: jmp rax`, then `caller: call ind; mov eax, 1; ret`.
+const STOPS: &[u8] = &[
+    0xff, 0xe0, 0xe8, 0xf9, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+/// `f: call g; ret`, padding, then `g: call f; ret`.
+const MUTUAL: &[u8] = &[
+    0xe8, 0x0b, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xe8,
+    0xeb, 0xff, 0xff, 0xff, 0xc3,
+];
+
+/// Where a function's blocks end, and whether the program proves it never returns.
+fn extent(program: &mut OpenProgram<Literal>, entry: u64) -> (u64, bool) {
+    let info = program.function_info(entry).expect("it is described");
+    (info.max_addr(), info.noreturn)
+}
+
+#[test]
+fn a_caller_of_a_function_that_only_calls_exit_ends_at_that_call() {
+    let (wrap, user, next, other) = (BASE, BASE + 0xa, BASE + 0xf, BASE + 0x15);
+    let literal = || {
+        let functions = [("wrap", wrap, 10), ("user", user, 5), ("other", other, 6)];
+        Literal::of_code(&WRAPPED, &functions).importing("exit")
+    };
+    let mut cold = OpenProgram::of(literal());
+    // `next` is nobody's entry but a call's, so only knowing `wrap` never returns stops `user` there.
+    assert_eq!(extent(&mut cold, user), (next, true));
+    assert_eq!(extent(&mut cold, wrap), (user, true));
+    assert_eq!(extent(&mut cold, next), (other, false));
+    // Discovery asked first derives the same answers for the whole program.
+    let mut warm = OpenProgram::of(literal());
+    let found = believed(&mut warm);
+    assert!(found.contains(&(next, Confidence::Called)), "{found:?}");
+    assert_eq!(extent(&mut warm, user), (next, true));
+}
+
+#[test]
+fn a_call_to_a_function_that_spins_forever_ends_its_caller() {
+    let (spin, caller) = (BASE, BASE + 2);
+    let functions = [("spin", spin, 2), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(SPINS, &functions));
+    assert_eq!(extent(&mut program, caller), (caller + 5, true));
+    assert_eq!(extent(&mut program, spin), (caller, true));
+}
+
+#[test]
+fn a_defined_function_named_exit_that_returns_is_called_past() {
+    let (exit, caller) = (BASE, BASE + 1);
+    let functions = [("exit", exit, 1), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(DEFINES_EXIT, &functions));
+    assert_eq!(extent(&mut program, caller), (caller + 11, false));
+    assert_eq!(extent(&mut program, exit), (caller, false));
+}
+
+#[test]
+fn functions_that_only_call_each_other_never_return() {
+    let (f, g) = (BASE, BASE + 0x10);
+    let functions = [("f", f, 6), ("g", g, 6)];
+    let mut program = OpenProgram::of(Literal::of_code(MUTUAL, &functions));
+    assert_eq!(extent(&mut program, f), (f + 5, true));
+    assert_eq!(extent(&mut program, g), (g + 5, true));
+}
+
+#[test]
+fn a_callee_whose_walk_stops_at_an_indirect_branch_may_return() {
+    let (ind, caller) = (BASE, BASE + 2);
+    let functions = [("ind", ind, 2), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(STOPS, &functions));
+    assert_eq!(extent(&mut program, caller), (caller + 11, false));
+    assert!(!extent(&mut program, ind).1);
 }

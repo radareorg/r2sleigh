@@ -7,8 +7,8 @@
 //! capture is new, and nothing here formats anything.
 //!
 //! The callees a function calls directly are walked too, one level deep, and
-//! their bodies are what say what each call takes and returns. Deeper than one
-//! level is what an interprocedural fixpoint is for, and this is not one.
+//! their bodies are what say what each call takes and returns. Whether a call
+//! comes back at all is the program's whole-program fixpoint, which every walk asks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -341,49 +341,74 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
-/// One walk of a body: where control goes, and the lift the reverse index reads.
-pub struct Survey {
-    pub transfers: crate::discovery::Transfers,
-    /// The body's own lift, which the reverse index reads.
-    pub lifted: Vec<r2il::R2ILBlock>,
-    /// Where the walk stopped without knowing where control went.
-    pub unresolved: Vec<r2ssa::body::Unresolved>,
-}
-
-/// Where one body transfers, walked but not prepared, or why it could not be walked.
-pub fn surveyed(
+/// Whether a body that transfers to these callees and loads these constant addresses calls anything declared to take a function.
+///
+/// The cheap half of the question, asked off the walk alone so that a body
+/// which cannot hand a function anywhere is never prepared to find out. An
+/// import is reached through a slot the loader fills, and the walk sees the
+/// load rather than the call's target, so every slot read counts as a callee.
+pub(crate) fn hands_a_function(
     target: &NativeTarget<'_>,
     program: &dyn Program,
-    entry: u64,
-) -> Result<Survey, NativeRefusal> {
-    let native = Native {
-        target,
-        program,
-        machine: machine(target)?,
-        control: program.control().ssa_execution_control(),
+    callees: impl IntoIterator<Item = u64>,
+    loads: &BTreeSet<u64>,
+) -> bool {
+    let direct = callees
+        .into_iter()
+        .filter_map(|callee| program.name_at(callee));
+    let through_a_slot = loads.iter().filter_map(|slot| program.import_at(*slot));
+    direct.chain(through_a_slot).any(|name| {
+        let prototype = target.prototypes.get(&name);
+        prototype.is_some_and(|prototype| {
+            prototype
+                .parameters
+                .iter()
+                .any(r2abi::Parameter::is_function)
+        })
+    })
+}
+
+/// The functions a walked body hands to a parameter a declaration calls a function.
+pub(crate) fn handed(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    body: r2ssa::body::Body,
+) -> Vec<u64> {
+    let entry = body.entry;
+    let native = match machine(target) {
+        Ok(machine) => Native {
+            target,
+            program,
+            machine,
+            control: program.control().ssa_execution_control(),
+        },
+        Err(error) => {
+            r2il::refusal_evidence!("handed-function", "{entry:#x}: {error}");
+            return Vec::new();
+        }
     };
-    let walked = native.walk(entry)?;
-    let mut transfers = crate::discovery::Transfers::from(&walked.body);
-    // Preparing a body costs far more than walking one, so it is done only
-    // where the typed rule could fire at all: this function has to call
-    // something whose declaration hands it a function. On an ordinary binary
-    // that is `entry0` and whoever registers a handler, and nothing else.
-    if native.hands_a_function(&walked) {
-        match native.prepare(&walked, &Callees::default()) {
-            Ok(artifact) => transfers.handed = native.handed_functions(&artifact, &walked),
-            Err(error) => r2il::refusal_evidence!(
+    let walked = native.walked(body);
+    match native.prepare(&walked, &Callees::default()) {
+        Ok(artifact) => native.handed_functions(&artifact, &walked),
+        Err(error) => {
+            r2il::refusal_evidence!(
                 "handed-function",
                 "{entry:#x}: preparing to read its arguments failed: {error:?}"
-            ),
+            );
+            Vec::new()
         }
     }
-    let body = walked.body;
-    let lifted = body.blocks.into_iter().map(|block| block.lifted).collect();
-    Ok(Survey {
-        transfers,
-        lifted,
-        unresolved: body.unresolved,
-    })
+}
+
+/// Whether control comes back from the import at `address`, as its own declaration says; `None` where it is no import.
+pub(crate) fn declared_return(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    address: u64,
+) -> Option<bool> {
+    let name = program.import_at(address)?;
+    let prototype = target.prototypes.get(&name);
+    Some(!prototype.is_some_and(|prototype| prototype.noreturn))
 }
 
 /// What the binding plan decided about each value.
@@ -1622,40 +1647,26 @@ impl Native<'_> {
         entry: u64,
         dispatched: &BTreeMap<u64, Vec<u64>>,
     ) -> Result<Walked, NativeRefusal> {
-        let body = r2ssa::body::lift_body_where(
-            entry,
-            self.target.disasm,
-            self.program,
-            dispatched,
-            &|target| self.never_returns(target),
-        )
-        .map_err(NativeRefusal::Body)?;
+        let body = r2ssa::body::lift_body(entry, self.target.disasm, self.program, dispatched)
+            .map_err(NativeRefusal::Body)?;
+        Ok(self.walked(body))
+    }
+
+    /// One walked body, with what the program calls it and each function it calls.
+    fn walked(&self, body: r2ssa::body::Body) -> Walked {
         let callee_names = body
             .calls
             .iter()
             .filter_map(|address| self.program.name_at(*address))
             .collect();
-        Ok(Walked {
+        Walked {
             name: self
                 .program
-                .name_at(entry)
-                .unwrap_or_else(|| r2source::unnamed_function(entry)),
+                .name_at(body.entry)
+                .unwrap_or_else(|| r2source::unnamed_function(body.entry)),
             body,
             callee_names,
-        })
-    }
-
-    /// Whether the declarations say control never comes back from this call.
-    ///
-    /// The address is the call's own target, which for an import is the stub
-    /// the loader fills; the binary says which symbol that stub stands for,
-    /// and the shipped table says whether that symbol returns.
-    fn never_returns(&self, target: u64) -> bool {
-        self.program
-            .import_at(target)
-            .or_else(|| self.program.name_at(target))
-            .and_then(|name| self.target.prototypes.get(&name))
-            .is_some_and(|prototype| prototype.noreturn)
+        }
     }
 
     /// The tables the dispatches in a prepared body read, fetched.
@@ -2102,42 +2113,6 @@ impl Native<'_> {
             }
             _ => None,
         }
-    }
-
-    /// Whether any call this body makes is declared to take a function.
-    ///
-    /// The cheap half of the question, asked off the walk alone so that a body
-    /// which cannot hand a function anywhere is never prepared to find out.
-    fn hands_a_function(&self, walked: &Walked) -> bool {
-        let direct = call_sites(&walked.body, self.program)
-            .into_iter()
-            .filter_map(|site| self.program.name_at(site.target));
-        // An import is reached through a slot the loader fills, and the walk
-        // sees the load rather than the call's target, so every slot this body
-        // reads counts as a callee it might be handing something to.
-        let through_a_slot = walked
-            .body
-            .blocks
-            .iter()
-            .flat_map(|block| block.lifted.ops.iter())
-            .filter_map(|op| match op {
-                // The address is a constant operand; the space is where the
-                // load reads from, which is memory.
-                r2il::R2ILOp::Load { space, addr, .. }
-                    if *space == r2il::SpaceId::Ram && addr.space == r2il::SpaceId::Const =>
-                {
-                    self.program.import_at(addr.offset)
-                }
-                _ => None,
-            });
-        direct.chain(through_a_slot).any(|name| {
-            self.target.prototypes.get(&name).is_some_and(|prototype| {
-                prototype
-                    .parameters
-                    .iter()
-                    .any(r2abi::Parameter::is_function)
-            })
-        })
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.

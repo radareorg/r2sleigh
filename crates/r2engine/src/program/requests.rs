@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
-use crate::native::{NativeRefusal, Prepared, Survey};
+use crate::native::{NativeRefusal, Prepared};
 use crate::query::{
     Answer, Answered, Completion, Decoders, Line, Listing, Memory, References, Stop, Unread,
     WalkedBody, Work,
@@ -22,15 +22,11 @@ pub struct Rendering {
     pub response: EngineDecompileResponse,
 }
 
-/// One walked body with the target and decoder it was lifted with, or why it could not be walked.
-type Surveyed<'t, 'l> = Result<
-    (
-        &'t crate::native::NativeTarget<'t>,
-        &'t r2sleigh_lift::EmbeddedMachine,
-        &'l Survey,
-    ),
-    &'l NativeRefusal,
->;
+/// Every function discovery found, and whether each body was walked as Thumb or why it could not be walked.
+pub(super) struct Survey {
+    functions: Vec<Discovered>,
+    walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
+}
 
 /// The one decoder a body was walked with, whatever the address.
 struct Walked<'m>(&'m r2sleigh_lift::EmbeddedMachine);
@@ -113,8 +109,9 @@ impl<S: Source> OpenProgram<S> {
         self.start_request();
         let prepared = self.prepare(entry)?;
         let artifact = prepared.artifact().artifact();
+        let noreturn = !self.comes_back(entry);
         let read = |sealed: &SealedFunctionAnalysis| {
-            super::info::FunctionInfo::read(entry, artifact, sealed.facts())
+            super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
         };
         self.read_sealed(entry, &prepared, read)?
             .map_err(|refused| refused.diagnostics.route_reason.unwrap_or_default())
@@ -170,7 +167,7 @@ impl<S: Source> OpenProgram<S> {
     /// what the bodies reach.
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
         self.start_request();
-        self.surveyed(|_, _, _| {})
+        Ok(self.surveyed()?.functions)
     }
 
     /// Every reference the program makes, from every function discovery
@@ -183,98 +180,73 @@ impl<S: Source> OpenProgram<S> {
         // A callee's body is read in the instruction set discovery settled, so that is settled first.
         self.ensure_decodable()?;
         let revision = self.revision();
+        let walked = self.surveyed()?.walked;
+        let program = &*self;
+        let walker = super::returns::Walking::new(program, true)?;
         let mut index = References::default();
-        self.surveyed(|program, entry, walked| {
-            let (target, machine, survey) = match walked {
-                Ok(walked) => walked,
+        for (entry, walked) in walked {
+            // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
+            let lifted = walked.and_then(|thumb| {
+                let target = walker.target(thumb);
+                let body = r2ssa::body::lift_body(entry, target.disasm, program, &BTreeMap::new());
+                body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
+            });
+            let (thumb, body) = match lifted {
+                Ok(lifted) => lifted,
                 Err(refusal) => {
                     index
                         .coverage
                         .unread
-                        .insert(entry, Unread::Refused(refusal.clone()));
-                    return;
+                        .insert(entry, Unread::Refused(refusal));
+                    continue;
                 }
             };
-            if !survey.unresolved.is_empty() {
-                index
-                    .coverage
-                    .unresolved
-                    .insert(entry, survey.unresolved.clone());
+            if !body.unresolved.is_empty() {
+                index.coverage.unresolved.insert(entry, body.unresolved);
             }
-            let body = WalkedBody::new(&survey.lifted, target.arch);
-            let answered = Answered {
-                decoders: &Walked(machine),
-                body: Some(&body),
-                spelled: false,
-                call_effect: target.call_effect,
-                ..program.answered(None)
-            };
-            let lines = listed_by_block(&answered, &survey.lifted, revision).value;
-            // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
-            if body.failed() {
-                index.coverage.unread.insert(entry, Unread::NoSsa);
-                return;
+            let machine = walker.machine(thumb).ok_or("no machine")?;
+            let decoder = (walker.target(thumb), machine);
+            match claimed_by(program, decoder, body.blocks, revision) {
+                Ok(facts) => {
+                    index.coverage.read.push(entry);
+                    index.facts.extend(facts);
+                }
+                Err(unread) => {
+                    index.coverage.unread.insert(entry, unread);
+                }
             }
-            index.coverage.read.push(entry);
-            index
-                .facts
-                .extend(crate::query::references::claimed_by(&lines));
-        })?;
-        index.coverage.read.sort_unstable();
+        }
         index.facts.sort_unstable();
         index.facts.dedup();
         Ok(Answer::complete(index, revision))
     }
 
-    /// Discovery, handing `read` the lift of each body it walked.
-    pub(super) fn surveyed(
-        &mut self,
-        mut read: impl FnMut(&Self, u64, Surveyed<'_, '_>),
-    ) -> Result<Vec<Discovered>, String> {
+    /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
+    pub(super) fn surveyed(&mut self) -> Result<Survey, String> {
         self.ensure_current()?;
         let seeds = self.stated_functions();
         let Some(&(first, _, _)) = seeds.first() else {
-            return Ok(Default::default());
+            return Ok(Survey {
+                functions: Vec::new(),
+                walked: BTreeMap::new(),
+            });
         };
         // Both instruction sets share one convention and one compiler
         // specification, so one assembly serves either decoder.
         self.ensure_assembled(first)?;
         let program = &*self;
-        let primary = program.target_of(program.machine_in(false).ok_or("no machine")?)?;
-        let thumb = match program.machine_in(true) {
-            Some(machine) => Some(program.target_of(machine)?),
-            None => None,
-        };
-        let found = crate::discovery::functions(program, seeds, |entry, in_thumb| {
-            let (target, machine) = match (in_thumb, &thumb, program.machine_in(true)) {
-                (true, Some(thumb), Some(machine)) => (thumb, machine),
-                _ => (&primary, program.machine_in(false)?),
-            };
-            let survey = crate::native::surveyed(target, program, entry);
-            read(
-                program,
-                entry,
-                survey.as_ref().map(|survey| (target, machine, survey)),
-            );
-            let mut survey = survey.ok()?;
-            let transfers = &mut survey.transfers;
-            if thumb.is_some() {
-                interworking(transfers);
-            }
-            // A handed constant is a function only where it decodes, in the
-            // instruction set it is entered in.
-            let entered_in = &transfers.entered_in;
-            transfers.handed.retain(|address| {
-                let target = match (entered_in.get(address), &thumb) {
-                    (Some(true), Some(thumb)) => thumb,
-                    _ => &primary,
-                };
-                crate::native::decodes(target.disasm, program, *address)
-            });
-            Some(survey.transfers)
-        });
+        let walker = super::returns::Walking::new(program, true)?;
+        let found = crate::discovery::functions(program, seeds, &walker);
+        let walked = found
+            .walks
+            .into_iter()
+            .map(|(entry, walk)| (entry, walk.map(|walk| walk.thumb)))
+            .collect();
+        let at = (self.source.identity(), self.source.byte_revision());
+        self.hold_returns(at, found.returns);
         if self.thumb_machine.is_some() {
             let modes = found
+                .functions
                 .iter()
                 .map(|one| (one.address, one.thumb))
                 .collect::<BTreeMap<_, _>>();
@@ -282,7 +254,10 @@ impl<S: Source> OpenProgram<S> {
             self.modes = modes;
             self.modes_at = Some(self.source.byte_revision());
         }
-        Ok(found)
+        Ok(Survey {
+            functions: found.functions,
+            walked,
+        })
     }
 
     /// Where the program states a function begins, and whether it states the
@@ -326,12 +301,32 @@ impl<S: Source> OpenProgram<S> {
     }
 }
 
-/// A handed function pointer states its instruction set in its low bit, as
-/// `bx` reads it, so the function is at the pointer with that bit clear.
-fn interworking(transfers: &mut crate::discovery::Transfers) {
-    for pointer in &mut transfers.handed {
-        let thumb = *pointer & 1 == 1;
-        *pointer &= !1;
-        transfers.entered_in.insert(*pointer, thumb);
+/// What one body's listing claims about where it refers, or why it is unread.
+fn claimed_by<S: Source>(
+    program: &OpenProgram<S>,
+    (target, machine): (
+        &crate::native::NativeTarget<'_>,
+        &r2sleigh_lift::EmbeddedMachine,
+    ),
+    blocks: Vec<r2ssa::body::BodyBlock>,
+    revision: crate::query::Revision,
+) -> Result<Vec<crate::query::Reference>, Unread> {
+    let lifted = blocks
+        .into_iter()
+        .map(|block| block.lifted)
+        .collect::<Vec<_>>();
+    let body = WalkedBody::new(&lifted, target.arch);
+    let answered = Answered {
+        decoders: &Walked(machine),
+        body: Some(&body),
+        spelled: false,
+        call_effect: target.call_effect,
+        ..program.answered(None)
+    };
+    let lines = listed_by_block(&answered, &lifted, revision).value;
+    // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
+    if body.failed() {
+        return Err(Unread::NoSsa);
     }
+    Ok(crate::query::references::claimed_by(&lines))
 }
