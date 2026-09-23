@@ -661,6 +661,49 @@ fn body_proven_result(
         })
 }
 
+/// The result the returns prove; a walk that reaches no return proves void only where non-returning calls close the body.
+fn returned_result(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
+    slot: CanonicalStorageId,
+) -> RecoveredFunctionResult {
+    let result = if !live_out.has_returns() {
+        if closed_by_calls_that_do_not_return(func) {
+            RecoveredFunctionResult::Void
+        } else {
+            RecoveredFunctionResult::Unproven
+        }
+    } else if live_out.unresolved_blocks().next().is_some() {
+        // A return the walk could not answer leaves the carrier as the caller, or an opaque operation, left it.
+        RecoveredFunctionResult::Void
+    } else {
+        RecoveredFunctionResult::from_slot(recovered_result(graph, facts, live_out, slot))
+    };
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "result at the returns: returns={} unresolved={} -> {result:?}",
+        live_out.has_returns(),
+        live_out.unresolved_blocks().count()
+    );
+    result
+}
+
+/// Whether every way out of the body is a call its source says does not come back.
+fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
+    func.cfg().blocks().all(|block| {
+        !block.successors().is_empty()
+            || matches!(
+                block.terminator,
+                crate::cfg::BlockTerminator::Call {
+                    fallthrough: None,
+                    ..
+                } | crate::cfg::BlockTerminator::IndirectCall { fallthrough: None }
+            )
+    })
+}
+
 fn recovered_result(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
@@ -888,14 +931,9 @@ fn recover_interface_inner(
     {
         let candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, &graph, &[candidate]);
+        result = returned_result(func, &graph, &facts, &candidate_live_out, candidate);
         if !candidate_live_out.is_empty() && candidate_live_out.unresolved_blocks().next().is_none()
         {
-            result = RecoveredFunctionResult::from_slot(recovered_result(
-                &graph,
-                &facts,
-                &candidate_live_out,
-                candidate,
-            ));
             live_out = candidate_live_out;
         }
     }
@@ -2052,6 +2090,22 @@ mod tests {
             recovered.result().register().map(|result| result.slot()),
             Some(register(0, 8))
         );
+    }
+
+    #[test]
+    fn a_body_whose_walk_reaches_no_return_proves_no_void() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        let target = Varnode::unique(0x100, 8);
+        block.push(R2ILOp::Load {
+            dst: target.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: Varnode::register(8, 8),
+        });
+        block.push(R2ILOp::BranchInd { target });
+        let arch = arch();
+        let function = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
+        let recovered = recover_interface(&function, &candidates(), None).expect("recovery");
+        assert_eq!(recovered.result(), RecoveredFunctionResult::Unproven);
     }
 }
 

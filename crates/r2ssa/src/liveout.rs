@@ -57,10 +57,12 @@ impl FunctionLiveOut {
     ) -> Self {
         let mut live = Self::default();
         for block in func.blocks() {
+            // A predicated return (`bxeq lr`) ends its block in a return the terminator does not name.
             let returns = func
                 .cfg()
                 .get_block(block.addr)
-                .is_some_and(|cfg| cfg.is_return());
+                .is_some_and(|cfg| cfg.is_return())
+                || matches!(block.ops.last(), Some(crate::op::SSAOp::Return { .. }));
             if !returns {
                 continue;
             }
@@ -221,6 +223,11 @@ impl FunctionLiveOut {
     pub fn unresolved_blocks(&self) -> impl Iterator<Item = u64> + '_ {
         self.unresolved.iter().copied()
     }
+
+    /// Whether any block returns, resolved or not.
+    pub fn has_returns(&self) -> bool {
+        !self.by_return.is_empty() || !self.unresolved.is_empty()
+    }
 }
 
 /// Whether anything at all reads a value: an operation in the body, or the caller.
@@ -251,6 +258,56 @@ mod tests {
         arch.add_register(RegisterDef::new("RCX", 8, 8));
         arch.add_register(RegisterDef::new("RIP", 0x288, 8));
         arch
+    }
+
+    #[test]
+    fn a_predicated_return_hands_back_what_its_register_holds() {
+        // `rax = 7; if (rcx == 0) return;` then `rax = 9; return`: both returns hand back a value.
+        let predicated = R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: reg(0, 8),
+                    src: Varnode::constant(7, 8),
+                },
+                R2ILOp::IntNotEqual {
+                    dst: Varnode::unique(0x10, 1),
+                    a: reg(8, 8),
+                    b: Varnode::constant(0, 8),
+                },
+                R2ILOp::CBranch {
+                    target: Varnode::new(SpaceId::Ram, 0x1004, 8),
+                    cond: Varnode::unique(0x10, 1),
+                },
+                R2ILOp::Return {
+                    target: reg(0x288, 8),
+                },
+            ],
+            ..R2ILBlock::default()
+        };
+        let plain = R2ILBlock {
+            addr: 0x1004,
+            size: 4,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: reg(0, 8),
+                    src: Varnode::constant(9, 8),
+                },
+                R2ILOp::Return {
+                    target: reg(0x288, 8),
+                },
+            ],
+            ..R2ILBlock::default()
+        };
+        let func = SSAFunction::from_blocks_with_arch(&[predicated, plain], Some(&x86_64_arch()))
+            .expect("ssa");
+        let graph = SsaGraph::from_function(&func);
+        let live = FunctionLiveOut::compute(&func, &graph, &x86_64_return_storages());
+        assert_eq!(
+            live.by_return().map(|(block, _)| block).collect::<Vec<_>>(),
+            vec![0x1000, 0x1004]
+        );
     }
 
     /// A body that computes into the return register and returns.
