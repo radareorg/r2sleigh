@@ -10,7 +10,6 @@
 use std::collections::BTreeMap;
 
 use super::source::{EntryKind, Format, Section, Source, Symbol, SymbolKind};
-use crate::discovery::Confidence;
 use crate::names::{Name, NameDb, Namespace};
 use r2il::R2ILOp;
 use r2sleigh_lift::Disassembler;
@@ -36,7 +35,6 @@ pub fn of(source: &impl Source) -> NameDb {
                 text: section.name.clone(),
                 namespace: Namespace::Section,
                 size: section.vsize,
-                confidence: Confidence::Stated,
             },
         );
     }
@@ -56,7 +54,6 @@ pub fn of(source: &impl Source) -> NameDb {
                     SymbolKind::Other | SymbolKind::Mapping(_) => Namespace::Label,
                 },
                 size: symbol.size,
-                confidence: Confidence::Stated,
             },
         );
     }
@@ -99,7 +96,6 @@ pub fn of(source: &impl Source) -> NameDb {
                 text,
                 namespace: Namespace::Entry,
                 size: 0,
-                confidence: Confidence::Stated,
             },
         );
     }
@@ -146,7 +142,6 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
                         // The terminator belongs to the string: it is what a
                         // reader has to step over to reach the next one.
                         size: run as u64 + 1,
-                        confidence: Confidence::Stated,
                     },
                 );
             }
@@ -196,7 +191,6 @@ pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Str
                 text: undecorated.to_owned(),
                 namespace: Namespace::Import,
                 size: 0,
-                confidence: Confidence::Stated,
             },
         );
     }
@@ -236,7 +230,6 @@ pub fn name_slots(
                 text: undecorated.to_owned(),
                 namespace: Namespace::Reloc,
                 size: 0,
-                confidence: Confidence::Stated,
             },
         );
     }
@@ -478,7 +471,6 @@ mod tests {
                 text: "_add_two".to_owned(),
                 namespace: Namespace::Symbol,
                 size: 0x20,
-                confidence: Confidence::Stated,
             },
         );
         name_imports(

@@ -187,7 +187,6 @@ fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Op
 #[cfg(test)]
 mod tests {
     use super::{spelled, stopped};
-    use r2engine::discovery::Confidence;
     use r2engine::names::{Name, NameDb, Namespace};
     use r2engine::query::Line;
 
@@ -199,7 +198,6 @@ mod tests {
                 text: "_add_two".to_owned(),
                 namespace: Namespace::Symbol,
                 size: 0,
-                confidence: Confidence::Stated,
             },
         );
         db.insert(
@@ -208,7 +206,6 @@ mod tests {
                 text: "_nl_current".to_owned(),
                 namespace: Namespace::Label,
                 size: 0,
-                confidence: Confidence::Stated,
             },
         );
         db

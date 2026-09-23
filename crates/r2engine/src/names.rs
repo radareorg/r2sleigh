@@ -1,4 +1,4 @@
-//! What each address in a program is called, and how sure the engine is.
+//! What each address in a program is called.
 //!
 //! Before this there were four answers to that question and they disagreed:
 //! the shell's flag table spelled `sym.imp.printf`, the engine's `name_at`
@@ -13,8 +13,6 @@
 //! binary fills it; the engine and the shell read it.
 
 use std::collections::{BTreeMap, BTreeSet};
-
-use crate::discovery::Confidence;
 
 /// The longest text that will be read out of one address.
 ///
@@ -105,7 +103,6 @@ pub struct Name {
     /// name covers only its own address, which is what keeps a nearest-name
     /// lookup from claiming everything after the last symbol.
     pub size: u64,
-    pub confidence: Confidence,
 }
 
 impl Name {
@@ -161,40 +158,17 @@ impl NameDb {
         Self::default()
     }
 
-    /// Record a name, replacing only a weaker name of the same kind.
-    ///
-    /// Strength is the confidence first and the namespace second, so a symbol
-    /// the container declares outranks a function the engine inferred, and the
-    /// order a caller happens to insert in does not decide the answer.
+    /// Record a name unless the address has one of its kind: every name is the container's, so its first statement stands.
     pub fn insert(&mut self, vaddr: u64, name: Name) {
         let held = self.by_address.entry(vaddr).or_default();
-        let seeks = name.seeks();
-        match held.iter_mut().find(|at| at.namespace == name.namespace) {
-            Some(at) if at.confidence <= name.confidence => return,
-            Some(at) => {
-                // One namespace per address, so no other name here seeks the same.
-                for replaced in std::mem::replace(at, name).seeks() {
-                    self.forget(&replaced, vaddr);
-                }
-            }
-            None => {
-                held.push(name);
-                held.sort_by(|a, b| (a.confidence, a.namespace).cmp(&(b.confidence, b.namespace)));
-            }
+        if held.iter().any(|at| at.namespace == name.namespace) {
+            return;
         }
-        for spelling in seeks {
+        for spelling in name.seeks() {
             self.by_spelling.entry(spelling).or_default().insert(vaddr);
         }
-    }
-
-    fn forget(&mut self, spelling: &str, vaddr: u64) {
-        let Some(addresses) = self.by_spelling.get_mut(spelling) else {
-            return;
-        };
-        addresses.remove(&vaddr);
-        if addresses.is_empty() {
-            self.by_spelling.remove(spelling);
-        }
+        held.push(name);
+        held.sort_by_key(|name| name.namespace);
     }
 
     /// The lowest address a name is spelled as, the way a listing writes it.
@@ -267,40 +241,33 @@ impl NameDb {
 mod tests {
     use super::*;
 
-    fn named(text: &str, namespace: Namespace, size: u64, confidence: Confidence) -> Name {
+    fn named(text: &str, namespace: Namespace, size: u64) -> Name {
         Name {
             text: text.to_owned(),
             namespace,
             size,
-            confidence,
         }
     }
 
     #[test]
     fn a_string_is_stored_as_itself_and_spelled_as_an_identifier() {
-        let name = named("hello %s\n", Namespace::String, 10, Confidence::Stated);
+        let name = named("hello %s\n", Namespace::String, 10);
         assert_eq!(name.text, "hello %s\n");
         assert_eq!(name.spelled(), "str.hello__s_");
     }
 
     #[test]
     fn a_name_is_stored_plain_and_spelled_with_its_namespace() {
-        let name = named("printf", Namespace::Import, 0, Confidence::Stated);
+        let name = named("printf", Namespace::Import, 0);
         assert_eq!(name.text, "printf");
         assert_eq!(name.spelled(), "sym.imp.printf");
     }
 
     #[test]
-    fn a_stated_symbol_outranks_an_inferred_function() {
+    fn a_symbol_outranks_a_function_name() {
         let mut db = NameDb::new();
-        db.insert(
-            0x1000,
-            named("work", Namespace::Symbol, 0x20, Confidence::Stated),
-        );
-        db.insert(
-            0x1000,
-            named("1000", Namespace::Function, 0, Confidence::Called),
-        );
+        db.insert(0x1000, named("work", Namespace::Symbol, 0x20));
+        db.insert(0x1000, named("1000", Namespace::Function, 0));
         assert_eq!(db.text_at(0x1000), Some("work"));
         // Both are true of the address, so both are kept.
         assert_eq!(db.all_at(0x1000).len(), 2);
@@ -308,8 +275,8 @@ mod tests {
 
     #[test]
     fn the_order_of_insertion_does_not_decide_the_answer() {
-        let weak = named("1000", Namespace::Function, 0, Confidence::Called);
-        let strong = named("work", Namespace::Symbol, 0x20, Confidence::Stated);
+        let weak = named("1000", Namespace::Function, 0);
+        let strong = named("work", Namespace::Symbol, 0x20);
         let mut forwards = NameDb::new();
         forwards.insert(0x1000, weak.clone());
         forwards.insert(0x1000, strong.clone());
@@ -325,10 +292,7 @@ mod tests {
         // `.text` begins where the first function does, and the engine keys a
         // prototype by what a thing is called rather than by where it lives.
         let mut db = NameDb::new();
-        db.insert(
-            0x1000,
-            named(".text", Namespace::Section, 0x200, Confidence::Stated),
-        );
+        db.insert(0x1000, named(".text", Namespace::Section, 0x200));
         assert_eq!(db.text_at(0x1000), None);
         assert_eq!(db.at(0x1000).map(|name| name.text.as_str()), Some(".text"));
     }
@@ -338,14 +302,8 @@ mod tests {
         // The first linkage stub begins where `.text` does, and both
         // statements are the container's own.
         let mut db = NameDb::new();
-        db.insert(
-            0x1000,
-            named(".text", Namespace::Section, 0x200, Confidence::Stated),
-        );
-        db.insert(
-            0x1000,
-            named("printf", Namespace::Import, 0, Confidence::Stated),
-        );
+        db.insert(0x1000, named(".text", Namespace::Section, 0x200));
+        db.insert(0x1000, named("printf", Namespace::Import, 0));
         assert_eq!(db.all_at(0x1000).len(), 2);
         assert_eq!(db.text_at(0x1000), Some("printf"));
     }
@@ -353,43 +311,25 @@ mod tests {
     #[test]
     fn a_name_covers_its_own_extent_and_no_further() {
         let mut db = NameDb::new();
-        db.insert(
-            0x1000,
-            named("work", Namespace::Symbol, 0x20, Confidence::Stated),
-        );
+        db.insert(0x1000, named("work", Namespace::Symbol, 0x20));
         assert_eq!(db.containing(0x1000).map(|(at, _)| at), Some(0x1000));
         assert_eq!(db.containing(0x101f).map(|(at, _)| at), Some(0x1000));
         assert!(db.containing(0x1020).is_none());
     }
 
     #[test]
-    fn a_spelling_resolves_to_the_address_it_names_and_a_replaced_one_does_not() {
+    fn a_spelling_resolves_to_the_address_it_names_and_a_second_of_its_kind_does_not() {
         let mut db = NameDb::new();
-        db.insert(
-            0x1000,
-            named("1000", Namespace::Function, 0, Confidence::Called),
-        );
-        db.insert(
-            0x1000,
-            named("1000", Namespace::Function, 0, Confidence::Stated),
-        );
-        db.insert(
-            0x2000,
-            named("entry0", Namespace::Entry, 0, Confidence::Stated),
-        );
-        db.insert(
-            0x3000,
-            named("work", Namespace::Function, 0, Confidence::Called),
-        );
-        db.insert(
-            0x3000,
-            named("other", Namespace::Function, 0, Confidence::Stated),
-        );
+        db.insert(0x1000, named("1000", Namespace::Function, 0));
+        db.insert(0x2000, named("entry0", Namespace::Entry, 0));
+        db.insert(0x3000, named("work", Namespace::Function, 0));
+        db.insert(0x3000, named("other", Namespace::Function, 0));
         assert_eq!(db.address_of("fcn.1000"), Some(0x1000));
         assert_eq!(db.address_of("entry0"), Some(0x2000));
-        assert_eq!(db.address_of("fcn.other"), Some(0x3000));
-        assert_eq!(db.address_of("fcn.work"), None);
-        assert_eq!(db.address_of("work"), None);
+        // The first statement of a kind at an address is the one kept, and the second seeks nowhere.
+        assert_eq!(db.address_of("fcn.work"), Some(0x3000));
+        assert_eq!(db.address_of("fcn.other"), None);
+        assert_eq!(db.address_of("other"), None);
     }
 
     #[test]
@@ -397,10 +337,7 @@ mod tests {
         // A symbol table that gave no size must not make the last symbol
         // answer for every address after it.
         let mut db = NameDb::new();
-        db.insert(
-            0x1000,
-            named("work", Namespace::Symbol, 0, Confidence::Stated),
-        );
+        db.insert(0x1000, named("work", Namespace::Symbol, 0));
         assert!(db.containing(0x1000).is_some());
         assert!(db.containing(0x1001).is_none());
     }
