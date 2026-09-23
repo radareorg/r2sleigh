@@ -186,11 +186,11 @@ fi
 
 phase "Dependency checks"
 run cargo machete --with-metadata --skip-target-dir
-run cargo +nightly udeps --workspace --all-targets --features x86
+run cargo +nightly udeps --workspace --all-targets --all-features
 
 phase "Formatting and Clippy"
 run cargo fmt --all -- --check
-run cargo clippy --workspace --all-targets --features x86 -- -D warnings
+run cargo clippy --workspace --all-targets --all-features -- -D warnings
 run cargo test -p r2rewrite
 
 phase "Local Dylint lint"
@@ -201,10 +201,10 @@ if [ "$strict_dylint" -eq 1 ]; then
     fi
     run env DYLINT_RUSTFLAGS="$dylint_rustflags" \
         cargo dylint --path tools/dylints/r2sleigh_lints --workspace -- \
-        --all-targets --features x86
+        --all-targets --all-features
 else
     run cargo dylint --path tools/dylints/r2sleigh_lints --workspace -- \
-        --all-targets --features x86
+        --all-targets --all-features
 fi
 
 phase "Focused Kani harnesses"

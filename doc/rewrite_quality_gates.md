@@ -32,9 +32,9 @@ The current phases are:
 
 1. Tool availability checks.
 2. Dependency checks with `cargo machete --with-metadata --skip-target-dir` and
-   `cargo +nightly udeps --workspace --all-targets --features x86`.
+   `cargo +nightly udeps --workspace --all-targets --all-features`.
 3. Formatting and linting with `cargo fmt --all -- --check` and
-   `cargo clippy --workspace --all-targets --features x86 -- -D warnings`.
+   `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 4. Local Dylint linting through `tools/dylints/r2sleigh_lints`.
 5. Focused Kani proofs already present in `r2il`, `r2ssa`, and `r2types`.
 6. Targeted mutation testing for `crates/r2ssa/src/var.rs`.
