@@ -458,3 +458,30 @@ fn sole_operand(syntax: &Syntax, address: u64) -> Option<NumberSpan> {
     let found = spelling.next()?;
     spelling.next().is_none().then_some(*found)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storages_overlap_by_a_shared_byte_in_one_space_only() {
+        let rax = Varnode::register(8, 8);
+        assert!(overlaps(&rax, &Varnode::register(8, 1)));
+        assert!(overlaps(&rax, &Varnode::register(15, 1)));
+        // The neighbours on either side share no byte.
+        assert!(!overlaps(&rax, &Varnode::register(0, 8)));
+        assert!(!overlaps(&rax, &Varnode::register(16, 8)));
+        assert!(!overlaps(&rax, &Varnode::unique(8, 8)));
+    }
+
+    #[test]
+    fn a_write_covers_only_what_it_replaces_whole() {
+        let rax = Varnode::register(8, 8);
+        assert!(covers(&rax, &rax));
+        assert!(covers(&rax, &Varnode::register(9, 1)));
+        assert!(!covers(&Varnode::register(8, 1), &rax));
+        assert!(!covers(&Varnode::register(12, 8), &rax));
+        assert!(!covers(&Varnode::register(4, 8), &rax));
+        assert!(!covers(&Varnode::unique(8, 8), &rax));
+    }
+}

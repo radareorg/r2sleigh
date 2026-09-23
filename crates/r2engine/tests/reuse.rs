@@ -2,7 +2,8 @@
 
 mod common;
 
-use common::{ONE, TWO, opened};
+use common::{Literal, ONE, STUB, TEXT, TWO, opened};
+use r2engine::program::OpenProgram;
 
 #[test]
 fn every_tier_of_one_function_is_rendered_from_one_analysis() {
@@ -93,4 +94,42 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
         r2engine::query::MemoStats::default(),
         "a listing asked the engine to analyse a function"
     );
+}
+
+#[test]
+fn a_patch_that_names_a_string_makes_every_held_analysis_stale() {
+    // The walk asks the name table about addresses it never reads, so a new
+    // name anywhere is a new program to it even though no byte it read moved.
+    let mut program = OpenProgram::of(Literal::new().with_data());
+    program.prepared(ONE).expect("it prepares");
+    let before = program.revision();
+    program.source_mut().write(TEXT, b"hello\0");
+    program.prepared(ONE).expect("it prepares");
+    assert_eq!(program.names().text_at(TEXT), Some("hello"));
+    let after = program.revision();
+    assert_eq!(
+        (after.names, after.entries),
+        (before.names + 1, before.entries)
+    );
+    assert_eq!(program.memo_stats().replacements, 1);
+}
+
+#[test]
+fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
+    // The stub table decides which addresses are entries, which bounds every
+    // walk, so a patch that unmakes a stub is a new program to every body.
+    let mut program = OpenProgram::of(Literal::new().importing("puts"));
+    program.prepared(ONE).expect("it prepares");
+    assert_eq!(
+        program.imports().get(&STUB).map(String::as_str),
+        Some("puts")
+    );
+    let before = program.revision().entries;
+    // `jmp [rip + 2]` becomes `jmp [rip + 0x10]`, which reads no slot.
+    program.source_mut().write(STUB + 2, &[0x10]);
+    program.prepared(ONE).expect("it prepares");
+    assert!(program.imports().is_empty());
+    assert_eq!(program.revision().entries, before + 1);
+    let stats = program.memo_stats();
+    assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
 }

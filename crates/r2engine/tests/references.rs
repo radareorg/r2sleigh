@@ -47,7 +47,8 @@ fn the_index_carries_the_scope_it_was_read_over() {
 #[test]
 fn an_index_over_bodies_walked_to_their_end_is_closed() {
     let mut program = common::opened();
+    let found = program.functions().expect("discovery runs").len();
     let index = program.references().expect("the index builds").value;
     assert!(index.coverage.is_closed(), "{:?}", index.coverage);
-    assert_eq!(index.coverage.read.len(), 5);
+    assert_eq!(index.coverage.read.len(), found);
 }

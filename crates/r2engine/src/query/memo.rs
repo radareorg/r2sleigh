@@ -318,7 +318,9 @@ mod tests {
                 0x1000..0x1004,
                 0x1004..0x1008,
                 0x2000..0x2004,
-                0x1002..0x1003
+                0x1002..0x1003,
+                // An empty read covers no byte, so no write can land in it.
+                0x3000..0x3000
             ]),
             vec![0x1000..0x1008, 0x2000..0x2004]
         );

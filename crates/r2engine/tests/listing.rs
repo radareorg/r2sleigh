@@ -1,8 +1,9 @@
-//! Whether a listed number is a result or a step, as `pd` and `pdf` each answer it.
+//! Whether a listed number is a result or a step, as `pd` and `pdf` each answer it,
+//! and what a function listing says was proved.
 
 mod common;
 
-use common::{FORKED, JOINED, ONE, PASSES, STEPPED, opened};
+use common::{FORKED, JOINED, ONE, PASSES, STEPPED, TWO, opened};
 use r2engine::query::{AnnotationKind, Line, Listing, Stop};
 
 /// The result each line claims, by address.
@@ -95,4 +96,37 @@ fn a_value_the_prelude_mints_leaves_every_line_its_own_definitions() {
     };
     assert_eq!(proved(FORKED), [(ONE, ONE)]);
     assert_eq!(proved(FORKED + 7), []);
+}
+
+/// `mov eax, edi; and eax, 7; ret`
+const MASKED: [u8; 8] = [0x89, 0xf8, 0x83, 0xe0, 0x07, 0xc3, 0xcc, 0xcc];
+
+/// Each proved range, with the line it is on.
+fn bounds(lines: &[Line]) -> Vec<(u64, u64, u64)> {
+    lines
+        .iter()
+        .flat_map(|line| line.annotations.iter().map(move |one| (line.address, one)))
+        .filter_map(|(at, annotation)| match annotation.kind {
+            AnnotationKind::Bounds { low, high, .. } => Some((at, low, high)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_function_listing_says_what_was_proved_about_each_value() {
+    let mut program = opened();
+    program.source_mut().write(TWO, &MASKED);
+    let function = program.function_listing(TWO).expect("it lists");
+    let proved = bounds(&function.value);
+    assert!(proved.contains(&(TWO + 2, 0, 7)), "{proved:?}");
+    // Writing eax only restates the width a 32-bit write clears, which says nothing.
+    assert!(!proved.contains(&(TWO, 0, 0xffff_ffff)), "{proved:?}");
+    let plain = program
+        .listing(Listing {
+            start: TWO,
+            stop: Stop::After(3),
+        })
+        .expect("it lists");
+    assert!(bounds(&plain.value).is_empty(), "{:?}", plain.value);
 }

@@ -263,6 +263,33 @@ mod tests {
     }
 
     #[test]
+    fn only_clearing_the_instruction_set_bit_keeps_the_slot() {
+        let target = Varnode::register(0, 4);
+        let masked = |mask: Varnode| {
+            let loaded = Varnode::register(8, 4);
+            BlockOrigins::of_block(&block(vec![
+                R2ILOp::Load {
+                    dst: loaded.clone(),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x2000, 4),
+                },
+                R2ILOp::IntAnd {
+                    dst: target.clone(),
+                    a: loaded,
+                    b: mask,
+                },
+            ]))
+            .of(&target)
+            .and_then(ValueOrigin::loaded_slot)
+            .map(|slot| slot.offset)
+        };
+        assert_eq!(masked(Varnode::constant(0xffff_fffe, 4)), Some(0x2000));
+        // Any other mask computes a different number, not the slot's contents.
+        assert_eq!(masked(Varnode::constant(0x7fff_ffff, 4)), None);
+        assert_eq!(masked(Varnode::register(16, 4)), None);
+    }
+
+    #[test]
     fn a_slot_of_no_width_names_nothing_readable() {
         let empty = ValueOrigin::LoadedSlot(CanonicalStorageId {
             space: CanonicalStorageSpace::Ram,

@@ -63,8 +63,6 @@ const TABLE_SWITCH: &[u8] = &[
 struct Fixture {
     bytes: &'static [u8],
     name: &'static str,
-    /// The register a call returns through, where the test needs one.
-    link: Option<r2il::Varnode>,
 }
 
 impl r2ssa::body::Program for Fixture {
@@ -76,10 +74,6 @@ impl r2ssa::body::Program for Fixture {
 
     fn is_entry(&self, vaddr: u64) -> bool {
         vaddr == BASE
-    }
-
-    fn return_address_register(&self) -> Option<r2il::Varnode> {
-        self.link.clone()
     }
 }
 
@@ -119,7 +113,6 @@ fn a_function_is_decompiled_from_bytes_alone() {
     let program = Fixture {
         bytes: ADD_TWO,
         name: "add_two",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -171,7 +164,6 @@ fn an_address_the_program_does_not_map_refuses() {
     let program = Fixture {
         bytes: ADD_TWO,
         name: "add_two",
-        link: None,
     };
     let refusal = decompile(&target, &program, 0x9000).expect_err("unmapped");
     assert_eq!(refusal.to_string(), "nothing mapped at 0x9000");
@@ -195,7 +187,6 @@ fn a_call_is_rendered_from_the_callee_body() {
     let program = Fixture {
         bytes: CALLER,
         name: "caller",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -234,7 +225,6 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let program = Fixture {
         bytes: PC_THUNK,
         name: "pc_caller",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -273,7 +263,6 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
     let program = Fixture {
         bytes: PC_THUNK,
         name: "pc_thunk",
-        link: None,
     };
     // The thunk itself: `mov rsi, [rsp]; ret`, which reads what the call left.
     let response = decompile(&target, &program, BASE + 0x0b).expect("decompile");
@@ -398,7 +387,6 @@ fn a_function_is_decompiled_on_aarch64_too() {
     let program = Fixture {
         bytes: AARCH64_ADD_ONE,
         name: "add_one",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -456,7 +444,6 @@ fn a_load_nothing_reads_still_reads() {
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
 
@@ -469,74 +456,6 @@ fn a_load_nothing_reads_still_reads() {
     assert!(
         response.output.text().contains("(void)*"),
         "the discarded read is missing:\n{}",
-        response.output
-    );
-}
-
-/// mvn r3, 0xf000; mov lr, pc; sub pc, r3, 0x3f; bx lr
-///
-/// ARM's pre-`blx` indirect call: the link register is loaded with the address
-/// after the transfer, and `0xFFFF0FFF - 0x3F` is the kernel helper page.
-const ARM_LINK_REGISTER_CALL: &[u8] = &[
-    0x0f, 0x3a, 0xe0, 0xe3, // 0x1000 mvn r3, 0xf000
-    0x0f, 0xe0, 0xa0, 0xe1, // 0x1004 mov lr, pc
-    0x3f, 0xf0, 0x43, 0xe2, // 0x1008 sub pc, r3, 0x3f
-    0x1e, 0xff, 0x2f, 0xe1, // 0x100c bx lr
-];
-
-/// A branch that leaves the return address behind is a call.
-///
-/// Sleigh lifts `sub pc, r3, 0x3f` as a branch, because that is the opcode.
-/// The link register holding `0x100c` is what says control comes back, so the
-/// walk follows it and the transfer renders as a call.
-#[test]
-fn a_branch_that_leaves_a_return_address_is_a_call() {
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    // The specification names it; nothing here guesses which register it is.
-    let name = compiler.return_address.clone().expect("a link register");
-    let link = machine
-        .arch
-        .registers
-        .iter()
-        .find(|register| register.name.eq_ignore_ascii_case(&name))
-        .map(|register| r2il::Varnode {
-            space: r2il::SpaceId::Register,
-            offset: register.offset,
-            size: register.size,
-            meta: None,
-        })
-        .expect("the link register is in the architecture");
-
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
-    let program = Fixture {
-        bytes: ARM_LINK_REGISTER_CALL,
-        name: "helper_call",
-        link: Some(link),
-    };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-
-    assert!(
-        response.render_refusal.is_none(),
-        "{:?}\n{}",
-        response.render_refusal,
-        response.output
-    );
-    // Spelled by name now that the target folds to its constant, so the
-    // address is in the name rather than beside it.
-    assert!(
-        response.output.text().contains("fcn_ffff0fc0();"),
-        "the helper call is missing:\n{}",
         response.output
     );
 }
@@ -563,7 +482,6 @@ fn the_medium_tier_is_readable_without_rendering() {
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
-        link: None,
     };
     let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
     let dump = artifact.artifact().function().dump();
@@ -597,7 +515,6 @@ fn the_structured_tier_is_the_tree_the_c_comes_from() {
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
-        link: None,
     };
     let tree = r2engine::native::structured(&target, &program, BASE)
         .expect("structured")
@@ -638,7 +555,6 @@ fn the_c_tier_hands_back_the_tree_the_text_came_from() {
     let program = Fixture {
         bytes: ARM_DEAD_LOAD,
         name: "dead_load",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let function = response
@@ -653,39 +569,6 @@ fn the_c_tier_hands_back_the_tree_the_text_came_from() {
         response.output.text().contains("dead_load"),
         "{}",
         response.output.text()
-    );
-}
-
-/// The lift tier is what Sleigh produced, with the machine's own names.
-#[test]
-fn the_low_tier_spells_the_machine_registers() {
-    let machine = r2sleigh_lift::embedded_machine("arm").expect("arm machine");
-    let conventions = Conventions::for_arch("arm", 32).expect("conventions");
-    let convention = conventions.default_convention().expect("default");
-    let compiler = CompilerSpec::parse(machine.compiler_spec);
-    let prototypes = r2abi::Prototypes::embedded();
-    let target = NativeTarget {
-        arch: &machine.arch,
-        disasm: &machine.disasm,
-        cpu: machine.cpu,
-        convention,
-        compiler: &compiler,
-        prototypes: &prototypes,
-    };
-    let program = Fixture {
-        bytes: ARM_LINK_REGISTER_CALL,
-        name: "helper_call",
-        link: None,
-    };
-    let lifted = r2engine::native::lifted(&target, &program, BASE).expect("lifted");
-
-    assert!(lifted.contains("Block 0x1000"), "{lifted}");
-    // The link register is spelled, not offset-numbered, and the write to it
-    // is what the call recovery reads.
-    assert!(lifted.contains("lr"), "{lifted}");
-    assert!(
-        !lifted.contains("reg:0x58"),
-        "unspelled register:\n{lifted}"
     );
 }
 
@@ -711,7 +594,6 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     let program = Fixture {
         bytes: TABLE_SWITCH,
         name: "pick",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     assert!(
@@ -769,7 +651,6 @@ fn a_machine_operation_the_specification_names_is_called_and_declared() {
     let program = Fixture {
         bytes: BARRIER,
         name: "barrier",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
@@ -813,7 +694,6 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
     let program = Fixture {
         bytes: ATOMIC_INCREMENT,
         name: "increment",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     assert!(
@@ -865,7 +745,6 @@ fn a_leaf_whose_barrier_is_only_a_user_operation_cannot_prove_its_frame() {
     let program = Fixture {
         bytes: BARRIER_LEAF,
         name: "order",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     assert!(

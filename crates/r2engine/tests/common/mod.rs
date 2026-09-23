@@ -28,9 +28,15 @@ pub const JOINED: u64 = BASE + 0x50;
 pub const PASSES: u64 = BASE + 0x70;
 /// `lea rax, [one]; add rax, 8; ret`
 pub const STEPPED: u64 = BASE + 0x80;
+/// `jmp qword [rip + 2]`, the linkage stub for an import where the program has one.
+pub const STUB: u64 = BASE + 0x90;
+/// The slot that stub reads, which the loader fills with the import.
+pub const SLOT: u64 = BASE + 0x98;
+/// Where the program keeps a string, where it has one.
+pub const TEXT: u64 = BASE + 0xa0;
 
 /// Copy `bytes` into `code` at `at`.
-const fn place<const N: usize>(mut code: [u8; 0x90], at: usize, bytes: [u8; N]) -> [u8; 0x90] {
+const fn place<const N: usize>(mut code: [u8; 0xb0], at: usize, bytes: [u8; N]) -> [u8; 0xb0] {
     let mut offset = 0;
     while offset < N {
         code[at + offset] = bytes[offset];
@@ -39,8 +45,8 @@ const fn place<const N: usize>(mut code: [u8; 0x90], at: usize, bytes: [u8; N]) 
     code
 }
 
-const CODE: [u8; 0x90] = {
-    let code = [0xcc; 0x90];
+const CODE: [u8; 0xb0] = {
+    let code = [0xcc; 0xb0];
     // one: mov eax, 1; ret
     let code = place(code, 0x00, [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
     // caller: call one (rel32 = 0x1000 - 0x1015); ret
@@ -82,6 +88,8 @@ const CODE: [u8; 0x90] = {
             0xc3, // ret
         ],
     );
+    // stub: jmp qword [rip + 2], which is the slot at 0x98
+    let code = place(code, 0x90, [0xff, 0x25, 0x02, 0x00, 0x00, 0x00]);
     // stepped: the address is a base the next instruction moves past
     place(
         code,
@@ -181,7 +189,7 @@ impl Literal {
                 sections: vec![Section {
                     name: ".text".to_owned(),
                     vaddr: BASE,
-                    vsize: CODE.len() as u64,
+                    vsize: STUB - BASE,
                     is_code: true,
                     loaded: true,
                 }],
@@ -270,6 +278,44 @@ impl Literal {
             kind: SymbolKind::Function,
             defined: true,
             thumb: false,
+        });
+        self
+    }
+
+    /// The same program with one more symbol in the container.
+    pub fn declaring(mut self, symbol: Symbol) -> Self {
+        self.container.symbols.push(symbol);
+        self
+    }
+
+    /// The same program with an import: a linkage stub, and the slot it reads.
+    pub fn importing(mut self, import: &str) -> Self {
+        let section = |name: &str, vaddr, vsize, is_code| Section {
+            name: name.to_owned(),
+            vaddr,
+            vsize,
+            is_code,
+            loaded: true,
+        };
+        self.container.sections.extend([
+            section(".plt", STUB, 6, true),
+            section(".got", SLOT, 8, false),
+        ]);
+        self.container.relocations.push(Relocation {
+            vaddr: SLOT,
+            symbol: import.to_owned(),
+        });
+        self
+    }
+
+    /// The same program with a data section, where a write can put a string.
+    pub fn with_data(mut self) -> Self {
+        self.container.sections.push(Section {
+            name: ".data".to_owned(),
+            vaddr: TEXT,
+            vsize: 8,
+            is_code: false,
+            loaded: true,
         });
         self
     }

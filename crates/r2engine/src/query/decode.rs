@@ -292,6 +292,19 @@ mod tests {
     }
 
     #[test]
+    fn a_jump_says_where_it_goes_and_that_it_is_no_call() {
+        // jmp 0x1010; je 0x1010
+        let answer = answer(&[0xeb, 0x0e, 0x74, 0x0c], 2, Work::InstructionLocal);
+        for line in &answer.value {
+            assert!(line.annotations.iter().any(|annotation| annotation.kind
+                == AnnotationKind::Target {
+                    address: BASE + 0x10,
+                    call: false,
+                }));
+        }
+    }
+
+    #[test]
     fn an_absolute_memory_operand_is_the_read_it_performs() {
         // mov rax, qword [0x1234]
         let answer = answer(
@@ -311,6 +324,24 @@ mod tests {
                 width: 8,
             }
         );
+    }
+
+    #[test]
+    fn an_absolute_memory_destination_is_the_write_it_performs() {
+        // mov dword [0x1234], eax
+        let answer = answer(
+            &[0x89, 0x04, 0x25, 0x34, 0x12, 0x00, 0x00],
+            1,
+            Work::InstructionLocal,
+        );
+        assert!(answer.value[0].annotations.iter().any(|annotation| {
+            annotation.kind
+                == AnnotationKind::Writes {
+                    address: 0x1234,
+                    width: 4,
+                }
+                && annotation.support == Support::Decoded
+        }));
     }
 
     #[test]
@@ -398,15 +429,27 @@ mod tests {
 
     #[test]
     fn a_number_overwritten_before_any_read_is_still_its_result() {
-        // mov eax, 0x1234; mov eax, 5; ret
+        // mov eax, 0x1234; mov eax, 5; mov ebx, eax -- the read is of the 5
         let answer = answer(
             &[
-                0xb8, 0x34, 0x12, 0x00, 0x00, 0xb8, 0x05, 0x00, 0x00, 0x00, 0xc3,
+                0xb8, 0x34, 0x12, 0x00, 0x00, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x89, 0xc3,
             ],
             3,
             Work::BlockLocal,
         );
         assert_eq!(computes(&answer.value[0]), Some(0x1234));
+    }
+
+    #[test]
+    fn a_number_partly_overwritten_and_then_built_on_is_a_step() {
+        // mov eax, 0x1234; mov al, 5; add ebx, eax -- `al` leaves the rest
+        // of the number standing, and the add builds on it.
+        let answer = answer(
+            &[0xb8, 0x34, 0x12, 0x00, 0x00, 0xb0, 0x05, 0x01, 0xc3],
+            3,
+            Work::BlockLocal,
+        );
+        assert_eq!(computes(&answer.value[0]), None);
     }
 
     #[test]
@@ -420,6 +463,15 @@ mod tests {
             answer.value[1].syntax.as_ref().expect("decoded").text(),
             "ret"
         );
+    }
+
+    #[test]
+    fn an_instruction_cut_off_by_the_end_of_what_is_mapped_is_not_one() {
+        // 48 8b begins `mov rax, [rax]`, whose third byte is not mapped; the
+        // zero padding the decoder is handed must not complete it.
+        let answer = answer(&[0x48, 0x8b], 1, Work::Decode);
+        assert!(!answer.value[0].decoded());
+        assert_eq!(answer.value[0].bytes, [0x48]);
     }
 
     #[test]

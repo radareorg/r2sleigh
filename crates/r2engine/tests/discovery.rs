@@ -11,7 +11,7 @@ use common::{
     TWO, VENEER,
 };
 use r2engine::discovery::Confidence;
-use r2engine::program::OpenProgram;
+use r2engine::program::{OpenProgram, Symbol, SymbolKind};
 use r2engine::query::{Listing, Stop};
 
 fn believed(program: &mut OpenProgram<Literal>) -> Vec<(u64, Confidence)> {
@@ -36,6 +36,58 @@ fn every_function_the_container_states_is_found_as_stated() {
             (JOINED, Confidence::Stated),
             (PASSES, Confidence::Stated),
             (STEPPED, Confidence::Stated)
+        ]
+    );
+}
+
+#[test]
+fn a_data_symbol_or_an_import_s_symbol_states_no_function() {
+    let symbol = |name: &str, kind, defined| Symbol {
+        name: name.to_owned(),
+        vaddr: TWO + 0x8,
+        size: 0,
+        kind,
+        defined,
+        thumb: false,
+    };
+    for literal in [
+        Literal::new().declaring(symbol("table", SymbolKind::Data, true)),
+        Literal::new().declaring(symbol("imported", SymbolKind::Function, false)),
+    ] {
+        assert_eq!(
+            believed(&mut OpenProgram::of(literal)),
+            believed(&mut OpenProgram::of(Literal::new()))
+        );
+    }
+}
+
+#[test]
+fn every_reference_every_believed_body_makes_is_indexed_once_in_order() {
+    // `one` and `two` each read a word, and `caller` still reaches `one` so
+    // discovery walks it. r2ssa drops targets below 0x10000, so the words
+    // read are placed above that.
+    let mut program = OpenProgram::of(Literal::new().stripped_of("one"));
+    // mov eax, dword [0x20000]; ret
+    program
+        .source_mut()
+        .write(ONE, &[0x8b, 0x04, 0x25, 0x00, 0x00, 0x02, 0x00, 0xc3]);
+    // mov eax, dword [0x10000]; ret
+    program
+        .source_mut()
+        .write(TWO, &[0x8b, 0x04, 0x25, 0x00, 0x00, 0x01, 0x00, 0xc3]);
+    let refs = program
+        .references()
+        .expect("the index builds")
+        .value
+        .facts
+        .iter()
+        .map(|one| (one.from, one.to, one.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refs,
+        [
+            (ONE, 0x20000, r2ssa::DataRefKind::Data),
+            (TWO, 0x10000, r2ssa::DataRefKind::Data)
         ]
     );
 }

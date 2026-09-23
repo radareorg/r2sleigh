@@ -24,6 +24,17 @@ fn a_cancelled_request_refuses_rather_than_answering() {
 }
 
 #[test]
+fn the_work_a_request_spent_is_read_from_its_own_control() {
+    let mut program = opened();
+    program.begin_request(EngineExecutionControl::default());
+    program.prepared(ONE).expect("it prepares");
+    assert!(
+        program.control().work_spent() > 0,
+        "the control a caller reaches is not the one the request ran under"
+    );
+}
+
+#[test]
 fn the_next_request_does_not_inherit_the_last_one_s_stop() {
     let mut program = opened();
     let cancellation = EngineCancellationToken::default();
