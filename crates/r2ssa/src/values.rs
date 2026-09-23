@@ -473,15 +473,6 @@ fn assumptions_by_block(
         return BTreeMap::new();
     }
     let domtree = function.domtree();
-    let reachable = |block: u64| block == domtree.entry || domtree.idom(block).is_some();
-    let edge_dominates = |predecessor: u64, block: u64| {
-        block != domtree.entry
-            && function
-                .predecessors(block)
-                .into_iter()
-                .filter(|other| *other != predecessor && reachable(*other))
-                .all(|other| function.dominates(block, other))
-    };
     let mut by_block = BTreeMap::<u64, BTreeMap<ValueId, StridedInterval>>::new();
     let mut ready = vec![domtree.entry];
     while let Some(addr) = ready.pop() {
@@ -500,7 +491,7 @@ fn assumptions_by_block(
                 continue;
             };
             if fact.true_target == fact.false_target
-                || !edge_dominates(assumption.predecessor, addr)
+                || !edge_dominates(function, assumption.predecessor, addr)
             {
                 continue;
             }
@@ -519,6 +510,18 @@ fn assumptions_by_block(
         ready.extend(domtree.children(addr).iter().copied());
     }
     by_block
+}
+
+/// Whether every arrival at `block` first takes `predecessor -> block`, so what that edge tests holds there (doc/ssa.md, "Branch assumptions").
+pub(crate) fn edge_dominates(function: &crate::SSAFunction, predecessor: u64, block: u64) -> bool {
+    let domtree = function.domtree();
+    let reachable = |other: u64| other == domtree.entry || domtree.idom(other).is_some();
+    block != domtree.entry
+        && function
+            .predecessors(block)
+            .into_iter()
+            .filter(|other| *other != predecessor && reachable(*other))
+            .all(|other| function.dominates(block, other))
 }
 
 /// Narrow what a block holds by one comparison, taken the way `truth` says.

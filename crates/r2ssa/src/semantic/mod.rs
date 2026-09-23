@@ -19,6 +19,7 @@ mod shared;
 mod structured;
 #[cfg(test)]
 mod tests;
+mod trips;
 
 pub(crate) use assumptions::*;
 pub(crate) use boundaries::*;
@@ -34,6 +35,7 @@ pub(crate) use prefix::*;
 pub(crate) use private_objects::*;
 pub(crate) use shared::*;
 pub(crate) use structured::*;
+pub(crate) use trips::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -267,18 +269,20 @@ impl PreparedFunctionFacts {
             .map(|slot| slot.storage())
             .collect::<Vec<_>>();
         let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
-        let loops = collect_structured_loop_facts(
+        let (loops, inductions) = collect_structured_loop_facts(
             Body {
                 function,
                 graph,
                 machine_context,
             },
-            &predicates,
-            &latches_by_header,
+            LoopEvidence {
+                predicates: &predicates,
+                values: &values,
+                latches_by_header: &latches_by_header,
+            },
             &live_out,
             storage_spans,
         );
-        let inductions = collect_induction_facts(graph, &loops);
         phase!("loops", loops.len());
         let boundaries =
             collect_source_boundary_facts(function, graph, &call_sites, machine_context, &live_out);

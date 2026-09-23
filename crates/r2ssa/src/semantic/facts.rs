@@ -1079,7 +1079,52 @@ pub struct StructuredLoopFact {
     pub induction_phi: Option<ValueId>,
     pub induction_init: Option<ValueId>,
     pub induction_update: Option<ValueId>,
-    pub bound: Option<ValueId>,
+    /// How many times the header runs when control leaves through the one exit.
+    pub trips: Result<LoopTrips, TripRefusal>,
+}
+
+/// The header's runs from entering the loop to leaving it, stated only for control that leaves through the one exit edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopTrips {
+    Exact(u64),
+    /// The form's value read unsigned at its width, which an entry assumption proves is not zero.
+    Symbolic(EntryAffineForm),
+}
+
+/// `Σ coefficient·value + constant` modulo `2^width_bits`, over values the function is entered with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryAffineForm {
+    pub width_bits: u32,
+    /// Nonzero coefficients by entry value.
+    pub terms: BTreeMap<ValueId, u64>,
+    pub constant: u64,
+}
+
+/// Why a loop states no trip count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TripRefusal {
+    /// The body returns, branches indirectly or leaves for another function.
+    BodyLeaves,
+    /// Control leaves the loop by other than exactly one edge.
+    MultipleExits,
+    /// A trip can reach the latch without passing the exit test.
+    ExitSkipped,
+    /// The exit test reads no single-latch induction's merge or update at its width.
+    ExitNotInduction,
+    /// The induction multiplies rather than adds.
+    AffineStep,
+    /// The step is even and the equality may never hold.
+    EvenStep,
+    /// The bound is computed inside the loop from something that is not constant.
+    BoundVariesInLoop,
+    /// The start or bound is not an affine form of entry values.
+    BoundNotAffine,
+    /// An ordered or inequality exit whose start or bound is not constant.
+    CountNotAffine,
+    /// An iterate before the exit may wrap its width or cross its sign.
+    MayWrap,
+    /// The count read at its width may be zero, which is `2^width` trips.
+    ZeroNotExcluded,
 }
 
 impl StructuredLoopFact {

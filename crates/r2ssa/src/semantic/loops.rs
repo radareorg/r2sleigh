@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Every loop-carried value whose motion round the latch is known exactly.
+/// Every carrier of one loop whose motion round the latch is known exactly.
 ///
 /// Derived from the carrier facts rather than from a second walk of the CFG:
 /// the carriers already prove which merge carries a value, which edge enters
@@ -10,28 +10,24 @@ use super::*;
 /// the merge. A carrier with more than one update edge is skipped, because two
 /// latches may step the value differently and one step would not describe
 /// both.
-pub(crate) fn collect_induction_facts(
+fn loop_induction_facts(
     graph: &SsaGraph,
-    loops: &BTreeMap<LoopId, StructuredLoopFact>,
-) -> BTreeMap<ValueId, InductionFact> {
-    let mut inductions = BTreeMap::new();
-    for loop_fact in loops.values() {
-        for carrier in &loop_fact.carriers {
-            let [update] = carrier.updates.as_slice() else {
-                continue;
-            };
-            let [entry] = carrier.entries.as_slice() else {
-                continue;
+    loop_id: LoopId,
+    header: u64,
+    carriers: &[LoopCarrierFact],
+) -> Vec<InductionFact> {
+    carriers
+        .iter()
+        .filter_map(|carrier| {
+            let ([update], [entry]) = (carrier.updates.as_slice(), carrier.entries.as_slice())
+            else {
+                return None;
             };
             let width_bits = carrier.width.saturating_mul(8).max(1);
-            let Some(step) =
-                induction_step_for_update(graph, carrier.phi, update.value, width_bits)
-            else {
-                continue;
-            };
+            let step = induction_step_for_update(graph, carrier.phi, update.value, width_bits)?;
             let fact = InductionFact {
-                loop_id: loop_fact.id,
-                header: loop_fact.header,
+                loop_id,
+                header,
                 phi: carrier.phi,
                 init: entry.value,
                 update: update.value,
@@ -41,12 +37,9 @@ pub(crate) fn collect_induction_facts(
             };
             // A fact that does not prove itself against the graph it came from
             // is a fact nobody should read.
-            if fact.validate(graph) {
-                inductions.insert(carrier.phi, fact);
-            }
-        }
-    }
-    inductions
+            fact.validate(graph).then_some(fact)
+        })
+        .collect()
 }
 
 /// Each loop header with the blocks that branch back to it: one natural loop per header.
@@ -65,17 +58,34 @@ pub(crate) fn latches_by_header(function: &SSAFunction) -> BTreeMap<u64, BTreeSe
     latches_by_header
 }
 
+/// What loop recovery reads beside the body: the branch tests, the value ranges and the back edges.
+pub(crate) struct LoopEvidence<'a> {
+    pub(crate) predicates: &'a PredicateFacts,
+    pub(crate) values: &'a crate::values::ValueRanges,
+    pub(crate) latches_by_header: &'a BTreeMap<u64, BTreeSet<u64>>,
+}
+
+/// Every natural loop with its carriers and trip count, and every induction its carriers prove.
 pub(crate) fn collect_structured_loop_facts(
     code: Body<'_>,
-    predicates: &PredicateFacts,
-    latches_by_header: &BTreeMap<u64, BTreeSet<u64>>,
+    evidence: LoopEvidence<'_>,
     live_out: &crate::liveout::FunctionLiveOut,
     storage_spans: &StorageSpans,
-) -> BTreeMap<LoopId, StructuredLoopFact> {
+) -> (
+    BTreeMap<LoopId, StructuredLoopFact>,
+    BTreeMap<ValueId, InductionFact>,
+) {
     let Body {
         function, graph, ..
     } = code;
+    let LoopEvidence {
+        predicates,
+        values,
+        latches_by_header,
+    } = evidence;
+    let mut counter = TripCounter::new(function, graph, predicates, values);
     let mut loops = BTreeMap::new();
+    let mut inductions = BTreeMap::new();
     for (idx, (&header, latches)) in latches_by_header.iter().enumerate() {
         let id = LoopId(idx as u32);
         let body_set = natural_loop_body(function, header, latches);
@@ -91,13 +101,13 @@ pub(crate) fn collect_structured_loop_facts(
         let carriers = loop_carrier_facts(code, loop_, live_out, storage_spans);
         let (induction_phi, induction_init, induction_update) =
             loop_induction_values(graph, predicates, condition, loop_);
-        let bound = loop_bound_value(
-            graph,
-            predicates,
+        let loop_inductions = loop_induction_facts(graph, id, header, &carriers);
+        let trips = counter.count(&TripLoop {
+            loop_,
             condition,
-            induction_phi,
-            induction_update,
-        );
+            inductions: &loop_inductions,
+        });
+        inductions.extend(loop_inductions.into_iter().map(|fact| (fact.phi, fact)));
         loops.insert(
             id,
             StructuredLoopFact {
@@ -116,11 +126,11 @@ pub(crate) fn collect_structured_loop_facts(
                 induction_phi,
                 induction_init,
                 induction_update,
-                bound,
+                trips,
             },
         );
     }
-    loops
+    (loops, inductions)
 }
 
 /// One natural loop: which it is, where it begins, the edges back to it and
@@ -489,26 +499,4 @@ pub(crate) fn loop_induction_values(
     }
     best.map(|(_, phi, init, update)| (Some(phi), init, update))
         .unwrap_or((None, None, None))
-}
-
-pub(crate) fn loop_bound_value(
-    graph: &SsaGraph,
-    predicates: &PredicateFacts,
-    condition: Option<PredicateId>,
-    induction_phi: Option<ValueId>,
-    induction_update: Option<ValueId>,
-) -> Option<ValueId> {
-    let comparison = predicates
-        .predicates
-        .get(&condition?)?
-        .comparison
-        .as_ref()?;
-    let induction = induction_phi.or(induction_update)?;
-    let lhs_depends = value_depends_on(graph, comparison.lhs, induction);
-    let rhs_depends = value_depends_on(graph, comparison.rhs, induction);
-    match (lhs_depends, rhs_depends) {
-        (true, false) => Some(comparison.rhs),
-        (false, true) => Some(comparison.lhs),
-        _ => None,
-    }
 }

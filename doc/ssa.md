@@ -382,6 +382,28 @@ entry-to-`def(v)` path that avoids `B`, would reach `B` for the first time
 without `P -> B`. Such a prefix exists because `B` cannot dominate `def(v)`,
 or it would dominate `P` and never be entered first through `P -> B`.
 
+### Loop trip counts (`semantic/trips.rs`)
+
+`StructuredLoopFact::trips` claims only this: if control leaves the loop through
+its one exit edge, the header ran `N` times since the loop was entered. The
+hypotheses are a body that neither returns nor branches out of the function, one
+exit edge whose block dominates the one latch, and an exit test comparing an
+induction's merge (`j = 0`) or update (`j = 1`) at its width `w` with a bound.
+Every trip then tests once, and the header's `k`-th run sees
+`X_k = c + (k + j)·s mod 2^w`.
+
+An equality exit is solved in the ring: with `s = 2^t·u`, `u` odd, a solution
+exists only if `2^t` divides `b − c`, and `k* = ((b − c)/2^t · u⁻¹ − j) mod
+2^(w−t)`, exact through wrap. An ordered exit is solved over the integers and
+stated only when the first and last iterates up to `k*` lie inside the width,
+read signed or unsigned as the comparison reads them; monotone iterates then
+never wrap in between. The start and bound are read as affine forms over entry
+values modulo `2^w`, a value `ValueRanges` pins being its constant, so a
+symbolic count arises only from an equality with an odd step. Its zero, which is
+`2^w` trips, is excluded only by an assumption on an edge that dominates the
+header (the rule above) whose two sides differ by an odd multiple of the count;
+entry values never change, so what the edge tested holds at every run.
+
 ### Block origins (`origin.rs`)
 
 An origin maps a storage only while none of its bytes has been written since
