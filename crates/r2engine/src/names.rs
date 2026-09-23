@@ -174,12 +174,7 @@ impl NameDb {
             Some(at) => {
                 // One namespace per address, so no other name here seeks the same.
                 for replaced in std::mem::replace(at, name).seeks() {
-                    if let Some(addresses) = self.by_spelling.get_mut(&replaced) {
-                        addresses.remove(&vaddr);
-                        if addresses.is_empty() {
-                            self.by_spelling.remove(&replaced);
-                        }
-                    }
+                    self.forget(&replaced, vaddr);
                 }
             }
             None => {
@@ -189,6 +184,16 @@ impl NameDb {
         }
         for spelling in seeks {
             self.by_spelling.entry(spelling).or_default().insert(vaddr);
+        }
+    }
+
+    fn forget(&mut self, spelling: &str, vaddr: u64) {
+        let Some(addresses) = self.by_spelling.get_mut(spelling) else {
+            return;
+        };
+        addresses.remove(&vaddr);
+        if addresses.is_empty() {
+            self.by_spelling.remove(spelling);
         }
     }
 
