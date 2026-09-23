@@ -634,10 +634,8 @@ version = "0.1.0"
 name = "r2dec"
 version = "0.1.0"
 dependencies = [
- "postcard",
  "r2il",
  "r2rewrite",
- "r2sleigh-lift",
  "r2source",
  "r2ssa",
  "r2types",
