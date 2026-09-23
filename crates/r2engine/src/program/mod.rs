@@ -476,6 +476,17 @@ impl<S: Source> OpenProgram<S> {
     pub fn endian(&self) -> r2il::Endianness {
         self.source.container().arch.endian
     }
+
+    /// The loaded sections the program declares at this address.
+    fn loaded_sections_at(&self, vaddr: u64) -> impl Iterator<Item = &Section> {
+        self.source
+            .container()
+            .sections
+            .iter()
+            .filter(move |section| {
+                section.loaded && vaddr >= section.vaddr && vaddr - section.vaddr < section.vsize
+            })
+    }
 }
 
 impl<S: Source> Decoders for OpenProgram<S> {
@@ -525,12 +536,12 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.source.container().sections.iter().any(|section| {
-            section.loaded
-                && !section.is_code
-                && vaddr >= section.vaddr
-                && vaddr - section.vaddr < section.vsize
-        })
+        self.loaded_sections_at(vaddr)
+            .any(|section| !section.is_code)
+    }
+
+    fn in_loaded_section(&self, vaddr: u64) -> bool {
+        self.loaded_sections_at(vaddr).next().is_some()
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {
@@ -589,6 +600,10 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
         self.program.holds_static_data(vaddr)
+    }
+
+    fn in_loaded_section(&self, vaddr: u64) -> bool {
+        self.program.in_loaded_section(vaddr)
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {

@@ -82,31 +82,32 @@ fn a_data_symbol_or_an_import_s_symbol_states_no_function() {
 
 #[test]
 fn every_reference_every_believed_body_makes_is_indexed_once_in_order() {
-    // `one` and `two` each read a word, and `caller` still reaches `one` so
-    // discovery walks it. r2ssa drops targets below 0x10000, so the words
-    // read are placed above that.
+    // `one` and `two` each read a word the program's `.text` holds, and
+    // `caller` still reaches `one` so discovery walks it.
     let mut program = OpenProgram::of(Literal::new().stripped_of("one"));
-    // mov eax, dword [0x20000]; ret
+    // mov eax, dword [stepped + 8]; ret
     program
         .source_mut()
-        .write(ONE, &[0x8b, 0x04, 0x25, 0x00, 0x00, 0x02, 0x00, 0xc3]);
-    // mov eax, dword [0x10000]; ret
+        .write(ONE, &[0x8b, 0x04, 0x25, 0x88, 0x10, 0x00, 0x00, 0xc3]);
+    // mov eax, dword [stepped]; ret
     program
         .source_mut()
-        .write(TWO, &[0x8b, 0x04, 0x25, 0x00, 0x00, 0x01, 0x00, 0xc3]);
-    let refs = program
-        .references()
-        .expect("the index builds")
-        .value
-        .facts
+        .write(TWO, &[0x8b, 0x04, 0x25, 0x80, 0x10, 0x00, 0x00, 0xc3]);
+    let facts = program.references().expect("the index builds").value.facts;
+    let mut sorted = facts.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(facts, sorted);
+    let read = facts
         .iter()
+        .filter(|one| [ONE, TWO].contains(&one.from))
         .map(|one| (one.from, one.to, one.kind))
         .collect::<Vec<_>>();
     assert_eq!(
-        refs,
+        read,
         [
-            (ONE, 0x20000, r2ssa::DataRefKind::Data),
-            (TWO, 0x10000, r2ssa::DataRefKind::Data)
+            (ONE, STEPPED + 8, r2ssa::DataRefKind::Data),
+            (TWO, STEPPED, r2ssa::DataRefKind::Data)
         ]
     );
 }

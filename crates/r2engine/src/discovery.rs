@@ -207,6 +207,10 @@ mod tests {
         fn holds_static_data(&self, _vaddr: u64) -> bool {
             false
         }
+
+        fn in_loaded_section(&self, _vaddr: u64) -> bool {
+            false
+        }
     }
 
     #[test]

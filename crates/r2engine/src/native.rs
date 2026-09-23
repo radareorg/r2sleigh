@@ -67,6 +67,12 @@ pub trait Program: r2ssa::body::Program {
     /// no section at all.
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
+    /// Whether a section the program loads holds this address, code or data.
+    ///
+    /// This is what makes a constant a reference: it names something the
+    /// program declares, however low the program is linked.
+    fn in_loaded_section(&self, vaddr: u64) -> bool;
+
     /// The machine the function at this address is written in, where the
     /// program has more than one; `None` keeps the caller's.
     fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {

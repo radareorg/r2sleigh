@@ -7,9 +7,10 @@
 
 mod common;
 
-use common::{BASE, Literal, TWO};
+use common::{BASE, FORKED, JOINED, Literal, ONE, TWO};
 use r2engine::program::OpenProgram;
 use r2engine::query::Unread;
+use r2ssa::DataRefKind;
 use r2ssa::body::{Unresolved, UnresolvedReason};
 
 #[test]
@@ -23,9 +24,6 @@ fn the_index_carries_the_scope_it_was_read_over() {
     assert!(answer.is_complete());
     let index = answer.value;
 
-    // Nothing this low is an address to the index, so it is empty, and the
-    // coverage is what says that empty is not the same as unreferenced.
-    assert!(index.facts.is_empty(), "{:?}", index.facts);
     let coverage = &index.coverage;
     assert!(!coverage.is_closed());
     assert!(coverage.read.contains(&TWO), "{coverage:?}");
@@ -51,4 +49,21 @@ fn an_index_over_bodies_walked_to_their_end_is_closed() {
     let index = program.references().expect("the index builds").value;
     assert!(index.coverage.is_closed(), "{:?}", index.coverage);
     assert_eq!(index.coverage.read.len(), found);
+}
+
+#[test]
+fn a_program_linked_low_still_has_references() {
+    // Whether a constant is an address is what the program declares there,
+    // not how large it is: this one is linked at 0x1000.
+    let mut program = common::opened();
+    let facts = program.references().expect("the index builds").value.facts;
+    let named = |from: u64, kind: DataRefKind| {
+        facts
+            .iter()
+            .any(|fact| fact.from == from && fact.to == ONE && fact.kind == kind)
+    };
+    assert!(named(FORKED, DataRefKind::Data), "{facts:?}");
+    assert!(named(JOINED + 4, DataRefKind::Data), "{facts:?}");
+    // And a small immediate names nothing the program declares.
+    assert!(facts.iter().all(|fact| fact.to >= BASE), "{facts:?}");
 }

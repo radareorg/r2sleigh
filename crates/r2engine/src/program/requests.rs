@@ -161,6 +161,10 @@ impl<S: Source> OpenProgram<S> {
                 }
             }
         })?;
+        // A candidate names this program only where a section it loads holds it, however low it is linked.
+        index
+            .facts
+            .retain(|fact| crate::native::Program::in_loaded_section(&*self, fact.to));
         index.coverage.read.sort_unstable();
         index.facts.sort_unstable();
         index.facts.dedup();

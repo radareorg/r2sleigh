@@ -351,10 +351,7 @@ fn push_data_ref(
     from: u64,
     space: SpaceId,
 ) {
-    if let Some(target) = value
-        .and_then(|value| state_of(states, value).exact())
-        .filter(|target| *target >= 0x10000)
-    {
+    if let Some(target) = value.and_then(|value| state_of(states, value).exact()) {
         refs.push(DataRefFact::data(from, target, space));
     }
 }
@@ -365,10 +362,7 @@ fn push_code_ref(
     value: Option<ValueId>,
     from: u64,
 ) {
-    if let Some(target) = value
-        .and_then(|value| state_of(states, value).exact())
-        .filter(|target| *target >= 0x10000)
-    {
+    if let Some(target) = value.and_then(|value| state_of(states, value).exact()) {
         refs.push(DataRefFact::code(from, target, SpaceId::Ram));
     }
 }
@@ -503,6 +497,8 @@ fn refs_over(
 }
 
 /// Every reference one body makes, prepared only as far as references read: graph, memory prefix, stack reloads.
+///
+/// Every exact constant in an address position is a candidate; which of them name the program is the engine's call.
 pub fn data_refs_from_blocks(
     blocks: &[R2ILBlock],
     arch: Option<&ArchSpec>,
