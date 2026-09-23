@@ -1371,10 +1371,16 @@ pub fn build_source_owned_type_analysis(
         ptr_bits,
         &mut diagnostics,
     );
-    let local_field_accesses = local_field_accesses_named(
-        &local_structs,
-        &crate::prepare::source_field_names(source.as_ref()),
-    );
+    // The exact certificates own member naming: one name per (parameter, offset) they certify.
+    let exact_source_fields = field_access_certificates_from_source_aggregate_accesses(&source);
+    let source_field_names = exact_source_fields
+        .iter()
+        .map(|certificate| {
+            let key = (certificate.slot, certificate.field_offset);
+            (key, certificate.field_name.clone())
+        })
+        .collect();
+    let local_field_accesses = local_field_accesses_named(&local_structs, &source_field_names);
     let interproc_report = interproc_summary
         .as_ref()
         .map(|summary| summary.report().clone());
@@ -1410,7 +1416,6 @@ pub fn build_source_owned_type_analysis(
     if derived.type_facts != *function_facts.type_facts() {
         return Err(TypeAnalysisError::DerivedTypeFactsMismatch);
     }
-    let exact_source_fields = field_access_certificates_from_source_aggregate_accesses(&source);
     if !exact_source_fields.is_empty() {
         let mut type_facts = function_facts.type_facts().clone();
         for certificate in exact_source_fields {
