@@ -180,41 +180,9 @@ impl ValueLiveness {
             }
         }
 
-        // The caller's reads, by the block they leave from.
-        let mut returned_by_block = vec![Vec::<ValueId>::new(); block_count];
-        for (addr, values) in live_out.by_return() {
-            if let Some(block) = graph.block_id_for_addr(addr) {
-                returned_by_block[block.0 as usize].extend(values);
-            }
-        }
-
-        // A merge nothing reads, directly or through other such merges, is not
-        // a read of its sources: the graph keeps a merge for every storage a
-        // loop writes, and counting those would hold a value live round a loop
-        // that never looks at it again.
-        let mut dead_phi = vec![false; graph.insts.len()];
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for inst in &graph.insts {
-                if dead_phi[inst.id.0 as usize] || !matches!(inst.payload, InstPayload::Phi { .. })
-                {
-                    continue;
-                }
-                let Some(output) = inst.output else {
-                    continue;
-                };
-                let unread = !live_out.contains(output)
-                    && graph
-                        .use_sites(output)
-                        .iter()
-                        .all(|site| dead_phi[site.inst.0 as usize]);
-                if unread {
-                    dead_phi[inst.id.0 as usize] = true;
-                    changed = true;
-                }
-            }
-        }
+        // The caller's reads, indexed by value rather than scanned per block.
+        let returned = returned_blocks_by_value(graph, live_out, value_count);
+        let dead_phi = unread_phis(graph, live_out);
 
         let mut scratch = vec![BlockScratch::default(); block_count];
         let mut touched = Vec::<BlockId>::new();
@@ -267,11 +235,12 @@ impl ValueLiveness {
                     InstPayload::Op(_) => reads.push((inst.block, inst.ordinal as u32)),
                 }
             }
-            for (block, values) in returned_by_block.iter().enumerate() {
-                if values.contains(&value.id) {
-                    reads.push((BlockId(block as u32), BLOCK_END));
-                }
-            }
+            reads.extend(
+                returned
+                    .of(value.id)
+                    .iter()
+                    .map(|block| (*block, BLOCK_END)),
+            );
 
             for (block, position) in reads {
                 touch(block, &mut scratch, &mut touched);
@@ -313,7 +282,7 @@ impl ValueLiveness {
                 }
             }
 
-            let first = segments.len();
+            order_touched_blocks(&mut touched, &scratch, stamp);
             for block in &touched {
                 let cell = scratch[block.0 as usize];
                 if *block == def_block {
@@ -363,7 +332,6 @@ impl ValueLiveness {
                     });
                 }
             }
-            segments[first..].sort_unstable();
         }
         offsets.push(segments.len() as u32);
 
@@ -446,6 +414,100 @@ fn content_union(parent: &mut [u32], left: u32, right: u32) {
     if left != right {
         parent[left.max(right) as usize] = left.min(right);
     }
+}
+
+/// The returning blocks each value is handed back from, indexed by value.
+struct ReturnedBlocks {
+    offsets: Vec<u32>,
+    blocks: Vec<BlockId>,
+}
+
+impl ReturnedBlocks {
+    fn of(&self, value: ValueId) -> &[BlockId] {
+        let index = value.0 as usize;
+        match (self.offsets.get(index), self.offsets.get(index + 1)) {
+            (Some(start), Some(end)) => &self.blocks[*start as usize..*end as usize],
+            _ => &[],
+        }
+    }
+}
+
+/// One counting pass over the caller's reads, in `O(values + reads)`.
+fn returned_blocks_by_value(
+    graph: &SsaGraph,
+    live_out: &FunctionLiveOut,
+    value_count: usize,
+) -> ReturnedBlocks {
+    let reads = live_out
+        .by_return()
+        .filter_map(|(addr, values)| Some((graph.block_id_for_addr(addr)?, values)))
+        .flat_map(|(block, values)| values.map(move |value| (value, block)))
+        .filter(|(value, _)| (value.0 as usize) < value_count)
+        .collect::<Vec<_>>();
+    let mut offsets = vec![0u32; value_count + 1];
+    for (value, _) in &reads {
+        offsets[value.0 as usize + 1] += 1;
+    }
+    for index in 0..value_count {
+        offsets[index + 1] += offsets[index];
+    }
+    let mut next = offsets.clone();
+    let mut blocks = vec![BlockId(0); reads.len()];
+    for (value, block) in reads {
+        let slot = &mut next[value.0 as usize];
+        blocks[*slot as usize] = block;
+        *slot += 1;
+    }
+    ReturnedBlocks { offsets, blocks }
+}
+
+/// Merges nothing reads, even through other such merges: a worklist fixpoint in `O(insts + uses)`.
+fn unread_phis(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Vec<bool> {
+    let mut dead = vec![false; graph.insts.len()];
+    let mut readers = (0..graph.values.len() as u32)
+        .map(|value| graph.use_sites(ValueId(value)).len())
+        .collect::<Vec<_>>();
+    let unread_phi = |value: ValueId, readers: &[usize]| {
+        let inst = graph.def_inst(value)?;
+        let is_phi = matches!(graph.inst(inst)?.payload, InstPayload::Phi { .. });
+        (is_phi && readers[value.0 as usize] == 0 && !live_out.contains(value)).then_some(inst)
+    };
+    let mut pending = graph
+        .insts
+        .iter()
+        .filter_map(|inst| unread_phi(inst.output?, &readers))
+        .collect::<Vec<_>>();
+    while let Some(inst) = pending.pop() {
+        if std::mem::replace(&mut dead[inst.0 as usize], true) {
+            continue;
+        }
+        let Some(inst) = graph.inst(inst) else {
+            continue;
+        };
+        for input in &inst.inputs {
+            let count = &mut readers[input.0 as usize];
+            *count = count.saturating_sub(1);
+            pending.extend(unread_phi(*input, &readers));
+        }
+    }
+    dead
+}
+
+/// Order touched blocks by id, by sort (`k log k`) or stamp scan (`blocks`), whichever is cheaper.
+fn order_touched_blocks(touched: &mut Vec<BlockId>, scratch: &[BlockScratch], stamp: u32) {
+    let count = touched.len();
+    if count * (usize::BITS - count.leading_zeros()) as usize <= scratch.len() {
+        touched.sort_unstable();
+        return;
+    }
+    touched.clear();
+    touched.extend(
+        scratch
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.stamp == stamp)
+            .map(|(block, _)| BlockId(block as u32)),
+    );
 }
 
 /// The live segments of a set of values that share, or are proposed to share,

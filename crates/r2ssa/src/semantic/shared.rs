@@ -2277,25 +2277,24 @@ pub(crate) fn loop_carrier_member_rows(
     // so the ordered set was built with thousands of entries per loop and
     // emptied again doing nothing. The guards below are the body's own, in its
     // order, so what is skipped here is exactly what it would have skipped.
+    // Read the carriers' spans' members, not every instruction once per loop.
     let mut pending = BTreeSet::new();
-    for inst in &graph.insts {
-        let InstPayload::Phi { .. } = &inst.payload else {
-            continue;
-        };
-        let Some(block) = graph.block(inst.block) else {
-            continue;
-        };
-        if block.addr == header || loop_body.contains(&block.addr) {
-            continue;
+    for span in roots_by_span.keys() {
+        for value in storage_spans.members(*span)? {
+            let Some(inst) = graph.def_inst(*value).and_then(|inst| graph.inst(inst)) else {
+                continue;
+            };
+            let InstPayload::Phi { .. } = &inst.payload else {
+                continue;
+            };
+            let Some(block) = graph.block(inst.block) else {
+                continue;
+            };
+            if block.addr == header || loop_body.contains(&block.addr) || inst.inputs.len() < 2 {
+                continue;
+            }
+            pending.insert(inst.id);
         }
-        let output = inst.output?;
-        if inst.inputs.len() < 2 {
-            continue;
-        }
-        if !roots_by_span.contains_key(&storage_spans.span_of(output)?) {
-            continue;
-        }
-        pending.insert(inst.id);
     }
     while let Some(inst_id) = pending.pop_first() {
         let inst = graph.inst(inst_id)?;
@@ -2314,21 +2313,18 @@ pub(crate) fn loop_carrier_member_rows(
         let output_width = graph.value(output)?.var.size;
         let mut matches = candidate_roots.iter().copied().filter(|root| {
             let row = &rows[*root];
-            let all_owned = inst.inputs.iter().all(|input| row.contains_key(input));
-            let has_carried_state = inst.inputs.iter().any(|input| {
-                row.get(input).is_some_and(|roles| {
-                    roles.contains(&LoopCarrierMemberRole::LatchUpdate)
-                        || roles.contains(&LoopCarrierMemberRole::UpdateIdentity)
-                        || roles.contains(&LoopCarrierMemberRole::PostLoopMerge)
-                })
-            });
-            let has_other_state = inst.inputs.iter().any(|input| {
-                row.get(input).is_some_and(|roles| {
-                    !roles.contains(&LoopCarrierMemberRole::LatchUpdate)
-                        && !roles.contains(&LoopCarrierMemberRole::UpdateIdentity)
-                        && !roles.contains(&LoopCarrierMemberRole::PostLoopMerge)
-                })
-            });
+            // One pass over the inputs, stopping at the first the row does not own.
+            let (mut has_carried_state, mut has_other_state) = (false, false);
+            for input in &inst.inputs {
+                let Some(roles) = row.get(input) else {
+                    return false;
+                };
+                let carried = roles.contains(&LoopCarrierMemberRole::LatchUpdate)
+                    || roles.contains(&LoopCarrierMemberRole::UpdateIdentity)
+                    || roles.contains(&LoopCarrierMemberRole::PostLoopMerge);
+                has_carried_state |= carried;
+                has_other_state |= !carried;
+            }
             let carrier = &carriers[*root];
             let width_is_exact = output_width == carrier.width;
             let projected_width_is_exact = !width_is_exact
@@ -2341,10 +2337,7 @@ pub(crate) fn loop_carrier_member_rows(
                         _ => false,
                     }
                 });
-            all_owned
-                && has_carried_state
-                && has_other_state
-                && (width_is_exact || projected_width_is_exact)
+            has_carried_state && has_other_state && (width_is_exact || projected_width_is_exact)
         });
         let Some(root) = matches.next() else {
             continue;

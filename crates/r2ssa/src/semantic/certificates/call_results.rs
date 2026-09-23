@@ -482,10 +482,19 @@ pub(crate) struct StackMemoryAccessInput<'a> {
 pub(crate) fn stack_memory_access_at(
     input: StackMemoryAccessInput<'_>,
 ) -> Option<(ObjectId, i64, StructuredAccessId)> {
+    // Only this operation's instruction can own a match, so search its accesses alone.
+    let inst = input
+        .graph
+        .inst_id_for_op_site(input.block_addr, input.op_index)?;
+    let first = StructuredAccessId { inst, ordinal: 0 };
+    let last = StructuredAccessId {
+        inst,
+        ordinal: u32::MAX,
+    };
     input
         .structured
         .memory_accesses
-        .iter()
+        .range(first..=last)
         .filter(|(_, access)| {
             access.block_addr == input.block_addr
                 && access.op_index == input.op_index
