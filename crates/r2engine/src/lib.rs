@@ -1629,7 +1629,10 @@ impl EngineAnalyzeRequest {
         self.source_snapshot = None;
         self.semantic_metadata_enabled = true;
         self.reg_type_hints.clear();
+        // Where the program's sections lie is the caller's to state; the artifact knows one function.
+        let program_extents = std::mem::take(&mut self.parsed_context.program_extents);
         self.parsed_context = trusted_parsed_context(&trusted, self.ptr_bits);
+        self.parsed_context.program_extents = program_extents;
         self.semantic_mode = EngineSemanticMode::Full;
         self.trusted_ssa = Some(trusted);
         self

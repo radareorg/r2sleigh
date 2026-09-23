@@ -16,10 +16,20 @@ fn global_field_profiles_refuse_spoofed_constant_names() {
         phis: Vec::new(),
     };
 
-    let spoofed = infer_global_field_profiles(&[load_from(SSAVar::new("const:10000", 0, 8))], 64);
-    let exact = infer_global_field_profiles(&[load_from(SSAVar::constant(0x10000, 8))], 64);
+    let loaded = crate::ProgramExtents::new([(0x10000, 0x11000)]);
+    let spoofed =
+        infer_global_field_profiles(&[load_from(SSAVar::new("const:10000", 0, 8))], 64, &loaded);
+    let exact =
+        infer_global_field_profiles(&[load_from(SSAVar::constant(0x10000, 8))], 64, &loaded);
+    // The same access, where no section the program loads holds the base, names no global.
+    let outside = infer_global_field_profiles(
+        &[load_from(SSAVar::constant(0x10000, 8))],
+        64,
+        &crate::ProgramExtents::none(),
+    );
 
     assert!(spoofed.is_empty());
+    assert!(outside.is_empty());
     assert_eq!(
         exact
             .get(&0x10000)

@@ -59,6 +59,8 @@ pub struct OpenProgram<S: Source> {
     /// walk cost one pass over every symbol per edge. Read from the container
     /// alone, so no write moves it.
     defined: BTreeMap<u64, bool>,
+    /// Where the loaded sections lie, indexed once from the container, which no write moves.
+    extents: r2types::ProgramExtents,
     /// Whether each function discovery found is Thumb, by its entry.
     ///
     /// Derived from the whole program, since a function nothing states is in
@@ -120,6 +122,13 @@ impl<S: Source> OpenProgram<S> {
                 .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
                 .collect(),
             defined: definitions(container),
+            extents: r2types::ProgramExtents::new(
+                container
+                    .sections
+                    .iter()
+                    .filter(|section| section.loaded)
+                    .map(|section| (section.vaddr, section.vaddr.saturating_add(section.vsize))),
+            ),
             modes: BTreeMap::new(),
             mapped: container
                 .symbols
@@ -549,6 +558,10 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
             .any(|section| !section.is_code)
     }
 
+    fn extents(&self) -> &r2types::ProgramExtents {
+        &self.extents
+    }
+
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.imports
             .get(&vaddr)
@@ -605,6 +618,10 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
         self.program.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.program.extents()
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {

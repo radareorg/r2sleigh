@@ -1190,6 +1190,7 @@ fn build_type_analysis_inner(
         &struct_decls,
         &var_type_candidates,
         input.ptr_bits,
+        &input.parsed_context.program_extents,
     );
 
     let plan = TypePlan {

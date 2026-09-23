@@ -47,7 +47,8 @@ pub use solver::{SolvedTypes, SolverConfig, SolverDiagnostics, TypeSolver};
 
 pub use context::{
     ExternalStackBase, ExternalStackSlotRole, ExternalStackSlotSpec, ParsedExternalContext,
-    StackSlotKey, is_generic_arg_name, parse_external_context_json, sanitize_c_identifier,
+    ProgramExtents, StackSlotKey, is_generic_arg_name, parse_external_context_json,
+    sanitize_c_identifier,
 };
 pub use convert::{
     CTypeLike, c_object_declaration, parse_c_type_like, spellable_c_type_like,

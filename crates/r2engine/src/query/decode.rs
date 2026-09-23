@@ -232,11 +232,17 @@ mod tests {
     struct Mapped {
         base: u64,
         bytes: Vec<u8>,
+        extents: r2types::ProgramExtents,
     }
 
     impl Mapped {
         fn new(base: u64, bytes: Vec<u8>) -> Self {
-            Self { base, bytes }
+            let end = base + bytes.len() as u64;
+            Self {
+                base,
+                bytes,
+                extents: r2types::ProgramExtents::new([(base, end)]),
+            }
         }
     }
 
@@ -252,6 +258,7 @@ mod tests {
         }
     }
 
+    /// The one run of bytes is the one section the program loads.
     impl crate::native::Program for Mapped {
         fn name_at(&self, _vaddr: u64) -> Option<String> {
             None
@@ -259,6 +266,10 @@ mod tests {
 
         fn holds_static_data(&self, _vaddr: u64) -> bool {
             false
+        }
+
+        fn extents(&self) -> &r2types::ProgramExtents {
+            &self.extents
         }
 
         fn import_at(&self, _vaddr: u64) -> Option<String> {

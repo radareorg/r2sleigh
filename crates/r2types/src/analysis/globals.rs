@@ -28,8 +28,9 @@ pub(crate) fn score_global_type_links(
     struct_decls: &[StructDeclCandidate],
     var_type_candidates: &[VarTypeCandidate],
     ptr_bits: u32,
+    extents: &crate::ProgramExtents,
 ) -> Vec<GlobalTypeLinkCandidate> {
-    let per_addr_profiles = infer_global_field_profiles(ssa_blocks, ptr_bits);
+    let per_addr_profiles = infer_global_field_profiles(ssa_blocks, ptr_bits, extents);
     if per_addr_profiles.is_empty() {
         return Vec::new();
     }
@@ -139,9 +140,15 @@ pub(crate) fn score_global_type_links(
         .collect()
 }
 
+/// Every global a body accesses, by base, with what each offset from it was read and written as.
+///
+/// A base is a constant a section the program loads holds; this cannot see
+/// whether the number moved with the program, so the engine's test for an
+/// absolute number decides it.
 pub(crate) fn infer_global_field_profiles(
     ssa_blocks: &[SSABlock],
     ptr_bits: u32,
+    extents: &crate::ProgramExtents,
 ) -> BTreeMap<u64, BTreeMap<u64, InferredGlobalFieldEvidence>> {
     let mut addr_exprs: HashMap<(u64, SSAVar), GlobalAddrExpr> = HashMap::new();
     let mut field_evidence: BTreeMap<u64, BTreeMap<u64, InferredGlobalFieldEvidence>> =
@@ -154,7 +161,7 @@ pub(crate) fn infer_global_field_profiles(
             for op in &block.ops {
                 let addr_of = |var: &SSAVar, map: &HashMap<(u64, SSAVar), GlobalAddrExpr>| {
                     var.constant_bits()
-                        .filter(|base| *base >= 0x10000)
+                        .filter(|base| extents.holds(*base))
                         .map(|base| GlobalAddrExpr {
                             base,
                             offset: 0,
@@ -335,7 +342,7 @@ pub(crate) fn infer_global_field_profiles(
         for op in &block.ops {
             let resolve_addr = |addr: &SSAVar| -> Option<GlobalAddrExpr> {
                 addr.constant_bits()
-                    .filter(|base| *base >= 0x10000)
+                    .filter(|base| extents.holds(*base))
                     .map(|base| GlobalAddrExpr {
                         base,
                         offset: 0,

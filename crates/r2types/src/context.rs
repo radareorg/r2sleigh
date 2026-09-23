@@ -44,11 +44,56 @@ pub struct ParsedExternalContext {
     pub stack_slots: BTreeMap<StackSlotKey, ExternalStackSlotSpec>,
     pub external_type_db: ExternalTypeDb,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
+    /// Where the program's loaded sections lie, which is where a constant can name one of its objects.
+    pub program_extents: ProgramExtents,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub assumptions: r2ssa::AssumptionSet,
     pub diagnostics: Vec<String>,
     pub callconv: Option<String>,
     pub noreturn: bool,
+}
+
+/// The address ranges a program's loaded sections hold.
+///
+/// A number that is not proven to move with the program names one of its
+/// objects only where a section it loads holds it; how large the number is
+/// says nothing, since a program linked low keeps its data at small addresses.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgramExtents {
+    /// Half-open, sorted by start, and merged wherever two touch.
+    ranges: Vec<(u64, u64)>,
+}
+
+impl ProgramExtents {
+    /// A program that declares no loaded section, so no number names anything in it.
+    pub const fn none() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
+    /// The extents of these half-open ranges; an empty one holds nothing.
+    pub fn new(ranges: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        let mut sorted = ranges
+            .into_iter()
+            .filter(|(start, end)| start < end)
+            .collect::<Vec<_>>();
+        sorted.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+        for (start, end) in sorted {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        Self { ranges: merged }
+    }
+
+    /// Whether a loaded section holds this address.
+    pub fn holds(&self, address: u64) -> bool {
+        let after = self.ranges.partition_point(|(start, _)| *start <= address);
+        after
+            .checked_sub(1)
+            .is_some_and(|index| address < self.ranges[index].1)
+    }
 }
 
 pub use r2ssa::StackAddressBase as ExternalStackBase;

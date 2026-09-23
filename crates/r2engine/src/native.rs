@@ -67,6 +67,12 @@ pub trait Program: r2ssa::body::Program {
     /// no section at all.
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
+    /// Where the program's loaded sections lie, code or data.
+    ///
+    /// A number nothing proves to move with the program names one of its
+    /// objects only here, however low the program is linked.
+    fn extents(&self) -> &r2types::ProgramExtents;
+
     /// The machine the function at this address is written in, where the
     /// program has more than one; `None` keeps the caller's.
     fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {
@@ -246,6 +252,7 @@ pub struct Prepared {
     declared: Vec<r2types::SourceOwnedCalleeSignature>,
     ptr_bits: u32,
     unread: Vec<Unread>,
+    extents: r2types::ProgramExtents,
 }
 
 impl Prepared {
@@ -443,9 +450,10 @@ fn request(
         declared,
         ptr_bits,
         unread: _,
+        extents,
     } = prepared;
     let block_count = artifact.source_block_count();
-    let signatures = declared_signatures(target, root, *ptr_bits);
+    let signatures = declared_signatures(target, root, *ptr_bits, extents);
     EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
             function_name: root.name.clone(),
@@ -712,6 +720,7 @@ fn analyse(
         declared,
         ptr_bits,
         unread,
+        extents: program.extents().clone(),
     })
 }
 
@@ -1038,8 +1047,12 @@ fn declared_signatures(
     target: &NativeTarget<'_>,
     root: &Walked,
     ptr_bits: u32,
+    extents: &r2types::ProgramExtents,
 ) -> r2types::ParsedExternalContext {
-    let mut context = r2types::ParsedExternalContext::default();
+    let mut context = r2types::ParsedExternalContext {
+        program_extents: extents.clone(),
+        ..r2types::ParsedExternalContext::default()
+    };
     for name in &root.callee_names {
         let Some(prototype) = target.prototypes.get(name) else {
             continue;

@@ -207,6 +207,11 @@ mod tests {
         fn holds_static_data(&self, _vaddr: u64) -> bool {
             false
         }
+
+        fn extents(&self) -> &r2types::ProgramExtents {
+            const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+            NONE
+        }
     }
 
     #[test]
