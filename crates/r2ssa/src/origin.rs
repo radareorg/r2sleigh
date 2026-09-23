@@ -179,20 +179,13 @@ impl BlockOrigins {
     /// Apply one operation where a call writes only `clobbered`, as its convention says.
     pub fn step_under(&mut self, op: &R2ILOp, clobbered: &[CanonicalStorageId]) {
         match op {
-            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => self.forget(clobbered),
+            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
+                for storage in clobbered {
+                    self.forget_bytes(storage.space, storage.offset, storage.size.into());
+                }
+            }
             _ => self.step(op),
         }
-    }
-
-    /// Forget whatever any of these storages held, as a call leaves them undefined.
-    fn forget(&mut self, storages: &[CanonicalStorageId]) {
-        self.origins.retain(|held, _| {
-            !storages.iter().any(|storage| {
-                storage.space == held.space
-                    && storage.offset < held.offset + u64::from(held.size)
-                    && held.offset < storage.offset + u64::from(storage.size)
-            })
-        });
     }
 
     fn after(&self, op: &R2ILOp) -> Option<ValueOrigin> {
@@ -460,6 +453,35 @@ mod tests {
             },
         ]));
         assert_eq!(origins.of(&scratch), None);
+    }
+
+    #[test]
+    fn a_call_under_a_convention_keeps_what_it_preserves() {
+        let (scratch, kept) = (Varnode::register(0, 8), Varnode::register(24, 8));
+        let mut origins = BlockOrigins::default();
+        for op in [
+            R2ILOp::Copy {
+                dst: scratch.clone(),
+                src: Varnode::constant(0x1000, 8),
+            },
+            R2ILOp::Copy {
+                dst: kept.clone(),
+                src: Varnode::constant(0x2000, 8),
+            },
+            R2ILOp::Call {
+                target: Varnode::constant(0x3000, 8),
+            },
+        ] {
+            origins.step_under(
+                &op,
+                &[CanonicalStorageId::from_varnode(&Varnode::register(4, 4))],
+            );
+        }
+        assert_eq!(origins.of(&scratch), None);
+        assert_eq!(
+            origins.of(&kept).and_then(ValueOrigin::constant),
+            Some(0x2000)
+        );
     }
 
     #[test]
