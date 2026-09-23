@@ -747,6 +747,22 @@ pub(crate) fn call_entering_stack_pointer_offset(
     .then_some((root, recorded_restore))
 }
 
+/// The last operation of a block past a call's boundary: its `CallDefine` and `CallRestore` run and the lanes it inserts.
+fn terminal_past_call_boundary(ops: &[SSAOp]) -> Option<&SSAOp> {
+    let call_defined = ops
+        .iter()
+        .filter_map(|op| match op {
+            SSAOp::CallDefine { dst } => Some(dst),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    ops.iter().rev().find(|op| match op {
+        SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. } => false,
+        SSAOp::Insert(insert) => !call_defined.contains(&insert.value),
+        _ => true,
+    })
+}
+
 /// Convention-clobbered registers this body leaves exactly as it found them
 /// at every exit.
 ///
@@ -778,12 +794,7 @@ pub(crate) fn preserved_call_carriers(
         if !function.successors(block.addr).is_empty() {
             continue;
         }
-        let terminal = block
-            .ops
-            .iter()
-            .rev()
-            .find(|op| !matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }));
-        match terminal {
+        match terminal_past_call_boundary(&block.ops) {
             Some(SSAOp::Return { .. }) => saw_return = true,
             Some(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {}
             _ => return BTreeSet::new(),

@@ -381,6 +381,24 @@ mod tests {
         assert_eq!(default.return_register().map(Slot::name), Some("x0"));
     }
 
+    /// AAPCS64 keeps only the low halves of `v8..v15`, which the data names `d8..d15`.
+    #[test]
+    fn aarch64_preserves_only_the_low_half_of_its_callee_saved_vectors() {
+        let conventions = Conventions::for_arch("aarch64", 64).expect("arm-64 conventions");
+        let default = conventions.default_convention().expect("default");
+        let vectors = default
+            .preserved
+            .iter()
+            .filter(|reg| !reg.starts_with('x') && *reg != "sp")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vectors,
+            ["d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15"]
+        );
+        assert!(default.clobbered.iter().any(|reg| reg == "q16"));
+        assert!(!default.clobbered.iter().any(|reg| reg.starts_with('v')));
+    }
+
     #[test]
     fn a_float_slot_keeps_every_width_that_spells_it() {
         let conventions = Conventions::for_arch("aarch64", 64).expect("arm-64 conventions");

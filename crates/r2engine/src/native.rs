@@ -1303,11 +1303,7 @@ fn restate(
         r2il::refusal_evidence!("restate-interface", "the slots do not restate: {error:?}");
     })
     .ok()?
-    .with_role_register_names(interface.role_register_names())
-    .with_preserved_call_carriers(
-        interface.stack_pointer_preserved_across_calls(),
-        interface.frame_pointer_preserved_across_calls(),
-    );
+    .with_role_register_names(interface.role_register_names());
     let carried = |what: &str, placed: Result<_, _>| {
         placed
             .inspect_err(|error| {

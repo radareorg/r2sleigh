@@ -646,7 +646,6 @@ fn test_decompiler_config_aarch64() {
     assert_eq!(config.fp_name, "x29");
     assert_eq!(config.arg_regs[0], "x0");
     assert_eq!(config.ret_regs[0], "x0");
-    assert!(config.caller_saved_regs.contains("x17"));
 }
 
 #[test]

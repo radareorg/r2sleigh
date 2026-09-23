@@ -1446,10 +1446,6 @@ pub struct SourceFunctionInterface {
     return_logical_value: Option<SourceLogicalValue>,
     type_graph: Option<SourceTypeGraph>,
     stack_slot_roles_complete: bool,
-    /// The convention states that a callee restores these carriers, so a
-    /// consumer may treat them as surviving a call rather than assuming it.
-    stack_pointer_preserved_across_calls: bool,
-    frame_pointer_preserved_across_calls: bool,
     /// Which of this function's own parameters its body proves is a format
     /// string, for callers whose prototype for it names none. A property of
     /// the function, unlike the per-callsite count rule a literal decides.
@@ -1857,10 +1853,6 @@ impl SourceFunctionInterface {
             return_logical_value,
             type_graph,
             stack_slot_roles_complete: require_exact_stack_slot_roles,
-            // Preservation is recorded by the capture, which is where the
-            // convention is known; a bare interface claims neither.
-            stack_pointer_preserved_across_calls: false,
-            frame_pointer_preserved_across_calls: false,
             body_proven_format_parameter: None,
             body_proven_return_address: false,
             prototype_from_source_types: false,
@@ -2343,25 +2335,6 @@ impl SourceFunctionInterface {
 
     pub const fn type_graph(&self) -> Option<&SourceTypeGraph> {
         self.type_graph.as_ref()
-    }
-
-    /// Record that the convention restores these carriers across a call.
-    pub fn with_preserved_call_carriers(
-        mut self,
-        stack_pointer: bool,
-        frame_pointer: bool,
-    ) -> Self {
-        self.stack_pointer_preserved_across_calls = stack_pointer;
-        self.frame_pointer_preserved_across_calls = frame_pointer;
-        self
-    }
-
-    pub const fn stack_pointer_preserved_across_calls(&self) -> bool {
-        self.stack_pointer_preserved_across_calls
-    }
-
-    pub const fn frame_pointer_preserved_across_calls(&self) -> bool {
-        self.frame_pointer_preserved_across_calls
     }
 
     pub const fn stack_slot_roles_complete(&self) -> bool {
@@ -3684,6 +3657,55 @@ mod tests {
         assert_eq!(no_implicit.owned_entry_relative_envelope(0), Some(0..0));
         assert!(!no_implicit.owns_entry_relative_range(0, 0, 1));
         assert!(no_implicit.owns_entry_relative_range(-16, -16, 16));
+    }
+
+    /// A storage survives a call only where preserved registers cover every byte of it.
+    #[test]
+    fn a_call_preserves_exactly_the_bytes_its_preserved_registers_cover() {
+        // Two adjacent halves, a split pair with a gap, and a register nested in a wider preserved one.
+        let effect = SourceCallEffect::new(
+            [register_storage(0x40, 8)],
+            [
+                register_storage(0x10, 8),
+                register_storage(0x18, 8),
+                register_storage(0x80, 4),
+                register_storage(0x88, 4),
+                register_storage(0xa0, 16),
+                register_storage(0xa4, 4),
+            ],
+        )
+        .expect("a call effect");
+        assert!(effect.preserves(register_storage(0x10, 16)));
+        assert!(effect.preserves(register_storage(0x14, 8)));
+        assert!(!effect.preserves(register_storage(0x80, 16)));
+        assert!(effect.preserves(register_storage(0x88, 4)));
+        assert!(effect.preserves(register_storage(0xa4, 4)));
+        assert!(effect.preserves(register_storage(0xa0, 16)));
+        // A partial overlap is not preserved, nor is anything past the covered prefix.
+        assert!(!effect.preserves(register_storage(0x0c, 8)));
+        assert!(!effect.preserves(register_storage(0x18, 16)));
+        assert!(!effect.preserves(register_storage(0xa8, 16)));
+        assert!(effect.clobbers(register_storage(0x40, 8)));
+        assert!(effect.clobbers(register_storage(0x30, 8)));
+        assert!(!effect.preserves(CanonicalStorageId {
+            space: CanonicalStorageSpace::Unique,
+            offset: 0x10,
+            size: 8,
+        }));
+    }
+
+    /// One register named both clobbered and preserved, even through an alias, is a contradiction.
+    #[test]
+    fn a_call_effect_naming_one_register_both_ways_refuses() {
+        assert_eq!(
+            SourceCallEffect::new([register_storage(0x10, 8)], [register_storage(0x14, 4)]),
+            Err(SourceMachineRolesError::ContradictoryCallEffect)
+        );
+        assert_eq!(
+            SourceCallEffect::new([register_storage(0x10, 8)], [register_storage(0x18, 8)])
+                .map(|effect| (effect.clobbered().len(), effect.preserved().len())),
+            Ok((1, 1))
+        );
     }
 }
 

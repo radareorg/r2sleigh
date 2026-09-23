@@ -345,6 +345,7 @@ mod tests {
             Some(interface),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(context.abi_model().argument_placement_is_coherent());

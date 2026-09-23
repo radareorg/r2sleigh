@@ -135,12 +135,8 @@ impl SSAFunction {
         // halves have to be in hand before SSA construction, because it is
         // construction that decides which value each later read of the carrier
         // sees.
-        let stack_pointer_restored_by_callee = stack_pointer_carrier.filter(|_| {
-            stack_pointer_restored_across_calls(
-                call_preserved_carriers,
-                questions.for_machine_carriers(),
-            )
-        });
+        let stack_pointer_restored_by_callee = stack_pointer_carrier
+            .filter(|_| call_preserved_carriers.is_some_and(|carriers| carriers.stack_pointer()));
         // The carriers the convention names at this function's own boundary:
         // every caller reads the result register and writes the argument
         // registers, so the whole of each is used even where the body's own
@@ -409,17 +405,12 @@ impl SSAFunction {
                     used.push((carrier.offset, carrier.size));
                 }
             }
-            // A call's clobbers widen a root only in a function that makes one.
-            let calls = cfg.blocks().any(|block| {
-                block
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }))
-            });
-            if let Some(call_boundaries) = call_boundaries.filter(|_| calls) {
-                for storage in &call_boundaries.clobbered {
-                    used.push((storage.offset, storage.size));
-                }
+            // A call's clobbers widen a root; a body that never calls has none.
+            for storage in call_boundaries
+                .into_iter()
+                .flat_map(|config| &config.clobbered)
+            {
+                used.push((storage.offset, storage.size));
             }
             Arc::new(families.with_program_roots(used))
         });

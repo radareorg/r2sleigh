@@ -281,6 +281,34 @@ mod tests {
         );
     }
 
+    /// A body that calls under no stated call effect refuses; a leaf needs none.
+    #[test]
+    fn a_calling_body_without_a_call_effect_refuses_and_a_leaf_builds() {
+        let disasm = create_x86_64_disasm();
+        let arch = r2sleigh_lift::create_x86_64_spec();
+        let prepare = |hex: &str, size: usize| {
+            let block = disasm
+                .lift_block(&pad_hex(hex), 0x1000, size)
+                .expect("lifted body");
+            r2ssa::SsaArtifact::for_decompile_with_interfaces_and_control(
+                &[block],
+                Some(&arch),
+                None,
+                r2ssa::SourceMachineRoles::default(),
+                Vec::new(),
+                None,
+                &r2ssa::SsaExecutionControl::default(),
+            )
+        };
+        // mov rax, rdi; call 0x2000; ret
+        assert_eq!(
+            prepare("4889f8e8f80f0000c3", 9).err(),
+            Some(r2ssa::SsaPrepareError::NoCallEffect)
+        );
+        // mov rax, rdi; ret
+        assert!(prepare("4889f8c3", 4).is_ok());
+    }
+
     #[test]
     fn decompile_prep_x86_call_boundaries_materialize_rax_defs_even_without_prior_rax_write() {
         let disasm = create_x86_64_disasm();

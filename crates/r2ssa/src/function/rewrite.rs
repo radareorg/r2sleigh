@@ -517,13 +517,10 @@ impl SSAFunction {
         //
         // Operations whose effect the model does not describe are a different
         // matter: nothing says what they leave behind, so they still stop this.
-        // The convention's call effect, stated without a linked signature too, and only then the interface's copy.
-        let call_carriers_are_restored =
-            stack_pointer_restored_across_calls(self.call_preserved_carriers, function_interface)
-                && frame_pointer_restored_across_calls(
-                    self.call_preserved_carriers,
-                    function_interface,
-                );
+        // The convention's call effect states it, with or without a linked signature.
+        let call_carriers_are_restored = self
+            .call_preserved_carriers
+            .is_some_and(|carriers| carriers.stack_pointer() && carriers.frame_pointer());
         // A user operation writes only its output varnode, so one whose output
         // is not a frame carrier -- a NEON reduction into a vector register --
         // leaves the entry-relative facts standing; one without an output, a

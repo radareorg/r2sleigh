@@ -563,10 +563,7 @@ pub struct SourceMachineContext {
     register_storages_by_name: BTreeMap<String, CanonicalStorageId>,
     /// What the convention says a call does to the registers, where it says.
     call_effect: Option<SourceCallEffect>,
-    /// The registers a call in this body may leave changed, from the call
-    /// effect. The same set construction defines after every call, so a body
-    /// that proves one of these untouched at every return is stating a fact
-    /// its callers can consume without translation.
+    /// What a call in this body may leave changed: the set construction defines after every call.
     call_clobbered_carriers: Box<[CanonicalStorageId]>,
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
@@ -1038,6 +1035,7 @@ impl SourceMachineContext {
             None,
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         )
     }
@@ -1048,6 +1046,7 @@ impl SourceMachineContext {
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: Option<SourceConventionSlots>,
+        call_effect: Option<SourceCallEffect>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Self {
         Self::from_blocks_with_interfaces_and_tail_calls(
@@ -1056,6 +1055,7 @@ impl SourceMachineContext {
             function_interface,
             machine_roles,
             convention_slots,
+            call_effect,
             call_site_interfaces,
             Vec::new(),
         )
@@ -1067,6 +1067,7 @@ impl SourceMachineContext {
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: Option<SourceConventionSlots>,
+        call_effect: Option<SourceCallEffect>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
     ) -> Self {
@@ -1076,6 +1077,7 @@ impl SourceMachineContext {
             function_interface,
             machine_roles,
             convention_slots,
+            call_effect,
             call_site_interfaces,
             tail_call_identities,
             &BTreeSet::new(),
@@ -1093,10 +1095,13 @@ impl SourceMachineContext {
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         convention_slots: Option<SourceConventionSlots>,
+        call_effect: Option<SourceCallEffect>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
         terminal_blocks: &BTreeSet<u64>,
     ) -> Self {
+        // One walk over the body names every register it touches, for the projections and the clobbers alike.
+        let observed = observed_register_storages(blocks);
         // The architecture says where it returns a value, for a function whose
         // ABI was never recovered.
         let architecture_result_slot = arch.and_then(|arch| {
@@ -1147,10 +1152,10 @@ impl SourceMachineContext {
                         .iter()
                         .map(|projection| (projection.written, *projection))
                         .collect::<BTreeMap<_, _>>();
-                    for storage in observed_register_storages(blocks) {
+                    for storage in &observed {
                         projections
-                            .entry(storage)
-                            .or_insert_with(|| query.project(storage));
+                            .entry(*storage)
+                            .or_insert_with(|| query.project(*storage));
                     }
                     (
                         MachineRegisterGeometryState::Available,
@@ -1382,8 +1387,11 @@ impl SourceMachineContext {
             architecture_result_slot,
             abi_model,
             register_storages_by_name,
-            call_effect: None,
-            call_clobbered_carriers: Box::default(),
+            call_clobbered_carriers: call_effect
+                .as_ref()
+                .map(|effect| clobbered_by_a_call(effect, &observed))
+                .unwrap_or_default(),
+            call_effect,
             register_geometry_state,
             register_projections,
             raw_call_sites,
@@ -1596,19 +1604,6 @@ impl SourceMachineContext {
     /// What the convention says a call does to the registers.
     pub const fn call_effect(&self) -> Option<&SourceCallEffect> {
         self.call_effect.as_ref()
-    }
-
-    /// Bind what a call does, and with it what a call in these blocks clobbers.
-    pub(crate) fn bind_call_effect(
-        &mut self,
-        effect: Option<SourceCallEffect>,
-        blocks: &[R2ILBlock],
-    ) {
-        self.call_clobbered_carriers = effect
-            .as_ref()
-            .map(|effect| clobbered_by_a_call(effect, &observed_register_storages(blocks)))
-            .unwrap_or_default();
-        self.call_effect = effect;
     }
 
     /// Whether a call leaves the frame carriers where they were, per the call effect.
@@ -2460,6 +2455,7 @@ mod tests {
             None,
             SourceMachineRoles::default(),
             Some(slots),
+            None,
             Vec::new(),
         );
 
@@ -2514,6 +2510,7 @@ mod tests {
                 None,
                 SourceMachineRoles::default(),
                 Some(SourceConventionSlots::new(spelling, [], None).expect("convention slots")),
+                None,
                 Vec::new(),
             )
         };
@@ -2570,6 +2567,7 @@ mod tests {
             Some(base_interface),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         let stacked = SourceMachineContext::from_blocks_with_interfaces(
@@ -2577,6 +2575,7 @@ mod tests {
             Some(&little),
             Some(stacked_interface),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -2610,6 +2609,7 @@ mod tests {
             None,
             SourceMachineRoles::default(),
             None,
+            None,
             vec![call_interface(false)],
         );
         let complete = SourceMachineContext::from_blocks_with_interfaces(
@@ -2617,6 +2617,7 @@ mod tests {
             Some(&little),
             None,
             SourceMachineRoles::default(),
+            None,
             None,
             vec![call_interface(true)],
         );
@@ -2843,6 +2844,7 @@ mod tests {
             Some(make()),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!without_roles.abi_model().machine_carriers_are_coherent());
@@ -2856,6 +2858,7 @@ mod tests {
                     .expect("return-address role"),
             ),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -2871,6 +2874,7 @@ mod tests {
                     .expect("exact machine roles"),
             ),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -2892,6 +2896,7 @@ mod tests {
                 .expect("compatibility interface remains representable for refusal diagnostics"),
             ),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -2915,6 +2920,7 @@ mod tests {
             ),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!narrow.abi_model().machine_carriers_are_coherent());
@@ -2934,6 +2940,7 @@ mod tests {
             ),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!subregister_sp.abi_model().machine_carriers_are_coherent());
@@ -2950,6 +2957,7 @@ mod tests {
                     .expect("standalone binding cannot inspect ArchSpec parentage"),
             ),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -2987,6 +2995,7 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(all_abi_questions_coherent(coherent.abi_model()));
@@ -2997,6 +3006,7 @@ mod tests {
             Some(&arch),
             Some(make()),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -3018,6 +3028,7 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!context.abi_model().machine_carriers_are_coherent());
@@ -3032,6 +3043,7 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!context.abi_model().machine_carriers_are_coherent());
@@ -3044,6 +3056,7 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!context.abi_model().machine_carriers_are_coherent());
@@ -3055,6 +3068,7 @@ mod tests {
             Some(&wrong_ram_width),
             Some(exact),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -3108,6 +3122,7 @@ mod tests {
             Some(make_explicit(frame_pointer)),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(all_abi_questions_coherent(coherent.abi_model()));
@@ -3125,6 +3140,7 @@ mod tests {
                 return_address,
             )),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -3149,6 +3165,7 @@ mod tests {
             Some(&arch),
             Some(absent),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -3194,6 +3211,7 @@ mod tests {
             Some(narrow_interface),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(!narrow.abi_model().machine_carriers_are_coherent());
@@ -3215,6 +3233,7 @@ mod tests {
                 return_address,
             )),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -3251,6 +3270,7 @@ mod tests {
             Some(&arch),
             Some(overlapping),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );
@@ -3673,6 +3693,7 @@ mod tests {
             None,
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
             vec![identity],
         );
@@ -3691,6 +3712,7 @@ mod tests {
             None,
             None,
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
             vec![wrong_target],
@@ -3790,6 +3812,7 @@ mod tests {
             Some(interface),
             SourceMachineRoles::default(),
             None,
+            None,
             Vec::new(),
         );
         assert!(context.abi_model().is_available());
@@ -3819,6 +3842,7 @@ mod tests {
             Some(&arch),
             Some(interface),
             SourceMachineRoles::default(),
+            None,
             None,
             Vec::new(),
         );

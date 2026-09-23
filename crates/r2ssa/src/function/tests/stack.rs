@@ -58,6 +58,7 @@ fn tail_slot_is_a_terminal_callsite_through_either_ssa_shape() {
             None,
             SourceMachineRoles::default(),
             None,
+            None,
             vec![interface],
             vec![identity],
         );
@@ -621,9 +622,9 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
         None,
         roles,
         Some(convention),
+        preserving([register(64)]),
         vec![interface],
     );
-    machine_context.bind_call_effect(preserving([register(64)]), &blocks);
     machine_context.bind_source_string_literals(&[(0x3000, "%d".to_string())]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         &blocks,
@@ -1192,8 +1193,7 @@ fn a_mask_that_aligns_the_stack_pointer_opens_a_frame_of_its_own() {
     .with_return_address_storage(ra_storage)
     .expect("custom return-address carrier")
     .with_stack_pointer_storage(sp_storage)
-    .expect("custom stack-pointer carrier")
-    .with_preserved_call_carriers(true, false);
+    .expect("custom stack-pointer carrier");
     let blocks = vec![R2ILBlock {
         addr: 0x3400,
         size: 4,
@@ -1278,8 +1278,7 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
     .with_return_address_storage(ra_storage)
     .expect("custom return-address carrier")
     .with_stack_pointer_storage(sp_storage)
-    .expect("custom stack-pointer carrier")
-    .with_preserved_call_carriers(true, false);
+    .expect("custom stack-pointer carrier");
 
     for (name, boundary) in [
         (

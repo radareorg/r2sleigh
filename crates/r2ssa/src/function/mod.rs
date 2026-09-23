@@ -171,7 +171,6 @@ pub(crate) struct InterfaceQuestions<'a> {
     return_boundary: bool,
     argument_placement: bool,
     frame_geometry: bool,
-    machine_carriers: bool,
 }
 
 impl<'a> InterfaceQuestions<'a> {
@@ -182,7 +181,6 @@ impl<'a> InterfaceQuestions<'a> {
             return_boundary: abi.return_boundary_is_coherent(),
             argument_placement: abi.argument_placement_is_coherent(),
             frame_geometry: abi.frame_geometry_is_coherent(),
-            machine_carriers: abi.machine_carriers_are_coherent(),
         }
     }
 
@@ -193,7 +191,6 @@ impl<'a> InterfaceQuestions<'a> {
             return_boundary: false,
             argument_placement: false,
             frame_geometry: false,
-            machine_carriers: false,
         }
     }
 
@@ -207,10 +204,6 @@ impl<'a> InterfaceQuestions<'a> {
 
     fn for_frame_geometry(self) -> Option<&'a SourceFunctionInterface> {
         self.interface.filter(|_| self.frame_geometry)
-    }
-
-    fn for_machine_carriers(self) -> Option<&'a SourceFunctionInterface> {
-        self.interface.filter(|_| self.machine_carriers)
     }
 }
 
@@ -654,6 +647,7 @@ impl SsaArtifact {
                 function_interface,
                 SourceMachineRoles::default(),
                 None,
+                None,
                 call_site_interfaces,
             ),
         ))
@@ -742,16 +736,16 @@ impl SsaArtifact {
             callee_preserved_carriers,
             callee_interfaces,
         } = inputs;
-        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+        let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
             arch,
             function_interface,
             machine_roles,
             convention_slots,
+            call_effect,
             call_site_interfaces,
             tail_call_identities,
         );
-        machine_context.bind_call_effect(call_effect, blocks);
         Some(Self::new_with_context(
             SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                 blocks,
@@ -771,8 +765,7 @@ impl SsaArtifact {
         ))
     }
 
-    /// Build controlled decompiler SSA with explicit source interfaces,
-    /// independently source-owned machine roles, and what a call does.
+    /// Build controlled decompiler SSA from explicit source interfaces, machine roles and call effect.
     pub fn for_decompile_with_interfaces_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
@@ -782,15 +775,15 @@ impl SsaArtifact {
         call_effect: Option<r2source::SourceCallEffect>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
+        let machine_context = SourceMachineContext::from_blocks_with_interfaces(
             blocks,
             arch,
             function_interface,
             machine_roles,
             None,
+            call_effect,
             call_site_interfaces,
         );
-        machine_context.bind_call_effect(call_effect, blocks);
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks,
             arch,
@@ -836,6 +829,7 @@ impl SsaArtifact {
             Some(arch),
             Some(function_interface),
             SourceMachineRoles::default(),
+            None,
             None,
             call_site_interfaces,
         );
@@ -933,6 +927,7 @@ impl SsaArtifact {
                 arch,
                 function_interface,
                 SourceMachineRoles::default(),
+                None,
                 None,
                 call_site_interfaces,
             ),
@@ -2129,6 +2124,7 @@ impl TrustedSsaArtifact {
                         None,
                         *source.machine_roles(),
                         Some(source.convention_slots().clone()),
+                        source.call_effect().cloned(),
                         correlated_call_sites.interfaces.clone(),
                         correlated_call_sites.tail_calls.clone(),
                     );
@@ -2136,8 +2132,6 @@ impl TrustedSsaArtifact {
                 // the final pass reads; without them every format was unproven.
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
-                provisional_machine_context
-                    .bind_call_effect(source.call_effect().cloned(), &blocks);
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
@@ -2198,11 +2192,11 @@ impl TrustedSsaArtifact {
                 function_interface,
                 *source.machine_roles(),
                 Some(source.convention_slots().clone()),
+                source.call_effect().cloned(),
                 correlated_call_sites.interfaces,
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
             );
-        machine_context.bind_call_effect(source.call_effect().cloned(), &blocks);
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
@@ -2435,11 +2429,7 @@ impl DecompilePrepFacts {
 /// It contains the CFG, dominator tree, and SSA operations for all blocks.
 #[derive(Debug)]
 pub struct SSAFunction {
-    /// Whether a call leaves the carriers that address this frame alone.
-    ///
-    /// Held here rather than read off the function interface, because the
-    /// convention states it for functions that have no interface, and those
-    /// are the ones that need it.
+    /// Whether a call leaves the carriers that address this frame alone, as the call effect says.
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
     /// The lifted memory operations promotion took out of memory.
     ///
@@ -2986,18 +2976,28 @@ fn decompile_call_boundary_config(
     let Some(arch) = arch else {
         return Ok(None);
     };
-    let clobbered = machine_context.call_clobbered_carriers().to_vec();
-    if clobbered.is_empty() && stack_pointer_restored_by_callee.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(CallBoundaryConfig {
+    // A body that never calls has no call to clobber anything.
+    let (clobbered, preserved) = match machine_context.call_effect().filter(|_| calls) {
+        Some(effect) => (
+            machine_context.call_clobbered_carriers().to_vec(),
+            effect.preserved().to_vec(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    let config = CallBoundaryConfig {
         clobbered,
+        preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         result_by_target: callees.results,
         argument_regs: call_argument_register_defs(arch),
         return_regs: return_read_register_defs(arch),
-    }))
+    };
+    let inert = config.clobbered.is_empty()
+        && config.stack_pointer_restored_by_callee.is_none()
+        && config.argument_regs.is_empty()
+        && config.return_regs.is_empty();
+    Ok((!inert).then_some(config))
 }
 
 /// The registers a call reads without naming them in an operand: the
@@ -3076,42 +3076,6 @@ fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
         "aarch64" | "arm64" => named(&[("x0", 8), ("w0", 4), ("x1", 8), ("w1", 4)]),
         _ => Vec::new(),
     }
-}
-
-/// Whether the convention puts the stack pointer back after a call.
-///
-/// The convention's call effect states this for every function, including the
-/// ones whose signature was never linked; the interface's copy is the fallback,
-/// and it is defaulted to false for exactly those functions, so asking it first
-/// asks the answerer that does not know.
-fn stack_pointer_restored_across_calls(
-    carriers: Option<SourceCallPreservedCarriers>,
-    function_interface: Option<&SourceFunctionInterface>,
-) -> bool {
-    carriers.map_or_else(
-        || {
-            function_interface
-                .is_some_and(SourceFunctionInterface::stack_pointer_preserved_across_calls)
-        },
-        SourceCallPreservedCarriers::stack_pointer,
-    )
-}
-
-/// The same question for the frame pointer, which has no carrier to restore
-/// when the function keeps none.
-fn frame_pointer_restored_across_calls(
-    carriers: Option<SourceCallPreservedCarriers>,
-    function_interface: Option<&SourceFunctionInterface>,
-) -> bool {
-    carriers.map_or_else(
-        || {
-            function_interface.is_some_and(|interface| {
-                interface.frame_pointer_storage().is_none()
-                    || interface.frame_pointer_preserved_across_calls()
-            })
-        },
-        SourceCallPreservedCarriers::frame_pointer,
-    )
 }
 
 impl SSAFunction {
@@ -3899,17 +3863,25 @@ impl RegisterFamilyInfo {
     /// value of the family has under `doc/adr-register-identity.md`. `None`
     /// for a range no family covers, and for one that is already its root.
     pub(crate) fn root_slot_over(&self, offset: u64, size: u32) -> Option<RegisterFamilySlot> {
+        let root = self.root_slot_containing(offset, size)?;
+        (root.offset != offset || root.width != size).then_some(root)
+    }
+
+    /// The root a storage range lies in, which may be the range itself.
+    pub(crate) fn root_slot_containing(
+        &self,
+        offset: u64,
+        size: u32,
+    ) -> Option<RegisterFamilySlot> {
         let member = self.member_at_offset(offset, size)?;
         let end = offset.saturating_add(u64::from(size));
-        let root = self
-            .program_roots
+        self.program_roots
             .get(&member.family_id)
             .copied()
             .filter(|root| {
                 root.offset <= offset && end <= root.offset.saturating_add(u64::from(root.width))
             })
-            .or_else(|| self.widest_slot_containing(member))?;
-        (root.offset != offset || root.width != size).then_some(root)
+            .or_else(|| self.widest_slot_containing(member))
     }
 
     fn widest_slot_containing(&self, member: RegisterFamilyMember) -> Option<RegisterFamilySlot> {

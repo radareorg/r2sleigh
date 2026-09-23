@@ -73,8 +73,10 @@ struct LaneState {
 /// Decompiler-safe call boundary policy.
 #[derive(Debug, Clone, Default)]
 pub struct CallBoundaryConfig {
-    /// Registers a call leaves changed in this body, which it defines afresh.
+    /// Registers a call leaves changed in this body, which it defines afresh; empty in a body that never calls.
     pub clobbered: Vec<CanonicalStorageId>,
+    /// Registers the convention says a call leaves as it found them, sorted.
+    pub preserved: Vec<CanonicalStorageId>,
     /// The carrier the callee puts back where it found it.
     ///
     /// A call instruction's own p-code carries the whole architectural cost of
@@ -108,6 +110,37 @@ pub struct CallBoundaryConfig {
 }
 
 impl CallBoundaryConfig {
+    /// The byte ranges of `root` a call writes, in offset order; empty where it keeps every byte.
+    pub(crate) fn written_within(&self, root: CanonicalStorageId) -> Vec<(u64, u64)> {
+        let end = root.offset + u64::from(root.size);
+        let mut written = Vec::new();
+        let mut start = root.offset;
+        // One sweep over the sorted preserved ranges, emitting the gaps between them.
+        for kept in self
+            .preserved
+            .iter()
+            .filter(|kept| kept.space == root.space)
+        {
+            let kept_end = kept.offset + u64::from(kept.size);
+            if kept_end <= start || kept.offset >= end {
+                continue;
+            }
+            if kept.offset > start {
+                written.push((start, kept.offset));
+            }
+            start = start.max(kept_end);
+        }
+        if start < end {
+            written.push((start, end));
+        }
+        written
+    }
+
+    /// Whether a call leaves some byte of `root` as it found it.
+    pub(crate) fn keeps_part_of(&self, root: CanonicalStorageId) -> bool {
+        self.written_within(root) != [(root.offset, root.offset + u64::from(root.size))]
+    }
+
     /// What this call's own callee says about the convention, asked once for
     /// both consumers: only a direct call names a callee whose boundary may
     /// have been read.
@@ -692,6 +725,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                     );
                 }
 
+                let mut written_lanes = Vec::new();
                 if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
                     && let Some(boundary) = call_boundaries
                 {
@@ -704,7 +738,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         boundary.callee_boundary(op),
                         reg_names,
                     );
-                    for (dst, storage) in boundary_defs {
+                    for (dst, storage) in boundary_defs.retained {
                         record_canonical_storage(
                             &mut result.canonical_storage_by_var,
                             &mut result.ambiguous_storage_vars,
@@ -712,6 +746,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                             storage,
                         );
                     }
+                    written_lanes = boundary_defs.written_lanes;
                 }
 
                 // After the clobbers, not before them: the run of `CallDefine`
@@ -744,6 +779,17 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         &mut result.ambiguous_storage_vars,
                         &dst,
                         identity.storage,
+                    );
+                }
+                let block_ops = result.blocks.get_mut(&block_addr).unwrap();
+                for (var, storage) in
+                    append_written_lane_inserts(block_ops, ctx, &mut defined_vars, written_lanes)
+                {
+                    record_canonical_storage(
+                        &mut result.canonical_storage_by_var,
+                        &mut result.ambiguous_storage_vars,
+                        &var,
+                        storage,
                     );
                 }
                 // Everything this iteration appended -- the lane projections,
@@ -928,53 +974,23 @@ fn append_call_boundary_defs(
     call_boundaries: &CallBoundaryConfig,
     callee: CalleeBoundary<'_>,
     reg_names: Option<&RegisterNameMap>,
-) -> Vec<(SSAVar, CanonicalStorageId)> {
+) -> CallBoundaryDefs {
+    let mut defs = CallBoundaryDefs::default();
     let Some(block_ops) = blocks.get_mut(&block_addr) else {
-        return Vec::new();
+        return defs;
     };
-    let mut retained = Vec::new();
 
     // A call clobbers each family's root once.
-    let mut clobbered: BTreeSet<RenameIdentity> = call_boundaries
+    let clobbered: BTreeSet<RenameIdentity> = call_boundaries
         .clobbered
         .iter()
         .map(|storage| crate::phi::clobber_identity(*storage, reg_names, ctx.families.as_deref()))
         .collect();
     // A callee's own result carrier comes back changed whatever the convention says.
-    if let Some(reg) = callee.result {
-        let mut actual_identities: BTreeSet<RenameIdentity> = match ctx
-            .families
-            .as_deref()
-            .and_then(|families| families.widest_slot_for_name(&reg.name))
-        {
-            Some(root) => BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]),
-            None => ctx
-                .matching_identities_ci(&reg.name, reg.size)
-                .into_iter()
-                .collect(),
-        };
-        if actual_identities.is_empty()
-            && let Some(reg_names) = reg_names
-        {
-            for ((offset, size), candidate) in reg_names {
-                if *size == reg.size && candidate.eq_ignore_ascii_case(&reg.name) {
-                    actual_identities.insert(RenameIdentity::new(
-                        candidate,
-                        CanonicalStorageId {
-                            space: crate::CanonicalStorageSpace::Register,
-                            offset: *offset,
-                            size: *size,
-                        },
-                    ));
-                }
-            }
-        }
-        if actual_identities.is_empty() {
-            actual_identities.insert(RenameIdentity::synthetic(&reg.name, reg.size));
-        }
-        clobbered.extend(actual_identities);
-    }
-    for identity in clobbered {
+    let results = callee.result.map_or_else(BTreeSet::new, |reg| {
+        callee_result_identities(ctx, reg, reg_names)
+    });
+    for identity in clobbered.union(&results) {
         let storage = identity.storage;
         if callee
             .preserved
@@ -983,12 +999,121 @@ fn append_call_boundary_defs(
             continue;
         }
         ctx.init_identity(identity.clone());
-        let dst = ctx.write_var(&identity);
-        defined_vars.push(identity);
+        if !results.contains(identity)
+            && let Some(lanes) = define_written_lanes(block_ops, ctx, call_boundaries, storage)
+        {
+            defs.written_lanes.push((identity.clone(), lanes));
+            continue;
+        }
+        let dst = ctx.write_var(identity);
+        defined_vars.push(identity.clone());
         if matches!(storage.space, crate::CanonicalStorageSpace::Register) {
-            retained.push((dst.clone(), storage));
+            defs.retained.push((dst.clone(), storage));
         }
         block_ops.push(SSAOp::CallDefine { dst });
+    }
+    defs
+}
+
+/// The identities a callee's own result carrier renames to.
+fn callee_result_identities(
+    ctx: &RenameContext,
+    reg: &CallBoundaryDef,
+    reg_names: Option<&RegisterNameMap>,
+) -> BTreeSet<RenameIdentity> {
+    let mut identities: BTreeSet<RenameIdentity> = match ctx
+        .families
+        .as_deref()
+        .and_then(|families| families.widest_slot_for_name(&reg.name))
+    {
+        Some(root) => BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]),
+        None => ctx
+            .matching_identities_ci(&reg.name, reg.size)
+            .into_iter()
+            .collect(),
+    };
+    if identities.is_empty()
+        && let Some(reg_names) = reg_names
+    {
+        identities.extend(
+            reg_names
+                .iter()
+                .filter(|((_, size), candidate)| {
+                    *size == reg.size && candidate.eq_ignore_ascii_case(&reg.name)
+                })
+                .map(|((offset, size), candidate)| {
+                    RenameIdentity::new(
+                        candidate,
+                        CanonicalStorageId {
+                            space: crate::CanonicalStorageSpace::Register,
+                            offset: *offset,
+                            size: *size,
+                        },
+                    )
+                }),
+        );
+    }
+    if identities.is_empty() {
+        identities.insert(RenameIdentity::synthetic(&reg.name, reg.size));
+    }
+    identities
+}
+
+/// Define the bytes of `root` a call writes, each as a lane, where the convention keeps the rest.
+fn define_written_lanes(
+    block_ops: &mut Vec<SSAOp>,
+    ctx: &mut RenameContext,
+    call_boundaries: &CallBoundaryConfig,
+    root: CanonicalStorageId,
+) -> Option<Vec<(SSAVar, u64)>> {
+    let families = ctx.families.clone()?;
+    let slot = families
+        .root_slot_containing(root.offset, root.size)
+        .filter(|slot| slot.offset == root.offset && slot.width == root.size)?;
+    if !call_boundaries.keeps_part_of(root) {
+        return None;
+    }
+    let written = call_boundaries.written_within(root);
+    let mut lanes = Vec::with_capacity(written.len());
+    for (start, end) in written {
+        let size = u32::try_from(end - start).expect("a lane inside its root");
+        let lane = ctx.fresh_lane_temp(size);
+        block_ops.push(SSAOp::CallDefine { dst: lane.clone() });
+        lanes.push((lane, families.lane_lsb_byte(slot, start, size) * 8));
+    }
+    Some(lanes)
+}
+
+/// What a call boundary defined: whole roots, and the written lanes of roots it keeps part of.
+#[derive(Default)]
+struct CallBoundaryDefs {
+    retained: Vec<(SSAVar, CanonicalStorageId)>,
+    written_lanes: Vec<(RenameIdentity, Vec<(SSAVar, u64)>)>,
+}
+
+/// Insert each lane a call wrote into its root, after the run of `CallDefine` and `CallRestore`.
+fn append_written_lane_inserts(
+    block_ops: &mut Vec<SSAOp>,
+    ctx: &mut RenameContext,
+    defined_vars: &mut Vec<RenameIdentity>,
+    written_lanes: Vec<(RenameIdentity, Vec<(SSAVar, u64)>)>,
+) -> Vec<(SSAVar, CanonicalStorageId)> {
+    let mut retained = Vec::new();
+    for (identity, lanes) in written_lanes {
+        let mut root = ctx.read_var(&identity);
+        retained.push((root.clone(), identity.storage));
+        for (lane, position) in lanes {
+            let after = ctx.write_var(&identity);
+            defined_vars.push(identity.clone());
+            block_ops.push(SSAOp::Insert(Box::new(crate::op::InsertOp {
+                dst: after.clone(),
+                src: root,
+                value: lane,
+                position: SSAVar::constant(position, 4),
+            })));
+            retained.push((after.clone(), identity.storage));
+            root = after;
+        }
     }
     retained
 }

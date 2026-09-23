@@ -851,3 +851,101 @@ fn what_a_call_clobbers_is_what_its_convention_says() {
         }
     }
 }
+
+/// Two AArch64 values held across a call to an import nothing declares, then stored:
+///
+/// ```text
+///   1000  ldr  d8, 0x1030       ; callee-saved: its low 64 bits survive
+///   1004  ldr  d16, 0x1038      ; caller-saved
+///   1008  bl   0x1020           ; the import's stub
+///   100c  adr  x9, 0x1040
+///   1010  str  d8, [x9]
+///   1014  str  d16, [x9, 8]
+///   1018  ret
+///   1020  ldr  x16, 0x1050 ; br x16   ; the stub, through its slot
+/// ```
+const AARCH64_HELD_ACROSS_A_CALL: &[u8] = &[
+    0x88, 0x01, 0x00, 0x5c, // 1000 ldr d8, 0x1030
+    0xb0, 0x01, 0x00, 0x5c, // 1004 ldr d16, 0x1038
+    0x06, 0x00, 0x00, 0x94, // 1008 bl 0x1020
+    0xa9, 0x01, 0x00, 0x10, // 100c adr x9, 0x1040
+    0x28, 0x01, 0x00, 0xfd, // 1010 str d8, [x9]
+    0x30, 0x05, 0x00, 0xfd, // 1014 str d16, [x9, 8]
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+    0x1f, 0x20, 0x03, 0xd5, // 101c nop
+    0x90, 0x01, 0x00, 0x58, // 1020 ldr x16, 0x1050
+    0x00, 0x02, 0x1f, 0xd6, // 1024 br x16
+    0x1f, 0x20, 0x03, 0xd5, // 1028 nop
+    0x1f, 0x20, 0x03, 0xd5, // 102c nop
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x3f, // 1030 1.5
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x40, // 1038 2.5
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 where d8 goes
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 where d16 goes
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 the stub's slot
+];
+
+/// AAPCS64 keeps `d8` across a call and not `d16`.
+#[test]
+fn a_call_keeps_the_low_half_of_a_callee_saved_vector_register() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let program = ImportCaller {
+        bytes: AARCH64_HELD_ACROSS_A_CALL,
+        stub: 0x1020,
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    for (store, clobbered) in [(0x1010, false), (0x1014, true)] {
+        let origin = stored_value_origin(prepared.artifact(), store);
+        assert_eq!(
+            matches!(origin, SSAOp::CallDefine { .. }),
+            clobbered,
+            "the store at {store:#x} reads what {origin:?} defined"
+        );
+    }
+}
+
+/// Every register a shipped default convention names is one register of its machine, so none is dropped.
+#[test]
+fn every_register_a_default_convention_names_is_one_of_its_machine() {
+    for (sleigh, family, bits) in [
+        ("x86-64", "x86-64", 64),
+        ("x86", "x86", 32),
+        ("aarch64", "aarch64", 64),
+        ("arm", "arm", 32),
+    ] {
+        let machine = Machine::new(sleigh, family, bits);
+        let convention = machine
+            .conventions
+            .default_convention()
+            .expect("a default convention");
+        let unplaced = convention
+            .clobbered
+            .iter()
+            .chain(&convention.preserved)
+            .filter(|name| {
+                let named = machine.embedded.arch.registers.iter();
+                named
+                    .filter(|register| register.name.eq_ignore_ascii_case(name))
+                    .count()
+                    != 1
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unplaced.is_empty(),
+            "{sleigh}/{}: {unplaced:?}",
+            convention.name
+        );
+        let effect = machine.effects[&convention.name]
+            .as_ref()
+            .expect("the default convention states a call effect");
+        assert_eq!(
+            effect.clobbered().len(),
+            convention.clobbered.len(),
+            "{sleigh}"
+        );
+        assert_eq!(
+            effect.preserved().len(),
+            convention.preserved.len(),
+            "{sleigh}"
+        );
+    }
+}

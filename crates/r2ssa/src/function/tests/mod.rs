@@ -63,6 +63,7 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
         None,
         SourceMachineRoles::default(),
         None,
+        None,
         vec![interface],
         vec![identity],
     );
@@ -1079,9 +1080,9 @@ fn variadic_format_call_artifact_formed(
         None,
         SourceMachineRoles::default(),
         Some(convention),
+        clobbering((0..4).map(slot), []),
         vec![interface],
     );
-    machine_context.bind_call_effect(clobbering((0..4).map(slot), []), &blocks);
     if let Some(format) = format {
         machine_context.bind_source_string_literals(&[(0x3000, format.to_string())]);
     }
@@ -1211,9 +1212,9 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
         None,
         SourceMachineRoles::default(),
         Some(convention),
+        clobbering((0..4).map(slot), []),
         vec![interface],
     );
-    machine_context.bind_call_effect(clobbering((0..4).map(slot), []), &blocks);
     machine_context
         .bind_source_string_literals(&[(0x3000, first.to_string()), (0x3010, second.to_string())]);
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
@@ -1376,9 +1377,9 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         None,
         SourceMachineRoles::default(),
         Some(convention),
+        clobbering((0..4).map(slot), []),
         vec![interface(first_call_index), interface(second_call_index)],
     );
-    machine_context.bind_call_effect(clobbering((0..4).map(slot), []), &blocks);
     machine_context.bind_source_string_literals(&[
         (0x3000, "%u:%u".to_string()),
         (0x3010, "complete: 100%%".to_string()),
@@ -2360,6 +2361,135 @@ fn a_body_that_calls_preserves_nothing_its_own_call_may_touch() {
         "{:?}",
         artifact.facts().boundaries.preserved_call_carriers
     );
+}
+
+/// Prepare blocks where a call clobbers the general registers and keeps `xmm8`, the low half of `ymm8`.
+fn prepared_keeping_xmm8(
+    blocks: Vec<(u64, Vec<R2ILOp>)>,
+    callee_preserved_carriers: CalleePreservedCarriers,
+) -> SsaArtifact {
+    let mut arch = call_preservation_arch();
+    arch.add_register(RegisterDef::new("ymm8", 0x100, 32));
+    arch.add_register(RegisterDef::new("xmm8", 0x100, 16));
+    let blocks = blocks
+        .into_iter()
+        .map(|(addr, ops)| R2ILBlock {
+            addr,
+            ..call_preservation_block(ops)
+        })
+        .collect::<Vec<_>>();
+    let clobbered = [0, 8, 16, 24].map(|offset| call_preservation_storage(offset, 8));
+    SsaArtifact::for_decompile_with(
+        &blocks,
+        DecompileInputs {
+            arch: Some(&arch),
+            call_effect: clobbering(clobbered, [call_preservation_storage(0x100, 16)]),
+            callee_preserved_carriers,
+            ..Default::default()
+        },
+    )
+    .expect("artifact")
+}
+
+/// Write the upper half of `ymm8`, the half a call does not keep.
+fn write_upper_ymm8() -> R2ILOp {
+    R2ILOp::Copy {
+        dst: make_reg(0x110, 16),
+        src: make_const(0, 16),
+    }
+}
+
+/// A call that never returns still ends its block when it writes part of a register it keeps the rest of.
+#[test]
+fn a_call_that_never_returns_ends_its_block_past_the_lanes_it_writes() {
+    let general = [0, 8, 16, 24].map(|offset| call_preservation_storage(offset, 8));
+    // The callee's body leaves every general register alone, so only the upper half of ymm8 changes.
+    let callee = BTreeMap::from([(0x2000, general.into_iter().collect::<BTreeSet<_>>())]);
+    let branch = R2ILOp::CBranch {
+        target: make_ram(0x1020, 8),
+        cond: make_reg(8, 1),
+    };
+    let ret = R2ILOp::Return {
+        target: make_const(0, 8),
+    };
+    let call = R2ILOp::Call {
+        target: make_ram(0x2000, 8),
+    };
+    let artifact = prepared_keeping_xmm8(
+        vec![
+            (0x1000, vec![write_upper_ymm8(), branch]),
+            (0x1010, vec![ret]),
+            (0x1020, vec![call]),
+        ],
+        callee,
+    );
+    let ends = artifact
+        .function()
+        .get_block(0x1020)
+        .expect("calling block");
+    assert!(
+        matches!(ends.ops.last(), Some(SSAOp::Insert(_))),
+        "{:?}",
+        ends.ops
+    );
+    let preserved = &artifact.facts().boundaries.preserved_call_carriers;
+    assert!(preserved.contains(&general[1]), "{preserved:?}");
+}
+
+/// The half of a register a call keeps is the value that reached the call, here a merge of two paths.
+#[test]
+fn a_call_keeps_the_merged_half_of_a_register_it_writes_part_of() {
+    let set_xmm8 = |value| R2ILOp::Copy {
+        dst: make_reg(0x100, 16),
+        src: make_const(value, 16),
+    };
+    let to_join = R2ILOp::Branch {
+        target: make_ram(0x1030, 8),
+    };
+    let call = R2ILOp::Call {
+        target: make_ram(0x2000, 8),
+    };
+    let store = R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: make_const(0x5000, 8),
+        val: make_reg(0x100, 16),
+    };
+    let ret = R2ILOp::Return {
+        target: make_const(0, 8),
+    };
+    let fork = R2ILOp::CBranch {
+        target: make_ram(0x1020, 8),
+        cond: make_reg(8, 1),
+    };
+    let artifact = prepared_keeping_xmm8(
+        vec![
+            (0x1000, vec![fork]),
+            (0x1010, vec![set_xmm8(1), to_join]),
+            (0x1020, vec![set_xmm8(2)]),
+            (0x1030, vec![write_upper_ymm8(), call, store, ret]),
+        ],
+        BTreeMap::new(),
+    );
+    let function = artifact.function();
+    let ops = || function.blocks().iter().flat_map(|block| &block.ops);
+    let merged = |value: &SSAVar| {
+        let mut phis = function.blocks().iter().flat_map(|block| &block.phis);
+        phis.any(|phi| phi.dst == *value)
+    };
+    let mut value = ops()
+        .find_map(|op| match op {
+            SSAOp::Store { val, .. } => Some(val.clone()),
+            _ => None,
+        })
+        .expect("the store survives");
+    while !merged(&value) {
+        let def = ops().find(|op| op.dst() == Some(&value));
+        value = match def.unwrap_or_else(|| panic!("{value} has no definition")) {
+            SSAOp::Copy { src, .. } | SSAOp::Subpiece { src, .. } => src.clone(),
+            SSAOp::Insert(insert) => insert.src.clone(),
+            other => panic!("the stored value comes from {other:?}, not the merge"),
+        };
+    }
 }
 
 fn promotion_fixture(ops: Vec<R2ILOp>) -> BTreeSet<(u64, usize)> {

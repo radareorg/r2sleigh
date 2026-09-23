@@ -678,15 +678,15 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
     let convention =
         SourceConventionSlots::new("amd64", vec![slot(8), slot(16), slot(24)], Some(slot(0)))
             .expect("convention slots");
-    let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
+    let machine_context = SourceMachineContext::from_blocks_with_interfaces(
         std::slice::from_ref(&block),
         Some(&arch),
         None,
         SourceMachineRoles::default(),
         Some(convention),
+        call_preservation_effect(),
         Vec::new(),
     );
-    machine_context.bind_call_effect(call_preservation_effect(), std::slice::from_ref(&block));
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
         std::slice::from_ref(&block),
         Some(&arch),

@@ -7,8 +7,7 @@ use crate::{
     SourceFunctionInterface, SsaArtifact,
 };
 
-/// A call effect naming these registers clobbered and these preserved; every
-/// register it does not preserve is clobbered either way.
+/// A call effect naming these registers clobbered and these preserved.
 pub(crate) fn call_effect(
     clobbered: impl IntoIterator<Item = CanonicalStorageId>,
     preserved: impl IntoIterator<Item = CanonicalStorageId>,

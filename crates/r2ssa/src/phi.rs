@@ -417,7 +417,11 @@ pub fn live_in_by_block(
             .filter(|identity| defs.contains_key(identity))
             .collect::<BTreeSet<_>>()
     };
-    let clobbered = observed_clobbers(call_boundaries, reg_names, families, defs);
+    // A root a call keeps part of is written in place, like a lane, so the call does not kill it.
+    let clobbered = observed_clobbers(call_boundaries, reg_names, families, defs)
+        .into_iter()
+        .filter(|identity| !call_boundaries.keeps_part_of(identity.storage))
+        .collect::<BTreeSet<_>>();
     let arguments = resolve(&call_boundaries.argument_regs);
     let returned = resolve(&call_boundaries.return_regs);
 

@@ -763,6 +763,10 @@ the `ret` pops are **not** the same SSA value -- the lift makes two loads of
   r0 = 0x0`, a false bound. The address folds inside the instruction, so the
   lifter can spell it as the register varnode, which is exact p-code semantics.
   `BlockOrigins` kills on such stores; SSA construction does not.
+- `crates/r2abi/data/cc-arm-64.sdb.txt` differs from radare2 in two lines until
+  upstream takes them: AAPCS64 preserves only `d8..d15`, and `v*` names no
+  Sleigh register, so the clobbers are spelled `q*`. A call now writes only the
+  bytes of a register family it does not keep, as lanes inserted into the root.
 
 ## ARM 32-bit: Thumb decodes, and `pdd` still does not run
 
