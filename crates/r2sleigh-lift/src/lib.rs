@@ -37,8 +37,7 @@ pub use disasm::syntax::{NumberSpan, Syntax};
 pub use disasm::{
     Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineInstructionSpan,
     GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
-    GenuineLiftedFunctionAuthority, SemanticMetadataOptions, SemanticMetadataPrecision,
-    TrustedLiftedFunction, TrustedSleighProfile,
+    GenuineLiftedFunctionAuthority, TrustedLiftedFunction, TrustedSleighProfile,
 };
 pub use disasm::{
     EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,

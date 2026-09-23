@@ -31462,3 +31462,13 @@ each with the decoder `thumb_at` picks -- the mode of the nearest symbol below
 symbol below a called function is often data. The mode of a called function is
 the call's to state (`bl` keeps it, `blx` switches it), and no transfer carries
 it yet.
+
+## Listings continue the decoder context
+
+`pd` and `pdf` decode each line with `Disassembler::decode`, one Sleigh parse
+for the spelling and the lift, continuing the context where the previous line
+ended in the same decoder. IT-predicated Thumb now reads `addeq`/`bxeq lr`, as
+the walk lifts it. Open: a run's first line, and each `pdf` block's first line,
+starts afresh, so a listing that begins inside an IT block spells it
+unconditional. radare2 is wrong on the later lines of an IT block (`itt eq;
+addeq; lsrs` on libarm.so 0x18e5e), so those lines are not matched.
