@@ -111,8 +111,8 @@ impl<S: Source> OpenProgram<S> {
         Ok(Rendering { prepared, response })
     }
 
-    /// What one function is: its blocks, calls, arguments and locals, read
-    /// off the sealed analysis every rendering draws from.
+    /// What one function is: its blocks, calls, arguments, locals and
+    /// signature, read off the sealed analysis every rendering draws from.
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
         let prepared = self.prepare(entry)?;

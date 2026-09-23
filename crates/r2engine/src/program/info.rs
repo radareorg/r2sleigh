@@ -23,6 +23,8 @@ pub struct FunctionInfo {
     pub convention: Option<String>,
     pub arguments: Vec<Argument>,
     pub locals: Vec<Local>,
+    /// What it returns, where a signature is authorized and the return decided.
+    pub returns: Option<CTypeLike>,
 }
 
 /// One basic block.
@@ -41,6 +43,8 @@ pub struct Argument {
     /// The storage it arrives in, where the entry value names one.
     pub storage: Option<r2ssa::CanonicalStorageId>,
     pub ty: CTypeLike,
+    /// What the source calls it, where the source names it.
+    pub name: Option<String>,
 }
 
 /// One stack object in the function's own frame, frame management excluded.
@@ -50,6 +54,13 @@ pub struct Local {
     pub offset: i64,
     /// The declared type, or else storage of the width its accesses agree on.
     pub ty: CTypeLike,
+}
+
+impl Argument {
+    /// This parameter declared under a name, as C spells the declaration.
+    pub fn declared_as(&self, name: &str) -> String {
+        r2types::c_object_declaration(&self.ty, name)
+    }
 }
 
 impl FunctionInfo {
@@ -75,6 +86,7 @@ impl FunctionInfo {
                 .collect(),
             convention: facts.type_facts().callconv.clone(),
             arguments: arguments(artifact, facts, &entities),
+            returns: returns(artifact, sealed),
             locals: locals(artifact, &entities),
         }
     }
@@ -195,6 +207,10 @@ fn arguments(
             Some(Argument {
                 slot: *slot,
                 storage,
+                name: facts
+                    .display_names()
+                    .parameter(*slot as usize)
+                    .map(str::to_owned),
                 ty: ty
                     .clone()
                     .or(signed)
@@ -204,6 +220,19 @@ fn arguments(
         .collect::<Vec<_>>();
     arguments.sort_unstable_by_key(|argument| argument.slot);
     arguments
+}
+
+/// The decided return, spelled as a rendering declares it, where the signature is authorized.
+fn returns(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> Option<CTypeLike> {
+    sealed.report().type_facts().render_authorized_signature()?;
+    let bits = artifact
+        .machine_context()
+        .memory_model()
+        .default_address_bits();
+    Some(r2types::spellable_c_type_like(
+        sealed.return_type().decided()?,
+        bits,
+    ))
 }
 
 /// Every declarable stack object, and every frame slot promotion took out of memory.

@@ -18,7 +18,7 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         .of(entry)
         .map(r2engine::names::Name::spelled);
     let mut out = vec!["#".to_owned(), format!("addr: {entry:#010x}")];
-    out.extend(name.map(|name| format!("name: {name}")));
+    out.extend(name.as_ref().map(|name| format!("name: {name}")));
     out.extend([
         format!("size: {}", info.max_addr() - info.min_addr()),
         format!("realsz: {}", info.real_size()),
@@ -29,6 +29,9 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("num-bbs: {}", info.blocks.len()),
         format!("num-instrs: {}", info.instructions()),
         format!("edges: {}", info.edges()),
+    ]);
+    out.extend(signature(&info, name.as_deref()));
+    out.extend([
         format!("minaddr: {:#010x}", info.min_addr()),
         format!("maxaddr: {:#010x}", info.max_addr()),
         format!("is-lineal: {}", info.is_lineal()),
@@ -39,6 +42,29 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("args: {}", info.arguments.len()),
     ]);
     Ok(out.join("\n"))
+}
+
+/// `signature: <ret> <name> (<type> <arg>, ...);`, as radare2's `afcf` spells one, where it is authorized.
+fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -> Option<String> {
+    let returns = info.returns.as_ref()?;
+    let parameters = info
+        .arguments
+        .iter()
+        .map(|argument| argument.declared_as(&argument_name(argument)))
+        .collect::<Vec<_>>();
+    Some(format!(
+        "signature: {returns} {} ({});",
+        name?,
+        parameters.join(", ")
+    ))
+}
+
+/// What the source calls a parameter, or `argN` numbered from one as radare2 numbers them.
+fn argument_name(argument: &Argument) -> String {
+    argument
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("arg{}", argument.slot + 1))
 }
 
 /// `afv`: the function's arguments, then its locals.
@@ -53,14 +79,14 @@ pub fn variables(session: &mut Session, argument: &str) -> Result<String, String
     Ok(arguments.chain(locals).collect::<Vec<_>>().join("\n"))
 }
 
-/// `arg <type> argN @ <register>`, numbered from one as radare2 numbers them.
+/// `arg <type> <name> @ <register>`.
 fn spell_argument(session: &Session, entry: u64, argument: &Argument) -> String {
     let at = argument
         .storage
         .and_then(|storage| session.program.spell_storage(entry, storage))
         .map(|register| format!(" @ {register}"))
         .unwrap_or_default();
-    format!("arg {} arg{}{at}", argument.ty, argument.slot + 1)
+    format!("arg {} {}{at}", argument.ty, argument_name(argument))
 }
 
 /// `var <type> stack_mN @ <base><offset>`, named as the decompiler names it.
