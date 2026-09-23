@@ -34,6 +34,20 @@ fn a_call_is_spelled_by_the_name_the_container_gives_its_target() {
 }
 
 #[test]
+fn a_call_to_an_import_declared_never_to_return_ends_the_function() {
+    let mut program = OpenProgram::of(Literal::new().importing("exit"));
+    // mov edi, 1; call exit; mov eax, 7; ret -- the last two are never reached.
+    let call = i32::try_from(STUB as i64 - (TWO + 10) as i64).expect("near");
+    let mut code = vec![0xbf, 0x01, 0, 0, 0, 0xe8];
+    code.extend_from_slice(&call.to_le_bytes());
+    code.extend_from_slice(&[0xb8, 0x07, 0, 0, 0, 0xc3]);
+    program.source_mut().write(TWO, &code);
+    let c = c_of(&mut program, TWO);
+    assert!(c.contains("exit(1)"), "{c}");
+    assert!(!c.contains("return"), "{c}");
+}
+
+#[test]
 fn text_in_a_data_section_is_a_string_and_text_in_code_is_not() {
     let mut program = OpenProgram::of(Literal::new().with_data().importing("puts"));
     program.source_mut().write(TEXT, b"hello\0");

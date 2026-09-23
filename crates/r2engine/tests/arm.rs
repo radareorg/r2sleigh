@@ -3,6 +3,7 @@
 
 use std::ops::Range;
 
+use r2engine::discovery::Confidence;
 use r2engine::program::{
     Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Section, Source, Symbol,
     SymbolKind,
@@ -68,14 +69,17 @@ fn opened() -> OpenProgram<Mixed> {
 /// ARM code, a Thumb function stated only by the entry point, and an ARM pool.
 fn opened_as(endian: r2il::Endianness) -> OpenProgram<Mixed> {
     let mut mixed = arm_only(&CODE, endian);
-    mixed.container.symbols.push(Symbol {
-        name: "$a".to_owned(),
-        vaddr: DATA,
-        size: 0,
-        kind: SymbolKind::Mapping(Mapping::Arm),
-        defined: true,
-        thumb: false,
-    });
+    // `$a` at the ARM code too, which the Thumb function after it outranks.
+    for vaddr in [ARM, DATA] {
+        mixed.container.symbols.push(Symbol {
+            name: "$a".to_owned(),
+            vaddr,
+            size: 0,
+            kind: SymbolKind::Mapping(Mapping::Arm),
+            defined: true,
+            thumb: false,
+        });
+    }
     mixed.container.entries.push(Entry {
         vaddr: THUMB,
         kind: EntryKind::Main,
@@ -145,6 +149,28 @@ fn arm_and_thumb_functions_in_one_program_each_decode_as_stated() {
 }
 
 #[test]
+fn a_thumb_mapping_symbol_switches_one_arm_function_to_thumb() {
+    // No entry and no symbol says Thumb here; only the `$t` does.
+    let mapping = |name: &str, vaddr, mapping| Symbol {
+        name: name.to_owned(),
+        vaddr,
+        size: 0,
+        kind: SymbolKind::Mapping(mapping),
+        defined: true,
+        thumb: false,
+    };
+    let mut mixed = arm_only(&CODE, r2il::Endianness::Little);
+    mixed.container.symbols.extend([
+        mapping("$t", THUMB, Mapping::Thumb),
+        mapping("$a", DATA, Mapping::Arm),
+    ]);
+    let mut program = OpenProgram::of(mixed);
+    assert_eq!(widths(&mut program, ARM), [4, 4]);
+    assert_eq!(widths(&mut program, THUMB), [2, 2]);
+    assert_eq!(widths(&mut program, DATA), [4, 4]);
+}
+
+#[test]
 fn a_pool_word_reads_in_the_container_s_order_not_the_decoder_s() {
     // BE8: little-endian instructions in a big-endian program.
     let holds = |endian| {
@@ -210,5 +236,43 @@ fn the_low_tier_spells_the_machine_registers() {
     assert!(
         !lifted.contains("reg:0x58"),
         "unspelled register:\n{lifted}"
+    );
+}
+
+/// `movw r0, thumb+1; bl atexit; bx lr`, a word nothing reads, `atexit: bx lr`,
+/// and a Thumb `bx lr` whose word ARM cannot decode.
+const HANDS_THUMB: [u8; 0x1c] = [
+    0x15, 0x00, 0x01, 0xe3, 0x01, 0x00, 0x00, 0xeb, 0x1e, 0xff, 0x2f, 0xe1, //
+    0x00, 0x00, 0x00, 0x00, //
+    0x1e, 0xff, 0x2f, 0xe1, //
+    0x70, 0x47, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[test]
+fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
+    // The pointer's low bit says Thumb, so the function is at the even
+    // address and decodes as Thumb; the ARM decoder rejects its bytes.
+    let mut mixed = arm_only(&HANDS_THUMB, r2il::Endianness::Little);
+    mixed.container.symbols.push(Symbol {
+        name: "atexit".to_owned(),
+        vaddr: ARM + 0x10,
+        size: 4,
+        kind: SymbolKind::Function,
+        defined: true,
+        thumb: false,
+    });
+    let found = OpenProgram::of(mixed)
+        .functions()
+        .expect("discovery runs")
+        .iter()
+        .map(|one| (one.address, one.confidence, one.thumb))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        found,
+        [
+            (ARM, Confidence::Stated, false),
+            (ARM + 0x10, Confidence::Stated, false),
+            (ARM + 0x14, Confidence::Handed, true),
+        ]
     );
 }

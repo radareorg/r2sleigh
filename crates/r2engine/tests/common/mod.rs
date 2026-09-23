@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Format, Mapping, OpenProgram, Relocation, Section, Source, Symbol, SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Relocation, Section, Source,
+    Symbol, SymbolKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -277,6 +278,22 @@ impl Literal {
             size: 0,
             kind: SymbolKind::Function,
             defined: true,
+            thumb: false,
+        });
+        self
+    }
+
+    /// The same program with a section listed ahead of its code.
+    pub fn preceded_by(mut self, section: Section) -> Self {
+        self.container.sections.insert(0, section);
+        self
+    }
+
+    /// The same program with one more entry point in the container.
+    pub fn entering(mut self, vaddr: u64, kind: EntryKind) -> Self {
+        self.container.entries.push(Entry {
+            vaddr,
+            kind,
             thumb: false,
         });
         self

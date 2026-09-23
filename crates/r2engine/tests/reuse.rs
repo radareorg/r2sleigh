@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Literal, ONE, STUB, TEXT, TWO, opened};
+use common::{ARM_ENTRY, Literal, ONE, STUB, TEXT, THUMB_CALLED, THUMB_LEAF, TWO, opened};
 use r2engine::program::OpenProgram;
 
 #[test]
@@ -132,4 +132,30 @@ fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
     assert_eq!(program.revision().entries, before + 1);
     let stats = program.memo_stats();
     assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
+}
+
+#[test]
+fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
+    // `blx` becomes `bl`, so the callee is entered in ARM; the leaf's own
+    // bytes are untouched, but the instruction set it is read in moved.
+    let mut program = OpenProgram::of(Literal::arm_thumb());
+    program.prepared(THUMB_LEAF).expect("it prepares");
+    let before = program.revision().entries;
+    // Discovering the instruction sets the first time is no change.
+    assert_eq!(before, 0);
+    program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
+    let _ = program.prepared(THUMB_LEAF);
+    assert_eq!(program.revision().entries, before + 1);
+    assert_eq!(program.memo_stats().replacements, 1);
+    let called = program
+        .functions()
+        .expect("discovery runs")
+        .iter()
+        .find(|one| one.address == THUMB_CALLED)
+        .map(|one| one.thumb);
+    assert_eq!(called, Some(false));
+    // A write that moves no function's instruction set moves nothing.
+    program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
+    program.functions().expect("discovery runs");
+    assert_eq!(program.revision().entries, before + 1);
 }
