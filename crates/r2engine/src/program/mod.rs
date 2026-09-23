@@ -188,6 +188,31 @@ impl<S: Source> OpenProgram<S> {
         &self.names
     }
 
+    /// Where a session starts before anything has been sought.
+    ///
+    /// Wherever the name table puts `entry0`, so `s entry0` and the start agree;
+    /// then the declared entry, which `LC_MAIN` names `main` rather than
+    /// `entry0`; then any entry; then the first code section, because an
+    /// object file declares no entry at all.
+    pub fn start(&self) -> Option<u64> {
+        let container = self.source.container();
+        let entries = &container.entries;
+        let declared = entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Main)
+            .or_else(|| entries.first());
+        self.names
+            .address_of("entry0")
+            .or_else(|| declared.map(|entry| entry.vaddr))
+            .or_else(|| {
+                container
+                    .sections
+                    .iter()
+                    .find(|section| section.is_code && section.vsize > 0)
+                    .map(|section| section.vaddr)
+            })
+    }
+
     /// Which stub stands for which import, as of the last `ensure_current`.
     pub const fn imports(&self) -> &BTreeMap<u64, String> {
         &self.imports

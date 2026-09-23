@@ -99,12 +99,23 @@ pub(crate) fn disassemble_function(
     if answer.value.is_empty() {
         return Err(format!("no blocks at {addr:#x}"));
     }
-    let out: String = answer
+    let mut out: String = answer
         .value
         .iter()
         .map(|line| listed(session, line))
         .collect();
+    out.push_str(&stopped(answer.completion));
     Ok(out.trim_end().to_owned())
+}
+
+/// Where a listing ended short of what was asked, as a trailing comment line.
+fn stopped(completion: Completion) -> String {
+    match completion {
+        Completion::Complete => String::new(),
+        Completion::Unmapped { at } => {
+            format!("            ; listing stopped: nothing mapped at {at:#x}\n")
+        }
+    }
 }
 
 /// How well supported a claim about this number is, where anything claims it.
@@ -179,7 +190,7 @@ fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::spelled;
+    use super::{spelled, stopped};
     use r2engine::discovery::Confidence;
     use r2engine::names::{Name, NameDb, Namespace};
     use r2engine::query::Line;
@@ -300,6 +311,16 @@ mod tests {
         assert_eq!(
             spelled(&line("call", "0x1030"), &NameDb::new()),
             "call 0x1030"
+        );
+    }
+
+    #[test]
+    fn a_listing_cut_short_by_unmapped_bytes_says_where() {
+        use r2engine::query::Completion;
+        assert_eq!(stopped(Completion::Complete), "");
+        assert_eq!(
+            stopped(Completion::Unmapped { at: 0x401360 }).trim(),
+            "; listing stopped: nothing mapped at 0x401360"
         );
     }
 }

@@ -75,7 +75,8 @@ fn split_verb(line: &str) -> (&str, &str) {
     (&line[..end], line[end..].trim())
 }
 
-pub(crate) fn parse_number(session: &Session, text: &str) -> Result<u64, String> {
+/// An address as radare2 reads one: hex, decimal, or a name `f` lists.
+pub(crate) fn parse_number(session: &mut Session, text: &str) -> Result<u64, String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(session.addr);
@@ -83,18 +84,19 @@ pub(crate) fn parse_number(session: &Session, text: &str) -> Result<u64, String>
     if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         return u64::from_str_radix(hex, 16).map_err(|_| format!("bad address '{}'", text));
     }
-    // `s entry0` on a file with no declared entry keeps the session's start.
-    if text == "entry0" {
-        return Ok(session
-            .image()
-            .entry_points()
-            .iter()
-            .find(|entry| entry.kind == r2image::EntryKind::Main)
-            .map(|entry| entry.vaddr)
-            .unwrap_or(session.addr));
+    if let Ok(number) = text.parse::<u64>() {
+        return Ok(number);
     }
-    text.parse::<u64>()
-        .map_err(|_| format!("bad address '{}'", text))
+    if let Some(addr) = session.program.names().address_of(text) {
+        return Ok(addr);
+    }
+    // Import stubs are named only once there is a decoder to read them with.
+    session.program.ensure_current()?;
+    session
+        .program
+        .names()
+        .address_of(text)
+        .ok_or_else(|| format!("unknown address or flag '{}'", text))
 }
 
 pub(crate) fn parse_count(argument: &str, default: usize) -> Result<usize, String> {

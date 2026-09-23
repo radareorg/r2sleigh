@@ -12,7 +12,7 @@
 //! belongs to, and spelling is a projection of the pair. Whoever opened the
 //! binary fills it; the engine and the shell read it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::discovery::Confidence;
 
@@ -142,6 +142,8 @@ fn identifier(text: &str) -> String {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NameDb {
     by_address: BTreeMap<u64, Vec<Name>>,
+    /// Every address each spelling names, so a name resolves in `O(log n)`.
+    by_spelling: BTreeMap<String, BTreeSet<u64>>,
 }
 
 impl NameDb {
@@ -156,14 +158,33 @@ impl NameDb {
     /// order a caller happens to insert in does not decide the answer.
     pub fn insert(&mut self, vaddr: u64, name: Name) {
         let held = self.by_address.entry(vaddr).or_default();
+        let spelling = name.spelled();
         match held.iter_mut().find(|at| at.namespace == name.namespace) {
-            Some(at) if at.confidence <= name.confidence => {}
-            Some(at) => *at = name,
+            Some(at) if at.confidence <= name.confidence => return,
+            Some(at) => {
+                let replaced = std::mem::replace(at, name).spelled();
+                // One namespace per address, so no other name here spells the same.
+                if let Some(addresses) = self.by_spelling.get_mut(&replaced) {
+                    addresses.remove(&vaddr);
+                    if addresses.is_empty() {
+                        self.by_spelling.remove(&replaced);
+                    }
+                }
+            }
             None => {
                 held.push(name);
                 held.sort_by(|a, b| (a.confidence, a.namespace).cmp(&(b.confidence, b.namespace)));
             }
         }
+        self.by_spelling.entry(spelling).or_default().insert(vaddr);
+    }
+
+    /// The lowest address a name is spelled as, the way a listing writes it.
+    ///
+    /// This is what `s sym.main` or `s entry0` reads: the name `f` lists for an
+    /// address is the name that seeks there.
+    pub fn address_of(&self, spelling: &str) -> Option<u64> {
+        self.by_spelling.get(spelling)?.first().copied()
     }
 
     /// The strongest name at exactly this address.
@@ -321,6 +342,36 @@ mod tests {
         assert_eq!(db.containing(0x1000).map(|(at, _)| at), Some(0x1000));
         assert_eq!(db.containing(0x101f).map(|(at, _)| at), Some(0x1000));
         assert!(db.containing(0x1020).is_none());
+    }
+
+    #[test]
+    fn a_spelling_resolves_to_the_address_it_names_and_a_replaced_one_does_not() {
+        let mut db = NameDb::new();
+        db.insert(
+            0x1000,
+            named("1000", Namespace::Function, 0, Confidence::Called),
+        );
+        db.insert(
+            0x1000,
+            named("1000", Namespace::Function, 0, Confidence::Stated),
+        );
+        db.insert(
+            0x2000,
+            named("entry0", Namespace::Entry, 0, Confidence::Stated),
+        );
+        db.insert(
+            0x3000,
+            named("work", Namespace::Function, 0, Confidence::Called),
+        );
+        db.insert(
+            0x3000,
+            named("other", Namespace::Function, 0, Confidence::Stated),
+        );
+        assert_eq!(db.address_of("fcn.1000"), Some(0x1000));
+        assert_eq!(db.address_of("entry0"), Some(0x2000));
+        assert_eq!(db.address_of("fcn.other"), Some(0x3000));
+        assert_eq!(db.address_of("fcn.work"), None);
+        assert_eq!(db.address_of("work"), None);
     }
 
     #[test]

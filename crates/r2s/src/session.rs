@@ -21,11 +21,11 @@ pub struct Session {
 impl Session {
     pub fn open(path: &str) -> Result<Self, String> {
         let image = Image::open(path).map_err(|error| error.to_string())?;
-        let addr = entry_of(&image);
+        let program = OpenProgram::of(Opened::of(image));
         Ok(Self {
-            program: OpenProgram::of(Opened::of(image)),
+            addr: program.start().unwrap_or(0),
+            program,
             path: path.to_owned(),
-            addr,
         })
     }
 
@@ -150,33 +150,4 @@ fn container_of(image: &Image) -> Container {
             .collect(),
         declared: image.debug_prototypes().prototypes().collect(),
     }
-}
-
-/// Where a listing starts before anything has been sought.
-///
-/// The declared main entry, then any declared entry, then the first code
-/// section -- an object file declares no entry at all -- then the first
-/// executable segment.
-fn entry_of(image: &Image) -> u64 {
-    image
-        .entry_points()
-        .iter()
-        .find(|entry| entry.kind == r2image::EntryKind::Main)
-        .or_else(|| image.entry_points().first())
-        .map(|entry| entry.vaddr)
-        .or_else(|| {
-            image
-                .sections()
-                .iter()
-                .find(|section| section.is_code && section.vsize > 0)
-                .map(|section| section.vaddr)
-        })
-        .or_else(|| {
-            image
-                .segments()
-                .iter()
-                .find(|segment| segment.permissions.execute)
-                .map(|segment| segment.vaddr)
-        })
-        .unwrap_or(0)
 }

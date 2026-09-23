@@ -201,6 +201,43 @@ fn every_named_address_is_spelled_in_one_vocabulary() {
     assert!(!run.out.contains("entry1"), "{}", run.out);
 }
 
+/// A seek reads the same table `f` lists, so a flag name goes where `f` says.
+#[test]
+fn a_flag_name_seeks_where_the_flag_table_puts_it() {
+    let flagged = r2s("f~entry0");
+    assert!(flagged.ok, "{}", flagged.out);
+    let listed = flagged
+        .out
+        .split_whitespace()
+        .next()
+        .and_then(|addr| u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok())
+        .expect("f lists entry0");
+    let spelled = format!("{listed:#x}");
+    // The session starts there, and `s entry0` agrees with both.
+    let run = r2s("s; s entry0; s; s sym.fnv1a32; s; s 4199216; s");
+    assert!(run.ok, "{}", run.out);
+    let seeks: Vec<&str> = run.out.lines().collect();
+    assert_eq!(
+        seeks,
+        [spelled.as_str(), spelled.as_str(), FNV1A32, FNV1A32],
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn an_unknown_name_is_refused_and_the_cursor_stays() {
+    let run = r2s(&format!("s {FNV1A32}; s sym.no_such_function; s"));
+    assert!(!run.ok, "{}", run.out);
+    assert!(
+        run.out
+            .contains("unknown address or flag 'sym.no_such_function'"),
+        "{}",
+        run.out
+    );
+    assert!(run.out.contains(FNV1A32), "{}", run.out);
+}
+
 #[test]
 fn a_string_is_named_only_where_it_is_terminated() {
     let run = r2s("f~str.");
