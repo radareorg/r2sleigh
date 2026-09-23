@@ -591,6 +591,7 @@ impl R2ILOp {
             | R2ILOp::Multiequal { .. }
             | R2ILOp::Indirect { .. }
             | R2ILOp::Cast { .. }
+            // A selection moves whichever arm it chose, as the SSA operation it becomes says.
             | R2ILOp::Select { .. } => ValueUse::Carries,
             R2ILOp::IntAdd { .. }
             | R2ILOp::IntSub { .. }

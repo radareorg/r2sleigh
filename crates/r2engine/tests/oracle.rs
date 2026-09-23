@@ -65,6 +65,16 @@ const FILLED: &[u8] = &[
     0x11, 0x11, 0x11, 0x11, // 0x1020, what it clears
 ];
 
+/// `lea rbx, [0x1000]; test edi, edi; cmovne rax, rbx; mov ebx, 0; add rax, 8; ret`: the move selects the address.
+const SELECTED: &[u8] = &[
+    0x48, 0x8d, 0x1d, 0xf9, 0xff, 0xff, 0xff, // lea rbx, [rip - 7]
+    0x85, 0xff, // test edi, edi
+    0x48, 0x0f, 0x45, 0xc3, // cmovne rax, rbx
+    0xbb, 0x00, 0x00, 0x00, 0x00, // mov ebx, 0
+    0x48, 0x83, 0xc0, 0x08, // add rax, 8
+    0xc3, // ret
+];
+
 /// Operations and block elements one run executes before it stops, ruling on nothing after.
 const BUDGET: u64 = 1 << 14;
 /// Runs from seeded random entry states, after the edge values.
@@ -89,6 +99,7 @@ fn oracle_set() -> Vec<(&'static str, Literal, u64)> {
         ("counted", COUNTED, 0x10),
         ("flagged", FLAGGED, FLAGGED.len()),
         ("filled", FILLED, 0x14),
+        ("selected", SELECTED, SELECTED.len()),
     ];
     let common = common.map(|(name, entry)| (name, Literal::new(), entry));
     let own = own.map(|(name, code, size)| {
