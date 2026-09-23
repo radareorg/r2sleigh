@@ -146,16 +146,30 @@ fn computed_by(lift: &r2il::R2ILBlock, rest: &[Option<r2il::R2ILBlock>]) -> Opti
     }
     let output = lift.ops.iter().rev().find_map(r2il::R2ILOp::output)?;
     let value = origins.of(output)?.constant()?;
-    let storage = (output.space, output.offset);
+    // Forward until something reads any byte of it, or overwrites all of it.
+    // Comparing the starting offset alone missed `ah` read out of an `rax`
+    // just written, and named a step as though it were the result.
+    let covers = |varnode: &Varnode| {
+        varnode.space == output.space
+            && varnode.offset <= output.offset
+            && output.offset + u64::from(output.size) <= varnode.offset + u64::from(varnode.size)
+    };
+    let overlaps = |varnode: &Varnode| {
+        varnode.space == output.space
+            && varnode.offset < output.offset + u64::from(output.size)
+            && output.offset < varnode.offset + u64::from(varnode.size)
+    };
     let read_later = rest
         .iter()
         .flatten()
         .flat_map(|block| block.ops.iter())
-        .any(|op| {
-            op.inputs()
-                .into_iter()
-                .any(|input| (input.space, input.offset) == storage)
-        });
+        .find_map(|op| {
+            if op.inputs().into_iter().any(&overlaps) {
+                return Some(true);
+            }
+            op.output().filter(|written| covers(written)).map(|_| false)
+        })
+        .unwrap_or(false);
     (!read_later).then_some(AnnotationKind::Computes { value })
 }
 

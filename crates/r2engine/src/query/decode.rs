@@ -291,6 +291,47 @@ mod tests {
         );
     }
 
+    fn computes(line: &Line) -> Option<u64> {
+        line.annotations
+            .iter()
+            .find_map(|annotation| match annotation.kind {
+                AnnotationKind::Computes { value } => Some(value),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn a_number_an_instruction_leaves_standing_is_its_result() {
+        // mov eax, 0x1234; ret
+        let answer = answer(&[0xb8, 0x34, 0x12, 0x00, 0x00, 0xc3], 2, Work::BlockLocal);
+        assert_eq!(computes(&answer.value[0]), Some(0x1234));
+    }
+
+    #[test]
+    fn a_number_read_back_by_any_byte_is_a_step_not_a_result() {
+        // mov eax, 0x1234; mov bl, ah -- `ah` is the second byte of `rax`, so
+        // the value is read back even though no read starts where it does.
+        let answer = answer(
+            &[0xb8, 0x34, 0x12, 0x00, 0x00, 0x88, 0xe3],
+            2,
+            Work::BlockLocal,
+        );
+        assert_eq!(computes(&answer.value[0]), None);
+    }
+
+    #[test]
+    fn a_number_overwritten_before_any_read_is_still_its_result() {
+        // mov eax, 0x1234; mov eax, 5; ret
+        let answer = answer(
+            &[
+                0xb8, 0x34, 0x12, 0x00, 0x00, 0xb8, 0x05, 0x00, 0x00, 0x00, 0xc3,
+            ],
+            3,
+            Work::BlockLocal,
+        );
+        assert_eq!(computes(&answer.value[0]), Some(0x1234));
+    }
+
     #[test]
     fn bytes_that_are_not_an_instruction_are_one_byte_and_no_spelling() {
         // 0x06 encodes nothing in long mode; the `ret` after it still decodes.
