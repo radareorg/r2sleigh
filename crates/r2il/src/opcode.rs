@@ -220,7 +220,7 @@ pub enum R2ILOp {
     /// Two's complement negation: dst = -src
     IntNegate { dst: Varnode, src: Varnode },
 
-    /// Addition with carry: dst = a + b + carry
+    /// Unsigned carry: dst = whether a + b overflows their width
     IntCarry {
         dst: Varnode,
         a: Varnode,

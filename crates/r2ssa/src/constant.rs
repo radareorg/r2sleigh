@@ -113,51 +113,30 @@ pub(crate) fn sign_extend(value: u64, size: u32) -> i64 {
     ((value << (64 - bits)) as i64) >> (64 - bits)
 }
 
-/// Keep a folded value inside the width it was computed at.
-pub(crate) fn truncate(value: u64, size: u32) -> u64 {
-    match size {
-        0 | 8.. => value,
-        bytes => value & (u64::MAX >> (64 - bytes * 8)),
-    }
-}
-
 /// How many operands an operation folds over, when it folds at all.
 fn folded_arity(op: &SSAOp) -> Option<usize> {
     if is_value_preserving(op) {
         return Some(1);
     }
-    Some(match op {
-        SSAOp::IntSExt { .. }
-        | SSAOp::IntNegate { .. }
-        | SSAOp::IntNot { .. }
-        | SSAOp::BoolNot { .. } => 1,
-        SSAOp::IntAdd { .. }
-        | SSAOp::IntSub { .. }
-        | SSAOp::IntMult { .. }
-        | SSAOp::IntDiv { .. }
-        | SSAOp::IntSDiv { .. }
-        | SSAOp::IntRem { .. }
-        | SSAOp::IntSRem { .. }
-        | SSAOp::IntAnd { .. }
-        | SSAOp::IntOr { .. }
-        | SSAOp::IntXor { .. }
-        | SSAOp::IntLeft { .. }
-        | SSAOp::IntRight { .. }
-        | SSAOp::IntSRight { .. }
-        | SSAOp::IntCarry { .. }
-        | SSAOp::IntSCarry { .. }
-        | SSAOp::IntSBorrow { .. }
-        | SSAOp::IntEqual { .. }
-        | SSAOp::IntNotEqual { .. }
-        | SSAOp::IntLess { .. }
-        | SSAOp::IntLessEqual { .. }
-        | SSAOp::IntSLess { .. }
-        | SSAOp::IntSLessEqual { .. }
-        | SSAOp::BoolAnd { .. }
-        | SSAOp::BoolOr { .. }
-        | SSAOp::BoolXor { .. } => 2,
-        _ => return None,
-    })
+    op.operation().map(|_| op.sources().len())
+}
+
+/// What an operation computes from its operands' values, in `sources` order, as `r2il::eval` states it.
+///
+/// `None` where p-code leaves the value undefined or it does not fit a constant.
+pub(crate) fn computed(op: &SSAOp, operands: &[u64]) -> Option<u64> {
+    let operation = op.operation()?;
+    let sources = op.sources();
+    if sources.len() != operands.len() {
+        return None;
+    }
+    let words = sources
+        .iter()
+        .zip(operands)
+        .map(|(source, value)| r2il::eval::Word::new(u128::from(*value), source.size).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let value = r2il::eval::apply(operation, &words, op.dst()?.size).ok()?;
+    u64::try_from(value).ok()
 }
 
 /// The operands an operation folds over, where it folds at all.
@@ -182,103 +161,11 @@ pub(crate) fn fold_inst(
 }
 
 /// Evaluate one operation over operands already folded to constants.
-fn fold_op(
-    graph: &SsaGraph,
-    op: &SSAOp,
-    output: ValueId,
-    inputs: &[ValueId],
-    operands: &[Option<u64>],
-) -> Option<u64> {
-    let operand = |index: usize| *operands.get(index)?;
-    let width = |index: usize| Some(graph.value(*inputs.get(index)?)?.var.size);
-    let signed = |index: usize| Some(i128::from(sign_extend(operand(index)?, width(index)?)));
+fn fold_op(op: &SSAOp, operands: &[Option<u64>]) -> Option<u64> {
     if is_value_preserving(op) {
-        return operand(0);
+        return *operands.first()?;
     }
-    let folded = match op {
-        SSAOp::IntSExt { .. } => {
-            let source = width(0)?;
-            let bits = source.saturating_mul(8);
-            // A sign extension only states a value when the width it came from is known.
-            if bits == 0 || bits >= 64 || graph.value(output)?.var.size <= source {
-                return None;
-            }
-            sign_extend(operand(0)?, source) as u64
-        }
-        SSAOp::IntNegate { .. } => operand(0)?.wrapping_neg(),
-        SSAOp::IntNot { .. } => !operand(0)?,
-        SSAOp::BoolNot { .. } => u64::from(operand(0)? == 0),
-        SSAOp::IntAdd { .. } => operand(0)?.wrapping_add(operand(1)?),
-        SSAOp::IntSub { .. } => operand(0)?.wrapping_sub(operand(1)?),
-        SSAOp::IntMult { .. } => operand(0)?.wrapping_mul(operand(1)?),
-        SSAOp::IntDiv { .. } => {
-            truncate(operand(0)?, width(0)?).checked_div(truncate(operand(1)?, width(1)?))?
-        }
-        SSAOp::IntRem { .. } => {
-            truncate(operand(0)?, width(0)?).checked_rem(truncate(operand(1)?, width(1)?))?
-        }
-        SSAOp::IntSDiv { .. } => i64::try_from(signed(0)?.checked_div(signed(1)?)?).ok()? as u64,
-        SSAOp::IntSRem { .. } => i64::try_from(signed(0)?.checked_rem(signed(1)?)?).ok()? as u64,
-        SSAOp::IntAnd { .. } => operand(0)? & operand(1)?,
-        SSAOp::IntOr { .. } => operand(0)? | operand(1)?,
-        SSAOp::IntXor { .. } => operand(0)? ^ operand(1)?,
-        SSAOp::IntLeft { .. } => {
-            let shift = u32::try_from(operand(1)?).ok()?;
-            // Past the operand's width the machine states zero rather than wrapping.
-            if shift >= 64 {
-                0
-            } else {
-                operand(0)?.wrapping_shl(shift)
-            }
-        }
-        SSAOp::IntRight { .. } => {
-            let shift = u32::try_from(operand(1)?).ok()?;
-            if shift >= 64 {
-                0
-            } else {
-                truncate(operand(0)?, width(0)?) >> shift
-            }
-        }
-        SSAOp::IntSRight { .. } => {
-            let shift = u32::try_from(operand(1)?).ok()?.min(63);
-            (sign_extend(operand(0)?, width(0)?) >> shift) as u64
-        }
-        SSAOp::IntCarry { .. } => {
-            let (left, right) = (
-                truncate(operand(0)?, width(0)?),
-                truncate(operand(1)?, width(1)?),
-            );
-            u64::from(truncate(left.wrapping_add(right), width(0)?) < left)
-        }
-        SSAOp::IntSCarry { .. } => {
-            let sum = signed(0)?.checked_add(signed(1)?)?;
-            u64::from(i128::from(sign_extend(truncate(sum as u64, width(0)?), width(0)?)) != sum)
-        }
-        SSAOp::IntSBorrow { .. } => {
-            let difference = signed(0)?.checked_sub(signed(1)?)?;
-            u64::from(
-                i128::from(sign_extend(
-                    truncate(difference as u64, width(0)?),
-                    width(0)?,
-                )) != difference,
-            )
-        }
-        SSAOp::IntEqual { .. } => u64::from(operand(0)? == operand(1)?),
-        SSAOp::IntNotEqual { .. } => u64::from(operand(0)? != operand(1)?),
-        SSAOp::IntLess { .. } => {
-            u64::from(truncate(operand(0)?, width(0)?) < truncate(operand(1)?, width(1)?))
-        }
-        SSAOp::IntLessEqual { .. } => {
-            u64::from(truncate(operand(0)?, width(0)?) <= truncate(operand(1)?, width(1)?))
-        }
-        SSAOp::IntSLess { .. } => u64::from(signed(0)? < signed(1)?),
-        SSAOp::IntSLessEqual { .. } => u64::from(signed(0)? <= signed(1)?),
-        SSAOp::BoolAnd { .. } => u64::from(operand(0)? != 0 && operand(1)? != 0),
-        SSAOp::BoolOr { .. } => u64::from(operand(0)? != 0 || operand(1)? != 0),
-        SSAOp::BoolXor { .. } => u64::from((operand(0)? != 0) != (operand(1)? != 0)),
-        _ => return None,
-    };
-    Some(truncate(folded, graph.value(output)?.var.size))
+    computed(op, &operands.iter().copied().collect::<Option<Vec<_>>>()?)
 }
 
 /// The constant a value computes to.
@@ -330,7 +217,7 @@ fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) ->
             .iter()
             .map(|input| known.get(input).copied().flatten())
             .collect();
-        let folded = fold_op(graph, op, current, &inputs, &operands);
+        let folded = fold_op(op, &operands);
         known.insert(current, folded);
     }
     known.get(&value).copied().flatten()

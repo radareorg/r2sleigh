@@ -12,6 +12,7 @@
 //! - [`R2ILOp`]: A single semantic operation (copy, add, load, store, branch, etc.)
 //! - [`R2ILBlock`]: A sequence of operations for a single instruction
 //! - [`ArchSpec`]: Full architecture specification with registers and instruction semantics
+//! - [`eval`]: What each operation computes, run on a concrete machine state
 //!
 //! # Example
 //!
@@ -28,6 +29,7 @@
 
 pub mod allocation;
 pub mod endianness;
+pub mod eval;
 pub mod memory;
 pub mod metadata;
 pub mod opcode;

@@ -191,8 +191,7 @@ impl BlockOrigins {
     fn after(&self, op: &R2ILOp) -> Option<ValueOrigin> {
         match op {
             R2ILOp::Copy { src, .. } => self.of(src),
-            R2ILOp::IntAdd { a, b, dst } => self.arithmetic(a, b, dst.size, u64::wrapping_add),
-            R2ILOp::IntSub { a, b, dst } => self.arithmetic(a, b, dst.size, u64::wrapping_sub),
+            R2ILOp::IntAdd { .. } | R2ILOp::IntSub { .. } => self.arithmetic(op),
             // ARM clears the low bit of a loaded target before branching to
             // it: the bit selects the instruction set, not the address, so the
             // value still names the slot it was loaded from.
@@ -214,17 +213,20 @@ impl BlockOrigins {
         }
     }
 
-    fn arithmetic(
-        &self,
-        a: &Varnode,
-        b: &Varnode,
-        size: u32,
-        combine: fn(u64, u64) -> u64,
-    ) -> Option<ValueOrigin> {
-        let (left, right) = (self.of(a)?.constant()?, self.of(b)?.constant()?);
+    /// What `r2il::eval` says an operation computes over the numbers the block folded its operands to.
+    fn arithmetic(&self, op: &R2ILOp) -> Option<ValueOrigin> {
+        let (operation, dst, operands) = r2il::eval::Operation::of(op)?;
+        let words = operands
+            .into_iter()
+            .map(|operand| {
+                let value = self.of(operand)?.constant()?;
+                r2il::eval::Word::new(u128::from(value), operand.size).ok()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let value = r2il::eval::apply(operation, &words, dst.size).ok()?;
         Some(ValueOrigin::Constant {
-            value: truncated(combine(left, right), size),
-            size,
+            value: u64::try_from(value).ok()?,
+            size: dst.size,
         })
     }
 }

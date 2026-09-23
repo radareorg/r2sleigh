@@ -51,6 +51,36 @@ in-memory program out of byte literals, implements the six-method `Program`
 trait over it, and asserts on what the engine renders. No binary on disk, no
 external tool, no fixture to regenerate.
 
+### The claim oracle
+
+`crates/r2engine/tests/oracle.rs` checks every claim `pd` and `pdf` make
+against runs of the function's own lift. `r2il::eval` is the machine: one
+concrete byte state per run, and one step per operation as the p-code reference
+defines it, importing nothing an analysis derives. A value of any width is
+exact while it fits the 128 bits carried, and a result that does not is
+refused rather than wrapped. `r2il::eval::apply` is also what every constant
+fold in `r2ssa` answers through, so the oracle checks the semantics the engine
+folds with.
+
+Each function runs from entry states that give every register it reads nought,
+one, all ones, each constant the body names and one either side of it, and
+seeded randoms; a register the lift reads as a p-code boolean gets only nought
+or one. The stack pointer and the registers the processor specification tracks
+are pinned, and everything above the program's highest section is stack. A
+second run from each state gives every writable word the first read before
+writing it, on the stack or anywhere some run stores, that state's values, so
+the revision's bytes are one memory state of many.
+
+A run that reaches a call, an unmapped access, an operation the evaluator does
+not execute or its budget stops, and rules on nothing after that point. A
+`Computes` number is followed until nothing holds it, a call clobbers it or the
+function returns it, and fails where anything builds another number on it. A
+range is ruled only where the instruction's own operations write its storage,
+and `Holds` once, by the evaluator's load of the revision. A claim no run rules
+on fails, so an unchecked claim never passes as a checked one, and a second
+test injects the overclaims each check exists to reject. A new claim kind does
+not compile until `verdict` in the oracle says how a run rules on it.
+
 ### End-to-end gates
 
 These run the built `r2s` over real binaries. **Build before measuring**: the
@@ -82,6 +112,7 @@ What each kind of change needs
 |---|---|
 | New opcode | Unit test in the crate that lowers it |
 | New lowering or fold | Unit test, plus a tier print that shows it |
+| New `pd`/`pdf` claim | A `verdict` arm in the claim oracle, and a function in its set that makes the claim |
 | New `r2s` command | Integration test in `crates/r2s/tests/` |
 | Optimization pass | Unit test in `r2ssa` with before and after SSA |
 | Decompiler change | The certification gate, plus a unit test for the rule |

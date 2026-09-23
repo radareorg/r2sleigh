@@ -474,6 +474,57 @@ pub(crate) const fn block_transfer_spelling(
 }
 
 impl SSAOp {
+    /// What `r2il::eval` computes this operation's value with, from its `sources` in order.
+    pub fn operation(&self) -> Option<r2il::eval::Operation> {
+        use SSAOp::*;
+        use r2il::eval::Operation as O;
+        Some(match self {
+            Copy { .. } => O::Copy,
+            IntAdd { .. } => O::Add,
+            IntSub { .. } => O::Sub,
+            IntMult { .. } => O::Mult,
+            IntDiv { .. } => O::Div,
+            IntSDiv { .. } => O::SDiv,
+            IntRem { .. } => O::Rem,
+            IntSRem { .. } => O::SRem,
+            IntAnd { .. } => O::And,
+            IntOr { .. } => O::Or,
+            IntXor { .. } => O::Xor,
+            IntLeft { .. } => O::Left,
+            IntRight { .. } => O::Right,
+            IntSRight { .. } => O::SRight,
+            IntEqual { .. } => O::Equal,
+            IntNotEqual { .. } => O::NotEqual,
+            IntLess { .. } => O::Less,
+            IntSLess { .. } => O::SLess,
+            IntLessEqual { .. } => O::LessEqual,
+            IntSLessEqual { .. } => O::SLessEqual,
+            IntCarry { .. } => O::Carry,
+            IntSCarry { .. } => O::SCarry,
+            IntSBorrow { .. } => O::SBorrow,
+            BoolAnd { .. } => O::BoolAnd,
+            BoolOr { .. } => O::BoolOr,
+            BoolXor { .. } => O::BoolXor,
+            IntNegate { .. } => O::Negate,
+            IntNot { .. } => O::Not,
+            BoolNot { .. } => O::BoolNot,
+            IntZExt { .. } => O::ZExt,
+            IntSExt { .. } => O::SExt,
+            PopCount { .. } => O::PopCount,
+            Lzcount { .. } => O::Lzcount,
+            Subpiece { offset, .. } => O::Subpiece { offset: *offset },
+            Piece { .. } => O::Piece,
+            PtrAdd { element_size, .. } => O::PtrAdd {
+                element_size: *element_size,
+            },
+            PtrSub { element_size, .. } => O::PtrSub {
+                element_size: *element_size,
+            },
+            Select(_) => O::Select,
+            _ => return None,
+        })
+    }
+
     /// Exact address space touched by a memory operation.
     pub const fn memory_space(&self) -> Option<SpaceId> {
         match self {

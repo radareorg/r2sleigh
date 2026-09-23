@@ -520,17 +520,6 @@ fn mask_for_bits(bits: u32) -> u64 {
     }
 }
 
-fn sign_extend(value: u64, bits: u32) -> i64 {
-    if bits == 0 {
-        return 0;
-    }
-    if bits >= 64 {
-        return value as i64;
-    }
-    let shift = 64 - bits;
-    ((value << shift) as i64) >> shift
-}
-
 fn const_for_var(var: &SSAVar, consts: &HashMap<VarKey, u64>) -> Option<u64> {
     if let Some(val) = const_value(var) {
         return Some(val);
@@ -538,196 +527,47 @@ fn const_for_var(var: &SSAVar, consts: &HashMap<VarKey, u64>) -> Option<u64> {
     consts.get(&VarKey::from_var(var)).copied()
 }
 
+/// Whether the optimizer folds this operation over constants; a flag over literals is r2rewrite's `literal.flag` to fold.
+fn folds_over_constants(op: &SSAOp) -> bool {
+    op.operation().is_some()
+        && !matches!(
+            op,
+            SSAOp::IntCarry { .. } | SSAOp::IntSCarry { .. } | SSAOp::IntSBorrow { .. }
+        )
+}
+
 fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
     use SSAOp::*;
 
     let dst = op.dst()?;
-    let bits = dst.size.saturating_mul(8);
-    let mask = mask_for_bits(bits);
-
-    let unary = |src: &SSAVar| const_for_var(src, consts);
-    let binary =
-        |a: &SSAVar, b: &SSAVar| Some((const_for_var(a, consts)?, const_for_var(b, consts)?));
-
-    let val = match op {
-        Copy { src, .. } => unary(src)?,
-        IntNegate { src, .. } => (!unary(src)?).wrapping_add(1),
-        IntNot { src, .. } => !unary(src)?,
-        BoolNot { src, .. } => (unary(src)? == 0) as u64,
-        IntZExt { src, .. } => unary(src)?,
-        IntSExt { src, .. } => {
-            let src_bits = src.size.saturating_mul(8);
-            sign_extend(unary(src)?, src_bits) as u64
+    let mask = mask_for_bits(dst.size.saturating_mul(8));
+    let known = |var: &SSAVar| const_for_var(var, consts);
+    // Absorbing elements decide the value whatever the other operand holds: `or rax, -1` reads nothing.
+    match op {
+        IntMult { a, b, .. } | IntAnd { a, b, .. }
+            if known(a) == Some(0) || known(b) == Some(0) =>
+        {
+            return Some(0);
         }
-        Trunc { src, .. } => unary(src)? & mask_for_bits(bits),
-        IntAdd { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a.wrapping_add(b)
+        IntOr { a, b, .. }
+            if [known(a), known(b)]
+                .into_iter()
+                .flatten()
+                .any(|value| value & mask == mask) =>
+        {
+            return Some(mask);
         }
-        IntSub { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a.wrapping_sub(b)
-        }
-        IntMult { a, b, .. } => match (unary(a), unary(b)) {
-            (Some(0), _) | (_, Some(0)) => 0,
-            (Some(a), Some(b)) => a.wrapping_mul(b),
-            _ => return None,
-        },
-        IntDiv { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b == 0 {
-                return None;
-            }
-            a / b
-        }
-        IntSDiv { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b == 0 {
-                return None;
-            }
-            let signed = sign_extend(a, bits) / sign_extend(b, bits);
-            signed as u64
-        }
-        IntRem { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b == 0 {
-                return None;
-            }
-            a % b
-        }
-        IntSRem { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b == 0 {
-                return None;
-            }
-            let signed = sign_extend(a, bits) % sign_extend(b, bits);
-            signed as u64
-        }
-        // Absorbing elements are constants whatever the other operand holds:
-        // `and x, 0` is 0, `or x, -1` is all ones, `mul x, 0` is 0. Without
-        // them a write like `or rax, -1` reads the entry carrier for nothing.
-        IntAnd { a, b, .. } => match (unary(a), unary(b)) {
-            (Some(0), _) | (_, Some(0)) => 0,
-            (Some(a), Some(b)) => a & b,
-            _ => return None,
-        },
-        IntOr { a, b, .. } => match (unary(a), unary(b)) {
-            (Some(v), _) | (_, Some(v)) if v & mask == mask => mask,
-            (Some(a), Some(b)) => a | b,
-            _ => return None,
-        },
-        IntXor { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a ^ b
-        }
-        IntLeft { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b >= bits as u64 {
-                return None;
-            }
-            a.wrapping_shl(b as u32)
-        }
-        IntRight { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b >= bits as u64 {
-                return None;
-            }
-            a >> (b as u32)
-        }
-        IntSRight { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            if b >= bits as u64 {
-                return None;
-            }
-            let signed = sign_extend(a, bits) >> (b as u32);
-            signed as u64
-        }
-        IntEqual { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            (a == b) as u64
-        }
-        IntNotEqual { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            (a != b) as u64
-        }
-        IntLess { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            (a < b) as u64
-        }
-        IntLessEqual { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            (a <= b) as u64
-        }
-        IntSLess { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            (sign_extend(a, bits) < sign_extend(b, bits)) as u64
-        }
-        IntSLessEqual { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            (sign_extend(a, bits) <= sign_extend(b, bits)) as u64
-        }
-        BoolAnd { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            ((a != 0) && (b != 0)) as u64
-        }
-        BoolOr { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            ((a != 0) || (b != 0)) as u64
-        }
-        BoolXor { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            ((a != 0) ^ (b != 0)) as u64
-        }
-        Piece { hi, lo, .. } => {
-            let hi_val = const_for_var(hi, consts)?;
-            let lo_val = const_for_var(lo, consts)?;
-            let lo_bits = lo.size.saturating_mul(8);
-            if lo_bits >= 64 {
-                return None;
-            }
-            (hi_val << lo_bits) | (lo_val & mask_for_bits(lo_bits))
-        }
-        Subpiece { src, offset, .. } => {
-            let val = unary(src)?;
-            let shift = offset.saturating_mul(8);
-            if shift >= 64 {
-                return None;
-            }
-            val >> shift
-        }
-        PopCount { src, .. } => (unary(src)? & mask).count_ones() as u64,
-        Lzcount { src, .. } => {
-            let val = unary(src)? & mask;
-            let width = bits.min(64);
-            if width == 0 {
-                0
-            } else {
-                let leading = val.leading_zeros();
-                (leading.saturating_sub(64 - width)) as u64
-            }
-        }
-        PtrAdd {
-            base,
-            index,
-            element_size,
-            ..
-        } => {
-            let (base, index) = binary(base, index)?;
-            base.wrapping_add(index.wrapping_mul(*element_size as u64))
-        }
-        PtrSub {
-            base,
-            index,
-            element_size,
-            ..
-        } => {
-            let (base, index) = binary(base, index)?;
-            base.wrapping_sub(index.wrapping_mul(*element_size as u64))
-        }
-        _ => return None,
-    };
-
-    Some(val & mask)
+        _ => {}
+    }
+    if !folds_over_constants(op) {
+        return None;
+    }
+    let operands = op
+        .sources()
+        .into_iter()
+        .map(known)
+        .collect::<Option<Vec<_>>>()?;
+    crate::constant::computed(op, &operands)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1880,8 +1720,7 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
     use SSAOp::*;
 
     let dst = op.dst()?.clone();
-    let bits = dst.size.saturating_mul(8);
-    let mask = mask_for_bits(bits);
+    let mask = mask_for_bits(dst.size.saturating_mul(8));
 
     let const_of = |var: &SSAVar| const_value(var);
 
@@ -1895,8 +1734,22 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
         src: src.clone(),
     };
 
+    if matches!(op, Copy { .. }) {
+        return None;
+    }
+    // Over constants the value is what `r2il::eval` says the operation computes, or nothing.
+    if folds_over_constants(op)
+        && let Some(values) = op
+            .sources()
+            .into_iter()
+            .map(const_of)
+            .collect::<Option<Vec<_>>>()
+    {
+        return crate::constant::computed(op, &values).map(make_const);
+    }
+
+    // What remains are identities, which hold whatever the unknown operand is.
     let simplified = match op {
-        Copy { .. } => return None,
         // A selection on a decided condition is the arm it decided.
         Select(select) => match const_of(&select.cond) {
             Some(0) => make_copy(&select.if_false),
@@ -1906,57 +1759,25 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
         IntAdd { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) => make_copy(b),
             (_, Some(0)) => make_copy(a),
-            (Some(av), Some(bv)) => make_const(av.wrapping_add(bv)),
             _ => return None,
         },
-        IntSub { a, b, .. } => match (const_of(a), const_of(b)) {
-            (_, Some(0)) => make_copy(a),
+        IntSub { a, b, .. } => match const_of(b) {
+            Some(0) => make_copy(a),
             _ if a == b => make_const(0),
-            (Some(av), Some(bv)) => make_const(av.wrapping_sub(bv)),
             _ => return None,
         },
         IntMult { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) | (_, Some(0)) => make_const(0),
             (Some(1), _) => make_copy(b),
             (_, Some(1)) => make_copy(a),
-            (Some(av), Some(bv)) => make_const(av.wrapping_mul(bv)),
             _ => return None,
         },
-        IntDiv { a, b, .. } => match (const_of(a), const_of(b)) {
-            (_, Some(1)) => make_copy(a),
-            (Some(_), Some(0)) => return None,
-            (Some(av), Some(bv)) => make_const(av / bv),
-            _ => return None,
-        },
-        IntSDiv { a, b, .. } => match (const_of(a), const_of(b)) {
-            (_, Some(1)) => make_copy(a),
-            (Some(_), Some(0)) => return None,
-            (Some(av), Some(bv)) => {
-                let res = sign_extend(av, bits) / sign_extend(bv, bits);
-                make_const(res as u64)
-            }
-            _ => return None,
-        },
-        IntRem { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(_), Some(0)) => return None,
-            (Some(av), Some(bv)) => make_const(av % bv),
-            _ => return None,
-        },
-        IntSRem { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(_), Some(0)) => return None,
-            (Some(av), Some(bv)) => {
-                let res = sign_extend(av, bits) % sign_extend(bv, bits);
-                make_const(res as u64)
-            }
-            _ => return None,
-        },
-        IntNegate { src, .. } => match const_of(src) {
-            Some(val) => make_const((!val).wrapping_add(1)),
+        IntDiv { a, b, .. } | IntSDiv { a, b, .. } => match const_of(b) {
+            Some(1) => make_copy(a),
             _ => return None,
         },
         IntAnd { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) | (_, Some(0)) => make_const(0),
-            (Some(av), Some(bv)) => make_const(av & bv),
             (Some(av), _) if av == mask => make_copy(b),
             (_, Some(bv)) if bv == mask => make_copy(a),
             _ => return None,
@@ -1967,35 +1788,17 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
             // All ones absorbs: `or rax, -1` is the constant whatever `rax` held.
             (Some(av), _) if av == mask => make_const(mask),
             (_, Some(bv)) if bv == mask => make_const(mask),
-            (Some(av), Some(bv)) => make_const(av | bv),
             _ => return None,
         },
         IntXor { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) => make_copy(b),
             (_, Some(0)) => make_copy(a),
-            (Some(av), Some(bv)) => make_const(av ^ bv),
             _ if a == b => make_const(0),
             _ => return None,
         },
-        IntNot { src, .. } => match const_of(src) {
-            Some(val) => make_const(!val),
-            _ => return None,
-        },
         IntLeft { a, b, .. } | IntRight { a, b, .. } | IntSRight { a, b, .. } => {
-            match (const_of(a), const_of(b)) {
-                (Some(av), Some(bv)) => {
-                    if bv >= bits as u64 {
-                        return None;
-                    }
-                    let res = match op {
-                        IntLeft { .. } => av.wrapping_shl(bv as u32),
-                        IntRight { .. } => av >> (bv as u32),
-                        IntSRight { .. } => (sign_extend(av, bits) >> (bv as u32)) as u64,
-                        _ => av,
-                    };
-                    make_const(res)
-                }
-                (_, Some(0)) => make_copy(a),
+            match const_of(b) {
+                Some(0) => make_copy(a),
                 _ => return None,
             }
         }
@@ -2004,109 +1807,24 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
         | IntLess { a, b, .. }
         | IntLessEqual { a, b, .. }
         | IntSLess { a, b, .. }
-        | IntSLessEqual { a, b, .. } => {
-            if a == b {
-                let val = matches!(
-                    op,
-                    IntEqual { .. } | IntLessEqual { .. } | IntSLessEqual { .. }
-                ) as u64;
-                return Some(make_const(val));
-            }
+        | IntSLessEqual { a, b, .. }
+            if a == b =>
+        {
+            let reflexive = matches!(
+                op,
+                IntEqual { .. } | IntLessEqual { .. } | IntSLessEqual { .. }
+            );
+            make_const(u64::from(reflexive))
+        }
+        BoolAnd { a, b, .. } | BoolOr { a, b, .. } => {
+            // Nought decides a conjunction and one a disjunction, whatever the other operand is.
+            let absorbing = u64::from(matches!(op, BoolOr { .. }));
             match (const_of(a), const_of(b)) {
-                (Some(av), Some(bv)) => {
-                    let result = match op {
-                        IntEqual { .. } => av == bv,
-                        IntNotEqual { .. } => av != bv,
-                        IntLess { .. } => av < bv,
-                        IntLessEqual { .. } => av <= bv,
-                        IntSLess { .. } => sign_extend(av, bits) < sign_extend(bv, bits),
-                        IntSLessEqual { .. } => sign_extend(av, bits) <= sign_extend(bv, bits),
-                        _ => false,
-                    };
-                    make_const(result as u64)
-                }
+                (Some(av), _) | (_, Some(av)) if av == absorbing => make_const(absorbing),
                 _ => return None,
             }
         }
-        BoolNot { src, .. } => match const_of(src) {
-            Some(val) => make_const((val == 0) as u64),
-            _ => return None,
-        },
-        BoolAnd { a, b, .. } | BoolOr { a, b, .. } | BoolXor { a, b, .. } => {
-            match (const_of(a), const_of(b)) {
-                (Some(av), Some(bv)) => {
-                    let a = av != 0;
-                    let b = bv != 0;
-                    let res = match op {
-                        BoolAnd { .. } => a && b,
-                        BoolOr { .. } => a || b,
-                        BoolXor { .. } => a ^ b,
-                        _ => false,
-                    };
-                    make_const(res as u64)
-                }
-                (Some(0), _) if matches!(op, BoolAnd { .. }) => make_const(0),
-                (_, Some(0)) if matches!(op, BoolAnd { .. }) => make_const(0),
-                (Some(1), _) if matches!(op, BoolOr { .. }) => make_const(1),
-                (_, Some(1)) if matches!(op, BoolOr { .. }) => make_const(1),
-                _ => return None,
-            }
-        }
-        IntZExt { src, .. } => match const_of(src) {
-            Some(val) => make_const(val),
-            _ if src.size == dst.size => make_copy(src),
-            _ => return None,
-        },
-        IntSExt { src, .. } => match const_of(src) {
-            Some(val) => {
-                let src_bits = src.size.saturating_mul(8);
-                make_const(sign_extend(val, src_bits) as u64)
-            }
-            _ if src.size == dst.size => make_copy(src),
-            _ => return None,
-        },
-        Trunc { src, .. } => match const_of(src) {
-            Some(val) => make_const(val & mask_for_bits(bits)),
-            _ => return None,
-        },
-        Piece { hi, lo, .. } => match (const_of(hi), const_of(lo)) {
-            (Some(h), Some(l)) => {
-                let lo_bits = lo.size.saturating_mul(8);
-                if lo_bits >= 64 {
-                    return None;
-                }
-                make_const((h << lo_bits) | (l & mask_for_bits(lo_bits)))
-            }
-            _ => return None,
-        },
-        Subpiece { src, offset, .. } => match const_of(src) {
-            Some(val) => {
-                let shift = offset.saturating_mul(8);
-                if shift >= 64 {
-                    return None;
-                }
-                make_const(val >> shift)
-            }
-            _ => return None,
-        },
-        PtrAdd {
-            base,
-            index,
-            element_size,
-            ..
-        } => match (const_of(base), const_of(index)) {
-            (Some(b), Some(i)) => make_const(b.wrapping_add(i.wrapping_mul(*element_size as u64))),
-            _ => return None,
-        },
-        PtrSub {
-            base,
-            index,
-            element_size,
-            ..
-        } => match (const_of(base), const_of(index)) {
-            (Some(b), Some(i)) => make_const(b.wrapping_sub(i.wrapping_mul(*element_size as u64))),
-            _ => return None,
-        },
+        IntZExt { src, .. } | IntSExt { src, .. } if src.size == dst.size => make_copy(src),
         _ => return None,
     };
 
@@ -2701,6 +2419,62 @@ mod sccp_tests {
             2,
             "SCCP should fold `x & 0` and `0 * x` to zero: {consts:?}"
         );
+    }
+
+    #[test]
+    fn a_fold_computes_what_r2il_eval_says_the_operation_does() {
+        // A four-byte 0x80 is positive at its own width, whatever width the boolean result has.
+        let less = |dst| R2ILOp::IntSLess {
+            dst,
+            a: make_const(0x80, 4),
+            b: make_const(0, 4),
+        };
+        // The most negative quotient's negation does not fit, so p-code gives it no value.
+        let overflow = |dst| R2ILOp::IntSDiv {
+            dst,
+            a: make_const(1 << 63, 8),
+            b: make_const(u64::MAX, 8),
+        };
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                less(make_reg(0, 1)),
+                overflow(make_reg(8, 8)),
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }]);
+        let (consts, _) = sccp(&func);
+        let sized = |size| {
+            let found = consts.iter().filter(|(key, _)| key.size == size);
+            found.map(|(_, value)| *value).collect::<Vec<_>>()
+        };
+        assert_eq!(sized(1), [0], "{consts:?}");
+        assert!(sized(8).is_empty(), "{consts:?}");
+        // The combiner answers from the same statement once every operand is a constant.
+        let flag = SSAVar::new("flag", 1, 1);
+        let quotient = SSAVar::new("quotient", 1, 8);
+        let constant = |value, size| SSAVar::constant(value, size);
+        let signed_less = SSAOp::IntSLess {
+            dst: flag.clone(),
+            a: constant(0x80, 4),
+            b: constant(0, 4),
+        };
+        let folded = SSAOp::Copy {
+            dst: flag,
+            src: constant(0, 1),
+        };
+        assert_eq!(simplify_op(&signed_less), Some(folded));
+        let divided = SSAOp::IntSDiv {
+            dst: quotient,
+            a: constant(1 << 63, 8),
+            b: constant(u64::MAX, 8),
+        };
+        assert_eq!(simplify_op(&divided), None);
     }
 
     #[test]
