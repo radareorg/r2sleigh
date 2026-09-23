@@ -214,12 +214,18 @@ fn a_flag_name_seeks_where_the_flag_table_puts_it() {
         .expect("f lists entry0");
     let spelled = format!("{listed:#x}");
     // The session starts there, and `s entry0` agrees with both.
-    let run = r2s("s; s entry0; s; s sym.fnv1a32; s; s 4199216; s");
+    let run = r2s("s; s entry0; s; s sym.fnv1a32; s; s fnv1a32; s; s 4199216; s");
     assert!(run.ok, "{}", run.out);
     let seeks: Vec<&str> = run.out.lines().collect();
     assert_eq!(
         seeks,
-        [spelled.as_str(), spelled.as_str(), FNV1A32, FNV1A32],
+        [
+            spelled.as_str(),
+            spelled.as_str(),
+            FNV1A32,
+            FNV1A32,
+            FNV1A32
+        ],
         "{}",
         run.out
     );

@@ -114,6 +114,16 @@ impl Name {
     /// A string is stored as the text it is, because that is what a listing of
     /// strings is for; what a flag can be written as is a projection of it,
     /// with everything an identifier cannot hold replaced.
+    /// Every spelling that seeks to this name: the listed one, and a symbol's
+    /// bare text, which radare2 also accepts (`s main` as well as `s sym.main`).
+    fn seeks(&self) -> Vec<String> {
+        let spelled = self.spelled();
+        match self.namespace == Namespace::Symbol && spelled != self.text {
+            true => vec![spelled, self.text.clone()],
+            false => vec![spelled],
+        }
+    }
+
     pub fn spelled(&self) -> String {
         match self.namespace {
             Namespace::String => format!("{}{}", self.namespace.prefix(), identifier(&self.text)),
@@ -158,16 +168,17 @@ impl NameDb {
     /// order a caller happens to insert in does not decide the answer.
     pub fn insert(&mut self, vaddr: u64, name: Name) {
         let held = self.by_address.entry(vaddr).or_default();
-        let spelling = name.spelled();
+        let seeks = name.seeks();
         match held.iter_mut().find(|at| at.namespace == name.namespace) {
             Some(at) if at.confidence <= name.confidence => return,
             Some(at) => {
-                let replaced = std::mem::replace(at, name).spelled();
-                // One namespace per address, so no other name here spells the same.
-                if let Some(addresses) = self.by_spelling.get_mut(&replaced) {
-                    addresses.remove(&vaddr);
-                    if addresses.is_empty() {
-                        self.by_spelling.remove(&replaced);
+                // One namespace per address, so no other name here seeks the same.
+                for replaced in std::mem::replace(at, name).seeks() {
+                    if let Some(addresses) = self.by_spelling.get_mut(&replaced) {
+                        addresses.remove(&vaddr);
+                        if addresses.is_empty() {
+                            self.by_spelling.remove(&replaced);
+                        }
                     }
                 }
             }
@@ -176,7 +187,9 @@ impl NameDb {
                 held.sort_by(|a, b| (a.confidence, a.namespace).cmp(&(b.confidence, b.namespace)));
             }
         }
-        self.by_spelling.entry(spelling).or_default().insert(vaddr);
+        for spelling in seeks {
+            self.by_spelling.entry(spelling).or_default().insert(vaddr);
+        }
     }
 
     /// The lowest address a name is spelled as, the way a listing writes it.
