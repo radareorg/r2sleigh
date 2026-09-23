@@ -85,10 +85,7 @@ impl<S: Source> OpenProgram<S> {
             .map_err(|refusal| refusal.to_string())
     }
 
-    /// Read the type analysis of one prepared function, sealed once and held beside it.
-    ///
-    /// A refusal is the response a rendering returns in its place, and is not
-    /// held: it may be this request's stop rather than a fact about the program.
+    /// Read one prepared function's sealed type analysis; a refusal may be this request's stop, so it is not held.
     fn read_sealed<R>(
         &self,
         entry: u64,
@@ -111,8 +108,7 @@ impl<S: Source> OpenProgram<S> {
         Ok(Rendering { prepared, response })
     }
 
-    /// What one function is: its blocks, calls, arguments, locals and
-    /// signature, read off the sealed analysis every rendering draws from.
+    /// What one function is, read off the sealed analysis every rendering draws from.
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
         let prepared = self.prepare(entry)?;

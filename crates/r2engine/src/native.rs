@@ -406,10 +406,7 @@ fn render(
     })
 }
 
-/// The type analysis of one prepared function, sealed for every tier and `afi` to read.
-///
-/// A refusal is the response a rendering would have returned. The control is
-/// the request's own, so a stopped sealing is that request's and nobody keeps it.
+/// The type analysis of one prepared function under this request's control; a refusal is the response a rendering returns.
 pub fn sealed(
     target: &NativeTarget<'_>,
     entry: u64,

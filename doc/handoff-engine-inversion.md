@@ -1130,3 +1130,32 @@ per-crate test run without `--features sleigh` clears neither.
 
 `plain_o2_check_secret` and `plain_o2_sum_array` still fail at SSA hash
 `9a9df9f6a934275a`, unchanged by any of the above.
+
+## One return decision, and what `void` now needs
+
+The return type is decided once, in `r2types::ReturnTypeFact`, in this order:
+the declared type graph (`prototype_from_source_types`), the declaration's
+spelling, a boundary r2ssa proved void, the recovered interface's carrier word,
+then the agreement of every return and tail call. Local inference,
+`apply_recovered_return_type` and the signature-first shortcut are gone; the
+merged signature's `ret_type` is written from the fact and is `None` where the
+fact refuses. A constant exit agrees with any type that holds it; an untyped
+exit refuses. `afi` prints `signature:` only for a decided return.
+
+Interface recovery no longer calls a body void when its walk reached no return:
+that needs every exit to be a call that does not come back, else the result is
+`Unproven`. Predicated returns (`bxeq lr`) now count as returns. The cause of
+the clang `murmur3_32` and `siphash24` rendering `void` with a dropped seed was
+the two-pass preparation: the first walk stops at a jump table, and a body that
+proved a frame slot restated that partial interface as the second pass's
+declaration. A dispatched body is now prepared once more before its slots are
+restated, so its interface is read off every arm.
+
+Open: a return the walk cannot answer (the register untouched, or behind a user
+operation such as `dmb` or `svc`) is still read as void. On ARM and AArch64 the
+result register is also the first argument, so an untouched one may be that
+argument returned; and a user operation with no output may or may not write
+it. Deciding that is a question about what the specification's silence means.
+`pdd`'s placement also drops trailing formals the body never mentions, so its
+arity can be shorter than `afi`'s (`vfold`, `main` with an unread `argv`); the
+per-slot types agree.

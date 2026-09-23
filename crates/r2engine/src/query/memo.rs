@@ -151,9 +151,7 @@ impl<T, S> Memo<T, S> {
         }
     }
 
-    /// Read the type analysis sealed from exactly this held analysis, sealing it first where no request has.
-    ///
-    /// A refusal is counted and not held, for the reason no refusal is.
+    /// Read the type analysis sealed from exactly this held analysis, sealing it first; a refusal is counted, not held.
     pub fn read_sealed<E, R>(
         &self,
         analysis: &Arc<T>,

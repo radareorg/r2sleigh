@@ -1749,9 +1749,7 @@ pub struct EngineAnalyzeResponse {
     pub diagnostics: EngineDiagnostics,
 }
 
-/// One function's type analysis, sealed against the body it read and the route chosen for it.
-///
-/// Every tier renders from this and `afi` reads it, so one prepared body is typed once.
+/// One function's type analysis, sealed against its body and route, that every tier and `afi` read.
 #[derive(Debug)]
 pub struct SealedFunctionAnalysis {
     function_name: String,
@@ -2406,9 +2404,7 @@ impl EngineSession {
         })
     }
 
-    /// Type one function once: analyse it, choose its route and seal the facts every tier reads.
-    ///
-    /// A refusal is the response a rendering would have returned, and is never held.
+    /// Type one function once and seal the facts every tier reads; a refusal is the response a rendering returns.
     pub(crate) fn seal_function(
         &self,
         request: EngineFunctionDecompileRequest,
