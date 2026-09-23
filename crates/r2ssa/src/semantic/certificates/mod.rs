@@ -537,31 +537,25 @@ pub(crate) fn counted_for_loop_certificate(
     structured: &StructuredDataflowFacts,
     loop_fact: &StructuredLoopFact,
 ) -> Option<ForLoopCertificate> {
-    let phi = loop_fact.induction_phi?;
-    let induction = structured.inductions.get(&phi)?;
-    if induction.loop_id != loop_fact.id
-        || induction.header != loop_fact.header
-        || loop_fact.latches.as_slice() != [induction.latch]
-        || loop_fact.induction_init != Some(induction.init)
-        || loop_fact.induction_update != Some(induction.update)
-        || !induction.validate(graph)
-    {
-        return None;
-    }
     let comparison = predicates
         .predicates
         .get(&loop_fact.condition?)?
         .comparison
         .as_ref()?;
-    let lhs_reads_phi = value_depends_on(graph, comparison.lhs, phi);
-    let rhs_reads_phi = value_depends_on(graph, comparison.rhs, phi);
-    if lhs_reads_phi == rhs_reads_phi {
+    // The clause variable is the first induction exactly one side of the condition reads.
+    let (carrier, induction) = loop_fact.carriers.iter().find_map(|carrier| {
+        let induction = structured.inductions.get(&carrier.phi)?;
+        let reads = |side: ValueId| value_depends_on(graph, side, carrier.phi);
+        (reads(comparison.lhs) != reads(comparison.rhs)).then_some((carrier, induction))
+    })?;
+    let phi = induction.phi;
+    if induction.loop_id != loop_fact.id
+        || induction.header != loop_fact.header
+        || loop_fact.latches.as_slice() != [induction.latch]
+        || !induction.validate(graph)
+    {
         return None;
     }
-    let carrier = loop_fact
-        .carriers
-        .iter()
-        .find(|carrier| carrier.phi == phi)?;
     let mut initializers = carrier.entries.iter().filter(|entry| {
         entry.value == induction.init
             && function.dominates(entry.predecessor, loop_fact.header)

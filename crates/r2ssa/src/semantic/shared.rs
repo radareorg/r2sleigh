@@ -525,6 +525,10 @@ pub(crate) fn induction_step_for_update(
     update: ValueId,
     width_bits: u32,
 ) -> Option<InductionStep> {
+    // A `u64` step taken modulo a wider width would misstate every carry past bit sixty-three.
+    if width_bits > u64::BITS {
+        return None;
+    }
     let mut visited = BTreeSet::new();
     let (multiplier, addend) =
         induction_affine_parts(graph, phi, update, width_bits, 8, &mut visited)?;

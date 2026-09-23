@@ -529,12 +529,7 @@ fn counted_for_certificate_joins_condition_phi_initializer_and_latch_by_identity
 fn unrelated_condition_value_has_no_for_certificate() {
     let artifact = counted_loop_artifact(false);
     assert!(
-        artifact
-            .facts()
-            .structured
-            .loops
-            .values()
-            .any(|loop_fact| loop_fact.induction_phi.is_some()),
+        !artifact.facts().structured.inductions.is_empty(),
         "the refusal fixture must still contain an induction"
     );
     assert!(for_certificate(&artifact).is_none());
@@ -543,14 +538,13 @@ fn unrelated_condition_value_has_no_for_certificate() {
 #[test]
 fn distinct_value_identities_never_merge_for_certificate_by_name() {
     let artifact = counted_loop_artifact(false);
-    let loop_fact = artifact
-        .facts()
-        .structured
-        .loops
+    let structured = &artifact.facts().structured;
+    let induction = structured
+        .inductions
         .values()
-        .find(|loop_fact| loop_fact.induction_phi.is_some())
+        .next()
         .expect("loop induction");
-    let phi = loop_fact.induction_phi.expect("induction phi");
+    let loop_fact = structured.loops.get(&induction.loop_id).expect("its loop");
     let comparison = artifact
         .facts()
         .predicates
@@ -561,12 +555,12 @@ fn distinct_value_identities_never_merge_for_certificate_by_name() {
     assert!(!super::super::value_depends_on(
         artifact.graph(),
         comparison.lhs,
-        phi
+        induction.phi
     ));
     assert!(!super::super::value_depends_on(
         artifact.graph(),
         comparison.rhs,
-        phi
+        induction.phi
     ));
     assert!(for_certificate(&artifact).is_none());
 }

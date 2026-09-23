@@ -943,6 +943,7 @@ pub struct InductionFact {
     pub update: ValueId,
     /// The latch block whose edge carries `update`.
     pub latch: u64,
+    /// At most sixty-four, the widest a `u64` step describes exactly.
     pub width_bits: u32,
     pub step: InductionStep,
 }
@@ -1076,19 +1077,44 @@ pub struct StructuredLoopFact {
     pub exits: Vec<u64>,
     pub condition: Option<PredicateId>,
     pub carriers: Vec<LoopCarrierFact>,
-    pub induction_phi: Option<ValueId>,
-    pub induction_init: Option<ValueId>,
-    pub induction_update: Option<ValueId>,
     /// How many times the header runs when control leaves through the one exit.
     pub trips: Result<LoopTrips, TripRefusal>,
 }
 
-/// The header's runs from entering the loop to leaving it, stated only for control that leaves through the one exit edge.
+/// The header's runs from entering the loop to leaving it, with the exit test that proves them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopTrips {
+pub struct LoopTrips {
+    pub count: TripCount,
+    pub test: TripTest,
+}
+
+/// The runs, stated only for control that leaves through the one exit edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TripCount {
     Exact(u64),
-    /// The form's value read unsigned at its width, which an entry assumption proves is not zero.
-    Symbolic(EntryAffineForm),
+    /// The form's value read unsigned at its width, which `guard` proves is not zero.
+    Symbolic {
+        form: EntryAffineForm,
+        guard: TripGuard,
+    },
+}
+
+/// The exit comparison a count solves: one induction's merge or update against a bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TripTest {
+    pub predicate: PredicateId,
+    /// The induction's header merge.
+    pub induction: ValueId,
+    /// Whether the test reads the update, a step ahead of the merge.
+    pub reads_update: bool,
+    pub bound: ValueId,
+}
+
+/// An assumption holding at `block`, which dominates the header, whose sides differ exactly when the count is nonzero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TripGuard {
+    pub block: u64,
+    pub assumption: BlockAssumption,
 }
 
 /// `Σ coefficient·value + constant` modulo `2^width_bits`, over values the function is entered with.

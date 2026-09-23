@@ -404,6 +404,14 @@ symbolic count arises only from an equality with an odd step. Its zero, which is
 header (the rule above) whose two sides differ by an odd multiple of the count;
 entry values never change, so what the edge tested holds at every run.
 
+A count carries its evidence: the predicate, the induction, whether the update
+or the merge is tested, the bound, and for a symbolic count the guarding
+assumption. `StructuredLoopFact::validate_trips` recounts it from the graph. An
+induction is stated only up to sixty-four bits, the widest a `u64` step
+describes exactly, so no count is ever taken modulo a wider width. How control
+leaves a loop is read once, when the loop is recovered (`LoopExits`), and the
+loop's `exits` and the count's single exit edge both come from that walk.
+
 ### Block origins (`origin.rs`)
 
 An origin maps a storage only while none of its bytes has been written since

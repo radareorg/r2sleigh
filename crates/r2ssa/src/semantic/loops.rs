@@ -1,6 +1,7 @@
 //! Loops, their carriers and the inductions they run.
 
 use super::*;
+use crate::cfg::BlockTerminator;
 
 /// Every carrier of one loop whose motion round the latch is known exactly.
 ///
@@ -90,17 +91,17 @@ pub(crate) fn collect_structured_loop_facts(
         let id = LoopId(idx as u32);
         let body_set = natural_loop_body(function, header, latches);
         let body = body_set.iter().copied().collect::<Vec<_>>();
-        let exits = loop_exits(function, &body_set);
+        let leaving = LoopExits::of(function, &body_set);
+        let exits = leaving.targets();
         let condition = loop_condition(predicates, header, &body_set, &exits);
         let loop_ = NaturalLoop {
             id,
             header,
             latches,
             body: &body_set,
+            exits: &leaving,
         };
         let carriers = loop_carrier_facts(code, loop_, live_out, storage_spans);
-        let (induction_phi, induction_init, induction_update) =
-            loop_induction_values(graph, predicates, condition, loop_);
         let loop_inductions = loop_induction_facts(graph, id, header, &carriers);
         let trips = counter.count(&TripLoop {
             loop_,
@@ -123,9 +124,6 @@ pub(crate) fn collect_structured_loop_facts(
                 exits,
                 condition,
                 carriers,
-                induction_phi,
-                induction_init,
-                induction_update,
                 trips,
             },
         );
@@ -133,18 +131,64 @@ pub(crate) fn collect_structured_loop_facts(
     (loops, inductions)
 }
 
-/// One natural loop: which it is, where it begins, the edges back to it and
-/// the blocks it contains.
+/// One natural loop: which it is, where it begins, the edges back to it, the
+/// blocks it contains and how control leaves it.
 ///
-/// The four are computed together and every rule that reasons about a loop
-/// takes all four, so they are one thing rather than four parameters each rule
-/// takes apart again.
+/// These are computed together and every rule that reasons about a loop takes
+/// them all, so they are one thing rather than parameters each rule takes
+/// apart again.
 #[derive(Clone, Copy)]
 pub(crate) struct NaturalLoop<'a> {
     pub(crate) id: LoopId,
     pub(crate) header: u64,
     pub(crate) latches: &'a BTreeSet<u64>,
     pub(crate) body: &'a BTreeSet<u64>,
+    pub(crate) exits: &'a LoopExits,
+}
+
+/// How control leaves one loop, from one walk of its blocks' terminators.
+pub(crate) struct LoopExits {
+    /// Each edge from a block inside to a block outside, as `(from, to)`.
+    pub(crate) edges: BTreeSet<(u64, u64)>,
+    /// Whether a block returns, branches indirectly, or transfers out of the function.
+    pub(crate) leaves_function: bool,
+}
+
+impl LoopExits {
+    pub(crate) fn of(function: &SSAFunction, body: &BTreeSet<u64>) -> Self {
+        let cfg = function.cfg();
+        let leaves = |block: u64| {
+            cfg.get_block(block).is_none_or(|bb| {
+                matches!(
+                    bb.terminator,
+                    BlockTerminator::Return
+                        | BlockTerminator::ConditionalExit { .. }
+                        | BlockTerminator::IndirectBranch
+                        | BlockTerminator::None
+                ) || bb
+                    .successors()
+                    .into_iter()
+                    .any(|succ| cfg.get_block(succ).is_none())
+            })
+        };
+        let mut exits = Self {
+            edges: BTreeSet::new(),
+            leaves_function: false,
+        };
+        for &block in body {
+            exits.leaves_function |= leaves(block);
+            let outside = function.successors(block).into_iter();
+            let outside = outside.filter(|succ| !body.contains(succ));
+            exits.edges.extend(outside.map(|succ| (block, succ)));
+        }
+        exits
+    }
+
+    /// The blocks control reaches on leaving, in address order.
+    pub(crate) fn targets(&self) -> Vec<u64> {
+        let targets = self.edges.iter().map(|(_, to)| *to);
+        targets.collect::<BTreeSet<_>>().into_iter().collect()
+    }
 }
 
 pub(crate) fn loop_carrier_facts(
@@ -163,6 +207,7 @@ pub(crate) fn loop_carrier_facts(
         header,
         latches,
         body: loop_body,
+        ..
     } = loop_;
     let Some(header_block) = function.get_block(header) else {
         return Vec::new();
@@ -415,88 +460,4 @@ pub(crate) fn natural_loop_body(
         }
     }
     body
-}
-
-pub(crate) fn loop_exits(function: &SSAFunction, body: &BTreeSet<u64>) -> Vec<u64> {
-    let mut exits = BTreeSet::new();
-    for block in body {
-        for succ in function.successors(*block) {
-            if !body.contains(&succ) {
-                exits.insert(succ);
-            }
-        }
-    }
-    exits.into_iter().collect()
-}
-
-pub(crate) fn loop_induction_values(
-    graph: &SsaGraph,
-    predicates: &PredicateFacts,
-    condition: Option<PredicateId>,
-    loop_: NaturalLoop<'_>,
-) -> (Option<ValueId>, Option<ValueId>, Option<ValueId>) {
-    let NaturalLoop {
-        header,
-        latches,
-        body,
-        ..
-    } = loop_;
-    let Some(header_id) = graph.block_id_for_addr(header) else {
-        return (None, None, None);
-    };
-    let Some(header_block) = graph.block(header_id) else {
-        return (None, None, None);
-    };
-
-    let mut best = None;
-    for inst_id in &header_block.insts {
-        let Some(inst) = graph.inst(*inst_id) else {
-            continue;
-        };
-        let InstPayload::Phi { predecessors } = &inst.payload else {
-            continue;
-        };
-        let Some(output) = inst.output else {
-            continue;
-        };
-        let mut init = None;
-        let mut update = None;
-        for (pred_id, input) in predecessors
-            .iter()
-            .copied()
-            .zip(inst.inputs.iter().copied())
-        {
-            let Some(pred_addr) = graph.block(pred_id).map(|block| block.addr) else {
-                continue;
-            };
-            if latches.contains(&pred_addr) {
-                update = Some(input);
-            } else if !body.contains(&pred_addr) {
-                init = Some(input);
-            }
-        }
-        if init.is_none() || update.is_none() {
-            continue;
-        }
-        let condition_dependency_rank = condition
-            .and_then(|condition| predicates.predicates.get(&condition))
-            .and_then(|predicate| predicate.comparison.as_ref())
-            .is_some_and(|comparison| {
-                value_depends_on(graph, comparison.lhs, output)
-                    || value_depends_on(graph, comparison.rhs, output)
-            });
-        let candidate = (
-            usize::from(!condition_dependency_rank),
-            output,
-            init,
-            update,
-        );
-        if best.as_ref().is_none_or(
-            |current: &(usize, ValueId, Option<ValueId>, Option<ValueId>)| candidate < *current,
-        ) {
-            best = Some(candidate);
-        }
-    }
-    best.map(|(_, phi, init, update)| (Some(phi), init, update))
-        .unwrap_or((None, None, None))
 }

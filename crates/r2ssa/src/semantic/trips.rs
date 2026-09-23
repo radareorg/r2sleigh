@@ -1,7 +1,6 @@
 //! How many times a loop's header runs, from its induction, its exit test and the values it compares (doc/ssa.md, "Loop trip counts").
 
 use super::*;
-use crate::cfg::BlockTerminator;
 use crate::values::ValueRanges;
 
 /// One loop as its count reads it.
@@ -24,9 +23,9 @@ pub(crate) struct TripCounter<'a> {
 /// The exit test resolved against the induction it reads.
 struct ExitTest<'a> {
     induction: &'a InductionFact,
-    /// One where the test reads the update, a step ahead of the merge.
-    ahead: u64,
-    bound: ValueId,
+    evidence: TripTest,
+    /// The step as a signed integer: the addend, or the subtrahend negated.
+    delta: i128,
     exit: Exit,
 }
 
@@ -35,7 +34,14 @@ struct ExitTest<'a> {
 enum Exit {
     Equal,
     Unequal,
-    Ordered { relation: Relation, signed: bool },
+    Ordered(Order),
+}
+
+/// An ordered comparison: the iterate's relation to the bound, read signed or not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Order {
+    relation: Relation,
+    signed: bool,
 }
 
 /// The iterate's order against the bound.
@@ -65,6 +71,13 @@ struct Form {
     constant: u64,
 }
 
+impl ExitTest<'_> {
+    /// One where the test reads the update, a step ahead of the merge.
+    const fn ahead(&self) -> u64 {
+        self.evidence.reads_update as u64
+    }
+}
+
 impl<'a> TripCounter<'a> {
     pub(crate) fn new(
         function: &'a SSAFunction,
@@ -81,17 +94,12 @@ impl<'a> TripCounter<'a> {
         }
     }
 
-    /// The header's run count, or why none is stated.
+    /// The header's run count with the test that proves it, or why none is stated.
     pub(crate) fn count(&mut self, lp: &TripLoop<'_>) -> Result<LoopTrips, TripRefusal> {
-        let exiting = self.single_exit(lp.loop_)?;
+        let exiting = single_exit(self.function, lp.loop_)?;
         let test = self.exit_test(lp, exiting)?;
         let width = test.induction.width_bits;
-        let delta = match test.induction.step {
-            InductionStep::AddConst(addend) => i128::from(addend),
-            InductionStep::SubConst(subtrahend) => -i128::from(subtrahend),
-            InductionStep::Affine { .. } => return Err(TripRefusal::AffineStep),
-        };
-        let bound = self.form(test.bound, width);
+        let bound = self.form(test.evidence.bound, width);
         if bound
             .as_ref()
             .is_err_and(|blocker| self.defined_in(*blocker, lp.loop_.body))
@@ -99,68 +107,26 @@ impl<'a> TripCounter<'a> {
             return Err(TripRefusal::BoundVariesInLoop);
         }
         let start = self.form(test.induction.init, width);
-        if test.exit == Exit::Equal {
-            let (Ok(start), Ok(bound)) = (start, bound) else {
-                return Err(TripRefusal::BoundNotAffine);
-            };
-            return self.equal_trips(lp.loop_.header, &test, &bound.minus(&start, width));
-        }
-        let (Some(start), Some(bound)) = (constant(&start), constant(&bound)) else {
-            return Err(TripRefusal::CountNotAffine);
-        };
-        let first = match test.exit {
-            Exit::Ordered { relation, signed } => {
-                first_ordered(&test, delta, (start, bound), (relation, signed))?
+        let count = match test.exit {
+            Exit::Equal => {
+                let (Ok(start), Ok(bound)) = (start, bound) else {
+                    return Err(TripRefusal::BoundNotAffine);
+                };
+                self.equal_trips(lp.loop_.header, &test, &bound.minus(&start, width))?
             }
-            _ => first_unequal(&test, start, bound),
+            exit => {
+                let (Some(start), Some(bound)) = (constant(&start), constant(&bound)) else {
+                    return Err(TripRefusal::CountNotAffine);
+                };
+                exact(match exit {
+                    Exit::Ordered(order) => order.first(&test, start, bound)?,
+                    _ => first_unequal(&test, start, bound),
+                })?
+            }
         };
-        exact(first)
-    }
-
-    /// The block whose edge is the loop's only way out, where it tests on every trip.
-    fn single_exit(&self, loop_: NaturalLoop<'_>) -> Result<u64, TripRefusal> {
-        let body = loop_.body;
-        if body.iter().any(|block| self.leaves_function(*block)) {
-            return Err(TripRefusal::BodyLeaves);
-        }
-        let mut edges = body
-            .iter()
-            .flat_map(|&block| {
-                self.function
-                    .successors(block)
-                    .into_iter()
-                    .filter(move |succ| !body.contains(succ))
-                    .map(move |succ| (block, succ))
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter();
-        let (Some((exiting, _)), None) = (edges.next(), edges.next()) else {
-            return Err(TripRefusal::MultipleExits);
-        };
-        match loop_
-            .latches
-            .iter()
-            .all(|latch| self.function.dominates(exiting, *latch))
-        {
-            true => Ok(exiting),
-            false => Err(TripRefusal::ExitSkipped),
-        }
-    }
-
-    /// Whether a block returns, branches indirectly, or transfers somewhere outside the function.
-    fn leaves_function(&self, block: u64) -> bool {
-        let cfg = self.function.cfg();
-        cfg.get_block(block).is_none_or(|bb| {
-            matches!(
-                bb.terminator,
-                BlockTerminator::Return
-                    | BlockTerminator::ConditionalExit { .. }
-                    | BlockTerminator::IndirectBranch
-                    | BlockTerminator::None
-            ) || bb
-                .successors()
-                .into_iter()
-                .any(|succ| cfg.get_block(succ).is_none())
+        Ok(LoopTrips {
+            count,
+            test: test.evidence,
         })
     }
 
@@ -175,29 +141,30 @@ impl<'a> TripCounter<'a> {
                     && body.contains(&fact.true_target) != body.contains(&fact.false_target)
             })
             .ok_or(TripRefusal::ExitNotInduction)?;
-        let leaves_when = !body.contains(&predicate.true_target);
-        [&predicate.comparison, &predicate.evaluated_comparison]
+        let tested = [&predicate.comparison, &predicate.evaluated_comparison]
             .into_iter()
             .flatten()
-            .find_map(|compare| self.tested_induction(lp, compare, leaves_when))
-            .ok_or(TripRefusal::ExitNotInduction)
+            .find_map(|compare| self.tested_induction(lp, predicate, compare));
+        tested.unwrap_or(Err(TripRefusal::ExitNotInduction))
     }
 
+    /// The test where one side of `compare` is a single-latch induction's merge or update at its width.
     fn tested_induction<'l>(
         &self,
         lp: &TripLoop<'l>,
+        predicate: &PredicateFact,
         compare: &CompareProvenance,
-        leaves_when: bool,
-    ) -> Option<ExitTest<'l>> {
+    ) -> Option<Result<ExitTest<'l>, TripRefusal>> {
+        let leaves_when = !lp.loop_.body.contains(&predicate.true_target);
         let sides = [
             (compare.lhs, compare.rhs, true),
             (compare.rhs, compare.lhs, false),
         ];
         sides.into_iter().find_map(|(tested, bound, tested_left)| {
-            let (induction, ahead) = lp.inductions.iter().find_map(|induction| {
+            let (induction, reads_update) = lp.inductions.iter().find_map(|induction| {
                 (induction.phi == tested)
-                    .then_some((induction, 0))
-                    .or((induction.update == tested).then_some((induction, 1)))
+                    .then_some((induction, false))
+                    .or((induction.update == tested).then_some((induction, true)))
             })?;
             let width = Some(induction.width_bits);
             let fits = lp.loop_.latches.len() == 1
@@ -205,26 +172,33 @@ impl<'a> TripCounter<'a> {
                 && self.width_of(tested) == width
                 && self.width_of(bound) == width
                 && induction.validate(self.graph);
-            fits.then_some(ExitTest {
-                induction,
-                ahead,
-                bound,
-                exit: exit_of(compare.kind, tested_left, leaves_when),
+            fits.then(|| {
+                Ok(ExitTest {
+                    induction,
+                    evidence: TripTest {
+                        predicate: predicate.id,
+                        induction: induction.phi,
+                        reads_update,
+                        bound,
+                    },
+                    delta: additive(induction.step)?,
+                    exit: exit_of(compare.kind, tested_left, leaves_when),
+                })
             })
         })
     }
 
-    /// A symbolic count from an equality exit, where an assumption rules out its zero.
+    /// A count from an equality exit: exact for constant ends, or symbolic where a guard rules out its zero.
     fn equal_trips(
         &mut self,
         header: u64,
         test: &ExitTest<'_>,
         difference: &Form,
-    ) -> Result<LoopTrips, TripRefusal> {
+    ) -> Result<TripCount, TripRefusal> {
         let width = test.induction.width_bits;
         let step = test.induction.step.apply(0, width);
         if let Some(difference) = difference.as_constant() {
-            return exact(first_equal(difference, step, test.ahead, width)?);
+            return exact(first_equal(difference, step, test.ahead(), width)?);
         }
         if step & 1 == 0 {
             return Err(TripRefusal::EvenStep);
@@ -232,52 +206,54 @@ impl<'a> TripCounter<'a> {
         // `(k + ahead)·step ≡ difference`, so the count `k + 1` is `difference·step⁻¹ + 1 − ahead`.
         let count = difference
             .scaled(inverse(step), width)
-            .plus(&Form::constant(1 - test.ahead, width), width);
-        if !self.excludes_zero(header, &count, width) {
-            return Err(TripRefusal::ZeroNotExcluded);
-        }
-        Ok(LoopTrips::Symbolic(EntryAffineForm {
-            width_bits: width,
-            terms: count.terms,
-            constant: count.constant,
-        }))
+            .plus(&Form::constant(1 - test.ahead(), width), width);
+        let guard = self
+            .zero_guard(header, &count, width)
+            .ok_or(TripRefusal::ZeroNotExcluded)?;
+        Ok(TripCount::Symbolic {
+            form: EntryAffineForm {
+                width_bits: width,
+                terms: count.terms,
+                constant: count.constant,
+            },
+            guard,
+        })
     }
 
-    /// Whether a branch assumption holding at the header proves the count is not zero.
-    fn excludes_zero(&mut self, header: u64, count: &Form, width: u32) -> bool {
+    /// The nearest assumption holding at the header, or a block dominating it, that proves the count is not zero.
+    fn zero_guard(&mut self, header: u64, count: &Form, width: u32) -> Option<TripGuard> {
         let domtree = self.function.domtree();
         let mut at = Some(header);
         while let Some(block) = at {
-            if self.nonzero_at(block, count, width) {
-                return true;
+            if let Some(assumption) = self.nonzero_at(block, count, width) {
+                return Some(TripGuard { block, assumption });
             }
             at = domtree.idom(block);
         }
-        false
+        None
     }
 
-    /// Whether an edge that dominates `block` tests two sides whose difference is a unit multiple of the count.
-    fn nonzero_at(&mut self, block: u64, count: &Form, width: u32) -> bool {
+    /// An edge that dominates `block` testing two sides whose difference is a unit multiple of the count.
+    fn nonzero_at(&mut self, block: u64, count: &Form, width: u32) -> Option<BlockAssumption> {
         let (function, predicates) = (self.function, self.predicates);
-        predicates
-            .block_assumptions
-            .get(&block)
-            .into_iter()
+        let assumptions = predicates.block_assumptions.get(&block).into_iter();
+        assumptions
             .flatten()
             .filter(|assumption| {
                 crate::values::edge_dominates(function, assumption.predecessor, block)
             })
-            .filter_map(|assumption| {
-                let fact = predicates.predicates.get(&assumption.predicate)?;
-                (fact.true_target != fact.false_target).then_some((fact, assumption.truth))
+            .find(|assumption| {
+                let Some(fact) = predicates.predicates.get(&assumption.predicate) else {
+                    return false;
+                };
+                fact.true_target != fact.false_target
+                    && [&fact.comparison, &fact.evaluated_comparison]
+                        .into_iter()
+                        .flatten()
+                        .filter(|compare| implies_unequal(compare.kind, assumption.truth))
+                        .any(|compare| self.difference_divides(compare, count, width))
             })
-            .flat_map(|(fact, truth)| {
-                [&fact.comparison, &fact.evaluated_comparison]
-                    .into_iter()
-                    .flatten()
-                    .filter(move |compare| implies_unequal(compare.kind, truth))
-            })
-            .any(|compare| self.difference_divides(compare, count, width))
+            .cloned()
     }
 
     /// Whether `lhs − rhs` is an odd multiple of the count at its width.
@@ -478,9 +454,9 @@ fn constant(form: &Result<Form, ValueId>) -> Option<u64> {
 }
 
 /// The count one more than the last trip's index, which a `u64` holds unless it is `2^64`.
-fn exact(first: u128) -> Result<LoopTrips, TripRefusal> {
+fn exact(first: u128) -> Result<TripCount, TripRefusal> {
     u64::try_from(first + 1)
-        .map(LoopTrips::Exact)
+        .map(TripCount::Exact)
         .map_err(|_| TripRefusal::ZeroNotExcluded)
 }
 
@@ -500,32 +476,86 @@ fn first_equal(difference: u64, step: u64, ahead: u64, width: u32) -> Result<u12
 fn first_unequal(test: &ExitTest<'_>, start: u64, bound: u64) -> u128 {
     let width = test.induction.width_bits;
     let step = test.induction.step.apply(0, width);
-    let first = start.wrapping_add(test.ahead.wrapping_mul(step)) & mask(width);
+    let first = start.wrapping_add(test.ahead().wrapping_mul(step)) & mask(width);
     u128::from(first == bound)
 }
 
-/// The least `k` at which an ordered exit holds, where every iterate up to it keeps its width and sign.
-fn first_ordered(
-    test: &ExitTest<'_>,
-    delta: i128,
-    (start, bound): (u64, u64),
-    (relation, signed): (Relation, bool),
-) -> Result<u128, TripRefusal> {
-    let width = test.induction.width_bits;
-    let (low, high) = span(width, signed);
-    let first = read(start, width, signed) + i128::from(test.ahead) * delta;
-    let bound = read(bound, width, signed);
-    let reached = match relation {
-        Relation::AtLeast => at_least(first, delta, bound),
-        Relation::Above => at_least(first, delta, bound + 1),
-        Relation::AtMost => at_least(-first, -delta, -bound),
-        Relation::Below => at_least(-first, -delta, 1 - bound),
+impl Order {
+    /// The least `k` at which the exit holds, where every iterate up to it keeps its width and sign.
+    fn first(self, test: &ExitTest<'_>, start: u64, bound: u64) -> Result<u128, TripRefusal> {
+        let Self { relation, signed } = self;
+        let (width, delta) = (test.induction.width_bits, test.delta);
+        let (low, high) = span(width, signed);
+        let first = read(start, width, signed) + i128::from(test.ahead()) * delta;
+        let bound = read(bound, width, signed);
+        let reached = match relation {
+            Relation::AtLeast => at_least(first, delta, bound),
+            Relation::Above => at_least(first, delta, bound + 1),
+            Relation::AtMost => at_least(-first, -delta, -bound),
+            Relation::Below => at_least(-first, -delta, 1 - bound),
+        };
+        let steps = reached.ok_or(TripRefusal::MayWrap)?;
+        let last = first + steps * delta;
+        match (low..=high).contains(&first) && (low..=high).contains(&last) {
+            true => u128::try_from(steps).map_err(|_| TripRefusal::MayWrap),
+            false => Err(TripRefusal::MayWrap),
+        }
+    }
+}
+
+/// The step as a signed integer, where it adds or subtracts a constant.
+fn additive(step: InductionStep) -> Result<i128, TripRefusal> {
+    match step {
+        InductionStep::AddConst(addend) => Ok(i128::from(addend)),
+        InductionStep::SubConst(subtrahend) => Ok(-i128::from(subtrahend)),
+        InductionStep::Affine { .. } => Err(TripRefusal::AffineStep),
+    }
+}
+
+impl StructuredLoopFact {
+    /// Whether the stated trips are what this loop's graph proves, recounted from its blocks and inductions.
+    pub fn validate_trips(&self, artifact: &crate::SsaArtifact) -> bool {
+        let function = artifact.function();
+        let body = self.body.iter().copied().collect::<BTreeSet<_>>();
+        let latches = self.latches.iter().copied().collect::<BTreeSet<_>>();
+        let exits = LoopExits::of(function, &body);
+        let inductions = artifact.structured().inductions.values();
+        let inductions = inductions
+            .filter(|induction| induction.loop_id == self.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let lp = TripLoop {
+            loop_: NaturalLoop {
+                id: self.id,
+                header: self.header,
+                latches: &latches,
+                body: &body,
+                exits: &exits,
+            },
+            condition: self.condition,
+            inductions: &inductions,
+        };
+        let (graph, predicates) = (artifact.graph(), artifact.predicates());
+        TripCounter::new(function, graph, predicates, artifact.values()).count(&lp) == self.trips
+    }
+}
+
+/// The block whose edge is the loop's only way out, where it tests on every trip.
+fn single_exit(function: &SSAFunction, loop_: NaturalLoop<'_>) -> Result<u64, TripRefusal> {
+    if loop_.exits.leaves_function {
+        return Err(TripRefusal::BodyLeaves);
+    }
+    let mut edges = loop_.exits.edges.iter();
+    let (Some((exiting, _)), None) = (edges.next(), edges.next()) else {
+        return Err(TripRefusal::MultipleExits);
     };
-    let steps = reached.ok_or(TripRefusal::MayWrap)?;
-    let last = first + steps * delta;
-    match (low..=high).contains(&first) && (low..=high).contains(&last) {
-        true => u128::try_from(steps).map_err(|_| TripRefusal::MayWrap),
-        false => Err(TripRefusal::MayWrap),
+    match loop_
+        .latches
+        .iter()
+        .all(|latch| function.dominates(*exiting, *latch))
+    {
+        true => Ok(*exiting),
+        false => Err(TripRefusal::ExitSkipped),
     }
 }
 
@@ -600,7 +630,7 @@ fn exit_of(kind: CompareKind, tested_left: bool, leaves_when: bool) -> Exit {
         true => relation,
         false => relation.negated(),
     };
-    Exit::Ordered { relation, signed }
+    Exit::Ordered(Order { relation, signed })
 }
 
 impl Relation {
@@ -625,9 +655,12 @@ impl Relation {
     }
 }
 
+/// An odd number is its own inverse to three bits, and each round doubles them: `3·2^5 = 96 ≥ 64`.
+const NEWTON_ROUNDS: usize = 5;
+
 /// The inverse of an odd number modulo `2^64`, by Newton's iteration doubling the correct bits.
 fn inverse(odd: u64) -> u64 {
-    (0..5).fold(odd, |inverse, _| {
+    (0..NEWTON_ROUNDS).fold(odd, |inverse, _| {
         inverse.wrapping_mul(2u64.wrapping_sub(odd.wrapping_mul(inverse)))
     })
 }
@@ -645,7 +678,7 @@ mod tests {
     use crate::SsaArtifact;
     use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, Varnode};
 
-    type Trips = Result<LoopTrips, TripRefusal>;
+    type Trips = Result<TripCount, TripRefusal>;
 
     /// Code mapped at one address, in a program that declares no other function.
     struct Code {
@@ -690,9 +723,11 @@ mod tests {
         ))
     }
 
+    /// Each loop's count, once its stated trips recount the same from the graph.
     fn trips_of(artifact: &SsaArtifact) -> Vec<Trips> {
         let loops = artifact.structured().loops.values();
-        loops.map(|fact| fact.trips.clone()).collect()
+        let checked = loops.inspect(|fact| assert!(fact.validate_trips(artifact)));
+        checked.map(|fact| Ok(fact.trips.clone()?.count)).collect()
     }
 
     /// `counter = start`, then a header that runs `ops` and branches back while `cond` holds.
@@ -746,7 +781,7 @@ mod tests {
     fn a_counted_down_register_runs_its_start_many_times() {
         // mov edx, 8; L: sub edx, 1; jne L; ret
         let bytes = &[0xba, 0x08, 0, 0, 0, 0x83, 0xea, 0x01, 0x75, 0xfb, 0xc3];
-        assert_eq!(x86(bytes), [Ok(LoopTrips::Exact(8))]);
+        assert_eq!(x86(bytes), [Ok(TripCount::Exact(8))]);
     }
 
     #[test]
@@ -760,7 +795,20 @@ mod tests {
             },
             step(1, 3),
         ];
-        assert_eq!(self_loop(1, 10, ops), [Ok(LoopTrips::Exact(170))]);
+        assert_eq!(self_loop(1, 10, ops), [Ok(TripCount::Exact(170))]);
+    }
+
+    #[test]
+    fn a_carrier_wider_than_a_word_states_no_count() {
+        let ops = vec![
+            R2ILOp::IntNotEqual {
+                dst: cond(),
+                a: counter(16),
+                b: Varnode::constant(5, 16),
+            },
+            step(16, 3),
+        ];
+        assert_eq!(self_loop(16, 10, ops), [Err(TripRefusal::ExitNotInduction)]);
     }
 
     #[test]
@@ -772,7 +820,7 @@ mod tests {
             b: Varnode::constant(bound, size),
         };
         let counted = self_loop(8, 0, vec![step(8, 4), below(8, 100)]);
-        assert_eq!(counted, [Ok(LoopTrips::Exact(25))]);
+        assert_eq!(counted, [Ok(TripCount::Exact(25))]);
         // From 250 by 4 at eight bits: the second update is 258, which the byte cannot hold.
         let wrapping = self_loop(1, 250, vec![step(1, 4), below(1, 255)]);
         assert_eq!(wrapping, [Err(TripRefusal::MayWrap)]);
@@ -783,7 +831,7 @@ mod tests {
             b: Varnode::constant(bound, 1),
         };
         let signed = self_loop(1, 0xf6, vec![step(1, 3), signed_below(5)]);
-        assert_eq!(signed, [Ok(LoopTrips::Exact(5))]);
+        assert_eq!(signed, [Ok(TripCount::Exact(5))]);
         // From 120 by 4 while below 127: the second update is 128, past the sign boundary.
         let crossing = self_loop(1, 120, vec![step(1, 4), signed_below(127)]);
         assert_eq!(crossing, [Err(TripRefusal::MayWrap)]);
@@ -796,7 +844,7 @@ mod tests {
         assert_eq!(x86(from_seven), [Err(TripRefusal::EvenStep)]);
         // mov edx, 8; L: sub edx, 2; jne L; ret -- 8, 6, 4, 2.
         let from_eight = &[0xba, 0x08, 0, 0, 0, 0x83, 0xea, 0x02, 0x75, 0xfb, 0xc3];
-        assert_eq!(x86(from_eight), [Ok(LoopTrips::Exact(4))]);
+        assert_eq!(x86(from_eight), [Ok(TripCount::Exact(4))]);
     }
 
     #[test]
@@ -840,7 +888,33 @@ mod tests {
             terms: BTreeMap::from([(length, 1)]),
             constant: 0,
         };
-        assert_eq!(trips_of(&artifact), [Ok(LoopTrips::Symbolic(form))]);
+        let [
+            Ok(TripCount::Symbolic {
+                form: counted,
+                guard,
+            }),
+        ] = &trips_of(&artifact)[..]
+        else {
+            panic!("one symbolic count");
+        };
+        assert_eq!(*counted, form);
+        // The guard is `test rsi, rsi; je` taken not equal, on the edge into the preheader.
+        let (block, assumption) = (guard.block, &guard.assumption);
+        assert_eq!(
+            (block, assumption.predecessor, assumption.truth),
+            (0x401339, 0x401330, false)
+        );
+        // The test is `cmp rsi, rdi` after `add rdi, 1`: the pointer's update against the end.
+        let loop_fact = artifact
+            .structured()
+            .loops
+            .values()
+            .next()
+            .expect("the loop");
+        let test = loop_fact.trips.as_ref().expect("a count").test;
+        let name = |value: ValueId| artifact.graph().value(value).map(|v| v.var.to_string());
+        let tested = (name(test.induction), name(test.bound), test.reads_update);
+        assert_eq!(tested, (Some("RDI_1".into()), Some("RSI_1".into()), true));
         // Entered past `test rsi, rsi; je`, nothing says the length is not zero, which is 2^64 trips.
         let unguarded = lifted("x86-64", code(), 0x401339);
         assert_eq!(trips_of(&unguarded), [Err(TripRefusal::ZeroNotExcluded)]);

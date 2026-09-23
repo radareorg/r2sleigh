@@ -179,9 +179,9 @@ pub use semantic::{
     StackArrayLayoutDisposition, StackArrayLayoutRefusal, StackFrameRoundTripCertificate,
     StackGeometryCertificate, StackObjectKey, StackSlotCertificate, StructuredAccessId,
     StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind, StructuredMemoryAccessFact,
-    StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact, TripRefusal,
-    TwoWaySelectionCertificate, ValueOwner, VariadicCallsiteArgumentCountEvidence,
-    VariadicCallsiteArgumentCountRefusal, value_reaching,
+    StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact, TripCount, TripGuard,
+    TripRefusal, TripTest, TwoWaySelectionCertificate, ValueOwner,
+    VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal, value_reaching,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
