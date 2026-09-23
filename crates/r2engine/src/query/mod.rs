@@ -22,7 +22,8 @@ pub mod references;
 pub use decode::listing;
 pub use memo::{Memo, MemoStats};
 pub use records::{
-    Annotation, AnnotationKind, Answered, Decoders, DefUse, Line, Listing, Memory, Stop,
+    Annotation, AnnotationKind, Answered, Callee, Decoders, DefUse, Line, Listing, Memory,
+    Parameters, Stop,
 };
 pub use references::{Coverage, Reference, ReferenceKind, References, Unread};
 
@@ -62,9 +63,15 @@ pub enum Support {
     Decoded,
     /// Constants folded, within one instruction or across a run of them.
     Folded,
+    /// The number is passed to a callee whose own body loads or stores
+    /// through the parameter it arrives in.
+    Dereferenced,
     /// An analysis over the whole function proved it, as a bound rather than a
     /// value: true everywhere, exact nowhere in particular.
     Solved,
+    /// The number is passed in a parameter a declaration the program's
+    /// libraries state types as a pointer.
+    Declared,
     /// The number equals an address something names, and nothing in the
     /// instruction says it is used as one.
     Coincident,

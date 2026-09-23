@@ -7,9 +7,9 @@
 
 mod common;
 
-use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, TWO};
+use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, STUB, TEXT, TWO};
 use r2engine::program::OpenProgram;
-use r2engine::query::{ReferenceKind, Unread};
+use r2engine::query::{AnnotationKind, Listing, ReferenceKind, Stop, Support, Unread};
 use r2ssa::body::{Unresolved, UnresolvedReason};
 
 #[test]
@@ -84,7 +84,12 @@ fn the_index_is_what_each_function_listing_claims() {
     // `ax` and `pdf` are one owner's answer: every fact from a function is a
     // claim a line of its listing makes, and every claim naming this program
     // is a fact. The ARM program switches instruction set inside one function.
-    for literal in [Literal::new(), Literal::arm_thumb()] {
+    for literal in [
+        Literal::new(),
+        Literal::arm_thumb(),
+        reading_callee(),
+        declared_callee(),
+    ] {
         let mut program = OpenProgram::of(literal);
         let facts = program.references().expect("the index builds").value.facts;
         let functions = program.functions().expect("discovery runs");
@@ -101,4 +106,75 @@ fn the_index_is_what_each_function_listing_claims() {
         assert_eq!(claimed, facts);
         assert!(!facts.is_empty());
     }
+}
+
+/// `caller`: `mov edi, TEXT; call <callee>; ret`, handing an absolute number to its first parameter.
+fn passing_text(literal: &mut Literal, callee: u64) {
+    let after_call = CALLER + 10;
+    let displacement = (callee.wrapping_sub(after_call) as u32).to_le_bytes();
+    let text = (TEXT as u32).to_le_bytes();
+    let mut bytes = vec![0xbf];
+    bytes.extend(text);
+    bytes.push(0xe8);
+    bytes.extend(displacement);
+    bytes.push(0xc3);
+    literal.write(CALLER, &bytes);
+}
+
+/// `one` reads through its first parameter: `mov eax, [rdi]; ret`.
+fn reading_callee() -> Literal {
+    let mut literal = Literal::new().with_data();
+    literal.write(ONE, &[0x8b, 0x07, 0xc3]);
+    passing_text(&mut literal, ONE);
+    literal
+}
+
+/// The call goes to the linkage stub of `strlen`, which is declared to take a pointer.
+fn declared_callee() -> Literal {
+    let mut literal = Literal::new().with_data().importing("strlen");
+    passing_text(&mut literal, STUB);
+    literal
+}
+
+/// What the `mov edi, TEXT` line claims about TEXT in `pd`, and what `ax` holds from it.
+fn claimed_at_caller(literal: Literal) -> (Option<Support>, bool) {
+    let mut program = OpenProgram::of(literal);
+    let listing = Listing {
+        start: CALLER,
+        stop: Stop::After(3),
+    };
+    let lines = program.listing(listing).expect("it lists").value;
+    let support = lines[0]
+        .annotations
+        .iter()
+        .find(|annotation| annotation.kind == AnnotationKind::Computes { value: TEXT })
+        .map(|annotation| annotation.support);
+    let facts = program.references().expect("the index builds").value.facts;
+    let indexed = facts
+        .iter()
+        .any(|fact| fact.from == CALLER && fact.to == TEXT && fact.kind == ReferenceKind::Data);
+    (support, indexed)
+}
+
+#[test]
+fn a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one() {
+    // The callee's own body loads through the parameter the number arrives in.
+    assert_eq!(
+        claimed_at_caller(reading_callee()),
+        (Some(Support::Dereferenced), true)
+    );
+    // A declaration types the parameter as a pointer.
+    assert_eq!(
+        claimed_at_caller(declared_callee()),
+        (Some(Support::Declared), true)
+    );
+    // `one` returns 1 and never reads its parameter, so the same number is only a number.
+    let mut literal = Literal::new().with_data();
+    passing_text(&mut literal, ONE);
+    assert_eq!(claimed_at_caller(literal), (None, false));
+    // Mapped but in no section the program loads, as NULL or the header would be, it names no object.
+    let mut literal = Literal::new();
+    literal.write(ONE, &[0x8b, 0x07, 0xc3]);
+    passing_text(&mut literal, ONE);
+    assert_eq!(claimed_at_caller(literal), (None, false));
 }

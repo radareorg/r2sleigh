@@ -8,6 +8,7 @@
 
 pub mod info;
 pub mod naming;
+mod pointers;
 mod requests;
 pub mod source;
 
@@ -106,6 +107,8 @@ pub struct OpenProgram<S: Source> {
     /// The registers the machine's convention says a call leaves undefined;
     /// ARM and Thumb decode apart but call alike, so one set serves both.
     clobbered: Box<[r2ssa::CanonicalStorageId]>,
+    /// Which parameters of each callee take an address, read once per callee and revision.
+    pointers: std::sync::Mutex<pointers::Pointers>,
 }
 
 impl<S: Source> OpenProgram<S> {
@@ -153,6 +156,7 @@ impl<S: Source> OpenProgram<S> {
             machine: None,
             thumb_machine: None,
             clobbered: Box::default(),
+            pointers: std::sync::Mutex::default(),
         }
     }
 

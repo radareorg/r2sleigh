@@ -301,6 +301,7 @@ mod tests {
             fate: None,
             spelled: true,
             clobbered: &[],
+            parameters: None,
         };
         listing(
             &answered,
@@ -351,6 +352,7 @@ mod tests {
             fate: None,
             spelled: true,
             clobbered: &[],
+            parameters: None,
         };
         let answer = listing(
             &answered,
@@ -596,6 +598,7 @@ mod tests {
             fate: None,
             spelled: true,
             clobbered: &[],
+            parameters: None,
         };
         let listed = |work| {
             let request = Listing {
@@ -624,6 +627,47 @@ mod tests {
         assert!(
             block[2].contains(&AnnotationKind::Reads { address, width: 8 }),
             "{block:?}"
+        );
+    }
+
+    #[test]
+    fn a_conditional_load_reads_the_address_it_names() {
+        // ldreq r3, [pc, 0x10] -- lifted as a guarded load, which reads when the condition holds.
+        let mut bytes = vec![0x10, 0x30, 0x9f, 0x05];
+        bytes.resize(0x40, 0);
+        let machine = Everywhere(embedded_machine("arm").expect("ARM is compiled in"));
+        let program = Mapped::new(BASE, bytes);
+        let answered = Answered {
+            decoders: &machine,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            facts: None,
+            fate: None,
+            spelled: true,
+            clobbered: &[],
+            parameters: None,
+        };
+        let request = Listing {
+            start: BASE,
+            stop: Stop::After(1),
+        };
+        let line = &listing(
+            &answered,
+            request,
+            Work::InstructionLocal,
+            Revision::default(),
+        )
+        .value[0];
+        assert!(
+            line.annotations.iter().any(|annotation| annotation.kind
+                == AnnotationKind::Reads {
+                    address: BASE + 8 + 0x10,
+                    width: 4,
+                }),
+            "{:?}",
+            line.annotations
         );
     }
 

@@ -532,6 +532,55 @@ fn declare_imports(
     declared
 }
 
+/// One callee's body, prepared against what the binary declares about it and against no callee of its own.
+///
+/// This is what a caller learns about a callee -- its interface, and what its
+/// own body does through each parameter -- so every caller learns it the same way.
+fn prepared_callee(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+    ptr_bits: u32,
+) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
+    // A callee in the other instruction set is walked and captured in it.
+    let own = native
+        .program
+        .target_at(address)
+        .filter(|own| own.cpu != target.cpu);
+    let switched = own.as_ref().and_then(|own| native.in_target(own));
+    let (native, target) = match (&switched, &own) {
+        (Some(switched), Some(own)) => (switched, own),
+        _ => (native, target),
+    };
+    let walked = native.walk(address).map_err(|_| Unreadable::NotWalked)?;
+    // Against what the binary declares about it, exactly as the root is
+    // prepared: a callee prepared without its declaration proves only what
+    // its instructions show, which for a result register is nothing, and
+    // then the call site renders it as returning nothing.
+    let declared = declaration_for(native, target, address, ptr_bits);
+    native
+        .prepare_restated(&walked, &Callees::default(), Vec::new(), declared, &[])
+        .map_err(|_| Unreadable::NotPrepared)
+}
+
+/// What a callee's own body proves about its parameters, prepared as every caller prepares it.
+pub(crate) fn callee_summary(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    address: u64,
+) -> Option<r2ssa::PreparedCalleeSummary> {
+    let native = Native {
+        target,
+        program,
+        machine: machine(target).ok()?,
+        control: program.control().ssa_execution_control(),
+    };
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    let artifact = prepared_callee(&native, target, address, ptr_bits).ok()?;
+    let shared = artifact.shared_artifact();
+    r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared).ok()
+}
+
 fn read_callees(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
@@ -568,36 +617,15 @@ fn read_callees(
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        // A callee in the other instruction set is walked and captured in it.
-        let own = native
-            .program
-            .target_at(*address)
-            .filter(|own| own.cpu != target.cpu);
-        let switched = own.as_ref().and_then(|own| native.in_target(own));
-        let (native, target) = match (&switched, &own) {
-            (Some(switched), Some(own)) => (switched, own),
-            _ => (native, target),
-        };
-        let Ok(walked) = native.walk(*address) else {
-            unread.push(Unread {
-                address: *address,
-                reason: Unreadable::NotWalked,
-            });
-            continue;
-        };
-        // Against what the binary declares about it, exactly as the root is
-        // prepared: a callee prepared without its declaration proves only what
-        // its instructions show, which for a result register is nothing, and
-        // then the call site renders it as returning nothing.
-        let declared = declaration_for(native, target, *address, ptr_bits);
-        let Ok(artifact) =
-            native.prepare_restated(&walked, &Callees::default(), Vec::new(), declared, &[])
-        else {
-            unread.push(Unread {
-                address: *address,
-                reason: Unreadable::NotPrepared,
-            });
-            continue;
+        let artifact = match prepared_callee(native, target, *address, ptr_bits) {
+            Ok(artifact) => artifact,
+            Err(reason) => {
+                unread.push(Unread {
+                    address: *address,
+                    reason,
+                });
+                continue;
+            }
         };
         // The interface is what the callee's body proves about its boundary,
         // and a callee whose whole preparation cannot be certified still
@@ -1039,6 +1067,40 @@ fn declaration_for(
     }
 }
 
+/// Where each integer argument arrives under this machine's convention, by index.
+pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageId> {
+    machine(target)
+        .map(|machine| machine.slots.argument_slots().to_vec())
+        .unwrap_or_default()
+}
+
+/// Where an import's declaration says it takes a pointer.
+pub(crate) fn declared_pointers(target: &NativeTarget<'_>, name: &str) -> Vec<CanonicalStorageId> {
+    let (Some(prototype), Ok(machine)) = (target.prototypes.get(name), machine(target)) else {
+        return Vec::new();
+    };
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    let placed = placed_prefix(prototype, target, &machine, ptr_bits);
+    prototype
+        .parameters
+        .iter()
+        .zip(placed)
+        .filter(|(parameter, _)| {
+            // The type data spells a function parameter `func`, which is a code address on the declaration's authority.
+            parameter.is_function()
+                || r2types::parse_c_type_like(parameter.spelling.as_type(), ptr_bits).is_some_and(
+                    |parsed| {
+                        matches!(
+                            unnamed(&parsed),
+                            r2types::CTypeLike::Pointer(_) | r2types::CTypeLike::Function { .. }
+                        )
+                    },
+                )
+        })
+        .map(|(_, storage)| storage)
+        .collect()
+}
+
 /// The declared interfaces of the library functions this body calls.
 ///
 /// Keyed by name, because that is what an import is: the body is elsewhere and
@@ -1418,6 +1480,20 @@ fn placed_parameters(
     machine: &NativeMachine,
     ptr_bits: u32,
 ) -> Option<Vec<CanonicalStorageId>> {
+    let placed = placed_prefix(prototype, target, machine, ptr_bits);
+    (placed.len() == prototype.parameters.len()).then_some(placed)
+}
+
+/// Where the declared parameters arrive, up to the first that does not arrive in a register this can name.
+///
+/// Every parameter before that one is placed whatever follows it: a seventh
+/// argument on the stack does not move the first six out of their registers.
+fn placed_prefix(
+    prototype: &r2abi::Prototype,
+    target: &NativeTarget<'_>,
+    machine: &NativeMachine,
+    ptr_bits: u32,
+) -> Vec<CanonicalStorageId> {
     let integer_slots = machine.slots.argument_slots();
     let mut integers = 0usize;
     let mut floats = 0usize;
@@ -1431,13 +1507,13 @@ fn placed_parameters(
                 prototype.name,
                 parameter.spelling.as_written()
             );
-            return None;
+            break;
         };
         let storage = match unnamed(&parsed) {
             r2types::CTypeLike::Float(_) => {
-                let slot = target.convention.float_args.get(floats)?;
+                let slot = target.convention.float_args.get(floats);
                 floats += 1;
-                storage(target.arch, slot.name()).ok()?
+                slot.and_then(|slot| storage(target.arch, slot.name()).ok())
             }
             // How an aggregate travels depends on its size and on what its
             // members are: one register, two, or memory. Nothing here knows
@@ -1452,17 +1528,20 @@ fn placed_parameters(
                     prototype.name,
                     parameter.spelling.as_written()
                 );
-                return None;
+                None
             }
             _ => {
-                let storage = *integer_slots.get(integers)?;
+                let slot = integer_slots.get(integers).copied();
                 integers += 1;
-                storage
+                slot
             }
+        };
+        let Some(storage) = storage else {
+            break;
         };
         placed.push(storage);
     }
-    Some(placed)
+    placed
 }
 
 /// One declared prototype as the type layer states it.

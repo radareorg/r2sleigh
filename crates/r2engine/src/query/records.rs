@@ -23,6 +23,30 @@ pub trait Decoders {
     fn at(&self, vaddr: u64) -> Option<&EmbeddedMachine>;
 }
 
+/// A call's callee, as the call names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Callee {
+    /// A direct call to this address.
+    At(u64),
+    /// A call through the word at this address, which names a callee only where the loader fills it with an import.
+    ThroughSlot(u64),
+}
+
+/// Which parameters of a callee take an address, and what shows it.
+///
+/// One owner answers for every listing: a declaration for an import, the
+/// callee's own prepared body otherwise, each read once per callee.
+pub trait Parameters {
+    /// How well a call is shown to hand an address in one of the `held` storages, where it is.
+    ///
+    /// The callee is read only when one of them is a register its convention passes an argument in.
+    fn pointer_use(
+        &self,
+        callee: Callee,
+        held: &dyn Fn(&r2ssa::CanonicalStorageId) -> bool,
+    ) -> Option<Support>;
+}
+
 /// The program's own memory, and how it spells a word in it.
 ///
 /// The endianness is the container's and not the decoder's. ARM BE8 is the
@@ -38,6 +62,11 @@ impl Memory<'_> {
     /// Whether the program maps this address at all.
     pub(super) fn maps(&self, address: u64) -> bool {
         self.program.read(address, 1).is_some()
+    }
+
+    /// Whether a section the program loads holds this address.
+    pub(super) fn declares(&self, address: u64) -> bool {
+        self.program.extents().holds(address)
     }
 
     /// The value this revision holds at an address, where it holds one.
@@ -76,6 +105,8 @@ pub struct Answered<'a> {
     pub spelled: bool,
     /// The registers a call leaves undefined, a fact of the machine computed once with it.
     pub clobbered: &'a [r2ssa::CanonicalStorageId],
+    /// Which parameters of each callee take an address, where the listing can ask.
+    pub parameters: Option<&'a dyn Parameters>,
 }
 
 /// The def-use of one body, built the first time a line's fate needs it.

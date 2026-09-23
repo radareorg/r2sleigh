@@ -119,6 +119,8 @@ impl<S: Source> OpenProgram<S> {
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
         self.start_request();
         self.ensure_decodable()?;
+        // Only a callee's parameters need the assembled machine; a machine it cannot assemble still lists.
+        self.ensure_assembled(request.start).ok();
         Ok(crate::query::listing(
             &self.answered(None),
             request,
@@ -161,6 +163,8 @@ impl<S: Source> OpenProgram<S> {
     /// those lines claim, in the instruction set discovery walked the body in.
     pub fn references(&mut self) -> Result<Answer<References>, String> {
         self.start_request();
+        // A callee's body is read in the instruction set discovery settled, so that is settled first.
+        self.ensure_decodable()?;
         let revision = self.revision();
         let mut index = References::default();
         self.surveyed(|program, entry, walked| {
@@ -296,6 +300,7 @@ impl<S: Source> OpenProgram<S> {
             fate: None,
             spelled: true,
             clobbered: &self.clobbered,
+            parameters: Some(self),
         }
     }
 }

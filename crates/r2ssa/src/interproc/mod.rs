@@ -798,6 +798,9 @@ struct LocalSummaryFacts {
     return_observations: Vec<SummaryValueObservation>,
     call_observations: BTreeMap<CallSiteId, CallObservation>,
     call_carriers_converged: bool,
+    /// The arguments the body itself loads or stores through: proof, where
+    /// `arg_effects` also holds what an unknown call is assumed to do.
+    dereferenced_args: BTreeSet<usize>,
 }
 
 #[derive(Debug)]
@@ -1279,6 +1282,37 @@ impl PreparedCalleeSummary {
 
     pub const fn id(&self) -> InterprocFunctionId {
         self.id
+    }
+
+    /// The arguments this body itself loads or stores through, by index.
+    ///
+    /// Only accesses the body performs: an argument handed to a call nothing
+    /// can see is assumed read and written in `arg_effects`, which is a
+    /// conservative guess about effects rather than proof the value is an address.
+    pub const fn dereferenced_arguments(&self) -> &BTreeSet<usize> {
+        &self.local.dereferenced_args
+    }
+
+    /// Each argument this body passes on unchanged to a direct callee: the
+    /// callee, the argument it arrives as there, and the argument it was here.
+    pub fn forwarded_arguments(&self) -> Vec<(u64, usize, usize)> {
+        let mut forwarded = self
+            .local
+            .call_observations
+            .values()
+            .flat_map(|call| {
+                call.args
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(there, operand)| match operand {
+                        SummaryOperand::Arg(here) => Some((call.target, there, *here)),
+                        SummaryOperand::Const(_) | SummaryOperand::Unknown => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        forwarded.sort_unstable();
+        forwarded.dedup();
+        forwarded
     }
 
     /// How far this body is proven to touch through each pointer argument it
@@ -2250,6 +2284,7 @@ fn collect_local_summary_facts_with_obligation_authority(
         return_observations: Vec::new(),
         call_observations: BTreeMap::new(),
         call_carriers_converged: call_argument_state.converged,
+        dereferenced_args: BTreeSet::new(),
     };
 
     if source_requires_unknown_effects {
@@ -2312,7 +2347,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, dst.size);
-                    mark_location_arg_effect(&mut out.arg_effects, location, true, false);
+                    mark_location_access(&mut out, location, true, false);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
                         location,
@@ -2332,7 +2367,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, space, expected.size);
-                    mark_location_arg_effect(&mut out.arg_effects, location, true, true);
+                    mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
                         location,
@@ -2359,7 +2394,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
-                    mark_location_arg_effect(&mut out.arg_effects, location, true, true);
+                    mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
                         location,
@@ -2394,7 +2429,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
-                    mark_location_arg_effect(&mut out.arg_effects, location, false, true);
+                    mark_location_access(&mut out, location, false, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Write,
                         location,
@@ -2484,8 +2519,9 @@ fn memory_access_is_local_stack(prepared: &SsaArtifact, addr: &SSAVar, space: Sp
         })
 }
 
-fn mark_location_arg_effect(
-    effects: &mut BTreeMap<usize, SummaryArgEffect>,
+/// A load or store the body performs, through an argument where the location is one.
+fn mark_location_access(
+    out: &mut LocalSummaryFacts,
     location: SummaryMemoryLocation,
     read: bool,
     write: bool,
@@ -2493,7 +2529,8 @@ fn mark_location_arg_effect(
     let SummaryMemoryRegion::Arg { index } = location.region else {
         return;
     };
-    let effect = effects.entry(index).or_default();
+    out.dereferenced_args.insert(index);
+    let effect = out.arg_effects.entry(index).or_default();
     if read {
         effect.mark_read();
     }

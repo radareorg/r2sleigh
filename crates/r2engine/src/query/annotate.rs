@@ -83,19 +83,32 @@ pub(super) fn over_run(
             .collect::<Vec<_>>();
         if work >= Work::BlockLocal
             && let Some(computed) = &named.computed
-            && relative.get(index).copied() == Some(true)
+            // A number that stays put is an address candidate only where a section the program loads holds it: NULL and the header are not objects.
+            && (relative.get(index).copied() == Some(true) || memory.declares(computed.value))
         {
+            let relative = relative.get(index).copied() == Some(true);
             let mut after = After {
                 rest: &run.lifts[index + 1..],
                 beyond: &mut *beyond,
                 clobbered,
                 graph,
+                parameters: (!relative).then_some(answered.parameters).flatten(),
+                used: None,
             };
-            if fate_of(lift, &mut after, &computed.output, line.address) == Fate::Result {
+            // A number that moves with the program is an address; one that stays put is one only where it is used as one.
+            let support = match relative {
+                true => (fate_of(lift, &mut after, &computed.output, line.address) == Fate::Result)
+                    .then(|| folded_support(computed.own)),
+                false => {
+                    straight_line_fate(lift, &mut after, &computed.output);
+                    after.used
+                }
+            };
+            if let Some(support) = support {
                 let kind = AnnotationKind::Computes {
                     value: computed.value,
                 };
-                claims.push((kind, folded_support(computed.own)));
+                claims.push((kind, support));
             }
         }
         let held = held_at(memory, &claims);
@@ -122,8 +135,9 @@ pub(super) fn over_run(
 /// Whether a claim names an address of this program.
 ///
 /// An address the instruction transfers to or accesses is used as one, and a
-/// number it computes is claimed at all only where it moves with the program;
-/// either names this program wherever the program maps it. What a read holds
+/// number it computes is claimed at all only where it moves with the program
+/// or is handed to a parameter its callee takes an address in; either names
+/// this program wherever the program maps it. What a read holds
 /// is data, and a pool word is a pc-relative or thread offset as often as a
 /// pointer, so the read is the reference and the word it holds is not.
 fn referenced(memory: &Memory<'_>, kind: AnnotationKind) -> Option<ReferenceKind> {
@@ -369,6 +383,10 @@ struct After<'a, 'r, 'b> {
     clobbered: &'a [CanonicalStorageId],
     /// The function's def-use, where the request paid for it.
     graph: Option<&'a super::records::DefUse<'a>>,
+    /// Which parameters of a callee take an address, where the number's use decides whether it is one.
+    parameters: Option<&'a dyn super::records::Parameters>,
+    /// The strongest support a call handing the number to such a parameter gave.
+    used: Option<Support>,
 }
 
 /// Whether the number an instruction leaves in `output` is a step or its result.
@@ -435,7 +453,12 @@ fn straight_line_fate(
             return Fate::Unknown;
         };
         let mut derived: Vec<Varnode> = Vec::new();
-        for op in &block.ops {
+        for (at, op) in block.ops.iter().enumerate() {
+            if let Some(parameters) = after.parameters
+                && let Some(support) = pointer_use(parameters, block, at, &holders)
+            {
+                after.used = Some(after.used.map_or(support, |held| held.min(support)));
+            }
             match op_fate(op, &mut holders, &mut derived, after.clobbered) {
                 Some(Fate::Step) if called => return Fate::Unknown,
                 Some(fate) => return fate,
@@ -452,6 +475,30 @@ fn straight_line_fate(
         }
     }
     Fate::Unknown
+}
+
+/// How a call hands on the number where a register holding it is a parameter its callee takes an address in.
+fn pointer_use(
+    parameters: &dyn super::records::Parameters,
+    block: &r2il::R2ILBlock,
+    at: usize,
+    holders: &[Varnode],
+) -> Option<Support> {
+    use super::records::Callee;
+    let callee = match block.ops.get(at)? {
+        R2ILOp::Call { target } => Callee::At(encoded_target(target)?),
+        R2ILOp::CallInd { target } => match BlockOrigins::upto(block, at).of(target)? {
+            ValueOrigin::Constant { value, .. } => Callee::At(value),
+            ValueOrigin::LoadedSlot(slot) => Callee::ThroughSlot(slot.offset),
+        },
+        _ => return None,
+    };
+    let held = |storage: &CanonicalStorageId| {
+        holders
+            .iter()
+            .any(|held| held.space == SpaceId::Register && held.offset == storage.offset)
+    };
+    parameters.pointer_use(callee, &held)
 }
 
 /// What one operation does to the storages holding the number, where it decides.
@@ -591,10 +638,23 @@ fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
                 }),
             )
         }
+        // A conditional or linked access names the address it would use as surely as a plain one does.
         R2ILOp::Load {
             dst,
             space: SpaceId::Ram,
             addr,
+        }
+        | R2ILOp::LoadLinked {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            ..
+        }
+        | R2ILOp::LoadGuarded {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            ..
         } => found.extend(folded(addr).map(|address| AnnotationKind::Reads {
             address,
             width: dst.size,
@@ -603,10 +663,36 @@ fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
             space: SpaceId::Ram,
             addr,
             val,
+        }
+        | R2ILOp::StoreConditional {
+            space: SpaceId::Ram,
+            addr,
+            val,
+            ..
+        }
+        | R2ILOp::StoreGuarded {
+            space: SpaceId::Ram,
+            addr,
+            val,
+            ..
         } => found.extend(folded(addr).map(|address| AnnotationKind::Writes {
             address,
             width: val.size,
         })),
+        R2ILOp::AtomicCAS {
+            space: SpaceId::Ram,
+            addr,
+            expected,
+            ..
+        } => {
+            let width = expected.size;
+            found.extend(folded(addr).into_iter().flat_map(|address| {
+                [
+                    AnnotationKind::Reads { address, width },
+                    AnnotationKind::Writes { address, width },
+                ]
+            }));
+        }
         _ => {}
     }
     found
