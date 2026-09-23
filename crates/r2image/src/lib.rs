@@ -642,10 +642,12 @@ impl Image {
         segments.sort_by_key(|segment| segment.vaddr);
 
         // A format whose segments do not map (an object file) still has sections.
+        // Only those a load would occupy: `.symtab` in an object is file data, not memory.
         if segments.is_empty() {
             segments = file
                 .sections()
                 .filter(|section| placed(section) != 0 || section.size() != 0)
+                .filter(section_is_loaded)
                 .map(|section| {
                     let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
                     Segment {
@@ -653,7 +655,7 @@ impl Image {
                         vsize: section.size(),
                         file_offset,
                         file_size,
-                        permissions: Permissions::RX,
+                        permissions: section_permissions(section.flags()),
                         name: section.name().ok().map(str::to_owned),
                     }
                 })
@@ -1226,6 +1228,23 @@ fn map_format(format: object::BinaryFormat) -> Format {
         object::BinaryFormat::Wasm => Format::Wasm,
         object::BinaryFormat::Xcoff => Format::Xcoff,
         _ => Format::Other,
+    }
+}
+
+/// What a loaded section permits, as its own flags state it.
+fn section_permissions(flags: object::SectionFlags) -> Permissions {
+    match flags {
+        object::SectionFlags::Elf { sh_flags } => Permissions {
+            read: true,
+            write: sh_flags & 0x1 != 0,
+            execute: sh_flags & 0x4 != 0,
+        },
+        object::SectionFlags::Coff { characteristics } => Permissions {
+            read: characteristics & 0x4000_0000 != 0,
+            write: characteristics & 0x8000_0000 != 0,
+            execute: characteristics & 0x2000_0000 != 0,
+        },
+        _ => Permissions::RX,
     }
 }
 

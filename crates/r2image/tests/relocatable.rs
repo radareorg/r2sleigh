@@ -51,3 +51,21 @@ fn a_symbol_moves_with_its_section_whatever_its_type() {
     assert_eq!(at("f"), Some((BASE + 0x40, true)));
     assert_eq!(at("label"), Some((BASE + 0x48, true)));
 }
+
+/// `.symtab` is file data a load never places, so it has no bytes at an address.
+#[test]
+fn only_a_section_the_load_occupies_is_mapped_and_with_its_own_permissions() {
+    let image = image();
+    let symtab = image
+        .sections()
+        .iter()
+        .find(|section| section.name == ".symtab")
+        .expect("the fixture has a symbol table");
+    assert!(image.read(symtab.vaddr, 4).is_none());
+    let permits = |vaddr: u64| {
+        let p = image.segment_at(vaddr).expect("mapped").permissions;
+        (p.read, p.write, p.execute)
+    };
+    assert_eq!(permits(BASE + 0x40), (true, false, true));
+    assert_eq!(permits(BASE + 0x48), (true, true, false));
+}
