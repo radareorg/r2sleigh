@@ -53,6 +53,8 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "pdf" => crate::listing::disassemble_function(session, argument),
         "pdd" => decompile(session, argument),
         "afl" => discovered(session),
+        "afi" => crate::function::info(session, argument),
+        "afv" => crate::function::variables(session, argument),
         "f" => flags(session),
         "ax" => cross_references(session, argument),
         "axt" => references_to(session, argument),

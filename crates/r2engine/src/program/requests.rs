@@ -47,6 +47,17 @@ impl<S: Source> OpenProgram<S> {
         Ok(Rendering { prepared, response })
     }
 
+    /// What one function is: its blocks, calls, arguments and locals, read
+    /// off the analysis a rendering would draw from, with nothing rendered.
+    pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
+        self.start_request();
+        let prepared = self.prepare(entry)?;
+        let target = self.target(entry)?;
+        let facts = crate::native::function_facts(&target, entry, &prepared, &self.control)?;
+        let artifact = prepared.artifact().artifact();
+        Ok(super::info::FunctionInfo::read(entry, artifact, &facts))
+    }
+
     /// The operations Sleigh produced for one function, before any analysis.
     pub fn lifted(&mut self, entry: u64) -> Result<String, String> {
         self.start_request();

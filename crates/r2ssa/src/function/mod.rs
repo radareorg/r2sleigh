@@ -1227,6 +1227,51 @@ impl SsaArtifact {
                 .is_some_and(|slot| slot.size.is_some_and(|size| size > 0))
     }
 
+    /// The entry-relative offset of a stack object addressed from the entry stack pointer.
+    fn entry_stack_offset(&self, object: crate::ObjectId) -> Option<i64> {
+        match self.objects().object(object).map(|found| &found.kind) {
+            Some(crate::ObjectKind::StackSlot {
+                base: crate::StackAddressBase::StackPointer,
+                offset,
+                ..
+            }) => Some(*offset),
+            _ => None,
+        }
+    }
+
+    /// Whether this stack object is the caller's storage rather than this body's.
+    ///
+    /// The frame grows down from the entry stack pointer, so an object at or above
+    /// it is the caller's storage: the return address, a stack-passed argument, or
+    /// -- at a process entry -- what the loader left there. Nothing in this body
+    /// assigns it, and requiring a definition asks for one that cannot exist.
+    pub fn caller_stack_object(&self, object: crate::ObjectId) -> bool {
+        self.entry_stack_offset(object)
+            .is_some_and(Self::caller_frame_offset)
+    }
+
+    /// Whether an offset from the entry stack pointer lies in the caller's storage.
+    pub const fn caller_frame_offset(offset: i64) -> bool {
+        offset >= 0
+    }
+
+    /// Whether this object is the slot the caller pushed the return address into.
+    ///
+    /// The machine states where that is: a convention whose call pushes the return
+    /// address says so as a return mechanism, and the slot it names is at the
+    /// pointer the function was entered with. It is caller storage like a stack
+    /// argument, but it is not an argument -- nothing in the program assigns it,
+    /// and a rendering that declares it as a local reads a name it never wrote.
+    pub fn return_address_stack_object(&self, object: crate::ObjectId) -> bool {
+        let mechanism = self
+            .machine_context()
+            .function_interface()
+            .and_then(crate::SourceFunctionInterface::return_mechanism);
+        mechanism.is_some_and(|mechanism| {
+            self.entry_stack_offset(object) == Some(mechanism.stack_offset())
+        })
+    }
+
     pub fn certificates(&self) -> &crate::semantic::PreparedFunctionCertificates {
         &self.facts.certificates
     }

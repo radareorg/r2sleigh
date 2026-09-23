@@ -426,6 +426,36 @@ pub fn rendered(
     prepared: &Prepared,
     control: &crate::EngineExecutionControl,
 ) -> EngineDecompileResponse {
+    EngineSession::new()
+        .decompile_function_from_input(request(target, entry, prepared, control).rendering(tier))
+}
+
+/// What the type analysis concludes about one function, with nothing rendered.
+///
+/// The same request a rendering makes, stopped before the renderer, so what it
+/// reports is what the C would have been drawn from.
+pub fn function_facts(
+    target: &NativeTarget<'_>,
+    entry: u64,
+    prepared: &Prepared,
+    control: &crate::EngineExecutionControl,
+) -> Result<r2types::FunctionFacts, String> {
+    let input = request(target, entry, prepared, control);
+    let analysis =
+        crate::EngineFunctionDecompileRequest::full_semantics_for_function(input).analysis;
+    EngineSession::new()
+        .analyze_checked(analysis)
+        .map(|response| response.artifact.function_facts().clone())
+        .map_err(|refusal| refusal.reason)
+}
+
+/// The request one prepared function is analysed under.
+fn request(
+    target: &NativeTarget<'_>,
+    entry: u64,
+    prepared: &Prepared,
+    control: &crate::EngineExecutionControl,
+) -> EngineFunctionDecompileRequestInput {
     let Prepared {
         artifact,
         root,
@@ -434,15 +464,9 @@ pub fn rendered(
         ptr_bits,
         unread: _,
     } = prepared;
-    let (artifact, facts, declared, ptr_bits) = (
-        std::sync::Arc::clone(artifact),
-        facts.clone(),
-        declared.clone(),
-        *ptr_bits,
-    );
     let block_count = artifact.source_block_count();
-    let signatures = declared_signatures(target, root, ptr_bits);
-    let input = EngineFunctionDecompileRequestInput::single_function(
+    let signatures = declared_signatures(target, root, *ptr_bits);
+    EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
             function_name: root.name.clone(),
             function_addr: entry,
@@ -452,17 +476,14 @@ pub fn rendered(
             semantic_metadata_enabled: true,
             source_snapshot: None,
         },
-        Some(ptr_bits),
+        Some(*ptr_bits),
         signatures,
     )
     .with_input_quality(EngineFunctionInputQuality::complete(block_count))
-    .with_trusted_ssa(artifact)
-    .with_callee_facts(facts)
-    .with_declared_signatures(declared)
-    .rendering(tier)
-    .with_execution_control(control.clone());
-
-    EngineSession::new().decompile_function_from_input(input)
+    .with_trusted_ssa(std::sync::Arc::clone(artifact))
+    .with_callee_facts(facts.clone())
+    .with_declared_signatures(declared.clone())
+    .with_execution_control(control.clone())
 }
 
 /// What the functions this one calls contribute to preparing it.

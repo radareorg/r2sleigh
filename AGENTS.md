@@ -646,7 +646,7 @@ cd ../radare2/test && r2r -L -o results.json db/cmd/cmd_af db/json/json1
 
 Two tiers:
 
-- public: `q ?e s i ie iS is ir iz px pd pdf pdd afl f ax axt w wx wc wcr`
+- public: `q ?e s i ie iS is ir iz px pd pdf pdd afl afi afv f ax axt w wx wc wcr`
 - maintainer: `pdil`, `pdim`, `pdih` — the three IL tiers
 
 Do not expand the public surface casually. Prefer deeper integration over more

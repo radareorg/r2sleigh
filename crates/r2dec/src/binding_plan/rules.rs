@@ -81,12 +81,6 @@ pub(super) enum ParameterCandidate {
 /// over a later range, and the source carries both under the parameter's
 /// index; the second is a local the function copied the parameter into, and
 /// binding it to the parameter would make two objects one symbol.
-/// Whether a stack object sits outside this function's own frame.
-///
-/// The frame grows down from the entry stack pointer, so an object at or above
-/// it is the caller's storage: the return address, a stack-passed argument, or
-/// -- at a process entry -- what the loader left there. Nothing in this body
-/// assigns it, and requiring a definition asks for one that cannot exist.
 /// Whether the caller supplied what this binding holds.
 ///
 /// One question, one answer. A member with no defining instruction entered
@@ -106,53 +100,10 @@ pub(super) fn is_caller_supplied<'a>(
         .any(|value| graph.caller_supplied(*value))
         || sources.into_iter().any(|source| match source {
             BindingCertificateSource::CertifiedEntity(SemanticId::StackSlot(object)) => {
-                stack_object_is_caller_storage(source_owned, *object)
+                source_owned.source().caller_stack_object(*object)
             }
             _ => false,
         })
-}
-
-pub(super) fn stack_object_is_caller_storage(
-    source_owned: &SourceOwnedFunctionFacts,
-    object: r2ssa::ObjectId,
-) -> bool {
-    matches!(
-        source_owned.source().objects().object(object).map(|o| &o.kind),
-        Some(r2ssa::ObjectKind::StackSlot {
-            base: r2ssa::StackAddressBase::StackPointer,
-            offset,
-            ..
-        }) if *offset >= 0
-    )
-}
-
-/// Whether this object is the slot the caller pushed the return address into.
-///
-/// The machine states where that is: a convention whose call pushes the return
-/// address says so as a return mechanism, and the slot it names is at the
-/// pointer the function was entered with. It is caller storage like a stack
-/// argument, but it is not an argument -- nothing in the program assigns it,
-/// and a rendering that declares it as a local reads a name it never wrote.
-pub(super) fn stack_object_is_return_address(
-    source_owned: &SourceOwnedFunctionFacts,
-    object: r2ssa::ObjectId,
-) -> bool {
-    let Some(mechanism) = source_owned
-        .source()
-        .machine_context()
-        .function_interface()
-        .and_then(r2ssa::SourceFunctionInterface::return_mechanism)
-    else {
-        return false;
-    };
-    matches!(
-        source_owned.source().objects().object(object).map(|o| &o.kind),
-        Some(r2ssa::ObjectKind::StackSlot {
-            base: r2ssa::StackAddressBase::StackPointer,
-            offset,
-            ..
-        }) if *offset == mechanism.stack_offset()
-    )
 }
 
 pub(super) fn effective_stack_slot_role(

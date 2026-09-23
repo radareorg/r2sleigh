@@ -583,6 +583,52 @@ mod dispatch_table {
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
+    /// The block counts and the frame are the prepared analysis's: the saved
+    /// `x29`/`x30` pair is frame management, the two spills of `x0`/`x1` and
+    /// the promoted loop counter are the body's own.
+    #[test]
+    fn a_function_reports_its_shape_and_its_frame() {
+        let run = r2s("afi @ sym._table_dispatch; afv @ sym._table_dispatch");
+        assert!(run.ok, "{}", run.out);
+        for line in [
+            "name: sym._table_dispatch",
+            "size: 152",
+            "num-bbs: 6",
+            "num-instrs: 38",
+            "cyclomatic-complexity: 2",
+            "is-lineal: true",
+            "locals: 5",
+            "args: 2",
+        ] {
+            assert!(
+                run.out.lines().any(|out| out == line),
+                "{line}: {}",
+                run.out
+            );
+        }
+        let frame = run.out.lines().skip_while(|line| !line.starts_with("arg "));
+        let frame = frame.collect::<Vec<_>>().join("\n");
+        assert_eq!(
+            frame,
+            "arg uint64_t arg1 @ x0\n\
+             arg uint64_t arg2 @ x1\n\
+             var uint32_t stack_m76 @ entry.sp-0x4c\n\
+             var uint64_t stack_m72 @ entry.sp-0x48\n\
+             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40\n\
+             var uint64_t stack_m32 @ entry.sp-0x20\n\
+             var uint64_t stack_m24 @ entry.sp-0x18"
+        );
+    }
+
+    #[test]
+    fn a_function_query_where_nothing_is_mapped_is_refused() {
+        for command in ["afi @ 0x10", "afv @ 0x10"] {
+            let run = r2s(command);
+            assert!(!run.ok, "{command}: {}", run.out);
+            assert!(run.out.contains("0x10"), "{command}: {}", run.out);
+        }
+    }
+
     #[test]
     fn the_table_entries_are_functions_in_their_own_right() {
         let run = r2s("afl");

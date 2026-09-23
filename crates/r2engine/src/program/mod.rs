@@ -6,6 +6,7 @@
 //! and keeps it current as the bytes move. It never opens anything, so the
 //! whole derivation runs just as well over a program built from byte literals.
 
+pub mod info;
 pub mod naming;
 mod requests;
 pub mod source;

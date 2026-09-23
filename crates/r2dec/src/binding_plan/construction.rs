@@ -1509,7 +1509,7 @@ impl BindingPlan {
                         } else {
                             format!("stack_p{}", certificate.entry_offset.unsigned_abs())
                         }),
-                        super::rules::stack_object_is_caller_storage(source_owned, *object),
+                        source_owned.source().caller_stack_object(*object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
@@ -1543,7 +1543,7 @@ impl BindingPlan {
                         } else {
                             format!("stack_p{}", offset.unsigned_abs())
                         }),
-                        super::rules::stack_object_is_caller_storage(source_owned, *object),
+                        source_owned.source().caller_stack_object(*object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
@@ -1628,7 +1628,7 @@ impl BindingPlan {
                             *id,
                             declaration_type,
                             name_hint,
-                            super::rules::stack_object_is_caller_storage(source_owned, *object),
+                            source_owned.source().caller_stack_object(*object),
                         )?;
                         stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     }
@@ -1749,7 +1749,7 @@ impl BindingPlan {
         let return_address_objects = stack_objects
             .keys()
             .copied()
-            .filter(|object| super::rules::stack_object_is_return_address(source_owned, *object))
+            .filter(|object| source_owned.source().return_address_stack_object(*object))
             .collect();
         let plan = Self {
             authority: source.authority().clone(),

@@ -234,6 +234,12 @@ fn frame_displacement(
 /// scratch either.
 pub(crate) const PROMOTED_SLOT_SPACE: u32 = 0x5301;
 
+/// Where a promoted frame slot sits relative to the entry frame, where this storage is one.
+pub fn promoted_slot_offset(storage: &crate::CanonicalStorageId) -> Option<i64> {
+    let promoted = storage.space == crate::CanonicalStorageSpace::Custom(PROMOTED_SLOT_SPACE);
+    promoted.then_some(storage.offset as i64)
+}
+
 /// A stack slot promoted out of memory, keyed by where it sits in the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct PromotedSlot {
