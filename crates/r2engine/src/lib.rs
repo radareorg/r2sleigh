@@ -30,9 +30,7 @@ use r2types::{
 use serde::{Deserialize, Serialize};
 
 mod json;
-mod program_cache;
 use json::*;
-pub use program_cache::cache_program_data_object_types;
 pub use r2sleigh_lift::disasm::syntax::number_spans;
 pub use r2sleigh_lift::{NumberSpan, Syntax};
 
@@ -1354,15 +1352,6 @@ fn trusted_callee_signatures(
         .collect()
 }
 
-/// Everything one callee contributes to a caller's request.
-///
-/// Each field is derived from that callee's own snapshot and nothing else, so
-/// one derivation serves every caller of that function. The callee's prepared
-/// body is read to produce this and is then done with: what a caller reads of
-/// a callee is its interface, the local effect summary the interprocedural
-/// fixpoint iterates over, the C signature its own typed body proves, and the
-/// data objects its image observed. Holding the body instead, so that a later
-/// caller could redo those four derivations from it, is what made a session
 /// The register a body proves it returns in, or None when it proves none.
 ///
 /// Every returning block must name a definition reaching the return register:
@@ -1381,14 +1370,22 @@ fn body_proven_return(shared: &r2ssa::SsaArtifact) -> Option<r2ssa::CanonicalSto
         .map(|slot| slot.storage())
 }
 
-/// retain a prepared function per function in the program.
+/// Everything one callee contributes to a caller's request.
+///
+/// Each field is derived from that callee's own snapshot and nothing else, so
+/// one derivation serves every caller of that function. The callee's prepared
+/// body is read to produce this and is then done with: what a caller reads of
+/// a callee is its interface, the local effect summary the interprocedural
+/// fixpoint iterates over, and the C signature its own typed body proves.
+/// Holding the body instead, so that a later caller could redo those
+/// derivations from it, is what made a session retain a prepared function per
+/// function in the program.
 #[derive(Debug, Clone)]
 pub struct CalleeFacts {
     address: u64,
     interface: r2ssa::SourceFunctionInterface,
     summary: r2ssa::PreparedCalleeSummary,
     signature: Option<r2types::SourceOwnedCalleeSignature>,
-    observed_data_objects: r2types::ProgramDataObjectTypeFacts,
     /// Convention-clobbered registers this callee's body proves it leaves
     /// untouched at every exit; a caller reads them after the call as its own.
     preserved_carriers: BTreeSet<r2ssa::CanonicalStorageId>,
@@ -1412,17 +1409,6 @@ impl CalleeFacts {
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
-        let external_type_db = trusted_external_type_db(callee);
-        let observed_data_objects = r2types::ProgramDataObjectTypeFacts::from_radare2(
-            callee
-                .source()
-                .image()
-                .data_symbols()
-                .iter()
-                .map(|object| (object.address(), object.type_spelling())),
-            ptr_bits,
-            &external_type_db,
-        );
         let context = trusted_parsed_context(callee, ptr_bits);
         let signature = r2types::build_source_owned_type_analysis(
             r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?,
@@ -1434,7 +1420,6 @@ impl CalleeFacts {
             interface,
             summary,
             signature,
-            observed_data_objects,
             preserved_carriers,
         })
     }
@@ -1447,7 +1432,6 @@ impl CalleeFacts {
         &self.interface
     }
 
-    /// Registers this callee's body proves it leaves untouched at every exit.
     /// How far this callee is proven to touch through each pointer argument.
     pub fn argument_touch_reach(
         &self,
@@ -1455,15 +1439,9 @@ impl CalleeFacts {
         self.summary.argument_touch_reach()
     }
 
+    /// Registers this callee's body proves it leaves untouched at every exit.
     pub const fn preserved_carriers(&self) -> &BTreeSet<r2ssa::CanonicalStorageId> {
         &self.preserved_carriers
-    }
-
-    /// Re-announce this callee's observed data objects to the program view.
-    /// Absorption is monotone, so replaying it is what a cached derivation
-    /// owes a session that did not run the derivation itself.
-    pub fn announce_data_objects(&self) {
-        let _ = cache_program_data_object_types(&self.observed_data_objects);
     }
 }
 
@@ -1473,7 +1451,8 @@ fn trusted_parsed_context(
 ) -> r2types::ParsedExternalContext {
     let signature = trusted_source_signature(trusted, ptr_bits);
     let external_type_db = trusted_external_type_db(trusted);
-    let observed_data_objects = r2types::ProgramDataObjectTypeFacts::from_radare2(
+    // What this function's own capture states: an object's type is the program's, so no other request can add to it.
+    let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_radare2(
         trusted
             .source()
             .image()
@@ -1483,7 +1462,6 @@ fn trusted_parsed_context(
         ptr_bits,
         &external_type_db,
     );
-    let program_data_objects = cache_program_data_object_types(&observed_data_objects);
     r2types::ParsedExternalContext {
         known_function_signatures: trusted_callee_signatures(trusted, ptr_bits),
         stack_slots: trusted_stack_slot_names(trusted, ptr_bits),
@@ -1676,7 +1654,6 @@ impl EngineAnalyzeRequest {
             if !seen.insert(callee.address()) {
                 continue;
             }
-            callee.announce_data_objects();
             self.callee_facts.push(callee);
         }
         self
@@ -1772,21 +1749,37 @@ pub struct EngineAnalyzeResponse {
     pub diagnostics: EngineDiagnostics,
 }
 
-#[derive(Debug, Clone)]
-struct EngineDecompileRequest {
-    pub tier: RenderTier,
-    pub function_name: String,
-    pub source_owned_facts: r2types::SourceOwnedFunctionFacts,
-    pub trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
-    pub input_quality: Option<r2types::FunctionInputQualityFacts>,
-    pub render_target: EngineRenderTarget,
-    pub execution: EngineExecutionControl,
-    pub metrics: EngineMetrics,
+/// One function's type analysis, sealed against the body it read and the route chosen for it.
+///
+/// Every tier renders from this and `afi` reads it, so one prepared body is typed once.
+#[derive(Debug)]
+pub struct SealedFunctionAnalysis {
+    function_name: String,
+    source_owned_facts: r2types::SourceOwnedFunctionFacts,
+    trusted_ssa: Option<Arc<r2ssa::TrustedSsaArtifact>>,
+    input_quality: Option<r2types::FunctionInputQualityFacts>,
+    render_target: EngineRenderTarget,
+    /// What sealing cost, which every rendering of it reports beside its own.
+    metrics: EngineMetrics,
 }
 
-impl EngineDecompileRequest {
+impl SealedFunctionAnalysis {
+    pub const fn facts(&self) -> &r2types::SourceOwnedFunctionFacts {
+        &self.source_owned_facts
+    }
+}
+
+/// One tier asked of one sealed analysis, under one request's control.
+#[derive(Clone)]
+struct EngineDecompileRequest<'a> {
+    tier: RenderTier,
+    sealed: &'a SealedFunctionAnalysis,
+    execution: EngineExecutionControl,
+}
+
+impl EngineDecompileRequest<'_> {
     fn function_facts(&self) -> &FunctionFacts {
-        self.source_owned_facts.report()
+        self.sealed.source_owned_facts.report()
     }
 }
 
@@ -1794,8 +1787,6 @@ impl EngineDecompileRequest {
 pub(crate) struct EngineFunctionDecompileRequest {
     analysis: EngineAnalyzeRequest,
     input_quality: Option<EngineFunctionInputQuality>,
-    /// Which tier to render: the C, or the tree it is generated from.
-    tier: RenderTier,
 }
 
 /// What a decompile is asked to produce.
@@ -1919,7 +1910,6 @@ impl EngineFunctionDecompileRequest {
         let declared_signatures = input.declared_signatures;
         Self {
             input_quality: Some(input.input_quality),
-            tier: input.tier,
             analysis: EngineAnalyzeRequest::full_semantics_for_function(
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
@@ -2416,15 +2406,17 @@ impl EngineSession {
         })
     }
 
-    pub(crate) fn decompile_function(
+    /// Type one function once: analyse it, choose its route and seal the facts every tier reads.
+    ///
+    /// A refusal is the response a rendering would have returned, and is never held.
+    pub(crate) fn seal_function(
         &self,
         request: EngineFunctionDecompileRequest,
-    ) -> EngineDecompileResponse {
+    ) -> Result<SealedFunctionAnalysis, Box<EngineDecompileResponse>> {
         let started = Instant::now();
         let EngineFunctionDecompileRequest {
             analysis: analysis_request,
             input_quality,
-            tier,
         } = request;
         let execution = analysis_request.execution.clone();
         let canonical_name = analysis_request.function_name.clone();
@@ -2434,25 +2426,25 @@ impl EngineSession {
             EnginePhase::SnapshotContext,
             &EngineMetrics::default(),
         ) {
-            return refused_decompile_response_with_metrics(
+            return Err(Box::new(refused_decompile_response_with_metrics(
                 &display_name,
                 &refusal.reason,
                 None,
                 *refusal.metrics,
                 *refusal.diagnostics,
-            );
+            )));
         }
         let actual_lifted_blocks = analysis_request.lifted_block_count();
         let input_quality_facts = if let Some(quality) = input_quality {
             let reason = quality.refusal_reason_for_actual_lifted_blocks(actual_lifted_blocks);
             let facts = function_input_quality_facts(quality, actual_lifted_blocks, reason.clone());
             if let Some(reason) = reason {
-                return refused_decompile_response(
+                return Err(Box::new(refused_decompile_response(
                     &display_name,
                     &reason,
                     started.elapsed(),
                     Some(facts),
-                );
+                )));
             }
             Some(facts)
         } else {
@@ -2465,13 +2457,13 @@ impl EngineSession {
         let analyze_response = match self.analyze_checked(analysis_request) {
             Ok(response) => response,
             Err(refusal) => {
-                return refused_decompile_response_with_metrics(
+                return Err(Box::new(refused_decompile_response_with_metrics(
                     &display_name,
                     &refusal.reason,
                     input_quality_facts,
                     *refusal.metrics,
                     *refusal.diagnostics,
-                );
+                )));
             }
         };
 
@@ -2481,50 +2473,56 @@ impl EngineSession {
         let analyzed_function_facts = artifact.function_facts().clone();
         let Some(render_target) = EngineRenderTarget::for_prepared(artifact.ssa_func()) else {
             metrics.refuse_from(EnginePhase::Normalization);
-            return refused_decompile_response_with_metrics_and_audits(
-                &display_name,
-                "source-owned machine context cannot define an exact render target",
-                input_quality_facts,
-                metrics,
-                analyze_diagnostics,
-                Some(analyzed_function_facts),
-                BindingShadowAuditOutcome::NotRun,
-                None,
-                PlacementAudit::NotRun,
-                None,
-            );
+            return Err(Box::new(
+                refused_decompile_response_with_metrics_and_audits(
+                    &display_name,
+                    "source-owned machine context cannot define an exact render target",
+                    input_quality_facts,
+                    metrics,
+                    analyze_diagnostics,
+                    Some(analyzed_function_facts),
+                    BindingShadowAuditOutcome::NotRun,
+                    None,
+                    PlacementAudit::NotRun,
+                    None,
+                ),
+            ));
         };
         if render_target != requested_render_target {
             metrics.refuse_from(EnginePhase::Normalization);
-            return refused_decompile_response_with_metrics_and_audits(
-                &display_name,
-                "requested render target does not match the source-owned machine context",
-                input_quality_facts,
-                metrics,
-                analyze_diagnostics,
-                Some(analyzed_function_facts),
-                BindingShadowAuditOutcome::NotRun,
-                None,
-                PlacementAudit::NotRun,
-                None,
-            );
+            return Err(Box::new(
+                refused_decompile_response_with_metrics_and_audits(
+                    &display_name,
+                    "requested render target does not match the source-owned machine context",
+                    input_quality_facts,
+                    metrics,
+                    analyze_diagnostics,
+                    Some(analyzed_function_facts),
+                    BindingShadowAuditOutcome::NotRun,
+                    None,
+                    PlacementAudit::NotRun,
+                    None,
+                ),
+            ));
         }
 
         if let Err(refusal) =
             poll_engine_execution(&execution, EnginePhase::Normalization, &metrics)
         {
-            return refused_decompile_response_with_metrics_and_audits(
-                &display_name,
-                &refusal.reason,
-                input_quality_facts,
-                *refusal.metrics,
-                *refusal.diagnostics,
-                Some(analyzed_function_facts),
-                BindingShadowAuditOutcome::NotRun,
-                None,
-                PlacementAudit::NotRun,
-                None,
-            );
+            return Err(Box::new(
+                refused_decompile_response_with_metrics_and_audits(
+                    &display_name,
+                    &refusal.reason,
+                    input_quality_facts,
+                    *refusal.metrics,
+                    *refusal.diagnostics,
+                    Some(analyzed_function_facts),
+                    BindingShadowAuditOutcome::NotRun,
+                    None,
+                    PlacementAudit::NotRun,
+                    None,
+                ),
+            ));
         }
         let normalization_started = Instant::now();
         let cfg_summary = artifact.ssa_func().function().cfg_risk_summary();
@@ -2552,18 +2550,20 @@ impl EngineSession {
             Ok(facts) => facts,
             Err(_) => {
                 metrics.refuse_from(EnginePhase::Normalization);
-                return refused_decompile_response_with_metrics_and_audits(
-                    &display_name,
-                    "requested decompile route is incompatible with source-owned facts",
-                    input_quality_facts,
-                    metrics,
-                    analyze_diagnostics,
-                    Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
-                    None,
-                    PlacementAudit::NotRun,
-                    None,
-                );
+                return Err(Box::new(
+                    refused_decompile_response_with_metrics_and_audits(
+                        &display_name,
+                        "requested decompile route is incompatible with source-owned facts",
+                        input_quality_facts,
+                        metrics,
+                        analyze_diagnostics,
+                        Some(analyzed_function_facts),
+                        BindingShadowAuditOutcome::NotRun,
+                        None,
+                        PlacementAudit::NotRun,
+                        None,
+                    ),
+                ));
             }
         };
         metrics.record_phase(
@@ -2571,14 +2571,12 @@ impl EngineSession {
             EnginePhaseStatus::Executed,
             normalization_started.elapsed(),
         );
-        self.decompile(EngineDecompileRequest {
-            tier,
+        Ok(SealedFunctionAnalysis {
             function_name: display_name,
             source_owned_facts,
             trusted_ssa,
             input_quality: input_quality_facts,
             render_target,
-            execution,
             metrics,
         })
     }
@@ -2587,6 +2585,19 @@ impl EngineSession {
         &self,
         input: EngineFunctionDecompileRequestInput,
     ) -> EngineDecompileResponse {
+        let tier = input.tier;
+        let execution = input.execution.clone();
+        match self.seal_function_from_input(input) {
+            Ok(sealed) => self.render_sealed(&sealed, tier, &execution),
+            Err(refused) => *refused,
+        }
+    }
+
+    /// Type one function from checked input, once, for every tier and `afi` to read.
+    pub fn seal_function_from_input(
+        &self,
+        input: EngineFunctionDecompileRequestInput,
+    ) -> Result<SealedFunctionAnalysis, Box<EngineDecompileResponse>> {
         let actual_lifted_blocks = input.lifted_block_count();
         if let Some(reason) = input
             .input_quality
@@ -2597,39 +2608,54 @@ impl EngineSession {
                 actual_lifted_blocks,
                 Some(reason.clone()),
             );
-            return refused_decompile_response(
+            return Err(Box::new(refused_decompile_response(
                 &input.function.function_name,
                 &reason,
                 Duration::default(),
                 Some(input_quality),
-            );
+            )));
         }
-        self.decompile_function(EngineFunctionDecompileRequest::full_semantics_for_function(
+        self.seal_function(EngineFunctionDecompileRequest::full_semantics_for_function(
             input,
         ))
     }
 
-    fn decompile(&self, request: EngineDecompileRequest) -> EngineDecompileResponse {
+    /// Render one tier of an analysis already sealed, under this request's control.
+    pub fn render_sealed(
+        &self,
+        sealed: &SealedFunctionAnalysis,
+        tier: RenderTier,
+        execution: &EngineExecutionControl,
+    ) -> EngineDecompileResponse {
+        self.decompile(EngineDecompileRequest {
+            tier,
+            sealed,
+            execution: execution.clone(),
+        })
+    }
+
+    fn decompile(&self, request: EngineDecompileRequest<'_>) -> EngineDecompileResponse {
         let render_control = request.execution.ssa_execution_control();
         self.decompile_with_r2dec_control(request, &render_control)
     }
 
     fn decompile_with_r2dec_control<C: r2ssa::SsaWorkControl>(
         &self,
-        request: EngineDecompileRequest,
+        request: EngineDecompileRequest<'_>,
         render_control: &C,
     ) -> EngineDecompileResponse {
         let started = Instant::now();
-        let input_quality = request.input_quality.clone();
+        let sealed = request.sealed;
+        let input_quality = sealed.input_quality.clone();
         let response_function_facts = request.function_facts().clone();
-        if request.trusted_ssa.as_deref().is_some_and(|trusted| {
-            !trusted.shares_artifact(&request.source_owned_facts.shared_source())
+        if sealed.trusted_ssa.as_deref().is_some_and(|trusted| {
+            !trusted.shares_artifact(&sealed.source_owned_facts.shared_source())
         }) {
             return refused_decompile_response_with_metrics_and_audits(
-                &request.function_name,
+                &sealed.function_name,
                 "trusted SSA does not match the source-owned function facts",
                 input_quality,
-                request.metrics,
+                sealed.metrics.clone(),
                 EngineDiagnostics::default(),
                 Some(response_function_facts),
                 BindingShadowAuditOutcome::NotRun,
@@ -2644,10 +2670,10 @@ impl EngineSession {
         if let Err(refusal) = poll_engine_execution(
             &request.execution,
             EnginePhase::Certification,
-            &request.metrics,
+            &sealed.metrics,
         ) {
             return refused_decompile_response_with_metrics_and_audits(
-                &request.function_name,
+                &sealed.function_name,
                 &refusal.reason,
                 input_quality,
                 *refusal.metrics,
@@ -2666,7 +2692,7 @@ impl EngineSession {
             Err(stop) => {
                 let render_time = render_started.elapsed();
                 let metrics = engine_metrics_for_render_stop(
-                    request.metrics,
+                    sealed.metrics.clone(),
                     &stop,
                     planning_time,
                     render_time,
@@ -2677,7 +2703,7 @@ impl EngineSession {
                 let render_refusal = stop.render_refusal.map(|refusal| *refusal);
                 let refusal = engine_render_execution_refusal(stop.reason, stop.phase, metrics);
                 return refused_decompile_response_with_metrics_and_audits(
-                    &request.function_name,
+                    &sealed.function_name,
                     &refusal.reason,
                     input_quality,
                     *refusal.metrics,
@@ -2691,7 +2717,7 @@ impl EngineSession {
             }
         };
         let render_time = render_started.elapsed();
-        let mut metrics = request.metrics;
+        let mut metrics = sealed.metrics.clone();
         if rendered.structuring_executed {
             metrics.record_phase(
                 EnginePhase::Structuring,
@@ -2744,7 +2770,7 @@ impl EngineSession {
                 render_time,
             );
             return refused_decompile_response_with_metrics_and_audits(
-                &request.function_name,
+                &sealed.function_name,
                 &reason,
                 input_quality,
                 metrics,
@@ -2764,7 +2790,7 @@ impl EngineSession {
                 render_time,
             );
             return refused_decompile_response_with_metrics_and_audits(
-                &request.function_name,
+                &sealed.function_name,
                 &reason,
                 input_quality,
                 metrics,
@@ -2786,7 +2812,7 @@ impl EngineSession {
                 render_time,
             );
             return refused_decompile_response_with_metrics_and_audits(
-                &request.function_name,
+                &sealed.function_name,
                 &reason,
                 input_quality,
                 metrics,
@@ -2802,7 +2828,7 @@ impl EngineSession {
             poll_engine_execution(&request.execution, EnginePhase::FfiConversion, &metrics)
         {
             return refused_decompile_response_with_metrics_and_audits(
-                &request.function_name,
+                &sealed.function_name,
                 &refusal.reason,
                 input_quality,
                 *refusal.metrics,
@@ -3161,11 +3187,11 @@ fn engine_render_stop_from_decompiler(
 /// `None` when the request is for the C itself. Both listings stop the same
 /// way, so the stop is written once rather than once per tier.
 fn render_listing_tier<C: r2ssa::SsaWorkControl>(
-    request: &EngineDecompileRequest,
+    request: &EngineDecompileRequest<'_>,
     control: &C,
     input: &r2dec::DecompilerInput,
 ) -> Option<Result<String, EngineRenderExecutionStop>> {
-    let decompiler = r2dec::Decompiler::new(request.render_target.to_decompiler_config());
+    let decompiler = r2dec::Decompiler::new(request.sealed.render_target.to_decompiler_config());
     let listing = match request.tier {
         RenderTier::Values => decompiler.values_input_with_control(input, control),
         RenderTier::Structured => decompiler.structured_input_with_control(input, control),
@@ -3223,7 +3249,7 @@ fn rendering_reached_before_the_stop(
 }
 
 fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
-    request: &EngineDecompileRequest,
+    request: &EngineDecompileRequest<'_>,
     control: &C,
 ) -> Result<EngineRenderedDecompile, EngineRenderExecutionStop> {
     poll_engine_render_control(control, EnginePhase::Rendering)?;
@@ -3240,7 +3266,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     if let Some(listing) = render_listing_tier(request, control, &input) {
         return listing.map(EngineRenderedDecompile::structured);
     }
-    let audited = match r2dec::Decompiler::new(request.render_target.to_decompiler_config())
+    let audited = match r2dec::Decompiler::new(request.sealed.render_target.to_decompiler_config())
         .decompile_input_keeping_partial_with_pending_binding_audit(&input, control)
     {
         Ok(pending) => pending,
@@ -3293,7 +3319,7 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
         product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
             output: EngineRendering::Listing(
                 decompile_route_output_from_function_facts(
-                    &request.function_name,
+                    &request.sealed.function_name,
                     request.function_facts(),
                 )
                 .unwrap_or_default(),
@@ -3309,8 +3335,10 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     })
 }
 
-fn decompiler_input_for_engine_request(request: &EngineDecompileRequest) -> r2dec::DecompilerInput {
-    r2dec::DecompilerInput::new(request.source_owned_facts.clone())
+fn decompiler_input_for_engine_request(
+    request: &EngineDecompileRequest<'_>,
+) -> r2dec::DecompilerInput {
+    r2dec::DecompilerInput::new(request.sealed.source_owned_facts.clone())
 }
 
 /// The measured cost of one decompile, per phase.

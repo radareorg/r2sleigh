@@ -925,6 +925,20 @@ fn analyze_reports_planning_time() {
     );
 }
 
+impl EngineSession {
+    /// Seal one request and render its C, as `pdd` does.
+    fn decompile_function(
+        &self,
+        request: EngineFunctionDecompileRequest,
+    ) -> EngineDecompileResponse {
+        let execution = request.analysis.execution.clone();
+        match self.seal_function(request) {
+            Ok(sealed) => self.render_sealed(&sealed, RenderTier::C, &execution),
+            Err(refused) => *refused,
+        }
+    }
+}
+
 fn controlled_ssa_test_request(
     function_name: &str,
     blocks: Vec<R2ILBlock>,
@@ -947,7 +961,7 @@ fn controlled_ssa_test_request(
     })
 }
 
-fn controlled_r2dec_render_request() -> EngineDecompileRequest {
+fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
     let mut block = R2ILBlock::new(0x614000, 4);
     block.push(r2il::R2ILOp::Copy {
         dst: r2il::Varnode::register(0, 8),
@@ -1006,15 +1020,22 @@ fn controlled_r2dec_render_request() -> EngineDecompileRequest {
             fallback_comment: None,
         })
         .expect("compatible controlled r2dec route");
-    EngineDecompileRequest {
-        tier: RenderTier::C,
+    SealedFunctionAnalysis {
         function_name: "sym.r2dec_controlled".to_string(),
         source_owned_facts,
         trusted_ssa: None,
         input_quality: None,
         render_target: EngineRenderTarget::default(),
-        execution: EngineExecutionControl::default(),
         metrics: EngineMetrics::default(),
+    }
+}
+
+/// Its C, asked under a fresh control.
+fn render_request(sealed: &SealedFunctionAnalysis) -> EngineDecompileRequest<'_> {
+    EngineDecompileRequest {
+        tier: RenderTier::C,
+        sealed,
+        execution: EngineExecutionControl::default(),
     }
 }
 
@@ -1060,8 +1081,9 @@ impl r2ssa::SsaWorkControl for StopRenderAtPoll {
 
 #[test]
 fn engine_decompiler_input_retains_exact_source_owned_facts() {
-    let request = controlled_r2dec_render_request();
-    let source = request.source_owned_facts.shared_source();
+    let sealed = controlled_r2dec_sealed();
+    let request = render_request(&sealed);
+    let source = request.sealed.source_owned_facts.shared_source();
     let input = decompiler_input_for_engine_request(&request);
 
     assert!(input.source_owned_facts().shares_source(&source));
@@ -1074,9 +1096,10 @@ fn engine_decompiler_input_retains_exact_source_owned_facts() {
 #[test]
 fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
     let session = EngineSession::new();
-    let request = controlled_r2dec_render_request();
+    let sealed = controlled_r2dec_sealed();
+    let request = render_request(&sealed);
     let decompiler_input = decompiler_input_for_engine_request(&request);
-    let legacy_output = r2dec::Decompiler::new(request.render_target.to_decompiler_config())
+    let legacy_output = r2dec::Decompiler::new(request.sealed.render_target.to_decompiler_config())
         .decompile_input(&decompiler_input);
     let counting = CountingRenderControl::default();
     let controlled = session.decompile_with_r2dec_control(request.clone(), &counting);
@@ -2102,7 +2125,6 @@ fn decompile_function_uses_engine_summary_preprobe_without_plugin_policy() {
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
-        tier: RenderTier::C,
         input_quality: None,
         analysis: EngineAnalyzeRequest {
             function_name: "dbg.init_node".to_string(),
@@ -2421,7 +2443,6 @@ fn decompile_function_refuses_incomplete_optional_input_quality() {
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
-        tier: RenderTier::C,
         input_quality: Some(EngineFunctionInputQuality {
             expected_blocks: 2,
             lifted_blocks: 1,
@@ -2480,7 +2501,6 @@ fn decompile_function_uses_canonical_display_identity_without_raw_payloads() {
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
-        tier: RenderTier::C,
         input_quality: None,
         analysis: EngineAnalyzeRequest {
             function_name: "dbg.raw_name".to_string(),
@@ -2525,7 +2545,6 @@ fn decompile_function_does_not_invent_raw_payload_callee_names() {
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
-        tier: RenderTier::C,
         input_quality: None,
         analysis: EngineAnalyzeRequest {
             function_name: "sym.caller".to_string(),
@@ -2568,7 +2587,6 @@ fn decompile_function_does_not_invent_raw_payload_strings() {
     let session = EngineSession::new();
 
     let response = session.decompile_function(EngineFunctionDecompileRequest {
-        tier: RenderTier::C,
         input_quality: None,
         analysis: EngineAnalyzeRequest {
             function_name: "sym.string_const".to_string(),

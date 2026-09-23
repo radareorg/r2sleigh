@@ -14,7 +14,7 @@ use crate::query::{
     Answer, Answered, Completion, Decoders, DefUse, Line, Listing, Memory, References, Stop,
     Unread, Work,
 };
-use crate::{EngineDecompileResponse, RenderTier};
+use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
 
 /// A function rendered at one tier, and the analysis it was rendered from.
 pub struct Rendering {
@@ -85,24 +85,43 @@ impl<S: Source> OpenProgram<S> {
             .map_err(|refusal| refusal.to_string())
     }
 
+    /// Read the type analysis of one prepared function, sealed once and held beside it.
+    ///
+    /// A refusal is the response a rendering returns in its place, and is not
+    /// held: it may be this request's stop rather than a fact about the program.
+    fn read_sealed<R>(
+        &self,
+        entry: u64,
+        prepared: &Arc<Prepared>,
+        read: impl FnOnce(&SealedFunctionAnalysis) -> R,
+    ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
+        let target = self.target(entry)?;
+        let seal = || crate::native::sealed(&target, entry, prepared, &self.control);
+        Ok(self.memo.read_sealed(prepared, seal, read))
+    }
+
     /// One function rendered at one tier.
     pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
         self.start_request();
         let prepared = self.prepare(entry)?;
-        let target = self.target(entry)?;
-        let response = crate::native::rendered(&target, entry, tier, &prepared, &self.control);
+        let render = |sealed: &_| EngineSession::new().render_sealed(sealed, tier, &self.control);
+        let response = self
+            .read_sealed(entry, &prepared, render)?
+            .unwrap_or_else(|refused| *refused);
         Ok(Rendering { prepared, response })
     }
 
     /// What one function is: its blocks, calls, arguments and locals, read
-    /// off the analysis a rendering would draw from, with nothing rendered.
+    /// off the sealed analysis every rendering draws from.
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
         let prepared = self.prepare(entry)?;
-        let target = self.target(entry)?;
-        let facts = crate::native::function_facts(&target, entry, &prepared, &self.control)?;
         let artifact = prepared.artifact().artifact();
-        Ok(super::info::FunctionInfo::read(entry, artifact, &facts))
+        let read = |sealed: &SealedFunctionAnalysis| {
+            super::info::FunctionInfo::read(entry, artifact, sealed.facts())
+        };
+        self.read_sealed(entry, &prepared, read)?
+            .map_err(|refused| refused.diagnostics.route_reason.unwrap_or_default())
     }
 
     /// The operations Sleigh produced for one function, before any analysis.

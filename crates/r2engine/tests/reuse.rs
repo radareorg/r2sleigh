@@ -25,6 +25,25 @@ fn every_tier_of_one_function_is_rendered_from_one_analysis() {
 }
 
 #[test]
+fn afi_afv_and_pdd_read_one_type_analysis() {
+    // `afi`, then `afv`, then `pdd`: one prepared function, so one sealed type analysis.
+    let mut program = opened();
+    let first = program.function_info(ONE).expect("it is described");
+    let second = program.function_info(ONE).expect("it is described again");
+    assert_eq!(first, second);
+    let rendering = program
+        .rendered(ONE, r2engine::RenderTier::C)
+        .expect("it renders");
+    assert!(!rendering.response.output.into_text().is_empty());
+    let stats = program.memo_stats();
+    assert_eq!(
+        (stats.misses, stats.hits, stats.sealed),
+        (1, 2, 1),
+        "each command ran its own type analysis of one prepared function"
+    );
+}
+
+#[test]
 fn deriving_the_tables_the_first_time_is_not_a_change() {
     let mut program = opened();
     program.prepared(ONE).expect("it prepares");
@@ -158,4 +177,112 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
     program.functions().expect("discovery runs");
     assert_eq!(program.revision().entries, before + 1);
+}
+
+/// `mov eax, [rip + 0xffa]; ret` at 0x1000: the value of the object at 0x2000.
+const RETURNS_OBJECT: [u8; 7] = [0x8b, 0x05, 0xfa, 0x0f, 0x00, 0x00, 0xc3];
+
+/// The amd64 machine a capture of an x86-64 function states.
+fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeMachine {
+    let register = |name: &str| {
+        let register = embedded
+            .arch
+            .registers
+            .iter()
+            .find(|register| register.name.eq_ignore_ascii_case(name))
+            .expect("a named register");
+        r2source::CanonicalStorageId {
+            space: r2source::CanonicalStorageSpace::Register,
+            offset: register.offset,
+            size: register.size,
+        }
+    };
+    let roles = r2source::SourceMachineRoles::new(Some(register("RIP")), Some(register("RSP")))
+        .expect("machine roles")
+        .with_role_register_names(r2source::SourceRoleRegisterNames::new(
+            Some("RIP"),
+            Some("RSP"),
+            None,
+        ));
+    let slots = r2source::SourceConventionSlots::new(
+        "amd64",
+        ["RDI", "RSI", "RDX", "RCX", "R8", "R9"].map(register),
+        Some(register("RAX")),
+    )
+    .expect("convention slots");
+    r2source::native::NativeMachine {
+        arch_id: "x86".to_owned(),
+        cpu_id: embedded.cpu.to_owned(),
+        bits: 64,
+        endianness: r2source::SourceEndianness::Little,
+        roles,
+        slots,
+        call_effect: None,
+    }
+}
+
+/// The C for that function in a program whose object at 0x2000 has this declared type.
+fn rendered_returning_object(declared: Option<&str>) -> String {
+    use r2source::native::{NativeBlock, NativeFunction};
+    let embedded = r2sleigh_lift::embedded_machine("x86-64").expect("an x86-64 machine");
+    let machine = amd64(&embedded);
+    let function = NativeFunction {
+        address: 0x1000,
+        name: "sym.object".to_owned(),
+        blocks: vec![NativeBlock {
+            address: 0x1000,
+            bytes: RETURNS_OBJECT.to_vec(),
+            successors: Vec::new(),
+            switch: None,
+        }],
+        calls: Vec::new(),
+        string_literals: Vec::new(),
+        data_symbols: vec![r2source::SourceDataObject::new(
+            0x2000,
+            "obj.counter",
+            declared,
+        )],
+        code_pointer_tables: Vec::new(),
+        interface: None,
+        parameter_names: Vec::new(),
+        stack_slot_names: Vec::new(),
+        signature: None,
+        loader_role: None,
+    };
+    let snapshot = r2source::native::capture(&machine, function).expect("a capture");
+    let lifted = r2sleigh_lift::Disassembler::lift_owned_function(snapshot).expect("a lift");
+    let artifact = r2ssa::TrustedSsaArtifact::prepare(lifted).expect("a prepared body");
+    let input = r2engine::EngineFunctionDecompileRequestInput::single_function(
+        r2engine::EngineFunctionInput {
+            function_name: "sym.object".to_owned(),
+            function_addr: 0x1000,
+            blocks: Vec::new(),
+            arch: Some(embedded.arch),
+            semantic_metadata_enabled: true,
+            source_snapshot: None,
+        },
+        Some(64),
+        r2types::ParsedExternalContext {
+            program_extents: r2types::ProgramExtents::new([(0x1000, 0x1007), (0x2000, 0x2004)]),
+            ..r2types::ParsedExternalContext::default()
+        },
+    )
+    .with_input_quality(r2engine::EngineFunctionInputQuality::complete(1))
+    .with_trusted_ssa(std::sync::Arc::new(artifact));
+    r2engine::EngineSession::new()
+        .decompile_function_from_input(input)
+        .output
+        .into_text()
+}
+
+#[test]
+fn a_data_object_type_stays_with_the_program_that_stated_it() {
+    let fresh = rendered_returning_object(None);
+    let typed = rendered_returning_object(Some("int32_t"));
+    assert!(typed.contains("int32_t counter"), "{typed}");
+    assert_eq!(
+        rendered_returning_object(None),
+        fresh,
+        "a type another program stated reached this one"
+    );
 }

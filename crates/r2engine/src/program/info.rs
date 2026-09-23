@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use r2types::{CTypeLike, CertifiedEntity, FunctionFacts};
+use r2types::{CTypeLike, CertifiedEntity, FunctionFacts, SourceOwnedFunctionFacts};
 
 pub use r2ssa::StackAddressBase as StackBase;
 
@@ -53,8 +53,13 @@ pub struct Local {
 }
 
 impl FunctionInfo {
-    /// Read one prepared function and the type analysis made of it.
-    pub(crate) fn read(entry: u64, artifact: &r2ssa::SsaArtifact, facts: &FunctionFacts) -> Self {
+    /// Read one prepared function and the type analysis sealed from it.
+    pub(crate) fn read(
+        entry: u64,
+        artifact: &r2ssa::SsaArtifact,
+        sealed: &SourceOwnedFunctionFacts,
+    ) -> Self {
+        let facts = sealed.report();
         let certificates = artifact.certificates();
         let entities = facts
             .render()

@@ -272,6 +272,11 @@ impl Prepared {
             .collect()
     }
 
+    /// What the program declares about each callee this body calls, where it declares one.
+    pub fn declared(&self) -> &[r2types::SourceOwnedCalleeSignature] {
+        &self.declared
+    }
+
     /// The callees this analysis could not read, and how far each got.
     ///
     /// A call to one of these renders from whatever the call site itself
@@ -394,48 +399,24 @@ fn render(
     tier: crate::RenderTier,
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
     let control = program.control();
-    Ok(rendered(
-        target,
-        entry,
-        tier,
-        &analyse(target, program, entry)?,
-        &control,
-    ))
+    let prepared = analyse(target, program, entry)?;
+    Ok(match sealed(target, entry, &prepared, &control) {
+        Ok(sealed) => EngineSession::new().render_sealed(&sealed, tier, &control),
+        Err(refused) => *refused,
+    })
 }
 
-/// Render one tier from an analysis already done.
+/// The type analysis of one prepared function, sealed for every tier and `afi` to read.
 ///
-/// The control is the current request's, not the one the analysis was made
-/// under: a held analysis outlives the request that produced it, and stopping
-/// this render has to stop this render.
-pub fn rendered(
-    target: &NativeTarget<'_>,
-    entry: u64,
-    tier: crate::RenderTier,
-    prepared: &Prepared,
-    control: &crate::EngineExecutionControl,
-) -> EngineDecompileResponse {
-    EngineSession::new()
-        .decompile_function_from_input(request(target, entry, prepared, control).rendering(tier))
-}
-
-/// What the type analysis concludes about one function, with nothing rendered.
-///
-/// The same request a rendering makes, stopped before the renderer, so what it
-/// reports is what the C would have been drawn from.
-pub fn function_facts(
+/// A refusal is the response a rendering would have returned. The control is
+/// the request's own, so a stopped sealing is that request's and nobody keeps it.
+pub fn sealed(
     target: &NativeTarget<'_>,
     entry: u64,
     prepared: &Prepared,
     control: &crate::EngineExecutionControl,
-) -> Result<r2types::FunctionFacts, String> {
-    let input = request(target, entry, prepared, control);
-    let analysis =
-        crate::EngineFunctionDecompileRequest::full_semantics_for_function(input).analysis;
-    EngineSession::new()
-        .analyze_checked(analysis)
-        .map(|response| response.artifact.function_facts().clone())
-        .map_err(|refusal| refusal.reason)
+) -> Result<crate::SealedFunctionAnalysis, Box<EngineDecompileResponse>> {
+    EngineSession::new().seal_function_from_input(request(target, entry, prepared, control))
 }
 
 /// The request one prepared function is analysed under.

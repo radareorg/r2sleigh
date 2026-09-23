@@ -93,8 +93,8 @@ pub struct OpenProgram<S: Source> {
     /// The same, for the import stubs, which are the entries a write can move.
     entries_revision: u64,
     assembled: Option<Assembled>,
-    /// What this session has already worked out about one function.
-    memo: Memo<Prepared>,
+    /// What this session has already worked out about one function, and the type analysis sealed from it.
+    memo: Memo<Prepared, crate::SealedFunctionAnalysis>,
     /// The control for the request in hand: its cancellation, its deadline and
     /// the work it has spent. Held here so a caller can reach it while the
     /// request runs, which is the whole point of having one.

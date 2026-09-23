@@ -47,28 +47,32 @@ pub struct MemoStats {
     /// moved on. Worth separating from a first-ever miss: a session full of
     /// these means something is writing between requests.
     pub replacements: u64,
+    /// Type analyses run, a refused one included.
+    pub sealed: u64,
 }
 
 /// The one analysis a session holds, and what identifies it.
-struct Held<T> {
+struct Held<T, S> {
     revision: Revision,
     entry: u64,
     analysis: Arc<T>,
     /// Which bytes deriving it read. A write that missed every one of them --
     /// a patch to another function -- leaves this answer about this program.
     read: Vec<std::ops::Range<u64>>,
+    /// The type analysis sealed from exactly this analysis, once a request sealed it.
+    sealed: Option<S>,
 }
 
 /// The most recent analysis, and nothing older.
 ///
 /// Generic in what it holds so the map's own behaviour can be tested without
 /// preparing a real function, which needs an image and a Sleigh profile.
-pub struct Memo<T> {
-    held: Mutex<Option<Held<T>>>,
+pub struct Memo<T, S> {
+    held: Mutex<Option<Held<T, S>>>,
     stats: Mutex<MemoStats>,
 }
 
-impl<T> Default for Memo<T> {
+impl<T, S> Default for Memo<T, S> {
     fn default() -> Self {
         Self {
             held: Mutex::new(None),
@@ -77,7 +81,7 @@ impl<T> Default for Memo<T> {
     }
 }
 
-impl<T> Memo<T> {
+impl<T, S> Memo<T, S> {
     /// The held answer, where the program has not moved under it.
     ///
     /// `written_since` says whether anything in a range has been written since
@@ -108,6 +112,7 @@ impl<T> Memo<T> {
             entry,
             analysis: Arc::clone(&analysis),
             read: coalesced(read),
+            sealed: None,
         });
         Ok(analysis)
     }
@@ -146,12 +151,44 @@ impl<T> Memo<T> {
         }
     }
 
+    /// Read the type analysis sealed from exactly this held analysis, sealing it first where no request has.
+    ///
+    /// A refusal is counted and not held, for the reason no refusal is.
+    pub fn read_sealed<E, R>(
+        &self,
+        analysis: &Arc<T>,
+        seal: impl FnOnce() -> Result<S, E>,
+        read: impl FnOnce(&S) -> R,
+    ) -> Result<R, E> {
+        let beside = |held: &Held<T, S>| Arc::ptr_eq(&held.analysis, analysis);
+        {
+            let held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+            if let Some(sealed) = held
+                .as_ref()
+                .filter(|held| beside(held))
+                .and_then(|held| held.sealed.as_ref())
+            {
+                return Ok(read(sealed));
+            }
+        }
+        self.stats
+            .lock()
+            .unwrap_or_else(|stats| stats.into_inner())
+            .sealed += 1;
+        let sealed = seal()?;
+        let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+        Ok(match held.as_mut().filter(|held| beside(held)) {
+            Some(held) => read(held.sealed.insert(sealed)),
+            None => read(&sealed),
+        })
+    }
+
     pub fn stats(&self) -> MemoStats {
         *self.stats.lock().unwrap_or_else(|stats| stats.into_inner())
     }
 }
 
-impl<T> std::fmt::Debug for Memo<T> {
+impl<T, S> std::fmt::Debug for Memo<T, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Memo")
             .field("stats", &self.stats())
@@ -190,7 +227,7 @@ mod tests {
         }
     }
 
-    fn memo() -> Memo<u32> {
+    fn memo() -> Memo<u32, u64> {
         Memo::default()
     }
 
@@ -209,7 +246,7 @@ mod tests {
         Ok((value, std::iter::once(0x1000..0x1010).collect()))
     }
 
-    fn derived(memo: &Memo<u32>, revision: Revision, value: u32) -> Arc<u32> {
+    fn derived(memo: &Memo<u32, u64>, revision: Revision, value: u32) -> Arc<u32> {
         memo.analysed_since(revision, 0x1000, &untouched, || reading(value))
             .expect("derived")
     }
@@ -226,6 +263,28 @@ mod tests {
         assert_eq!(*again, 99);
         let stats = memo.stats();
         assert_eq!((stats.hits, stats.misses, stats.replacements), (1, 1, 0));
+    }
+
+    #[test]
+    fn a_refused_sealing_is_not_held_and_a_sealed_one_is() {
+        let memo = memo();
+        let analysis = derived(&memo, at(0), 99);
+        let read = |sealed: &u64| *sealed;
+        assert_eq!(
+            memo.read_sealed(&analysis, || Err("stopped"), read),
+            Err("stopped")
+        );
+        assert_eq!(
+            memo.read_sealed(&analysis, || Ok::<_, &str>(7), read),
+            Ok(7)
+        );
+        let held = memo.read_sealed(
+            &analysis,
+            || -> Result<u64, &str> { panic!("the held sealing answers") },
+            read,
+        );
+        assert_eq!(held, Ok(7));
+        assert_eq!(memo.stats().sealed, 2);
     }
 
     #[test]
