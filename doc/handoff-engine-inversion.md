@@ -757,6 +757,12 @@ the `ret` pops are **not** the same SSA value -- the lift makes two loads of
 - `StackObjectDeclarationWidth` on `_Z6_startv` (`_Exit (42)`): an access-less,
   address-only stack object becomes a binding that demands a declaration width
   it cannot have.
+- A register-space access is lifted as memory, so SSA never defines or reads the
+  register. NEON `vmov.i64 d0, #0; vld1.8 {d0[3]}, [r1]; vmov r0, r1, d0`
+  lifts the lane load as `STORE [reg](0x300 + 3)`, and `pd` prints `defines
+  r0 = 0x0`, a false bound. The address folds inside the instruction, so the
+  lifter can spell it as the register varnode, which is exact p-code semantics.
+  `BlockOrigins` kills on such stores; SSA construction does not.
 
 ## ARM 32-bit: Thumb decodes, and `pdd` still does not run
 

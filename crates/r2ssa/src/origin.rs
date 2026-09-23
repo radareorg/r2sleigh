@@ -6,12 +6,7 @@
 //! loads from folds to a constant. Each was answered by its own walk over the
 //! same operations, so this is that walk, once, with a name.
 //!
-//! The pass is `O(n log s + k)` for `n` operations, `s` tracked storages and
-//! `k` storages killed. A write forgets every tracked storage sharing a byte
-//! with it, and a call forgets every register and temporary, so an origin maps
-//! a storage only while no byte of it has been written since and no call has
-//! intervened: an older origin can never survive a clobber and become false
-//! evidence.
+//! An origin lives only until a byte of its storage is written or a call intervenes (doc/ssa.md, "Block origins").
 
 use crate::{CanonicalStorageId, CanonicalStorageSpace};
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
@@ -111,12 +106,13 @@ impl BlockOrigins {
             self.origins.clear();
             return;
         }
+        let origin = self.after(op);
+        self.forget_memory_write(op);
         let Some(output) = op.output() else {
             return;
         };
         let storage = CanonicalStorageId::from_varnode(output);
-        let origin = self.after(op);
-        self.forget_overlapping(storage);
+        self.forget_bytes(storage.space, storage.offset, storage.size.into());
         if let Some(origin) = origin
             && storage.size != 0
             && storage.space != CanonicalStorageSpace::Ram
@@ -125,29 +121,54 @@ impl BlockOrigins {
         }
     }
 
-    /// Forget every tracked storage sharing a byte with a written one.
-    ///
-    /// Tracked storages never overlap, so at most one starts below the write
-    /// and reaches into it, and the rest start inside it: one step back and a
-    /// run forward over the ordered map, `O(log s + k)`.
-    fn forget_overlapping(&mut self, written: CanonicalStorageId) {
-        let end =
+    /// Forget what a memory write may change: the bytes it names where its address folds, else its space.
+    fn forget_memory_write(&mut self, op: &R2ILOp) {
+        let (space, addr, size) = match op {
+            R2ILOp::Store { space, addr, val }
+            | R2ILOp::StoreConditional {
+                space, addr, val, ..
+            }
+            | R2ILOp::StoreGuarded {
+                space, addr, val, ..
+            } => (*space, Some(addr), val.size),
+            R2ILOp::AtomicCAS {
+                space,
+                addr,
+                replacement,
+                ..
+            } => (*space, Some(addr), replacement.size),
+            // Its extent turns on a count and a direction, so it may write anywhere in its space.
+            R2ILOp::BlockTransfer { space, .. } => (*space, None, 0),
+            _ => return,
+        };
+        let space = CanonicalStorageId::from_varnode(&Varnode::new(space, 0, 0)).space;
+        match addr.and_then(|addr| self.of(addr)?.constant()) {
+            Some(offset) => self.forget_bytes(space, offset, size.into()),
+            None => self.forget_bytes(space, 0, 1 << 64),
+        }
+    }
+
+    /// Forget every tracked storage sharing a byte with `width` bytes at `start`, in `O(log s + k)`.
+    fn forget_bytes(&mut self, space: CanonicalStorageSpace, start: u64, width: u128) {
+        let reaches =
             |storage: &CanonicalStorageId| u128::from(storage.offset) + u128::from(storage.size);
-        let from = CanonicalStorageId { size: 0, ..written };
+        let from = CanonicalStorageId {
+            space,
+            offset: start,
+            size: 0,
+        };
         let below = self
             .origins
             .range(..from)
             .next_back()
             .map(|(storage, _)| *storage)
-            .filter(|storage| {
-                storage.space == written.space && end(storage) > u128::from(written.offset)
-            });
+            .filter(|storage| storage.space == space && reaches(storage) > u128::from(start));
         let inside = self
             .origins
             .range(from..)
             .map(|(storage, _)| *storage)
             .take_while(|storage| {
-                storage.space == written.space && u128::from(storage.offset) < end(&written)
+                storage.space == space && u128::from(storage.offset) < u128::from(start) + width
             })
             .collect::<Vec<_>>();
         for storage in below.into_iter().chain(inside) {
@@ -382,6 +403,48 @@ mod tests {
             },
         ]));
         assert_eq!(straddled.of(&high_half), None);
+    }
+
+    #[test]
+    fn a_store_into_the_register_space_kills_what_it_overwrites() {
+        // vmov.i64 d0, #0; vld1.8 {d0[3]}, [r1]: NEON writes one lane through `*[register]`.
+        let (d0, lane) = (Varnode::register(0x300, 8), Varnode::unique(0x80, 1));
+        let lane_load = |addr: Varnode, space: SpaceId| {
+            BlockOrigins::of_block(&block(vec![
+                R2ILOp::Copy {
+                    dst: d0.clone(),
+                    src: Varnode::constant(0, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x90, 4),
+                    src: Varnode::constant(0x300, 4),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::unique(0x90, 4),
+                    a: Varnode::unique(0x90, 4),
+                    b: addr,
+                },
+                R2ILOp::Store {
+                    space,
+                    addr: Varnode::unique(0x90, 4),
+                    val: lane.clone(),
+                },
+            ]))
+            .of(&d0)
+            .and_then(ValueOrigin::constant)
+        };
+        assert_eq!(lane_load(Varnode::constant(3, 4), SpaceId::Register), None);
+        // An address nothing folds may name any register.
+        assert_eq!(
+            lane_load(Varnode::register(0x20, 4), SpaceId::Register),
+            None
+        );
+        // A store past its last byte, or into RAM, leaves it.
+        assert_eq!(
+            lane_load(Varnode::constant(8, 4), SpaceId::Register),
+            Some(0)
+        );
+        assert_eq!(lane_load(Varnode::constant(3, 4), SpaceId::Ram), Some(0));
     }
 
     #[test]

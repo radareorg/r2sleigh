@@ -9,25 +9,9 @@
 //! instruction, and re-queue the readers of anything that moved. What is different is the domain, and that a merge
 //! joins rather than giving up.
 //!
-//! Termination comes from widening at the phis of `W`, the targets of the back
-//! edges of a depth-first walk from the entry. Every transfer reads values
-//! defined at a dominator of the reader, or a phi input defined at a dominator
-//! of the edge's source; dominators are DFS ancestors, so postorder never rises
-//! along a read and strictly falls along a phi input on an edge that is not a
-//! back edge. A cycle of reads therefore passes a phi at a target in `W`, on
-//! any graph, reducible or not; natural loop headers are in `W`, so a
-//! reducible graph widens where it always did. A widened phi moves at most
-//! once per stride change for each bound, and a stride falls through at most
-//! sixty-four divisors; every other value sits on no cycle that avoids a
-//! widened phi, so it moves only when something it reads moved, and the ascent
-//! ends. The criterion is structural rather than a count of visits, because a
-//! count would be a number nothing derived.
+//! Widening at `W`, the DFS back-edge targets, ends the ascent on any CFG (doc/ssa.md, "Termination").
 //!
-//! A value wider than sixty-four bits is described at sixty-four, where top
-//! means unknown rather than below `2^64`. An operation that would read an
-//! unknown one as below `2^64` -- a shift, a division, a select's narrowed
-//! arm, a piece cut from it -- leaves its result unknown, and a comparison
-//! never narrows one.
+//! Top wider than sixty-four bits is unknown, never read as a value below `2^64`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -198,10 +182,7 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
     (by_value, transfers)
 }
 
-/// Every instruction whose transfer reads this value.
-///
-/// Its users, and the users of a comparison it feeds: a select narrows its arms
-/// by the comparison's operands, which are not its own inputs.
+/// Every instruction whose transfer reads this value: its users, and a select narrowed by a comparison it feeds.
 fn readers(graph: &SsaGraph, value: ValueId) -> impl Iterator<Item = InstId> + '_ {
     graph.use_sites(value).iter().flat_map(move |site| {
         let tested = graph
@@ -380,18 +361,7 @@ const fn mask_of(width_bits: u32) -> u64 {
 /// dominators proved and adds its own, which is the same set a walk up the
 /// chain from each instruction would gather, gathered once.
 ///
-/// An assumption filed under `B` by the edge `P -> B` holds at `B` only when
-/// that edge dominates `B`: `B` is not the entry, which is also entered by the
-/// call, and `B` dominates every other predecessor it has. Otherwise `B` is
-/// reached by a path that never took the branch, as a merge is.
-///
-/// The lemma that makes inheritance sound: if `def(v)` dominates `P` and the
-/// edge `P -> B` dominates `B`, then at every `C` that `B` dominates, the live
-/// instance of `v` is the one tested on the last traversal of `P -> B`. A path
-/// from a later `def(v)` to `C` that avoids `P -> B`, joined to an
-/// entry-to-`def(v)` path that avoids `B`, would reach `B` for the first time
-/// without `P -> B`. Such a prefix exists because `B` cannot dominate `def(v)`,
-/// or it would dominate `P` and never be entered first through `P -> B`.
+/// An assumption holds at `B` only where its edge dominates `B` (doc/ssa.md, "Branch assumptions").
 fn assumptions_by_block(
     function: &crate::SSAFunction,
     graph: &SsaGraph,
@@ -517,11 +487,7 @@ fn narrowed_side(
     (now != was).then_some(now)
 }
 
-/// One comparison's effect on one side of it.
-///
-/// A comparison that does not hold is the mirror of the one that does --
-/// `!(a < b)` is `b <= a` -- so the false case is taken by turning the
-/// comparison round rather than by four more arms saying the same thing.
+/// One comparison's effect on one side of it; a false one is its mirror, `!(a < b)` being `b <= a`.
 fn narrow(
     known: &dyn Fn(ValueId) -> Option<StridedInterval>,
     range: StridedInterval,

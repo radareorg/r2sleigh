@@ -175,16 +175,7 @@ impl StridedInterval {
         Self::strided(self.width_bits, stride.max(1), low, high)
     }
 
-    /// The greatest element both hold.
-    ///
-    /// Two strided intervals are arithmetic progressions, so their
-    /// intersection is one too: it exists only where their starts agree
-    /// modulo the greatest common divisor of their strides, and then it steps
-    /// by their least common multiple. Solving that is what keeps a meet of
-    /// the even numbers and the odd ones empty, which a bounds-only meet
-    /// cannot say and a switch recovery would believe.
-    ///
-    /// The common values are solved for, not searched: `O(log stride)`.
+    /// The greatest element both hold: two progressions' intersection, solved in `O(log stride)` (doc/ssa.md).
     pub fn meet(&self, other: &Self) -> Self {
         debug_assert_eq!(self.width_bits, other.width_bits);
         let width = self.width_bits;
@@ -211,18 +202,7 @@ impl StridedInterval {
         }
     }
 
-    /// Jump to a bound rather than climbing to it.
-    ///
-    /// Used where a fixpoint would otherwise ascend one loop iteration at a
-    /// time. The stride is the join's, `s = gcd(old, new, |old.low - new.low|)`,
-    /// so every value of both lies on it. A low that fell drops to its residue
-    /// modulo `s`, the least value that stride reaches; a high that grew rises
-    /// to the last value below the width's end that it reaches. Both keep the
-    /// residue, so nothing either side held is lost.
-    ///
-    /// This is what makes the fixpoint terminate: once widened, a bound moves
-    /// again only when the stride shrinks, and a stride can only shrink to a
-    /// proper divisor, at most sixty-four times.
+    /// Jump a moved bound to the width's extreme on the join's stride and residue (doc/ssa.md, "widen").
     pub fn widen(&self, next: &Self) -> Self {
         debug_assert_eq!(self.width_bits, next.width_bits);
         let (Some(old), Some(new)) = (self.body, next.body) else {
@@ -338,12 +318,7 @@ impl StridedInterval {
         self.mul(&Self::constant(self.width_bits, 1u64 << places))
     }
 
-    /// A logical right shift divides, and divides the stride with it.
-    ///
-    /// The stride survives only when `2^places` divides it: adding a multiple
-    /// of `2^places` never carries into the bits the shift keeps. Any other
-    /// stride lets the dropped bits carry, so `{1, 11, 21} >> 2` is
-    /// `{0, 2, 5}` and only a unit stride holds it.
+    /// A logical right shift, whose stride survives only where `2^places` divides it (doc/ssa.md, "shr").
     pub fn shr(&self, places: u32) -> Self {
         if places >= self.width_bits.min(Self::MAX_WIDTH_BITS) {
             return Self::constant(self.width_bits, 0);
@@ -406,13 +381,7 @@ impl StridedInterval {
     }
 }
 
-/// The first value at or above `from` that both progressions reach, and the
-/// step between such values, their least common multiple.
-///
-/// `x ≡ l1 (mod s1)` and `x ≡ l2 (mod s2)` have a common solution exactly when
-/// `gcd(s1, s2)` divides `l2 - l1` (the Chinese remainder theorem), so this
-/// is `None` where two strides start out of phase. The arithmetic is in
-/// `u128`, where a multiple of two `u64` strides always fits.
+/// The first common value at or above `from` and the lcm step, or `None` out of phase (CRT; doc/ssa.md, "meet").
 fn common_progression(left: (u64, u64), right: (u64, u64), from: u64) -> Option<(u128, u128)> {
     let ((left_start, left_stride), (right_start, right_stride)) = (left, right);
     let divisor = gcd(left_stride, right_stride);
@@ -852,12 +821,7 @@ mod tests {
 
 #[cfg(kani)]
 mod kani_proofs {
-    //! Eight-bit proofs of the operations CBMC settles in a gate's time.
-    //!
-    //! Every `gcd` step and every product of two symbolic strides is a
-    //! sixty-four-bit division or multiplier circuit that it does not; join,
-    //! widen, meet, add, sub, mul and shl are proved exhaustively below six
-    //! bits by the unit tests instead.
+    //! Eight-bit proofs CBMC settles in a gate's time; the rest are exhausted by unit tests (doc/ssa.md, "Kani").
     use super::*;
 
     /// An eight-bit element and one value it holds.
