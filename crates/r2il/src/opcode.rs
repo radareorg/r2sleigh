@@ -11,6 +11,19 @@ use crate::metadata::OpMetadata;
 use crate::space::SpaceId;
 use crate::varnode::Varnode;
 
+/// What an operation does with a number it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValueUse {
+    /// Moves the number, or a slice or extension of it, somewhere else unchanged.
+    Carries,
+    /// Computes a different number from it.
+    Derives,
+    /// Compares or tests it, yielding a flag or a count rather than a number built on it.
+    Tests,
+    /// Uses it as it stands: an address, a stored value, a target, an argument.
+    Consumes,
+}
+
 /// Whether a block operation reads its elements from memory or repeats a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BlockTransferKind {
@@ -532,6 +545,53 @@ pub enum R2ILOp {
 }
 
 impl R2ILOp {
+    /// What this operation does with the numbers it reads.
+    pub fn value_use(&self) -> ValueUse {
+        match self {
+            R2ILOp::Copy { .. }
+            | R2ILOp::IntZExt { .. }
+            | R2ILOp::IntSExt { .. }
+            | R2ILOp::Subpiece { .. }
+            | R2ILOp::Multiequal { .. }
+            | R2ILOp::Indirect { .. } => ValueUse::Carries,
+            R2ILOp::IntAdd { .. }
+            | R2ILOp::IntSub { .. }
+            | R2ILOp::IntMult { .. }
+            | R2ILOp::IntDiv { .. }
+            | R2ILOp::IntSDiv { .. }
+            | R2ILOp::IntRem { .. }
+            | R2ILOp::IntSRem { .. }
+            | R2ILOp::IntNegate { .. }
+            | R2ILOp::IntAnd { .. }
+            | R2ILOp::IntOr { .. }
+            | R2ILOp::IntXor { .. }
+            | R2ILOp::IntNot { .. }
+            | R2ILOp::IntLeft { .. }
+            | R2ILOp::IntRight { .. }
+            | R2ILOp::IntSRight { .. }
+            | R2ILOp::Piece { .. }
+            | R2ILOp::PtrAdd { .. }
+            | R2ILOp::PtrSub { .. }
+            | R2ILOp::SegmentOp { .. } => ValueUse::Derives,
+            R2ILOp::IntEqual { .. }
+            | R2ILOp::IntNotEqual { .. }
+            | R2ILOp::IntLess { .. }
+            | R2ILOp::IntSLess { .. }
+            | R2ILOp::IntLessEqual { .. }
+            | R2ILOp::IntSLessEqual { .. }
+            | R2ILOp::IntCarry { .. }
+            | R2ILOp::IntSCarry { .. }
+            | R2ILOp::IntSBorrow { .. }
+            | R2ILOp::BoolNot { .. }
+            | R2ILOp::BoolAnd { .. }
+            | R2ILOp::BoolOr { .. }
+            | R2ILOp::BoolXor { .. }
+            | R2ILOp::PopCount { .. }
+            | R2ILOp::Lzcount { .. } => ValueUse::Tests,
+            _ => ValueUse::Consumes,
+        }
+    }
+
     /// Returns true if this operation is a control flow operation.
     pub fn is_control_flow(&self) -> bool {
         matches!(

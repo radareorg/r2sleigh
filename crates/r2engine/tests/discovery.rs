@@ -7,7 +7,8 @@
 mod common;
 
 use common::{
-    ARM_ENTRY, CALLER, FORKED, JOINED, Literal, ONE, THUMB_CALLED, THUMB_LEAF, TWO, VENEER,
+    ARM_ENTRY, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, THUMB_CALLED, THUMB_LEAF,
+    TWO, VENEER,
 };
 use r2engine::discovery::Confidence;
 use r2engine::program::OpenProgram;
@@ -32,7 +33,9 @@ fn every_function_the_container_states_is_found_as_stated() {
             (CALLER, Confidence::Stated),
             (TWO, Confidence::Stated),
             (FORKED, Confidence::Stated),
-            (JOINED, Confidence::Stated)
+            (JOINED, Confidence::Stated),
+            (PASSES, Confidence::Stated),
+            (STEPPED, Confidence::Stated)
         ]
     );
 }
@@ -47,7 +50,9 @@ fn a_function_nothing_states_is_found_by_its_caller() {
             (CALLER, Confidence::Stated),
             (TWO, Confidence::Stated),
             (FORKED, Confidence::Stated),
-            (JOINED, Confidence::Stated)
+            (JOINED, Confidence::Stated),
+            (PASSES, Confidence::Stated),
+            (STEPPED, Confidence::Stated)
         ]
     );
 }

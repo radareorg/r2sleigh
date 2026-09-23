@@ -46,7 +46,7 @@ pub use metadata::{
     VarnodeMetadata,
 };
 pub use opcode::{
-    BlockTransferKind, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, guarded_transfer,
+    BlockTransferKind, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, ValueUse, guarded_transfer,
     predicated_transfer, returns_to,
 };
 pub use regname::select_register_name;

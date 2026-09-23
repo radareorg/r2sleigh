@@ -1,6 +1,6 @@
 //! A program built from byte literals, for the tests that need an open one.
 //!
-//! Five x86-64 functions in one run of bytes, a container that says where they
+//! Seven x86-64 functions in one run of bytes, a container that says where they
 //! are, and a patch layer, which is everything `Source` asks for. No binary on
 //! disk: the engine never knows what a file is, so its tests need not either.
 
@@ -20,62 +20,78 @@ pub const ONE: u64 = BASE;
 pub const CALLER: u64 = BASE + 0x10;
 /// `mov eax, 2; ret`
 pub const TWO: u64 = BASE + 0x20;
-/// `lea rax, [one]; test edi, edi; je L; mov eax, 5; L: mov rdi, rax; ret`
+/// `lea rax, [one]; test edi, edi; je L; mov eax, 5; L: add rax, 8; ret`
 pub const FORKED: u64 = BASE + 0x30;
-/// `test edi, edi; je L; lea rax, [one]; L: mov rdi, rax; ret`
+/// `test edi, edi; je L; lea rax, [one]; L: add rax, 8; ret`
 pub const JOINED: u64 = BASE + 0x50;
+/// `lea rdi, [one]; call one; ret`
+pub const PASSES: u64 = BASE + 0x70;
+/// `lea rax, [one]; add rax, 8; ret`
+pub const STEPPED: u64 = BASE + 0x80;
 
-const CODE: [u8; 0x70] = {
-    let mut code = [0xcc; 0x70];
-    // one: mov eax, 1; ret
-    code[0x00] = 0xb8;
-    code[0x01] = 0x01;
-    code[0x02] = 0x00;
-    code[0x03] = 0x00;
-    code[0x04] = 0x00;
-    code[0x05] = 0xc3;
-    // caller: call one (rel32 = 0x1000 - 0x1015); ret
-    code[0x10] = 0xe8;
-    code[0x11] = 0xeb;
-    code[0x12] = 0xff;
-    code[0x13] = 0xff;
-    code[0x14] = 0xff;
-    code[0x15] = 0xc3;
-    // two: mov eax, 2; ret
-    code[0x20] = 0xb8;
-    code[0x21] = 0x02;
-    code[0x22] = 0x00;
-    code[0x23] = 0x00;
-    code[0x24] = 0x00;
-    code[0x25] = 0xc3;
-    // forked: the address is read back only on the path that skips the overwrite
-    let forked = [
-        0x48, 0x8d, 0x05, 0xc9, 0xff, 0xff, 0xff, // lea rax, [rip - 0x37]
-        0x85, 0xff, // test edi, edi
-        0x74, 0x05, // je 0x1040
-        0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5
-        0x48, 0x89, 0xc7, // mov rdi, rax
-        0xc3, // ret
-    ];
-    let mut at = 0;
-    while at < forked.len() {
-        code[0x30 + at] = forked[at];
-        at += 1;
-    }
-    // joined: the address falls through into a block another path also enters
-    let joined = [
-        0x85, 0xff, // test edi, edi
-        0x74, 0x07, // je 0x105b
-        0x48, 0x8d, 0x05, 0xa5, 0xff, 0xff, 0xff, // lea rax, [rip - 0x5b]
-        0x48, 0x89, 0xc7, // mov rdi, rax
-        0xc3, // ret
-    ];
-    let mut at = 0;
-    while at < joined.len() {
-        code[0x50 + at] = joined[at];
-        at += 1;
+/// Copy `bytes` into `code` at `at`.
+const fn place<const N: usize>(mut code: [u8; 0x90], at: usize, bytes: [u8; N]) -> [u8; 0x90] {
+    let mut offset = 0;
+    while offset < N {
+        code[at + offset] = bytes[offset];
+        offset += 1;
     }
     code
+}
+
+const CODE: [u8; 0x90] = {
+    let code = [0xcc; 0x90];
+    // one: mov eax, 1; ret
+    let code = place(code, 0x00, [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    // caller: call one (rel32 = 0x1000 - 0x1015); ret
+    let code = place(code, 0x10, [0xe8, 0xeb, 0xff, 0xff, 0xff, 0xc3]);
+    // two: mov eax, 2; ret
+    let code = place(code, 0x20, [0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]);
+    // forked: the address is built on only on the path that skips the overwrite
+    let code = place(
+        code,
+        0x30,
+        [
+            0x48, 0x8d, 0x05, 0xc9, 0xff, 0xff, 0xff, // lea rax, [rip - 0x37]
+            0x85, 0xff, // test edi, edi
+            0x74, 0x05, // je 0x1040
+            0xb8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5
+            0x48, 0x83, 0xc0, 0x08, // add rax, 8
+            0xc3, // ret
+        ],
+    );
+    // joined: the address falls through into a block another path also enters
+    let code = place(
+        code,
+        0x50,
+        [
+            0x85, 0xff, // test edi, edi
+            0x74, 0x07, // je 0x105b
+            0x48, 0x8d, 0x05, 0xa5, 0xff, 0xff, 0xff, // lea rax, [rip - 0x5b]
+            0x48, 0x83, 0xc0, 0x08, // add rax, 8
+            0xc3, // ret
+        ],
+    );
+    // passes: the address is an argument, which uses it as it stands
+    let code = place(
+        code,
+        0x70,
+        [
+            0x48, 0x8d, 0x3d, 0x89, 0xff, 0xff, 0xff, // lea rdi, [rip - 0x77]
+            0xe8, 0x84, 0xff, 0xff, 0xff, // call one
+            0xc3, // ret
+        ],
+    );
+    // stepped: the address is a base the next instruction moves past
+    place(
+        code,
+        0x80,
+        [
+            0x48, 0x8d, 0x05, 0x79, 0xff, 0xff, 0xff, // lea rax, [rip - 0x87]
+            0x48, 0x83, 0xc0, 0x08, // add rax, 8
+            0xc3, // ret
+        ],
+    )
 };
 
 /// An ARM function the container states: `blx thumb; bx lr`.
@@ -155,8 +171,10 @@ impl Literal {
                     function("one", ONE, 6),
                     function("caller", CALLER, 6),
                     function("two", TWO, 6),
-                    function("forked", FORKED, 0x14),
-                    function("joined", JOINED, 0xf),
+                    function("forked", FORKED, 0x15),
+                    function("joined", JOINED, 0x10),
+                    function("passes", PASSES, 0xd),
+                    function("stepped", STEPPED, 0xc),
                 ],
                 ..Container::default()
             },

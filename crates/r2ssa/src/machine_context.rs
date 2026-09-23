@@ -1099,17 +1099,7 @@ impl SourceMachineContext {
                 })
                 .collect();
         let call_clobbered_carriers = arch
-            .map(|arch| {
-                crate::function::call_clobbered_register_defs(arch)
-                    .into_iter()
-                    .filter_map(|def| {
-                        register_storages_by_name
-                            .get(&def.name.to_ascii_lowercase())
-                            .copied()
-                            .filter(|storage| storage.size == def.size)
-                    })
-                    .collect::<Box<[_]>>()
-            })
+            .map(crate::function::call_clobbered_storages)
             .unwrap_or_default();
         let (register_geometry_state, register_projections) = match arch {
             None => (MachineRegisterGeometryState::Unavailable, Box::default()),

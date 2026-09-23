@@ -737,6 +737,58 @@ impl SSAOp {
         sources
     }
 
+    /// What this operation does with the values it reads, as the lifted operation it mirrors says.
+    pub fn value_use(&self) -> r2il::ValueUse {
+        use r2il::ValueUse;
+        match self {
+            SSAOp::Phi { .. }
+            | SSAOp::Copy { .. }
+            | SSAOp::IntZExt { .. }
+            | SSAOp::IntSExt { .. }
+            | SSAOp::Subpiece { .. }
+            | SSAOp::Cast { .. }
+            | SSAOp::CallRestore { .. }
+            | SSAOp::Select(_) => ValueUse::Carries,
+            SSAOp::IntAdd { .. }
+            | SSAOp::IntSub { .. }
+            | SSAOp::IntMult { .. }
+            | SSAOp::IntDiv { .. }
+            | SSAOp::IntSDiv { .. }
+            | SSAOp::IntRem { .. }
+            | SSAOp::IntSRem { .. }
+            | SSAOp::IntNegate { .. }
+            | SSAOp::IntAnd { .. }
+            | SSAOp::IntOr { .. }
+            | SSAOp::IntXor { .. }
+            | SSAOp::IntNot { .. }
+            | SSAOp::IntLeft { .. }
+            | SSAOp::IntRight { .. }
+            | SSAOp::IntSRight { .. }
+            | SSAOp::Piece { .. }
+            | SSAOp::PtrAdd { .. }
+            | SSAOp::PtrSub { .. }
+            | SSAOp::SegmentOp { .. }
+            | SSAOp::Extract { .. }
+            | SSAOp::Insert(_) => ValueUse::Derives,
+            SSAOp::IntEqual { .. }
+            | SSAOp::IntNotEqual { .. }
+            | SSAOp::IntLess { .. }
+            | SSAOp::IntSLess { .. }
+            | SSAOp::IntLessEqual { .. }
+            | SSAOp::IntSLessEqual { .. }
+            | SSAOp::IntCarry { .. }
+            | SSAOp::IntSCarry { .. }
+            | SSAOp::IntSBorrow { .. }
+            | SSAOp::BoolNot { .. }
+            | SSAOp::BoolAnd { .. }
+            | SSAOp::BoolOr { .. }
+            | SSAOp::BoolXor { .. }
+            | SSAOp::PopCount { .. }
+            | SSAOp::Lzcount { .. } => ValueUse::Tests,
+            _ => ValueUse::Consumes,
+        }
+    }
+
     /// Returns true if this operation is a control flow operation.
     pub fn is_control_flow(&self) -> bool {
         matches!(

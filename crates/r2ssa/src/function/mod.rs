@@ -3009,6 +3009,29 @@ fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
 /// at every call, and a callee's return boundary tests the same entries to
 /// state which of them its body leaves untouched, so the two sides can never
 /// disagree about which registers are in question.
+/// The registers a call leaves undefined under this architecture's convention, as storages.
+pub fn call_clobbered_storages(arch: &ArchSpec) -> Box<[CanonicalStorageId]> {
+    call_clobbered_register_defs(arch)
+        .into_iter()
+        .filter_map(|def| {
+            let mut declared = arch.registers.iter().filter(|register| {
+                register.size != 0
+                    && register
+                        .offset
+                        .checked_add(u64::from(register.size))
+                        .is_some()
+                    && register.name.trim().eq_ignore_ascii_case(&def.name)
+            });
+            let register = declared.next()?;
+            (declared.next().is_none() && register.size == def.size).then_some(CanonicalStorageId {
+                space: CanonicalStorageSpace::Register,
+                offset: register.offset,
+                size: register.size,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn call_clobbered_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
     let lower = arch.name.to_ascii_lowercase();
     match lower.as_str() {

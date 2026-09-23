@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{FORKED, JOINED, ONE, opened};
+use common::{FORKED, JOINED, ONE, PASSES, STEPPED, opened};
 use r2engine::query::{AnnotationKind, Line, Listing, Stop};
 
 /// The result each line claims, by address.
@@ -37,20 +37,20 @@ fn pdf(entry: u64) -> Vec<(u64, Option<u64>)> {
 }
 
 #[test]
-fn an_address_read_back_past_a_branch_is_not_claimed_a_result() {
-    // The overwrite is skipped on the taken path, and the read at L sees the address.
+fn an_address_built_on_past_a_branch_is_not_claimed_a_result() {
+    // The overwrite is skipped on the taken path, and the add at L builds on the address.
     assert_eq!(pd(FORKED, 6)[0], (FORKED, None));
     assert_eq!(pdf(FORKED)[0], (FORKED, None));
 }
 
 #[test]
 fn the_function_listing_refines_the_run_and_never_contradicts_it() {
-    // lea rax, [one] falls through into L, which the branch also enters, and L reads it.
+    // lea rax, [one] falls through into L, which the branch also enters, and L adds to it.
     let lea = JOINED + 4;
     assert_eq!(pd(JOINED, 5)[2], (lea, None));
     assert_eq!(pdf(JOINED)[2], (lea, None));
     // Every result the run claims, the function claims too.
-    for entry in [FORKED, JOINED, ONE] {
+    for entry in [FORKED, JOINED, ONE, PASSES, STEPPED] {
         let whole = pdf(entry);
         for (address, claimed) in pd(entry, whole.len()) {
             if claimed.is_some() {
@@ -61,6 +61,19 @@ fn the_function_listing_refines_the_run_and_never_contradicts_it() {
     // mov eax, 1; ret -- the run cannot see past the return; the def-use says nothing reads it.
     assert_eq!(pd(ONE, 2)[0], (ONE, None));
     assert_eq!(pdf(ONE)[0], (ONE, Some(1)));
+}
+
+#[test]
+fn an_address_passed_to_a_call_is_a_result() {
+    // lea rdi, [one]; call one -- the callee is handed the address, and the call leaves rdi undefined.
+    assert_eq!(pd(PASSES, 3)[0], (PASSES, Some(ONE)));
+    assert_eq!(pdf(PASSES)[0], (PASSES, Some(ONE)));
+}
+
+#[test]
+fn an_address_the_next_instruction_adds_to_is_a_step() {
+    assert_eq!(pd(STEPPED, 3)[0], (STEPPED, None));
+    assert_eq!(pdf(STEPPED)[0], (STEPPED, None));
 }
 
 #[test]

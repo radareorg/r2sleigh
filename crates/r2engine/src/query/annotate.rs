@@ -3,14 +3,16 @@
 //! Lifting is the whole point: a number in the operands is an address because
 //! the instruction transfers to it or reads it, not because it looks like one.
 
+use r2il::ValueUse;
 use r2il::{R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::{NumberSpan, Syntax};
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
-use r2ssa::{CanonicalStorageId, InstPayload, SsaGraph, ValueId};
+use r2ssa::{CanonicalStorageId, CanonicalStorageSpace, InstPayload, SsaGraph, ValueId};
 use std::collections::BTreeSet;
 
 use super::Support;
 use super::Work;
+use super::decode::Lookahead;
 use super::records::{Annotation, AnnotationKind, Answered, Line, Memory};
 
 /// Say what each line's own lift says, and what the run says about it.
@@ -25,12 +27,19 @@ pub(super) fn over_run(
     answered: &Answered<'_>,
     work: Work,
     lifts: &[Option<r2il::R2ILBlock>],
+    beyond: &mut Lookahead<'_, '_>,
     lines: &mut [Line],
 ) {
     if work == Work::Decode {
         return;
     }
     let memory = &answered.memory;
+    // One convention per run: ARM and Thumb decode apart but call alike.
+    let clobbered = lines
+        .first()
+        .and_then(|line| answered.decoders.at(line.address))
+        .map(|machine| r2ssa::call_clobbered_storages(&machine.arch))
+        .unwrap_or_default();
     for (index, line) in lines.iter_mut().enumerate() {
         let (Some(lift), Some(syntax)) = (lifts.get(index).and_then(Option::as_ref), &line.syntax)
         else {
@@ -42,7 +51,13 @@ pub(super) fn over_run(
                 .then_some(answered.facts)
                 .flatten()
                 .map(r2ssa::SsaArtifact::graph);
-            kinds.extend(computed_by(lift, &lifts[index + 1..], graph, line.address));
+            let mut after = After {
+                rest: &lifts[index + 1..],
+                beyond: &mut *beyond,
+                clobbered: &clobbered,
+                graph,
+            };
+            kinds.extend(computed_by(lift, &mut after, line.address));
         }
         kinds.extend(held_at(memory, &kinds));
         if work >= Work::Function {
@@ -140,15 +155,27 @@ fn touched_by(lift: &r2il::R2ILBlock) -> Vec<AnnotationKind> {
     kinds
 }
 
-/// The number this instruction produces, where nothing reads it back.
+/// What can be known of the program after one instruction.
+struct After<'a, 'r, 'b> {
+    /// The lifts of the lines that follow it in the run.
+    rest: &'a [Option<r2il::R2ILBlock>],
+    /// The instructions past the run, read as far as a question needs them.
+    beyond: &'a mut Lookahead<'r, 'b>,
+    /// The registers the convention says a call leaves undefined.
+    clobbered: &'a [CanonicalStorageId],
+    /// The function's def-use, where the request paid for it.
+    graph: Option<&'a SsaGraph>,
+}
+
+/// The number this instruction produces, where nothing derives another from it.
 ///
-/// A value a later instruction reads back is a step towards an address rather
-/// than one: spelling `adrp x17, reloc.humanize_number` named the page base
-/// the `add` after it was about to move fifty bytes past.
+/// A value a later instruction builds a number on is a step towards an address
+/// rather than one: spelling `adrp x17, reloc.humanize_number` named the page
+/// base the `add` after it was about to move fifty bytes past. Copying, storing,
+/// comparing, loading through or passing the number is using it as it stands.
 fn computed_by(
     lift: &r2il::R2ILBlock,
-    rest: &[Option<r2il::R2ILBlock>],
-    graph: Option<&SsaGraph>,
+    after: &mut After<'_, '_, '_>,
     address: u64,
 ) -> Option<AnnotationKind> {
     let mut origins = BlockOrigins::default();
@@ -157,62 +184,139 @@ fn computed_by(
     }
     let output = lift.ops.iter().rev().find_map(r2il::R2ILOp::output)?;
     let value = origins.of(output)?.constant()?;
-    let fate = match straight_line_fate(lift, rest, output) {
-        Fate::Unknown => graph.map_or(Fate::Unknown, |graph| defined_fate(graph, address, output)),
+    let fate = match straight_line_fate(lift, after, output) {
+        Fate::Unknown => after
+            .graph
+            .map_or(Fate::Unknown, |graph| defined_fate(graph, address, output)),
         settled => settled,
     };
     (fate == Fate::Result).then_some(AnnotationKind::Computes { value })
 }
 
-/// Whether a number an instruction leaves is read back, and who can tell.
+/// Whether a number an instruction leaves is a step, and who can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fate {
-    /// Something reads a byte of it: a step towards what that reader computes.
+    /// Something derives another number from it.
     Step,
-    /// Nothing reads it before all of it is overwritten or it leaves the function unread.
+    /// Every copy of it is gone before anything derives from it.
     Result,
     /// The evidence at hand does not reach far enough to say.
     Unknown,
 }
 
+/// Whether a storage is a temporary one instruction's operations share.
+fn scratch(space: SpaceId) -> bool {
+    space == SpaceId::Unique
+}
+
 /// What the run after an instruction says, as far as it is one straight line.
+///
+/// The number is followed through every storage a copy puts it in; a number
+/// derived from it is followed only through temporaries, because a flag is
+/// computed that way and a flag is a test rather than a step.
 fn straight_line_fate(
     lift: &r2il::R2ILBlock,
-    rest: &[Option<r2il::R2ILBlock>],
+    after: &mut After<'_, '_, '_>,
     output: &Varnode,
 ) -> Fate {
-    // Comparing the starting offset alone missed `ah` read out of an `rax` just written.
-    let covers = |varnode: &Varnode| {
-        varnode.space == output.space
-            && varnode.offset <= output.offset
-            && output.offset + u64::from(output.size) <= varnode.offset + u64::from(varnode.size)
-    };
-    let overlaps = |varnode: &Varnode| {
-        varnode.space == output.space
-            && varnode.offset < output.offset + u64::from(output.size)
-            && output.offset < varnode.offset + u64::from(varnode.size)
-    };
-    // Past a transfer the run is no longer every path the value takes, so it settles nothing.
+    // Past a branch the run is no longer every path the value takes, so it settles nothing.
     if lift.ops.iter().any(R2ILOp::is_control_flow) {
         return Fate::Unknown;
     }
-    for block in rest {
+    let mut holders = vec![output.clone()];
+    // A callee may have left a register as it found it, so a read after a call proves no step.
+    let mut called = false;
+    let listed = after.rest.len();
+    for index in 0.. {
+        let block = match after.rest.get(index) {
+            Some(block) => block.as_ref(),
+            None => after.beyond.at(index - listed).flatten(),
+        };
         let Some(block) = block else {
             return Fate::Unknown;
         };
+        let mut derived: Vec<Varnode> = Vec::new();
         for op in &block.ops {
-            if op.inputs().into_iter().any(&overlaps) {
-                return Fate::Step;
+            match op_fate(op, &mut holders, &mut derived, after.clobbered) {
+                Some(Fate::Step) if called => return Fate::Unknown,
+                Some(fate) => return fate,
+                None => {}
             }
-            if op.is_control_flow() {
-                return Fate::Unknown;
-            }
-            if op.output().is_some_and(&covers) {
+            called |= matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
+            if holders.is_empty() && derived.is_empty() {
                 return Fate::Result;
             }
         }
+        holders.retain(|held| !scratch(held.space));
+        if holders.is_empty() {
+            return Fate::Result;
+        }
     }
     Fate::Unknown
+}
+
+/// What one operation does to the storages holding the number, where it decides.
+fn op_fate(
+    op: &R2ILOp,
+    holders: &mut Vec<Varnode>,
+    derived: &mut Vec<Varnode>,
+    clobbered: &[CanonicalStorageId],
+) -> Option<Fate> {
+    let inputs = op.inputs();
+    let reads = |set: &[Varnode]| {
+        inputs
+            .iter()
+            .any(|input| set.iter().any(|held| overlaps(held, input)))
+    };
+    let (held, built) = (reads(holders), reads(derived));
+    match op {
+        R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
+            holders.retain(|held| {
+                !clobbered
+                    .iter()
+                    .any(|storage| covers(&storage_varnode(*storage), held))
+            });
+            return built.then_some(Fate::Step);
+        }
+        _ if op.is_control_flow() => return Some(Fate::Unknown),
+        _ => {}
+    }
+    let carried = match op.value_use() {
+        ValueUse::Derives if held || built => Some(true),
+        ValueUse::Carries if built => Some(true),
+        ValueUse::Carries if held => Some(false),
+        ValueUse::Consumes if built => return Some(Fate::Step),
+        _ => None,
+    };
+    let written = op.output()?;
+    holders.retain(|held| !covers(written, held));
+    derived.retain(|held| !covers(written, held));
+    match carried {
+        Some(true) if !scratch(written.space) => return Some(Fate::Step),
+        Some(true) => derived.push(written.clone()),
+        Some(false) => holders.push(written.clone()),
+        None => {}
+    }
+    None
+}
+
+/// Whether two storages share a byte.
+fn overlaps(left: &Varnode, right: &Varnode) -> bool {
+    left.space == right.space
+        && left.offset < right.offset + u64::from(right.size)
+        && right.offset < left.offset + u64::from(left.size)
+}
+
+/// Whether a write to `outer` replaces every byte of `inner`.
+fn covers(outer: &Varnode, inner: &Varnode) -> bool {
+    outer.space == inner.space
+        && outer.offset <= inner.offset
+        && inner.offset + u64::from(inner.size) <= outer.offset + u64::from(outer.size)
+}
+
+/// A register storage, as the lift spells it.
+fn storage_varnode(storage: CanonicalStorageId) -> Varnode {
+    Varnode::new(SpaceId::Register, storage.offset, storage.size)
 }
 
 /// What the function's def-use says of the value this instruction leaves in `output`.
@@ -226,27 +330,44 @@ fn defined_fate(graph: &SsaGraph, address: u64, output: &Varnode) -> Fate {
         .find(|inst| inst.canonical_storage == Some(storage))
         .and_then(|inst| inst.output);
     match defined {
-        Some(defined) if read_through_merges(graph, defined) => Fate::Step,
+        Some(defined) if derived_from(graph, defined) => Fate::Step,
         Some(_) => Fate::Result,
         None => Fate::Unknown,
     }
 }
 
-/// Whether an operation reads this value, directly or through the merges it flows into.
-fn read_through_merges(graph: &SsaGraph, defined: ValueId) -> bool {
-    let mut seen = BTreeSet::from([defined]);
-    let mut pending = vec![defined];
-    while let Some(value) = pending.pop() {
+/// Whether an operation builds a number on this value, through the copies and merges it flows into.
+fn derived_from(graph: &SsaGraph, defined: ValueId) -> bool {
+    let mut seen = BTreeSet::from([(defined, false)]);
+    let mut pending = vec![(defined, false)];
+    while let Some((value, built)) = pending.pop() {
         let users = graph
             .use_sites(value)
             .iter()
             .filter_map(|site| graph.inst(site.inst));
         for user in users {
-            // A merge only passes the value on; any other operation reads it.
-            let InstPayload::Phi { .. } = user.payload else {
-                return true;
+            let carried = match &user.payload {
+                InstPayload::Phi { .. } => built,
+                InstPayload::Op(op) => match op.value_use() {
+                    ValueUse::Carries => built,
+                    ValueUse::Derives => true,
+                    ValueUse::Consumes if built => return true,
+                    ValueUse::Consumes | ValueUse::Tests => continue,
+                },
             };
-            pending.extend(user.output.filter(|merged| seen.insert(*merged)));
+            let Some(next) = user.output else {
+                continue;
+            };
+            let temporary = graph
+                .value(next)
+                .and_then(|value| value.canonical_storage)
+                .is_some_and(|storage| storage.space == CanonicalStorageSpace::Unique);
+            if carried && !temporary {
+                return true;
+            }
+            if seen.insert((next, carried)) {
+                pending.push((next, carried));
+            }
         }
     }
     false

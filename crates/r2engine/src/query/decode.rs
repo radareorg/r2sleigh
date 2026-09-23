@@ -18,7 +18,6 @@ pub fn listing(
     work: Work,
     revision: Revision,
 ) -> Answer<Vec<Line>> {
-    let (decoders, memory) = (answered.decoders, &answered.memory);
     let mut lines = Vec::new();
     // The lift of each line, kept until the run has been read: whether an
     // instruction's own result is an address or a step towards one is a fact
@@ -31,59 +30,114 @@ pub fn listing(
         Stop::After(count) => lines.len() < count,
         Stop::At(end) => pc < end,
     } {
-        let (Some(machine), Some(window)) =
-            (decoders.at(pc), memory.program.read(pc, DECODE_WINDOW))
-        else {
+        let Some(one) = decoded(answered, pc, work) else {
             completion = Completion::Unmapped { at: pc };
             break;
         };
-        // Bytes that do not decode are stepped over by the width this machine
-        // addresses instructions at. Stepping one byte puts the next
-        // instruction at an odd address on ARM, where none can begin.
-        let step = u64::from(machine.arch.alignment.max(1));
-        let available = window.len();
-        let mut fetch = window;
-        fetch.resize(DECODE_WINDOW, 0);
-
-        let decoded = machine
-            .disasm
-            .disasm_syntax(&fetch, pc)
-            .ok()
-            .filter(|syntax| syntax.size != 0 && syntax.size <= available);
-        let Some(syntax) = decoded else {
-            lines.push(Line {
-                address: pc,
-                bytes: fetch[..1].to_vec(),
-                syntax: None,
-                annotations: Vec::new(),
-            });
-            lifts.push(None);
-            pc += step;
-            continue;
-        };
-
-        let size = syntax.size;
-        lines.push(Line {
-            address: pc,
-            bytes: fetch[..size].to_vec(),
-            syntax: Some(syntax),
-            annotations: Vec::new(),
-        });
-        // The window is the decoder's, not the instruction's: Sleigh reads the
-        // whole of it whatever the instruction needs, and handing it only the
-        // bytes the instruction occupies fails the decode just performed.
-        lifts.push(match work {
-            Work::Decode => None,
-            _ => machine.disasm.lift(&fetch, pc).ok(),
-        });
-        pc += size as u64;
+        lines.push(one.line);
+        lifts.push(one.lift);
+        pc = one.next;
     }
 
-    super::annotate::over_run(answered, work, &lifts, &mut lines);
+    let mut beyond = Lookahead {
+        answered,
+        work,
+        next: pc,
+        open: completion == Completion::Complete,
+        tail: Vec::new(),
+    };
+    super::annotate::over_run(answered, work, &lifts, &mut beyond, &mut lines);
     Answer {
         value: lines,
         revision,
         completion,
+    }
+}
+
+/// One instruction read at an address, and where the next one begins.
+struct Decoded {
+    line: Line,
+    lift: Option<r2il::R2ILBlock>,
+    next: u64,
+}
+
+/// Read and spell the instruction at `pc`; `None` where the program maps nothing to read.
+fn decoded(answered: &Answered<'_>, pc: u64, work: Work) -> Option<Decoded> {
+    let machine = answered.decoders.at(pc)?;
+    let window = answered.memory.program.read(pc, DECODE_WINDOW)?;
+    // Bytes that do not decode are stepped over by the width this machine
+    // addresses instructions at. Stepping one byte puts the next
+    // instruction at an odd address on ARM, where none can begin.
+    let step = u64::from(machine.arch.alignment.max(1));
+    let available = window.len();
+    let mut fetch = window;
+    fetch.resize(DECODE_WINDOW, 0);
+
+    let decoded = machine
+        .disasm
+        .disasm_syntax(&fetch, pc)
+        .ok()
+        .filter(|syntax| syntax.size != 0 && syntax.size <= available);
+    let Some(syntax) = decoded else {
+        return Some(Decoded {
+            line: Line {
+                address: pc,
+                bytes: fetch[..1].to_vec(),
+                syntax: None,
+                annotations: Vec::new(),
+            },
+            lift: None,
+            next: pc + step,
+        });
+    };
+    let size = syntax.size;
+    // The window is the decoder's, not the instruction's: Sleigh reads the
+    // whole of it whatever the instruction needs, and handing it only the
+    // bytes the instruction occupies fails the decode just performed.
+    let lift = match work {
+        Work::Decode => None,
+        _ => machine.disasm.lift(&fetch, pc).ok(),
+    };
+    Some(Decoded {
+        line: Line {
+            address: pc,
+            bytes: fetch[..size].to_vec(),
+            syntax: Some(syntax),
+            annotations: Vec::new(),
+        },
+        lift,
+        next: pc + size as u64,
+    })
+}
+
+/// The instructions after the run's last line, lifted only when a line asks.
+///
+/// Where a listing stops is the reader's choice, not the program's: whether a
+/// number the last line computes is a step is decided by what follows it.
+pub(super) struct Lookahead<'r, 'a> {
+    answered: &'r Answered<'a>,
+    work: Work,
+    next: u64,
+    open: bool,
+    tail: Vec<Option<r2il::R2ILBlock>>,
+}
+
+impl Lookahead<'_, '_> {
+    /// The lift of the `index`th instruction past the run, or `None` where the program stops being one straight line of code.
+    pub(super) fn at(&mut self, index: usize) -> Option<Option<&r2il::R2ILBlock>> {
+        while self.open && self.tail.len() <= index {
+            // Another function's entry is not where this one's value goes.
+            let one = (!self.answered.memory.program.is_entry(self.next))
+                .then(|| decoded(self.answered, self.next, self.work))
+                .flatten();
+            let Some(one) = one else {
+                self.open = false;
+                break;
+            };
+            self.next = one.next;
+            self.tail.push(one.lift);
+        }
+        self.tail.get(index).map(Option::as_ref)
     }
 }
 
@@ -315,15 +369,31 @@ mod tests {
     }
 
     #[test]
-    fn a_number_read_back_by_any_byte_is_a_step_not_a_result() {
-        // mov eax, 0x1234; mov bl, ah -- `ah` is the second byte of `rax`, so
-        // the value is read back even though no read starts where it does.
+    fn a_number_built_on_by_any_byte_is_a_step_not_a_result() {
+        // mov eax, 0x1234; add bl, ah; mov eax, 5 -- `ah` is the second byte of `rax`, so
+        // the add builds on the value even though no read starts where it does.
         let answer = answer(
-            &[0xb8, 0x34, 0x12, 0x00, 0x00, 0x88, 0xe3],
-            2,
+            &[
+                0xb8, 0x34, 0x12, 0x00, 0x00, 0x00, 0xe3, 0xb8, 0x05, 0x00, 0x00, 0x00,
+            ],
+            3,
             Work::BlockLocal,
         );
         assert_eq!(computes(&answer.value[0]), None);
+    }
+
+    #[test]
+    fn a_number_copied_and_then_overwritten_everywhere_is_its_result() {
+        // mov eax, 0x1234; mov ecx, eax; cmp ecx, 1; mov eax, 5; mov ecx, 6
+        let answer = answer(
+            &[
+                0xb8, 0x34, 0x12, 0x00, 0x00, 0x89, 0xc1, 0x83, 0xf9, 0x01, 0xb8, 0x05, 0x00, 0x00,
+                0x00, 0xb9, 0x06, 0x00, 0x00, 0x00,
+            ],
+            5,
+            Work::BlockLocal,
+        );
+        assert_eq!(computes(&answer.value[0]), Some(0x1234));
     }
 
     #[test]
