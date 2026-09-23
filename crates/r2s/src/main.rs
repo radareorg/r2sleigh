@@ -1,6 +1,7 @@
 //! r2s: a radare2-compatible shell over the r2sleigh engine.
 
 mod commands;
+mod listing;
 mod session;
 
 use clap::Parser;

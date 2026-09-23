@@ -31383,3 +31383,57 @@ dispatch loop answered a cell twice and three functions refused with
 `ConflictingUse`. And `Switch`'s operand is the selector, which the switch
 spells, so the transfer has to be left out of that loop rather than filtered by
 opcode at each use.
+
+## The input seam, back where `AGENTS.md` puts it
+
+An earlier commit this stretch moved file-opening and the `Program`
+implementation into `r2engine`, on a reading of `doc/engine-vision.md`'s "Image
+and IO" as assigning the input layer to that crate. It names what the project
+replaces from radare2's C, not which crate owns it, and `AGENTS.md` says
+outright that the shell opens the binary and nothing below it knows what a file
+is. Asked, the user chose `AGENTS.md`.
+
+So `r2engine::program::Source` is the seam: the bytes, what the container
+states (`Container`: format, arch, sections, symbols, relocations, entries,
+declared prototypes), the program's identity, its byte revision, and whether a
+range has been written since a revision. `r2s::session::Opened` is its only
+implementor and projects `r2image` into it once, at open. `OpenProgram<S>` is
+generic over the source and derives everything else -- names, import stubs
+decoded out of their bytes, the definition index, the memo, the revision axes --
+exactly as before. `r2engine` no longer depends on `r2image`, and
+`crates/r2engine/tests/architecture.rs` fails if it does or if any engine source
+names `std::fs`, `File::open` or `Image::open`.
+
+What that bought beyond the rule: the memo, control and degraded-callee tests
+now run over three x86-64 functions written as byte literals in
+`crates/r2engine/tests/common/mod.rs`, with a patch layer of their own, rather
+than over a binary on disk.
+
+## `pdf`, and what an audit of this stretch's own code found
+
+`pdf` lists the function at the cursor with the range each machine word was
+proved to hold -- `movzx edx, byte [rdi] ; rdx in [0x0, 0xff]`, `mov eax,
+0x811c9dc5 ; rax = 0x811c9dc5`. It lists block by block, by each block's own
+extent: the first version swept from the lowest block to the highest, which
+listed the alignment padding between them and, for a cold partition placed far
+away, would have decoded the whole gap. Ranges that span their storage, and
+ranges over anything narrower than a machine word, are not printed; every flag
+a line sets is proved to hold nought or one, which is true and says nothing.
+
+The rest were defects in code written this stretch, each fixed with a test that
+fails without the fix:
+
+- `certificate_answers_for_inst` rebuilt two sets over the whole value list per
+  operation; it is now `CertifiedSilence`, built once per function (a
+  131-function sweep of `/bin/ls` went from 2.89 s to 2.68 s), and the
+  observation journal builds it lazily once rather than once per value.
+- `OpenProgram::read` logged every read of every listing forever. The log now
+  exists only while a derivation runs.
+- A listing asked for a count and discarded what ran past the end, which read
+  the next function's bytes. It now stops at an address where it has one.
+- Whether a computed number is read back compared only the storage's starting
+  offset, so `ah` read out of an `rax` just written went unseen and the step was
+  named as though it were the result. It is decided by byte overlap now, and a
+  full overwrite before any read ends the search.
+- `Completion::Exhausted` was never produced and is gone; `Work` and `Support`
+  carry only the rungs something produces and something reads.
