@@ -52,7 +52,7 @@ pub use opcode::{
 pub use regname::select_register_name;
 pub use serialize::{
     ArchSpec, RegisterBitSlice, RegisterDef, RegisterProjection, RegisterProjectionDisposition,
-    RegisterProjectionQuery, RegisterProjectionRefusal, RegisterStorage,
+    RegisterProjectionQuery, RegisterProjectionRefusal, RegisterStorage, TrackedRegisterValue,
 };
 pub use space::{AddressSpace, SpaceId};
 pub use validate::{

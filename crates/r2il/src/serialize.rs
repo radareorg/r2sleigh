@@ -535,6 +535,17 @@ pub struct ArchSpec {
     /// stays unidentified rather than being guessed at.
     #[serde(default)]
     pub user_ops: Vec<String>,
+
+    /// What the processor specification's `<tracked_set>` says registers hold on entry to every function.
+    #[serde(default)]
+    pub tracked_entry_values: Vec<TrackedRegisterValue>,
+}
+
+/// One register the processor specification tracks, and the value it holds on entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackedRegisterValue {
+    pub register: String,
+    pub value: u64,
 }
 
 impl ArchSpec {
@@ -553,6 +564,7 @@ impl ArchSpec {
             return_registers: Vec::new(),
             program_counter: None,
             user_ops: Vec::new(),
+            tracked_entry_values: Vec::new(),
         }
     }
 

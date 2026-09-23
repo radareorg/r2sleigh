@@ -30,7 +30,7 @@ pub use r2source::{
     StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 25;
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 26;
 
 /// Canonical architecture family captured from the exact lifting profile.
 ///
@@ -593,6 +593,8 @@ pub struct SourceMachineContext {
     /// semantic identity because a variadic format literal is count evidence.
     source_string_literals: BTreeMap<u64, String>,
     memory_spaces_by_op: BTreeMap<(u64, usize), SpaceId>,
+    /// What the processor specification says registers hold on entry to every function.
+    tracked_entry_values: Box<[(CanonicalStorageId, u64)]>,
 }
 
 struct MachineContextIdentityWriter(Vec<u8>);
@@ -1141,6 +1143,16 @@ impl SourceMachineContext {
                     Some((name, *storage))
                 })
                 .collect();
+        // A tracked register the architecture cannot place states nothing.
+        let tracked_entry_values = arch
+            .into_iter()
+            .flat_map(|arch| &arch.tracked_entry_values)
+            .filter_map(|tracked| {
+                let storage =
+                    register_storages_by_name.get(&tracked.register.trim().to_ascii_lowercase())?;
+                Some((*storage, tracked.value))
+            })
+            .collect();
         let (register_geometry_state, register_projections) = match arch {
             None => (MachineRegisterGeometryState::Unavailable, Box::default()),
             Some(arch) => match RegisterProjectionQuery::from_arch(arch) {
@@ -1403,6 +1415,7 @@ impl SourceMachineContext {
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             memory_spaces_by_op,
+            tracked_entry_values,
         }
     }
 
@@ -1622,6 +1635,11 @@ impl SourceMachineContext {
 
     pub const fn register_storages_by_name(&self) -> &BTreeMap<String, CanonicalStorageId> {
         &self.register_storages_by_name
+    }
+
+    /// The registers the processor specification says hold a value on entry, with that value.
+    pub const fn tracked_entry_values(&self) -> &[(CanonicalStorageId, u64)] {
+        &self.tracked_entry_values
     }
 
     pub const fn register_geometry_state(&self) -> MachineRegisterGeometryState {
@@ -1950,6 +1968,11 @@ impl SourceMachineContext {
             writer.u64(*block_addr);
             writer.usize(*op_index);
             writer.space(*space);
+        }
+        writer.usize(self.tracked_entry_values.len());
+        for (storage, value) in &self.tracked_entry_values {
+            writer.storage(*storage);
+            writer.u64(*value);
         }
         writer.finish()
     }
@@ -2480,8 +2503,8 @@ mod tests {
         let x86_context = SourceMachineContext::from_blocks(&[], Some(&x86));
         let arm_context = SourceMachineContext::from_blocks(&[], Some(&arm));
 
-        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 25);
-        assert_eq!(x86_context.schema_version(), 25);
+        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 26);
+        assert_eq!(x86_context.schema_version(), 26);
         assert_eq!(
             x86_context.architecture_family(),
             MachineArchitectureFamily::X86_64

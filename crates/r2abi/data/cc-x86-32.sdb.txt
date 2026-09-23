@@ -4,7 +4,7 @@ cdecl=cc
 cc.cdecl.argn=stack
 cc.cdecl.pop=caller
 cc.cdecl.clobber=eax,ecx,edx
-cc.cdecl.preserve=ebx,esi,edi,ebp,esp
+cc.cdecl.preserve=ebx,esi,edi,ebp,esp,df
 cc.cdecl.ret0=eax
 
 cdecl-fastcall-ms=cc
@@ -25,7 +25,7 @@ stdcall=cc
 cc.stdcall.argn=stack
 cc.stdcall.pop=callee
 cc.stdcall.clobber=eax,ecx,edx
-cc.stdcall.preserve=ebx,esi,edi,ebp,esp
+cc.stdcall.preserve=ebx,esi,edi,ebp,esp,df
 cc.stdcall.ret0=eax
 
 fastcall=cc
@@ -34,7 +34,7 @@ cc.fastcall.arg1=edx
 cc.fastcall.argn=stack
 cc.fastcall.pop=callee
 cc.fastcall.clobber=eax,ecx,edx
-cc.fastcall.preserve=ebx,esi,edi,ebp,esp
+cc.fastcall.preserve=ebx,esi,edi,ebp,esp,df
 cc.fastcall.ret0=eax
 
 borland=cc

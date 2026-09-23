@@ -949,3 +949,77 @@ fn every_register_a_default_convention_names_is_one_of_its_machine() {
         );
     }
 }
+
+/// A block copy of `rdx` quadwords.
+const REPEATED_MOVE: &[u8] = &[
+    0x48, 0x89, 0xd1, // 0x1000 mov rcx, rdx
+    0xf3, 0x48, 0xa5, // 0x1003 rep movsq
+    0xc3, // 0x1006 ret
+];
+
+/// The specification's clear direction flag settles which way the copy walks.
+#[test]
+fn a_repeated_move_walks_the_way_the_specification_says() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: REPEATED_MOVE,
+        name: "copy",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(text.contains("uint64_t* to = (uint64_t*)RDI_0;"), "{text}");
+    assert!(
+        text.contains("to[transferred] = ((uint64_t*)RSI_0)[transferred];"),
+        "{text}"
+    );
+    assert!(text.contains("while (transferred != RDX_0)"), "{text}");
+}
+
+/// A block copy after a call to an import nothing declares, from callee-saved registers:
+///
+/// ```text
+///   1000  call 0x1012             ; the import's stub
+///   1005  mov  rdi, rbx
+///   1008  mov  rsi, rbp
+///   100b  mov  rcx, r12
+///   100e  rep  movsq
+///   1011  ret
+///   1012  jmp  [rip + 8]          ; the stub, through its slot at 0x1020
+/// ```
+const MOVE_AFTER_A_CALL: &[u8] = &[
+    0xe8, 0x0d, 0x00, 0x00, 0x00, // 1000 call 0x1012
+    0x48, 0x89, 0xdf, // 1005 mov rdi, rbx
+    0x48, 0x89, 0xee, // 1008 mov rsi, rbp
+    0x4c, 0x89, 0xe1, // 100b mov rcx, r12
+    0xf3, 0x48, 0xa5, // 100e rep movsq
+    0xc3, // 1011 ret
+    0xff, 0x25, 0x08, 0x00, 0x00, 0x00, // 1012 jmp [rip + 8]
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1020 the stub's slot
+];
+
+/// The entry's clear direction flag survives a call because every x86 convention preserves it.
+#[test]
+fn a_clear_direction_flag_survives_a_call() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: MOVE_AFTER_A_CALL,
+        stub: 0x1012,
+    };
+    for convention in ["amd64", "ms"] {
+        let response = decompile(&machine.under(convention), &program, BASE).expect("decompile");
+        let text = response.output.text();
+        assert!(response.render_refusal.is_none(), "{convention}\n{text}");
+        assert!(!text.contains("r2dec gap"), "{convention}\n{text}");
+        assert!(
+            text.contains("to[transferred] = ((uint64_t*)RBP_0)[transferred];"),
+            "{convention}\n{text}"
+        );
+        assert!(
+            text.contains("while (transferred != R12_0)"),
+            "{convention}\n{text}"
+        );
+    }
+}

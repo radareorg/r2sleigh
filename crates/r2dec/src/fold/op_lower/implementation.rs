@@ -1646,18 +1646,24 @@ impl<'a> FoldingContext<'a> {
             cursor_type.clone(),
             crate::symbol::SymbolRole::RenderCursor,
         );
-        let destination = CExpr::cast(
+        // The walk writes through its own pointer, as a callee writes through an address it was handed.
+        let to = self.symbols.borrow_mut().declare(
+            "to",
+            pointer.clone(),
+            crate::symbol::SymbolRole::RenderCursor,
+        );
+        let address = CExpr::cast(
             pointer.clone(),
             self.observed_input(frame, 0, self.get_expr(destination)?),
         );
         let written = CExpr::Subscript {
-            base: Box::new(destination),
+            base: Box::new(CExpr::Var(to)),
             index: Box::new(CExpr::Var(cursor)),
         };
         let read = match kind {
             r2il::BlockTransferKind::Move => CExpr::Subscript {
                 base: Box::new(CExpr::cast(
-                    pointer,
+                    pointer.clone(),
                     self.observed_input(frame, 1, self.get_expr(source)?),
                 )),
                 index: Box::new(CExpr::Var(cursor)),
@@ -1679,6 +1685,11 @@ impl<'a> FoldingContext<'a> {
                 ty: cursor_type,
                 name: cursor,
                 init: Some(CExpr::UIntLit(0)),
+            },
+            CStmt::Decl {
+                ty: pointer,
+                name: to,
+                init: Some(address),
             },
             CStmt::While {
                 cond: CExpr::binary(

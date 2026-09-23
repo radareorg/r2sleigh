@@ -1472,7 +1472,8 @@ impl LoadedSpecification {
             .map_err(|e| LiftError::Parse(format!("Failed to load .sla: {}", e)))?;
 
         let reg_name_map = build_register_name_map(&sleigh);
-        let extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
+        let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
+        extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
         let arch = Arc::new(extracted.arch);
         let authority = certifying.then(|| {
             GenuineLiftAuthority::new(

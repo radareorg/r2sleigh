@@ -159,8 +159,9 @@ impl SSAFunction {
         self.decompile_prep_facts = None;
     }
 
-    /// Replace the direction flag's value on entry, and after every call, with
-    /// the zero the convention requires of it.
+    /// Replace the values a boundary states: the processor specification's
+    /// tracked registers on entry, and the direction flag on entry and after
+    /// every call, with the zero the convention requires of it.
     ///
     /// A repeated string instruction reads the flag to decide which way it
     /// walks, and no compiled function sets it -- the corpus contains no `cld`
@@ -172,53 +173,59 @@ impl SSAFunction {
     /// transfer fold: the instruction's own pointer updates are written over
     /// the flag, and with it a constant they collapse to the extent.
     ///
+    /// A tracked register states only its entry value: past a call it holds
+    /// what the call effect leaves, which is the entry value where the effect
+    /// preserves it and a call definition where it does not.
+    ///
     /// Nothing is substituted for a convention that states no such thing, or a
     /// machine with no such flag, and a function that writes the flag itself
     /// has a later version neither boundary value reaches.
-    pub(crate) fn apply_convention_cleared_direction_flag(
-        &mut self,
-        machine_context: &SourceMachineContext,
-    ) {
+    pub(crate) fn apply_boundary_constants(&mut self, machine_context: &SourceMachineContext) {
         let clears = machine_context
             .convention_slots()
             .is_some_and(|slots| slots.abi_class().clears_direction_flag());
-        let Some(storage) = machine_context.machine_roles().direction_flag_storage() else {
-            return;
-        };
-        if !clears {
-            return;
-        }
-        let on_storage = |var: &SSAVar| self.canonical_storage_by_var.get(var) == Some(&storage);
-        // The entry value, and the value each call's clobber leaves.
+        let cleared_flag = machine_context
+            .machine_roles()
+            .direction_flag_storage()
+            .filter(|_| clears);
+        let entry_constants = machine_context
+            .tracked_entry_values()
+            .iter()
+            .copied()
+            .chain(cleared_flag.map(|storage| (storage, 0)))
+            .collect::<BTreeMap<_, _>>();
+        let storage_of = |var: &SSAVar| self.canonical_storage_by_var.get(var).copied();
+        // The entry values, and the value each call's clobber leaves in the flag.
         let boundary_values = self
             .canonical_storage_by_var
-            .keys()
-            .filter(|var| var.version == 0 && on_storage(var))
-            .cloned()
+            .iter()
+            .filter(|(var, _)| var.version == 0)
+            .filter_map(|(var, storage)| Some((var.clone(), *entry_constants.get(storage)?)))
             .chain(
                 self.blocks
                     .iter()
                     .flat_map(|block| &block.ops)
                     .filter_map(|op| match op {
-                        SSAOp::CallDefine { dst } if on_storage(dst) => Some(dst.clone()),
+                        SSAOp::CallDefine { dst }
+                            if cleared_flag.is_some() && storage_of(dst) == cleared_flag =>
+                        {
+                            Some((dst.clone(), 0))
+                        }
                         _ => None,
                     }),
             )
-            .collect::<BTreeSet<_>>();
+            .collect::<BTreeMap<_, _>>();
         if boundary_values.is_empty() {
             return;
         }
         r2il::refusal_evidence!(
-            "direction-flag-cleared",
-            "the convention clears {storage:?} at every boundary; {} boundary values become zero",
+            "boundary-constants",
+            "{} boundary values become the constants stated for them: entry {entry_constants:?}, after a call {cleared_flag:?}",
             boundary_values.len()
         );
-        let substitute = |var: &SSAVar| {
-            if boundary_values.contains(var) {
-                SSAVar::constant(0, var.size)
-            } else {
-                var.clone()
-            }
+        let substitute = |var: &SSAVar| match boundary_values.get(var) {
+            Some(value) => SSAVar::constant(*value, var.size),
+            None => var.clone(),
         };
         for block in self.blocks.iter_mut() {
             for phi in &mut block.phis {

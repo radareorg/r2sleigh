@@ -435,7 +435,7 @@ pub(crate) fn prepare_graph(
         r2il::refusal_evidence!("ssa-integrity", "{error:?}");
         malformed_ssa_input()
     })?;
-    function.apply_convention_cleared_direction_flag(machine_context);
+    function.apply_boundary_constants(machine_context);
     function.mint_entry_lane_projections(machine_context);
     // Before the graph, so every fact built from it counts readers of a
     // copied value where they are, not where the copy was. It rewrites

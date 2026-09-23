@@ -426,6 +426,7 @@ pub fn build_arch_spec(
 
     let mut arch = extract_arch_spec(&sleigh, arch_name)?;
     arch.program_counter = processor_spec_program_counter(pspec_data);
+    arch.tracked_entry_values = processor_spec_tracked_values(pspec_data);
     Ok(arch)
 }
 
@@ -443,6 +444,36 @@ pub(crate) fn processor_spec_program_counter(pspec_data: &str) -> Option<String>
     quoted.next()?;
     let name = quoted.next()?.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The `<set name val/>` values of `<tracked_set space="ram">`; one that does not parse is left out.
+pub(crate) fn processor_spec_tracked_values(pspec_data: &str) -> Vec<r2il::TrackedRegisterValue> {
+    fn attribute<'a>(element: &'a str, name: &str) -> Option<&'a str> {
+        let after = element.split(&format!("{name}=\"")).nth(1)?;
+        after.split('"').next().map(str::trim)
+    }
+    pspec_data
+        .split("<tracked_set")
+        .skip(1)
+        .filter_map(|set| {
+            let (open, body) = set.split_once('>')?;
+            let body = body.split("</tracked_set>").next()?;
+            (attribute(open, "space") == Some("ram")).then_some(body)
+        })
+        .flat_map(|body| body.split("<set").skip(1))
+        .filter_map(|element| {
+            let register = attribute(element, "name")?;
+            let value = attribute(element, "val")?;
+            let value = match value.strip_prefix("0x") {
+                Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+                None => value.parse().ok()?,
+            };
+            (!register.is_empty()).then(|| r2il::TrackedRegisterValue {
+                register: register.to_string(),
+                value,
+            })
+        })
+        .collect()
 }
 
 /// Metadata about a parsed Sleigh specification.
@@ -474,6 +505,21 @@ pub fn get_sleigh_info(sleigh: &GhidraSleigh, arch_name: &str) -> Result<SleighI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tracked_set_states_what_a_register_holds_on_entry() {
+        let pspec = r#"<context_data>
+            <context_set space="ram"><set name="longMode" val="1"/></context_set>
+            <tracked_set space="ram"><set name="DF" val="0"/><set name="X" val="0x10"/></tracked_set>
+            <tracked_set space="other"><set name="Y" val="1"/></tracked_set>
+        </context_data>"#;
+        let tracked = processor_spec_tracked_values(pspec)
+            .into_iter()
+            .map(|value| (value.register, value.value))
+            .collect::<Vec<_>>();
+        // Context variables and other spaces are not function-entry values.
+        assert_eq!(tracked, [("DF".to_string(), 0), ("X".to_string(), 0x10)]);
+    }
 
     fn declaration(
         offset: u64,

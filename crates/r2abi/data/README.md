@@ -14,9 +14,11 @@ radare2 is LGPL-3.0, as is this tree.
 
 ## Refreshing
 
-One line is edited locally until radare2 carries it: `cc-arm-64.sdb.txt` spells
+Lines are edited locally until radare2 carries them: `cc-arm-64.sdb.txt` spells
 the arm64 vector clobbers `q0..q7,q16..q31` and preserves only `d8..d15`, the
-low halves AAPCS64 keeps. Everything else is a copy:
+low halves AAPCS64 keeps; and the x86 conventions with a `preserve` list end it
+with `df`, since every x86 ABI requires the direction flag clear on entry and on
+return. Everything else is a copy:
 
     cp ../radare2/libr/anal/d/cc-{x86-64,x86-32,arm-64,arm-32,riscv-64}.sdb.txt \
        ../radare2/libr/anal/d/types{,-linux,-darwin}.sdb.txt \
