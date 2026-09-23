@@ -867,8 +867,6 @@ fn control_op_is_intra_instruction(block: &GenuineLiftedBlock, op_index: usize) 
     }) {
         return true;
     }
-    // A repeating string instruction ends with a branch to its own start, so
-    // nothing of it follows and its target is what says it stays inside.
     let target = match &block.block.ops[op_index] {
         R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => {
             constant_control_target(target)
@@ -878,30 +876,6 @@ fn control_op_is_intra_instruction(block: &GenuineLiftedBlock, op_index: usize) 
     let Some(target) = target else {
         return false;
     };
-    // Only where the instruction has something to iterate over. `hlt` is one
-    // operation, a branch to its own address, and that branch is the whole of
-    // what the instruction does rather than a step of it -- reading it as
-    // internal left the block with no terminator, so the machine named no
-    // successor while the walk named the self-edge, and every function ending
-    // in `hlt` refused on a contradiction neither graph was wrong about.
-    let operations_of_this_instruction = (0..block.block.ops.len())
-        .filter(|index| {
-            block
-                .block
-                .op_metadata(*index)
-                .and_then(|metadata| metadata.instruction_addr)
-                == Some(instruction)
-        })
-        .count();
-    if operations_of_this_instruction > 1
-        && block.instruction_spans.iter().any(|span| {
-            span.addr == instruction
-                && target >= span.addr
-                && target < span.addr.saturating_add(u64::from(span.size))
-        })
-    {
-        return true;
-    }
     // A branch to a later instruction of this same block leaves nothing: the
     // block goes where it was going. `-O0` arm64 emits `b` to the very next
     // instruction before a `__stack_chk_fail` call, and radare2 keeps the two

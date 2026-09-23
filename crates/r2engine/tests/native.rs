@@ -811,3 +811,49 @@ fn a_loop_with_two_entries_is_decompiled_in_bounded_time() {
         response.output
     );
 }
+
+/// xor eax, eax; or rcx, -1; repne scasb; not rcx; lea rax, [rcx - 1]; ret
+///
+/// The inline `strlen` older compilers emit: the scan repeats its own
+/// instruction until it finds the byte or runs out of count.
+const REPEATED_SCAN: &[u8] = &[
+    0x31, 0xc0, // 0x1000 xor eax, eax
+    0x48, 0x83, 0xc9, 0xff, // 0x1002 or rcx, -1
+    0xf2, 0xae, // 0x1006 repne scasb
+    0x48, 0xf7, 0xd1, // 0x1008 not rcx
+    0x48, 0x8d, 0x41, 0xff, // 0x100b lea rax, [rcx - 1]
+    0xc3, // 0x100f ret
+];
+
+/// A repeated instruction that branches back to its own start is a loop the
+/// machine graph and the walk both name, not a contradiction between them.
+#[test]
+fn a_repeated_scan_is_a_loop_on_its_own_instruction() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
+    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: REPEATED_SCAN,
+        name: "scan",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("the two graphs agree");
+    let text = response.output.text();
+    // Until the scan has a lowering, its zero-count guard is the named gap.
+    assert!(
+        response.render_refusal.is_none() || text.contains("0x1006"),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+}
