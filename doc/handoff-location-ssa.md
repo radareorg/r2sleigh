@@ -31437,3 +31437,28 @@ fails without the fix:
   full overwrite before any read ends the search.
 - `Completion::Exhausted` was never produced and is gone; `Work` and `Support`
   carry only the rungs something produces and something reads.
+
+## The shell asks; the engine sequences
+
+Every analysis command in `r2s` used to sequence the engine itself: make the
+tables current, assemble the machine, describe the target, prepare, then
+render; `afl` and `ax` also gathered discovery's seeds out of the container and
+the decoded stubs. That order is request orchestration, which `AGENTS.md` gives
+to `r2engine`, and it was written out once per command. `OpenProgram` now takes
+the question whole -- `prepared`, `rendered(tier)`, `lifted`, `listing`,
+`function_listing`, `functions`, `references` -- and `r2s` has no
+`with_native`, no `NativeTarget`, and no `cfg(feature = "sleigh")` stubs: a
+shell built without decoders gets the engine's own refusal. An architecture
+test in `crates/r2s/tests/architecture.rs` forbids the sequencing names.
+
+The tables are private now. `defined` and `slots` are read from the container
+alone and built once, and the Thumb decoder is loaded with the first machine,
+so a write rebuilds only the names and the stubs, and `entries` moves only when
+the stubs do.
+
+Discovery still walks every body with the decoder of the declared entry. Walking
+each with the decoder `thumb_at` picks -- the mode of the nearest symbol below
+-- lost eighteen Thumb functions on `armeb_hello_static`, because the nearest
+symbol below a called function is often data. The mode of a called function is
+the call's to state (`bl` keeps it, `blx` switches it), and no transfer carries
+it yet.

@@ -4,37 +4,17 @@
 //! number in it sits, what the instruction was proved to touch and hold. This
 //! is the column layout and the words a reader reads, and nothing else.
 
-#[cfg(feature = "sleigh")]
 use crate::commands::{parse_count, parse_number};
 use crate::session::Session;
+use r2engine::query::{Completion, Listing, Stop};
 
-#[cfg(feature = "sleigh")]
 pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<String, String> {
-    use r2engine::query::{Listing, Memory, listing};
-
     let count = parse_count(argument, 16)?;
-    let start = session.addr;
-    session.program.ensure_current()?;
-    let session: &Session = session;
-
-    let answered = r2engine::query::Answered {
-        decoders: &session.program,
-        memory: Memory {
-            program: &session.program,
-            endian: session.program.endian(),
-        },
-        facts: None,
-    };
-    let answer = listing(
-        &answered,
-        Listing {
-            start,
-            stop: r2engine::query::Stop::After(count),
-        },
-        r2engine::query::Work::BlockLocal,
-        session.program.revision(),
-    );
-    if let r2engine::query::Completion::Unmapped { at } = answer.completion
+    let answer = session.program.listing(Listing {
+        start: session.addr,
+        stop: Stop::After(count),
+    })?;
+    if let Completion::Unmapped { at } = answer.completion
         && answer.value.is_empty()
     {
         return Err(format!("nothing mapped at {at:#x}"));
@@ -47,7 +27,6 @@ pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<Strin
 }
 
 /// One listing line, in the columns radare2 writes them in.
-#[cfg(feature = "sleigh")]
 fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     let mut hex: String = line.bytes.iter().map(|b| format!("{:02x}", b)).collect();
     // radare2 caps the byte column at twelve characters and marks the cut.
@@ -57,7 +36,7 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     }
     let text = match line.decoded() {
         false => "invalid".to_owned(),
-        true => spelled(line, &session.program.names),
+        true => spelled(line, session.program.names()),
     };
     format!(
         "            {:#010x}      {:<14} {}{}\n",
@@ -68,7 +47,6 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     )
 }
 
-#[cfg(feature = "sleigh")]
 /// One line, with a name written wherever a number is one.
 ///
 /// Substitution is by span rather than by value. Scanning the finished text
@@ -112,74 +90,27 @@ fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> Str
 /// instruction and its neighbours show; this pays for the walk and the
 /// preparation, and every line can then carry the range its value was proved
 /// to lie in.
-#[cfg(feature = "sleigh")]
 pub(crate) fn disassemble_function(
     session: &mut Session,
     argument: &str,
 ) -> Result<String, String> {
-    use r2engine::query::{Listing, Memory, Stop, Work, listing};
-
     let addr = parse_number(session, argument)?;
-    session.program.ensure_assembled(addr)?;
-    let session: &Session = session;
-    let target = session.program.target(addr)?;
-    let prepared = session
-        .program
-        .analysed(&target, addr)
-        .map_err(|refusal| refusal.to_string())?;
-    let artifact = prepared.artifact().artifact();
-    let answered = r2engine::query::Answered {
-        decoders: &session.program,
-        memory: Memory {
-            program: &session.program,
-            endian: session.program.endian(),
-        },
-        facts: Some(artifact),
-    };
-    // Block by block, each by its own extent. The function is what the
-    // analysis covers, and sweeping from its lowest block to its highest ran
-    // through whatever lay between -- another function's bytes, or the whole
-    // gap to a cold partition placed far away.
-    let mut blocks = artifact
-        .function()
-        .blocks()
-        .iter()
-        .filter(|block| block.size > 0)
-        .map(|block| (block.addr, block.addr + u64::from(block.size)))
-        .collect::<Vec<_>>();
-    blocks.sort_unstable();
-    if blocks.is_empty() {
+    let answer = session.program.function_listing(addr)?;
+    if answer.value.is_empty() {
         return Err(format!("no blocks at {addr:#x}"));
     }
-    let mut out = String::new();
-    for (start, end) in blocks {
-        let answer = listing(
-            &answered,
-            Listing {
-                start,
-                stop: Stop::At(end),
-            },
-            Work::Function,
-            session.program.revision(),
-        );
-        out.extend(answer.value.iter().map(|line| listed(session, line)));
-    }
+    let out: String = answer
+        .value
+        .iter()
+        .map(|line| listed(session, line))
+        .collect();
     Ok(out.trim_end().to_owned())
-}
-
-#[cfg(not(feature = "sleigh"))]
-pub(crate) fn disassemble_function(
-    _session: &mut Session,
-    _argument: &str,
-) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature".to_owned())
 }
 
 /// How well supported a claim about this number is, where anything claims it.
 ///
 /// A number no annotation claims is a coincidence: the table knows an address
 /// of that value and nothing in the instruction says this is one.
-#[cfg(feature = "sleigh")]
 fn claim(
     line: &r2engine::query::Line,
     number: r2engine::NumberSpan,
@@ -197,7 +128,6 @@ fn claim(
 /// load used to be spelled `ldr r3, sym.foo`, which says the load returns that
 /// address; all this program states is that the word there is that address
 /// now, and the instruction text stays what the machine encodes.
-#[cfg(feature = "sleigh")]
 fn held(session: &Session, line: &r2engine::query::Line) -> String {
     let notes = line
         .annotations
@@ -211,7 +141,6 @@ fn held(session: &Session, line: &r2engine::query::Line) -> String {
 }
 
 /// One annotation, as a reader reads it.
-#[cfg(feature = "sleigh")]
 fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Option<String> {
     match kind {
         r2engine::query::AnnotationKind::Holds {
@@ -221,7 +150,7 @@ fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Op
         } => {
             let named = session
                 .program
-                .names
+                .names()
                 .of(value)
                 .map(r2engine::names::Name::spelled);
             Some(format!(
@@ -248,12 +177,7 @@ fn note(session: &Session, at: u64, kind: r2engine::query::AnnotationKind) -> Op
     }
 }
 
-#[cfg(not(feature = "sleigh"))]
-pub(crate) fn disassemble(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("built without the sleigh feature, so pd cannot decode".to_owned())
-}
-
-#[cfg(all(test, feature = "sleigh"))]
+#[cfg(test)]
 mod tests {
     use super::spelled;
     use r2engine::discovery::Confidence;

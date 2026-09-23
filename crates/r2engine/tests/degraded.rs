@@ -11,15 +11,11 @@ use r2engine::native::Unreadable;
 
 #[test]
 fn a_callee_that_cannot_be_walked_is_named() {
-    let mut program = opened(CALLER);
+    let mut program = opened();
     // `0x06` encodes nothing in long mode, so the callee's first instruction
     // is not an instruction and its body cannot be walked at all.
     program.source_mut().write(ONE, &[0x06]);
-    program.ensure_assembled(CALLER).expect("it reassembles");
-    let target = program.target(CALLER).expect("the machine is described");
-    let prepared = program
-        .analysed(&target, CALLER)
-        .expect("the caller still prepares");
+    let prepared = program.prepared(CALLER).expect("the caller still prepares");
     let named = prepared
         .unread()
         .iter()
@@ -31,10 +27,7 @@ fn a_callee_that_cannot_be_walked_is_named() {
 
 #[test]
 fn a_program_whose_callees_all_read_reports_none() {
-    let program = opened(CALLER);
-    let target = program.target(CALLER).expect("the machine is described");
-    let prepared = program
-        .analysed(&target, CALLER)
-        .expect("the caller prepares");
+    let mut program = opened();
+    let prepared = program.prepared(CALLER).expect("the caller prepares");
     assert_eq!(prepared.unread(), &[]);
 }

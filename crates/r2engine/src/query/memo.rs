@@ -78,14 +78,6 @@ impl<T> Default for Memo<T> {
 }
 
 impl<T> Memo<T> {
-    /// Say which bytes deriving the held answer read.
-    pub fn record_reads(&self, read: impl IntoIterator<Item = std::ops::Range<u64>>) {
-        let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
-        if let Some(held) = held.as_mut() {
-            held.read = coalesced(read);
-        }
-    }
-
     /// The held answer, where the program has not moved under it.
     ///
     /// `written_since` says whether anything in a range has been written since
@@ -93,23 +85,29 @@ impl<T> Memo<T> {
     /// the answer standing, which is what a patch to another function is; the
     /// name and entry tables are compared whole, because a walk consults them
     /// about addresses it never read.
+    ///
+    /// `derive` answers with the analysis and the bytes it read, together, so
+    /// the read set held is always the one that derivation made. Recorded by a
+    /// second call, a hit -- which reads nothing -- wrote an empty set over it,
+    /// and the answer then stood against every later write.
     pub fn analysed_since(
         &self,
         revision: Revision,
         entry: u64,
         written_since: &dyn Fn(u64, &std::ops::Range<u64>) -> bool,
-        derive: impl FnOnce() -> Result<T, NativeRefusal>,
+        derive: impl FnOnce() -> Result<(T, Vec<std::ops::Range<u64>>), NativeRefusal>,
     ) -> Result<Arc<T>, NativeRefusal> {
         if let Some(held) = self.lookup_against(revision, entry, written_since) {
             return Ok(held);
         }
-        let analysis = Arc::new(derive()?);
+        let (analysis, read) = derive()?;
+        let analysis = Arc::new(analysis);
         let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
         *held = Some(Held {
             revision,
             entry,
             analysis: Arc::clone(&analysis),
-            read: Vec::new(),
+            read: coalesced(read),
         });
         Ok(analysis)
     }
@@ -206,8 +204,13 @@ mod tests {
         true
     }
 
+    /// An answer, and the bytes deriving it read.
+    fn reading(value: u32) -> Result<(u32, Vec<std::ops::Range<u64>>), NativeRefusal> {
+        Ok((value, std::iter::once(0x1000..0x1010).collect()))
+    }
+
     fn derived(memo: &Memo<u32>, revision: Revision, value: u32) -> Arc<u32> {
-        memo.analysed_since(revision, 0x1000, &untouched, || Ok(value))
+        memo.analysed_since(revision, 0x1000, &untouched, || reading(value))
             .expect("derived")
     }
 
@@ -229,9 +232,8 @@ mod tests {
     fn a_write_over_what_it_read_is_a_replacement_not_a_hit() {
         let memo = memo();
         derived(&memo, at(0), 99);
-        memo.record_reads(std::iter::once(0x1000..0x1010));
         let value = memo
-            .analysed_since(at(1), 0x1000, &overwritten, || Ok(100))
+            .analysed_since(at(1), 0x1000, &overwritten, || reading(100))
             .expect("derived");
         assert_eq!(*value, 100);
         assert_eq!((memo.stats().hits, memo.stats().replacements), (0, 1));
@@ -244,7 +246,6 @@ mod tests {
         // which bytes it read.
         let memo = memo();
         derived(&memo, at(0), 99);
-        memo.record_reads(std::iter::once(0x1000..0x1010));
         let held = memo
             .analysed_since(at(1), 0x1000, &untouched, || {
                 panic!("the held analysis answers")
@@ -267,9 +268,8 @@ mod tests {
         ] {
             let memo = memo();
             derived(&memo, at(0), 99);
-            memo.record_reads(std::iter::once(0x1000..0x1010));
             let value = memo
-                .analysed_since(moved, 0x1000, &untouched, || Ok(100))
+                .analysed_since(moved, 0x1000, &untouched, || reading(100))
                 .expect("derived");
             assert_eq!(*value, 100);
         }
@@ -292,7 +292,7 @@ mod tests {
     fn another_function_is_a_plain_miss() {
         let memo = memo();
         derived(&memo, at(0), 99);
-        memo.analysed_since(at(0), 0x2000, &untouched, || Ok(100))
+        memo.analysed_since(at(0), 0x2000, &untouched, || reading(100))
             .expect("derived");
         let stats = memo.stats();
         assert_eq!((stats.misses, stats.replacements), (2, 0));

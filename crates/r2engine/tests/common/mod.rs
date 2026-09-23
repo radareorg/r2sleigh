@@ -93,6 +93,12 @@ impl Literal {
         }
     }
 
+    /// The same program with one symbol stripped from the container.
+    pub fn stripped_of(mut self, name: &str) -> Self {
+        self.container.symbols.retain(|symbol| symbol.name != name);
+        self
+    }
+
     /// Write bytes over the program's own, as a patch would.
     pub fn write(&mut self, vaddr: u64, bytes: &[u8]) {
         for (offset, byte) in bytes.iter().enumerate() {
@@ -136,9 +142,7 @@ impl Source for Literal {
     }
 }
 
-/// The literal program, opened and made ready to answer about `at`.
-pub fn opened(at: u64) -> OpenProgram<Literal> {
-    let mut program = OpenProgram::of(Literal::new());
-    program.ensure_assembled(at).expect("it assembles");
-    program
+/// The literal program, opened.
+pub fn opened() -> OpenProgram<Literal> {
+    OpenProgram::of(Literal::new())
 }

@@ -6,8 +6,7 @@
 //! column rather than a wrong value.
 
 use crate::session::Session;
-#[cfg(feature = "sleigh")]
-use r2engine::program::OpenProgram;
+use r2engine::RenderTier;
 
 pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
     let line = line.trim();
@@ -178,28 +177,8 @@ fn entries(session: &Session) -> Result<String, String> {
 /// entry point, its initialiser array and a linkage stub per import were
 /// already parsed and only the program entry was read. Discovery starts from
 /// all of them and closes over what the bodies call.
-#[cfg(feature = "sleigh")]
 fn discovered(session: &mut Session) -> Result<String, String> {
-    // The machine first: the stub table is decoded when it loads, and reading
-    // it before then is reading an empty map.
-    session.program.ensure_current()?;
-    let mut seeds = stated_seeds(session.image());
-    // A linkage stub is a function the format declares: the loader's own
-    // table says where each one begins, which is why they are stated rather
-    // than inferred. These were decoded already and read only for naming.
-    seeds.extend(
-        session
-            .program
-            .imports
-            .keys()
-            .map(|vaddr| (*vaddr, r2engine::discovery::Confidence::Stated)),
-    );
-    let addr = session.addr;
-    let found = with_native(session, addr, |target, program| {
-        Ok(r2engine::discovery::functions(program, seeds, |entry| {
-            r2engine::native::transfers(target, program, entry)
-        }))
-    })?;
+    let found = session.program.functions()?;
     let mut out = String::from("vaddr      confidence name\n");
     out.push_str(&"-".repeat(46));
     for one in &found {
@@ -207,7 +186,7 @@ fn discovered(session: &mut Session) -> Result<String, String> {
         // what makes the two comparable. The engine keeps the plain name.
         let name = session
             .program
-            .names
+            .names()
             .of(one.address)
             .map(r2engine::names::Name::spelled)
             .or_else(|| one.name.clone())
@@ -283,50 +262,12 @@ fn revert(session: &mut Session) -> Result<String, String> {
     Ok(format!("{count} patched bytes reverted"))
 }
 
-/// Every reference the program makes, from every function discovery believes.
-///
-/// A cross-reference is a query over the lift, not a scan: a body that names
-/// an address names it in an operation, and every function is asked once.
-#[cfg(feature = "sleigh")]
-fn references(session: &mut Session) -> Result<Vec<r2engine::DataRefFact>, String> {
-    session.program.ensure_current()?;
-    let mut seeds = stated_seeds(session.image());
-    seeds.extend(
-        session
-            .program
-            .imports
-            .keys()
-            .map(|vaddr| (*vaddr, r2engine::discovery::Confidence::Stated)),
-    );
-    let addr = session.addr;
-    with_native(session, addr, |target, program| {
-        // Discovery walks every body it believes, and the reverse index wants
-        // what that same walk already saw. Asking twice walked and lifted each
-        // function again for the half the first ask threw away.
-        let mut seen = std::collections::BTreeMap::new();
-        let found = r2engine::discovery::functions(program, seeds, |entry| {
-            let survey = r2engine::native::surveyed(target, program, entry)?;
-            seen.insert(entry, survey.data_refs);
-            Some(survey.transfers)
-        });
-        let mut refs = found
-            .iter()
-            .filter_map(|one| seen.remove(&one.address))
-            .flatten()
-            .collect::<Vec<_>>();
-        refs.sort_unstable();
-        refs.dedup();
-        Ok(refs)
-    })
-}
-
 /// Where each address is named from.
-#[cfg(feature = "sleigh")]
 fn cross_references(session: &mut Session, argument: &str) -> Result<String, String> {
     if !argument.trim().is_empty() {
         return Err("r2s: ax takes no argument; use axt <address>".to_owned());
     }
-    let refs = references(session)?;
+    let refs = session.program.references()?;
     let mut out = String::from("from       to         kind\n");
     out.push_str(&"-".repeat(34));
     for fact in &refs {
@@ -342,10 +283,9 @@ fn cross_references(session: &mut Session, argument: &str) -> Result<String, Str
 }
 
 /// Every place one address is named from.
-#[cfg(feature = "sleigh")]
 fn references_to(session: &mut Session, argument: &str) -> Result<String, String> {
     let wanted = parse_number(session, argument)?;
-    let refs = references(session)?;
+    let refs = session.program.references()?;
     let mut out = String::new();
     let mut count = 0usize;
     for fact in refs.iter().filter(|fact| fact.to == wanted) {
@@ -357,14 +297,13 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
 }
 
 /// Every string the data sections hold.
-#[cfg(feature = "sleigh")]
 fn strings(session: &mut Session) -> Result<String, String> {
     // The strings are read out of the image, so a patched image has other ones.
     session.program.ensure_current()?;
     let mut out = String::from("vaddr       size string\n");
     out.push_str(&"-".repeat(46));
     let mut count = 0usize;
-    for (vaddr, name) in session.program.names.iter() {
+    for (vaddr, name) in session.program.names().iter() {
         if name.namespace != r2engine::names::Namespace::String {
             continue;
         }
@@ -375,30 +314,14 @@ fn strings(session: &mut Session) -> Result<String, String> {
     Ok(out)
 }
 
-#[cfg(not(feature = "sleigh"))]
-fn cross_references(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature, so nothing can be lifted".to_owned())
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn references_to(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature, so nothing can be lifted".to_owned())
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn strings(_session: &mut Session) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature, so the data cannot be read".to_owned())
-}
-
 /// Every address this binary has a name for, spelled as radare2 spells it.
-#[cfg(feature = "sleigh")]
 fn flags(session: &mut Session) -> Result<String, String> {
     // The linkage stubs are named once there is a decoder to read them with,
     // so asking for the machine first is what makes the listing complete.
     session.program.ensure_current()?;
     let mut out = String::from("vaddr       size name\n");
     out.push_str(&"-".repeat(46));
-    for (vaddr, name) in session.program.names.iter() {
+    for (vaddr, name) in session.program.names().iter() {
         out.push_str(&format!(
             "\n{:#010x} {:>6} {}",
             vaddr,
@@ -406,40 +329,8 @@ fn flags(session: &mut Session) -> Result<String, String> {
             name.spelled()
         ));
     }
-    out.push_str(&format!("\n\n{} flags", session.program.names.len()));
+    out.push_str(&format!("\n\n{} flags", session.program.names().len()));
     Ok(out)
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn flags(_session: &mut Session) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature, so the stubs cannot be read".to_owned())
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn discovered(_session: &mut Session) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature, so discovery cannot walk".to_owned())
-}
-
-/// What the image states about where code begins.
-///
-/// Every one of these was already computed and only the program's own entry
-/// point was read.
-#[cfg(feature = "sleigh")]
-fn stated_seeds(image: &r2image::Image) -> Vec<(u64, r2engine::discovery::Confidence)> {
-    use r2engine::discovery::Confidence;
-    image
-        .entry_points()
-        .iter()
-        .map(|entry| entry.vaddr)
-        .chain(
-            image
-                .symbols()
-                .iter()
-                .filter(|symbol| symbol.defined && symbol.kind == r2image::SymbolKind::Function)
-                .map(|symbol| symbol.vaddr),
-        )
-        .map(|vaddr| (vaddr, Confidence::Stated))
-        .collect()
 }
 
 fn sections(session: &Session) -> Result<String, String> {
@@ -555,160 +446,64 @@ fn relocations(session: &Session) -> Result<String, String> {
     Ok(out.trim_end().to_owned())
 }
 
-#[cfg(not(feature = "sleigh"))]
-fn decompile(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("built without the sleigh feature, so pdd cannot decompile".to_owned())
-}
-
 /// The lift tier: the operations Sleigh produced, before any analysis.
-#[cfg(feature = "sleigh")]
 fn low_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    with_native(session, addr, |target, program| {
-        r2engine::native::lifted(target, program, addr).map_err(|refusal| refusal.to_string())
-    })
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn low_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature".to_owned())
+    session.program.lifted(addr)
 }
 
 /// The analysis tier for one function: blocks, phis, operations, edges.
 ///
 /// The renderer's input, printed. A defect in the C is either already here or
-/// is the lowering's, and that is the whole reason this exists.
-#[cfg(feature = "sleigh")]
+/// is the lowering's, and that is the whole reason this exists. Beside the
+/// operations, what the renderer decided about each value: the operations
+/// alone never answered which variable a value became, or why nothing spells
+/// it.
 fn medium_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    with_native(session, addr, |target, program| {
-        let prepared = program
-            .analysed(target, addr)
-            .map_err(|refusal: r2engine::native::NativeRefusal| refusal.to_string())?;
-        let ssa = prepared.artifact().artifact().function().dump();
-        // Beside the operations, what the renderer decided about each value.
-        // The operations alone never answered the question that cost the most
-        // time: which variable a value became, or why nothing spells it.
-        let values = r2engine::native::rendered(
-            target,
-            addr,
-            r2engine::RenderTier::Values,
-            &prepared,
-            program.control(),
-        )
-        .output
-        .into_text();
-        Ok(format!("{ssa}\n{values}"))
-    })
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn medium_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature".to_owned())
+    let rendering = session.program.rendered(addr, RenderTier::Values)?;
+    let ssa = rendering.prepared.artifact().artifact().function().dump();
+    Ok(format!("{ssa}\n{}", rendering.response.output.into_text()))
 }
 
 /// The structured tier: the tree the C is generated from.
 ///
 /// Read against `pdd`, this says whether a defect is already in the tree or
 /// belongs to the generation below it.
-#[cfg(feature = "sleigh")]
 fn high_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    with_native(session, addr, |target, program| {
-        let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
-        Ok(r2engine::native::rendered(
-            target,
-            addr,
-            r2engine::RenderTier::Structured,
-            &prepared,
-            program.control(),
-        )
-        .output
-        .into_text())
-    })
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn high_tier(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature".to_owned())
+    let rendering = session.program.rendered(addr, RenderTier::Structured)?;
+    Ok(rendering.response.output.into_text())
 }
 
 /// `pdd`: decompile the function at the cursor, with no radare2 anywhere.
-#[cfg(feature = "sleigh")]
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    with_native(session, addr, |target, program| {
-        let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
-        Ok(r2engine::native::rendered(
-            target,
-            addr,
-            r2engine::RenderTier::C,
-            &prepared,
-            program.control(),
-        )
-        .output
-        .into_text())
-    })
+    let rendering = session.program.rendered(addr, RenderTier::C)?;
+    Ok(rendering.response.output.into_text())
 }
 
 /// `pddo`: what became of every obligation the function's source imposes.
 ///
 /// `pdd` says what the C is; this says what the C owes and whether it paid.
-/// Until now the breakdown existed only behind an environment variable, so a
-/// refusal could be counted but not explained.
-#[cfg(feature = "sleigh")]
+/// What the analysis could not read is part of what the rendering owes: a
+/// call to a callee nothing proved renders from the call site alone.
 fn obligations(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    with_native(session, addr, |target, program| {
-        let prepared = program.analysed(target, addr).map_err(|r| r.to_string())?;
-        let response = r2engine::native::rendered(
-            target,
-            addr,
-            r2engine::RenderTier::C,
-            &prepared,
-            program.control(),
+    let rendering = session.program.rendered(addr, RenderTier::C)?;
+    let Some(ledger) = rendering.response.obligation_ledger.as_ref() else {
+        return Ok(
+            "no obligation ledger: the function did not reach native rendering\n".to_owned(),
         );
-        // What the analysis could not read is part of what the rendering owes:
-        // a call to a callee nothing proved renders from the call site alone.
-        let unread = match prepared.unread() {
-            [] => String::new(),
-            missing => {
-                missing
-                    .iter()
-                    .fold(String::from("\ncallees not read\n"), |mut out, callee| {
-                        out.push_str(&format!("  {callee}\n"));
-                        out
-                    })
-            }
-        };
-        response.obligation_ledger.as_ref().map_or_else(
-            || Ok("no obligation ledger: the function did not reach native rendering\n".to_owned()),
-            |ledger| Ok(format!("{}\n{unread}", ledger.report())),
-        )
-    })
-}
-
-#[cfg(not(feature = "sleigh"))]
-fn obligations(_session: &mut Session, _argument: &str) -> Result<String, String> {
-    Err("r2s: built without the sleigh feature".to_owned())
-}
-
-/// Ask one question of the open program.
-///
-/// Every tier is asked for through here, so the machine, the conventions and
-/// the compiler specification are assembled once and shared.
-#[cfg(feature = "sleigh")]
-fn with_native<T>(
-    session: &mut Session,
-    addr: u64,
-    ask: impl FnOnce(
-        &r2engine::native::NativeTarget<'_>,
-        &OpenProgram<crate::session::Opened>,
-    ) -> Result<T, String>,
-) -> Result<T, String> {
-    session.program.ensure_assembled(addr)?;
-    let program = &session.program;
-    ask(&program.target(addr)?, program)
+    };
+    let mut out = format!("{}\n", ledger.report());
+    if !rendering.prepared.unread().is_empty() {
+        out.push_str("\ncallees not read\n");
+    }
+    for callee in rendering.prepared.unread() {
+        out.push_str(&format!("  {callee}\n"));
+    }
+    Ok(out)
 }
 
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {

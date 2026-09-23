@@ -139,3 +139,24 @@ fn the_query_surface_formats_nothing() {
         outside_tests.join("\n")
     );
 }
+
+#[test]
+fn the_shell_sequences_no_analysis() {
+    // Which tables are current, which machine is assembled, what is prepared
+    // before what is rendered, and where discovery starts: the engine's order
+    // to keep, asked for in one call.
+    let sequencing = mentions(
+        &root().join("crates/r2s/src"),
+        &[
+            "NativeTarget",
+            "r2engine::native::",
+            "discovery::functions",
+            "ensure_assembled",
+        ],
+    );
+    assert!(
+        sequencing.is_empty(),
+        "the shell sequences the engine's work:\n{}",
+        sequencing.join("\n")
+    );
+}

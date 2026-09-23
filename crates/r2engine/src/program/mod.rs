@@ -7,7 +7,10 @@
 //! whole derivation runs just as well over a program built from byte literals.
 
 pub mod naming;
+mod requests;
 pub mod source;
+
+pub use requests::Rendering;
 
 pub use source::{
     Arch, Container, Entry, EntryKind, Format, Relocation, Section, Source, Symbol, SymbolKind,
@@ -23,46 +26,47 @@ use crate::query::{Decoders, Memo, Revision};
 
 /// What the binary defines at one address.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Definition {
+struct Definition {
     /// Whether a function begins here, which is what bounds a body.
-    pub function: bool,
+    function: bool,
     /// Whether this function's code is Thumb rather than ARM.
-    pub thumb: bool,
+    thumb: bool,
 }
 
 /// Everything a native request needs that is not the decoder itself.
-pub struct Assembled {
+struct Assembled {
     /// Which architecture and compiler specification this was built for, so a
     /// second instruction set in one program gets its own rather than this one.
     machine: (String, &'static str),
-    pub conventions: r2abi::Conventions,
-    pub compiler: r2abi::CompilerSpec,
-    pub prototypes: r2abi::Prototypes,
+    conventions: r2abi::Conventions,
+    compiler: r2abi::CompilerSpec,
+    prototypes: r2abi::Prototypes,
     /// The register a call returns through, in the coordinates the lift spells.
-    pub link: Option<r2il::Varnode>,
+    link: Option<r2il::Varnode>,
 }
 
 /// One open program: its source, its decoders, and the tables read out of both.
 pub struct OpenProgram<S: Source> {
     source: S,
     /// What this binary calls each address it names.
-    pub names: NameDb,
+    names: NameDb,
     /// Which stub stands for which import, by the import's own name.
-    pub imports: BTreeMap<u64, String>,
+    imports: BTreeMap<u64, String>,
     /// Which import each slot the loader fills stands for. A stub's tail
     /// transfer names the slot it reads rather than any code address, so the
     /// slot has to answer for the import too; only a stub is an entry.
-    pub slots: BTreeMap<u64, String>,
+    slots: BTreeMap<u64, String>,
     /// What this binary defines at each address, indexed once.
     ///
     /// The engine asks this per call target and per branch target of every
     /// body it walks, and answering it by scanning the symbol table made the
-    /// walk cost one pass over every symbol per edge.
-    pub defined: BTreeMap<u64, Definition>,
-    /// Which revision of the image's bytes the tables above were derived at.
+    /// walk cost one pass over every symbol per edge. Read from the container
+    /// alone, so no write moves it.
+    defined: BTreeMap<u64, Definition>,
+    /// Which revision of the bytes the names and the imports were derived at.
     ///
-    /// All of them are read out of the image, and one is *decoded* from it:
-    /// the import table comes from lifting the stub section. A patch changes
+    /// Both are read out of the bytes, and the imports are *decoded* from
+    /// them: the table comes from lifting the stub section. A patch changes
     /// what those say, and `imports` decides `is_entry`, which is what bounds
     /// every body walk -- so a stale table is not a stale listing, it is a
     /// body that ends in the wrong place.
@@ -73,7 +77,7 @@ pub struct OpenProgram<S: Source> {
     /// anything that depended only on a name stays good across them, and one
     /// counter for both would throw that away.
     names_revision: u64,
-    /// The same, for what the binary defines at each address.
+    /// The same, for the import stubs, which are the entries a write can move.
     entries_revision: u64,
     assembled: Option<Assembled>,
     /// What this session has already worked out about one function.
@@ -98,6 +102,7 @@ pub struct OpenProgram<S: Source> {
 
 impl<S: Source> OpenProgram<S> {
     pub fn of(source: S) -> Self {
+        let container = source.container();
         Self {
             names: {
                 let mut db = naming::of(&source);
@@ -105,8 +110,12 @@ impl<S: Source> OpenProgram<S> {
                 db
             },
             imports: BTreeMap::new(),
-            slots: BTreeMap::new(),
-            defined: definitions(source.container()),
+            slots: container
+                .relocations
+                .iter()
+                .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
+                .collect(),
+            defined: definitions(container),
             source,
             // The import table needs a decoder, so nothing here is derived yet.
             derived_at: None,
@@ -132,60 +141,56 @@ impl<S: Source> OpenProgram<S> {
         &mut self.source
     }
 
-    /// Make everything derived from the source current.
+    /// Make everything derived from the bytes current.
     ///
     /// The machine is loaded once: which instruction set a file is written in
-    /// is a property of the file and no patch changes it. Everything else is
-    /// read or decoded out of the bytes, so it is derived again whenever the
-    /// image says it is at a different revision.
-    ///
-    /// Separate from reading the machine so a caller can hold the machine and
-    /// the image at once; one method returning a reference out of `&mut self`
-    /// would make those two borrows conflict.
+    /// is a property of the file and no patch changes it. The names and the
+    /// import stubs are read or decoded out of the bytes, so they are derived
+    /// again whenever the source says it is at a different revision.
     pub fn ensure_current(&mut self) -> Result<(), String> {
         if self.machine.is_none() {
             self.machine = Some(
                 r2sleigh_lift::embedded_machine(&self.source.container().arch.name)
                     .map_err(|error| error.to_string())?,
             );
+            // Only where a function says it is Thumb, so a machine with no
+            // Thumb code pays nothing for the second specification.
+            if self.defined.values().any(|definition| definition.thumb) {
+                self.thumb_machine = r2sleigh_lift::embedded_machine("arm-thumb").ok();
+            }
         }
         let revision = self.source.byte_revision();
         if self.derived_at == Some(revision) {
             return Ok(());
         }
-        // Taken out and put back so the decoder can be read while the tables it
-        // fills are written.
-        let machine = self.machine.take().expect("the machine is loaded above");
-        let container = self.source.container();
+        let machine = self.machine.as_ref().expect("the machine is loaded above");
+        let format = self.source.container().format;
         let mut names = naming::of(&self.source);
         naming::name_strings(&mut names, &self.source);
-        let defined = definitions(container);
         // The import stubs can only be read once there is a decoder.
         let imports = naming::imports(&self.source, &machine.disasm, machine.arch.alignment);
-        self.slots = container
-            .relocations
-            .iter()
-            .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
-            .collect();
-        naming::name_imports(&mut names, container.format, &imports);
-        naming::name_slots(&mut names, container.format, &self.slots, &imports);
-        // A patch that changed no name and moved no entry leaves everything
+        naming::name_imports(&mut names, format, &imports);
+        naming::name_slots(&mut names, format, &self.slots, &imports);
+        // A patch that renamed nothing and moved no stub leaves everything
         // derived from those still good, so the counters move only on a
         // difference rather than on every write.
         self.names_revision += u64::from(names != self.names);
-        self.entries_revision += u64::from(defined != self.defined || imports != self.imports);
+        self.entries_revision += u64::from(imports != self.imports);
         self.names = names;
-        self.defined = defined;
         self.imports = imports;
-        self.machine = Some(machine);
-        // Only where a function says it is Thumb, so a machine with no Thumb
-        // code pays nothing for the second specification.
-        self.thumb_machine = match self.defined.values().any(|definition| definition.thumb) {
-            true => r2sleigh_lift::embedded_machine("arm-thumb").ok(),
-            false => None,
-        };
         self.derived_at = Some(revision);
         Ok(())
+    }
+
+    /// What this binary calls each address it names, as of the last
+    /// `ensure_current`.
+    pub const fn names(&self) -> &NameDb {
+        &self.names
+    }
+
+    /// Which stub stands for which import, as of the last `ensure_current`.
+    pub const fn imports(&self) -> &BTreeMap<u64, String> {
+        &self.imports
     }
 
     /// Assemble what a native request needs, once per program and machine.
@@ -193,7 +198,7 @@ impl<S: Source> OpenProgram<S> {
     /// All of it is constant while one program is open, and rebuilding it per
     /// command cost two milliseconds -- almost all of it parsing the embedded
     /// prototype table -- on every `pdd`, `pdil`, `afl` and `ax`.
-    pub fn ensure_assembled(&mut self, addr: u64) -> Result<(), String> {
+    fn ensure_assembled(&mut self, addr: u64) -> Result<(), String> {
         self.ensure_current()?;
         let machine = self
             .machine_at(addr)
@@ -251,7 +256,7 @@ impl<S: Source> OpenProgram<S> {
     ///
     /// Assembled once and handed out, so a caller holds one description of the
     /// program rather than building its own from the parts.
-    pub fn target(&self, addr: u64) -> Result<NativeTarget<'_>, String> {
+    fn target(&self, addr: u64) -> Result<NativeTarget<'_>, String> {
         let machine = self
             .machine_at(addr)
             .ok_or("no Sleigh specification for this architecture")?;
@@ -277,21 +282,22 @@ impl<S: Source> OpenProgram<S> {
     /// Every tier is a rendering of this. Asking for the C and then for the
     /// ledger behind it, or for the prepared function and then for its values,
     /// used to walk and prepare the same body twice.
-    pub fn analysed(
+    fn analysed(
         &self,
         target: &NativeTarget<'_>,
         entry: u64,
     ) -> Result<std::sync::Arc<Prepared>, NativeRefusal> {
-        *self.read.borrow_mut() = Some(Vec::new());
-        let analysis = self.memo.analysed_since(
+        self.memo.analysed_since(
             self.revision(),
             entry,
             &|since, range| self.source.written_since(since, range),
-            || crate::native::analysed(target, self, entry),
-        );
-        self.memo
-            .record_reads(self.read.borrow_mut().take().unwrap_or_default());
-        analysis
+            || {
+                *self.read.borrow_mut() = Some(Vec::new());
+                let analysis = crate::native::analysed(target, self, entry);
+                let read = self.read.borrow_mut().take().unwrap_or_default();
+                analysis.map(|analysis| (analysis, read))
+            },
+        )
     }
 
     /// The control every request against this program runs under.
@@ -346,11 +352,6 @@ impl<S: Source> OpenProgram<S> {
         self.memo.stats()
     }
 
-    /// What was assembled for the machine at this address.
-    pub fn assembled(&self) -> Option<&Assembled> {
-        self.assembled.as_ref()
-    }
-
     /// Which state of this program every answer is about.
     pub fn revision(&self) -> Revision {
         Revision {
@@ -365,7 +366,7 @@ impl<S: Source> OpenProgram<S> {
     ///
     /// ARM states the mode per function, in the low bit of the symbol that
     /// names it, so the image has no single answer and the address decides.
-    pub fn machine_at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
+    fn machine_at(&self, vaddr: u64) -> Option<&EmbeddedMachine> {
         match self.thumb_at(vaddr) {
             true => self.thumb_machine.as_ref().or(self.machine.as_ref()),
             false => self.machine.as_ref(),
@@ -373,7 +374,7 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Whether the function containing this address is Thumb.
-    pub fn thumb_at(&self, vaddr: u64) -> bool {
+    fn thumb_at(&self, vaddr: u64) -> bool {
         self.defined
             .range(..=vaddr)
             .next_back()
