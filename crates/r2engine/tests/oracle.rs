@@ -179,7 +179,7 @@ fn a_claim_no_run_supports_fails_and_one_every_run_supports_holds() {
         ),
     ];
     for (literal, entry, at, injected, expected) in cases {
-        let failures = judged(literal, entry, &[(at, injected)]);
+        let failures = judged(literal, entry, &[(at, injected.clone())]);
         let (ours, theirs): (Vec<_>, Vec<_>) = failures
             .iter()
             .partition(|failure| failure.listing == "injected");
@@ -199,7 +199,7 @@ fn counted() -> Literal {
 }
 
 /// A claim the test adds beside the engine's, naming a register as the architecture does.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Injected {
     Kind(AnnotationKind),
     Bounds(&'static str, u64, u64),
@@ -221,9 +221,9 @@ fn judged(literal: Literal, entry: u64, injected: &[(u64, Injected)]) -> Vec<Fai
     ledger.claim("pdf", &pdf);
     ledger.claim("pd", &pd.value);
     for (at, injected) in injected {
-        let kind = match *injected {
-            Injected::Kind(kind) => kind,
-            Injected::Bounds(name, low, high) => {
+        let kind = match injected {
+            Injected::Kind(kind) => kind.clone(),
+            &Injected::Bounds(name, low, high) => {
                 let register = lift.register(name).expect("the architecture names it");
                 AnnotationKind::Bounds {
                     storage: CanonicalStorageId::from_varnode(&register),
@@ -269,7 +269,7 @@ struct Failure {
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (listing, kind, at) = (self.listing, self.kind, self.at);
+        let (listing, kind, at) = (self.listing, &self.kind, self.at);
         match &self.why {
             Some(why) => write!(f, "{listing} claims {kind:?} at {at:#x}, but {why}"),
             None => write!(f, "no run rules on {listing}'s {kind:?} at {at:#x}"),
@@ -313,7 +313,7 @@ impl Ledger {
     fn claim(&mut self, listing: &'static str, lines: &[Line]) {
         for line in lines {
             for annotation in &line.annotations {
-                self.add(line.address, listing, annotation.kind);
+                self.add(line.address, listing, annotation.kind.clone());
             }
         }
     }
@@ -336,20 +336,33 @@ impl Ledger {
     fn rule_revision(&mut self, lift: &Lift<'_>) {
         let image = |address: u64| lift.source.read(address, 1)?.first().copied();
         for claim in self.claims.values_mut().flatten() {
-            let AnnotationKind::Holds {
-                address,
-                width,
-                value,
-            } = claim.kind
-            else {
-                continue;
-            };
             // A load spends none of a run's budget.
             let mut revision = State::new(lift.endian, image, 0).expect("a byte order");
-            let held = revision.load(address, width);
-            let verdict = match held == Ok(u128::from(value)) {
-                true => Ok(()),
-                false => Err(format!("the revision holds {held:x?}")),
+            let verdict = match &claim.kind {
+                &AnnotationKind::Holds {
+                    address,
+                    width,
+                    value,
+                } => {
+                    let held = revision.load(address, width);
+                    match held == Ok(u128::from(value)) {
+                        true => Ok(()),
+                        false => Err(format!("the revision holds {held:x?}")),
+                    }
+                }
+                // Text is its bytes and the terminator that ends it.
+                AnnotationKind::Text { address, text } => {
+                    let spelled = text.bytes().chain([0]).map(u128::from);
+                    let held = (0..)
+                        .zip(spelled)
+                        .map(|(at, byte)| (revision.load(address + at, 1), byte))
+                        .find(|(held, byte)| held.as_ref() != Ok(byte));
+                    match held {
+                        None => Ok(()),
+                        Some((held, _)) => Err(format!("the revision holds {held:x?}")),
+                    }
+                }
+                _ => continue,
             };
             claim.decided(verdict, "the revision");
         }
@@ -953,7 +966,7 @@ fn verdict<M: Mapped>(
                 .ok_or(format!("{spelled} holds {held:#x}"))
         }
         // What the revision holds is ruled once, against the revision: see `rule_revision`.
-        AnnotationKind::Holds { .. } => return None,
+        AnnotationKind::Holds { .. } | AnnotationKind::Text { .. } => return None,
     };
     Some(Verdict::Held(held))
 }

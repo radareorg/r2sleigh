@@ -157,7 +157,7 @@ pub(crate) fn fold_inst(
     };
     let inputs = folded_inputs(graph, inst, op)?;
     let operands = inputs.iter().map(|input| known(*input)).collect::<Vec<_>>();
-    fold_op(graph, op, inst.output?, &inputs, &operands)
+    fold_op(op, &operands)
 }
 
 /// Evaluate one operation over operands already folded to constants.
