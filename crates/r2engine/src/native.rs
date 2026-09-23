@@ -680,15 +680,26 @@ fn analyse(
     // the body walked again through it. The blocks this adds are the switch
     // arms, which nothing has seen until now.
     let tables = native.pointer_tables(&first);
-    let root = match tables.is_empty() {
-        true => root,
-        false => native.walk_dispatched(
-            entry,
-            &tables
-                .iter()
-                .map(|table| (table.instruction, table.targets.clone()))
-                .collect(),
-        )?,
+    let (root, first) = match tables.is_empty() {
+        true => (root, first),
+        false => {
+            let root = native.walk_dispatched(
+                entry,
+                &tables
+                    .iter()
+                    .map(|table| (table.instruction, table.targets.clone()))
+                    .collect(),
+            )?;
+            // The first walk stopped at the dispatch, so its interface and slots are read again off the whole body.
+            let first = native.prepare_restated(
+                &root,
+                &callees,
+                Vec::new(),
+                declared_root.clone(),
+                &tables,
+            )?;
+            (root, first)
+        }
     };
     // A second capture states what the first proved. Preparation recovers the
     // interface off the instructions and proves which frame slots home which
@@ -711,7 +722,7 @@ fn analyse(
         .unwrap_or_default();
     let restated = native.restated(&first, &declared_slots);
     let folded = native.folded_literals(&first, &root);
-    let artifact = match restated.is_none() && folded.is_empty() && tables.is_empty() {
+    let artifact = match restated.is_none() && folded.is_empty() {
         true => first,
         false => {
             // A body that proved no frame slot restates nothing, and the

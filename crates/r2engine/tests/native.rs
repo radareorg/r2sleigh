@@ -64,6 +64,25 @@ const TABLE_SWITCH: &[u8] = &[
     0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1026
 ];
 
+/// Every return sits behind the dispatch; before it the body keeps a local whose address escapes.
+const SPILLED_SWITCH: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0xc7, 0x04, 0x24, 0x07, 0x00, 0x00, 0x00, // 1004 mov dword [rsp], 7
+    0x48, 0x89, 0xe0, // 100b mov rax, rsp
+    0x48, 0x89, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // 100e mov [0x2000], rax
+    0x83, 0xe7, 0x03, // 1016 and edi, 3
+    0xff, 0x24, 0xfd, 0x48, 0x10, 0x00, 0x00, // 1019 jmp [rdi*8 + 0x1048]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x08, 0xc3, // 1020 case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x08, 0xc3, // 102a case 1
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x08, 0xc3, // 1034 case 2
+    0x8b, 0x04, 0x24, 0x48, 0x83, 0xc4, 0x08, 0xc3, // 103e case 3: return the local
+    0x00, 0x00, // 1046 padding
+    0x20, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1020
+    0x2a, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 -> 0x102a
+    0x34, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1058 -> 0x1034
+    0x3e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1060 -> 0x103e
+];
+
 /// One embedded machine with what the engine reads beside it.
 struct Machine {
     embedded: EmbeddedMachine,
@@ -559,6 +578,28 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
         labels.windows(2).all(|pair| pair[0] < pair[1]),
         "the arms are written in label order: {output}"
     );
+}
+
+#[test]
+fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
+    // The first walk stops at the dispatch and sees no return; that is no proof the result is void.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: SPILLED_SWITCH,
+        name: "pick",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
+    );
+    assert!(!output.starts_with("void "), "{output}");
+    for returns in ["10", "20", "30"] {
+        assert!(output.contains(&format!("return {returns};")), "{output}");
+    }
 }
 
 #[test]
