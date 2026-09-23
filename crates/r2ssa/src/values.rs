@@ -85,8 +85,8 @@ impl ValueRanges {
 
 /// Solve for every value, widening at the phis of the given blocks.
 ///
-/// `widen_at` is the loop headers, and any block in a cycle the structurer
-/// could not name. A phi anywhere else joins, which is exact.
+/// `widen_at` must cut every cycle, irreducible ones included, or the ascent
+/// climbs one step per round. A phi anywhere else joins, which is exact.
 pub fn solve_value_ranges(
     graph: &SsaGraph,
     function: &crate::SSAFunction,

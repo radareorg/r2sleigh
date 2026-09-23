@@ -753,3 +753,61 @@ fn a_leaf_whose_barrier_is_only_a_user_operation_cannot_prove_its_frame() {
         response.output
     );
 }
+
+/// A loop entered at two blocks, whose counter climbs on every pass.
+///
+/// ```text
+///   1000  xor eax, eax
+///   1002  test edi, edi
+///   1004  je  0x100c        ; enter the loop at its second block
+///   1006  inc eax           ; first block
+///   1008  cmp eax, esi
+///   100a  jae 0x1012
+///   100c  inc eax           ; second block
+///   100e  cmp eax, esi
+///   1010  jb  0x1006
+///   1012  ret
+/// ```
+const IRREDUCIBLE_COUNTER: &[u8] = &[
+    0x31, 0xc0, // 1000 xor eax, eax
+    0x85, 0xff, // 1002 test edi, edi
+    0x74, 0x06, // 1004 je 0x100c
+    0xff, 0xc0, // 1006 inc eax
+    0x39, 0xf0, // 1008 cmp eax, esi
+    0x73, 0x06, // 100a jae 0x1012
+    0xff, 0xc0, // 100c inc eax
+    0x39, 0xf0, // 100e cmp eax, esi
+    0x72, 0xf4, // 1010 jb 0x1006
+    0xc3, // 1012 ret
+];
+
+/// Neither block of the loop dominates the other, so it has no natural header;
+/// the value fixpoint still has to widen on it or it climbs one step per round.
+#[test]
+fn a_loop_with_two_entries_is_decompiled_in_bounded_time() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 machine");
+    let conventions = Conventions::for_arch("x86-64", 64).expect("conventions");
+    let convention = conventions.default_convention().expect("default");
+    let compiler = CompilerSpec::parse(machine.compiler_spec);
+    let prototypes = r2abi::Prototypes::embedded();
+    let target = NativeTarget {
+        arch: &machine.arch,
+        disasm: &machine.disasm,
+        cpu: machine.cpu,
+        convention,
+        compiler: &compiler,
+        prototypes: &prototypes,
+    };
+    let program = Fixture {
+        bytes: IRREDUCIBLE_COUNTER,
+        name: "count",
+        link: None,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    assert!(
+        response.render_refusal.is_none() && response.output.text().contains("return"),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+}
