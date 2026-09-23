@@ -1448,7 +1448,7 @@ fn require_current_interproc_report_for_source_owned(
 fn local_field_accesses_from_struct_artifacts(
     local_structs: &LocalStructArtifacts,
 ) -> Vec<LocalFieldAccessFact> {
-    local_field_accesses_named(local_structs, &HashMap::new())
+    local_field_accesses_named(local_structs, &BTreeMap::new())
 }
 
 /// The same observations, naming each field what the source called it when the
@@ -1459,7 +1459,7 @@ fn local_field_accesses_from_struct_artifacts(
 /// answer away.
 pub(crate) fn local_field_accesses_named(
     local_structs: &LocalStructArtifacts,
-    source_field_names: &HashMap<u64, String>,
+    source_field_names: &BTreeMap<(usize, u64), String>,
 ) -> Vec<LocalFieldAccessFact> {
     let mut accesses = Vec::new();
     for (slot, fields) in &local_structs.slot_field_profiles {
@@ -1468,7 +1468,7 @@ pub(crate) fn local_field_accesses_named(
                 slot: *slot,
                 field_offset: *field_offset,
                 field_name: source_field_names
-                    .get(field_offset)
+                    .get(&(*slot, *field_offset))
                     .cloned()
                     .unwrap_or_else(|| format!("f_{field_offset:x}")),
                 field_type: Some(field_type.clone()),

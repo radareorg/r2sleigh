@@ -1894,47 +1894,46 @@ fn infer_usage_register_type_hints(
     (hints, pointer_vars)
 }
 
-/// What the source calls the member at each offset of this function's
-/// aggregates.
+/// What the source calls the member each parameter reaches at each offset.
 ///
 /// A binary that carried debug info already said what its struct fields are
 /// called, and the access projections keep that beside the access that
 /// reached them. Without it a field is named after its offset, so something
 /// the source calls `next` prints as `f_10`.
 ///
-/// The projections are read only under the identity they were sealed with,
-/// and an offset two aggregates disagree about is dropped rather than
-/// guessed.
-pub fn source_field_names(prepared: &SsaArtifact) -> HashMap<u64, String> {
+/// Keyed by the parameter the projection proved the access goes through, so a
+/// name reaches only a field of that parameter's aggregate. The projections are
+/// read only under the identity they were sealed with, and an offset one
+/// parameter's accesses disagree about is dropped rather than guessed.
+pub fn source_field_names(prepared: &SsaArtifact) -> BTreeMap<(usize, u64), String> {
     let Some(interface) = prepared.machine_context().function_interface() else {
-        return HashMap::new();
+        return BTreeMap::new();
     };
     let Some(projections) = prepared
         .aggregate_accesses()
         .projections_for_revision(interface.revision_identity())
     else {
-        return HashMap::new();
+        return BTreeMap::new();
     };
-    let mut names: HashMap<u64, String> = HashMap::new();
-    let mut disputed = HashSet::new();
+    let mut names: BTreeMap<(usize, u64), Option<&str>> = BTreeMap::new();
     for projection in projections.values() {
+        let Ok(parameter) = usize::try_from(projection.source_parameter_index) else {
+            continue;
+        };
         if projection.member_name.is_empty() {
             continue;
         }
-        match names.get(&projection.byte_offset) {
-            Some(existing) if existing.as_str() != &*projection.member_name => {
-                disputed.insert(projection.byte_offset);
-            }
-            Some(_) => {}
-            None => {
-                names.insert(projection.byte_offset, projection.member_name.to_string());
-            }
+        let name = names
+            .entry((parameter, projection.byte_offset))
+            .or_insert(Some(&projection.member_name));
+        if *name != Some(&*projection.member_name) {
+            *name = None;
         }
     }
-    for offset in disputed {
-        names.remove(&offset);
-    }
     names
+        .into_iter()
+        .filter_map(|(key, name)| Some((key, name?.to_owned())))
+        .collect()
 }
 
 #[cfg(test)]
