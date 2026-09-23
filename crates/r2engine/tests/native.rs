@@ -801,7 +801,6 @@ fn a_loop_with_two_entries_is_decompiled_in_bounded_time() {
     let program = Fixture {
         bytes: IRREDUCIBLE_COUNTER,
         name: "count",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     assert!(
@@ -845,7 +844,6 @@ fn a_repeated_scan_is_a_loop_on_its_own_instruction() {
     let program = Fixture {
         bytes: REPEATED_SCAN,
         name: "scan",
-        link: None,
     };
     let response = decompile(&target, &program, BASE).expect("the two graphs agree");
     let text = response.output.text();
