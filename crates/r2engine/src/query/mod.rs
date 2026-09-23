@@ -17,10 +17,12 @@ pub mod annotate;
 pub mod decode;
 pub mod memo;
 pub mod records;
+pub mod references;
 
 pub use decode::listing;
 pub use memo::{Memo, MemoStats};
 pub use records::{Annotation, AnnotationKind, Answered, Decoders, Line, Listing, Memory, Stop};
+pub use references::{Coverage, References, Unread};
 
 /// How much work a request permits.
 ///

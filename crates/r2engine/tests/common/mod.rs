@@ -261,6 +261,19 @@ impl Literal {
         self
     }
 
+    /// The same program with one more function stated, wherever it points.
+    pub fn stating(mut self, name: &str, vaddr: u64) -> Self {
+        self.container.symbols.push(Symbol {
+            name: name.to_owned(),
+            vaddr,
+            size: 0,
+            kind: SymbolKind::Function,
+            defined: true,
+            thumb: false,
+        });
+        self
+    }
+
     /// Write bytes over the program's own, as a patch would.
     pub fn write(&mut self, vaddr: u64, bytes: &[u8]) {
         for (offset, byte) in bytes.iter().enumerate() {

@@ -9,9 +9,12 @@ use std::sync::Arc;
 
 use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
-use crate::native::Prepared;
-use crate::query::{Answer, Answered, Completion, Line, Listing, Memory, Stop, Work};
+use crate::native::{NativeRefusal, Prepared, Survey};
+use crate::query::{
+    Answer, Answered, Completion, Line, Listing, Memory, References, Stop, Unread, Work,
+};
 use crate::{DataRefFact, EngineDecompileResponse, RenderTier};
+use r2ssa::body::Unresolved;
 
 /// A function rendered at one tier, and the analysis it was rendered from.
 pub struct Rendering {
@@ -19,8 +22,43 @@ pub struct Rendering {
     pub response: EngineDecompileResponse,
 }
 
-/// What discovery found, and the references each body it walked makes.
-type Surveyed = (Vec<Discovered>, BTreeMap<u64, Vec<DataRefFact>>);
+/// What discovery found, and what each body it believes said about references.
+type Surveyed = (Vec<Discovered>, BTreeMap<u64, Walk>);
+
+/// What one function's walk says about the references its body makes.
+pub(super) struct Walk {
+    data_refs: Result<Vec<DataRefFact>, Unread>,
+    unresolved: Vec<Unresolved>,
+}
+
+impl Walk {
+    /// What the index keeps of a survey, and what discovery keeps of it.
+    fn of(survey: Result<Survey, NativeRefusal>) -> (Self, Option<Survey>) {
+        let mut survey = match survey {
+            Ok(survey) => survey,
+            Err(refusal) => {
+                let data_refs = Err(Unread::Refused(refusal));
+                let unresolved = Vec::new();
+                return (
+                    Self {
+                        data_refs,
+                        unresolved,
+                    },
+                    None,
+                );
+            }
+        };
+        let data_refs = survey.data_refs.take().ok_or(Unread::NoSsa);
+        let unresolved = std::mem::take(&mut survey.unresolved);
+        (
+            Self {
+                data_refs,
+                unresolved,
+            },
+            Some(survey),
+        )
+    }
+}
 
 impl<S: Source> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
@@ -126,21 +164,31 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Every reference the program makes, from every function discovery
-    /// believes, sorted and without repeats.
+    /// believes, sorted and without repeats, with the coverage it was read over.
     ///
     /// Discovery walks every body it believes and the index wants what that
     /// same walk saw, so both come from one walk per function.
-    pub fn references(&mut self) -> Result<Vec<DataRefFact>, String> {
+    pub fn references(&mut self) -> Result<Answer<References>, String> {
         self.start_request();
-        let (found, mut seen) = self.surveyed()?;
-        let mut refs = found
-            .iter()
-            .filter_map(|one| seen.remove(&one.address))
-            .flatten()
-            .collect::<Vec<_>>();
-        refs.sort_unstable();
-        refs.dedup();
-        Ok(refs)
+        let (_, seen) = self.surveyed()?;
+        let mut index = References::default();
+        for (entry, walk) in seen {
+            if !walk.unresolved.is_empty() {
+                index.coverage.unresolved.insert(entry, walk.unresolved);
+            }
+            match walk.data_refs {
+                Ok(refs) => {
+                    index.coverage.read.push(entry);
+                    index.facts.extend(refs);
+                }
+                Err(why) => {
+                    index.coverage.unread.insert(entry, why);
+                }
+            }
+        }
+        index.facts.sort_unstable();
+        index.facts.dedup();
+        Ok(Answer::complete(index, self.revision()))
     }
 
     /// Discovery, and the references each body it walked makes.
@@ -165,8 +213,9 @@ impl<S: Source> OpenProgram<S> {
                 (true, Some(thumb)) => thumb,
                 _ => &primary,
             };
-            let mut survey = crate::native::surveyed(target, program, entry)?;
-            seen.insert(entry, survey.data_refs);
+            let (walk, survey) = Walk::of(crate::native::surveyed(target, program, entry));
+            seen.insert(entry, walk);
+            let mut survey = survey?;
             let transfers = &mut survey.transfers;
             if thumb.is_some() {
                 interworking(transfers);

@@ -319,6 +319,30 @@ fn a_reference_is_a_query_over_the_lift() {
 }
 
 #[test]
+fn no_reference_is_absence_within_what_was_read() {
+    // Nothing names the second byte of the ELF magic, and saying so is a
+    // claim about the functions read, not about the program.
+    let none = r2s("axt 0x400001");
+    assert!(none.ok, "{}", none.out);
+    assert!(
+        none.out.contains("0 references to 0x400001"),
+        "{}",
+        none.out
+    );
+    assert!(
+        none.out.contains("\n; none within the functions read"),
+        "{}",
+        none.out
+    );
+    assert!(none.out.contains("\n; covers "), "{}", none.out);
+    // And the whole index says the same scope beneath its rows.
+    let all = r2s("ax");
+    assert!(all.ok, "{}", all.out);
+    let last = all.out.trim_end().lines().last().unwrap_or("");
+    assert!(last.starts_with("; covers "), "{}", all.out);
+}
+
+#[test]
 fn a_patch_is_a_layer_the_analysis_reads_through() {
     // The file is untouched and every read sees the new bytes, so the
     // analysis of a patched program is the analysis of the program as

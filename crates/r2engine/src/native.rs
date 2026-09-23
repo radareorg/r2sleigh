@@ -322,38 +322,35 @@ pub fn decompile(
 /// -- 0.33 seconds against 0.05 for the discovery alone on `/bin/ls`.
 pub struct Survey {
     pub transfers: crate::discovery::Transfers,
-    pub data_refs: Vec<r2ssa::DataRefFact>,
+    /// What the body names, or `None` where its SSA did not build.
+    pub data_refs: Option<Vec<r2ssa::DataRefFact>>,
+    /// Where the walk stopped without knowing where control went.
+    pub unresolved: Vec<r2ssa::body::Unresolved>,
 }
 
-/// Where one body transfers, without preparing or rendering it.
+/// Both answers from one walk, or why the body could not be walked.
 ///
-/// Discovery asks this of every address it believes, and it asks only for the
-/// transfers -- walking is the cheap half and a body that refuses to prepare
-/// still says who it calls.
-pub fn transfers(
+/// Discovery asks this of every address it believes; walking is the cheap
+/// half, and a body that refuses to prepare still says who it calls.
+pub fn surveyed(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
-) -> Option<crate::discovery::Transfers> {
-    surveyed(target, program, entry).map(|survey| survey.transfers)
-}
-
-/// Both answers from one walk.
-pub fn surveyed(target: &NativeTarget<'_>, program: &dyn Program, entry: u64) -> Option<Survey> {
+) -> Result<Survey, NativeRefusal> {
     let native = Native {
         target,
         program,
-        machine: machine(target).ok()?,
+        machine: machine(target)?,
         control: program.control().ssa_execution_control(),
     };
-    let walked = native.walk(entry).ok()?;
+    let walked = native.walk(entry)?;
     let blocks = walked
         .body
         .blocks
         .iter()
         .map(|block| block.lifted.clone())
         .collect::<Vec<_>>();
-    let data_refs = r2ssa::data_refs_from_blocks(&blocks, Some(target.arch)).unwrap_or_default();
+    let data_refs = r2ssa::data_refs_from_blocks(&blocks, Some(target.arch));
     let mut transfers = crate::discovery::Transfers::from(&walked.body);
     // Preparing a body costs far more than walking one, so it is done only
     // where the typed rule could fire at all: this function has to call
@@ -368,25 +365,11 @@ pub fn surveyed(target: &NativeTarget<'_>, program: &dyn Program, entry: u64) ->
             ),
         }
     }
-    Some(Survey {
+    Ok(Survey {
         transfers,
         data_refs,
+        unresolved: walked.body.unresolved,
     })
-}
-
-/// Every reference one function makes, from its own lift.
-///
-/// The sibling of `transfers`: where that says which addresses a body treats as
-/// code, this says every address it names at all, so a reverse index can be
-/// built by asking each discovered function once.
-pub fn data_refs(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Vec<r2ssa::DataRefFact> {
-    surveyed(target, program, entry)
-        .map(|survey| survey.data_refs)
-        .unwrap_or_default()
 }
 
 /// What the binding plan decided about each value.

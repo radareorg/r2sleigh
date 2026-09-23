@@ -265,10 +265,10 @@ fn cross_references(session: &mut Session, argument: &str) -> Result<String, Str
     if !argument.trim().is_empty() {
         return Err("r2s: ax takes no argument; use axt <address>".to_owned());
     }
-    let refs = session.program.references()?;
+    let index = session.program.references()?.value;
     let mut out = String::from("from       to         kind\n");
     out.push_str(&"-".repeat(34));
-    for fact in &refs {
+    for fact in &index.facts {
         out.push_str(&format!(
             "\n{:#010x} {:#010x} {}",
             fact.from,
@@ -276,22 +276,66 @@ fn cross_references(session: &mut Session, argument: &str) -> Result<String, Str
             fact.kind.as_str()
         ));
     }
-    out.push_str(&format!("\n\n{} references", refs.len()));
+    out.push_str(&format!("\n\n{} references", index.facts.len()));
+    for (entry, why) in &index.coverage.unread {
+        let why = match why {
+            r2engine::query::Unread::Refused(refusal) => refusal.to_string(),
+            r2engine::query::Unread::NoSsa => "its SSA did not build".to_owned(),
+        };
+        out.push_str(&format!("\n; {entry:#x} unread: {why}"));
+    }
+    out.push_str(&coverage(&index.coverage));
     Ok(out)
 }
 
 /// Every place one address is named from.
 fn references_to(session: &mut Session, argument: &str) -> Result<String, String> {
     let wanted = parse_number(session, argument)?;
-    let refs = session.program.references()?;
+    let index = session.program.references()?.value;
     let mut out = String::new();
     let mut count = 0usize;
-    for fact in refs.iter().filter(|fact| fact.to == wanted) {
+    for fact in index.facts.iter().filter(|fact| fact.to == wanted) {
         count += 1;
         out.push_str(&format!("{:#010x} {}\n", fact.from, fact.kind.as_str()));
     }
     out.push_str(&format!("\n{count} references to {wanted:#x}"));
+    if count == 0 {
+        out.push_str(&format!(
+            "\n; none within the functions read, which is not proof {wanted:#x} is unreferenced"
+        ));
+    }
+    out.push_str(&coverage(&index.coverage));
     Ok(out)
+}
+
+/// What a reference index was read over, as a trailing comment.
+fn coverage(coverage: &r2engine::query::Coverage) -> String {
+    let read = coverage.read.len();
+    if coverage.is_closed() {
+        return format!("\n; covers {read} functions, every body walked to its end");
+    }
+    let indirect = coverage.indirect_count();
+    let other = coverage.unresolved_count() - indirect;
+    let gaps = [
+        (
+            indirect,
+            "unresolved indirect transfer",
+            "unresolved indirect transfers",
+        ),
+        (
+            other,
+            "unreadable transfer target",
+            "unreadable transfer targets",
+        ),
+        (coverage.unread.len(), "body unread", "bodies unread"),
+    ];
+    let gaps = gaps
+        .iter()
+        .filter(|(count, ..)| *count > 0)
+        .map(|&(count, one, many)| format!("{count} {}", if count == 1 { one } else { many }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("\n; covers {read} functions; {gaps} — absence is not proof")
 }
 
 /// Every string the data sections hold.
