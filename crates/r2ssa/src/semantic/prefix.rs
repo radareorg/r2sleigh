@@ -44,13 +44,7 @@ impl MemoryPrefix {
         let mut predicates = collect_predicate_facts(function, graph);
         phase!("predicates", 0);
         let latches_by_header = latches_by_header(function);
-        // Widen where a depth-first walk re-enters a cycle, which cuts every cycle, irreducible ones included.
-        let widen_at = function
-            .cfg()
-            .collect_back_edges()
-            .into_keys()
-            .collect::<BTreeSet<_>>();
-        let values = crate::values::solve_value_ranges(graph, function, &predicates, &widen_at);
+        let values = crate::values::solve_value_ranges(graph, function, &predicates);
         // A table dispatch switches on what indexes the table's read, known only now.
         for (block_addr, selector) in crate::indirect::dispatch_selectors(function, graph, &values)
         {

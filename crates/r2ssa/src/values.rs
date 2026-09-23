@@ -9,19 +9,32 @@
 //! instruction, and re-queue the readers of anything that moved. What is different is the domain, and that a merge
 //! joins rather than giving up.
 //!
-//! Termination comes from widening at loop headers. The lattice has unbounded
-//! ascending chains through the bounds, so a counter would otherwise be raised
-//! one iteration at a time forever; at a header the bound that grew jumps to
-//! the extreme of its width instead. The criterion is structural -- this phi
-//! is a loop's -- rather than a count of visits, because a count would be a
-//! number nothing derived.
+//! Termination comes from widening at the phis of `W`, the targets of the back
+//! edges of a depth-first walk from the entry. Every transfer reads values
+//! defined at a dominator of the reader, or a phi input defined at a dominator
+//! of the edge's source; dominators are DFS ancestors, so postorder never rises
+//! along a read and strictly falls along a phi input on an edge that is not a
+//! back edge. A cycle of reads therefore passes a phi at a target in `W`, on
+//! any graph, reducible or not; natural loop headers are in `W`, so a
+//! reducible graph widens where it always did. A widened phi moves at most
+//! once per stride change for each bound, and a stride falls through at most
+//! sixty-four divisors; every other value sits on no cycle that avoids a
+//! widened phi, so it moves only when something it reads moved, and the ascent
+//! ends. The criterion is structural rather than a count of visits, because a
+//! count would be a number nothing derived.
+//!
+//! A value wider than sixty-four bits is described at sixty-four, where top
+//! means unknown rather than below `2^64`. An operation that would read an
+//! unknown one as below `2^64` -- a shift, a division, a select's narrowed
+//! arm, a piece cut from it -- leaves its result unknown, and a comparison
+//! never narrows one.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::graph::{GraphInst, SsaGraph};
 use crate::op::SSAOp;
 use crate::strided::StridedInterval;
-use crate::{InstPayload, ValueId};
+use crate::{InstId, InstPayload, ValueId};
 
 /// What every value in one function can be.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -82,23 +95,33 @@ impl ValueRanges {
     }
 }
 
-/// Solve for every value, widening at the phis of the given blocks.
-///
-/// `widen_at` must cut every cycle, irreducible ones included, or the ascent
-/// climbs one step per round. A phi anywhere else joins, which is exact.
+/// Solve for every value.
 pub fn solve_value_ranges(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
     predicates: &crate::semantic::PredicateFacts,
-    widen_at: &BTreeSet<u64>,
 ) -> ValueRanges {
-    let mut by_value = ascend(graph, widen_at);
+    solve_counted(graph, function, predicates).0
+}
+
+/// The solution, and how many transfers the ascent spent reaching it.
+fn solve_counted(
+    graph: &SsaGraph,
+    function: &crate::SSAFunction,
+    predicates: &crate::semantic::PredicateFacts,
+) -> (ValueRanges, usize) {
+    let (mut by_value, transfers) = ascend(graph, &widening_set(function));
     narrow_where_defined(graph, function, predicates, &mut by_value);
-    ValueRanges { by_value }
+    (ValueRanges { by_value }, transfers)
+}
+
+/// `W`: every block a depth-first walk from the entry reaches by a back edge, in `O(V + E)`.
+fn widening_set(function: &crate::SSAFunction) -> BTreeSet<u64> {
+    function.cfg().collect_back_edges().into_keys().collect()
 }
 
 /// The ascending half: raise every value until nothing moves.
-fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> Vec<StridedInterval> {
+fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, usize) {
     // A literal is what it says. A value some instruction defines starts at
     // bottom, since the transfer raises it to what the instruction can
     // produce. A value nothing in the function defines -- an argument, a
@@ -138,6 +161,7 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> Vec<StridedInterval> {
         .map(|inst| inst.id)
         .collect::<BTreeSet<_>>();
     let mut ready = queued.iter().copied().collect::<VecDeque<_>>();
+    let mut transfers = 0usize;
     while let Some(inst_id) = ready.pop_front() {
         queued.remove(&inst_id);
         let Some(inst) = graph.inst(inst_id) else {
@@ -149,6 +173,7 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> Vec<StridedInterval> {
         let Some(slot) = by_value.get(output.0 as usize).copied() else {
             continue;
         };
+        transfers += 1;
         let computed = transfer(graph, inst, &|value: ValueId| {
             by_value
                 .get(value.0 as usize)
@@ -163,17 +188,39 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> Vec<StridedInterval> {
             continue;
         }
         by_value[output.0 as usize] = next;
-        for site in graph.use_sites(output) {
-            if queued.insert(site.inst) {
-                ready.push_back(site.inst);
+        for reader in readers(graph, output) {
+            if queued.insert(reader) {
+                ready.push_back(reader);
             }
         }
     }
 
-    by_value
+    (by_value, transfers)
 }
 
-/// The block a phi belongs to, which its operation site does not name.
+/// Every instruction whose transfer reads this value.
+///
+/// Its users, and the users of a comparison it feeds: a select narrows its arms
+/// by the comparison's operands, which are not its own inputs.
+fn readers(graph: &SsaGraph, value: ValueId) -> impl Iterator<Item = InstId> + '_ {
+    graph.use_sites(value).iter().flat_map(move |site| {
+        let tested = graph
+            .inst(site.inst)
+            .filter(|inst| matches!(&inst.payload, InstPayload::Op(op) if comparison_kind(op).is_some()))
+            .and_then(|inst| inst.output)
+            .map(|condition| graph.use_sites(condition))
+            .unwrap_or_default();
+        std::iter::once(site.inst).chain(tested.iter().map(|site| site.inst))
+    })
+}
+
+/// Whether a value is wider than the domain describes.
+fn wide(graph: &SsaGraph, value: ValueId) -> bool {
+    graph
+        .value(value)
+        .is_some_and(|value| value.var.size > StridedInterval::MAX_WIDTH_BITS / 8)
+}
+
 /// The width a value is read at, in the widest the domain can describe.
 ///
 /// A vector register is wider than the domain's `u64`, and a value described
@@ -207,20 +254,7 @@ fn transfer(
             .map(|value| lookup(*value))
             .unwrap_or_else(|| StridedInterval::top(width))
     };
-    let at_width = |range: StridedInterval| -> StridedInterval {
-        match range.width_bits() == width {
-            true => range,
-            // A value read at a different width keeps its bounds where they
-            // fit and is otherwise unknown; the narrowing itself is the
-            // `Subpiece` and `IntZExt` cases below.
-            false => match range.bounds() {
-                Some((low, high)) if high <= mask_of(width) => {
-                    StridedInterval::strided(width, range.stride().unwrap_or(1), low, high)
-                }
-                _ => StridedInterval::top(width),
-            },
-        }
-    };
+    let at_width = |range: StridedInterval| read_at(range, width);
 
     let InstPayload::Op(op) = &inst.payload else {
         // A merge is the join of what reaches it, which is the whole reason
@@ -233,18 +267,27 @@ fn transfer(
             .reduce(|left, right| left.join(&right))
             .unwrap_or_else(|| StridedInterval::bottom(width));
     };
+    if bounds_unknown_as_known(graph, inst, op) {
+        return StridedInterval::top(width);
+    }
+    // A shift by more than `u32` holds is still past every width.
+    let places = |index: usize| {
+        input(index)
+            .as_constant()
+            .map(|places| u32::try_from(places).unwrap_or(u32::MAX))
+    };
 
     match op {
         SSAOp::Copy { .. } | SSAOp::CallRestore { .. } => at_width(input(0)),
         SSAOp::IntAdd { .. } => at_width(input(0)).add(&at_width(input(1))),
         SSAOp::IntSub { .. } => at_width(input(0)).sub(&at_width(input(1))),
         SSAOp::IntMult { .. } => at_width(input(0)).mul(&at_width(input(1))),
-        SSAOp::IntLeft { .. } => match input(1).as_constant() {
-            Some(places) => at_width(input(0)).shl(places as u32),
+        SSAOp::IntLeft { .. } => match places(1) {
+            Some(places) => at_width(input(0)).shl(places),
             None => StridedInterval::top(width),
         },
-        SSAOp::IntRight { .. } => match input(1).as_constant() {
-            Some(places) => at_width(input(0)).shr(places as u32),
+        SSAOp::IntRight { .. } => match places(1) {
+            Some(places) => at_width(input(0)).shr(places),
             None => StridedInterval::top(width),
         },
         SSAOp::IntAnd { .. } => match input(1).as_constant() {
@@ -258,7 +301,16 @@ fn transfer(
         SSAOp::IntDiv { .. } => at_width(input(0)).div(&at_width(input(1))),
         // Zero extension keeps the value and changes only the width it is
         // read at, which the bounds already say.
-        SSAOp::IntZExt { .. } | SSAOp::Subpiece { .. } => at_width(input(0)),
+        SSAOp::IntZExt { .. } => at_width(input(0)),
+        // A piece is the source shifted down past `offset` bytes, then read at the narrower width.
+        SSAOp::Subpiece { offset, .. } => {
+            let source = input(0);
+            let unknown = source.is_top() && inst.inputs.first().is_some_and(|v| wide(graph, *v));
+            match unknown {
+                true => StridedInterval::top(width),
+                false => at_width(source.shr(offset.saturating_mul(8))),
+            }
+        }
         // A selection is one arm or the other, and its condition says which.
         //
         // `csel x16, x16, xzr, ls` after `cmp x16, 0x5b` is how a compiler
@@ -271,21 +323,48 @@ fn transfer(
             arm(1).join(&arm(2))
         }
         // A comparison is nought or one, whatever it compares.
-        SSAOp::IntEqual { .. }
-        | SSAOp::IntNotEqual { .. }
-        | SSAOp::IntLess { .. }
-        | SSAOp::IntSLess { .. }
-        | SSAOp::IntLessEqual { .. }
-        | SSAOp::IntSLessEqual { .. }
-        | SSAOp::IntCarry { .. }
-        | SSAOp::IntSCarry { .. }
-        | SSAOp::IntSBorrow { .. }
-        | SSAOp::BoolAnd { .. }
-        | SSAOp::BoolOr { .. }
-        | SSAOp::BoolXor { .. }
-        | SSAOp::BoolNot { .. } => StridedInterval::interval(width, 0, 1),
+        op if comparison_kind(op).is_some() || is_flag(op) => {
+            StridedInterval::interval(width, 0, 1)
+        }
         _ => StridedInterval::top(width),
     }
+}
+
+/// A value read at a width other than its own keeps its bounds where they fit and is otherwise unknown.
+fn read_at(range: StridedInterval, width: u32) -> StridedInterval {
+    match range.bounds() {
+        _ if range.width_bits() == width => range,
+        Some((low, high)) if high <= mask_of(width) => {
+            StridedInterval::strided(width, range.stride().unwrap_or(1), low, high)
+        }
+        _ => StridedInterval::top(width),
+    }
+}
+
+/// Whether an operation's transfer would read an unknown value past sixty-four bits as below `2^64`.
+fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> bool {
+    inst.output.is_some_and(|output| wide(graph, output))
+        && matches!(
+            op,
+            SSAOp::IntLeft { .. }
+                | SSAOp::IntRight { .. }
+                | SSAOp::IntDiv { .. }
+                | SSAOp::Select(_)
+        )
+}
+
+/// A carry, borrow or boolean operation, which yields a flag.
+fn is_flag(op: &SSAOp) -> bool {
+    matches!(
+        op,
+        SSAOp::IntCarry { .. }
+            | SSAOp::IntSCarry { .. }
+            | SSAOp::IntSBorrow { .. }
+            | SSAOp::BoolAnd { .. }
+            | SSAOp::BoolOr { .. }
+            | SSAOp::BoolXor { .. }
+            | SSAOp::BoolNot { .. }
+    )
 }
 
 const fn mask_of(width_bits: u32) -> u64 {
@@ -300,8 +379,22 @@ const fn mask_of(width_bits: u32) -> u64 {
 /// Walked down the dominator tree so a block starts from everything its
 /// dominators proved and adds its own, which is the same set a walk up the
 /// chain from each instruction would gather, gathered once.
+///
+/// An assumption filed under `B` by the edge `P -> B` holds at `B` only when
+/// that edge dominates `B`: `B` is not the entry, which is also entered by the
+/// call, and `B` dominates every other predecessor it has. Otherwise `B` is
+/// reached by a path that never took the branch, as a merge is.
+///
+/// The lemma that makes inheritance sound: if `def(v)` dominates `P` and the
+/// edge `P -> B` dominates `B`, then at every `C` that `B` dominates, the live
+/// instance of `v` is the one tested on the last traversal of `P -> B`. A path
+/// from a later `def(v)` to `C` that avoids `P -> B`, joined to an
+/// entry-to-`def(v)` path that avoids `B`, would reach `B` for the first time
+/// without `P -> B`. Such a prefix exists because `B` cannot dominate `def(v)`,
+/// or it would dominate `P` and never be entered first through `P -> B`.
 fn assumptions_by_block(
     function: &crate::SSAFunction,
+    graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
     state: &[StridedInterval],
 ) -> BTreeMap<u64, BTreeMap<ValueId, StridedInterval>> {
@@ -309,6 +402,15 @@ fn assumptions_by_block(
         return BTreeMap::new();
     }
     let domtree = function.domtree();
+    let reachable = |block: u64| block == domtree.entry || domtree.idom(block).is_some();
+    let edge_dominates = |predecessor: u64, block: u64| {
+        block != domtree.entry
+            && function
+                .predecessors(block)
+                .into_iter()
+                .filter(|other| *other != predecessor && reachable(*other))
+                .all(|other| function.dominates(block, other))
+    };
     let mut by_block = BTreeMap::<u64, BTreeMap<ValueId, StridedInterval>>::new();
     let mut ready = vec![domtree.entry];
     while let Some(addr) = ready.pop() {
@@ -326,6 +428,11 @@ fn assumptions_by_block(
             let Some(fact) = predicates.predicates.get(&assumption.predicate) else {
                 continue;
             };
+            if fact.true_target == fact.false_target
+                || !edge_dominates(assumption.predecessor, addr)
+            {
+                continue;
+            }
             let Some(compare) = fact
                 .comparison
                 .as_ref()
@@ -333,11 +440,7 @@ fn assumptions_by_block(
             else {
                 continue;
             };
-            for side in [compare.lhs, compare.rhs] {
-                if let Some(now) = narrowed_side(&held, state, compare, assumption.truth, side) {
-                    held.insert(side, now);
-                }
-            }
+            assume(&mut held, graph, state, compare, assumption.truth);
         }
         if !held.is_empty() {
             by_block.insert(addr, held);
@@ -347,11 +450,24 @@ fn assumptions_by_block(
     by_block
 }
 
-/// One comparison's effect on one side of it.
-///
-/// A comparison that does not hold is the mirror of the one that does --
-/// `!(a < b)` is `b <= a` -- so the false case is taken by turning the
-/// comparison round rather than by four more arms saying the same thing.
+/// Narrow what a block holds by one comparison, taken the way `truth` says.
+fn assume(
+    held: &mut BTreeMap<ValueId, StridedInterval>,
+    graph: &SsaGraph,
+    state: &[StridedInterval],
+    compare: &crate::semantic::CompareProvenance,
+    truth: bool,
+) {
+    for side in [compare.lhs, compare.rhs] {
+        let now = (!wide(graph, side))
+            .then(|| narrowed_side(held, state, compare, truth, side))
+            .flatten();
+        if let Some(now) = now {
+            held.insert(side, now);
+        }
+    }
+}
+
 /// One arm of a select, under what its condition proves on that arm.
 ///
 /// A select is the one place a condition bounds a value with no path
@@ -401,6 +517,11 @@ fn narrowed_side(
     (now != was).then_some(now)
 }
 
+/// One comparison's effect on one side of it.
+///
+/// A comparison that does not hold is the mirror of the one that does --
+/// `!(a < b)` is `b <= a` -- so the false case is taken by turning the
+/// comparison round rather than by four more arms saying the same thing.
 fn narrow(
     known: &dyn Fn(ValueId) -> Option<StridedInterval>,
     range: StridedInterval,
@@ -441,7 +562,8 @@ fn narrow(
         Some(limit) => range.meet(&StridedInterval::interval(width, 0, limit)),
         None => StridedInterval::bottom(width),
     };
-    let above = |limit: Option<u64>| match limit {
+    // A limit past the width's end admits nothing, where masking it would admit everything.
+    let above = |limit: Option<u64>| match limit.filter(|limit| *limit <= ceiling) {
         Some(limit) => range.meet(&StridedInterval::interval(width, limit, ceiling)),
         None => StridedInterval::bottom(width),
     };
@@ -462,12 +584,21 @@ fn comparison_of(
     graph: &SsaGraph,
     condition: ValueId,
 ) -> Option<crate::semantic::CompareProvenance> {
-    use crate::semantic::CompareKind;
     let inst = graph.inst(graph.def_inst(condition)?)?;
     let InstPayload::Op(op) = &inst.payload else {
         return None;
     };
-    let kind = match op {
+    Some(crate::semantic::CompareProvenance {
+        kind: comparison_kind(op)?,
+        lhs: *inst.inputs.first()?,
+        rhs: *inst.inputs.get(1)?,
+    })
+}
+
+/// Which comparison an operation is, where it is one.
+fn comparison_kind(op: &SSAOp) -> Option<crate::semantic::CompareKind> {
+    use crate::semantic::CompareKind;
+    Some(match op {
         SSAOp::IntEqual { .. } => CompareKind::Equal,
         SSAOp::IntNotEqual { .. } => CompareKind::NotEqual,
         SSAOp::IntLess { .. } => CompareKind::Less,
@@ -475,11 +606,6 @@ fn comparison_of(
         SSAOp::IntSLess { .. } => CompareKind::SignedLess,
         SSAOp::IntSLessEqual { .. } => CompareKind::SignedLessEqual,
         _ => return None,
-    };
-    Some(crate::semantic::CompareProvenance {
-        kind,
-        lhs: *inst.inputs.first()?,
-        rhs: *inst.inputs.get(1)?,
     })
 }
 
@@ -518,7 +644,7 @@ fn narrow_where_defined(
     predicates: &crate::semantic::PredicateFacts,
     state: &mut [StridedInterval],
 ) {
-    let assumed = assumptions_by_block(function, predicates, state);
+    let assumed = assumptions_by_block(function, graph, predicates, state);
     if assumed.is_empty() {
         return;
     }
@@ -564,15 +690,15 @@ fn narrow_where_defined(
             continue;
         }
         state[output.0 as usize] = now;
-        for site in graph.use_sites(output) {
-            let Some(user) = graph.inst(site.inst) else {
+        for reader in readers(graph, output) {
+            let Some(user) = graph.inst(reader) else {
                 continue;
             };
             if matches!(user.payload, InstPayload::Phi { .. }) {
                 continue;
             }
-            if queued.insert(site.inst) {
-                ready.push_back(site.inst);
+            if queued.insert(reader) {
+                ready.push_back(reader);
             }
         }
     }
@@ -593,13 +719,30 @@ mod tests {
         SSAVar::constant(value, size)
     }
 
-    fn solve_over(blocks: &[SSABlock], cfg: CFG, widen_at: &[u64]) -> (ValueRanges, SsaGraph) {
+    fn solve_over(blocks: &[SSABlock], cfg: CFG) -> (ValueRanges, SsaGraph) {
+        let (ranges, graph, _) = solve_counting(blocks, cfg);
+        (ranges, graph)
+    }
+
+    fn solve_counting(blocks: &[SSABlock], cfg: CFG) -> (ValueRanges, SsaGraph, usize) {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg);
         let graph = SsaGraph::from_function(&function);
-        let widen = widen_at.iter().copied().collect::<BTreeSet<_>>();
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let ranges = solve_value_ranges(&graph, &function, &predicates, &widen);
-        (ranges, graph)
+        let (ranges, transfers) = solve_counted(&graph, &function, &predicates);
+        (ranges, graph, transfers)
+    }
+
+    /// A graph from each block's terminator.
+    fn cfg_of(entry: u64, shape: &[(u64, BlockTerminator)]) -> CFG {
+        let mut cfg = CFG::new(entry);
+        for (addr, terminator) in shape {
+            let mut basic = BasicBlock::new(*addr);
+            basic.size = 16;
+            basic.terminator = terminator.clone();
+            cfg.add_block(basic);
+        }
+        cfg.rebuild_edges();
+        cfg
     }
 
     fn straight_line(block: SSABlock) -> CFG {
@@ -627,7 +770,7 @@ mod tests {
             b: constant(6, 4),
         });
         let cfg = straight_line(block.clone());
-        let (ranges, graph) = solve_over(&[block], cfg, &[]);
+        let (ranges, graph) = solve_over(&[block], cfg);
         assert_eq!(range_of(&ranges, &graph, &sum).as_constant(), Some(10));
     }
 
@@ -648,7 +791,7 @@ mod tests {
             b: constant(4, 4),
         });
         let cfg = straight_line(block.clone());
-        let (ranges, graph) = solve_over(&[block], cfg, &[]);
+        let (ranges, graph) = solve_over(&[block], cfg);
 
         let index_range = range_of(&ranges, &graph, &index);
         assert_eq!(index_range.bounds(), Some((0, 7)));
@@ -704,7 +847,7 @@ mod tests {
         cfg.rebuild_edges();
 
         let blocks = [head, left_block, right_block, merge_block];
-        let (ranges, graph) = solve_over(&blocks, cfg, &[]);
+        let (ranges, graph) = solve_over(&blocks, cfg);
         let joined = range_of(&ranges, &graph, &merged);
         assert!(joined.contains(3), "{joined:?}");
         assert!(joined.contains(7), "{joined:?}");
@@ -752,10 +895,147 @@ mod tests {
         cfg.rebuild_edges();
 
         let blocks = [head, header_block];
-        let (ranges, graph) = solve_over(&blocks, cfg, &[header]);
+        let (ranges, graph) = solve_over(&blocks, cfg);
         let range = range_of(&ranges, &graph, &counter);
         assert!(range.contains(0), "the counter starts at nought: {range:?}");
         assert!(range.contains(1), "and is stepped: {range:?}");
+    }
+
+    #[test]
+    fn a_value_wider_than_the_domain_is_never_read_as_below_its_edge() {
+        // `div rcx` divides rdx:rax, a 128-bit dividend nothing bounds, so its quotient is not below 2^63.
+        let dividend = var("tmp", 0, 16);
+        let (divisor, quotient) = (var("divisor", 1, 16), var("quotient", 1, 16));
+        let (low, high) = (var("low", 1, 8), var("high", 1, 8));
+        let mut block = SSABlock::new(0x1000, 8);
+        block.ops.push(crate::op::SSAOp::IntZExt {
+            dst: divisor.clone(),
+            src: constant(2, 8),
+        });
+        block.ops.push(crate::op::SSAOp::IntDiv {
+            dst: quotient.clone(),
+            a: dividend.clone(),
+            b: divisor,
+        });
+        block.ops.push(crate::op::SSAOp::Subpiece {
+            dst: low.clone(),
+            src: quotient,
+            offset: 0,
+        });
+        // The high half of an unknown value is unknown, not the nought a shift past sixty-four bits gives.
+        block.ops.push(crate::op::SSAOp::Subpiece {
+            dst: high.clone(),
+            src: dividend,
+            offset: 8,
+        });
+        let cfg = straight_line(block.clone());
+        let (ranges, graph) = solve_over(&[block], cfg);
+        assert!(range_of(&ranges, &graph, &low).contains(1 << 63));
+        assert!(range_of(&ranges, &graph, &high).contains(5));
+    }
+
+    #[test]
+    fn an_edge_into_a_merge_narrows_nothing_there() {
+        // c = x <u 10; if c goto T else M; T: goto M; M: y = x -- T enters M with x < 10.
+        let (entry, taken, merge) = (0x1000, 0x1010, 0x1020);
+        let (x, below, y) = (var("x", 0, 4), var("below", 1, 1), var("y", 1, 4));
+        let mut head = SSABlock::new(entry, 16);
+        head.ops.push(crate::op::SSAOp::IntLess {
+            dst: below.clone(),
+            a: x.clone(),
+            b: constant(10, 4),
+        });
+        head.ops.push(crate::op::SSAOp::CBranch {
+            target: constant(taken, 8),
+            cond: below,
+        });
+        let mut merge_block = SSABlock::new(merge, 16);
+        merge_block.ops.push(crate::op::SSAOp::Copy {
+            dst: y.clone(),
+            src: x,
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: taken,
+                        false_target: merge,
+                    },
+                ),
+                (taken, BlockTerminator::Branch { target: merge }),
+                (merge, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, SSABlock::new(taken, 16), merge_block];
+        let (ranges, graph) = solve_over(&blocks, cfg);
+        let copied = range_of(&ranges, &graph, &y);
+        assert!(copied.contains(5), "{copied:?}");
+    }
+
+    #[test]
+    fn an_irreducible_counter_widens_and_settles() {
+        // entry -> A | B, A -> B, B -> A: neither A nor B dominates the other, so neither is a natural loop header.
+        let (entry, a, b) = (0x1000, 0x1010, 0x1020);
+        let (at_a, from_a) = (var("i", 1, 4), var("i", 2, 4));
+        let (at_b, from_b) = (var("i", 3, 4), var("i", 4, 4));
+        let choice = var("choice", 1, 1);
+        let mut head = SSABlock::new(entry, 16);
+        head.ops.push(crate::op::SSAOp::IntLess {
+            dst: choice.clone(),
+            a: var("arg", 0, 4),
+            b: constant(5, 4),
+        });
+        head.ops.push(crate::op::SSAOp::CBranch {
+            target: constant(a, 8),
+            cond: choice,
+        });
+        let counted = |addr: u64, phi: &SSAVar, stepped: &SSAVar, back: (u64, &SSAVar)| {
+            let mut block = SSABlock::new(addr, 16);
+            block.phis.push(PhiNode {
+                dst: phi.clone(),
+                sources: vec![(entry, constant(0, 4)), (back.0, back.1.clone())],
+                canonical_storage: None,
+            });
+            block.ops.push(crate::op::SSAOp::IntAdd {
+                dst: stepped.clone(),
+                a: phi.clone(),
+                b: constant(1, 4),
+            });
+            block
+        };
+        let blocks = [
+            head,
+            counted(a, &at_a, &from_a, (b, &from_b)),
+            counted(b, &at_b, &from_b, (a, &from_a)),
+        ];
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: a,
+                        false_target: b,
+                    },
+                ),
+                (a, BlockTerminator::Branch { target: b }),
+                (b, BlockTerminator::Branch { target: a }),
+            ],
+        );
+        let (ranges, graph, transfers) = solve_counting(&blocks, cfg);
+        let size = graph.insts.len()
+            + graph
+                .values
+                .iter()
+                .map(|value| graph.use_sites(value.id).len())
+                .sum::<usize>();
+        assert!(transfers <= 64 * size, "{transfers} transfers over {size}");
+        for counter in [&at_a, &at_b] {
+            let range = range_of(&ranges, &graph, counter);
+            assert!(range.contains(0) && range.contains(7), "{range:?}");
+        }
     }
 
     #[test]
@@ -823,7 +1103,7 @@ mod tests {
         cfg.rebuild_edges();
 
         let blocks = [head, header_block, body_block, latch_block, exit_block];
-        let (ranges, graph) = solve_over(&blocks, cfg, &[header]);
+        let (ranges, graph) = solve_over(&blocks, cfg);
         let scaled = range_of(&ranges, &graph, &offset);
         assert_eq!(scaled.bounds(), Some((0, 28)), "{scaled:?}");
         assert_eq!(scaled.stride(), Some(4), "{scaled:?}");

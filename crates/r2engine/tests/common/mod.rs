@@ -208,6 +208,25 @@ impl Literal {
         }
     }
 
+    /// An x86-64 program of one run of code at `BASE`, stating each `(name, vaddr, size)` as a function.
+    pub fn of_code(code: &'static [u8], functions: &[(&str, u64, u64)]) -> Self {
+        let mut program = Self::new();
+        program.code = code;
+        program.container.sections[0].vsize = code.len() as u64;
+        program.container.symbols = functions
+            .iter()
+            .map(|(name, vaddr, size)| Symbol {
+                name: (*name).to_owned(),
+                vaddr: *vaddr,
+                size: *size,
+                kind: SymbolKind::Function,
+                defined: true,
+                thumb: false,
+            })
+            .collect();
+        program
+    }
+
     /// A little-endian ARM program: a stated ARM function that calls into
     /// Thumb code nothing states, and a stated veneer that switches to ARM.
     pub fn arm_thumb() -> Self {

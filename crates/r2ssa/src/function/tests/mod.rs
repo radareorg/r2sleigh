@@ -22,8 +22,7 @@ fn advisory_call_site(
 fn test_switch_selector(function: &SSAFunction, block_addr: u64) -> String {
     let graph = crate::graph::SsaGraph::from_function(function);
     let predicates = crate::semantic::collect_predicate_facts_for_test(function, &graph);
-    let values =
-        crate::values::solve_value_ranges(&graph, function, &predicates, &Default::default());
+    let values = crate::values::solve_value_ranges(&graph, function, &predicates);
     let selector = crate::indirect::dispatch_selectors(function, &graph, &values)
         .remove(&block_addr)
         .expect("the analysis names a selector");

@@ -6,9 +6,12 @@
 //! loads from folds to a constant. Each was answered by its own walk over the
 //! same operations, so this is that walk, once, with a name.
 //!
-//! The pass is `O(n log s)` for `n` operations and `s` distinct storages.
-//! An operation this pass does not model clears its destination, so an older
-//! origin can never survive a clobber and become false evidence.
+//! The pass is `O(n log s + k)` for `n` operations, `s` tracked storages and
+//! `k` storages killed. A write forgets every tracked storage sharing a byte
+//! with it, and a call forgets every register and temporary, so an origin maps
+//! a storage only while no byte of it has been written since and no call has
+//! intervened: an older origin can never survive a clobber and become false
+//! evidence.
 
 use crate::{CanonicalStorageId, CanonicalStorageSpace};
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
@@ -63,6 +66,7 @@ pub fn encoded_target(target: &Varnode) -> Option<u64> {
 /// What every storage holds at one point in a block.
 #[derive(Debug, Default, Clone)]
 pub struct BlockOrigins {
+    /// Keyed by `(space, offset, size)`; no two tracked storages share a byte.
     origins: BTreeMap<CanonicalStorageId, ValueOrigin>,
 }
 
@@ -102,18 +106,65 @@ impl BlockOrigins {
 
     /// Apply one operation, so the state describes the point just after it.
     pub fn step(&mut self, op: &R2ILOp) {
+        if matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }) {
+            // A callee may write any register; RAM is read by `of` directly and is never tracked.
+            self.origins.clear();
+            return;
+        }
         let Some(output) = op.output() else {
             return;
         };
         let storage = CanonicalStorageId::from_varnode(output);
-        match self.after(op) {
-            Some(origin) => self.origins.insert(storage, origin),
-            None => self.origins.remove(&storage),
-        };
+        let origin = self.after(op);
+        self.forget_overlapping(storage);
+        if let Some(origin) = origin
+            && storage.size != 0
+            && storage.space != CanonicalStorageSpace::Ram
+        {
+            self.origins.insert(storage, origin);
+        }
+    }
+
+    /// Forget every tracked storage sharing a byte with a written one.
+    ///
+    /// Tracked storages never overlap, so at most one starts below the write
+    /// and reaches into it, and the rest start inside it: one step back and a
+    /// run forward over the ordered map, `O(log s + k)`.
+    fn forget_overlapping(&mut self, written: CanonicalStorageId) {
+        let end =
+            |storage: &CanonicalStorageId| u128::from(storage.offset) + u128::from(storage.size);
+        let from = CanonicalStorageId { size: 0, ..written };
+        let below = self
+            .origins
+            .range(..from)
+            .next_back()
+            .map(|(storage, _)| *storage)
+            .filter(|storage| {
+                storage.space == written.space && end(storage) > u128::from(written.offset)
+            });
+        let inside = self
+            .origins
+            .range(from..)
+            .map(|(storage, _)| *storage)
+            .take_while(|storage| {
+                storage.space == written.space && u128::from(storage.offset) < end(&written)
+            })
+            .collect::<Vec<_>>();
+        for storage in below.into_iter().chain(inside) {
+            self.origins.remove(&storage);
+        }
+    }
+
+    /// Apply one operation where a call writes only `clobbered`, as its convention says.
+    pub fn step_under(&mut self, op: &R2ILOp, clobbered: &[CanonicalStorageId]) {
+        match op {
+            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => self.forget(clobbered),
+            _ => self.step(op),
+        }
     }
 
     /// Forget whatever any of these storages held, as a call leaves them undefined.
-    pub fn forget(&mut self, storages: &[CanonicalStorageId]) {
+    fn forget(&mut self, storages: &[CanonicalStorageId]) {
         self.origins.retain(|held, _| {
             !storages.iter().any(|storage| {
                 storage.space == held.space
@@ -298,6 +349,80 @@ mod tests {
         // Any other mask computes a different number, not the slot's contents.
         assert_eq!(masked(Varnode::constant(0x7fff_ffff, 4)), None);
         assert_eq!(masked(Varnode::register(16, 4)), None);
+    }
+
+    #[test]
+    fn a_partial_write_kills_the_wider_origin() {
+        let (wide, low_byte) = (Varnode::register(0, 8), Varnode::register(0, 1));
+        let origins = BlockOrigins::of_block(&block(vec![
+            R2ILOp::Copy {
+                dst: wide.clone(),
+                src: Varnode::constant(0x1000, 8),
+            },
+            R2ILOp::Copy {
+                dst: low_byte.clone(),
+                src: Varnode::constant(5, 1),
+            },
+        ]));
+        assert_eq!(origins.of(&wide), None);
+        assert_eq!(
+            origins.of(&low_byte).and_then(ValueOrigin::constant),
+            Some(5)
+        );
+        // A write that reaches into a storage from below kills it too.
+        let high_half = Varnode::register(4, 4);
+        let straddled = BlockOrigins::of_block(&block(vec![
+            R2ILOp::Copy {
+                dst: high_half.clone(),
+                src: Varnode::constant(7, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(2, 4),
+                src: Varnode::constant(9, 4),
+            },
+        ]));
+        assert_eq!(straddled.of(&high_half), None);
+    }
+
+    #[test]
+    fn a_call_clears_a_register_origin() {
+        let scratch = Varnode::register(0, 8);
+        let origins = BlockOrigins::of_block(&block(vec![
+            R2ILOp::Copy {
+                dst: scratch.clone(),
+                src: Varnode::constant(0x1000, 8),
+            },
+            R2ILOp::Call {
+                target: Varnode::constant(0x2000, 8),
+            },
+        ]));
+        assert_eq!(origins.of(&scratch), None);
+    }
+
+    #[test]
+    fn a_jump_through_a_clobbered_address_names_no_slot() {
+        // mov rax, 0x1000; mov al, 5; jmp [rax]: the jump reads 0x1005's slot, not 0x1000's.
+        let (address, target) = (Varnode::register(0, 8), Varnode::unique(0x100, 8));
+        let block = block(vec![
+            R2ILOp::Copy {
+                dst: address.clone(),
+                src: Varnode::constant(0x1000, 8),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(0, 1),
+                src: Varnode::constant(5, 1),
+            },
+            R2ILOp::Load {
+                dst: target.clone(),
+                space: SpaceId::Ram,
+                addr: address,
+            },
+            R2ILOp::BranchInd { target },
+        ]);
+        assert_eq!(
+            crate::machine_context::terminal_indirect_loaded_slot(&block, 3),
+            None
+        );
     }
 
     #[test]

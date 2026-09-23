@@ -431,8 +431,7 @@ mod tests {
         // The dispatch is resolved from what the address can be, so the test
         // solves for that exactly as the analysis phase does.
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let values =
-            crate::values::solve_value_ranges(&graph, &function, &predicates, &Default::default());
+        let values = crate::values::solve_value_ranges(&graph, &function, &predicates);
         dispatch_table_reads_in_graph(&function, &graph, &values)
     }
 

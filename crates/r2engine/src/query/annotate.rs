@@ -215,11 +215,8 @@ fn named_by(
                 touched.push((kind, alone.contains(&kind)));
             }
         }
-        carried.step(op);
-        own.step(op);
-        if matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }) {
-            carried.forget(clobbered);
-        }
+        carried.step_under(op, clobbered);
+        own.step_under(op, clobbered);
     }
     // A number the instruction only copies from a register it read was computed where that was.
     let copied = lift

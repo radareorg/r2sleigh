@@ -77,16 +77,10 @@ impl StridedInterval {
         if low > high {
             return Self::bottom(width_bits);
         }
-        if low == high {
+        if low == high || stride == 0 {
             return Self::constant(width_bits, low);
         }
-        let stride = match stride {
-            0 => return Self::constant(width_bits, low),
-            stride => stride & mask,
-        };
-        if stride == 0 {
-            return Self::constant(width_bits, low);
-        }
+        // A stride past the span reaches only `low`; masking it would invent a finer one.
         let span = high - low;
         let high = low + span - span % stride;
         match low == high {
@@ -189,33 +183,46 @@ impl StridedInterval {
     /// by their least common multiple. Solving that is what keeps a meet of
     /// the even numbers and the odd ones empty, which a bounds-only meet
     /// cannot say and a switch recovery would believe.
+    ///
+    /// The common values are solved for, not searched: `O(log stride)`.
     pub fn meet(&self, other: &Self) -> Self {
         debug_assert_eq!(self.width_bits, other.width_bits);
+        let width = self.width_bits;
         let (Some(left), Some(right)) = (self.body, other.body) else {
-            return Self::bottom(self.width_bits);
+            return Self::bottom(width);
         };
-        let low = left.low.max(right.low);
-        let high = left.high.min(right.high);
+        let (low, high) = (left.low.max(right.low), left.high.min(right.high));
         if low > high {
-            return Self::bottom(self.width_bits);
+            return Self::bottom(width);
         }
-        let (left_stride, right_stride) = (left.stride.max(1), right.stride.max(1));
-        let Some((first, stride)) =
-            common_progression((left.low, left_stride), (right.low, right_stride), low)
-        else {
-            return Self::bottom(self.width_bits);
+        let Some((first, step)) = common_progression(
+            (left.low, left.stride.max(1)),
+            (right.low, right.stride.max(1)),
+            low,
+        ) else {
+            return Self::bottom(width);
         };
-        match first > high {
-            true => Self::bottom(self.width_bits),
-            false => Self::strided(self.width_bits, stride, first, high),
+        let high = u128::from(high);
+        match (first > high, step > high.saturating_sub(first)) {
+            (true, _) => Self::bottom(width),
+            // One common value in range: the next is past `high`, perhaps past `u64` itself.
+            (false, true) => Self::constant(width, first as u64),
+            (false, false) => Self::strided(width, step as u64, first as u64, high as u64),
         }
     }
 
     /// Jump to a bound rather than climbing to it.
     ///
     /// Used where a fixpoint would otherwise ascend one loop iteration at a
-    /// time: a bound that grew goes to the extreme of the width, and one that
-    /// did not is kept. This is what makes the fixpoint terminate.
+    /// time. The stride is the join's, `s = gcd(old, new, |old.low - new.low|)`,
+    /// so every value of both lies on it. A low that fell drops to its residue
+    /// modulo `s`, the least value that stride reaches; a high that grew rises
+    /// to the last value below the width's end that it reaches. Both keep the
+    /// residue, so nothing either side held is lost.
+    ///
+    /// This is what makes the fixpoint terminate: once widened, a bound moves
+    /// again only when the stride shrinks, and a stride can only shrink to a
+    /// proper divisor, at most sixty-four times.
     pub fn widen(&self, next: &Self) -> Self {
         debug_assert_eq!(self.width_bits, next.width_bits);
         let (Some(old), Some(new)) = (self.body, next.body) else {
@@ -225,15 +232,15 @@ impl StridedInterval {
             };
         };
         let mask = Self::mask_for(self.width_bits);
+        let stride = gcd(gcd(old.stride, new.stride), old.low.abs_diff(new.low)).max(1);
         let low = match new.low < old.low {
-            true => 0,
+            true => new.low % stride,
             false => old.low,
         };
         let high = match new.high > old.high {
-            true => mask,
+            true => mask - (mask - low) % stride,
             false => old.high,
         };
-        let stride = gcd(old.stride, new.stride).max(1);
         Self::strided(self.width_bits, stride, low, high)
     }
 
@@ -317,12 +324,8 @@ impl StridedInterval {
     pub fn and_mask(&self, mask: u64) -> Self {
         let width_mask = Self::mask_for(self.width_bits);
         let mask = mask & width_mask;
-        if mask == width_mask {
-            return *self;
-        }
-        // A mask of every low bit bounds the result without saying more.
-        match mask.checked_add(1).is_some_and(u64::is_power_of_two) {
-            true => Self::interval(self.width_bits, 0, mask),
+        match mask == width_mask {
+            true => *self,
             false => Self::interval(self.width_bits, 0, mask),
         }
     }
@@ -336,6 +339,11 @@ impl StridedInterval {
     }
 
     /// A logical right shift divides, and divides the stride with it.
+    ///
+    /// The stride survives only when `2^places` divides it: adding a multiple
+    /// of `2^places` never carries into the bits the shift keeps. Any other
+    /// stride lets the dropped bits carry, so `{1, 11, 21} >> 2` is
+    /// `{0, 2, 5}` and only a unit stride holds it.
     pub fn shr(&self, places: u32) -> Self {
         if places >= self.width_bits.min(Self::MAX_WIDTH_BITS) {
             return Self::constant(self.width_bits, 0);
@@ -343,9 +351,9 @@ impl StridedInterval {
         let Some(body) = self.body else {
             return Self::bottom(self.width_bits);
         };
-        let stride = match body.stride >> places {
-            0 => 1,
-            stride => stride,
+        let stride = match body.stride.trailing_zeros() >= places {
+            true => (body.stride >> places).max(1),
+            false => 1,
         };
         self.bounded(stride, body.low >> places, body.high >> places)
     }
@@ -399,33 +407,44 @@ impl StridedInterval {
 }
 
 /// The first value at or above `from` that both progressions reach, and the
-/// step between such values.
+/// step between such values, their least common multiple.
 ///
-/// `None` where they never coincide, which is the whole point: two strides
-/// that start out of phase share nothing.
-fn common_progression(left: (u64, u64), right: (u64, u64), from: u64) -> Option<(u64, u64)> {
-    let (left_start, left_stride) = (i128::from(left.0), i128::from(left.1));
-    let (right_start, right_stride) = (i128::from(right.0), i128::from(right.1));
-    let step = gcd(left.1, right.1);
-    let difference = right_start - left_start;
-    if difference % i128::from(step) != 0 {
+/// `x ≡ l1 (mod s1)` and `x ≡ l2 (mod s2)` have a common solution exactly when
+/// `gcd(s1, s2)` divides `l2 - l1` (the Chinese remainder theorem), so this
+/// is `None` where two strides start out of phase. The arithmetic is in
+/// `u128`, where a multiple of two `u64` strides always fits.
+fn common_progression(left: (u64, u64), right: (u64, u64), from: u64) -> Option<(u128, u128)> {
+    let ((left_start, left_stride), (right_start, right_stride)) = (left, right);
+    let divisor = gcd(left_stride, right_stride);
+    let difference = i128::from(right_start) - i128::from(left_start);
+    if difference % i128::from(divisor) != 0 {
         return None;
     }
-    let combined = lcm(left.1, right.1)?;
-    // Step from the later start until both progressions agree. The search is
-    // bounded by the combined stride, because the pattern repeats there.
-    let bound = i128::from(combined);
-    let mut candidate = i128::from(from);
-    let limit = candidate + bound;
-    while candidate < limit {
-        if (candidate - left_start).rem_euclid(left_stride) == 0
-            && (candidate - right_start).rem_euclid(right_stride) == 0
-        {
-            return u64::try_from(candidate).ok().map(|first| (first, combined));
-        }
-        candidate += 1;
+    // left_start + left_stride·t hits the right progression when (left_stride/g)·t ≡ difference/g mod (right_stride/g).
+    let modulus = right_stride / divisor;
+    let residue = (difference / i128::from(divisor)).rem_euclid(i128::from(modulus)) as u128;
+    let steps = residue * u128::from(inverse(left_stride / divisor, modulus)) % u128::from(modulus);
+    let step = u128::from(left_stride / divisor) * u128::from(right_stride);
+    let solution = u128::from(left_start) + u128::from(left_stride) * steps;
+    let from = u128::from(from);
+    let first = match solution >= from {
+        true => from + (solution - from) % step,
+        false => from + (step - (from - solution) % step) % step,
+    };
+    Some((first, step))
+}
+
+/// The inverse of `value` modulo `modulus`, which the caller made coprime to it.
+fn inverse(value: u64, modulus: u64) -> u64 {
+    let (mut remainder, mut next_remainder) = (i128::from(value % modulus), i128::from(modulus));
+    let (mut coefficient, mut next_coefficient) = (1i128, 0i128);
+    while next_remainder != 0 {
+        let quotient = remainder / next_remainder;
+        (remainder, next_remainder) = (next_remainder, remainder - quotient * next_remainder);
+        (coefficient, next_coefficient) =
+            (next_coefficient, coefficient - quotient * next_coefficient);
     }
-    None
+    coefficient.rem_euclid(i128::from(modulus)) as u64
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
@@ -435,13 +454,10 @@ fn gcd(a: u64, b: u64) -> u64 {
     }
 }
 
-fn lcm(a: u64, b: u64) -> Option<u64> {
-    (a / gcd(a, b)).checked_mul(b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn a_stride_reaches_only_its_own_values() {
@@ -522,6 +538,238 @@ mod tests {
     }
 
     #[test]
+    fn a_low_that_fell_keeps_the_residue_of_what_both_held() {
+        // `4[0, 8]` would drop the ten the old side held.
+        let widened =
+            StridedInterval::constant(32, 10).widen(&StridedInterval::strided(32, 4, 6, 10));
+        assert!(widened.contains(10), "{widened:?}");
+        assert!(widened.contains(6), "{widened:?}");
+    }
+
+    #[test]
+    fn a_shift_that_drops_a_carry_loses_the_stride() {
+        // {1, 11, 21} >> 2 is {0, 2, 5}: no stride of two reaches five.
+        let shifted = StridedInterval::strided(32, 10, 1, 21).shr(2);
+        assert!(shifted.contains(5), "{shifted:?}");
+    }
+
+    #[test]
+    fn strides_whose_common_multiple_leaves_u64_still_share_a_value() {
+        // Coprime strides near 2^32 meet only every 2^65 or so, which u64 cannot hold.
+        let odd = (1u64 << 33) + 1;
+        let left = StridedInterval::strided(64, odd, 5, 5 + 3 * odd);
+        let right = StridedInterval::strided(64, 1 << 32, 5, 5 + (4 << 32));
+        assert_eq!(left.meet(&right), StridedInterval::constant(64, 5));
+    }
+
+    #[test]
+    fn a_meet_solves_for_the_common_value_rather_than_scanning_for_it() {
+        let huge = StridedInterval::strided(64, 1 << 32, 0, 1 << 32);
+        let met = huge.meet(&StridedInterval::interval(64, 1, 1 << 40));
+        assert_eq!(met, StridedInterval::constant(64, 1 << 32));
+    }
+
+    /// Every element of a width, beside the set it describes as a bitmask.
+    fn every_element(width: u32) -> Vec<(StridedInterval, u32)> {
+        let top = (1u64 << width) - 1;
+        let reach = |low: u64, stride: u64, steps: u64| {
+            (0..=steps).fold(0u32, |set, step| set | 1 << (low + step * stride))
+        };
+        let progressions = (0..=top)
+            .flat_map(|low| (1..=top).map(move |stride| (low, stride)))
+            .flat_map(|(low, stride)| {
+                (0..=(top - low) / stride).map(move |steps| (low, stride, steps))
+            })
+            // Nought steps is a constant, listed once rather than once per stride.
+            .filter(|(_, stride, steps)| *steps > 0 || *stride == 1)
+            .map(|(low, stride, steps)| {
+                let high = low + steps * stride;
+                (
+                    StridedInterval::strided(width, stride, low, high),
+                    reach(low, stride, steps),
+                )
+            });
+        std::iter::once((StridedInterval::bottom(width), 0))
+            .chain(progressions)
+            .collect()
+    }
+
+    /// The values a bitmask holds, lowest first.
+    fn members(mut set: u32) -> impl Iterator<Item = u64> {
+        std::iter::from_fn(move || {
+            let value = (set != 0).then(|| u64::from(set.trailing_zeros()))?;
+            set &= set - 1;
+            Some(value)
+        })
+    }
+
+    fn described(element: &StridedInterval) -> u32 {
+        element.values().fold(0, |set, value| set | 1 << value)
+    }
+
+    /// Checks `op(a, b) ∈ γ(abstract(A, B))` for every pair of elements of a width and every pair of their members.
+    fn exhaustively(
+        width: u32,
+        concrete: impl Fn(u64, u64) -> Option<u64>,
+        abstracted: impl Fn(&StridedInterval, &StridedInterval) -> StridedInterval,
+    ) {
+        let all = every_element(width);
+        // What each left value makes of each right element, so a pair costs |A| rather than |A|·|B|.
+        let reached = (0..1u64 << width)
+            .map(|a| {
+                all.iter()
+                    .map(|(_, right)| {
+                        members(*right)
+                            .filter_map(|b| concrete(a, b))
+                            .fold(0u32, |set, value| set | 1 << value)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for (left, left_set) in &all {
+            for (index, (right, _)) in all.iter().enumerate() {
+                let results = members(*left_set).fold(0, |set, a| set | reached[a as usize][index]);
+                let result = abstracted(left, right);
+                let missed = members(results).find(|value| !result.contains(*value));
+                assert_eq!(missed, None, "{left:?} {right:?} -> {result:?}");
+            }
+        }
+    }
+
+    /// Checks `op(a) ∈ γ(abstract(A))` for every element of a width and every member of it.
+    fn exhaustively_unary(
+        width: u32,
+        concrete: impl Fn(u64) -> u64,
+        abstracted: impl Fn(&StridedInterval) -> StridedInterval,
+    ) {
+        for (element, set) in every_element(width) {
+            let result = abstracted(&element);
+            let missed = members(set)
+                .map(&concrete)
+                .find(|value| !result.contains(*value));
+            assert_eq!(missed, None, "{element:?} -> {result:?}");
+        }
+    }
+
+    /// Every operation at one width, against what the machine computes.
+    fn every_operation_at(width: u32) {
+        let mask = (1u64 << width) - 1;
+        exhaustively(width, |a, b| Some((a + b) & mask), |l, r| l.add(r));
+        exhaustively(
+            width,
+            |a, b| Some(a.wrapping_sub(b) & mask),
+            |l, r| l.sub(r),
+        );
+        exhaustively(width, |a, b| Some((a * b) & mask), |l, r| l.mul(r));
+        exhaustively(width, |a, b| a.checked_rem(b), |l, r| l.rem(r));
+        exhaustively(width, |a, b| a.checked_div(b), |l, r| l.div(r));
+        for places in 0..=width + 1 {
+            let kept = |value: u64| if places < width { value & mask } else { 0 };
+            exhaustively_unary(width, |a| kept(a << places.min(63)), |l| l.shl(places));
+            exhaustively_unary(width, |a| kept(a >> places.min(63)), |l| l.shr(places));
+        }
+        for bits in 0..=mask {
+            exhaustively_unary(width, |a| a & bits, |l| l.and_mask(bits));
+        }
+    }
+
+    #[test]
+    fn every_operation_keeps_every_concrete_result_at_small_widths() {
+        (1..=5).for_each(every_operation_at);
+    }
+
+    /// Join and widen hold both sides, and meet is exactly what both hold, at one width.
+    fn every_lattice_operation_at(width: u32) {
+        let all = every_element(width);
+        for (element, set) in &all {
+            assert_eq!(described(element), *set, "{element:?}");
+        }
+        let pairs = all
+            .iter()
+            .flat_map(|left| all.iter().map(move |right| (left, right)));
+        for ((left, left_set), (right, right_set)) in pairs {
+            let both = left_set | right_set;
+            let joined = left.join(right);
+            assert_eq!(described(&joined) & both, both, "{left:?} join {right:?}");
+            let widened = left.widen(right);
+            assert_eq!(described(&widened) & both, both, "{left:?} widen {right:?}");
+            // Two progressions meet in a progression, so the meet is exact.
+            let met = left.meet(right);
+            assert_eq!(
+                described(&met),
+                left_set & right_set,
+                "{left:?} meet {right:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lattice_operations_hold_what_they_promise_at_small_widths() {
+        (1..=5).for_each(every_lattice_operation_at);
+    }
+
+    /// An element of a width and one value it holds, from unconstrained numbers.
+    fn element_and_member(
+        width: u32,
+        (low, stride, span, pick): (u64, u64, u64, u64),
+    ) -> (StridedInterval, u64) {
+        let mask = StridedInterval::top(width).bounds().expect("top").1;
+        let low = low & mask;
+        let element =
+            StridedInterval::strided(width, stride, low, low.saturating_add(span).min(mask));
+        let (low, high) = element.bounds().expect("never bottom");
+        let step = u128::from(element.stride().unwrap_or(1));
+        let count = u128::from(high - low) / step + 1;
+        (
+            element,
+            (u128::from(low) + u128::from(pick) % count * step) as u64,
+        )
+    }
+
+    fn any_element() -> impl Strategy<Value = (u64, u64, u64, u64)> {
+        let stride = prop_oneof![0u64..17, (0u32..64).prop_map(|p| 1u64 << p), any::<u64>()];
+        let span = prop_oneof![0u64..300, any::<u64>()];
+        (any::<u64>(), stride, span, any::<u64>())
+    }
+
+    proptest! {
+        #[test]
+        fn every_operation_keeps_its_concrete_results_at_machine_widths(
+            wide in any::<bool>(),
+            left in any_element(),
+            right in any_element(),
+            places in 0u32..66,
+            bits in any::<u64>(),
+        ) {
+            let width = if wide { 64 } else { 32 };
+            let mask = StridedInterval::top(width).bounds().expect("top").1;
+            let (left, a) = element_and_member(width, left);
+            let (right, b) = element_and_member(width, right);
+            let kept = |value: u64| if places < width { value & mask } else { 0 };
+            let checks = [
+                (left.add(&right), Some(a.wrapping_add(b) & mask)),
+                (left.sub(&right), Some(a.wrapping_sub(b) & mask)),
+                (left.mul(&right), Some(a.wrapping_mul(b) & mask)),
+                (left.rem(&right), a.checked_rem(b)),
+                (left.div(&right), a.checked_div(b)),
+                (left.shl(places), Some(kept(a << places.min(63)))),
+                (left.shr(places), Some(kept(a >> places.min(63)))),
+                (left.and_mask(bits), Some(a & bits & mask)),
+                (left.join(&right), Some(a)),
+                (left.join(&right), Some(b)),
+                (left.widen(&right), Some(a)),
+                (left.widen(&right), Some(b)),
+                (left.meet(&right), right.contains(a).then_some(a)),
+            ];
+            for (result, value) in checks {
+                if let Some(value) = value {
+                    prop_assert!(result.contains(value), "{:?} {:?} -> {:?} misses {}", left, right, result, value);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn multiplying_scales_the_stride_which_is_what_an_index_does() {
         let index = StridedInterval::interval(32, 0, 9);
         let offsets = index.mul(&StridedInterval::constant(32, 4));
@@ -599,5 +847,50 @@ mod tests {
         let some = StridedInterval::interval(32, 3, 7);
         assert_eq!(bottom.join(&some), some);
         assert!(bottom.meet(&some).is_bottom());
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    //! Eight-bit proofs of the operations CBMC settles in a gate's time.
+    //!
+    //! Every `gcd` step and every product of two symbolic strides is a
+    //! sixty-four-bit division or multiplier circuit that it does not; join,
+    //! widen, meet, add, sub, mul and shl are proved exhaustively below six
+    //! bits by the unit tests instead.
+    use super::*;
+
+    /// An eight-bit element and one value it holds.
+    fn any_element() -> (StridedInterval, u64) {
+        let (low, stride, count, pick): (u8, u8, u8, u8) =
+            (kani::any(), kani::any(), kani::any(), kani::any());
+        kani::assume(count >= 1 && pick < count);
+        let high = u64::from(low) + u64::from(stride) * u64::from(count - 1);
+        kani::assume(high <= 0xff);
+        let element = StridedInterval::strided(8, u64::from(stride), u64::from(low), high);
+        (
+            element,
+            u64::from(low) + u64::from(stride) * u64::from(pick),
+        )
+    }
+
+    #[kani::proof]
+    fn eight_bit_shr_keeps_every_concrete_result() {
+        let (element, value) = any_element();
+        let places: u32 = kani::any();
+        kani::assume(places < 10);
+        let shifted = if places < 8 { value >> places } else { 0 };
+        assert!(element.shr(places).contains(shifted));
+    }
+
+    #[kani::proof]
+    fn eight_bit_quotients_and_masks_keep_every_concrete_result() {
+        let ((left, a), (right, b)) = (any_element(), any_element());
+        let mask: u8 = kani::any();
+        assert!(left.and_mask(u64::from(mask)).contains(a & u64::from(mask)));
+        if b != 0 {
+            assert!(left.rem(&right).contains(a % b));
+            assert!(left.div(&right).contains(a / b));
+        }
     }
 }
