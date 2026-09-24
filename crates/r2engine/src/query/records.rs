@@ -116,28 +116,39 @@ pub struct Answered<'a> {
     pub call_effect: Option<&'a r2ssa::SourceCallEffect>,
     /// The function's analysis; absent below `Work::Function`, which is what keeps a listing cheap.
     pub prepared: Option<&'a crate::native::Prepared>,
-    /// The def-use of the body the run is in, which says whether a number it computes is a step.
-    pub fate: Option<&'a DefUse<'a>>,
+    /// The walked body the run is in: its blocks, and the def-use that says whether a number a line computes is a step.
+    pub body: Option<&'a WalkedBody<'a>>,
     /// Whether each line is spelled; the reference index reads only what the lines claim.
     pub spelled: bool,
     /// Which parameters of each callee take an address, where the listing can ask.
     pub parameters: Option<&'a dyn Parameters>,
 }
 
-/// The def-use of one body and every value's fate on it, built the first time a line's fate needs them.
-pub struct DefUse<'a> {
+/// One walked body's blocks, in address order as the walk leaves them, and its def-use and every value's fate, built the first time a line needs them.
+pub struct WalkedBody<'a> {
     built: std::cell::OnceCell<Option<(r2ssa::SsaGraph, Fates)>>,
     blocks: &'a [r2il::R2ILBlock],
     arch: &'a r2il::ArchSpec,
 }
 
-impl<'a> DefUse<'a> {
+impl<'a> WalkedBody<'a> {
     pub fn new(blocks: &'a [r2il::R2ILBlock], arch: &'a r2il::ArchSpec) -> Self {
+        debug_assert!(
+            blocks.is_sorted_by_key(|block| block.addr),
+            "a walk leaves its blocks in address order"
+        );
         Self {
             built: std::cell::OnceCell::new(),
             blocks,
             arch,
         }
+    }
+
+    /// Where the block holding this address begins: the last block starting at or before it, where it runs past it.
+    pub fn block_of(&self, address: u64) -> Option<u64> {
+        let after = self.blocks.partition_point(|block| block.addr <= address);
+        let block = self.blocks.get(after.checked_sub(1)?)?;
+        (address - block.addr < u64::from(block.size)).then_some(block.addr)
     }
 
     /// What becomes of the value one instruction leaves in a storage, as the body's def-use settles it.

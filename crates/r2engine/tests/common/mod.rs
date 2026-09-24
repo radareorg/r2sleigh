@@ -156,6 +156,56 @@ const PLT: [u8; 0x26] = [
     0xc3, // ret
 ];
 
+/// `cmp rdi, 10; jae L; mov esi, 0; L: mov rax, rdi; ret`: L is entered with rdi below ten and above.
+pub const GUARDED_JOIN: &[u8] = &[
+    0x48, 0x83, 0xff, 0x0a, // cmp rdi, 10
+    0x73, 0x05, // jae L
+    0xbe, 0x00, 0x00, 0x00, 0x00, // mov esi, 0
+    0x48, 0x89, 0xf8, // L: mov rax, rdi
+    0xc3, // ret
+];
+
+/// `eax` is one, eleven or twenty-one where `shr eax, 2` reads it, so the shift leaves nought, two or five.
+pub const SHIFT_MERGE: &[u8] = &[
+    0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+    0x83, 0xff, 0x01, // cmp edi, 1
+    0x74, 0x07, // je 0x1011
+    0x83, 0xff, 0x02, // cmp edi, 2
+    0x74, 0x09, // je 0x1018
+    0xeb, 0x0c, // jmp 0x101d
+    0xb8, 0x0b, 0x00, 0x00, 0x00, // 0x1011 mov eax, 11
+    0xeb, 0x05, // jmp 0x101d
+    0xb8, 0x15, 0x00, 0x00, 0x00, // 0x1018 mov eax, 21
+    0xc1, 0xe8, 0x02, // 0x101d shr eax, 2
+    0xc3, // ret
+];
+
+/// `mov rax, 0x1010; mov rcx, [rax]; mov al, 5; mov rdx, [rax]; ret`, then the word at 0x1010: `mov al` leaves rax 0x1005.
+pub const OVERWRITTEN: &[u8] = &[
+    0x48, 0xc7, 0xc0, 0x10, 0x10, 0x00, 0x00, // mov rax, 0x1010
+    0x48, 0x8b, 0x08, // mov rcx, qword [rax]
+    0xb0, 0x05, // mov al, 5
+    0x48, 0x8b, 0x10, // mov rdx, qword [rax]
+    0xc3, // ret
+    0x0d, 0xf0, 0xad, 0x0b, 0x00, 0x00, 0x00, 0x00, // 0x1010, the word
+];
+
+/// An ARM import stub that builds its slot's address in two halves: `movw ip, #0x2000; movt ip, #0; ldr pc, [ip]`.
+pub const MOVED_STUB: &[u8] = &[
+    0x00, 0xc0, 0x02, 0xe3, // movw ip, #0x2000
+    0x00, 0xc0, 0x40, 0xe3, // movt ip, #0
+    0x00, 0xf0, 0x9c, 0xe5, // ldr pc, [ip]
+];
+
+/// ARM `movw r0, #0x1010; movt r0, #0; ldr r1, [r0]; bx lr`, then the word at 0x1010: the pair builds one address.
+pub const MOVED: &[u8] = &[
+    0x10, 0x00, 0x01, 0xe3, // movw r0, #0x1010
+    0x00, 0x00, 0x40, 0xe3, // movt r0, #0
+    0x00, 0x10, 0x90, 0xe5, // ldr r1, [r0]
+    0x1e, 0xff, 0x2f, 0xe1, // bx lr
+    0x0d, 0xf0, 0xad, 0x0b, // 0x1010, the word
+];
+
 /// The bytes, the container's statement about them, and what has been written.
 pub struct Literal {
     code: &'static [u8],
@@ -230,13 +280,8 @@ impl Literal {
     /// A little-endian ARM program: a stated ARM function that calls into
     /// Thumb code nothing states, and a stated veneer that switches to ARM.
     pub fn arm_thumb() -> Self {
-        let mut program = Self::new();
+        let mut program = Self::new().in_arm();
         program.code = &ARM_THUMB;
-        program.container.arch = Arch {
-            name: "arm".to_owned(),
-            bits: 32,
-            endian: r2il::Endianness::Little,
-        };
         program.container.sections[0].vsize = ARM_THUMB.len() as u64;
         let symbol = |name: &str, vaddr, kind, thumb| Symbol {
             name: name.to_owned(),
@@ -253,6 +298,16 @@ impl Literal {
             symbol("$a", VENEER + 4, SymbolKind::Mapping(Mapping::Arm), false),
         ];
         program
+    }
+
+    /// The same bytes as little-endian 32-bit ARM.
+    pub fn in_arm(mut self) -> Self {
+        self.container.arch = Arch {
+            name: "arm".to_owned(),
+            bits: 32,
+            endian: r2il::Endianness::Little,
+        };
+        self
     }
 
     /// A `.plt` holding PLT0, the zero pad after it, and one stub, then a caller.
@@ -282,6 +337,18 @@ impl Literal {
         }];
         program.container.loader_writes.push(PLT_SLOT..PLT_SLOT + 8);
         program
+    }
+
+    /// The same code as a `.plt`, stating a 32-bit slot at `slot` the loader fills with `import`.
+    pub fn in_plt(mut self, slot: u64, import: &str) -> Self {
+        ".plt".clone_into(&mut self.container.sections[0].name);
+        self.container.symbols.clear();
+        self.container.relocations.push(Relocation {
+            vaddr: slot,
+            symbol: import.to_owned(),
+        });
+        self.container.loader_writes.push(slot..slot + 4);
+        self
     }
 
     /// The same program with one symbol stripped from the container.

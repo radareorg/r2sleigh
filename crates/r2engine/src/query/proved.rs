@@ -11,9 +11,9 @@ pub(super) fn proved_about(
     address: u64,
     folded: &dyn Fn(CanonicalStorageId) -> Option<u64>,
 ) -> Vec<(AnnotationKind, Support)> {
-    let (Some(prepared), Some(lift), Some(machine)) = (
+    let (Some(prepared), Some(body), Some(machine)) = (
         answered.prepared,
-        answered.fate,
+        answered.body,
         answered.decoders.at(address),
     ) else {
         return Vec::new();
@@ -30,7 +30,7 @@ pub(super) fn proved_about(
         .into_iter()
         .filter(|(storage, _)| word(storage))
         .filter_map(|(storage, output)| {
-            let own = lift.own_bound(address, storage)?;
+            let own = body.own_bound(address, storage)?;
             let range = facts.values().get(output)?;
             let certified = || facts.folded_value(output);
             let (range, support) = claimed(range, own, folded(storage), certified)?;

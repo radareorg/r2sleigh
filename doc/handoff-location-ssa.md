@@ -31527,3 +31527,16 @@ reads `.init_array` raw, which an AArch64 PIE leaves zero with the target in
 the relocation's addend; jump tables in a text-relocated object; the slot
 loads handed-function discovery reads. A rebase states its target exactly, so
 the fact can carry the loaded value rather than only the refusal.
+
+## `pdf` folds within one block of the walked body
+
+The listing's fold carries from one line to the next only where both lie in
+one block of the walked body and the second does not begin it; a line past the
+body, or in another block, starts fresh (`WalkedBody::block_of`, one binary
+search over the walk's address-ordered blocks). `BlockOrigins` now folds every
+operation `r2il::eval` models, so `movw`/`movt` build one address. Parent
+against this tree, `afl` and `pd 24` over the first 60 functions of 26 ELF
+bins (every ARM, Thumb and AArch64 one in the corpus, plus x86): identical. A
+`movw`/`movt` import stub is now named from its slot (`tests/imports.rs`).
+`table_dispatch_pdf` pins the fold; its table load states no value, because
+dyld rebases that chained fixup to 0x100000400 while the file holds 0x400.

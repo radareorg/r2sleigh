@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::Support;
 use super::Work;
 use super::decode::Lookahead;
-use super::records::{Annotation, AnnotationKind, Answered, Line, Memory};
+use super::records::{Annotation, AnnotationKind, Answered, Line, Memory, WalkedBody};
 use super::references::ReferenceKind;
 
 /// How far on a run is lifted again to see which numbers move with it.
@@ -54,9 +54,9 @@ pub(super) fn over_run(
     }
     let memory = &answered.memory;
     let call_effect = answered.call_effect;
-    // A function listing's run is one block, entered only at its top, so what one line leaves the next reads.
-    let carry = work >= Work::Function;
-    let mut named = named_over(run.lifts, carry, call_effect);
+    let body = (work >= Work::Function).then_some(answered.body).flatten();
+    let fresh = fresh_over(lines, body);
+    let mut named = named_over(run.lifts, &fresh, call_effect);
     // A number the program does not map names nothing in it, whatever it moves with.
     for one in named.iter_mut().flatten() {
         if one
@@ -67,8 +67,7 @@ pub(super) fn over_run(
             one.computed = None;
         }
     }
-    let relative = relative_over(answered, run, lines, &named, carry);
-    let graph = (work >= Work::Function).then_some(answered.fate).flatten();
+    let relative = relative_over(answered, run, lines, &named, &fresh);
     for (index, line) in lines.iter_mut().enumerate() {
         let (Some(lift), Some(Some(named))) = (
             run.lifts.get(index).and_then(Option::as_ref),
@@ -91,7 +90,7 @@ pub(super) fn over_run(
                 rest: &run.lifts[index + 1..],
                 beyond: &mut *beyond,
                 call_effect,
-                graph,
+                body,
                 parameters: (!relative).then_some(answered.parameters).flatten(),
                 used: None,
             };
@@ -194,17 +193,33 @@ struct Computed {
     own: bool,
 }
 
-/// Name each line of a run, carrying what one line leaves into the next where the run is one block.
+/// Where the fold starts afresh: everywhere but the next line of one block of the body, which control reaches only from the line before.
+fn fresh_over(lines: &[Line], body: Option<&WalkedBody<'_>>) -> Vec<bool> {
+    let Some(body) = body else {
+        return vec![true; lines.len()];
+    };
+    let mut before = None;
+    let fresh = |line: &Line| {
+        let block = body.block_of(line.address);
+        let carried = block.is_some_and(|start| start != line.address && before == block);
+        before = block;
+        !carried
+    };
+    lines.iter().map(fresh).collect()
+}
+
+/// Name each line of a run, carrying what one line leaves into the next except where `fresh` starts the fold again.
 fn named_over(
     lifts: &[Option<r2il::R2ILBlock>],
-    carry: bool,
+    fresh: &[bool],
     call_effect: Option<&r2ssa::SourceCallEffect>,
 ) -> Vec<Option<Named>> {
     let mut carried = BlockOrigins::default();
     lifts
         .iter()
-        .map(|lift| {
-            if !carry {
+        .zip(fresh)
+        .map(|(lift, fresh)| {
+            if *fresh {
                 carried = BlockOrigins::default();
             }
             let Some(lift) = lift else {
@@ -283,14 +298,14 @@ fn relative_over(
     run: &Run<'_>,
     lines: &[Line],
     named: &[Option<Named>],
-    carry: bool,
+    fresh: &[bool],
 ) -> Vec<bool> {
     // Only as far as the last number that needs it: what the block carries runs forward.
     let Some(last) = named.iter().rposition(|one| computed(one).is_some()) else {
         return vec![false; lines.len()];
     };
     let shifted = super::decode::lift_run(answered, &lines[..=last], &run.windows[..=last], PAGE);
-    let there = named_over(&shifted, carry, answered.call_effect);
+    let there = named_over(&shifted, fresh, answered.call_effect);
     lines
         .iter()
         .enumerate()
@@ -367,8 +382,8 @@ struct After<'a, 'r, 'b> {
     beyond: &'a mut Lookahead<'r, 'b>,
     /// What a call does; without it a call leaves every holder standing.
     call_effect: Option<&'a r2ssa::SourceCallEffect>,
-    /// The function's def-use, where the request paid for it.
-    graph: Option<&'a super::records::DefUse<'a>>,
+    /// The walked body and its def-use, where the request paid for it.
+    body: Option<&'a WalkedBody<'a>>,
     /// Which parameters of a callee take an address, where the number's use decides whether it is one.
     parameters: Option<&'a dyn super::records::Parameters>,
     /// The strongest support a call handing the number to such a parameter gave.
@@ -392,7 +407,7 @@ fn result_of(
         Fate::Step => None,
         Fate::Unknown => {
             let settled = after
-                .graph?
+                .body?
                 .fate_of(address, CanonicalStorageId::from_varnode(output))?;
             (settled == r2ssa::fate::Fate::Result).then_some(Support::Certified)
         }

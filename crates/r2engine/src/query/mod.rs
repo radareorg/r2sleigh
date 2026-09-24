@@ -23,8 +23,8 @@ pub mod references;
 pub use decode::listing;
 pub use memo::{Memo, MemoStats};
 pub use records::{
-    Annotation, AnnotationKind, Answered, Callee, Decoders, DefUse, Line, Listing, Memory,
-    Parameters, Stop,
+    Annotation, AnnotationKind, Answered, Callee, Decoders, Line, Listing, Memory, Parameters,
+    Stop, WalkedBody,
 };
 pub use references::{Coverage, Reference, ReferenceKind, References, Unread};
 
@@ -44,10 +44,7 @@ pub enum Work {
     /// instruction computes is an address or a step towards one. A run may be
     /// entered anywhere, so nothing is folded across its instructions.
     BlockLocal,
-    /// List the function block by block: each block is entered only at its
-    /// top, so an address built over several of its instructions folds, and
-    /// the body's def-use settles what the run cannot; a prepared function
-    /// adds what was proved about the values each line defines.
+    /// List inside the walked body: the fold starts afresh at each of its blocks, its def-use settles what the run cannot, and a prepared function adds what was proved.
     Function,
 }
 

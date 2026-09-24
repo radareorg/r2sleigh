@@ -191,14 +191,14 @@ impl BlockOrigins {
     fn after(&self, op: &R2ILOp) -> Option<ValueOrigin> {
         match op {
             R2ILOp::Copy { src, .. } => self.of(src),
-            R2ILOp::IntAdd { .. } | R2ILOp::IntSub { .. } => self.arithmetic(op),
-            // ARM clears the low bit of a loaded target before branching to
-            // it: the bit selects the instruction set, not the address, so the
-            // value still names the slot it was loaded from.
+            // ARM clears the low bit of a loaded target before branching to it: the bit selects the instruction set, so the value still names its slot.
             R2ILOp::IntAnd { a, b, dst }
                 if b.space == SpaceId::Const && b.offset == truncated(u64::MAX << 1, dst.size) =>
             {
-                self.of(a)
+                match self.of(a)? {
+                    slot @ ValueOrigin::LoadedSlot(_) => Some(slot),
+                    ValueOrigin::Constant { .. } => self.arithmetic(op),
+                }
             }
             R2ILOp::Load {
                 dst,
@@ -209,7 +209,8 @@ impl BlockOrigins {
                 offset: self.of(addr)?.constant()?,
                 size: dst.size,
             })),
-            _ => None,
+            // Every other operation the evaluator models folds wherever its operands do, so `movw`/`movt` build one number.
+            _ => self.arithmetic(op),
         }
     }
 
@@ -313,13 +314,69 @@ mod tests {
                 dst: scratch.clone(),
                 src: Varnode::constant(0x1000, 8),
             },
-            R2ILOp::IntMult {
+            R2ILOp::FloatAdd {
                 dst: scratch.clone(),
                 a: scratch.clone(),
                 b: Varnode::constant(3, 8),
             },
         ]);
         assert_eq!(BlockOrigins::of_block(&block).of(&scratch), None);
+    }
+
+    #[test]
+    fn a_movw_and_movt_build_one_number() {
+        // movw r4, #0xc3a0; movt r4, #0x7, as ARM's specification lifts them.
+        let (r4, low, high) = (
+            Varnode::register(0x30, 4),
+            Varnode::unique(0x80, 4),
+            Varnode::unique(0x90, 4),
+        );
+        let block = block(vec![
+            R2ILOp::IntZExt {
+                dst: r4.clone(),
+                src: Varnode::constant(0xc3a0, 2),
+            },
+            R2ILOp::IntZExt {
+                dst: high.clone(),
+                src: Varnode::constant(0x7, 2),
+            },
+            R2ILOp::IntLeft {
+                dst: high.clone(),
+                a: high.clone(),
+                b: Varnode::constant(0x10, 4),
+            },
+            R2ILOp::IntAnd {
+                dst: low.clone(),
+                a: r4.clone(),
+                b: Varnode::constant(0xffff, 4),
+            },
+            R2ILOp::IntOr {
+                dst: r4.clone(),
+                a: high,
+                b: low,
+            },
+        ]);
+        let origins = BlockOrigins::of_block(&block);
+        assert_eq!(
+            origins.of(&r4).and_then(ValueOrigin::constant),
+            Some(0x7c3a0)
+        );
+        // Clearing the instruction-set bit of a number is arithmetic, not a slot.
+        let cleared = BlockOrigins::of_block(&self::block(vec![
+            R2ILOp::Copy {
+                dst: r4.clone(),
+                src: Varnode::constant(0x2001, 4),
+            },
+            R2ILOp::IntAnd {
+                dst: r4.clone(),
+                a: r4.clone(),
+                b: Varnode::constant(0xffff_fffe, 4),
+            },
+        ]));
+        assert_eq!(
+            cleared.of(&r4).and_then(ValueOrigin::constant),
+            Some(0x2000)
+        );
     }
 
     #[test]

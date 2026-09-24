@@ -3,7 +3,11 @@
 
 mod common;
 
-use common::{BASE, FORKED, JOINED, Literal, ONE, PASSES, SLOT, STEPPED, STUB, TWO, opened};
+use common::{
+    ARM_ENTRY, BASE, CALLER, FORKED, GUARDED_JOIN, JOINED, Literal, MOVED, ONE, OVERWRITTEN,
+    PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED, THUMB_LEAF, TWO,
+    VENEER, opened,
+};
 use r2engine::program::OpenProgram;
 use r2engine::query::{AnnotationKind, Line, Listing, Stop, Support};
 
@@ -51,21 +55,143 @@ fn the_function_listing_refines_the_run_and_never_contradicts_it() {
     let lea = JOINED + 4;
     assert_eq!(pd(JOINED, 5)[2], (lea, None));
     assert_eq!(pdf(JOINED)[2], (lea, None));
-    // Every result the run claims, the function claims too.
-    for entry in [FORKED, JOINED, ONE, PASSES, STEPPED] {
-        let whole = pdf(entry);
-        for (address, claimed) in pd(entry, whole.len()) {
-            if claimed.is_some() {
-                assert!(whole.contains(&(address, claimed)), "{address:#x}");
-            }
-        }
-    }
     // mov eax, 1; ret -- nothing reads it, but lifted a page on it is still 1, so it is no address.
     assert_eq!(pd(ONE, 2)[0], (ONE, None));
     assert_eq!(pdf(ONE)[0], (ONE, None));
     // lea rax, [one]; add rax, 8; ret -- the block carries the lea into the add, whose sum is returned.
     assert_eq!(pd(STEPPED, 3)[1], (STEPPED + 7, None));
     assert_eq!(pdf(STEPPED)[1], (STEPPED + 7, Some(ONE + 8)));
+}
+
+/// Every function these tests list, each in the program it is in.
+fn listed_functions() -> Vec<(fn() -> Literal, u64)> {
+    let common = [ONE, CALLER, TWO, FORKED, JOINED, PASSES, STEPPED];
+    let common = common.map(|entry| (Literal::new as fn() -> Literal, entry));
+    let own: [(fn() -> Literal, u64); 4] = [
+        (
+            || Literal::of_code(GUARDED_JOIN, &[("f", BASE, GUARDED_JOIN.len() as u64)]),
+            BASE,
+        ),
+        (
+            || Literal::of_code(SHIFT_MERGE, &[("f", BASE, SHIFT_MERGE.len() as u64)]),
+            BASE,
+        ),
+        (|| Literal::of_code(OVERWRITTEN, &[("f", BASE, 0x10)]), BASE),
+        (
+            || Literal::of_code(MOVED, &[("f", BASE, 0x10)]).in_arm(),
+            BASE,
+        ),
+    ];
+    let arm = [ARM_ENTRY, THUMB_CALLED, THUMB_LEAF, VENEER]
+        .map(|entry| (Literal::arm_thumb as fn() -> Literal, entry));
+    let plt = [PLT_STUB, PLT_CALLER].map(|entry| (Literal::plt as fn() -> Literal, entry));
+    let stub: (fn() -> Literal, u64) = (|| Literal::new().importing("_Exit"), STUB);
+    common
+        .into_iter()
+        .chain(own)
+        .chain(arm)
+        .chain(plt)
+        .chain([stub])
+        .collect()
+}
+
+#[test]
+fn every_claim_the_run_makes_the_function_listing_makes_on_the_same_line() {
+    for (literal, entry) in listed_functions() {
+        let mut program = OpenProgram::of(literal());
+        let whole = program.function_listing(entry);
+        let whole = whole
+            .unwrap_or_else(|refused| panic!("{entry:#x} lists: {refused}"))
+            .value;
+        let stop = Stop::After(whole.len());
+        let run = program.listing(Listing { start: entry, stop });
+        for line in &run.expect("it lists").value {
+            let Some(function) = whole.iter().find(|one| one.address == line.address) else {
+                continue;
+            };
+            // The rung may differ: what the run folds, the function may settle by its def-use.
+            let claimed = function.annotations.iter().map(|one| &one.kind);
+            let claimed = claimed.collect::<Vec<_>>();
+            for annotation in &line.annotations {
+                assert!(
+                    claimed.contains(&&annotation.kind),
+                    "{entry:#x}: pd claims {:?} at {:#x}, pdf {claimed:?}",
+                    annotation.kind,
+                    line.address
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() {
+    // jmp qword [rip + 2] reads the slot the loader fills with the import, whatever the file's bytes there are.
+    let mut program = OpenProgram::of(Literal::new().importing("_Exit"));
+    let listing = Listing {
+        start: STUB,
+        stop: Stop::After(1),
+    };
+    let read = AnnotationKind::Reads {
+        address: SLOT,
+        width: 8,
+    };
+    let run = program.listing(listing).expect("it lists").value;
+    assert_eq!(supported(&run[0]), [(read.clone(), Support::Decoded)]);
+    let whole = program.function_listing(STUB).expect("it lists").value;
+    assert_eq!(supported(&whole[0]), [(read, Support::Decoded)]);
+}
+
+#[test]
+fn a_function_listing_reads_through_an_address_until_a_byte_of_its_register_is_written() {
+    let literal = Literal::of_code(OVERWRITTEN, &[("f", BASE, 0x10)]);
+    let lines = OpenProgram::of(literal).function_listing(BASE);
+    let lines = lines.expect("it lists").value;
+    let reads = |at: u64| {
+        let line = lines.iter().find(|line| line.address == at);
+        let annotations = line.into_iter().flat_map(|line| &line.annotations);
+        let reads = annotations.filter_map(|annotation| match annotation.kind {
+            AnnotationKind::Reads { address, width } => Some((address, width, annotation.support)),
+            _ => None,
+        });
+        reads.collect::<Vec<_>>()
+    };
+    // `mov rcx, [rax]` reads the word the line before put in rax, which only the block's fold sees.
+    assert_eq!(reads(BASE + 7), [(BASE + 0x10, 8, Support::Folded)]);
+    // `mov al, 5` wrote a byte of rax, so the load after it names no address.
+    assert_eq!(reads(BASE + 0xc), []);
+}
+
+#[test]
+fn a_movw_and_movt_pair_is_one_address_the_load_after_them_reads() {
+    let listed = |program: &mut OpenProgram<Literal>, whole: bool| {
+        let lines = match whole {
+            true => program.function_listing(BASE),
+            false => program.listing(Listing {
+                start: BASE,
+                stop: Stop::After(4),
+            }),
+        };
+        let lines = lines.expect("it lists").value;
+        lines.iter().map(supported).collect::<Vec<_>>()
+    };
+    let mut program = OpenProgram::of(Literal::of_code(MOVED, &[("f", BASE, 0x10)]).in_arm());
+    let (address, width) = (BASE + 0x10, 4);
+    let read = [
+        (AnnotationKind::Reads { address, width }, Support::Folded),
+        (
+            AnnotationKind::Holds {
+                address,
+                width,
+                value: 0x0bad_f00d,
+            },
+            Support::Folded,
+        ),
+    ];
+    // The block folds `movw` into `movt`, so the load reads the word the pair addresses.
+    assert_eq!(listed(&mut program, true)[2], read);
+    // Each line alone knows nothing of r0 at the load.
+    assert_eq!(listed(&mut program, false)[2], []);
 }
 
 #[test]
@@ -317,22 +443,4 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
         })
         .expect("it lists");
     assert!(bounds(&plain.value).is_empty(), "{:?}", plain.value);
-}
-
-#[test]
-fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() {
-    // jmp qword [rip + 2] reads the slot the loader fills with the import, whatever the file's bytes there are.
-    let mut program = OpenProgram::of(Literal::new().importing("_Exit"));
-    let listing = Listing {
-        start: STUB,
-        stop: Stop::After(1),
-    };
-    let read = AnnotationKind::Reads {
-        address: SLOT,
-        width: 8,
-    };
-    let run = program.listing(listing).expect("it lists").value;
-    assert_eq!(supported(&run[0]), [(read.clone(), Support::Decoded)]);
-    let whole = program.function_listing(STUB).expect("it lists").value;
-    assert_eq!(supported(&whole[0]), [(read, Support::Decoded)]);
 }

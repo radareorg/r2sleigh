@@ -225,7 +225,7 @@ impl Lookahead<'_, '_> {
 mod tests {
     use super::*;
     use crate::query::Support;
-    use crate::query::records::{AnnotationKind, Decoders, Memory};
+    use crate::query::records::{AnnotationKind, Decoders, Memory, WalkedBody};
     use r2il::Endianness;
     use r2sleigh_lift::{EmbeddedMachine, embedded_machine};
     use r2ssa::body::Program;
@@ -306,7 +306,7 @@ mod tests {
             },
             call_effect: None,
             prepared: None,
-            fate: None,
+            body: None,
             spelled: true,
             parameters: None,
         };
@@ -357,7 +357,7 @@ mod tests {
             },
             call_effect: None,
             prepared: None,
-            fate: None,
+            body: None,
             spelled: true,
             parameters: None,
         };
@@ -405,7 +405,7 @@ mod tests {
                     endian: Endianness::Little,
                 },
                 prepared: None,
-                fate: None,
+                body: None,
                 spelled,
                 call_effect: None,
                 parameters: None,
@@ -635,18 +635,17 @@ mod tests {
         assert_eq!(computes(&answer.value[0]), None);
     }
 
-    #[test]
-    fn a_page_and_its_offset_are_one_address_only_where_the_block_carries_one_into_the_other() {
-        // adrp x0, 0x2000; add x0, x0, #0x50; ldr x0, [x0]; ret
-        let bytes = [
-            0x00, 0x00, 0x00, 0xb0, 0x00, 0x40, 0x01, 0x91, 0x00, 0x00, 0x40, 0xf9, 0xc0, 0x03,
-            0x5f, 0xd6,
-        ];
+    /// What each line of AArch64 code at `BASE` claims, listed in one run at `work` inside the body walked from `BASE`.
+    fn aarch64_claims(code: &[u8], work: Work) -> Vec<Vec<AnnotationKind>> {
         let machine = Everywhere(embedded_machine("aarch64").expect("AArch64 is compiled in"));
         // Mapped far enough that the page and the address in it are the program's.
-        let mut image = bytes.to_vec();
+        let mut image = code.to_vec();
         image.resize(0x1100, 0);
         let program = Mapped::new(BASE, image);
+        let walked = r2ssa::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
+        let blocks = walked.expect("it walks").blocks.into_iter();
+        let blocks = blocks.map(|block| block.lifted).collect::<Vec<_>>();
+        let body = WalkedBody::new(&blocks, &machine.0.arch);
         let answered = Answered {
             decoders: &machine,
             memory: Memory {
@@ -654,35 +653,37 @@ mod tests {
                 endian: Endianness::Little,
             },
             prepared: None,
-            fate: None,
+            body: Some(&body),
             spelled: true,
             call_effect: None,
             parameters: None,
         };
-        let listed = |work| {
-            let request = Listing {
-                start: BASE,
-                stop: Stop::After(4),
-            };
-            listing(&answered, request, work, Revision::default()).value
+        let request = Listing {
+            start: BASE,
+            stop: Stop::At(BASE + code.len() as u64),
         };
-        let claims = |lines: &[Line]| {
-            lines
+        let lines = listing(&answered, request, work, Revision::default()).value;
+        let kinds = |line: &Line| {
+            line.annotations
                 .iter()
-                .map(|line| {
-                    let kinds = line
-                        .annotations
-                        .iter()
-                        .map(|annotation| annotation.kind.clone());
-                    kinds.collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
+                .map(|one| one.kind.clone())
+                .collect()
         };
+        lines.iter().map(kinds).collect()
+    }
+
+    #[test]
+    fn a_page_and_its_offset_are_one_address_only_where_the_block_carries_one_into_the_other() {
+        // adrp x0, 0x2000; add x0, x0, #0x50; ldr x0, [x0]; ret
+        let code = [
+            0x00, 0x00, 0x00, 0xb0, 0x00, 0x40, 0x01, 0x91, 0x00, 0x00, 0x40, 0xf9, 0xc0, 0x03,
+            0x5f, 0xd6,
+        ];
         // A run entered anywhere knows nothing of `x0` at the add: the page is a step, the rest unknown.
-        let run = claims(&listed(Work::BlockLocal));
+        let run = aarch64_claims(&code, Work::BlockLocal);
         assert!(run.iter().all(Vec::is_empty), "{run:?}");
         // A block carries the page into the add, whose sum moves a page with the program and is read through.
-        let block = claims(&listed(Work::Function));
+        let block = aarch64_claims(&code, Work::Function);
         let address = 0x2050;
         assert_eq!(block[0], []);
         assert_eq!(block[1], [AnnotationKind::Computes { value: address }]);
@@ -690,6 +691,32 @@ mod tests {
             block[2].contains(&AnnotationKind::Reads { address, width: 8 }),
             "{block:?}"
         );
+    }
+
+    #[test]
+    fn a_function_run_folds_nothing_into_a_block_another_path_enters() {
+        // cbz x1, L; adrp x0, 0x2000; L: add x0, x0, #0x50; ldr x0, [x0]; ret
+        let code = [
+            0x41, 0x00, 0x00, 0xb4, 0x00, 0x00, 0x00, 0xb0, 0x00, 0x40, 0x01, 0x91, 0x00, 0x00,
+            0x40, 0xf9, 0xc0, 0x03, 0x5f, 0xd6,
+        ];
+        // One run over every block: L is entered from the cbz with `x0` as the caller left it, so nothing at L names the page's address.
+        let lines = aarch64_claims(&code, Work::Function);
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        assert!(lines[2..].iter().all(Vec::is_empty), "{lines:?}");
+    }
+
+    #[test]
+    fn a_function_run_folds_nothing_into_a_line_past_the_body() {
+        // adrp x0, 0x2000; ret; add x0, x0, #0x50; ldr x0, [x0] -- the walk ends at the ret, so the body is one block.
+        let code = [
+            0x00, 0x00, 0x00, 0xb0, 0xc0, 0x03, 0x5f, 0xd6, 0x00, 0x40, 0x01, 0x91, 0x00, 0x00,
+            0x40, 0xf9,
+        ];
+        // The run lists past the ret, and no path of the body reaches what it lists there.
+        let lines = aarch64_claims(&code, Work::Function);
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert!(lines[2..].iter().all(Vec::is_empty), "{lines:?}");
     }
 
     #[test]
@@ -706,7 +733,7 @@ mod tests {
                 endian: Endianness::Little,
             },
             prepared: None,
-            fate: None,
+            body: None,
             spelled: true,
             call_effect: None,
             parameters: None,

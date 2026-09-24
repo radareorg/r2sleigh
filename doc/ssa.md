@@ -401,6 +401,17 @@ becomes false evidence. Three kinds of operation write:
   varnode as the slot it names.
 - **A call.** A callee may write any register, so every origin is forgotten.
 
+An output's own origin: a copy keeps its source's, clearing the instruction-set
+bit of a loaded value keeps its slot, a load through a folded address is that
+slot, and every other operation `r2il::eval` models holds the number it
+computes wherever all its operands fold, so `movw`/`movt` build one address.
+
+`pdf` carries this fold from a line to the next only where both lie in one
+block of the walked body and the next does not begin it; anywhere else it
+starts afresh. A block is entered only at its top, so the state at a line is
+exact on every execution of it; and the fold is monotone in its entry state,
+so every access `pd` claims from one line alone `pdf` claims too.
+
 Plugin Commands
 ---------------
 

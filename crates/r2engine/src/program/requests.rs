@@ -11,8 +11,8 @@ use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
 use crate::native::{NativeRefusal, Prepared, Survey};
 use crate::query::{
-    Answer, Answered, Completion, Decoders, DefUse, Line, Listing, Memory, References, Stop,
-    Unread, Work,
+    Answer, Answered, Completion, Decoders, Line, Listing, Memory, References, Stop, Unread,
+    WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
 
@@ -158,9 +158,9 @@ impl<S: Source> OpenProgram<S> {
         let prepared = self.prepare(entry)?;
         let target = self.target(entry)?;
         let lifted = prepared.lifted();
-        let fate = DefUse::new(&lifted, target.arch);
+        let body = WalkedBody::new(&lifted, target.arch);
         let answered = Answered {
-            fate: Some(&fate),
+            body: Some(&body),
             ..self.answered(Some(&prepared))
         };
         Ok(listed_by_block(&answered, &lifted, self.revision()))
@@ -201,17 +201,17 @@ impl<S: Source> OpenProgram<S> {
                     .unresolved
                     .insert(entry, survey.unresolved.clone());
             }
-            let fate = DefUse::new(&survey.lifted, target.arch);
+            let body = WalkedBody::new(&survey.lifted, target.arch);
             let answered = Answered {
                 decoders: &Walked(machine),
-                fate: Some(&fate),
+                body: Some(&body),
                 spelled: false,
                 call_effect: target.call_effect,
                 ..program.answered(None)
             };
             let lines = listed_by_block(&answered, &survey.lifted, revision).value;
             // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
-            if fate.failed() {
+            if body.failed() {
                 index.coverage.unread.insert(entry, Unread::NoSsa);
                 return;
             }
@@ -319,7 +319,7 @@ impl<S: Source> OpenProgram<S> {
                 .as_ref()
                 .and_then(|held| held.call_effect.as_ref()),
             prepared,
-            fate: None,
+            body: None,
             spelled: true,
             parameters: Some(self),
         }

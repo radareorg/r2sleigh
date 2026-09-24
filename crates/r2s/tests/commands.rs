@@ -601,6 +601,31 @@ mod listing {
         insta::assert_snapshot!("table_dispatch_pd", run.out);
     }
 
+    /// `pdf` folds each block of the walked body across its lines, so the page and its offset are one address and the table load reads it; `pd` folds each line alone.
+    #[test]
+    fn the_aarch64_function_listing_folds_each_block() {
+        let fixture = "tests/fixtures/code_pointer_table_O0";
+        let run = at(fixture, "pdf @ sym._table_dispatch");
+        assert!(run.ok, "{}", run.out);
+        let page = "add x8, x8, 0x0 ; defines x8 = 0x100004000 (folded)";
+        assert!(run.out.contains(page), "{}", run.out);
+        // The word is a chained fixup dyld rebases to 0x100000400, so what the file holds there is no value to state.
+        let load = run
+            .out
+            .lines()
+            .find(|line| line.contains("ldr x8, [x8, 0x10]"));
+        assert!(
+            load.is_some_and(|line| line.ends_with("ldr x8, [x8, 0x10]")),
+            "{}",
+            run.out
+        );
+        let read = at(fixture, "axt 0x100004010");
+        assert!(read.out.starts_with("0x100000444 d\n"), "{}", read.out);
+        let plain = at(fixture, "s 0x100000420; pd 24");
+        assert!(!plain.out.contains("0x100004010"), "{}", plain.out);
+        insta::assert_snapshot!("table_dispatch_pdf", run.out);
+    }
+
     #[test]
     fn the_arm_listing_is_pinned() {
         let run = at("crates/r2image/tests/data/arm_thumb_entry.elf", "pd 12");
