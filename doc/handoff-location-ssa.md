@@ -31626,3 +31626,94 @@ indexed read `movzx eax, byte [rax + table]` names no table; Sleigh's `hlt`
 self-branch and ARM's `bxeq lr` skip to the next instruction are indexed as
 jumps. `afi` in-degree could read `to(entry)` but would make `afi` pay for the
 whole index.
+
+## Where this stretch stopped
+
+This stretch turned the engine's facts into answers across the command surface
+and closed the batches of a designed plan; it stopped on the user's instruction
+to finish what was started and record the rest. Everything below is on
+`engine/inversion` and pushed to origin.
+
+Landed, in order:
+
+- The shell asks and the engine sequences: `OpenProgram` takes each question
+  whole (`prepared`, `rendered`, `lifted`, `listing`, `function_listing`,
+  `functions`, `references`, `function_info`); `r2s` holds no engine sequencing,
+  enforced by `crates/r2s/tests/architecture.rs`.
+- The memo keeps the read set of the derivation that produced the answer, so a
+  hit no longer wipes it; each request runs under its own control; the read log
+  lives in the derivation, not in a `RefCell` on the program.
+- Which instruction set an address uses is a whole-program fact derived by
+  discovery on demand, from calls' `ISAModeSwitch` writes and `$a`/`$t`/`$d`
+  mapping symbols.
+- Discovery walks for transfers only; references prepare only the memory facts
+  they read; liveness is linear in its segments (ARM `pd 8` and `afl` 8-11x
+  less CPU, output byte-identical).
+- The reference index is what the listing claims: one owner of "this number is
+  an address", PC-relative numbers proven by lifting at a shifted address,
+  absolute numbers claimed where they reach a declared or body-proven pointer
+  parameter (`program/pointers.rs`), no `0x10000` floor anywhere. `ax`/`axt`
+  state their coverage; each reference carries its role and support; `axt`
+  speaks radare2's layout (E09).
+- `pdf` claims: a number is a step only where a later operation derives another
+  number from it; ranges say what the line defines and only where they beat the
+  written width; every claim states its support (E02) and is checked by the
+  r2il evaluator oracle (E03); folds run across each block (E04); calls,
+  switches and loops are stated at their lines (E08).
+- `afi`/`afv` answer from the prepared artifact and type analysis; the interface
+  owns arity and an unproven return is a marked gap; user operations write only
+  their named output (the last commit of this stretch).
+- Value and origin domains are sound and terminate on every CFG, widening at
+  DFS retreating edges (E01); listings decode with the walk's decoder context
+  (E05); call clobbers come from the selected convention (E06); type facts have
+  one owner per function (E07); noreturn is a whole-program fixpoint (E11);
+  trip counts are proved (E12).
+- `repne scas`/`repe cmps` are one block operation; bash `main` renders whole;
+  the x86 `<tracked_set>` gives DF its entry value.
+- Dead code hidden behind `allow(dead_code)` deleted and guarded; every Kani
+  harness runs; the quality gate checks all features.
+
+Decisions the user made in this stretch: parameters are spelled radare2's
+`argN` everywhere; unread proven certificates get readers; a folded product is
+a reference only where used as an address; repeated string instructions are
+block operations; the instruction set at an address is a whole-program fact;
+cost is optimised algorithmically before any work is cut; an unproven return is
+a marked gap with p-code-exact user operations; the interface owns arity.
+
+Not started, recorded for the next stretch:
+
+- Designed feature E10 (every memory access in `pdf` names its object;
+  `afvR`/`afvW`) and X01 (a call through an import's GOT slot uses the import's
+  prototype; a handed Thumb pointer is checked with the Thumb decoder; `start()`
+  reads the derived name table).
+- The queue: Q1 `argN` naming; Q2 readers for `TwoWaySelectionCertificate` and
+  `ControlDomainFacts`; Q3 kernel user-helper contracts (the two
+  `__kuser_cmpxchg` certify refusals); Q4/Q5 i386 stack arguments and internal
+  register conventions; Q6 syscall contracts; Q7 one sound constant fold over
+  def-use; Q8 branch-aware fate; Q9 `rep lods`/`ins`/`outs` and addr32;
+  Q10 arch-keyed carrier tables; Q11 the evidence refinement cap; Q12 value at
+  a point; Q13 `afi` completion; Q14 load sources and dead values in `pdf`;
+  Q15 callee interfaces per call-graph SCC; Q16 dispatch-aware discovery walk;
+  Q17 typed answers and `j` views; Q18 fact-family dedup; Q19
+  `dispatch_operations` linear; Q20 IBT/ET_REL/demangling; Q21 mid-body
+  instruction-set switch; Q22 the agent query surface.
+- Defects found and not fixed: bomb `read_six_numbers` gets a complete
+  zero-parameter interface where its arity is unproven (an entry read reaching
+  an incomplete call boundary); `__printf_chk` gets a two-parameter,
+  non-variadic interface with no prototype; the reference index misses lines
+  reachable only through a jump table (`dectest64` `str.pure`) and absolute
+  numbers into callees whose pointer parameter is unproven (`hashes`
+  `mov edi, 0x402060`); a call whose callee's result is unproven still gets a
+  convention-fallback declaration; the return gap is sometimes wrapped in an
+  extra block; `ls` `fcn_1000019f8` lost a pointer type on `X1_1`;
+  `tests/corpus/test_verify_rendering.py` fails 27 tests with or without this
+  stretch; supervisor calls are recognised by their specification names
+  because the specification has no role for them.
+- r2s is not yet thread-safe: `Disassembler` holds an `Rc`. No head-to-head
+  measurement against Ghidra, angr or radare2 exists; the assessment workflow
+  that would produce it did not finish.
+
+Gate at the tip that closed the stretch: fmt and clippy clean; 1916 tests
+passed, 0 failed; structure at baseline; certify 96 rendered, 2 refused (the
+`__kuser_cmpxchg` carry flag, Q3), 0 undefined reads; coverage 561/562 with no
+regressions; diff_r2 px 22/2, pd 18/6, ie/iS/is 24/0.
