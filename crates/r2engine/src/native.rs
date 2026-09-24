@@ -57,14 +57,9 @@ pub trait Program: r2ssa::body::Program {
         crate::EngineExecutionControl::default()
     }
 
-    /// Whether static data can live here: a section the program declares that
-    /// is not code.
-    ///
-    /// What makes a constant the address of a string is where it points, and
-    /// "the bytes there read as text" is far too weak a test -- almost any
-    /// pair of bytes does. A structure offset of eighty was rendered as the
-    /// string at address eighty, which is two bytes of the ELF header and in
-    /// no section at all.
+    /// Whether static data can live here: a section the program declares
+    /// holds this address and answers
+    /// [`holds_static_data`](crate::program::Section::holds_static_data).
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
     /// Whether the loader writes any byte of this range before the program runs, so the file's bytes there are not what it reads.
@@ -1806,6 +1801,11 @@ impl Native<'_> {
     /// a page and an offset, so the constant a string lives at exists only
     /// once the two are folded. Preparation folds them, and this asks it
     /// rather than re-scanning the operations that could not know.
+    ///
+    /// A residual: a folded value is read whatever uses it, so one that only
+    /// an indirect call or jump uses is still looked up. Only code lying in a
+    /// section the container states is data can be read as text that way,
+    /// and ruling it out needs the def-use to say how each value is used.
     fn folded_literals(
         &self,
         artifact: &TrustedSsaArtifact,
@@ -2229,12 +2229,16 @@ pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> 
         .is_ok_and(|lifted| lifted.size != 0 && lifted.size as usize <= available)
 }
 
-/// Every address this body names as a constant.
+/// Every address this body names as a constant it reads as data.
+///
+/// Where a branch or a call sends control is executed, not read, so its
+/// target is no constant of the body's: no string or object is looked for
+/// there.
 fn referenced(body: &r2ssa::body::Body) -> BTreeSet<u64> {
     let mut addresses = BTreeSet::new();
     for block in &body.blocks {
         for op in &block.lifted.ops {
-            for varnode in op.inputs() {
+            for varnode in op.data_inputs() {
                 // Whether a constant is an address is decided by what is
                 // there, not by how large it is: a binary linked low puts its
                 // strings at four-digit addresses.

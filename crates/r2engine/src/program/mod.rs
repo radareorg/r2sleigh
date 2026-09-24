@@ -65,6 +65,11 @@ pub struct OpenProgram<S: Source> {
     defined: BTreeMap<u64, bool>,
     /// Where the loaded sections lie, indexed once from the container, which no write moves.
     extents: r2types::ProgramExtents,
+    /// Where static data can live, by `Section::holds_static_data`, indexed
+    /// once the same way: a string is looked for per address a line or a
+    /// body names, and scanning every section for each was one pass per
+    /// question.
+    static_data: r2types::ProgramExtents,
     /// Whether each function discovery found is Thumb, by its entry.
     ///
     /// Derived from the whole program, since a function nothing states is in
@@ -134,7 +139,14 @@ impl<S: Source> OpenProgram<S> {
                     .sections
                     .iter()
                     .filter(|section| section.loaded)
-                    .map(|section| (section.vaddr, section.vaddr.saturating_add(section.vsize))),
+                    .map(Section::range),
+            ),
+            static_data: r2types::ProgramExtents::new(
+                container
+                    .sections
+                    .iter()
+                    .filter(|section| section.holds_static_data())
+                    .map(Section::range),
             ),
             modes: BTreeMap::new(),
             mapped: container
@@ -507,17 +519,6 @@ impl<S: Source> OpenProgram<S> {
     pub fn endian(&self) -> r2il::Endianness {
         self.source.container().arch.endian
     }
-
-    /// The loaded sections the program declares at this address.
-    fn loaded_sections_at(&self, vaddr: u64) -> impl Iterator<Item = &Section> {
-        self.source
-            .container()
-            .sections
-            .iter()
-            .filter(move |section| {
-                section.loaded && vaddr >= section.vaddr && vaddr - section.vaddr < section.vsize
-            })
-    }
 }
 
 impl<S: Source> Decoders for OpenProgram<S> {
@@ -571,8 +572,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
-        self.loaded_sections_at(vaddr)
-            .any(|section| !section.is_code)
+        self.static_data.holds(vaddr)
     }
 
     fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool {

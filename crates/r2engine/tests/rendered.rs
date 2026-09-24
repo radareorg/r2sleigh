@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{CALLER, Literal, ONE, STUB, TEXT, TWO, opened};
+use common::{BASE, CALLER, Literal, ONE, STUB, TEXT, TWO, opened};
 use r2engine::RenderTier;
 use r2engine::program::OpenProgram;
 
@@ -49,6 +49,28 @@ fn a_call_to_an_import_declared_never_to_return_ends_the_function() {
         .lines()
         .any(|line| line.trim_start().starts_with("return"));
     assert!(!returns, "{c}");
+}
+
+/// `g: jmp t` then `t: lea eax, [rdi + rdi*2 + 1]; ret`, each a stated function.
+const TAIL_JUMPING: &[u8] = &[
+    0xe9, 0x0b, 0x00, 0x00, 0x00, // g: jmp t
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding
+    0x8d, 0x44, 0x7f, 0x01, // t: lea eax, [rdi + rdi*2 + 1]
+    0xc3, // ret
+];
+
+/// Where a jump sends control is executed, not read, so the function it lands
+/// on is no data the jumping one names: `g` is `g`, calling `t` in its tail,
+/// and not the import stub of a symbol `t` it only reached by name.
+#[test]
+fn a_tail_jump_to_a_defined_function_is_a_call_to_it_and_no_import() {
+    let (g, t) = (BASE, BASE + 0x10);
+    let mut program = OpenProgram::of(Literal::of_code(TAIL_JUMPING, &[("g", g, 5), ("t", t, 5)]));
+    let c = c_of(&mut program, g);
+    let head = c.lines().next().unwrap_or_default();
+    assert!(head.contains(" g(") && !head.contains(" t("), "{c}");
+    assert!(c.contains("return t("), "{c}");
+    assert!(!c.contains("import stub"), "{c}");
 }
 
 #[test]

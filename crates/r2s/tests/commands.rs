@@ -614,6 +614,74 @@ mod listing {
         insta::assert_snapshot!("table_dispatch_pdf", run.out);
     }
 
+    /// `bl sym.imp.memcpy` lands on a stub in `__stubs`, which the container
+    /// states holds instructions (`S_ATTR_PURE_INSTRUCTIONS`): its first bytes
+    /// spell `"0"` only by chance, so no line says a string is there and the
+    /// name table names none, as radare2 names none.
+    #[test]
+    fn a_call_to_a_stub_says_no_text_at_it() {
+        let fixture = "tests/fixtures/manual_limits_O0";
+        let listed = at(fixture, "pdf @ sym._main");
+        assert!(listed.ok, "{}", listed.out);
+        let mut lines = listed.out.lines();
+        let call = lines.find(|line| line.trim_start().starts_with("0x100000e18"));
+        let certified =
+            "bl sym.imp.memcpy ; sym.imp.memcpy(arg1@x0, arg2=0x100004008, arg3=0x50) (certified)";
+        assert!(
+            call.is_some_and(|line| line.ends_with(certified)),
+            "{}",
+            listed.out
+        );
+        // No transfer's target is text, whichever function it goes to.
+        for line in listed.out.lines() {
+            let mnemonic = line.split_whitespace().nth(2).unwrap_or_default();
+            if matches!(mnemonic, "b" | "bl") || mnemonic.starts_with("b.") {
+                assert!(!line.contains(r#"; ""#), "{line}");
+            }
+        }
+        let one = at(fixture, "pd 1 @ 0x100000e18");
+        assert!(
+            one.out.trim_end().ends_with("bl sym.imp.memcpy"),
+            "{}",
+            one.out
+        );
+        // The stubs are 0x100000fd8 to 0x100000fe4, and the first string is `__cstring`'s at the end of them.
+        let strings = at(fixture, "iz");
+        assert!(strings.ok, "{}", strings.out);
+        let listed = strings.out.lines().filter_map(|line| {
+            let address = line.split_whitespace().next()?.strip_prefix("0x")?;
+            u64::from_str_radix(address, 16).ok()
+        });
+        let listed = listed.collect::<Vec<_>>();
+        assert!(listed.contains(&0x1_0000_0fe4), "{}", strings.out);
+        let stubs = 0x1_0000_0fd8..0x1_0000_0fe4;
+        assert!(
+            !listed.iter().any(|address| stubs.contains(address)),
+            "{}",
+            strings.out
+        );
+        let flags = at(fixture, "f");
+        let named = flags
+            .out
+            .lines()
+            .filter(|line| line.starts_with("0x100000fd8"));
+        let named = named.collect::<Vec<_>>();
+        assert!(
+            named.iter().any(|line| line.ends_with(" sym.imp.memcpy")),
+            "{}",
+            flags.out
+        );
+        assert!(
+            !named.iter().any(|line| line.contains(" str.")),
+            "{}",
+            flags.out
+        );
+        // The reference index never read the text, and still names the call.
+        let refs = at(fixture, "axt 0x100000fd8");
+        let call = "sym._main 0x100000e18 [CALL:--x] bl sym.imp.memcpy\n";
+        assert!(refs.out.starts_with(call), "{}", refs.out);
+    }
+
     #[test]
     fn the_arm_listing_is_pinned() {
         let run = at("crates/r2image/tests/data/arm_thumb_entry.elf", "pd 12");

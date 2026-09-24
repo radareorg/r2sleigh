@@ -7,7 +7,7 @@ use std::fmt;
 
 use common::{
     BASE, CALLER, FORKED, GUARDED_JOIN, HANDED, HANDS, JOINED, Literal, MOVED, ONE, OVERWRITTEN,
-    PASSES, SHIFT_MERGE, STEPPED, TWO, handing, table_switch,
+    PASSES, SHIFT_MERGE, STEPPED, TRANSFERRED, TWO, handing, table_switch, transferring,
 };
 use r2engine::program::{OpenProgram, Source};
 use r2engine::query::{
@@ -106,11 +106,19 @@ fn oracle_set() -> Vec<(&'static str, Literal, u64)> {
         ("hands", handing(), HANDS),
         ("pick", table_switch(), BASE),
     ];
+    // A call and a tail jump to the bytes of `"1"`, and a line that hands their address on as a value.
+    let transfers = [
+        ("calls", BASE),
+        ("jumps", BASE + 0x10),
+        ("hands_text", BASE + 0x20),
+    ]
+    .map(|(name, entry)| (name, transferring().with_data_after(TRANSFERRED), entry));
     common
         .into_iter()
         .chain(own)
         .chain([("moved", moved, BASE)])
         .chain(certified)
+        .chain(transfers)
         .collect()
 }
 
@@ -327,6 +335,7 @@ fn judged(literal: Literal, entry: u64, injected: &[(u64, Injected)]) -> Vec<Fai
             run(&lift, entry, state, &memory, &mut ledger);
         }
     }
+    ledger.rule_executed();
     ledger.failures()
 }
 
@@ -380,6 +389,8 @@ struct ClaimAt {
 #[derive(Default)]
 struct Ledger {
     claims: BTreeMap<u64, Vec<Claim>>,
+    /// Each address some run transferred control to directly, with the first run that did.
+    executed: BTreeMap<u64, String>,
 }
 
 impl Ledger {
@@ -458,6 +469,23 @@ impl Ledger {
                 _ => continue,
             };
             claim.decided(verdict, "the revision");
+        }
+    }
+
+    /// Rule on each text claim against where the runs sent control: bytes a run executes are no string.
+    ///
+    /// Independent of what the listings claim about the transfer, so a text
+    /// claim at a call's target fails even where no line claims the target.
+    fn rule_executed(&mut self) {
+        let claims = self.claims.values_mut().flatten();
+        for claim in claims {
+            let AnnotationKind::Text { address, .. } = claim.kind else {
+                continue;
+            };
+            if let Some(described) = self.executed.get(&address) {
+                let held = Err(format!("control transfers to {address:#x}"));
+                claim.decided(held, described);
+            }
         }
     }
 
@@ -1062,6 +1090,10 @@ fn run(
         };
         ledger.arrive(lift, &arrival, &mut track, &described);
         let ran = executed(&instruction.ops, &mut state);
+        if let Some((to, _)) = ran.direct {
+            let first = ledger.executed.entry(to);
+            first.or_insert_with(|| format!("the run entered with [{described}]"));
+        }
         trace.extend(ran.accesses.iter().copied());
         let ops = &instruction.ops[..ran.executed];
         following.retain_mut(|number| match number.through(ops, &ran.chosen, lift) {
@@ -1348,8 +1380,16 @@ fn verdict<M: Mapped>(
 fn certified<M: Mapped>(kind: &AnnotationKind, after: &After<'_, M>) -> Option<Result<(), String>> {
     Some(match *kind {
         // Each register argument the boundary names one value of holds it as the call runs.
-        AnnotationKind::Call { ref arguments, .. } => {
-            let called = after.ran.direct.is_none_or(|(_, called)| called);
+        AnnotationKind::Call {
+            callee,
+            ref arguments,
+            ..
+        } => {
+            // A tail call runs as the jump to the callee it names; a jump anywhere else skipped the call.
+            let called = after
+                .ran
+                .direct
+                .is_none_or(|(to, called)| called || callee == Some(to));
             if !after.whole() || !called {
                 return None;
             }

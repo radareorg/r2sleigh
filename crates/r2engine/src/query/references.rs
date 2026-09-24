@@ -52,6 +52,19 @@ pub enum Role {
     Value,
 }
 
+impl Role {
+    /// How many bytes the instruction accesses at the address where it uses it
+    /// as data, or `None` where it transfers control there, so the bytes are
+    /// executed rather than read.
+    pub const fn data_access(self) -> Option<u32> {
+        match self {
+            Self::Read { width } | Self::Write { width } => Some(width),
+            Self::Value => Some(0),
+            Self::Call | Self::Jump => None,
+        }
+    }
+}
+
 /// An instruction the index read references from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claimant {

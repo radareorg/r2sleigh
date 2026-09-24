@@ -85,10 +85,34 @@ pub struct Section {
     pub name: String,
     pub vaddr: u64,
     pub vsize: u64,
+    /// Whether the container states this section holds instructions, as its
+    /// own flags or attributes say, never as its name suggests.
     pub is_code: bool,
     /// Whether the loader maps it at all. A section it does not map occupies
     /// no address.
     pub loaded: bool,
+}
+
+impl Section {
+    /// Whether static data can live here: a section the loader maps that the
+    /// container does not state holds instructions.
+    ///
+    /// The one answer to where static data can be, which the name table, a
+    /// listing's text and the decompiler's literals all read. What makes a
+    /// constant the address of a string is where it points, and "the bytes
+    /// there read as text" is far too weak a test -- almost any pair of bytes
+    /// does. A structure offset of eighty was rendered as the string at
+    /// address eighty, which is two bytes of the ELF header and in no section
+    /// at all; the stub a Mach-O call lands on read as the string `"1"` while
+    /// the container stated it held instructions.
+    pub const fn holds_static_data(&self) -> bool {
+        self.loaded && !self.is_code && self.vsize > 0
+    }
+
+    /// The half-open range of addresses the section occupies.
+    pub const fn range(&self) -> (u64, u64) {
+        (self.vaddr, self.vaddr.saturating_add(self.vsize))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

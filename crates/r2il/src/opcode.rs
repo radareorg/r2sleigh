@@ -85,6 +85,23 @@ pub struct BlockTransfer {
     pub answer: Option<Varnode>,
 }
 
+/// The operand one operation sends control to, and how it sends it there.
+///
+/// R2IL's statement of which operand of a branch or a call says where control
+/// goes, which the lift's memory canonicalization, the listing's claims and
+/// the body's data references read rather than matching the operations
+/// themselves. Where control goes is executed, not read as data, so no
+/// consumer may look for a constant, a string or an object there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlTransfer<'a> {
+    /// Where control goes: the destination itself where `direct`, else the value that holds it.
+    pub target: &'a Varnode,
+    /// Whether the operation encodes its destination, as a direct branch or call does, rather than computing it at run time.
+    pub direct: bool,
+    /// Whether control comes back after it, as it does from a call.
+    pub call: bool,
+}
+
 /// An r2il operation representing a single semantic action.
 ///
 /// Operations are organized into categories:
@@ -648,6 +665,49 @@ impl R2ILOp {
                 // at one, and it names no successor of its own.
                 | R2ILOp::Breakpoint
         )
+    }
+
+    /// Where this operation sends control, where it names a place to send it.
+    ///
+    /// A return is none: it goes back to wherever its caller was, which is no
+    /// address the operation names, and a trap goes to a handler it does not
+    /// name either.
+    pub fn transfer(&self) -> Option<ControlTransfer<'_>> {
+        let (target, direct, call) = match self {
+            R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => (target, true, false),
+            R2ILOp::Call { target } => (target, true, true),
+            R2ILOp::BranchInd { target } => (target, false, false),
+            R2ILOp::CallInd { target } => (target, false, true),
+            _ => return None,
+        };
+        Some(ControlTransfer {
+            target,
+            direct,
+            call,
+        })
+    }
+
+    /// The inputs through which this operation can name data: every one but
+    /// the operand that says where control goes.
+    ///
+    /// A branch's, a call's or a return's destination is code the transfer
+    /// executes, so no constant, string or object is looked for there, whether
+    /// the operand is that destination or holds it; only a conditional
+    /// branch's condition is data among a transfer's operands.
+    ///
+    /// This is not the set of storages the operation reads: an indirect
+    /// transfer or a return still reads the register holding its destination,
+    /// so no def-use or liveness question is answered from it. It also takes
+    /// the canonical form the lift gives: a memory slot an indirect transfer
+    /// reads its destination from is data, and the lift loads it explicitly
+    /// first, so the operand here is never that slot.
+    pub fn data_inputs(&self) -> Vec<&Varnode> {
+        match self {
+            R2ILOp::CBranch { cond, .. } => vec![cond],
+            R2ILOp::Return { .. } => Vec::new(),
+            _ if self.transfer().is_some() => Vec::new(),
+            _ => self.inputs(),
+        }
     }
 
     /// Returns true if this operation reads from memory.
@@ -1581,5 +1641,69 @@ impl R2ILBlock {
             }
         }
         joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every transfer the lift spells, and one data operation beside them.
+    fn ops() -> Vec<R2ILOp> {
+        let (to, held, cond) = (
+            Varnode::ram(0x1000, 8),
+            Varnode::register(0, 8),
+            Varnode::register(0x200, 1),
+        );
+        vec![
+            R2ILOp::Branch { target: to.clone() },
+            R2ILOp::CBranch {
+                target: to.clone(),
+                cond,
+            },
+            R2ILOp::Call { target: to.clone() },
+            R2ILOp::BranchInd {
+                target: held.clone(),
+            },
+            R2ILOp::CallInd {
+                target: held.clone(),
+            },
+            R2ILOp::Return {
+                target: held.clone(),
+            },
+            R2ILOp::Load {
+                dst: held,
+                space: SpaceId::Ram,
+                addr: to,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_transfer_names_where_control_goes_and_every_other_input_is_data() {
+        let said = ops()
+            .iter()
+            .map(|op| {
+                let transfer = op
+                    .transfer()
+                    .map(|one| (one.target.offset, one.direct, one.call));
+                let data = op.data_inputs().iter().map(|input| input.offset).collect();
+                (transfer, data)
+            })
+            .collect::<Vec<(_, Vec<u64>)>>();
+        assert_eq!(
+            said,
+            [
+                (Some((0x1000, true, false)), vec![]),
+                // The condition decides whether it goes; it is read, not executed.
+                (Some((0x1000, true, false)), vec![0x200]),
+                (Some((0x1000, true, true)), vec![]),
+                (Some((0, false, false)), vec![]),
+                (Some((0, false, true)), vec![]),
+                // A return names no place of its own, and what it goes back to is still not data.
+                (None, vec![]),
+                (None, vec![0x1000]),
+            ]
+        );
     }
 }

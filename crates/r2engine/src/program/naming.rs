@@ -113,14 +113,15 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
     let scanned: u64 = image
         .sections
         .iter()
-        .filter(|section| holds_text(section))
+        .filter(|section| section.holds_static_data())
         .map(|section| section.vsize)
         .sum();
     // One bar for the whole listing, because that is what a reader reads: a
     // short section must not get a lower bar than the binary it is part of.
     let floor = chance_run_length(scanned);
     for section in &image.sections {
-        if !holds_text(section) {
+        // Section by section, so no string runs across the end of one.
+        if !section.holds_static_data() {
             continue;
         }
         let Some(bytes) = source.read(section.vaddr, section.vsize as usize) else {
@@ -148,11 +149,6 @@ pub fn name_strings(db: &mut NameDb, source: &impl Source) {
             at += run + 1;
         }
     }
-}
-
-/// Which sections a string can live in.
-fn holds_text(section: &Section) -> bool {
-    section.loaded && !section.is_code && section.vsize > 0
 }
 
 /// The shortest run this binary is not expected to contain by chance.

@@ -169,7 +169,9 @@ pub fn translate_ptrsub<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
 /// became an undefined variable, and a write a local nothing else could see.
 /// A read becomes a load into a fresh temporary, a written output becomes a
 /// temporary the operation writes and a store carries out; a copy needs no
-/// temporary at all. A code address a transfer names is not a memory operand.
+/// temporary at all. The code address a direct transfer names, as
+/// [`R2ILOp::transfer`] states it, is not a memory operand; a slot an indirect
+/// transfer reads its destination from is, and is loaded like any other.
 pub fn canonicalize_memory_operands(
     ops: Vec<R2ILOp>,
     address_size: u32,
@@ -201,12 +203,10 @@ pub fn canonicalize_memory_operands(
             }
             _ => {}
         }
-        let code_target = match &op {
-            R2ILOp::Branch { target }
-            | R2ILOp::CBranch { target, .. }
-            | R2ILOp::Call { target } => Some(target.clone()),
-            _ => None,
-        };
+        let code_target = op
+            .transfer()
+            .filter(|transfer| transfer.direct)
+            .map(|transfer| transfer.target.clone());
         for input in op.inputs_mut() {
             if input.space != SpaceId::Ram || code_target.as_ref() == Some(&*input) {
                 continue;

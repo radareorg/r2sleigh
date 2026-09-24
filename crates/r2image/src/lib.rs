@@ -96,6 +96,13 @@ pub struct Section {
     pub vsize: u64,
     pub file_offset: u64,
     pub file_size: u64,
+    /// Whether the container states this section holds instructions.
+    ///
+    /// Stated, not inferred from a name: ELF says it with `SHF_EXECINSTR`,
+    /// COFF with `IMAGE_SCN_CNT_CODE` or `IMAGE_SCN_MEM_EXECUTE`, and Mach-O
+    /// with the `S_ATTR_PURE_INSTRUCTIONS` or `S_ATTR_SOME_INSTRUCTIONS`
+    /// attribute. Mach-O's `__stubs` and `__auth_stubs` state it too, so the
+    /// stub a call lands on is never data a string can be read out of.
     pub is_code: bool,
     /// Whether the loader maps this section, so `vaddr` is an address at all.
     ///
@@ -396,6 +403,24 @@ fn section_is_loaded<'a>(section: &impl object::read::ObjectSection<'a>) -> bool
     }
 }
 
+/// Whether the container states this section holds instructions.
+///
+/// `object` reads a Mach-O section's kind off its segment and section names
+/// and knows only `__TEXT,__text` as code, so every stub section read as data;
+/// the section's own attributes say which hold instructions. For ELF and COFF
+/// `object` derives the kind from the flags that state it -- `SHF_EXECINSTR`
+/// on an allocated section, `IMAGE_SCN_CNT_CODE` or `IMAGE_SCN_MEM_EXECUTE` --
+/// so its answer there is the container's.
+fn states_instructions<'a>(section: &impl object::read::ObjectSection<'a>) -> bool {
+    use object::macho::{S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS};
+    match section.flags() {
+        object::SectionFlags::MachO { flags } => {
+            flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0
+        }
+        _ => section.kind() == object::SectionKind::Text,
+    }
+}
+
 fn macho_indirect_symbols(file: &object::File<'_>, data: &[u8]) -> Vec<Relocation> {
     match file {
         object::File::MachO64(macho) => indirect_symbols(macho, data),
@@ -676,7 +701,7 @@ impl Image {
                     vsize: section.size(),
                     file_offset,
                     file_size,
-                    is_code: section.kind() == object::SectionKind::Text,
+                    is_code: states_instructions(&section),
                     loaded: section_is_loaded(&section),
                 }
             })

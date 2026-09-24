@@ -14,6 +14,7 @@ use super::Support;
 use super::Work;
 use super::decode::Lookahead;
 use super::records::{Annotation, AnnotationKind, Answered, Line, Memory, WalkedBody};
+use super::references::Role;
 
 /// How far on a run is lifted again to see which numbers move with it.
 ///
@@ -314,31 +315,33 @@ fn relative_over(
         .collect()
 }
 
-/// What this revision holds at the addresses the line's claims use, each on the rung of the claim; a word read is data, not a use.
+/// What this revision holds at the addresses the line's claims use as data, each on the rung of the claim; a word read is data, not a use.
+///
+/// Text is said only where a claim reads, writes or computes the address.
+/// Where the line transfers control there, its own lift says the bytes are
+/// executed, so a string there would contradict the claim it hangs on.
 fn revision_at(
     memory: &Memory<'_>,
     claims: &[(AnnotationKind, Support)],
 ) -> Vec<(AnnotationKind, Support)> {
     let mut said = Vec::new();
-    // Each address a claim uses, with how many bytes the claim itself accesses there.
+    // Each address a claim uses as data, with how many bytes the claim itself accesses there.
     let mut used = BTreeMap::<u64, Vec<(u32, Support)>>::new();
     for (kind, support) in claims {
-        let (address, accessed) = match *kind {
-            AnnotationKind::Reads { address, width } => {
-                if let Some(value) = memory.word(address, width) {
-                    let kind = AnnotationKind::Holds {
-                        address,
-                        width,
-                        value,
-                    };
-                    said.push((kind, *support));
-                }
-                (address, width)
-            }
-            AnnotationKind::Writes { address, width } => (address, width),
-            AnnotationKind::Target { address, .. }
-            | AnnotationKind::Computes { value: address } => (address, 0),
-            _ => continue,
+        if let AnnotationKind::Reads { address, width } = *kind
+            && let Some(value) = memory.word(address, width)
+        {
+            let kind = AnnotationKind::Holds {
+                address,
+                width,
+                value,
+            };
+            said.push((kind, *support));
+        }
+        let (Some(address), Some(accessed)) =
+            (kind.address(), kind.role().and_then(Role::data_access))
+        else {
+            continue;
         };
         used.entry(address).or_default().push((accessed, *support));
     }
@@ -475,13 +478,15 @@ fn pointer_use(
     holders: &[Varnode],
 ) -> Option<Support> {
     use super::records::Callee;
-    let callee = match block.ops.get(at)? {
-        R2ILOp::Call { target } => Callee::At(encoded_target(target)?),
-        R2ILOp::CallInd { target } => match BlockOrigins::upto(block, at).of(target)? {
+    let op = block.ops.get(at)?;
+    let call = op.transfer().filter(|transfer| transfer.call)?;
+    let callee = if call.direct {
+        Callee::At(encoded_target(call.target)?)
+    } else {
+        match BlockOrigins::upto(block, at).of(call.target)? {
             ValueOrigin::Constant { value, .. } => Callee::At(value),
             ValueOrigin::LoadedSlot(slot) => Callee::ThroughSlot(slot.offset),
-        },
-        _ => return None,
+        }
     };
     let held = |storage: &CanonicalStorageId| {
         holders
@@ -556,16 +561,17 @@ fn covers(outer: &Varnode, inner: &Varnode) -> bool {
 fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
     let folded = |addr: &Varnode| origins.of(addr).and_then(ValueOrigin::constant);
     // A direct transfer encodes its target; a computed one names it wherever the block folds it, a loaded one only the slot it read.
-    let target = match op {
-        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } | R2ILOp::Call { target } => {
-            encoded_target(target)
-        }
-        R2ILOp::CallInd { target } | R2ILOp::BranchInd { target } => folded(target),
-        _ => None,
-    };
-    if let Some(address) = target {
-        let call = matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
-        return vec![AnnotationKind::Target { address, call }];
+    if let Some(transfer) = op.transfer() {
+        let target = if transfer.direct {
+            encoded_target(transfer.target)
+        } else {
+            folded(transfer.target)
+        };
+        let call = transfer.call;
+        return target
+            .map(|address| AnnotationKind::Target { address, call })
+            .into_iter()
+            .collect();
     }
     accessed(op)
         .into_iter()

@@ -6,7 +6,7 @@ mod common;
 use common::{
     ARM_ENTRY, BASE, CALLER, FORKED, GUARDED_JOIN, HANDED, HANDS, JOINED, Literal, MOVED, ONE,
     OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
-    THUMB_LEAF, TWO, VENEER, handing, opened, table_switch,
+    THUMB_LEAF, TRANSFERRED, TWO, VENEER, handing, opened, table_switch, transferring,
 };
 use r2engine::program::OpenProgram;
 use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
@@ -411,6 +411,70 @@ fn a_line_says_the_text_at_an_address_it_uses() {
         "{:?}",
         program.names().all_at(TEXT_AT)
     );
+}
+
+/// The address and text of every text claim a line makes.
+fn texts(line: &Line) -> Vec<(u64, String)> {
+    let texts = line
+        .annotations
+        .iter()
+        .filter_map(|annotation| match &annotation.kind {
+            AnnotationKind::Text { address, text } => Some((*address, text.clone())),
+            _ => None,
+        });
+    texts.collect()
+}
+
+#[test]
+fn a_transfer_target_holds_no_text_and_a_value_does() {
+    let t = TRANSFERRED;
+    let mut program = OpenProgram::of(transferring().with_data_after(t));
+    let first = |program: &mut OpenProgram<Literal>, start: u64| {
+        let listed = program.listing(Listing {
+            start,
+            stop: Stop::After(1),
+        });
+        listed.expect("it lists").value.remove(0)
+    };
+    // `call t` and `jmp t` execute the bytes at t, so the `"1"` they spell is no string there.
+    for (at, call) in [(BASE, true), (BASE + 0x10, false)] {
+        let line = first(&mut program, at);
+        let target = AnnotationKind::Target { address: t, call };
+        assert!(
+            line.annotations.iter().any(|one| one.kind == target),
+            "{line:?}"
+        );
+        assert_eq!(texts(&line), [], "{line:?}");
+    }
+    // `lea rdi, [t]` computes the address as a value, so the text there is said beside it.
+    let lea = first(&mut program, BASE + 0x20);
+    let computes = AnnotationKind::Computes { value: t };
+    assert!(
+        lea.annotations.iter().any(|one| one.kind == computes),
+        "{lea:?}"
+    );
+    assert_eq!(texts(&lea), [(t, "1".to_owned())]);
+    // The function listing reads the same rule: the call line names t and no text.
+    let whole = program.function_listing(BASE).expect("it lists").value;
+    let call = whole.iter().find(|line| line.address == BASE);
+    let call = call.expect("the call is listed");
+    let target = AnnotationKind::Target {
+        address: t,
+        call: true,
+    };
+    assert!(
+        call.annotations.iter().any(|one| one.kind == target),
+        "{call:?}"
+    );
+    assert_eq!(texts(call), [], "{call:?}");
+    // Where the container states the bytes hold instructions, no use of them reads a string.
+    let mut stated = OpenProgram::of(transferring().with_code_after(t));
+    let lea = first(&mut stated, BASE + 0x20);
+    assert!(
+        lea.annotations.iter().any(|one| one.kind == computes),
+        "{lea:?}"
+    );
+    assert_eq!(texts(&lea), [], "{lea:?}");
 }
 
 /// `mov eax, edi; and eax, 7; ret`

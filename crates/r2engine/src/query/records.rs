@@ -118,7 +118,7 @@ pub struct Answered<'a> {
     pub proved: Option<&'a super::proved::Proved<'a>>,
     /// The walked body the run is in: its blocks, and the def-use that says whether a number a line computes is a step.
     pub body: Option<&'a WalkedBody<'a>>,
-    /// Whether a line states what this revision holds where its claims use an address; the reference index reads only the claims.
+    /// Whether a line states what this revision holds where its claims use an address as data, never at a transfer's target; the reference index reads only the claims.
     pub holdings: bool,
     /// Which parameters of each callee take an address, where the listing can ask.
     pub parameters: Option<&'a dyn Parameters>,
@@ -285,7 +285,9 @@ pub enum AnnotationKind {
         width: u32,
         value: u64,
     },
-    /// The revision holds this text where a claim on the line uses the address; like `Holds`, never that the line reads it.
+    /// The revision holds this text where a claim on the line uses the address as data; like `Holds`, never that the line reads it.
+    ///
+    /// Never at a transfer's target: a call or a jump there executes the bytes.
     Text { address: u64, text: String },
     /// The call this line makes, and what its boundary proved it hands the callee; `None` where no mapping was proved.
     Call {

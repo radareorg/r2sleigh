@@ -228,6 +228,52 @@ pub fn handing() -> Literal {
     Literal::of_code(HANDING, &functions).with_data_after(HANDED)
 }
 
+/// `f: call t; ret`, `g: jmp t`, `h: lea rdi, [t]; call one; ret` and
+/// `one: mov eax, 1; ret`, then `"1"` at `t`: two transfers to one address
+/// and one use of it as a value.
+pub const TRANSFERRING: [u8; 0x102] = {
+    let mut bytes = [0xcc; 0x102];
+    let runs: [(usize, &[u8]); 5] = [
+        (0x00, &[0xe8, 0xfb, 0x00, 0x00, 0x00, 0xc3]), // f: call 0x1100; ret
+        (0x10, &[0xe9, 0xeb, 0x00, 0x00, 0x00]),       // g: jmp 0x1100
+        (
+            0x20,
+            &[
+                0x48, 0x8d, 0x3d, 0xd9, 0x00, 0x00, 0x00, // h: lea rdi, [rip + 0xd9]
+                0xe8, 0x04, 0x00, 0x00, 0x00, // call one
+                0xc3, // ret
+            ],
+        ),
+        (0x30, &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]), // one: mov eax, 1; ret
+        (0x100, b"1\0"),                               // t, the text
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            bytes[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    bytes
+};
+/// Where `TRANSFERRING` keeps `"1"`, which is also where its calls and jumps go.
+pub const TRANSFERRED: u64 = BASE + 0x100;
+
+/// `TRANSFERRING` as one run of code, stating `t` a function where its text is; the caller says what the section after its code is.
+pub fn transferring() -> Literal {
+    let functions = [
+        ("f", BASE, 6),
+        ("g", BASE + 0x10, 5),
+        ("h", BASE + 0x20, 0xd),
+        ("one", BASE + 0x30, 6),
+        ("t", TRANSFERRED, 2),
+    ];
+    Literal::of_code(&TRANSFERRING, &functions)
+}
+
 /// A jump table of absolute addresses, the form x86-64 uses:
 ///
 /// ```text
@@ -488,15 +534,25 @@ impl Literal {
     }
 
     /// The same program with its code ending at `end` and the rest of its bytes a data section.
-    pub fn with_data_after(mut self, end: u64) -> Self {
+    pub fn with_data_after(self, end: u64) -> Self {
+        self.split_at(end, ".rodata", false)
+    }
+
+    /// The same program with its code ending at `end` and the rest of its bytes a second section the container states holds instructions.
+    pub fn with_code_after(self, end: u64) -> Self {
+        self.split_at(end, ".init", true)
+    }
+
+    /// The same program with its first section ending at `end` and the rest of its bytes this one.
+    fn split_at(mut self, end: u64, name: &str, is_code: bool) -> Self {
         let code = &mut self.container.sections[0];
         let stop = code.vaddr + code.vsize;
         code.vsize = end - code.vaddr;
         self.container.sections.push(Section {
-            name: ".rodata".to_owned(),
+            name: name.to_owned(),
             vaddr: end,
             vsize: stop - end,
-            is_code: false,
+            is_code,
             loaded: true,
         });
         self
