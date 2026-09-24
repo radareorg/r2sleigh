@@ -592,12 +592,7 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
     }
 }
 
-/// The program as one derivation reads it, logging which bytes it read and
-/// what it was told about which calls return.
-///
-/// An answer that recorded this can be kept across a write that missed every
-/// one of them, which is what a patch to another function is. The log lives
-/// for one derivation only, so nothing else reads through it.
+/// The program as one derivation reads it, logging the bytes it read and each callee's return it was told.
 struct Recording<'a, S: Source> {
     program: &'a OpenProgram<S>,
     consulted: std::cell::RefCell<Consulted>,

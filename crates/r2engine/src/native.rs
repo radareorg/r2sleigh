@@ -7,8 +7,8 @@
 //! capture is new, and nothing here formats anything.
 //!
 //! The callees a function calls directly are walked too, one level deep, and
-//! their bodies are what say what each call takes and returns. Whether a call
-//! comes back at all is the program's whole-program fixpoint, which every walk asks.
+//! their bodies are what say what each call takes and returns.
+//! Whether a call comes back at all is the program's whole-program fixpoint.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -341,12 +341,7 @@ pub fn decompile(
     render(target, program, entry, crate::RenderTier::C)
 }
 
-/// Whether a body that transfers to these callees and loads these constant addresses calls anything declared to take a function.
-///
-/// The cheap half of the question, asked off the walk alone so that a body
-/// which cannot hand a function anywhere is never prepared to find out. An
-/// import is reached through a slot the loader fills, and the walk sees the
-/// load rather than the call's target, so every slot read counts as a callee.
+/// Whether a body that transfers to these callees and reads these import slots calls anything declared to take a function.
 pub(crate) fn hands_a_function(
     target: &NativeTarget<'_>,
     program: &dyn Program,

@@ -73,8 +73,7 @@ struct Held<T, S> {
     revision: Revision,
     entry: u64,
     analysis: Arc<T>,
-    /// What deriving it consulted. A write that moved none of it -- a patch to
-    /// another function -- leaves this answer about this program.
+    /// What deriving it consulted; a write that moved none of it leaves this answer standing.
     consulted: Consulted,
     /// The type analysis sealed from exactly this analysis, once a request sealed it.
     sealed: Option<S>,
@@ -99,17 +98,7 @@ impl<T, S> Default for Memo<T, S> {
 }
 
 impl<T, S> Memo<T, S> {
-    /// The held answer, where the program has not moved under it.
-    ///
-    /// A write that missed every byte the derivation read and changed no answer
-    /// it was given about a callee leaves it standing, which is what a patch
-    /// to another function is; the name and entry tables are compared whole,
-    /// because a walk consults them about addresses it never read.
-    ///
-    /// `derive` answers with the analysis and what it consulted, together, so
-    /// the set held is always the one that derivation made. Recorded by a
-    /// second call, a hit -- which reads nothing -- wrote an empty set over it,
-    /// and the answer then stood against every later write.
+    /// The held answer where nothing it consulted has moved, else what `derive` answers, held with what that derivation consulted.
     pub fn analysed_since(
         &self,
         revision: Revision,

@@ -283,3 +283,31 @@ fn a_callee_whose_walk_stops_at_an_indirect_branch_may_return() {
     assert_eq!(extent(&mut program, caller), (caller + 11, false));
     assert!(!extent(&mut program, ind).1);
 }
+
+/// `spin: b spin`, then `caller: cmp r0, #0; blne spin; bx lr`.
+const PREDICATED: &[u8] = &[
+    0xfe, 0xff, 0xff, 0xea, 0x00, 0x00, 0x50, 0xe3, 0xfc, 0xff, 0xff, 0x1b, 0x1e, 0xff, 0x2f, 0xe1,
+];
+
+#[test]
+fn a_predicated_call_to_a_function_that_never_returns_goes_on_when_its_predicate_fails() {
+    let (spin, caller) = (BASE, BASE + 4);
+    let functions = [("spin", spin, 4), ("caller", caller, 12)];
+    let literal = Literal::of_code(PREDICATED, &functions).in_arm();
+    let mut program = OpenProgram::of(literal);
+    assert_eq!(extent(&mut program, spin), (caller, true));
+    assert_eq!(extent(&mut program, caller), (caller + 12, false));
+}
+
+#[test]
+fn a_function_that_runs_on_into_another_returns_what_that_one_returns() {
+    // `f: call ind` runs on into `g: mov eax, 1; ret` once `ind`, stopped at `jmp rax`, may return.
+    let (ind, f, g) = (BASE, BASE + 2, BASE + 7);
+    let functions = [("ind", ind, 2), ("f", f, 5), ("g", g, 6)];
+    let literal = || Literal::of_code(STOPS, &functions);
+    let mut cold = OpenProgram::of(literal());
+    assert_eq!(extent(&mut cold, f), (g, false));
+    let mut warm = OpenProgram::of(literal());
+    believed(&mut warm);
+    assert_eq!(extent(&mut warm, f), (g, false));
+}

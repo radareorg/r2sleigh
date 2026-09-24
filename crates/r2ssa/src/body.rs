@@ -133,11 +133,6 @@ impl std::fmt::Display for BodyError {
 impl std::error::Error for BodyError {}
 
 /// Lift the body of the function at `entry`, past a call only where the program says control comes back from it.
-///
-/// A call assumed to return runs the walk straight into whatever follows. On
-/// `/bin/ls` five adjacent `err(1, ...)` stubs became one 260-byte function
-/// that claimed the four after it, and the interprocedural summary then
-/// refused all six for overlapping ranges.
 pub fn lift_body(
     entry: u64,
     disasm: &Disassembler,
@@ -163,8 +158,7 @@ impl Instruction {
     }
 }
 
-/// Whether control leaves an instruction ending this way for somewhere other
-/// than the next one, which is what ends a basic block.
+/// Whether control leaves an instruction ending this way for somewhere other than the next one, which ends a basic block.
 fn ends_block(terminator: &BlockTerminator) -> bool {
     !matches!(
         terminator,
@@ -191,6 +185,8 @@ pub struct Reached {
     pub tail_calls: Vec<u64>,
     /// Callees whose call now holds a fallthrough closed, each the first time.
     pub gated: Vec<u64>,
+    /// Entries of other functions control runs on into, each the first time.
+    pub falls_into: Vec<u64>,
     /// Whether control reached a return, a predicated exit or a stop the walk cannot see past.
     pub leaves: bool,
 }
@@ -258,6 +254,7 @@ struct Walk {
     calls: BTreeSet<u64>,
     loads: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
+    falls_into: BTreeSet<u64>,
     entered_with: BTreeMap<u64, u64>,
     unresolved: Vec<Unresolved>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
@@ -287,6 +284,7 @@ impl Walk {
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
+            falls_into: BTreeSet::new(),
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
             gated: BTreeMap::new(),
@@ -404,12 +402,7 @@ impl Walk {
         None
     }
 
-    /// Follow a transfer, or end the body where it leaves for another
-    /// function.
-    ///
-    /// Every way out of a block asks this: a conditional branch to another
-    /// entry is a tail call on one arm. Its own entry is not a boundary,
-    /// because a function that jumps to its own start is a loop.
+    /// Follow a transfer, or end the body where it leaves for another function's entry; its own entry is a loop.
     fn transfer(&mut self, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
         if target != self.entry && program.is_entry(target) {
             if self.tail_calls.insert(target) {
@@ -421,13 +414,15 @@ impl Walk {
         successors.push(target);
     }
 
-    /// Continue to the address after an instruction, where the next function
-    /// does not begin there.
+    /// Continue to the address after an instruction, or run on into the function that begins there.
     fn continues(&mut self, next: Option<u64>, successors: &mut Vec<u64>, program: &dyn Program) {
         let Some(next) = next else {
             return;
         };
         if next != self.entry && program.is_entry(next) {
+            if self.falls_into.insert(next) {
+                self.reached.falls_into.push(next);
+            }
             return;
         }
         successors.push(next);
@@ -467,7 +462,9 @@ impl Walk {
                 if let Some(mode) = self.mode_written(&instruction.lifted.ops) {
                     self.entered_with.entry(target).or_insert(mode);
                 }
-                match (program.returns(target), fallthrough) {
+                // A predicated call reaches the next instruction when its predicate fails, whatever the callee does.
+                let predicated = r2il::predicated_call(&instruction.lifted.ops, next);
+                match (predicated || program.returns(target), fallthrough) {
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
                     (false, Some(after)) => self.gate(target, addr, after),
@@ -531,12 +528,7 @@ impl Walk {
         held.push((call, after));
     }
 
-    /// Gather the decoded instructions into basic blocks.
-    ///
-    /// A block runs from a leader until control leaves it, until the next
-    /// instruction is a leader, or until the instructions stop being
-    /// contiguous, which is where an unresolved transfer left a hole. A call
-    /// whose fallthrough is still closed ends its block with no successor.
+    /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
     fn into_body(self) -> Body {
         let closed = self
             .gated
@@ -589,11 +581,7 @@ fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
     })
 }
 
-/// One block from the instructions collected for it.
-///
-/// The successors are the last instruction's, because that is the only
-/// instruction in a basic block that control can leave by; a call whose
-/// fallthrough is `closed` has none.
+/// One block from the instructions collected for it, with its last instruction's successors, or none where that call is `closed`.
 fn finish(
     parts: &mut Vec<Instruction>,
     link: Option<&r2il::Varnode>,

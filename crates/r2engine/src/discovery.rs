@@ -73,6 +73,8 @@ pub struct Transfers {
     pub tail_calls: Vec<u64>,
     /// Callees a call to which holds a fallthrough closed until they are known to return.
     pub gated: Vec<u64>,
+    /// Functions control runs on into from the end of this one, which then returns what they return.
+    pub falls_into: Vec<u64>,
     /// Whether the walk reached a return, or a stop it cannot see past.
     pub leaves: bool,
     /// Whether each target is entered in Thumb, where the transfer states it.
@@ -109,12 +111,7 @@ pub struct Discovery<T, E> {
     pub walks: BTreeMap<u64, Result<T, E>>,
 }
 
-/// Every function in the program, from what the image states and what the
-/// bodies reach.
-///
-/// Each seed carries the instruction set the image states it is written in.
-/// A body that cannot be walked contributes no successors and is still a
-/// function, because something stated or called it.
+/// Every function in the program from the seeds the image states, each in its stated instruction set, and what their bodies reach.
 pub fn functions<W: Walker>(
     program: &dyn Program,
     seeds: impl IntoIterator<Item = (u64, Confidence, bool)>,
@@ -168,7 +165,7 @@ pub fn returns<W: Walker>(
 enum Wait {
     /// The bytes after a call to it.
     Fallthrough,
-    /// Whether the caller returns, which its tail call to it decides.
+    /// Whether the caller returns, which its tail call to it or running on into it decides.
     TailCall,
 }
 
@@ -282,6 +279,9 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         }
         for &callee in &transfers.gated {
             self.wait(address, callee, Wait::Fallthrough);
+        }
+        for &next in &transfers.falls_into {
+            self.wait(address, next, Wait::TailCall);
         }
         if transfers.leaves {
             self.join(address);

@@ -42,6 +42,14 @@ fn the_index_carries_the_scope_it_was_read_over() {
 }
 
 #[test]
+fn a_program_that_states_no_function_has_an_empty_index() {
+    let mut program = OpenProgram::of(Literal::of_code(&[0xc3], &[]));
+    let index = program.references().expect("the index builds").value;
+    assert!(index.facts.is_empty(), "{:?}", index.facts);
+    assert!(index.coverage.read.is_empty(), "{:?}", index.coverage);
+}
+
+#[test]
 fn an_index_over_bodies_walked_to_their_end_is_closed() {
     let mut program = common::opened();
     let found = program.functions().expect("discovery runs").len();

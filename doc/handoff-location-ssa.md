@@ -31565,3 +31565,37 @@ Open: a call through an import's GOT slot (`call [exit@GOT]`, `-fno-plt`) and a
 call through the link register stay opaque, so their fallthrough is followed.
 A callee reached only through a dispatch-table arm is not in discovery, and its
 answer is derived on demand when a prepare walk asks.
+
+Two edges the first cut dropped. A predicated call (ARM `blne f` lifts to
+`CBranch next; lr = next; Call f`) reaches the next instruction when its
+predicate fails whatever the callee does, so the walk never gates it;
+`r2il::predicated_call` reads the skip `predicated_transfer` reads. Gated, a
+derived noreturn callee cut the caller's condition-false edge and could prove
+the caller noreturn. And a walk that runs on into another stated entry, by
+plain fallthrough or past a call that returns, waits on that entry as a tail
+call waits: the caller returns what it returns. Dropped silently, `f: call g`
+followed by entry `h` read as reaching nothing and proved `f` noreturn. The
+soundness induction (a function that returns on some finite execution is in
+MayReturn) needs every edge out of a walk to be one of: a return or stop, a
+tail call or run-on into an entry, or a gated fallthrough.
+
+Why the pieces are where they are: a call assumed to return runs the walk into
+whatever follows, and on `/bin/ls` five adjacent `err(1, ...)` stubs became one
+260-byte function claiming the four after it. `hands_a_function` counts every
+import slot a body reads as a callee because the walk sees the load, not the
+call's target. The memo takes the analysis and what its derivation consulted
+from one `derive` call: recorded by a second call, a hit wrote an empty read
+set over the held one and the answer then stood against every later write.
+`references` answers empty where the program states no function, because such
+a program is never assembled.
+
+Open, found by hand on an assembled ARM object (`ind: bx r3`, `f: bl ind`,
+then `g: mov r0, #1; bx lr`): discovery now says `f` may return, but `pdd`
+still renders `void f(void) { ind(); }` and `afi` types it `void`. Running into
+`g` is a tail call with no branch instruction to hang it on: the body carries
+the run-on only as a fallthrough edge out of the body, the machine context
+matches tail calls against `Branch` operations, so interface recovery reads a
+body closed by that edge as void and r2dec renders the edge as falling off the
+end. The fix is to give the run-on edge the tail-call contract (result is the
+entered function's, rendered as `return g();`), owned by r2ssa's body and
+machine context rather than patched in r2dec. It predates the return fixpoint.

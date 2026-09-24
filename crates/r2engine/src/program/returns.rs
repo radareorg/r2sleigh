@@ -1,8 +1,4 @@
 //! Whether control comes back from a call to each function, for one state of the bytes.
-//!
-//! An import answers from its own declaration and any other function from the
-//! discovery fixpoint over its callees, derived on first use over only what it
-//! reaches; `afl` derives the whole program at once.
 
 use std::collections::BTreeMap;
 
@@ -116,6 +112,7 @@ impl<'p, S: Source> Walking<'p, S> {
             calls: reached.calls,
             tail_calls: reached.tail_calls,
             gated: reached.gated,
+            falls_into: reached.falls_into,
             leaves: reached.leaves,
             entered_in,
         }

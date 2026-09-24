@@ -181,9 +181,13 @@ impl<S: Source> OpenProgram<S> {
         self.ensure_decodable()?;
         let revision = self.revision();
         let walked = self.surveyed()?.walked;
+        let mut index = References::default();
+        // A program that states no function is never assembled, and has nothing to index.
+        if walked.is_empty() {
+            return Ok(Answer::complete(index, revision));
+        }
         let program = &*self;
         let walker = super::returns::Walking::new(program, true)?;
-        let mut index = References::default();
         for (entry, walked) in walked {
             // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
             let lifted = walked.and_then(|thumb| {

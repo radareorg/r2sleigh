@@ -1488,13 +1488,24 @@ pub fn guarded_transfer(ops: &[R2ILOp]) -> Option<&R2ILOp> {
 /// other, so every derivation of where the block goes has to read the same
 /// pair. They ask here.
 pub fn predicated_transfer(ops: &[R2ILOp], next: u64) -> Option<&R2ILOp> {
+    guarded_transfer(predicated(ops, next)?)
+}
+
+/// Whether these operations call only when a predicate holds, so control reaches `next` whatever the callee does.
+pub fn predicated_call(ops: &[R2ILOp], next: u64) -> bool {
+    let calls = |op: &R2ILOp| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
+    predicated(ops, next).is_some_and(|guarded| guarded.iter().any(calls))
+}
+
+/// The operations a predicate skips by branching to `next`.
+fn predicated(ops: &[R2ILOp], next: u64) -> Option<&[R2ILOp]> {
     let skip = ops.iter().position(|op| match op {
         R2ILOp::CBranch { target, .. } => {
             matches!(target.space, SpaceId::Const | SpaceId::Ram) && target.offset == next
         }
         _ => false,
     })?;
-    guarded_transfer(&ops[skip + 1..])
+    Some(&ops[skip + 1..])
 }
 
 impl R2ILBlock {

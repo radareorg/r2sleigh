@@ -4,6 +4,6 @@ cognitive_complexity 49
 excessive_nesting 979
 redundant_clone 0
 assigning_clones 17
-needless_pass_by_ref_mut 15
+needless_pass_by_ref_mut 14
 clone_on_ref_ptr 3
 mut_mut 0
