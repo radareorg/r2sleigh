@@ -490,7 +490,45 @@ mod listing {
             "{}",
             run.out
         );
+        // The loop's header carries the byte pointer, one further each trip, and runs once per byte of the length.
+        let header = run.out.lines().find(|line| line.contains("0x00401348"));
+        let header = header.unwrap_or_default();
+        for said in [
+            "induction rdi = rdi@entry, +0x1 per trip (certified)",
+            "trips rsi@entry (solved)",
+        ] {
+            assert!(header.contains(said), "{said}: {}", run.out);
+        }
         insta::assert_snapshot!("proved_pdf", run.out);
+    }
+
+    /// Each arm of siphash24's tail switch is labelled with the cases the dispatch sends there, as radare2 labels them.
+    #[test]
+    fn every_case_the_decompiler_renders_is_a_label_in_the_listing() {
+        let listed = super::r2s("s sym.siphash24; pdf");
+        assert!(listed.ok, "{}", listed.out);
+        let rendered = super::r2s("s sym.siphash24; pdd");
+        let cases = rendered.out.lines().filter_map(|line| {
+            let case = line.trim().strip_prefix("case ")?.strip_suffix(':')?;
+            case.parse::<u64>().ok()
+        });
+        let cases = cases.collect::<Vec<_>>();
+        assert_eq!(cases.len(), 8, "{}", rendered.out);
+        for case in cases {
+            let label = format!(";-- case {case}:");
+            let label = listed
+                .out
+                .lines()
+                .find(|line| line.trim_start().starts_with(&label));
+            assert!(
+                label.is_some_and(|line| line.ends_with("; from 0x0040197e")),
+                "case {case}: {}",
+                listed.out
+            );
+        }
+        let dispatch = "; switch table (8 cases) at 0x402020 (solved)";
+        assert!(listed.out.contains(dispatch), "{}", listed.out);
+        insta::assert_snapshot!("siphash_pdf", listed.out);
     }
 
     /// A line that hands a string to a call says the text beside the address, on the rung the address stands on.

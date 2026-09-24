@@ -114,8 +114,8 @@ pub struct Answered<'a> {
     pub memory: Memory<'a>,
     /// What a call does, where the program's convention was read.
     pub call_effect: Option<&'a r2ssa::SourceCallEffect>,
-    /// The function's analysis; absent below `Work::Function`, which is what keeps a listing cheap.
-    pub prepared: Option<&'a crate::native::Prepared>,
+    /// The function's analysis and what its certificates say of each line; absent below `Work::Function`, which is what keeps a listing cheap.
+    pub proved: Option<&'a super::proved::Proved<'a>>,
     /// The walked body the run is in: its blocks, and the def-use that says whether a number a line computes is a step.
     pub body: Option<&'a WalkedBody<'a>>,
     /// Whether a line states what this revision holds where its claims use an address; the reference index reads only the claims.
@@ -287,6 +287,77 @@ pub enum AnnotationKind {
     },
     /// The revision holds this text where a claim on the line uses the address; like `Holds`, never that the line reads it.
     Text { address: u64, text: String },
+    /// The call this line makes, and what its boundary proved it hands the callee; `None` where no mapping was proved.
+    Call {
+        callee: Option<u64>,
+        arguments: Option<Vec<CallArgument>>,
+        /// Why the variadic tail was not counted, where the callee takes one and its format refused.
+        uncounted: Option<&'static str>,
+    },
+    /// This line sets the argument `index` of the call at `call`.
+    ArgumentOf { call: u64, index: usize },
+    /// This line transfers through a table to one arm per case.
+    Switch {
+        /// Each case value and the arm it reaches.
+        arms: Vec<(u64, u64)>,
+        default: Option<u64>,
+        table: Option<crate::native::DispatchTable>,
+    },
+    /// The dispatch at `dispatch` reaches this line for these selector values.
+    Case { values: Vec<u64>, dispatch: u64 },
+    /// The dispatch at `dispatch` sends here every selector value that is no case, by the guard ending at `guard`.
+    Default { dispatch: u64, guard: u64 },
+    /// An indirect transfer the walk could not follow, so nothing is said of where it goes.
+    Unresolved,
+    /// This line begins a loop's header: the blocks that return to it and those control leaves it for.
+    Loop { latches: Vec<u64>, exits: Vec<u64> },
+    /// A value this header carries moves by `step` on every trip round the latch, at `width_bits`.
+    Induction {
+        storage: r2ssa::CanonicalStorageId,
+        init: Option<Operand>,
+        step: r2ssa::InductionStep,
+        width_bits: u32,
+    },
+    /// How many times this header runs when control leaves through the loop's one exit.
+    Trips(Trips),
+    /// This line returns the value in this storage.
+    Returns { storage: r2ssa::CanonicalStorageId },
+}
+
+/// One argument a call hands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallArgument {
+    pub index: usize,
+    pub slot: ArgumentSlot,
+    /// The one value it is, where that is exact.
+    pub value: Option<u64>,
+}
+
+/// Where an argument is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentSlot {
+    Register(r2ssa::CanonicalStorageId),
+    /// At this offset from the stack pointer the callee is entered with.
+    Stack(i64),
+}
+
+/// A value a claim names: one exact number, or what a storage held when the function was entered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operand {
+    Exact(u64),
+    Entry(r2ssa::CanonicalStorageId),
+}
+
+/// A loop's trip count, exact or an affine form over what the function was entered with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trips {
+    Exact(u64),
+    /// `Σ coefficient·storage@entry + constant`, read unsigned modulo `2^width_bits`.
+    Affine {
+        terms: Vec<(r2ssa::CanonicalStorageId, u64)>,
+        constant: u64,
+        width_bits: u32,
+    },
 }
 
 impl AnnotationKind {
@@ -298,21 +369,21 @@ impl AnnotationKind {
             Self::Reads { width, .. } => Some(Role::Read { width }),
             Self::Writes { width, .. } => Some(Role::Write { width }),
             Self::Computes { .. } => Some(Role::Value),
-            Self::Bounds { .. } | Self::Holds { .. } | Self::Text { .. } => None,
+            // A range, what the revision holds, and what a certificate says are no use of an address.
+            _ => None,
         }
     }
 
-    /// The address this claim is about.
-    pub fn address(&self) -> u64 {
+    /// The address in the program this claim is about, where it is about one.
+    pub fn address(&self) -> Option<u64> {
         match *self {
             Self::Target { address, .. }
             | Self::Reads { address, .. }
             | Self::Writes { address, .. }
             | Self::Holds { address, .. }
-            | Self::Text { address, .. } => address,
-            Self::Computes { value } => value,
-            // A range is about a storage, not about an address in the program.
-            Self::Bounds { low, .. } => low,
+            | Self::Text { address, .. } => Some(address),
+            Self::Computes { value } => Some(value),
+            _ => None,
         }
     }
 }

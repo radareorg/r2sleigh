@@ -258,9 +258,41 @@ pub struct Prepared {
     ptr_bits: u32,
     unread: Vec<Unread>,
     extents: r2types::ProgramExtents,
+    /// The table each dispatch reads, as the walk fetched it, by the dispatching instruction.
+    tables: BTreeMap<u64, DispatchTable>,
+}
+
+/// Where one dispatch's table lies in the program, as the fetch that followed it read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchTable {
+    pub address: u64,
+    pub entry_size: u32,
+    pub entries: usize,
+}
+
+impl DispatchTable {
+    /// Where the fetch read this table, keyed by the dispatching instruction.
+    fn of(fetched: &NativePointerTable) -> (u64, Self) {
+        let table = Self {
+            address: fetched.table.address(),
+            entry_size: fetched.table.entry_size(),
+            entries: fetched.targets.len(),
+        };
+        (fetched.instruction, table)
+    }
 }
 
 impl Prepared {
+    /// The table the dispatch at this instruction reads, where the walk fetched one.
+    pub fn table_at(&self, instruction: u64) -> Option<&DispatchTable> {
+        self.tables.get(&instruction)
+    }
+
+    /// The walked body's blocks, dispatches followed, and where the walk could not follow.
+    pub fn body(&self) -> &r2ssa::body::Body {
+        &self.root.body
+    }
+
     pub fn artifact(&self) -> &std::sync::Arc<TrustedSsaArtifact> {
         &self.artifact
     }
@@ -454,6 +486,7 @@ fn request(
         ptr_bits,
         unread: _,
         extents,
+        tables: _,
     } = prepared;
     let block_count = artifact.source_block_count();
     let signatures = declared_signatures(target, root, *ptr_bits, extents);
@@ -755,6 +788,7 @@ fn analyse(
             native.prepare_restated(&root, &callees, folded, restatement, &tables)?
         }
     };
+    let tables = tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
         root,
@@ -763,6 +797,7 @@ fn analyse(
         ptr_bits,
         unread,
         extents: program.extents().clone(),
+        tables,
     })
 }
 

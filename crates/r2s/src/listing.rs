@@ -39,12 +39,53 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
         true => spelled(line, session.program.names()),
     };
     format!(
-        "            {:#010x}      {:<14} {}{}\n",
+        "{}            {:#010x}      {:<14} {}{}\n",
+        labels(line),
         line.address,
         hex,
         text,
         held(session, line)
     )
+}
+
+/// The case and default labels a dispatch puts on this line, each on its own line above it as radare2 writes them.
+fn labels(line: &r2engine::query::Line) -> String {
+    use r2engine::query::AnnotationKind;
+    let mut out = String::new();
+    let mut label = |text: String, dispatch: u64| {
+        let text = format!("            ;-- {text}:");
+        out.push_str(&format!("{text:<71}; from {dispatch:#010x}\n"));
+    };
+    for annotation in &line.annotations {
+        match annotation.kind {
+            AnnotationKind::Case {
+                ref values,
+                dispatch,
+            } => {
+                for (first, last) in runs(values) {
+                    match first == last {
+                        true => label(format!("case {first}"), dispatch),
+                        false => label(format!("case {first}...{last}"), dispatch),
+                    }
+                }
+            }
+            AnnotationKind::Default { dispatch, .. } => label("default".to_owned(), dispatch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Sorted values as their maximal runs of consecutive ones.
+fn runs(values: &[u64]) -> Vec<(u64, u64)> {
+    let mut runs: Vec<(u64, u64)> = Vec::new();
+    for &value in values {
+        match runs.last_mut() {
+            Some((_, last)) if last.checked_add(1) == Some(value) => *last = value,
+            _ => runs.push((value, value)),
+        }
+    }
+    runs
 }
 
 /// One line, with a name written wherever a number is one.
@@ -179,8 +220,169 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
                 false => format!("defines {name} in [{low:#x}, {high:#x}]"),
             }),
         r2engine::query::AnnotationKind::Text { ref text, .. } => Some(format!("{text:?}")),
+        r2engine::query::AnnotationKind::Call {
+            callee,
+            ref arguments,
+            uncounted,
+        } => Some(called(session, at, callee, arguments.as_deref(), uncounted)),
+        r2engine::query::AnnotationKind::ArgumentOf { call, index } => {
+            Some(format!("arg{} of {call:#x}", index + 1))
+        }
+        r2engine::query::AnnotationKind::Switch {
+            ref arms, table, ..
+        } => Some(switched(arms.len(), table.map(|table| table.address))),
+        r2engine::query::AnnotationKind::Unresolved => {
+            Some("indirect branch unresolved".to_owned())
+        }
+        r2engine::query::AnnotationKind::Loop {
+            ref latches,
+            ref exits,
+        } => Some(format!(
+            "loop: latches {}, exits {}",
+            addresses(latches),
+            addresses(exits)
+        )),
+        r2engine::query::AnnotationKind::Induction {
+            storage,
+            init,
+            step,
+            width_bits,
+        } => {
+            let name = session.program.spell_storage(at, storage)?;
+            let init = match init {
+                Some(init) => format!(" = {},", operand(session, at, init)?),
+                None => String::new(),
+            };
+            let bits = bits(width_bits);
+            Some(format!(
+                "induction {name}{init} {} per trip{bits}",
+                stepped(step)
+            ))
+        }
+        r2engine::query::AnnotationKind::Trips(ref trips) => {
+            Some(format!("trips {}", counted(session, at, trips)?))
+        }
+        r2engine::query::AnnotationKind::Returns { storage } => session
+            .program
+            .spell_storage(at, storage)
+            .map(|name| format!("returns {name}")),
+        // A case or default is a label above the line, not a note beside it.
         _ => None,
     }
+}
+
+/// A dispatch, in radare2's words where the table it reads is known.
+fn switched(cases: usize, table: Option<u64>) -> String {
+    match table {
+        Some(table) => format!("switch table ({cases} cases) at {table:#x}"),
+        None => format!("switch ({cases} cases)"),
+    }
+}
+
+/// How an induction moves on each trip.
+fn stepped(step: r2engine::query::InductionStep) -> String {
+    match step {
+        r2engine::query::InductionStep::AddConst(value) => format!("+{value:#x}"),
+        r2engine::query::InductionStep::SubConst(value) => format!("-{value:#x}"),
+        r2engine::query::InductionStep::Affine { multiplier, addend } => {
+            format!("*{multiplier:#x} +{addend:#x}")
+        }
+    }
+}
+
+/// A call as its boundary proved it: the callee and each argument, exact where it is one.
+fn called(
+    session: &Session,
+    at: u64,
+    callee: Option<u64>,
+    arguments: Option<&[r2engine::query::CallArgument]>,
+    uncounted: Option<&'static str>,
+) -> String {
+    let callee = callee.map_or_else(
+        || "indirect call".to_owned(),
+        |address| {
+            let name = session.program.names().of(address);
+            name.map_or_else(|| format!("{address:#x}"), |name| name.spelled())
+        },
+    );
+    // A refused variadic count is why the arguments are unproven, so it is said there.
+    let Some(arguments) = arguments else {
+        return match uncounted {
+            Some(reason) => {
+                format!("{callee}: arguments unproven, variadic tail uncounted: {reason}")
+            }
+            None => format!("{callee}: arguments unproven"),
+        };
+    };
+    let spelled = arguments
+        .iter()
+        .map(|argument| {
+            let name = format!("arg{}", argument.index + 1);
+            match (argument.value, argument.slot) {
+                (Some(value), _) => format!("{name}={value:#x}"),
+                (None, r2engine::query::ArgumentSlot::Register(storage)) => {
+                    let carrier = session.program.spell_storage(at, storage);
+                    format!("{name}@{}", carrier.unwrap_or_else(|| "?".to_owned()))
+                }
+                (None, r2engine::query::ArgumentSlot::Stack(offset)) => {
+                    format!("{name}@stack{offset:+#x}")
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("{callee}({})", spelled.join(", "))
+}
+
+/// A value a claim names, exactly or as what a register held on entry.
+fn operand(session: &Session, at: u64, operand: r2engine::query::Operand) -> Option<String> {
+    match operand {
+        r2engine::query::Operand::Exact(value) => Some(format!("{value:#x}")),
+        r2engine::query::Operand::Entry(storage) => session
+            .program
+            .spell_storage(at, storage)
+            .map(|name| format!("{name}@entry")),
+    }
+}
+
+/// A trip count, exact or affine over what the function was entered with.
+fn counted(session: &Session, at: u64, trips: &r2engine::query::Trips) -> Option<String> {
+    match *trips {
+        r2engine::query::Trips::Exact(count) => Some(format!("{count:#x}")),
+        r2engine::query::Trips::Affine {
+            ref terms,
+            constant,
+            width_bits,
+        } => {
+            let mut spelled = terms
+                .iter()
+                .map(|(storage, coefficient)| {
+                    let name = session.program.spell_storage(at, *storage)?;
+                    Some(match coefficient {
+                        1 => format!("{name}@entry"),
+                        _ => format!("{coefficient:#x}*{name}@entry"),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if constant != 0 || spelled.is_empty() {
+                spelled.push(format!("{constant:#x}"));
+            }
+            Some(format!("{}{}", spelled.join(" + "), bits(width_bits)))
+        }
+    }
+}
+
+/// A width a value wraps at, where it is narrower than sixty-four bits.
+fn bits(width_bits: u32) -> String {
+    match width_bits < 64 {
+        true => format!(" ({width_bits} bits)"),
+        false => String::new(),
+    }
+}
+
+/// Block addresses, as a list.
+fn addresses(blocks: &[u64]) -> String {
+    let spelled = blocks.iter().map(|block| format!("{block:#x}"));
+    spelled.collect::<Vec<_>>().join(" ")
 }
 
 /// The rung a claim stands on, as a reader reads it.

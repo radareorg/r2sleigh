@@ -4,12 +4,12 @@
 mod common;
 
 use common::{
-    ARM_ENTRY, BASE, CALLER, FORKED, GUARDED_JOIN, JOINED, Literal, MOVED, ONE, OVERWRITTEN,
-    PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED, THUMB_LEAF, TWO,
-    VENEER, opened,
+    ARM_ENTRY, BASE, CALLER, FORKED, GUARDED_JOIN, HANDED, HANDS, JOINED, Literal, MOVED, ONE,
+    OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
+    THUMB_LEAF, TWO, VENEER, handing, opened, table_switch,
 };
 use r2engine::program::OpenProgram;
-use r2engine::query::{AnnotationKind, Line, Listing, Stop, Support};
+use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
 
 /// The result each line claims, by address.
 fn computes(lines: &[Line]) -> Vec<(u64, Option<u64>)> {
@@ -139,7 +139,16 @@ fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() 
     let run = program.listing(listing).expect("it lists").value;
     assert_eq!(supported(&run[0]), [(read.clone(), Support::Decoded)]);
     let whole = program.function_listing(STUB).expect("it lists").value;
-    assert_eq!(supported(&whole[0]), [(read, Support::Decoded)]);
+    // The jump is a tail call through the slot, and nothing declares or proves what it hands on.
+    let call = AnnotationKind::Call {
+        callee: Some(SLOT),
+        arguments: None,
+        uncounted: None,
+    };
+    assert_eq!(
+        supported(&whole[0]),
+        [(read, Support::Decoded), (call, Support::Certified)]
+    );
 }
 
 #[test]
@@ -443,4 +452,119 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
         })
         .expect("it lists");
     assert!(bounds(&plain.value).is_empty(), "{:?}", plain.value);
+}
+
+/// What the certificates anchor at each line, by address, in the order the line lists them.
+fn certified(lines: &[Line]) -> Vec<(u64, AnnotationKind, Support)> {
+    let certified = |kind: &AnnotationKind| {
+        matches!(
+            kind,
+            AnnotationKind::Call { .. }
+                | AnnotationKind::ArgumentOf { .. }
+                | AnnotationKind::Switch { .. }
+                | AnnotationKind::Case { .. }
+                | AnnotationKind::Default { .. }
+                | AnnotationKind::Unresolved
+                | AnnotationKind::Loop { .. }
+                | AnnotationKind::Induction { .. }
+                | AnnotationKind::Trips(_)
+                | AnnotationKind::Returns { .. }
+        )
+    };
+    let on = |line: &Line| {
+        let claims = line.annotations.iter().filter(|one| certified(&one.kind));
+        let at = line.address;
+        let claims = claims.map(move |one| (at, one.kind.clone(), one.support));
+        claims.collect::<Vec<_>>()
+    };
+    lines.iter().flat_map(on).collect()
+}
+
+fn register(offset: u64) -> r2ssa::CanonicalStorageId {
+    r2ssa::CanonicalStorageId {
+        space: r2ssa::CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    }
+}
+
+#[test]
+fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so() {
+    let (rax, rdi) = (register(0), register(0x38));
+    let mut program = OpenProgram::of(handing());
+    let hands = program.function_listing(HANDS).expect("it lists").value;
+    let call = HANDS + 7;
+    let argument = CallArgument {
+        index: 0,
+        slot: ArgumentSlot::Register(rdi),
+        value: Some(HANDED),
+    };
+    let returns = AnnotationKind::Returns { storage: rax };
+    assert_eq!(
+        certified(&hands),
+        [
+            // The lea's own lift folds the address, so the def-use certifies the one value the call is handed.
+            (
+                HANDS,
+                AnnotationKind::ArgumentOf { call, index: 0 },
+                Support::Certified
+            ),
+            (
+                call,
+                AnnotationKind::Call {
+                    callee: Some(BASE),
+                    arguments: Some(vec![argument]),
+                    uncounted: None,
+                },
+                Support::Certified,
+            ),
+            (call + 5, returns.clone(), Support::Certified),
+        ]
+    );
+    let ident = program.function_listing(BASE).expect("it lists").value;
+    assert_eq!(certified(&ident), [(BASE + 3, returns, Support::Certified)]);
+}
+
+#[test]
+fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
+    let lines = OpenProgram::of(table_switch()).function_listing(BASE);
+    let lines = lines.expect("it lists").value;
+    let dispatch = BASE + 7;
+    let arms = [(0, 0x100e), (1, 0x1014), (2, 0x101a), (3, 0x1026)];
+    let table = r2engine::native::DispatchTable {
+        address: BASE + 0x30,
+        entry_size: 8,
+        entries: 4,
+    };
+    let case = |value: u64| AnnotationKind::Case {
+        values: vec![value],
+        dispatch,
+    };
+    // The guard's `ja` sends every index past three to the default, and only its other edge reaches the dispatch.
+    let default = AnnotationKind::Default {
+        dispatch,
+        guard: BASE + 3,
+    };
+    let switch = AnnotationKind::Switch {
+        arms: arms.to_vec(),
+        default: Some(BASE + 0x20),
+        table: Some(table),
+    };
+    let said = certified(&lines);
+    let switched = |at: u64, kind: AnnotationKind| (at, kind, Support::Solved);
+    for expected in [
+        switched(dispatch, switch),
+        switched(0x100e, case(0)),
+        switched(0x1014, case(1)),
+        switched(0x101a, case(2)),
+        switched(0x1026, case(3)),
+        switched(0x1020, default),
+    ] {
+        assert!(said.contains(&expected), "{expected:?} not in {said:?}");
+    }
+    // A dispatch whose table the walk read is no unresolved branch.
+    let unresolved = said
+        .iter()
+        .any(|(_, kind, _)| *kind == AnnotationKind::Unresolved);
+    assert!(!unresolved, "{said:?}");
 }

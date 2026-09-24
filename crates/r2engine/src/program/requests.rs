@@ -12,8 +12,8 @@ use crate::discovery::{Confidence, Discovered};
 use crate::native::{NativeRefusal, Prepared};
 use crate::query::references::Indexing;
 use crate::query::{
-    Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, References, Stop,
-    Unread, WalkedBody, Work,
+    Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
+    Stop, Unread, WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
 
@@ -157,9 +157,10 @@ impl<S: Source> OpenProgram<S> {
         let target = self.target(entry)?;
         let lifted = prepared.lifted();
         let body = WalkedBody::new(&lifted, target.arch);
+        let proved = Proved::new(&prepared);
         let answered = Answered {
             body: Some(&body),
-            ..self.answered(Some(&prepared))
+            ..self.answered(Some(&proved))
         };
         Ok(listed_by_block(&answered, &lifted, self.revision()))
     }
@@ -295,7 +296,7 @@ impl<S: Source> OpenProgram<S> {
             .collect()
     }
 
-    fn answered<'a>(&'a self, prepared: Option<&'a Prepared>) -> Answered<'a> {
+    fn answered<'a>(&'a self, proved: Option<&'a Proved<'a>>) -> Answered<'a> {
         Answered {
             decoders: self,
             memory: Memory {
@@ -306,7 +307,7 @@ impl<S: Source> OpenProgram<S> {
                 .assembled
                 .as_ref()
                 .and_then(|held| held.call_effect.as_ref()),
-            prepared,
+            proved,
             body: None,
             holdings: true,
             parameters: Some(self),

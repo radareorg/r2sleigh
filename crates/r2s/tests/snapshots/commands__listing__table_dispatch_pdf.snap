@@ -17,7 +17,7 @@ expression: run.out
             0x100000450      e80700f9       str x8, [sp, 0x8]
             0x100000454      ff0700b9       str wzr, [sp, 0x4]
             0x100000458      01000014       b 0x10000045c
-            0x10000045c      e80740b9       ldr w8, [sp, 0x4]
+            0x10000045c      e80740b9       ldr w8, [sp, 0x4] ; loop: latches 0x100000498, exits 0x1000004a8 (certified) ; trips 0x4 (solved)
             0x100000460      080d0071       subs w8, w8, 0x3
             0x100000464      22020054       b.cs 0x1000004a8
             0x100000468      01000014       b 0x10000046c
@@ -29,7 +29,7 @@ expression: run.out
             0x100000480      a9035ff8       ldur x9, [x29, -0x10]
             0x100000484      ea0740b9       ldr w10, [sp, 0x4] ; defines x10 in [0x0, 0x2] (solved)
             0x100000488      21010a8b       add x1, x9, x10
-            0x10000048c      00013fd6       blr x8
+            0x10000048c      00013fd6       blr x8 ; indirect call: arguments unproven (certified)
             0x100000490      e00700f9       str x0, [sp, 0x8]
             0x100000494      01000014       b 0x100000498
             0x100000498      e80740b9       ldr w8, [sp, 0x4] ; defines x8 in [0x0, 0x2] (solved)
@@ -39,4 +39,4 @@ expression: run.out
             0x1000004a8      e00740f9       ldr x0, [sp, 0x8]
             0x1000004ac      fd7b44a9       ldp x29, x30, [sp, 0x40]
             0x1000004b0      ff430191       add sp, sp, 0x50
-            0x1000004b4      c0035fd6       ret
+            0x1000004b4      c0035fd6       ret ; returns x0 (certified)

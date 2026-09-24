@@ -16,15 +16,17 @@
 pub mod annotate;
 pub mod decode;
 pub mod memo;
-mod proved;
+pub mod proved;
 pub mod records;
 pub mod references;
 
 pub use decode::listing;
 pub use memo::{Consulted, Memo, MemoStats, Moved};
+pub use proved::Proved;
+pub use r2ssa::InductionStep;
 pub use records::{
-    Annotation, AnnotationKind, Answered, Callee, Decoders, Line, Listing, Memory, Parameters,
-    Stop, WalkedBody,
+    Annotation, AnnotationKind, Answered, ArgumentSlot, CallArgument, Callee, Decoders, Line,
+    Listing, Memory, Operand, Parameters, Stop, Trips, WalkedBody,
 };
 pub use references::{Claimant, Coverage, Reference, References, Role, Unread};
 

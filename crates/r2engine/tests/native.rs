@@ -1,6 +1,10 @@
 //! Decompiling from bytes and an address, with no radare2 in the process.
 
+mod common;
+
 use std::collections::BTreeMap;
+
+use common::TABLE_SWITCH;
 
 use r2abi::{CompilerSpec, Conventions, Prototypes};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
@@ -31,37 +35,6 @@ const PC_THUNK: &[u8] = &[
     0x90, // 0x100a padding
     0x48, 0x8b, 0x34, 0x24, // 0x100b mov rsi, [rsp]
     0xc3, // 0x100f ret
-];
-
-/// A jump table of absolute addresses, the form x86-64 uses:
-///
-/// ```text
-///   1000  cmp  edi, 3              ; the bound the guard proves
-///   1003  ja   0x1020              ; out of range takes the default
-///   1005  mov  edi, edi            ; the index, zero-extended
-///   1007  jmp  [rdi*8 + 0x1030]    ; read one entry of the table
-///   100e  mov  eax, 10  ; ret      ; case 0
-///   1014  mov  eax, 20  ; ret      ; case 1
-///   101a  mov  eax, 30  ; ret      ; case 2
-///   1020  mov  eax, -1  ; ret      ; default
-///   1026  mov  eax, 40  ; ret      ; case 3
-///   1030  the four entries
-/// ```
-const TABLE_SWITCH: &[u8] = &[
-    0x83, 0xff, 0x03, // 1000 cmp edi, 3
-    0x77, 0x1b, // 1003 ja 0x1020
-    0x89, 0xff, // 1005 mov edi, edi
-    0xff, 0x24, 0xfd, 0x30, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1030]
-    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 100e case 0
-    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1014 case 1
-    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 101a case 2
-    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 1020 default
-    0xb8, 0x28, 0x00, 0x00, 0x00, 0xc3, // 1026 case 3
-    0x00, 0x00, 0x00, 0x00, // 102c padding
-    0x0e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1030 -> 0x100e
-    0x14, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1038 -> 0x1014
-    0x1a, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 -> 0x101a
-    0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1026
 ];
 
 /// Every return sits behind the dispatch; before it the body keeps a local whose address escapes.

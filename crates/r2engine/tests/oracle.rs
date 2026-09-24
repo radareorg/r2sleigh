@@ -6,11 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use common::{
-    BASE, CALLER, FORKED, GUARDED_JOIN, JOINED, Literal, MOVED, ONE, OVERWRITTEN, PASSES,
-    SHIFT_MERGE, STEPPED, TWO,
+    BASE, CALLER, FORKED, GUARDED_JOIN, HANDED, HANDS, JOINED, Literal, MOVED, ONE, OVERWRITTEN,
+    PASSES, SHIFT_MERGE, STEPPED, TWO, handing, table_switch,
 };
 use r2engine::program::{OpenProgram, Source};
-use r2engine::query::{AnnotationKind, Decoders, Line, Listing, Stop};
+use r2engine::query::{
+    AnnotationKind, ArgumentSlot, CallArgument, Decoders, Line, Listing, Operand, Stop, Trips,
+};
 use r2il::eval::{Access, AccessKind, Flow, Mapped, State, TransferKind, step};
 use r2il::{Endianness, R2ILOp, SpaceId, Varnode};
 use r2ssa::{CanonicalStorageId, CanonicalStorageSpace};
@@ -54,6 +56,17 @@ const SELECTED: &[u8] = &[
     0xc3, // ret
 ];
 
+/// `test rsi, rsi; je out; add rsi, rdi; L: add rdi, 1; cmp rsi, rdi; jne L; out: ret`: the header runs `rsi` times.
+const ADVANCED: &[u8] = &[
+    0x48, 0x85, 0xf6, // test rsi, rsi
+    0x74, 0x0c, // je 0x1011
+    0x48, 0x01, 0xfe, // add rsi, rdi
+    0x48, 0x83, 0xc7, 0x01, // 0x1008 add rdi, 1
+    0x48, 0x39, 0xfe, // cmp rsi, rdi
+    0x75, 0xf7, // jne 0x1008
+    0xc3, // 0x1011 ret
+];
+
 /// Operations and block elements one run executes before it stops, ruling on nothing after.
 const BUDGET: u64 = 1 << 14;
 /// Runs from seeded random entry states, after the edge values.
@@ -80,6 +93,7 @@ fn oracle_set() -> Vec<(&'static str, Literal, u64)> {
         ("filled", FILLED, 0x14),
         ("selected", SELECTED, SELECTED.len()),
         ("overwritten", OVERWRITTEN, 0x10),
+        ("advanced", ADVANCED, ADVANCED.len()),
     ];
     let common = common.map(|(name, entry)| (name, Literal::new(), entry));
     let own = own.map(|(name, code, size)| {
@@ -87,10 +101,16 @@ fn oracle_set() -> Vec<(&'static str, Literal, u64)> {
         (name, literal, BASE)
     });
     let moved = Literal::of_code(MOVED, &[("moved", BASE, 0x10)]).in_arm();
+    let certified = [
+        ("ident", handing(), BASE),
+        ("hands", handing(), HANDS),
+        ("pick", table_switch(), BASE),
+    ];
     common
         .into_iter()
         .chain(own)
         .chain([("moved", moved, BASE)])
+        .chain(certified)
         .collect()
 }
 
@@ -163,7 +183,7 @@ fn a_claim_no_run_supports_fails_and_one_every_run_supports_holds() {
             Expected::Held,
         ),
     ];
-    for (literal, entry, at, injected, expected) in cases {
+    for (literal, entry, at, injected, expected) in cases.into_iter().chain(certified_cases()) {
         let failures = judged(literal, entry, &[(at, injected.clone())]);
         let (ours, theirs): (Vec<_>, Vec<_>) = failures
             .iter()
@@ -179,8 +199,76 @@ fn a_claim_no_run_supports_fails_and_one_every_run_supports_holds() {
     }
 }
 
+/// Claims about calls, dispatches and loops that some run of the lift contradicts.
+fn certified_cases() -> Vec<(Literal, u64, u64, Injected, Expected)> {
+    vec![
+        // The lea hands the call the text's address, not the byte after it.
+        (
+            handing(),
+            HANDS,
+            HANDS + 7,
+            Injected::Kind(AnnotationKind::Call {
+                callee: Some(BASE),
+                arguments: Some(vec![CallArgument {
+                    index: 0,
+                    slot: ArgumentSlot::Register(register(0x38)),
+                    value: Some(HANDED + 1),
+                }]),
+                uncounted: None,
+            }),
+            Expected::Contradicted,
+        ),
+        // An index of one reaches the second arm, which a switch of one arm does not name.
+        (
+            table_switch(),
+            BASE,
+            BASE + 7,
+            Injected::Kind(AnnotationKind::Switch {
+                arms: vec![(0, 0x100e)],
+                default: None,
+                table: None,
+            }),
+            Expected::Contradicted,
+        ),
+        // The header runs `rsi` times, whatever a count of five says.
+        (
+            advanced(),
+            BASE,
+            BASE + 8,
+            Injected::Kind(AnnotationKind::Trips(Trips::Exact(5))),
+            Expected::Contradicted,
+        ),
+        // `add rdi, 1` moves rdi by one each trip, not two.
+        (
+            advanced(),
+            BASE,
+            BASE + 8,
+            Injected::Kind(AnnotationKind::Induction {
+                storage: register(0x38),
+                init: Some(Operand::Entry(register(0x38))),
+                step: r2ssa::InductionStep::AddConst(2),
+                width_bits: 64,
+            }),
+            Expected::Contradicted,
+        ),
+    ]
+}
+
 fn counted() -> Literal {
     Literal::of_code(COUNTED, &[("counted", BASE, 0x10)])
+}
+
+fn advanced() -> Literal {
+    Literal::of_code(ADVANCED, &[("advanced", BASE, ADVANCED.len() as u64)])
+}
+
+/// A 64-bit register at this offset.
+fn register(offset: u64) -> CanonicalStorageId {
+    CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    }
 }
 
 /// A claim the test adds beside the engine's, naming a register as the architecture does.
@@ -198,10 +286,10 @@ fn judged(literal: Literal, entry: u64, injected: &[(u64, Injected)]) -> Vec<Fai
     let pd = program
         .listing(Listing { start: entry, stop })
         .expect("it lists");
+    // The body as the analysis walked it, through each table it read, so a run follows a dispatch into its arms.
+    let prepared = program.prepared(entry).expect("it prepares");
     let machine = Decoders::at(&program, entry).expect("a decoder");
-    let body = r2ssa::body::lift_body(entry, &machine.disasm, &program, &BTreeMap::new())
-        .expect("it walks");
-    let lift = Lift::of(&body, machine, program.endian(), program.source());
+    let lift = Lift::of(prepared.body(), machine, program.endian(), program.source());
     let mut ledger = Ledger::default();
     ledger.claim("pdf", &pdf);
     ledger.claim("pd", &pd.value);
@@ -282,7 +370,7 @@ impl Claim {
 }
 
 /// Where a claim is in the ledger.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ClaimAt {
     at: u64,
     index: usize,
@@ -317,10 +405,23 @@ impl Ledger {
         claims[claim.index].decided(held, described);
     }
 
-    /// Rule on what each claim says the revision holds, read by the evaluator's own load.
+    /// Rule on what each claim says the revision holds, read by the evaluator's own load, and on what a line's lift is.
     fn rule_revision(&mut self, lift: &Lift<'_>) {
         let image = |address: u64| lift.source.read(address, 1)?.first().copied();
-        for claim in self.claims.values_mut().flatten() {
+        let lifted = |at: u64, is: fn(&R2ILOp) -> bool| {
+            let ops = lift
+                .instructions
+                .get(&at)
+                .map(|instruction| &instruction.ops);
+            match ops.is_some_and(|ops| ops.iter().any(is)) {
+                true => Ok(()),
+                false => Err(format!("the lift of {at:#x} is {ops:?}")),
+            }
+        };
+        let claims = self.claims.iter_mut();
+        let claims =
+            claims.flat_map(|(at, claims)| claims.iter_mut().map(move |claim| (*at, claim)));
+        for (claim_at, claim) in claims {
             // A load spends none of a run's budget.
             let mut revision = State::new(lift.endian, image, 0).expect("a byte order");
             let verdict = match &claim.kind {
@@ -347,9 +448,159 @@ impl Ledger {
                         Some((held, _)) => Err(format!("the revision holds {held:x?}")),
                     }
                 }
+                // A return and an unfollowed transfer are what the lift of the line is.
+                AnnotationKind::Returns { .. } => {
+                    lifted(claim_at, |op| matches!(op, R2ILOp::Return { .. }))
+                }
+                AnnotationKind::Unresolved => {
+                    lifted(claim_at, |op| matches!(op, R2ILOp::BranchInd { .. }))
+                }
                 _ => continue,
             };
             claim.decided(verdict, "the revision");
+        }
+    }
+
+    /// A claim some listing makes at a line, which says where a claim about another line is ruled.
+    fn find(&self, at: u64, kind: impl Fn(&AnnotationKind) -> bool) -> Option<&AnnotationKind> {
+        let claims = self.claims.get(&at)?.iter();
+        claims
+            .map(|claim| &claim.kind)
+            .find(|claimed| kind(claimed))
+    }
+
+    /// Where the call at `call` takes argument `index`.
+    fn slot_of(&self, call: u64, index: usize) -> Option<ArgumentSlot> {
+        let call = self.find(call, |kind| matches!(kind, AnnotationKind::Call { .. }));
+        let Some(AnnotationKind::Call {
+            arguments: Some(arguments),
+            ..
+        }) = call
+        else {
+            return None;
+        };
+        let argument = arguments.iter().find(|argument| argument.index == index)?;
+        Some(argument.slot)
+    }
+
+    /// Rule on what holds as control arrives at `at`: what each induction there carries, and each count a loop it leaves states.
+    fn arrive<M: Mapped>(
+        &mut self,
+        lift: &Lift<'_>,
+        arrival: &Arrival<'_, M>,
+        track: &mut Track,
+        described: &str,
+    ) {
+        let at = arrival.at;
+        self.leave(at, track, described);
+        let Some(claims) = self.claims.get(&at) else {
+            return;
+        };
+        let from = arrival
+            .previous
+            .and_then(|previous| lift.instructions.get(&previous));
+        let from = from.map(|previous| previous.block);
+        let (latches, exits) =
+            match self.find(at, |kind| matches!(kind, AnnotationKind::Loop { .. })) {
+                Some(AnnotationKind::Loop { latches, exits }) => (latches.clone(), exits.clone()),
+                _ => (Vec::new(), Vec::new()),
+            };
+        let around = from.is_some_and(|block| latches.contains(&block));
+        let mut verdicts = Vec::new();
+        for (index, claim) in claims.iter().enumerate() {
+            let at_claim = ClaimAt { at, index };
+            match &claim.kind {
+                AnnotationKind::Induction { .. } => {
+                    let verdict = inducted(&claim.kind, arrival, around, track, index);
+                    verdicts.extend(verdict.map(|verdict| (at_claim, verdict)));
+                }
+                AnnotationKind::Trips(_) if around => {
+                    let trip = track.trips.entry(at_claim);
+                    trip.and_modify(|trip| trip.count += 1);
+                }
+                AnnotationKind::Trips(trips) => {
+                    let expected = arrival.trips(trips);
+                    let exits = exits.clone();
+                    let trip = expected.map(|expected| Trip {
+                        count: 1,
+                        expected,
+                        exits,
+                    });
+                    track.trips.extend(trip.map(|trip| (at_claim, trip)));
+                }
+                _ => {}
+            }
+        }
+        for (claim, verdict) in verdicts {
+            self.decide(claim, verdict, described);
+        }
+    }
+
+    /// Leaving a loop for one of its exits settles how often its header ran.
+    fn leave(&mut self, at: u64, track: &mut Track, described: &str) {
+        let left = track
+            .trips
+            .iter()
+            .filter(|(_, trip)| trip.exits.contains(&at));
+        let left = left.map(|(claim, _)| *claim).collect::<Vec<_>>();
+        for claim in left {
+            let trip = track.trips.remove(&claim).expect("a trip in flight");
+            let held = match trip.count == trip.expected {
+                true => Ok(()),
+                false => Err(format!("the header ran {} times", trip.count)),
+            };
+            self.decide(claim, held, described);
+        }
+    }
+
+    /// Rule on each argument a line set, now the call it was set for runs.
+    fn called<M: Mapped>(&mut self, after: &After<'_, M>, track: &mut Track, described: &str) {
+        let (settled, waiting) = std::mem::take(&mut track.arguments)
+            .into_iter()
+            .partition::<Vec<_>, _>(|pending| pending.call == after.at);
+        track.arguments = waiting;
+        for pending in settled {
+            let (register, set) = (&pending.register, pending.value);
+            let held = after.state.register(register.offset, register.size);
+            let verdict = match held == Some(set) {
+                true => Ok(()),
+                false => Err(format!("the call is handed {held:x?}, not {set:#x}")),
+            };
+            self.decide(pending.claim, verdict, described);
+        }
+    }
+
+    /// Each argument a line sets waits for the call it is set for.
+    fn await_arguments<M: Mapped>(&self, after: &After<'_, M>, track: &mut Track) {
+        let Some(claims) = self.claims.get(&after.at).filter(|_| after.whole()) else {
+            return;
+        };
+        for (index, claim) in claims.iter().enumerate() {
+            let AnnotationKind::ArgumentOf {
+                call,
+                index: argument,
+            } = claim.kind
+            else {
+                continue;
+            };
+            let Some(ArgumentSlot::Register(storage)) = self.slot_of(call, argument) else {
+                continue;
+            };
+            let register = Varnode::register(storage.offset, storage.size);
+            let Some(value) = after.state.register(register.offset, register.size) else {
+                continue;
+            };
+            let claim = ClaimAt {
+                at: after.at,
+                index,
+            };
+            track.arguments.retain(|pending| pending.claim != claim);
+            track.arguments.push(Pending {
+                claim,
+                call,
+                register,
+                value,
+            });
         }
     }
 
@@ -358,8 +609,11 @@ impl Ledger {
         &mut self,
         lift: &Lift<'_>,
         after: &After<'_, M>,
+        track: &mut Track,
         described: &str,
     ) -> Vec<Following> {
+        self.called(after, track, described);
+        self.await_arguments(after, track);
         let Some(claims) = self.claims.get_mut(&after.at) else {
             return Vec::new();
         };
@@ -406,6 +660,8 @@ impl Ledger {
 /// One instruction of the walked body.
 struct Instruction {
     ops: Vec<R2ILOp>,
+    /// Where the block it is in begins.
+    block: u64,
     /// Where control falls through to.
     next: u64,
     /// The widest registers it writes, which is where it leaves a number it computes.
@@ -676,7 +932,16 @@ fn instructions(body: &r2ssa::body::Body) -> BTreeMap<u64, Instruction> {
         let nexts = nexts.collect::<Vec<_>>();
         for ((at, ops), next) in parts.into_iter().zip(nexts) {
             let widest = widest_written(&ops);
-            found.insert(at, Instruction { ops, next, widest });
+            let block = lifted.addr;
+            found.insert(
+                at,
+                Instruction {
+                    ops,
+                    block,
+                    next,
+                    widest,
+                },
+            );
         }
     }
     found
@@ -771,7 +1036,16 @@ fn run(
             .set_register(register.offset, register.size, *value)
             .expect("a register");
     }
+    // What the function was entered with, which is what an entry operand names.
+    let unmapped: fn(u64) -> Option<u8> = |_| None;
+    let mut entered = State::new(lift.endian, unmapped, 0).expect("a byte order");
+    for (register, value) in start.registers.iter().chain(&lift.pinned) {
+        entered
+            .set_register(register.offset, register.size, *value)
+            .expect("a register");
+    }
     let (mut trace, mut following) = (Vec::new(), Vec::<Following>::new());
+    let (mut track, mut previous) = (Track::default(), None);
     let mut at = entry;
     while let Some(instruction) = lift.instructions.get(&at) {
         if let Some(counter) = &lift.program_counter {
@@ -780,6 +1054,13 @@ fn run(
                 .set_register(counter.offset, counter.size, here)
                 .expect("a program counter");
         }
+        let arrival = Arrival {
+            at,
+            previous,
+            state: &state,
+            entry: &entered,
+        };
+        ledger.arrive(lift, &arrival, &mut track, &described);
         let ran = executed(&instruction.ops, &mut state);
         trace.extend(ran.accesses.iter().copied());
         let ops = &instruction.ops[..ran.executed];
@@ -798,8 +1079,10 @@ fn run(
             instruction,
             ran: &ran,
             state: &state,
+            previous,
         };
-        following.extend(ledger.rule(lift, &after, &described));
+        following.extend(ledger.rule(lift, &after, &mut track, &described));
+        previous = Some(at);
         match ran.flow {
             Flow::Transfer(transfer) if transfer.kind == TransferKind::Jump => at = transfer.to,
             Flow::Next => at = instruction.next,
@@ -868,6 +1151,109 @@ struct After<'r, M> {
     instruction: &'r Instruction,
     ran: &'r Ran,
     state: &'r State<M>,
+    /// The instruction the run executed before this one.
+    previous: Option<u64>,
+}
+
+/// The machine as control arrives at an instruction, and what it was entered with.
+struct Arrival<'r, M> {
+    at: u64,
+    previous: Option<u64>,
+    state: &'r State<M>,
+    entry: &'r State<fn(u64) -> Option<u8>>,
+}
+
+impl<M: Mapped> Arrival<'_, M> {
+    /// What a claim's operand is on this run.
+    fn operand(&self, operand: Operand) -> Option<u128> {
+        match operand {
+            Operand::Exact(value) => Some(u128::from(value)),
+            Operand::Entry(storage) => self.entry.register(storage.offset, storage.size),
+        }
+    }
+
+    /// How often a trip count says the header runs on this run, read unsigned at its width.
+    fn trips(&self, trips: &Trips) -> Option<u64> {
+        match trips {
+            Trips::Exact(count) => Some(*count),
+            Trips::Affine {
+                terms,
+                constant,
+                width_bits,
+            } => {
+                let mut sum = u128::from(*constant);
+                for (storage, coefficient) in terms {
+                    let value = self.entry.register(storage.offset, storage.size)?;
+                    sum = sum.wrapping_add(value.wrapping_mul(u128::from(*coefficient)));
+                }
+                let bits = 128u32.saturating_sub(*width_bits);
+                u64::try_from((sum << bits) >> bits).ok()
+            }
+        }
+    }
+}
+
+/// Whether an induction holds as control arrives: its start on entry, else one step on from the last trip.
+fn inducted<M: Mapped>(
+    kind: &AnnotationKind,
+    arrival: &Arrival<'_, M>,
+    around: bool,
+    track: &mut Track,
+    index: usize,
+) -> Option<Result<(), String>> {
+    let &AnnotationKind::Induction {
+        storage,
+        init,
+        step,
+        width_bits,
+    } = kind
+    else {
+        return None;
+    };
+    let bits = 128u32.saturating_sub(width_bits);
+    let width = |value: u128| (value << bits) >> bits;
+    let held = arrival
+        .state
+        .register(storage.offset, storage.size)
+        .map(width);
+    let key = (arrival.at, index);
+    let last = track
+        .inductions
+        .get(&key)
+        .map(|last| u64::try_from(*last).unwrap_or(u64::MAX));
+    let expected = match around {
+        true => last.map(|last| u128::from(step.apply(last, width_bits))),
+        false => init.and_then(|init| arrival.operand(init)).map(width),
+    };
+    track.inductions.extend(held.map(|held| (key, held)));
+    let (held, expected) = (held?, expected?);
+    Some(match held == expected {
+        true => Ok(()),
+        false => Err(format!("it holds {held:#x}, not {expected:#x}")),
+    })
+}
+
+/// What one run carries between instructions: each argument awaiting its call, each induction's last value, each loop in flight.
+#[derive(Default)]
+struct Track {
+    arguments: Vec<Pending>,
+    inductions: BTreeMap<(u64, usize), u128>,
+    trips: BTreeMap<ClaimAt, Trip>,
+}
+
+/// A value a line put in an argument's register, awaiting the call it is set for.
+struct Pending {
+    claim: ClaimAt,
+    call: u64,
+    register: Varnode,
+    value: u128,
+}
+
+/// A loop this run is inside: how often its header ran, how often the claim says, and where it leaves.
+struct Trip {
+    count: u64,
+    expected: u64,
+    exits: Vec<u64>,
 }
 
 impl<M> After<'_, M> {
@@ -952,8 +1338,68 @@ fn verdict<M: Mapped>(
         }
         // What the revision holds is ruled once, against the revision: see `rule_revision`.
         AnnotationKind::Holds { .. } | AnnotationKind::Text { .. } => return None,
+        // A certified call, dispatch or loop: see `certified`.
+        _ => certified(&claim.kind, after)?,
     };
     Some(Verdict::Held(held))
+}
+
+/// What one run of its instruction says about a certified call, dispatch or loop claim.
+fn certified<M: Mapped>(kind: &AnnotationKind, after: &After<'_, M>) -> Option<Result<(), String>> {
+    Some(match *kind {
+        // Each register argument the boundary names one value of holds it as the call runs.
+        AnnotationKind::Call { ref arguments, .. } => {
+            let called = after.ran.direct.is_none_or(|(_, called)| called);
+            if !after.whole() || !called {
+                return None;
+            }
+            let exact = arguments.iter().flatten().filter_map(|argument| {
+                let ArgumentSlot::Register(storage) = argument.slot else {
+                    return None;
+                };
+                Some((storage, u128::from(argument.value?)))
+            });
+            let wrong = exact.map(|(storage, value)| {
+                let held = after.state.register(storage.offset, storage.size);
+                (held != Some(value))
+                    .then(|| format!("{held:x?} is handed where {value:#x} is claimed"))
+            });
+            match wrong.flatten().next() {
+                None => Ok(()),
+                Some(wrong) => Err(wrong),
+            }
+        }
+        // A dispatch reaches one of the arms it claims, or the default it claims.
+        AnnotationKind::Switch {
+            ref arms, default, ..
+        } => {
+            let Flow::Transfer(transfer) = after.ran.flow else {
+                return None;
+            };
+            let arm = arms.iter().any(|(_, target)| *target == transfer.to);
+            match arm || default == Some(transfer.to) {
+                true => Ok(()),
+                false => Err(format!("it transferred to {:#x}", transfer.to)),
+            }
+        }
+        // An arm or default is reached from the dispatch or guard it names; any other arrival says nothing.
+        AnnotationKind::Case { dispatch, .. } => {
+            (after.previous == Some(dispatch)).then_some(())?;
+            Ok(())
+        }
+        AnnotationKind::Default { dispatch, guard } => {
+            let from = after.previous?;
+            (from == dispatch || from == guard).then_some(())?;
+            Ok(())
+        }
+        // A header is where control enters the loop the walk found.
+        AnnotationKind::Loop { .. } => {
+            after.whole().then_some(())?;
+            Ok(())
+        }
+        // Ruled against the lift, as control arrives, or as the call it is set for runs: see `rule_revision`, `arrive` and `called`.
+        _ => return None,
+    })
 }
 
 /// What the instruction's widest registers hold.

@@ -559,6 +559,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         argument_certificates: Vec::new(),
         arguments_complete: true,
         results_complete: true,
+        described: true,
     };
     let mut boundary = r2ssa::SourceCallBoundaryFact {
         call_site: call_site_id,
@@ -575,6 +576,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         complete: true,
         arguments_complete: true,
         results_complete: true,
+        described: true,
     };
 
     assert!(exact_tail_return_certificate_matches(

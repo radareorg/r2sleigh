@@ -153,25 +153,26 @@ pub fn capture(
             successors: block
                 .successors
                 .iter()
-                .map(|(kind, target)| {
-                    // What the selector was on an arm is a fact the dispatch
-                    // carries, so an arm it names is one of its cases and is
-                    // labelled from there rather than being a plain edge.
-                    let case = block.switch.as_ref().and_then(|switch| {
-                        switch
-                            .cases
-                            .iter()
-                            .find(|(_, arm)| arm == target)
-                            .map(|(value, _)| *value)
+                .flat_map(|(kind, target)| {
+                    // An arm the dispatch names is one case edge per selector value that reaches it, labelled from the dispatch.
+                    let mut values = block.switch.as_ref().map_or_else(Vec::new, |switch| {
+                        let reaching = switch.cases.iter().filter(|(_, arm)| arm == target);
+                        reaching.map(|(value, _)| *value).collect()
                     });
-                    AdvisorySuccessor {
-                        kind: match case {
-                            Some(_) => AdvisorySuccessorKind::SwitchCase,
-                            None => *kind,
-                        },
+                    values.sort_unstable();
+                    values.dedup();
+                    let edge = |kind, case_value| AdvisorySuccessor {
+                        kind,
                         target: *target,
-                        case_value: case,
+                        case_value,
                         external: !own_blocks.contains(target),
+                    };
+                    match values.is_empty() {
+                        true => vec![edge(*kind, None)],
+                        false => values
+                            .into_iter()
+                            .map(|value| edge(AdvisorySuccessorKind::SwitchCase, Some(value)))
+                            .collect(),
                     }
                 })
                 .collect(),

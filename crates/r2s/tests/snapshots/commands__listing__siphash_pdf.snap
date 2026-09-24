@@ -1,0 +1,176 @@
+---
+source: crates/r2s/tests/commands.rs
+expression: listed.out
+---
+            0x004018b0      f30f1efa       endbr64
+            0x004018b4      48b8756573..   mov rax, 0x736f6d6570736575
+            0x004018be      4989f0         mov r8, rsi
+            0x004018c1      48be617265..   mov rsi, 0x6c7967656e657261
+            0x004018cb      49bb6d6f64..   mov r11, 0x646f72616e646f6d
+            0x004018d5      4d89c2         mov r10, r8
+            0x004018d8      4831d0         xor rax, rdx
+            0x004018db      4831f2         xor rdx, rsi
+            0x004018de      4931cb         xor r11, rcx
+            0x004018e1      48be736574..   mov rsi, 0x7465646279746573
+            0x004018eb      4983e2f8       and r10, -0x8 ; defines r10 in [0x0, 0xfffffffffffffff8] (decoded)
+            0x004018ef      4831f1         xor rcx, rsi
+            0x004018f2      4901fa         add r10, rdi
+            0x004018f5      4c89c6         mov rsi, r8
+            0x004018f8      48c1e638       shl rsi, 0x38
+            0x004018fc      4c39d7         cmp rdi, r10
+            0x004018ff      7479           je 0x40197a
+            0x00401901      0f1f800000..   nop dword [rax]
+            0x00401908      4c8b0f         mov r9, qword [rdi] ; loop: latches 0x401908, exits 0x40197a (certified) ; induction rdi = rdi@entry, +0x8 per trip (certified)
+            0x0040190b      4c01d8         add rax, r11
+            0x0040190e      49c1c30d       rol r11, 0xd
+            0x00401912      4883c708       add rdi, 0x8
+            0x00401916      4931c3         xor r11, rax
+            0x00401919      48c1c020       rol rax, 0x20
+            0x0040191d      4c31c9         xor rcx, r9
+            0x00401920      4801ca         add rdx, rcx
+            0x00401923      48c1c110       rol rcx, 0x10
+            0x00401927      4831d1         xor rcx, rdx
+            0x0040192a      4c01da         add rdx, r11
+            0x0040192d      49c1c311       rol r11, 0x11
+            0x00401931      4801c8         add rax, rcx
+            0x00401934      48c1c115       rol rcx, 0x15
+            0x00401938      4931d3         xor r11, rdx
+            0x0040193b      4831c1         xor rcx, rax
+            0x0040193e      48c1c220       rol rdx, 0x20
+            0x00401942      4c01d8         add rax, r11
+            0x00401945      4801ca         add rdx, rcx
+            0x00401948      49c1c30d       rol r11, 0xd
+            0x0040194c      48c1c110       rol rcx, 0x10
+            0x00401950      4931c3         xor r11, rax
+            0x00401953      48c1c020       rol rax, 0x20
+            0x00401957      4831d1         xor rcx, rdx
+            0x0040195a      4c01da         add rdx, r11
+            0x0040195d      49c1c311       rol r11, 0x11
+            0x00401961      4801c8         add rax, rcx
+            0x00401964      48c1c115       rol rcx, 0x15
+            0x00401968      4931d3         xor r11, rdx
+            0x0040196b      4831c1         xor rcx, rax
+            0x0040196e      48c1c220       rol rdx, 0x20
+            0x00401972      4c31c8         xor rax, r9
+            0x00401975      4939fa         cmp r10, rdi
+            0x00401978      758e           jne 0x401908
+            0x0040197a      4183e007       and r8d, 0x7 ; defines r8 in [0x0, 0x7] (decoded)
+            0x0040197e      3e42ff24c5..   jmp qword ptr ds:[0x402020 + r8*0x8] ; switch table (8 cases) at 0x402020 (solved)
+            ;-- case 7:                                                ; from 0x0040197e
+            0x00401990      410fb67a06     movzx edi, byte [r10 + 0x6]
+            0x00401995      48c1e730       shl rdi, 0x30
+            0x00401999      4809fe         or rsi, rdi
+            ;-- case 6:                                                ; from 0x0040197e
+            0x0040199c      410fb67a05     movzx edi, byte [r10 + 0x5]
+            0x004019a1      48c1e728       shl rdi, 0x28
+            0x004019a5      4809fe         or rsi, rdi
+            ;-- case 5:                                                ; from 0x0040197e
+            0x004019a8      410fb67a04     movzx edi, byte [r10 + 0x4]
+            0x004019ad      48c1e720       shl rdi, 0x20
+            0x004019b1      4809fe         or rsi, rdi
+            ;-- case 4:                                                ; from 0x0040197e
+            0x004019b4      410fb67a03     movzx edi, byte [r10 + 0x3]
+            0x004019b9      48c1e718       shl rdi, 0x18
+            0x004019bd      4809fe         or rsi, rdi
+            ;-- case 3:                                                ; from 0x0040197e
+            0x004019c0      410fb67a02     movzx edi, byte [r10 + 0x2]
+            0x004019c5      48c1e710       shl rdi, 0x10
+            0x004019c9      4809fe         or rsi, rdi
+            ;-- case 2:                                                ; from 0x0040197e
+            0x004019cc      410fb67a01     movzx edi, byte [r10 + 0x1]
+            0x004019d1      48c1e708       shl rdi, 0x8
+            0x004019d5      4809fe         or rsi, rdi
+            ;-- case 1:                                                ; from 0x0040197e
+            0x004019d8      410fb63a       movzx edi, byte [r10]
+            0x004019dc      4809fe         or rsi, rdi
+            ;-- case 0:                                                ; from 0x0040197e
+            0x004019df      4831f1         xor rcx, rsi
+            0x004019e2      4a8d3c18       lea rdi, [rax + r11*0x1]
+            0x004019e6      49c1c30d       rol r11, 0xd
+            0x004019ea      4801ca         add rdx, rcx
+            0x004019ed      4889f8         mov rax, rdi
+            0x004019f0      48c1c110       rol rcx, 0x10
+            0x004019f4      4931fb         xor r11, rdi
+            0x004019f7      4831d1         xor rcx, rdx
+            0x004019fa      48c1c020       rol rax, 0x20
+            0x004019fe      4c01da         add rdx, r11
+            0x00401a01      488d3c08       lea rdi, [rax + rcx*0x1]
+            0x00401a05      4c89d8         mov rax, r11
+            0x00401a08      48c1c115       rol rcx, 0x15
+            0x00401a0c      48c1c011       rol rax, 0x11
+            0x00401a10      4831f9         xor rcx, rdi
+            0x00401a13      4831d0         xor rax, rdx
+            0x00401a16      48c1c220       rol rdx, 0x20
+            0x00401a1a      4801c7         add rdi, rax
+            0x00401a1d      4801ca         add rdx, rcx
+            0x00401a20      48c1c00d       rol rax, 0xd
+            0x00401a24      48c1c110       rol rcx, 0x10
+            0x00401a28      4831f8         xor rax, rdi
+            0x00401a2b      48c1c720       rol rdi, 0x20
+            0x00401a2f      4831d1         xor rcx, rdx
+            0x00401a32      4801c2         add rdx, rax
+            0x00401a35      48c1c011       rol rax, 0x11
+            0x00401a39      4801cf         add rdi, rcx
+            0x00401a3c      4831d0         xor rax, rdx
+            0x00401a3f      48c1c115       rol rcx, 0x15
+            0x00401a43      4831fe         xor rsi, rdi
+            0x00401a46      48c1c220       rol rdx, 0x20
+            0x00401a4a      4831f9         xor rcx, rdi
+            0x00401a4d      4801c6         add rsi, rax
+            0x00401a50      80f2ff         xor dl, 0xff
+            0x00401a53      48c1c00d       rol rax, 0xd
+            0x00401a57      4831f0         xor rax, rsi
+            0x00401a5a      48c1c620       rol rsi, 0x20
+            0x00401a5e      4801ca         add rdx, rcx
+            0x00401a61      48c1c110       rol rcx, 0x10
+            0x00401a65      4831d1         xor rcx, rdx
+            0x00401a68      4801c2         add rdx, rax
+            0x00401a6b      48c1c011       rol rax, 0x11
+            0x00401a6f      4801ce         add rsi, rcx
+            0x00401a72      48c1c115       rol rcx, 0x15
+            0x00401a76      4831d0         xor rax, rdx
+            0x00401a79      4831f1         xor rcx, rsi
+            0x00401a7c      48c1c220       rol rdx, 0x20
+            0x00401a80      4801c6         add rsi, rax
+            0x00401a83      4801ca         add rdx, rcx
+            0x00401a86      48c1c00d       rol rax, 0xd
+            0x00401a8a      48c1c110       rol rcx, 0x10
+            0x00401a8e      4831f0         xor rax, rsi
+            0x00401a91      48c1c620       rol rsi, 0x20
+            0x00401a95      4831d1         xor rcx, rdx
+            0x00401a98      4801c2         add rdx, rax
+            0x00401a9b      48c1c011       rol rax, 0x11
+            0x00401a9f      4801ce         add rsi, rcx
+            0x00401aa2      48c1c115       rol rcx, 0x15
+            0x00401aa6      4831d0         xor rax, rdx
+            0x00401aa9      4831f1         xor rcx, rsi
+            0x00401aac      48c1c220       rol rdx, 0x20
+            0x00401ab0      4801c6         add rsi, rax
+            0x00401ab3      4801ca         add rdx, rcx
+            0x00401ab6      48c1c00d       rol rax, 0xd
+            0x00401aba      48c1c110       rol rcx, 0x10
+            0x00401abe      4831f0         xor rax, rsi
+            0x00401ac1      48c1c620       rol rsi, 0x20
+            0x00401ac5      4831d1         xor rcx, rdx
+            0x00401ac8      4801ce         add rsi, rcx
+            0x00401acb      4801c2         add rdx, rax
+            0x00401ace      48c1c011       rol rax, 0x11
+            0x00401ad2      4831d0         xor rax, rdx
+            0x00401ad5      48c1c115       rol rcx, 0x15
+            0x00401ad9      4831f1         xor rcx, rsi
+            0x00401adc      4801c6         add rsi, rax
+            0x00401adf      48c1c00d       rol rax, 0xd
+            0x00401ae3      4831c6         xor rsi, rax
+            0x00401ae6      48c1c220       rol rdx, 0x20
+            0x00401aea      4889c8         mov rax, rcx
+            0x00401aed      4801ca         add rdx, rcx
+            0x00401af0      48c1c010       rol rax, 0x10
+            0x00401af4      4831d0         xor rax, rdx
+            0x00401af7      4801f2         add rdx, rsi
+            0x00401afa      48c1c611       rol rsi, 0x11
+            0x00401afe      48c1c015       rol rax, 0x15
+            0x00401b02      4831d0         xor rax, rdx
+            0x00401b05      48c1c220       rol rdx, 0x20
+            0x00401b09      4831f0         xor rax, rsi
+            0x00401b0c      4831d0         xor rax, rdx
+            0x00401b0f      c3             ret ; returns rax (certified)

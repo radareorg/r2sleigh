@@ -71,7 +71,7 @@ fn claims_of(line: &Line) -> impl Iterator<Item = Reference> + '_ {
     line.annotations.iter().filter_map(|annotation| {
         Some(Reference {
             from: line.address,
-            to: annotation.kind.address(),
+            to: annotation.kind.address()?,
             role: annotation.role()?,
             support: annotation.support,
         })

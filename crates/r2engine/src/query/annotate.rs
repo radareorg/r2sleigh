@@ -124,7 +124,8 @@ pub(super) fn over_run(
                 operand: line
                     .syntax
                     .as_ref()
-                    .and_then(|syntax| sole_operand(syntax, kind.address())),
+                    .zip(kind.address())
+                    .and_then(|(syntax, address)| sole_operand(syntax, address)),
                 reference: referenced(memory, &kind),
                 kind,
                 support,
@@ -142,7 +143,7 @@ pub(super) fn over_run(
 /// is data, and a pool word is a pc-relative or thread offset as often as a
 /// pointer, so the read is the reference and the word it holds is not.
 fn referenced(memory: &Memory<'_>, kind: &AnnotationKind) -> bool {
-    kind.role().is_some() && memory.maps(kind.address())
+    kind.role().is_some() && kind.address().is_some_and(|address| memory.maps(address))
 }
 
 /// Decoded where the instruction alone folds the number, folded where the block before it had to.
@@ -337,9 +338,7 @@ fn revision_at(
             AnnotationKind::Writes { address, width } => (address, width),
             AnnotationKind::Target { address, .. }
             | AnnotationKind::Computes { value: address } => (address, 0),
-            AnnotationKind::Holds { .. }
-            | AnnotationKind::Text { .. }
-            | AnnotationKind::Bounds { .. } => continue,
+            _ => continue,
         };
         used.entry(address).or_default().push((accessed, *support));
     }

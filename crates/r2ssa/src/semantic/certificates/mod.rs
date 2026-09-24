@@ -155,6 +155,68 @@ pub struct SwitchCertificate {
     /// meant the table read named a value the plan had elided, and the only
     /// account left was a marked gap over a dispatch the engine had proved.
     pub dispatch: Vec<InstId>,
+    /// The bound test that alone admits control to the dispatch, where it admits exactly the case values.
+    pub guard: Option<SwitchGuardCertificate>,
+}
+
+/// A predicate whose one edge into the dispatch holds exactly when the selector is a case value, so its other edge is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchGuardCertificate {
+    pub predicate: PredicateId,
+    /// The block the predicate ends, the dispatch's only predecessor.
+    pub block_addr: u64,
+    /// Where control goes for every selector value that is no case.
+    pub default: u64,
+}
+
+/// The guard whose edge into `dispatch` admits exactly the selector values `cases` names; `None` where anything else can reach it.
+fn switch_guard(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    predicates: &PredicateFacts,
+    fact: &SwitchPredicateFact,
+) -> Option<SwitchGuardCertificate> {
+    let selector = fact.selector?;
+    let [guard] = function.predecessors(fact.block_addr)[..] else {
+        return None;
+    };
+    let [assumption] = &predicates.block_assumptions.get(&fact.block_addr)?[..] else {
+        return None;
+    };
+    let predicate = predicates.predicates.get(&assumption.predicate)?;
+    let default = match assumption.truth {
+        true => predicate.false_target,
+        false => predicate.true_target,
+    };
+    if assumption.predecessor != guard || guard == fact.block_addr || default == fact.block_addr {
+        return None;
+    }
+    let comparison = predicate.comparison.as_ref()?;
+    let constant = |value: ValueId| graph.value(value)?.var.constant_bits();
+    // The edge in holds `selector <u bound` for the half-open bound, whichever way round the comparison is written.
+    let bound = match (comparison.kind, assumption.truth) {
+        (CompareKind::Less, true) if comparison.lhs == selector => constant(comparison.rhs)?,
+        (CompareKind::Less, false) if comparison.rhs == selector => {
+            constant(comparison.lhs)?.checked_add(1)?
+        }
+        (CompareKind::LessEqual, true) if comparison.lhs == selector => {
+            constant(comparison.rhs)?.checked_add(1)?
+        }
+        (CompareKind::LessEqual, false) if comparison.rhs == selector => constant(comparison.lhs)?,
+        _ => return None,
+    };
+    let values = fact
+        .cases
+        .iter()
+        .map(|(value, _)| *value)
+        .collect::<BTreeSet<_>>();
+    // Every value under the bound is a case and no case lies past it.
+    let admitted = bound > 0 && values.iter().copied().eq(0..bound);
+    admitted.then_some(SwitchGuardCertificate {
+        predicate: assumption.predicate,
+        block_addr: guard,
+        default,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +328,8 @@ pub struct CallsiteCertificate {
     pub arguments_complete: bool,
     /// Whether every result value the caller observes was proved.
     pub results_complete: bool,
+    /// Whether a prototype or the callee's own interface describes the call, rather than its arity being read off the registers written before it.
+    pub described: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -697,6 +761,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     cases: fact.cases.clone(),
                     default: fact.default,
                     dispatch: dispatch_operations(graph, *block_addr, fact.selector),
+                    guard: switch_guard(function, graph, predicates, fact),
                 },
             )
         })
@@ -1008,8 +1073,9 @@ pub(crate) fn collect_prepared_function_certificates(
                 .calls
                 .get(id)
                 .filter(|boundary| boundary.at == fact.at);
-            let complete_boundary = boundary.filter(|boundary| boundary.complete);
-            let (mut argument_certificates, declared_stack_arguments) = complete_boundary
+            // The arguments are certified wherever they were proved, whatever became of the results.
+            let complete_arguments = boundary.filter(|boundary| boundary.arguments_complete);
+            let (mut argument_certificates, declared_stack_arguments) = complete_arguments
                 .map(|boundary| exact_register_call_arguments(boundary, graph))
                 .unwrap_or_default();
             // A stack argument the prototype declared: the boundary proved
@@ -1137,6 +1203,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     argument_certificates,
                     arguments_complete,
                     results_complete,
+                    described: boundary.is_some_and(|boundary| boundary.described),
                 },
             )
         })

@@ -306,7 +306,7 @@ mod tests {
                 endian: Endianness::Little,
             },
             call_effect: None,
-            prepared: None,
+            proved: None,
             body: None,
             holdings: true,
             parameters: None,
@@ -357,7 +357,7 @@ mod tests {
                 endian: Endianness::Little,
             },
             call_effect: None,
-            prepared: None,
+            proved: None,
             body: None,
             holdings: true,
             parameters: None,
@@ -404,7 +404,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            prepared: None,
+            proved: None,
             body: None,
             holdings: true,
             call_effect: None,
@@ -456,7 +456,7 @@ mod tests {
             .iter()
             .find(|annotation| matches!(annotation.kind, AnnotationKind::Target { call: true, .. }))
             .expect("a direct call encodes its target");
-        assert_eq!(call.kind.address(), BASE + 0x10);
+        assert_eq!(call.kind.address(), Some(BASE + 0x10));
         assert_eq!(call.support, Support::Decoded);
         let body = &line.syntax.as_ref().expect("decoded").body;
         let span = call.operand.expect("one operand spells that address");
@@ -651,7 +651,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            prepared: None,
+            proved: None,
             body: Some(&body),
             holdings: true,
             call_effect: None,
@@ -731,7 +731,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            prepared: None,
+            proved: None,
             body: None,
             holdings: true,
             call_effect: None,
