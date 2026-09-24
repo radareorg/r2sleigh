@@ -521,10 +521,10 @@ impl<'a> FoldingContext<'a> {
             signedness: r2types::Signedness::Unsigned,
         };
         Some(match expr {
-            CExpr::Observed { id, expr } => CExpr::Observed {
-                id: *id,
-                expr: Box::new(self.integerize_certified_address_expr(expr, pointer_bits)?),
-            },
+            CExpr::Observed { ids, expr } => CExpr::observe_all(
+                ids.iter(),
+                self.integerize_certified_address_expr(expr, pointer_bits)?,
+            ),
             CExpr::IntLit(value) => CExpr::IntLit(*value),
             CExpr::UIntLit(value) => CExpr::UIntLit(*value),
             CExpr::Var(symbol) => {

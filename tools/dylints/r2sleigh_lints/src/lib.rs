@@ -2317,6 +2317,43 @@ rustc_session::declare_lint!(
     "a facts type states what is true; deciding what to render belongs to a renderer"
 );
 
+rustc_session::declare_lint!(
+    /// ### What it does
+    ///
+    /// Warns when a `CStmt::Observed` or `CExpr::Observed` render-observation
+    /// node is built as a struct literal anywhere but `r2dec::ast`.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// An occurrence carries every observation id it has on one node, and an
+    /// observed node never directly wraps another. The constructors in
+    /// `r2dec::ast` keep that true by fusing: attaching ids to a node that
+    /// already carries some adds them to its set. A literal skips the fusion,
+    /// and wrapping an observed node in another rebuilds the old
+    /// one-wrapper-per-id chain, whose depth grows with how many cells the
+    /// occurrence accounts for. That chain is what overflowed the stack on a
+    /// gap that claimed 38,726 cells: every recursive pass over the tree
+    /// recursed once per id.
+    ///
+    /// The seal refuses a nested node with `nested_observation`, which is the
+    /// runtime half of this check. The lint is the half that names the line.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// CStmt::Observed { ids, stmt: Box::new(rewrite(*stmt)) }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust
+    /// CStmt::observe_all(ids, rewrite(*stmt))
+    /// ```
+    pub R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
+    Warn,
+    "an observation node is built only by the fusing constructors in r2dec::ast"
+);
+
 rustc_session::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2402,7 +2439,8 @@ rustc_session::declare_lint_pass!(R2sleighLintPass => [
     R2ENGINE_R2DEC_FALLBACK_COMMENT_OWNERSHIP,
     R2TYPES_ROLE_NAME_SIGNATURE_HINT_OWNERSHIP,
     R2TYPES_FUNCTION_FACTS_FIELD_OWNERSHIP,
-    FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION
+    FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
+    R2DEC_OBSERVED_LITERAL_CONSTRUCTION
 ]);
 
 #[unsafe(no_mangle)]
@@ -2495,6 +2533,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2TYPES_ROLE_NAME_SIGNATURE_HINT_OWNERSHIP,
         R2TYPES_FUNCTION_FACTS_FIELD_OWNERSHIP,
         FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
+        R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
     ]);
     lint_store.register_late_pass(|_| Box::new(R2sleighLintPass));
 }
@@ -3381,6 +3420,18 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        if let ExprKind::Struct(qpath, ..) = expr.kind
+            && constructs_observation_node(cx, qpath, expr.hir_id)
+            && !is_r2dec_ast_span(cx, expr.span)
+        {
+            span_lint(
+                cx,
+                R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
+                expr.span,
+                "build an observation node with `observe_one` or `observe_all`, which fuse its ids into one set",
+            );
+        }
+
         if is_canonical_ssa_var_classifier(cx, expr) {
             return;
         }
@@ -6072,6 +6123,32 @@ fn is_display_name_rendering_span(cx: &LateContext<'_>, span: rustc_span::Span) 
         || filename.contains("crates/r2dec/src/")
         || filename.contains("crates/r2ssa/src/function.rs")
         || filename.contains("crates/r2types/src/function_facts.rs")
+}
+
+/// Whether a struct expression builds the `Observed` variant of `CStmt` or
+/// `CExpr`, by what the path resolves to rather than how it is spelled, so
+/// `Self::Observed { .. }` and a renamed import are caught too.
+fn constructs_observation_node(
+    cx: &LateContext<'_>,
+    qpath: &QPath<'_>,
+    hir_id: rustc_hir::HirId,
+) -> bool {
+    let rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Variant, variant) =
+        cx.qpath_res(qpath, hir_id)
+    else {
+        return false;
+    };
+    cx.tcx.item_name(variant).as_str() == "Observed"
+        && matches!(
+            cx.tcx.item_name(cx.tcx.parent(variant)).as_str(),
+            "CStmt" | "CExpr"
+        )
+}
+
+/// The one module that owns the observation node's canonical form.
+fn is_r2dec_ast_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
+    let filename = cx.sess().source_map().span_to_filename(span);
+    format!("{filename:?}").contains("crates/r2dec/src/ast.rs")
 }
 
 fn is_r2dec_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {

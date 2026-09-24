@@ -600,10 +600,11 @@ fn certified_value_read_rejects_forged_expression_at_allocation_and_seal() {
             CExpr::Var(symbol),
         )
         .expect("valid exact certified read marker");
-    let CExpr::Observed { id, .. } = marked else {
-        panic!("journal returns an observed expression")
-    };
-    let forged_after_allocation = CExpr::observed(id, CExpr::IntLit(7));
+    let id = *marked
+        .observation_ids()
+        .first()
+        .expect("journal returns an observed expression");
+    let forged_after_allocation = CExpr::observe_one(id, CExpr::IntLit(7));
     let sealed = seal_structured_body(
         CStmt::structured_region(
             StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
@@ -1683,13 +1684,15 @@ fn invalid_or_duplicate_markers_leave_ast_unchanged() {
     let (source, plan, mut range_function, mut range_journal) = journal_fixture();
     let (_value, binding, site, input_idx) = first_bound_rendered_input(&plan, &source);
     let symbol = declare_legacy_symbol(&range_function, &plan, binding, "range_value");
-    let mut marked = range_journal
+    let marked = range_journal
         .observe_normalized_input_expr(site, input_idx, CExpr::Var(symbol))
         .expect("value marker");
-    let CExpr::Observed { id, .. } = &mut marked else {
-        panic!("marked expression")
-    };
-    *id = test_render_observation_id(2);
+    let ids = marked.observation_ids();
+    let (_outermost, inner) = ids.split_first().expect("marked expression");
+    let marked = CExpr::observe_all(
+        std::iter::once(test_render_observation_id(2)).chain(inner.iter().copied()),
+        marked.unobserved().clone(),
+    );
     range_function.body = vec![CStmt::Expr(marked)];
     let mut range_ready = crate::codegen::prepare_function_for_emission(range_function);
     let unchanged = range_ready.function_for_marker_test().clone();
@@ -1710,13 +1713,11 @@ fn production_audit_failure_refuses_the_native_product() {
     let marked = journal
         .observe_normalized_input_expr(site, input_idx, CExpr::Var(symbol))
         .expect("value marker");
-    let CExpr::Observed {
-        id: duplicate_id, ..
-    } = &marked
-    else {
-        panic!("rendered input must carry an observation")
-    };
-    let duplicate_id = duplicate_id.index();
+    let duplicate_id = marked
+        .observation_ids()
+        .first()
+        .expect("rendered input must carry an observation")
+        .index();
     function.body = vec![CStmt::Expr(marked.clone()), CStmt::Expr(marked)];
 
     let result = MarkedNativeDraft::new(function, journal).finish_enforcing(&source, None);
@@ -2206,4 +2207,193 @@ fn replacement_rejects_a_bound_intermediate_producer() {
         ),
         "a replacement cannot absorb a producer the plan still renders separately"
     );
+}
+
+/// How many `Observed` layers stand on top of one another from `stmt` down,
+/// counted without recursing so that counting a deep chain cannot overflow.
+fn stacked_observation_layers(stmt: &CStmt) -> usize {
+    let mut layers = 0;
+    let mut cursor = stmt;
+    while let CStmt::Observed { stmt, .. } = cursor {
+        layers += 1;
+        cursor = stmt;
+    }
+    layers
+}
+
+/// A function of `pairs` sums of a register, each stored: a few thousand
+/// cells, all of them the gap's to claim.
+fn stored_sums(pairs: u64) -> SourceOwnedFunctionFacts {
+    let mut block = R2ILBlock::new(0x1000, 4);
+    for pair in 0..pairs {
+        let sum = Varnode::unique(0x100 + 8 * pair, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: sum.clone(),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(pair + 1, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::register(0x38, 8),
+            val: sum,
+        });
+    }
+    block.push(R2ILOp::Return {
+        target: Varnode::register(0x30, 8),
+    });
+    source_owned_from_blocks_with_parameter(&[block], true)
+}
+
+/// Every cell a fresh journal has not answered, which is every cell a gap
+/// over the whole function can claim.
+fn unanswered_cells(journal: &LegacyObservationJournal) -> Vec<GapCell> {
+    let values = journal.values.iter().enumerate();
+    let mut cells = values
+        .filter(|(_, slot)| slot.is_none())
+        .map(|(value, _)| GapCell::Value(ValueId(value as u32)))
+        .collect::<Vec<_>>();
+    let uses = journal.uses.iter().enumerate().flat_map(|(inst, inputs)| {
+        let unanswered = inputs.iter().enumerate().filter(|(_, slot)| slot.is_none());
+        unanswered.map(move |(input_idx, _)| GapCell::Use {
+            site: UseSite {
+                inst: InstId(inst as u32),
+                input_idx,
+            },
+            block: 0x1000,
+        })
+    });
+    cells.extend(uses);
+    let writes = journal.writes.iter().zip(journal.write_has_output.iter());
+    cells.extend(
+        writes
+            .enumerate()
+            .filter(|(_, (slot, has_output))| slot.is_none() && **has_output)
+            .map(|(inst, _)| GapCell::Write(InstId(inst as u32))),
+    );
+    cells.extend(
+        journal
+            .effect_occurrences
+            .keys()
+            .copied()
+            .map(GapCell::Effect),
+    );
+    cells
+}
+
+/// One statement as the whole of a function's one block, with sealed regions.
+fn the_whole_body(
+    stmt: CStmt,
+    source: &SourceOwnedFunctionFacts,
+) -> (
+    CStmt,
+    crate::structured_region::SealedStructuredRegionArtifact,
+) {
+    seal_structured_body(
+        CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::structured_region(
+                StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::Block),
+                stmt,
+            ),
+        ),
+        source.source().authority(),
+    )
+    .expect("sealed body")
+    .into_marked_parts()
+}
+
+/// One gap statement carries every cell it claims as one observation set.
+///
+/// A gap claims the whole closure of a refusal, and in `fcn.1000414cc` of
+/// macOS `ssh` that was 38,726 cells. They were attached one wrapper per cell,
+/// so the tree under the gap was as deep as the cell count and every recursive
+/// pass over it -- sealing, placement, stripping, cloning, dropping --
+/// recursed once per cell and overflowed the stack. The fixture is a few
+/// thousand generated instructions whose every cell the gap claims; the
+/// passes then run on a thread with 128 KiB of stack.
+#[test]
+fn a_gap_carries_every_cell_it_claims_on_one_node() {
+    let source = stored_sums(1_500);
+    let checked = std::thread::Builder::new()
+        .name("128 KiB stack".to_owned())
+        .stack_size(128 << 10)
+        .spawn(move || {
+            let (source, plan, mut function, mut journal) = journal_fixture_for_source(source);
+            let names = test_binding_names(&source, Rc::new(plan), Rc::clone(&function.symbols));
+            let cells = unanswered_cells(&journal);
+            let anchor = GapAnchor {
+                block_addr: 0x1000,
+                op_idx: 0,
+            };
+            let marker = crate::ast::GapMarker {
+                kind: "test".to_string(),
+                origin: "a_gap_carries_every_cell_it_claims_on_one_node".to_string(),
+                block_addr: 0x1000,
+                op_idx: 0,
+                ops: 3_001,
+            };
+            let gap = journal
+                .gap_stmt(anchor, marker, &cells)
+                .expect("the gap claims every unanswered cell");
+
+            // The depth does not grow with the cell count. Counted before
+            // anything recursive touches the tree; a chain is leaked rather
+            // than dropped, because dropping it recurses once per layer.
+            let layers = stacked_observation_layers(&gap);
+            if layers != 1 {
+                std::mem::forget(gap);
+                panic!("{layers} observation layers stand over one gap statement");
+            }
+
+            let (statement, regions) = the_whole_body(gap, &source);
+            function.body = vec![statement];
+            let count = journal.placement_target_count();
+
+            // Every id is the gap's, outermost first: the last one allocated
+            // stands outermost, as it did when each id was its own wrapper.
+            let mut visited = Vec::new();
+            crate::ast::inspect_render_observations(&function, count, |id, node| {
+                let on_the_gap =
+                    matches!(node, crate::ast::RenderObservationNode::Stmt(CStmt::Gap(_)));
+                visited.push((on_the_gap, id.index()));
+                Ok::<(), ()>(())
+            })
+            .expect("one valid observation set");
+            assert!(visited.iter().all(|(on_the_gap, _)| *on_the_gap));
+            assert!(visited.iter().map(|(_, id)| *id).rev().eq(0..count as u32));
+
+            crate::placement::collect_final_placement_occurrences(
+                &function,
+                &regions,
+                source.source(),
+                &names,
+                count,
+                |id| journal.placement_target(id),
+            )
+            .expect("a gap reads and writes no binding placement orders");
+
+            let mut stripped = function.clone();
+            let reachable = crate::ast::strip_render_observations(&mut stripped, count)
+                .expect("every id is in the journal's domain");
+            assert_eq!(reachable.ids().count(), count);
+
+            let mut ready = crate::codegen::prepare_function_for_emission(function);
+            let coverage = journal
+                .seal(&source, &mut ready)
+                .expect("the gap seals")
+                .coverage();
+            assert!(coverage.equations_hold(), "{coverage:?}");
+            (cells, coverage)
+        })
+        .expect("spawn the small-stack thread")
+        .join();
+    let (cells, coverage) = checked.expect("sealing, placement and stripping fit in 128 KiB");
+    assert!(cells.len() > 5_000, "{} cells", cells.len());
+    // Each claimed cell sealed exactly once, as the gap's.
+    let claimed = cells
+        .iter()
+        .filter(|cell| !matches!(cell, GapCell::Effect(_)))
+        .count();
+    let gapped = coverage.values.gapped + coverage.uses.gapped + coverage.writes.gapped;
+    assert_eq!(gapped, claimed, "{coverage:?}");
 }

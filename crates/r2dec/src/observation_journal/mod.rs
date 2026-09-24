@@ -165,6 +165,11 @@ pub(crate) enum GapCell {
     Effect(SemanticObligationId),
 }
 
+/// A statement the journal declined to mark, handed back as it came with the
+/// reason. The caller keeps the statement without having copied it in case of
+/// a refusal; boxed, because a statement is large and a refusal is rare.
+pub(crate) type RefusedStmt = Box<(LegacyObservationJournalError, CStmt)>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LegacyObservationJournalError {
     SourceAuthority,
@@ -630,6 +635,11 @@ impl From<&LegacyObservationJournalError> for BindingObservationJournalFailure {
             }) => Self::DuplicateObservation {
                 observation_id: id.index(),
             },
+            LegacyObservationJournalError::Markers(
+                RenderObservationStripError::NestedObservation { id },
+            ) => Self::NestedObservation {
+                observation_id: id.index(),
+            },
         }
     }
 }
@@ -1056,6 +1066,9 @@ fn observation_marker_refusal(
             expected_count,
         },
         Error::Duplicate { id } => Refusal::DuplicateObservation {
+            observation_id: id.index(),
+        },
+        Error::NestedObservation { id } => Refusal::NestedObservation {
             observation_id: id.index(),
         },
     }

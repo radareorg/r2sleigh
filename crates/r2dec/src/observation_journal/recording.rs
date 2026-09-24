@@ -506,7 +506,7 @@ impl LegacyObservationJournal {
             .into_iter()
             .next()
             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-        Ok(CExpr::observed(id, expr))
+        Ok(CExpr::observe_one(id, expr))
     }
 
     /// Mark one exact semantic value read that has no graph [`UseSite`].
@@ -560,11 +560,9 @@ impl LegacyObservationJournal {
             targets.push(ObservationTarget::Effect(obligation));
         }
 
-        let mut marked = expr;
-        for id in self.allocate_many(targets)? {
-            marked = CExpr::observed(id, marked);
-        }
-        Ok(marked)
+        // Allocated innermost first, so the set reads them the other way round.
+        let ids = self.allocate_many(targets)?;
+        Ok(CExpr::observe_all(ids.into_iter().rev(), expr))
     }
 
     /// The cells a bound value's assignment owes when its right-hand side is
@@ -587,14 +585,34 @@ impl LegacyObservationJournal {
     /// has no occurrence anywhere in the function. Everything else the rewrite
     /// drops still has one: a bound operand has its own statement, and an
     /// inline operand with a definition is in the absorbed list above.
+    ///
+    /// A refusal hands the statement back unmarked, so the caller keeps it
+    /// without having copied it first.
     pub(crate) fn observe_canonical_assignment_stmt(
         &mut self,
         value: ValueId,
         definition: InstId,
         absorbed: &[InstId],
         stmt: CStmt,
-    ) -> Result<CStmt, LegacyObservationJournalError> {
-        let rhs = assignment_rhs(&stmt).ok_or_else(|| {
+    ) -> Result<CStmt, RefusedStmt> {
+        let ids = self
+            .canonical_assignment_targets(value, definition, absorbed, &stmt)
+            .and_then(|targets| self.allocate_many(targets));
+        match ids {
+            // Allocated innermost first, so the set reads them the other way round.
+            Ok(ids) => Ok(CStmt::observe_all(ids.into_iter().rev(), stmt)),
+            Err(error) => Err(Box::new((error, stmt))),
+        }
+    }
+
+    fn canonical_assignment_targets(
+        &mut self,
+        value: ValueId,
+        definition: InstId,
+        absorbed: &[InstId],
+        stmt: &CStmt,
+    ) -> Result<Vec<ObservationTarget>, LegacyObservationJournalError> {
+        let rhs = assignment_rhs(stmt).ok_or_else(|| {
             LegacyObservationJournalError::rendered_value_required(
                 value,
                 RenderedValueRequirementCause::NonrenderedValueDisposition,
@@ -628,11 +646,7 @@ impl LegacyObservationJournal {
             self.value_slot(input)?;
             targets.push(ObservationTarget::Value(input));
         }
-        let mut marked = stmt;
-        for id in self.allocate_many(targets)? {
-            marked = CStmt::observed(id, marked);
-        }
-        Ok(marked)
+        Ok(targets)
     }
 
     pub(crate) fn observe_certified_value_read_expr(
@@ -709,7 +723,7 @@ impl LegacyObservationJournal {
             .into_iter()
             .next()
             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-        Ok(CExpr::observed(id, expr))
+        Ok(CExpr::observe_one(id, expr))
     }
 
     pub(crate) fn observe_certified_address_read_expr(
@@ -802,11 +816,10 @@ impl LegacyObservationJournal {
         let read_id = ids
             .next()
             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-        let marked = match value_id {
-            Some(value_id) => CExpr::observed(value_id, expr),
-            None => expr,
-        };
-        Ok(CExpr::observed(read_id, marked))
+        Ok(CExpr::observe_all(
+            std::iter::once(read_id).chain(value_id),
+            expr,
+        ))
     }
 
     /// Mark the exact value a certified stack-array subscript uses as its
@@ -870,7 +883,7 @@ impl LegacyObservationJournal {
             .into_iter()
             .next()
             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-        Ok(CExpr::observed(read_id, expr))
+        Ok(CExpr::observe_one(read_id, expr))
     }
 
     /// Mark one exact rendered access to a source-owned stack-object binding.
@@ -1003,11 +1016,9 @@ impl LegacyObservationJournal {
                 }
             }
         }
-        let mut marked = expr;
-        for id in self.allocate_many(targets)? {
-            marked = CExpr::observed(id, marked);
-        }
-        Ok(marked)
+        // Allocated innermost first, so the set reads them the other way round.
+        let ids = self.allocate_many(targets)?;
+        Ok(CExpr::observe_all(ids.into_iter().rev(), expr))
     }
 
     pub(crate) fn record_removed_value(
@@ -1072,22 +1083,24 @@ impl LegacyObservationJournal {
                 block,
             });
         }
-        let mut marked = expr;
-        for id in self.allocate_many(targets)? {
-            marked = CExpr::observed(id, marked);
-        }
-        Ok(marked)
+        // Allocated innermost first, so the set reads them the other way round.
+        let ids = self.allocate_many(targets)?;
+        Ok(CExpr::observe_all(ids.into_iter().rev(), expr))
     }
 
     /// Mark one rendered definition and its source write using the exact
     /// normalized output projection.
+    ///
+    /// A refusal hands the statement back unmarked.
     pub(crate) fn observe_normalized_output_stmt(
         &mut self,
         site: NormalizedOpSite,
         stmt: CStmt,
-    ) -> Result<CStmt, LegacyObservationJournalError> {
-        let (value_id, write_id) = self.allocate_normalized_output_targets(site)?;
-        Ok(CStmt::observed(write_id, CStmt::observed(value_id, stmt)))
+    ) -> Result<CStmt, RefusedStmt> {
+        match self.allocate_normalized_output_targets(site) {
+            Ok((value_id, write_id)) => Ok(CStmt::observe_all([write_id, value_id], stmt)),
+            Err(error) => Err(Box::new((error, stmt))),
+        }
     }
 
     /// Mark one rendered definition that survives inside an expression.
@@ -1102,7 +1115,7 @@ impl LegacyObservationJournal {
         expr: CExpr,
     ) -> Result<CExpr, LegacyObservationJournalError> {
         let (value_id, write_id) = self.allocate_normalized_output_targets(site)?;
-        Ok(CExpr::observed(write_id, CExpr::observed(value_id, expr)))
+        Ok(CExpr::observe_all([write_id, value_id], expr))
     }
 
     fn allocate_effect_targets(
@@ -1129,19 +1142,20 @@ impl LegacyObservationJournal {
     /// exact obligation IDs discharged by the construct. The IDs are checked
     /// against this journal's source-owned inventory, allocated in canonical
     /// order, and counted only if this statement occurrence reaches sealing.
+    /// A refusal hands the statement back unmarked.
     pub(crate) fn observe_effect_stmt(
         &mut self,
         obligation_ids: &BTreeSet<SemanticObligationId>,
         stmt: CStmt,
-    ) -> Result<CStmt, LegacyObservationJournalError> {
+    ) -> Result<CStmt, RefusedStmt> {
         if matches!(stmt.unobserved(), CStmt::Comment(_) | CStmt::Empty) {
             return Ok(stmt);
         }
-        let mut marked = stmt;
-        for id in self.allocate_effect_targets(obligation_ids)? {
-            marked = CStmt::observed(id, marked);
+        match self.allocate_effect_targets(obligation_ids) {
+            // Allocated innermost first, so the set reads them the other way round.
+            Ok(ids) => Ok(CStmt::observe_all(ids.into_iter().rev(), stmt)),
+            Err(error) => Err(Box::new((error, stmt))),
         }
-        Ok(marked)
     }
 
     /// Mark one gap statement with every cell it accounts for.
@@ -1245,11 +1259,13 @@ impl LegacyObservationJournal {
                 cell: *cell,
             })
             .collect();
-        let mut marked = CStmt::Gap(marker);
-        for id in self.allocate_many(targets)? {
-            marked = CStmt::observed(id, marked);
-        }
-        Ok(marked)
+        // One set on the one statement, however many cells the gap claims:
+        // allocated innermost first, so the set reads them the other way round.
+        let ids = self.allocate_many(targets)?;
+        Ok(CStmt::observe_all(
+            ids.into_iter().rev(),
+            CStmt::Gap(marker),
+        ))
     }
 
     /// Record a value only when the sealed plan proves that no rendered AST

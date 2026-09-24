@@ -835,7 +835,7 @@ fn prepended_comment_keeps_only_the_exact_original_statement_observation() {
         commented,
         CStmt::Block(vec![
             CStmt::comment("summary"),
-            CStmt::observed(stmt_id, CStmt::Return(Some(CExpr::IntLit(7)))),
+            CStmt::observe_one(stmt_id, CStmt::Return(Some(CExpr::IntLit(7)))),
         ])
     );
 

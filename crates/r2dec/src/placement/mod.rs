@@ -989,14 +989,16 @@ fn collect_expr_observation_regions(
         scoped: &mut FinalObservationScopes,
     ) {
         match expr {
-            CExpr::Observed { id, expr } => {
-                scoped.record(
-                    *id,
-                    ObservationScope {
-                        region,
-                        arms: arms.clone(),
-                    },
-                );
+            CExpr::Observed { ids, expr } => {
+                for id in ids.iter() {
+                    scoped.record(
+                        id,
+                        ObservationScope {
+                            region,
+                            arms: arms.clone(),
+                        },
+                    );
+                }
                 walk(expr, region, arms, conditionals, scoped);
             }
             CExpr::Ternary {
@@ -1051,11 +1053,10 @@ fn collect_stmt_observation_regions(
         collect_stmt_observation_regions(stmt, entered.or(current), regions, conditionals, scoped);
         return;
     }
-    let mut semantic = statement;
-    while let CStmt::Observed { id, stmt } = semantic {
+    for id in statement.observation_ids().iter() {
         record_observation_region(*id, current, scoped);
-        semantic = stmt;
     }
+    let semantic = statement.unobserved();
     match semantic {
         CStmt::StructuredRegion { .. } => {
             collect_stmt_observation_regions(semantic, current, regions, conditionals, scoped);
@@ -1202,8 +1203,8 @@ fn observations_directly_after_a_label(
 /// Every observation marker carried by one statement, including its own.
 fn collect_statement_observations(statement: &CStmt, into: &mut BTreeSet<RenderObservationId>) {
     match statement {
-        CStmt::Observed { id, stmt } => {
-            into.insert(*id);
+        CStmt::Observed { ids, stmt } => {
+            into.extend(ids.iter());
             collect_statement_observations(stmt, into);
         }
         CStmt::StructuredRegion { stmt, .. } => collect_statement_observations(stmt, into),
@@ -1384,6 +1385,40 @@ fn direct_stack_assignment_observations(
     expr: &CExpr,
     targets: &[Option<PlacementObservationTarget>],
 ) -> Option<(Vec<RenderObservationId>, Vec<RenderObservationId>)> {
+    /// File one observation on the destination as a read or the store's own
+    /// write, or answer that it is neither and the order cannot be stated.
+    fn classify(
+        id: RenderObservationId,
+        targets: &[Option<PlacementObservationTarget>],
+        reads: &mut Vec<RenderObservationId>,
+        writes: &mut Vec<RenderObservationId>,
+    ) -> bool {
+        match observation_target(targets, id) {
+            Some(PlacementObservationTarget::StackAccess { is_write: true, .. }) => {
+                writes.push(id);
+                true
+            }
+            // The address this destination names, and any value read to
+            // form it. Both are evaluated before the store they serve.
+            Some(
+                PlacementObservationTarget::Use { .. }
+                | PlacementObservationTarget::CertifiedValueRead { .. }
+                | PlacementObservationTarget::CertifiedArrayIndexRead { .. }
+                | PlacementObservationTarget::StackAccess {
+                    is_write: false, ..
+                }
+                | PlacementObservationTarget::ObjectAddress { .. },
+            ) => {
+                reads.push(id);
+                true
+            }
+            Some(PlacementObservationTarget::Other) => true,
+            // A write that is not this destination's own store, or an
+            // observation with no target, is not something this can order.
+            Some(PlacementObservationTarget::Write { .. }) | None => false,
+        }
+    }
+
     fn collect(
         expr: &CExpr,
         targets: &[Option<PlacementObservationTarget>],
@@ -1391,30 +1426,9 @@ fn direct_stack_assignment_observations(
         writes: &mut Vec<RenderObservationId>,
     ) -> bool {
         match expr {
-            CExpr::Observed { id, expr } => {
-                match observation_target(targets, *id) {
-                    Some(PlacementObservationTarget::StackAccess { is_write: true, .. }) => {
-                        writes.push(*id);
-                    }
-                    // The address this destination names, and any value read to
-                    // form it. Both are evaluated before the store they serve.
-                    Some(
-                        PlacementObservationTarget::Use { .. }
-                        | PlacementObservationTarget::CertifiedValueRead { .. }
-                        | PlacementObservationTarget::CertifiedArrayIndexRead { .. }
-                        | PlacementObservationTarget::StackAccess {
-                            is_write: false, ..
-                        }
-                        | PlacementObservationTarget::ObjectAddress { .. },
-                    ) => {
-                        reads.push(*id);
-                    }
-                    Some(PlacementObservationTarget::Other) => {}
-                    // A write that is not this destination's own store, or an
-                    // observation with no target, is not something this can order.
-                    Some(PlacementObservationTarget::Write { .. }) | None => return false,
-                }
-                collect(expr, targets, reads, writes)
+            CExpr::Observed { ids, expr } => {
+                ids.iter().all(|id| classify(id, targets, reads, writes))
+                    && collect(expr, targets, reads, writes)
             }
             CExpr::Paren(expr) | CExpr::Cast { expr, .. } => collect(expr, targets, reads, writes),
             // The address a destination dereferences, and the arithmetic that
@@ -1515,12 +1529,8 @@ fn collect_expr_observation_scopes(
     order: &mut u64,
     scoped: &mut [Option<FinalObservationScope>],
 ) {
-    let mut leading = Vec::new();
-    let mut semantic = expr;
-    while let CExpr::Observed { id, expr } = semantic {
-        leading.push(*id);
-        semantic = expr;
-    }
+    let leading: &[RenderObservationId] = &expr.observation_ids();
+    let semantic = expr.unobserved();
 
     match semantic {
         CExpr::Observed { .. } => unreachable!("leading observations were consumed"),
@@ -1694,7 +1704,7 @@ fn collect_expr_observation_scopes(
     }
 
     record_completion_observations(
-        &leading,
+        leading,
         current,
         targets,
         GroupPosition::Spelled,
@@ -1718,21 +1728,17 @@ fn collect_stmt_observation_scopes(
         collect_stmt_observation_scopes(stmt, Some(region), regions, targets, order, scoped);
         return;
     }
-    let mut leading = Vec::new();
-    let mut semantic = statement;
-    while let CStmt::Observed { id, stmt } = semantic {
-        leading.push(*id);
-        semantic = stmt;
-    }
+    let leading: &[RenderObservationId] = &statement.observation_ids();
+    let semantic = statement.unobserved();
     match semantic {
         CStmt::StructuredRegion { .. } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            record_control_observations(leading, current, targets, order, scoped);
             collect_stmt_observation_scopes(semantic, current, regions, targets, order, scoped);
         }
         CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
             collect_expr_observation_scopes(expr, current, targets, order, scoped);
             record_completion_observations(
-                &leading,
+                leading,
                 current,
                 targets,
                 GroupPosition::Spelled,
@@ -1745,7 +1751,7 @@ fn collect_stmt_observation_scopes(
                 collect_expr_observation_scopes(init, current, targets, order, scoped);
             }
             record_completion_observations(
-                &leading,
+                leading,
                 current,
                 targets,
                 GroupPosition::Spelled,
@@ -1758,7 +1764,7 @@ fn collect_stmt_observation_scopes(
             then_body,
             else_body,
         } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            record_control_observations(leading, current, targets, order, scoped);
             collect_expr_observation_scopes(cond, current, targets, order, scoped);
             collect_stmt_observation_scopes(then_body, current, regions, targets, order, scoped);
             if let Some(else_body) = else_body {
@@ -1768,12 +1774,12 @@ fn collect_stmt_observation_scopes(
             }
         }
         CStmt::While { cond, body } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            record_control_observations(leading, current, targets, order, scoped);
             collect_expr_observation_scopes(cond, current, targets, order, scoped);
             collect_stmt_observation_scopes(body, current, regions, targets, order, scoped);
         }
         CStmt::DoWhile { body, cond } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            record_control_observations(leading, current, targets, order, scoped);
             collect_stmt_observation_scopes(body, current, regions, targets, order, scoped);
             collect_expr_observation_scopes(cond, current, targets, order, scoped);
         }
@@ -1792,7 +1798,7 @@ fn collect_stmt_observation_scopes(
                 Some(_) => enclosing_region_of_loop(current, regions),
                 None => current,
             };
-            record_control_observations(&leading, header, targets, order, scoped);
+            record_control_observations(leading, header, targets, order, scoped);
             if let Some(init) = init {
                 collect_stmt_observation_scopes(init, header, regions, targets, order, scoped);
             }
@@ -1809,7 +1815,7 @@ fn collect_stmt_observation_scopes(
             cases,
             default,
         } => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            record_control_observations(leading, current, targets, order, scoped);
             collect_expr_observation_scopes(expr, current, targets, order, scoped);
             for case in cases {
                 record_ambiguous_expr_group([&case.value], current, order, scoped);
@@ -1828,7 +1834,7 @@ fn collect_stmt_observation_scopes(
             }
         }
         CStmt::Block(statements) => {
-            record_control_observations(&leading, current, targets, order, scoped);
+            record_control_observations(leading, current, targets, order, scoped);
             for statement in statements {
                 collect_stmt_observation_scopes(
                     statement, current, regions, targets, order, scoped,
@@ -1839,7 +1845,7 @@ fn collect_stmt_observation_scopes(
         // A marker names none of its cells, so they take its region but not its place.
         CStmt::Gap(_) => {
             record_completion_observations(
-                &leading,
+                leading,
                 current,
                 targets,
                 GroupPosition::Unspelled,
@@ -1855,7 +1861,7 @@ fn collect_stmt_observation_scopes(
         | CStmt::Label(_)
         | CStmt::Comment(_) => {
             record_completion_observations(
-                &leading,
+                leading,
                 current,
                 targets,
                 GroupPosition::Spelled,
@@ -1867,8 +1873,8 @@ fn collect_stmt_observation_scopes(
 }
 
 fn visit_expr_observations(expr: &CExpr, visit: &mut impl FnMut(RenderObservationId)) {
-    if let CExpr::Observed { id, expr } = expr {
-        visit(*id);
+    if let CExpr::Observed { ids, expr } = expr {
+        ids.iter().for_each(&mut *visit);
         visit_expr_observations(expr, visit);
         return;
     }
@@ -1965,14 +1971,12 @@ fn audit_statement(
     if let CStmt::StructuredRegion { stmt, .. } = statement {
         return audit_statement(stmt, source, names, targets, by_symbol);
     }
-    let mut active = Vec::new();
-    let mut semantic = statement;
-    while let CStmt::Observed { id, stmt } = semantic {
-        if let Some(target) = targets.get(id.index() as usize).copied().flatten() {
-            active.push(target);
-        }
-        semantic = stmt;
-    }
+    let active = statement
+        .observation_ids()
+        .iter()
+        .filter_map(|id| targets.get(id.index() as usize).copied().flatten())
+        .collect::<Vec<_>>();
+    let semantic = statement.unobserved();
     match semantic {
         CStmt::StructuredRegion { stmt, .. } => {
             audit_statement(stmt, source, names, targets, by_symbol)?;
@@ -2166,11 +2170,12 @@ fn audit_expr(
     targets: &[Option<PlacementObservationTarget>],
     by_symbol: &BTreeMap<crate::symbol::SymbolId, BindingId>,
 ) -> Result<(), PlacementAnalysisError> {
-    if let CExpr::Observed { id, expr } = expr {
+    if let CExpr::Observed { ids, expr } = expr {
         let mut nested = active.to_vec();
-        if let Some(target) = targets.get(id.index() as usize).copied().flatten() {
-            nested.push(target);
-        }
+        nested.extend(
+            ids.iter()
+                .filter_map(|id| targets.get(id.index() as usize).copied().flatten()),
+        );
         return audit_expr(expr, access, &nested, source, names, targets, by_symbol);
     }
     match expr {
@@ -3714,23 +3719,22 @@ impl SymbolMentions {
         // The observations that would empty this statement, which is exactly
         // what `statement_is_discarded` answers: a marker on any layer wrapping
         // the statement, or a marker on an assignment's target.
-        let mut own_discards: Vec<(RenderObservationId, ObservationMark)> = Vec::new();
-        let mut current = statement;
-        while let CStmt::Observed { id, stmt } = current {
-            own_discards.push((*id, ObservationMark::Statement));
-            current = stmt;
-        }
+        let mut own_discards: Vec<(RenderObservationId, ObservationMark)> = statement
+            .observation_ids()
+            .iter()
+            .map(|id| (*id, ObservationMark::Statement))
+            .collect();
         if let CStmt::Expr(CExpr::Binary {
             op: BinaryOp::Assign,
             left,
             ..
-        }) = current
+        }) = statement.unobserved()
         {
-            let mut target = left.as_ref();
-            while let CExpr::Observed { id, expr } = target {
-                own_discards.push((*id, ObservationMark::AssignmentTarget));
-                target = expr;
-            }
+            own_discards.extend(
+                left.observation_ids()
+                    .iter()
+                    .map(|id| (*id, ObservationMark::AssignmentTarget)),
+            );
         }
         // This statement's own mentions, then its children's.
         statement_visit_own_symbols(statement, &mut |symbol| {
@@ -3877,46 +3881,40 @@ fn discard_marked_statement(
         let Some(statement) = follow_route(body, route) else {
             continue;
         };
-        // A marker wrapping the statement empties everything from its own layer
-        // down and leaves the layers above it standing. Those outer markers are
-        // observations of this statement in their own right -- an effect one of
-        // them carries is still performed by whatever the layer below renders --
-        // and emptying them here would retract a claim this discard was never
-        // about.
-        let emptied = match mark {
-            ObservationMark::Statement => marked_layer(statement, target),
-            ObservationMark::AssignmentTarget => statement,
-        };
-        collect_statement_observations(emptied, discarded);
-        *emptied = CStmt::Empty;
+        match mark {
+            ObservationMark::Statement => discard_from_marker(statement, target, discarded),
+            ObservationMark::AssignmentTarget => {
+                collect_statement_observations(statement, discarded);
+                *statement = CStmt::Empty;
+            }
+        }
         removed += 1;
     }
     removed
 }
 
-/// The layer of an observation chain this observation is the marker of.
+/// Empty a statement from the observation `target` inward.
 ///
-/// Counted first and descended after, because the layer wanted is the one whose
-/// own marker matches and a borrow cannot be handed back from inside the walk
-/// that found it.
-fn marked_layer(statement: &mut CStmt, target: RenderObservationId) -> &mut CStmt {
-    let mut depth = 0usize;
-    let mut probe: &CStmt = statement;
-    while let CStmt::Observed { id, stmt } = probe {
-        if *id == target {
-            break;
-        }
-        depth += 1;
-        probe = stmt;
-    }
-    let mut current = statement;
-    for _ in 0..depth {
-        let CStmt::Observed { stmt, .. } = current else {
-            break;
-        };
-        current = stmt;
-    }
-    current
+/// A marker on the statement empties the statement together with itself and
+/// the markers after it in the occurrence's set, and leaves the markers before
+/// it standing. Those outer markers are observations of this statement in
+/// their own right -- an effect one of them carries is still performed by
+/// whatever the statement beneath renders -- and emptying them here would
+/// retract a claim this discard was never about. A target the set no longer
+/// holds, because an earlier discard took it, empties only the statement.
+fn discard_from_marker(
+    statement: &mut CStmt,
+    target: RenderObservationId,
+    discarded: &mut BTreeSet<RenderObservationId>,
+) {
+    let kept = {
+        let ids = statement.observation_ids();
+        let at = ids.iter().position(|id| *id == target).unwrap_or(ids.len());
+        discarded.extend(ids[at..].iter().copied());
+        ids[..at].to_vec()
+    };
+    collect_statement_observations(statement.unobserved(), discarded);
+    *statement = CStmt::observe_all(kept, CStmt::Empty);
 }
 
 /// The statement a recorded route leads to, or nothing when it leads nowhere.

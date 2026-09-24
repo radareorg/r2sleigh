@@ -976,7 +976,7 @@ fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
         CStmt::StructuredRegion { marker, stmt } => {
             CStmt::structured_region(marker, prepare_stmt_for_emission(*stmt))
         }
-        CStmt::Observed { id, stmt } => CStmt::observed(id, prepare_stmt_for_emission(*stmt)),
+        CStmt::Observed { ids, stmt } => CStmt::observe_all(ids, prepare_stmt_for_emission(*stmt)),
         CStmt::Block(stmts) => CStmt::Block(prepare_stmt_sequence_for_emission(stmts)),
         CStmt::If {
             cond,

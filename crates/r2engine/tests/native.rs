@@ -111,8 +111,11 @@ impl Machine {
 }
 
 /// One run of bytes mapped at `BASE`, under one name.
+///
+/// Owned, so a test can generate the program it decompiles rather than only
+/// spell it out.
 struct Fixture {
-    bytes: &'static [u8],
+    bytes: Vec<u8>,
     name: &'static str,
 }
 
@@ -161,7 +164,7 @@ fn a_function_is_decompiled_from_bytes_alone() {
 
     let target = machine.target();
     let program = Fixture {
-        bytes: ADD_TWO,
+        bytes: ADD_TWO.to_vec(),
         name: "add_two",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -201,7 +204,7 @@ fn an_address_the_program_does_not_map_refuses() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: ADD_TWO,
+        bytes: ADD_TWO.to_vec(),
         name: "add_two",
     };
     let refusal = decompile(&target, &program, 0x9000).expect_err("unmapped");
@@ -213,7 +216,7 @@ fn a_call_is_rendered_from_the_callee_body() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: CALLER,
+        bytes: CALLER.to_vec(),
         name: "caller",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -240,7 +243,7 @@ fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: PC_THUNK,
+        bytes: PC_THUNK.to_vec(),
         name: "pc_caller",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -267,7 +270,7 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: PC_THUNK,
+        bytes: PC_THUNK.to_vec(),
         name: "pc_thunk",
     };
     // The thunk itself: `mov rsi, [rsp]; ret`, which reads what the call left.
@@ -379,7 +382,7 @@ fn a_function_is_decompiled_on_aarch64_too() {
 
     let target = machine.target();
     let program = Fixture {
-        bytes: AARCH64_ADD_ONE,
+        bytes: AARCH64_ADD_ONE.to_vec(),
         name: "add_one",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -425,7 +428,7 @@ fn a_load_nothing_reads_still_reads() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: ARM_DEAD_LOAD,
+        bytes: ARM_DEAD_LOAD.to_vec(),
         name: "dead_load",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -452,7 +455,7 @@ fn the_medium_tier_is_readable_without_rendering() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: ARM_DEAD_LOAD,
+        bytes: ARM_DEAD_LOAD.to_vec(),
         name: "dead_load",
     };
     let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
@@ -474,7 +477,7 @@ fn the_structured_tier_is_the_tree_the_c_comes_from() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: ARM_DEAD_LOAD,
+        bytes: ARM_DEAD_LOAD.to_vec(),
         name: "dead_load",
     };
     let tree = r2engine::native::structured(&target, &program, BASE)
@@ -503,7 +506,7 @@ fn the_c_tier_hands_back_the_tree_the_text_came_from() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: ARM_DEAD_LOAD,
+        bytes: ARM_DEAD_LOAD.to_vec(),
         name: "dead_load",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -531,7 +534,7 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: TABLE_SWITCH,
+        bytes: TABLE_SWITCH.to_vec(),
         name: "pick",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -569,7 +572,7 @@ fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: SPILLED_SWITCH,
+        bytes: SPILLED_SWITCH.to_vec(),
         name: "pick",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -599,7 +602,7 @@ fn a_machine_operation_the_specification_names_is_called_and_declared() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: BARRIER,
+        bytes: BARRIER.to_vec(),
         name: "barrier",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -631,7 +634,7 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
     let machine = Machine::new("thumb", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: ATOMIC_INCREMENT,
+        bytes: ATOMIC_INCREMENT.to_vec(),
         name: "increment",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -660,7 +663,7 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
     let machine = Machine::new("arm", "arm", 32);
     let target = machine.target();
     let program = Fixture {
-        bytes: BARRIER_LEAF,
+        bytes: BARRIER_LEAF.to_vec(),
         name: "order",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -693,7 +696,7 @@ fn a_system_call_leaves_the_return_a_marked_gap_and_the_function_still_renders()
     let machine = Machine::new("aarch64", "aarch64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: EXIT,
+        bytes: EXIT.to_vec(),
         name: "start",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -718,7 +721,7 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     let machine = Machine::new("aarch64", "aarch64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: READ_ONLY,
+        bytes: READ_ONLY.to_vec(),
         name: "touch",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -738,7 +741,7 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: STORE,
+        bytes: STORE.to_vec(),
         name: "store",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -780,7 +783,7 @@ fn a_loop_with_two_entries_is_decompiled_in_bounded_time() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: IRREDUCIBLE_COUNTER,
+        bytes: IRREDUCIBLE_COUNTER.to_vec(),
         name: "count",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -820,7 +823,11 @@ const REPEATED_COMPARE: &[u8] = &[
 fn rendered(bytes: &'static [u8], name: &'static str) -> String {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    let response = decompile(&target, &Fixture { bytes, name }, BASE).expect("decompile");
+    let program = Fixture {
+        bytes: bytes.to_vec(),
+        name,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_string();
     assert!(response.render_refusal.is_none(), "{text}");
     text
@@ -1138,7 +1145,7 @@ fn a_repeated_move_walks_the_way_the_specification_says() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: REPEATED_MOVE,
+        bytes: REPEATED_MOVE.to_vec(),
         name: "copy",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -1203,4 +1210,95 @@ fn a_clear_direction_flag_survives_a_call() {
             "{convention}\n{text}"
         );
     }
+}
+
+/// How many instructions read the one value nothing can render.
+const STORES_OF_AN_UNRENDERABLE_VALUE: u32 = 2_000;
+
+/// `lzcnt ecx, edi`, then `mov [rsi + 4*i], ecx` for every `i`, then `xor eax, eax; ret`.
+///
+/// `lzcnt` is outside the machine vocabulary and has no C lowering, which is
+/// the refusal this wants: its value is unproven, so is every store of it,
+/// and the whole run is one marked gap. The readers fan out rather than
+/// chain. A chain of single-reader values is an inline expression as tall as
+/// the chain, a depth source of its own that is bounded where expressions are
+/// built; this is about how many cells one occurrence answers for.
+fn stores_of_an_unrenderable_value() -> Vec<u8> {
+    let mut bytes = vec![0xf3, 0x0f, 0xbd, 0xcf];
+    for store in 0..STORES_OF_AN_UNRENDERABLE_VALUE {
+        bytes.extend_from_slice(&[0x89, 0x8e]);
+        bytes.extend_from_slice(&(4 * store).to_le_bytes());
+    }
+    bytes.extend_from_slice(&[0x31, 0xc0, 0xc3]);
+    bytes
+}
+
+/// One gap answers for every cell its closure claims, on a small stack.
+///
+/// The gap here claims tens of thousands of cells. They used to hang off the
+/// one gap statement one wrapper per cell, so every recursive pass over the
+/// rendered tree recursed once per cell, and this aborted the process with a
+/// stack overflow long before it finished; `fcn.1000414cc` in macOS `ssh`
+/// did the same at the default eight megabytes. An occurrence now carries
+/// its cells as one set, so the depth of the tree does not grow with them.
+#[test]
+fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
+    let rendering = std::thread::Builder::new()
+        .name("half-megabyte stack".to_owned())
+        .stack_size(512 << 10)
+        .spawn(|| {
+            let machine = Machine::new("x86-64", "x86-64", 64);
+            let program = Fixture {
+                bytes: stores_of_an_unrenderable_value(),
+                name: "stores",
+            };
+            let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+            let observations = match response.binding_audit {
+                r2engine::BindingShadowAuditOutcome::Complete { observations, .. } => observations,
+                other => panic!("the gap accounts for every cell: {other:?}"),
+            };
+            (
+                response.render_refusal.is_none(),
+                response.output.text().to_string(),
+                response.effect_obligations(),
+                observations,
+            )
+        })
+        .expect("spawn the rendering thread")
+        .join()
+        .expect("the rendering finishes on half a megabyte of stack");
+    let (rendered, text, effects, observations) = rendering;
+    assert!(rendered, "{text}");
+
+    // One marker, and it covers every store.
+    assert_eq!(text.matches("r2dec gap:").count(), 1, "{text}");
+    let covered = text
+        .split("covering ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|count| count.parse::<u32>().ok())
+        .expect("the marker says how many operations it covers");
+    assert!(covered > STORES_OF_AN_UNRENDERABLE_VALUE, "{text}");
+
+    // Every store is a write the gap answers for, and no cell is left over.
+    assert!(observations.equations_hold(), "{observations:?}");
+    for domain in [observations.values, observations.uses, observations.writes] {
+        assert_eq!(domain.unaccounted, 0, "{observations:?}");
+        assert_eq!(domain.refused, 0, "{observations:?}");
+    }
+    assert!(
+        observations.writes.gapped >= STORES_OF_AN_UNRENDERABLE_VALUE as usize,
+        "{observations:?}"
+    );
+
+    // The proof line states what the ledger gapped, and that is every store.
+    assert_eq!(effects.unaccounted, 0, "{effects:?}");
+    assert!(
+        effects.gapped >= STORES_OF_AN_UNRENDERABLE_VALUE as usize,
+        "{effects:?}"
+    );
+    assert!(
+        text.contains(&format!(", {} gapped;", effects.gapped)),
+        "{text}"
+    );
 }

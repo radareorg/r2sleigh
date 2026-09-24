@@ -43,7 +43,7 @@ pub(crate) fn drop_values_from_void_returns(func: &mut CFunction) {
 
 fn drop_void_return_value(stmt: CStmt) -> CStmt {
     match stmt {
-        CStmt::Observed { id, stmt } => CStmt::observed(id, drop_void_return_value(*stmt)),
+        CStmt::Observed { ids, stmt } => CStmt::observe_all(ids, drop_void_return_value(*stmt)),
         CStmt::Return(Some(_)) => CStmt::Return(None),
         CStmt::Block(body) => CStmt::Block(body.into_iter().map(drop_void_return_value).collect()),
         CStmt::If {
@@ -156,8 +156,8 @@ fn drop_labels_outside(
     targeted: &std::collections::BTreeSet<String>,
 ) -> Option<CStmt> {
     match stmt {
-        CStmt::Observed { id, stmt } => {
-            drop_labels_outside(*stmt, targeted).map(|stmt| CStmt::observed(id, stmt))
+        CStmt::Observed { ids, stmt } => {
+            drop_labels_outside(*stmt, targeted).map(|stmt| CStmt::observe_all(ids, stmt))
         }
         CStmt::Label(name) if !targeted.contains(&name) => None,
         CStmt::Block(body) => Some(CStmt::Block(

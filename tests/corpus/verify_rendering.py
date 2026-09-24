@@ -237,6 +237,7 @@ BINDING_AUDIT_JOURNAL_CAUSE_FIELDS = {
         {"observation_id", "expected_count"}
     ),
     "duplicate_observation": frozenset({"observation_id"}),
+    "nested_observation": frozenset({"observation_id"}),
 }
 PLACEMENT_AUDIT_CAUSE_FIELDS = {
     "missing_structured_region_artifact": frozenset(),
@@ -263,6 +264,7 @@ PLACEMENT_AUDIT_CAUSE_FIELDS = {
         {"observation_id", "expected_count"}
     ),
     "duplicate_observation": frozenset({"observation_id"}),
+    "nested_observation": frozenset({"observation_id"}),
     "missing_observation_target": frozenset({"observation_id"}),
     "invalid_use": frozenset({"instruction_id", "input_index"}),
     "invalid_write": frozenset({"instruction_id"}),

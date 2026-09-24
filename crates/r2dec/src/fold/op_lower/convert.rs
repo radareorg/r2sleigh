@@ -204,7 +204,9 @@ fn renders_as_signed(expr: &CExpr) -> bool {
 /// it as the number it denotes is what makes the C say what the machine does.
 fn respell_literal(expr: CExpr, signed: bool, bits: u32) -> CExpr {
     match expr {
-        CExpr::Observed { id, expr } => CExpr::observed(id, respell_literal(*expr, signed, bits)),
+        CExpr::Observed { ids, expr } => {
+            CExpr::observe_all(ids, respell_literal(*expr, signed, bits))
+        }
         CExpr::Paren(inner) => CExpr::Paren(Box::new(respell_literal(*inner, signed, bits))),
         CExpr::UIntLit(value) if signed && reads_as_a_small_negative(value, bits) => {
             crate::typed_integer_literal_expr(value, signed, bits)

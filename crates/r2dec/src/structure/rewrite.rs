@@ -77,7 +77,11 @@ impl ControlFlowStructurer<'_, '_> {
                 }
             }
             CStmt::Observed { stmt: inner, .. } => {
-                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, inner)
+                Self::cleanup_recurse(symbols, is_write, carries_only_to_return, elisions, inner);
+                // A block that collapses to its one statement, or a
+                // conditional rewritten into something marked, can put an
+                // observed statement directly under this one.
+                stmt.rejoin_observations();
             }
             CStmt::Block(stmts) => {
                 for child in stmts.iter_mut() {
@@ -222,8 +226,8 @@ impl ControlFlowStructurer<'_, '_> {
     }
 
     fn rewrite_compound_assignment_expr(expr: CExpr) -> CExpr {
-        if let CExpr::Observed { id, expr } = expr {
-            return CExpr::observed(id, Self::rewrite_compound_assignment_expr(*expr));
+        if let CExpr::Observed { ids, expr } = expr {
+            return CExpr::observe_all(ids, Self::rewrite_compound_assignment_expr(*expr));
         }
         let CExpr::Binary {
             op: BinaryOp::Assign,
@@ -546,12 +550,7 @@ impl ControlFlowStructurer<'_, '_> {
                 // The assignment may carry expression markers of its own; they
                 // belong to the whole statement's occurrence, so they go back
                 // around whatever replaces it.
-                let mut carried = Vec::new();
-                let mut cursor = expr;
-                while let CExpr::Observed { id, expr } = cursor {
-                    carried.push(id);
-                    cursor = *expr;
-                }
+                let (cursor, carried) = expr.into_semantic_with_observations();
                 let CExpr::Binary {
                     op: BinaryOp::Assign,
                     left,
@@ -566,12 +565,7 @@ impl ControlFlowStructurer<'_, '_> {
                 // belong on the lvalue: placement asks whether the marked
                 // expression names the slot, and an assignment's plain-variable
                 // lvalue is not a read of it.
-                let mut written = Vec::new();
-                let mut left = *left;
-                while let CExpr::Observed { id, expr } = left {
-                    written.push(id);
-                    left = *expr;
-                }
+                let (left, written) = left.into_semantic_with_observations();
                 Some((observations, carried, written, left, *right))
             }
             _ => None,
@@ -622,12 +616,7 @@ impl ControlFlowStructurer<'_, '_> {
                 let CStmt::Expr(expr) = semantic else {
                     return None;
                 };
-                let mut carried = Vec::new();
-                let mut cursor = expr;
-                while let CExpr::Observed { id, expr } = cursor {
-                    carried.push(id);
-                    cursor = *expr;
-                }
+                let (cursor, carried) = expr.into_semantic_with_observations();
                 let CExpr::Binary {
                     op: BinaryOp::Assign,
                     left,
@@ -636,12 +625,7 @@ impl ControlFlowStructurer<'_, '_> {
                 else {
                     return None;
                 };
-                let mut written = Vec::new();
-                let mut left = *left;
-                while let CExpr::Observed { id, expr } = left {
-                    written.push(id);
-                    left = *expr;
-                }
+                let (left, written) = left.into_semantic_with_observations();
                 Some((observations, carried, written, left, *right))
             }
             _ => None,
@@ -676,9 +660,10 @@ impl ControlFlowStructurer<'_, '_> {
         owed: &mut Vec<crate::observation_journal::RenderObservationId>,
     ) -> Option<CExpr> {
         match expr {
-            CExpr::Observed { id, expr: inner } => {
+            CExpr::Observed { ids, expr: inner } => {
                 let rebuilt = Self::substitute_returned_var(symbols, inner, value, owed)?;
-                owed.push(*id);
+                // Innermost first, the order the walk back up the wrappers met them.
+                owed.extend(ids.iter().rev());
                 Some(rebuilt)
             }
             CExpr::Paren(inner) => Some(CExpr::Paren(Box::new(Self::substitute_returned_var(
@@ -754,11 +739,7 @@ impl ControlFlowStructurer<'_, '_> {
                     read.into_iter()
                         .map(|id| (id, crate::ledger::ElisionReason::SpecialisedMergeCarrier)),
                 );
-                let mut rebuilt = CStmt::Return(Some(returned));
-                for id in extra.iter().copied().rev() {
-                    rebuilt = CStmt::observed(id, rebuilt);
-                }
-                rebuilt
+                CStmt::observe_all(extra.iter().copied(), CStmt::Return(Some(returned)))
             }
             _ => return None,
         };
@@ -1017,13 +998,8 @@ impl ControlFlowStructurer<'_, '_> {
         // writes the object once and that write is what both machine writes
         // became, so each cell keeps its own marker and both name the same
         // occurrence.
-        let mut written_lhs = then_lhs;
-        for id in then_written.into_iter().chain(else_written).rev() {
-            written_lhs = CExpr::Observed {
-                id,
-                expr: Box::new(written_lhs),
-            };
-        }
+        let written_lhs =
+            CExpr::observe_all(then_written.into_iter().chain(else_written), then_lhs);
         // Everything else an arm owned goes inside that arm. The arm's
         // statement became the arm's expression, so its markers travel with it
         // -- and staying inside the arm is what keeps two occurrences of one
@@ -1040,7 +1016,7 @@ impl ControlFlowStructurer<'_, '_> {
         // cannot resolve.
         let (then_writes, then_marks) = then_marks.split_out(is_write);
         let (else_writes, else_marks) = else_marks.split_out(is_write);
-        let mut assignment = CExpr::assign(
+        let assignment = CExpr::assign(
             written_lhs,
             CExpr::Ternary {
                 cond: Box::new(cond),
@@ -1048,19 +1024,14 @@ impl ControlFlowStructurer<'_, '_> {
                 else_expr: Box::new(else_marks.reapply_expr(else_rhs)),
             },
         );
-        for id in then_carried
-            .into_iter()
-            .chain(then_writes)
-            .chain(else_carried)
-            .chain(else_writes)
-            .rev()
-        {
-            assignment = CExpr::Observed {
-                id,
-                expr: Box::new(assignment),
-            };
-        }
-        CStmt::expr(assignment)
+        CStmt::expr(CExpr::observe_all(
+            then_carried
+                .into_iter()
+                .chain(then_writes)
+                .chain(else_carried)
+                .chain(else_writes),
+            assignment,
+        ))
     }
 
     fn rewrite_empty_if_bodies(stmt: CStmt) -> CStmt {
@@ -1776,7 +1747,7 @@ impl ControlFlowStructurer<'_, '_> {
 
     pub(super) fn negate_condition(cond: CExpr) -> CExpr {
         match cond {
-            CExpr::Observed { id, expr } => CExpr::observed(id, Self::negate_condition(*expr)),
+            CExpr::Observed { ids, expr } => CExpr::observe_all(ids, Self::negate_condition(*expr)),
             CExpr::Unary {
                 op: UnaryOp::Not,
                 operand,
@@ -1882,7 +1853,9 @@ impl ControlFlowStructurer<'_, '_> {
             CStmt::StructuredRegion { marker, stmt } => {
                 CStmt::structured_region(marker.clone(), Self::rewrap(stmt, semantic))
             }
-            CStmt::Observed { id, stmt } => CStmt::observed(*id, Self::rewrap(stmt, semantic)),
+            CStmt::Observed { ids, stmt } => {
+                CStmt::observe_all(ids.iter(), Self::rewrap(stmt, semantic))
+            }
             _ => semantic,
         }
     }
@@ -2016,12 +1989,12 @@ impl ControlFlowStructurer<'_, '_> {
     /// if it's the only exit path.
     pub(super) fn strip_trailing_continue(stmt: CStmt) -> CStmt {
         match stmt {
-            CStmt::Observed { id, stmt } => {
+            CStmt::Observed { ids, stmt } => {
                 let stripped = Self::strip_trailing_continue(*stmt);
                 if matches!(stripped.unobserved(), CStmt::Empty) {
                     CStmt::Empty
                 } else {
-                    CStmt::observed(id, stripped)
+                    CStmt::observe_all(ids, stripped)
                 }
             }
             CStmt::Continue => CStmt::Empty,

@@ -137,10 +137,9 @@ impl FoldingContext<'_> {
     /// markers kept: a read stays recorded where it was recorded.
     fn under_observations(expr: &CExpr, replace: &dyn Fn(&CExpr) -> CExpr) -> CExpr {
         match expr {
-            CExpr::Observed { id, expr } => CExpr::Observed {
-                id: *id,
-                expr: Box::new(Self::under_observations(expr, replace)),
-            },
+            CExpr::Observed { ids, expr } => {
+                CExpr::observe_all(ids.iter(), Self::under_observations(expr, replace))
+            }
             other => replace(other),
         }
     }

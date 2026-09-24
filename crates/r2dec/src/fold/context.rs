@@ -1285,17 +1285,24 @@ impl<'a> FoldingContext<'a> {
         let Some(journal) = self.inputs.observation_journal else {
             return stmt;
         };
-        let fallback = stmt.clone();
-        let result = self.observation_site(block_addr, op_idx).and_then(|site| {
-            journal
-                .borrow_mut()
-                .observe_normalized_output_stmt(site, stmt)
-        });
-        match result {
-            Ok(marked) => marked,
+        let site = match self.observation_site(block_addr, op_idx) {
+            Ok(site) => site,
             Err(error) => {
                 self.retain_first_observation_error(error);
-                fallback
+                return stmt;
+            }
+        };
+        // A refusal hands the statement back unmarked, so nothing is copied
+        // in case of one.
+        let result = journal
+            .borrow_mut()
+            .observe_normalized_output_stmt(site, stmt);
+        match result {
+            Ok(marked) => marked,
+            Err(refused) => {
+                let (error, unmarked) = *refused;
+                self.retain_first_observation_error(error);
+                unmarked
             }
         }
     }
@@ -1317,15 +1324,15 @@ impl<'a> FoldingContext<'a> {
         let Some(journal) = self.inputs.observation_journal else {
             return stmt;
         };
-        let fallback = stmt.clone();
-        let marked = match journal
+        let result = journal
             .borrow_mut()
-            .observe_canonical_assignment_stmt(value, definition, absorbed, stmt)
-        {
+            .observe_canonical_assignment_stmt(value, definition, absorbed, stmt);
+        let marked = match result {
             Ok(marked) => marked,
-            Err(error) => {
+            Err(refused) => {
+                let (error, unmarked) = *refused;
                 self.retain_first_observation_error(error);
-                return fallback;
+                return unmarked;
             }
         };
         self.observe_discharged_effects(absorbed, already, marked)
@@ -1382,15 +1389,15 @@ impl<'a> FoldingContext<'a> {
         if obligation_ids.is_empty() {
             return stmt;
         }
-        let fallback = stmt.clone();
-        match journal
+        let result = journal
             .borrow_mut()
-            .observe_effect_stmt(obligation_ids, stmt)
-        {
+            .observe_effect_stmt(obligation_ids, stmt);
+        match result {
             Ok(marked) => marked,
-            Err(error) => {
+            Err(refused) => {
+                let (error, unmarked) = *refused;
                 self.retain_first_observation_error(error);
-                fallback
+                unmarked
             }
         }
     }

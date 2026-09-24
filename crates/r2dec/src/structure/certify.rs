@@ -508,12 +508,12 @@ impl Walker<'_> {
         let mut stack = vec![body];
         while let Some(stmt) = stack.pop() {
             match stmt {
-                CStmt::Observed { id, stmt } => {
-                    if (self.block_of)(*id).is_some() {
-                        return false;
-                    }
-                    stack.push(stmt);
+                CStmt::Observed { ids, .. }
+                    if ids.iter().any(|id| (self.block_of)(id).is_some()) =>
+                {
+                    return false;
                 }
+                CStmt::Observed { stmt, .. } => stack.push(stmt),
                 CStmt::StructuredRegion { stmt, .. } => stack.push(stmt),
                 CStmt::Block(statements) => stack.extend(statements.iter()),
                 CStmt::If {
@@ -557,15 +557,14 @@ impl Walker<'_> {
     /// of whatever text it sits in, and its edge is read through it.
     fn walk_observed(&mut self, stmt: &CStmt, open: Vec<OpenEnd>) -> Vec<OpenEnd> {
         let mut blocks = Vec::new();
-        let mut inner = stmt;
-        while let CStmt::Observed { id, stmt } = inner {
+        for id in stmt.observation_ids().iter() {
             if let Some(block) = (self.block_of)(*id)
                 && !blocks.contains(&block)
             {
                 blocks.push(block);
             }
-            inner = stmt;
         }
+        let inner = stmt.unobserved();
         match inner {
             CStmt::DoWhile { body, .. } => self.walk_do_while(&blocks, body, open),
             CStmt::For {
@@ -1212,7 +1211,7 @@ mod tests {
 
     /// A statement observed as belonging to `block`.
     fn at(block: u64, stmt: CStmt) -> CStmt {
-        CStmt::observed(
+        CStmt::observe_one(
             test_render_observation_id(u32::try_from(block).expect("small address")),
             stmt,
         )

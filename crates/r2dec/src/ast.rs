@@ -50,11 +50,13 @@ pub enum CExpr {
     /// Internal marker attached to one exact rendered expression occurrence.
     ///
     /// This is transparent to C rendering and must be stripped before a
-    /// `CFunction` leaves the decompiler.
+    /// `CFunction` leaves the decompiler. Every observation the occurrence
+    /// carries is in `ids`, and `expr` is never itself `Observed`: build it
+    /// with [`CExpr::observe_one`] or [`CExpr::observe_all`], which fuse.
     #[doc(hidden)]
     #[serde(skip)]
     Observed {
-        id: RenderObservationId,
+        ids: ObservationSet,
         expr: Box<CExpr>,
     },
     /// Integer literal.
@@ -202,12 +204,73 @@ pub enum BinaryOp {
 }
 
 impl CExpr {
-    /// Attach an internal observation marker to this exact occurrence.
-    pub(crate) fn observed(id: RenderObservationId, expr: CExpr) -> Self {
-        Self::Observed {
-            id,
-            expr: Box::new(expr),
+    /// Attach one observation to this exact occurrence, outside any it
+    /// already carries.
+    pub(crate) fn observe_one(id: RenderObservationId, expr: CExpr) -> Self {
+        Self::observe_all([id], expr)
+    }
+
+    /// Attach observations, given outermost first, to this exact occurrence.
+    ///
+    /// They go outside any the occurrence already carries, and into the same
+    /// node: an occurrence has one observation set however many cells it
+    /// answers for. No ids leaves the expression as it is.
+    pub(crate) fn observe_all(
+        outer_to_inner: impl IntoIterator<Item = RenderObservationId>,
+        expr: CExpr,
+    ) -> Self {
+        match ObservationSet::new(outer_to_inner.into_iter().collect()) {
+            Some(outer) => Self::observe_set(outer, expr),
+            None => expr,
         }
+    }
+
+    /// Attach a whole set outside any the occurrence already carries.
+    fn observe_set(outer: ObservationSet, expr: CExpr) -> Self {
+        match expr {
+            Self::Observed { ids: inner, expr } => Self::Observed {
+                ids: outer.join(inner),
+                expr,
+            },
+            expr => Self::Observed {
+                ids: outer,
+                expr: Box::new(expr),
+            },
+        }
+    }
+
+    /// The observations this occurrence carries, outermost first.
+    ///
+    /// Every id on the sets stacked over [`Self::unobserved`], so the two are
+    /// one decomposition: a walk or a rebuild that takes the semantic
+    /// expression from one and the ids from the other neither misses nor
+    /// drops an id. On a canonical tree that is the one set, borrowed. See
+    /// [`Self::unobserved`] for a tree some pass left nested.
+    pub(crate) fn observation_ids(&self) -> std::borrow::Cow<'_, [RenderObservationId]> {
+        stacked_observation_ids(self, |expr| match expr {
+            Self::Observed { ids, expr } => Some((ids, expr.as_ref())),
+            _ => None,
+        })
+    }
+
+    /// Separate this occurrence's observations, outermost first, from the
+    /// semantic expression beneath them. Observations inside it stay put.
+    ///
+    /// The by-value form of [`Self::observation_ids`] and
+    /// [`Self::unobserved`]: the ids of every set stacked on the occurrence
+    /// and the expression beneath them all. One step on a canonical tree.
+    pub(crate) fn into_semantic_with_observations(self) -> (Self, Vec<RenderObservationId>) {
+        let mut semantic = self;
+        let mut outer_to_inner = Vec::new();
+        while let Self::Observed { ids, expr } = semantic {
+            if outer_to_inner.is_empty() {
+                outer_to_inner = ids.into_ids();
+            } else {
+                outer_to_inner.extend(ids);
+            }
+            semantic = *expr;
+        }
+        (semantic, outer_to_inner)
     }
 
     /// Visit the opaque proof markers nested in this expression.
@@ -224,7 +287,14 @@ impl CExpr {
         .expect("an infallible render-observation visitor cannot refuse");
     }
 
-    /// Borrow the semantic expression beneath any internal observation markers.
+    /// Borrow the semantic expression beneath this occurrence's observations.
+    ///
+    /// One step: an occurrence carries all of its observations on one node.
+    /// A tree some pass left nested is still seen through, and
+    /// [`Self::observation_ids`] joins every set this steps over, so no pair
+    /// of the two loses an id on it. A rebuild from such a pair puts the ids
+    /// back as one set, canonical again. A read-only walk leaves the nesting
+    /// standing, and the seal refuses it as `NestedObservation`.
     pub(crate) fn unobserved(&self) -> &Self {
         let mut expr = self;
         while let Self::Observed { expr: inner, .. } = expr {
@@ -507,8 +577,9 @@ impl CExpr {
         // Through the render markers, which are metadata: the cast the
         // renderer already spelled is the one under them. A marker on a cast
         // that goes away moves onto what replaces it, at the same depth, so
-        // the occurrence it records is still in the sealed tree.
-        let (carried, bare) = peel_observations(&expr);
+        // the occurrence it records is still in the sealed tree. `carried` is
+        // every id `bare` sits beneath, however many sets they stand in.
+        let (carried, bare) = (expr.observation_ids(), expr.unobserved());
         if let CExpr::Cast {
             ty: inner_ty,
             expr: inner_expr,
@@ -518,7 +589,8 @@ impl CExpr {
             if *inner_ty == ty {
                 return expr;
             }
-            let surviving = |inner: &CExpr| rewrap_observations(&carried, inner.clone());
+            let surviving =
+                |inner: &CExpr| CExpr::observe_all(carried.iter().copied(), inner.clone());
             // Two pointer conversions in a row are one. C11 6.3.2.3p1 and p7
             // make a conversion to `void *` and back the same pointer, and an
             // object pointer converted twice lands where converting once would
@@ -678,10 +750,9 @@ impl CExpr {
     /// Apply a transformation to immediate child expressions.
     pub fn map_children(self, f: &mut impl FnMut(CExpr) -> CExpr) -> Self {
         match self {
-            Self::Observed { id, expr } => Self::Observed {
-                id,
-                expr: Box::new(f(*expr)),
-            },
+            // Through the fusing constructor: the rewritten child may carry
+            // observations of its own, and they join this occurrence's.
+            Self::Observed { ids, expr } => Self::observe_all(ids, f(*expr)),
             Self::Unary { op, operand } => Self::Unary {
                 op,
                 operand: Box::new(f(*operand)),
@@ -1138,7 +1209,7 @@ impl RenderObservationOwner {
         expr: CExpr,
     ) -> Result<(RenderObservationId, CExpr), RenderObservationAllocationError> {
         let id = self.allocate()?;
-        Ok((id, CExpr::observed(id, expr)))
+        Ok((id, CExpr::observe_one(id, expr)))
     }
 
     pub(crate) fn observe_stmt(
@@ -1146,7 +1217,7 @@ impl RenderObservationOwner {
         stmt: CStmt,
     ) -> Result<(RenderObservationId, CStmt), RenderObservationAllocationError> {
         let id = self.allocate()?;
-        Ok((id, CStmt::observed(id, stmt)))
+        Ok((id, CStmt::observe_one(id, stmt)))
     }
 
     pub(crate) fn expected_count(&self) -> usize {
@@ -1246,11 +1317,13 @@ pub enum CStmt {
     /// Internal marker attached to one exact rendered statement occurrence.
     ///
     /// This is transparent to C rendering and must be stripped before a
-    /// `CFunction` leaves the decompiler.
+    /// `CFunction` leaves the decompiler. Every observation the occurrence
+    /// carries is in `ids`, and `stmt` is never itself `Observed`: build it
+    /// with [`CStmt::observe_one`] or [`CStmt::observe_all`], which fuse.
     #[doc(hidden)]
     #[serde(skip)]
     Observed {
-        id: RenderObservationId,
+        ids: ObservationSet,
         stmt: Box<CStmt>,
     },
     /// Empty statement.
@@ -1340,16 +1413,107 @@ impl std::fmt::Display for GapMarker {
     }
 }
 
+/// Every observation one rendered occurrence carries, outermost first.
+///
+/// An observation set is an attribute of one occurrence. It used to be one
+/// wrapper per id, and an occurrence answers for as many cells as it stands
+/// for -- a gap claims every cell of its closure, tens of thousands in one
+/// function -- so the depth of the render tree grew with that count, and every
+/// recursive pass over the tree overflowed the stack on it. One node holding
+/// the whole set keeps the depth independent of the count and makes reaching
+/// the semantic node beneath it one step.
+///
+/// Never empty, and constructed only here: an occurrence with no observations
+/// has no `Observed` node, and one that gains more fuses them into the node it
+/// has. The one constructor answers `None` for no ids and the one combinator
+/// joins two sets, so no path builds an empty set in any build profile.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationSet {
+    outer_to_inner: Box<[RenderObservationId]>,
+}
+
+impl ObservationSet {
+    /// The set of these ids, outermost first; none for no ids.
+    fn new(outer_to_inner: Vec<RenderObservationId>) -> Option<Self> {
+        (!outer_to_inner.is_empty()).then(|| Self {
+            outer_to_inner: outer_to_inner.into_boxed_slice(),
+        })
+    }
+
+    /// This set outside `inner`: one occurrence's ids, this set's first.
+    fn join(self, inner: Self) -> Self {
+        let mut outer_to_inner = self.outer_to_inner.into_vec();
+        outer_to_inner.extend_from_slice(&inner.outer_to_inner);
+        Self {
+            outer_to_inner: outer_to_inner.into_boxed_slice(),
+        }
+    }
+
+    /// The ids, outermost first.
+    pub(crate) fn ids(&self) -> &[RenderObservationId] {
+        &self.outer_to_inner
+    }
+
+    /// The ids, outermost first, by value.
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = RenderObservationId> + '_ {
+        self.outer_to_inner.iter().copied()
+    }
+
+    /// The ids, outermost first, as a vector of their own.
+    fn into_ids(self) -> Vec<RenderObservationId> {
+        self.outer_to_inner.into_vec()
+    }
+}
+
+impl IntoIterator for ObservationSet {
+    type Item = RenderObservationId;
+    type IntoIter = std::vec::IntoIter<RenderObservationId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_ids().into_iter()
+    }
+}
+
+/// Every id on the observation sets stacked from `node` down, outermost
+/// first, where `layer` answers a node's set and the node beneath it.
+///
+/// On a canonical tree there is at most one set, which is borrowed. A tree
+/// some pass left nested has its sets joined in the order they stand, which is
+/// the order the one-box-per-id chains met them.
+fn stacked_observation_ids<'a, T: 'a>(
+    node: &'a T,
+    layer: impl Fn(&'a T) -> Option<(&'a ObservationSet, &'a T)>,
+) -> std::borrow::Cow<'a, [RenderObservationId]> {
+    use std::borrow::Cow;
+    let mut sets =
+        std::iter::successors(layer(node), |(_, beneath)| layer(beneath)).map(|(set, _)| set.ids());
+    match (sets.next(), sets.next()) {
+        (None, _) => Cow::Borrowed(&[]),
+        (Some(only), None) => Cow::Borrowed(only),
+        (Some(outer), Some(next)) => Cow::Owned(
+            outer
+                .iter()
+                .chain(next)
+                .chain(sets.flatten())
+                .copied()
+                .collect(),
+        ),
+    }
+}
+
 /// Ordered observation metadata peeled from the outside of one statement.
 ///
 /// Shape-changing passes may need to inspect or decompose the semantic
 /// statement, but the observation IDs still belong to the same source
-/// position. This chain is the single owner of that temporary separation: IDs
-/// are stored outermost-to-innermost and reapplied in reverse construction
-/// order, so neither their nesting order nor their cardinality can drift.
+/// position. This chain is the single owner of that temporary separation: it
+/// is the statement's [`ObservationSet`] taken off -- every set stacked on it,
+/// joined, should a pass have left them nested -- or nothing when the
+/// statement carried none, and it is put back as that same set, so neither the
+/// order nor the cardinality can drift.
 #[derive(Debug, Default)]
 pub(crate) struct StmtObservationChain {
-    outer_to_inner: Vec<RenderObservationId>,
+    set: Option<ObservationSet>,
 }
 
 impl StmtObservationChain {
@@ -1358,7 +1522,10 @@ impl StmtObservationChain {
     /// Two statements the text replaces with one still owe every cell they
     /// owned, so the survivor carries both chains.
     pub(crate) fn extend(&mut self, other: Self) {
-        self.outer_to_inner.extend(other.outer_to_inner);
+        self.set = match (self.set.take(), other.set) {
+            (Some(outer), Some(inner)) => Some(outer.join(inner)),
+            (outer, inner) => outer.or(inner),
+        };
     }
 
     /// Split the markers this predicate selects out of the chain, keeping both
@@ -1368,13 +1535,13 @@ impl StmtObservationChain {
         select: &dyn Fn(RenderObservationId) -> bool,
     ) -> (Vec<RenderObservationId>, Self) {
         let (selected, rest) = self
-            .outer_to_inner
+            .into_ids()
             .into_iter()
             .partition::<Vec<_>, _>(|id| select(*id));
         (
             selected,
             Self {
-                outer_to_inner: rest,
+                set: ObservationSet::new(rest),
             },
         )
     }
@@ -1382,24 +1549,24 @@ impl StmtObservationChain {
     /// The markers themselves, outermost first, for a rewrite that has to put
     /// them somewhere other than around one statement.
     pub(crate) fn into_ids(self) -> Vec<RenderObservationId> {
-        self.outer_to_inner
+        self.set.map_or_else(Vec::new, ObservationSet::into_ids)
     }
 
     /// Reattach this chain to the semantic statement at the same position.
-    pub(crate) fn reapply(self, mut stmt: CStmt) -> CStmt {
-        for id in self.outer_to_inner.into_iter().rev() {
-            stmt = CStmt::observed(id, stmt);
+    pub(crate) fn reapply(self, stmt: CStmt) -> CStmt {
+        match self.set {
+            Some(set) => CStmt::observe_set(set, stmt),
+            None => stmt,
         }
-        stmt
     }
 
     /// Move the exact statement occurrence into an expression-valued header
     /// position without dropping its observation ownership.
-    pub(crate) fn reapply_expr(self, mut expr: CExpr) -> CExpr {
-        for id in self.outer_to_inner.into_iter().rev() {
-            expr = CExpr::observed(id, expr);
+    pub(crate) fn reapply_expr(self, expr: CExpr) -> CExpr {
+        match self.set {
+            Some(set) => CExpr::observe_set(set, expr),
+            None => expr,
         }
-        expr
     }
 
     /// Reattach this chain when decomposition has one exact surviving statement.
@@ -1439,33 +1606,102 @@ impl CStmt {
         }
     }
 
-    /// Attach an internal observation marker to this exact occurrence.
-    pub(crate) fn observed(id: RenderObservationId, stmt: CStmt) -> Self {
-        Self::Observed {
-            id,
-            stmt: Box::new(stmt),
+    /// Attach one observation to this exact occurrence, outside any it
+    /// already carries.
+    #[cfg(test)]
+    pub(crate) fn observe_one(id: RenderObservationId, stmt: CStmt) -> Self {
+        Self::observe_all([id], stmt)
+    }
+
+    /// Attach observations, given outermost first, to this exact occurrence.
+    ///
+    /// They go outside any the occurrence already carries, and into the same
+    /// node: an occurrence has one observation set however many cells it
+    /// answers for. No ids leaves the statement as it is.
+    pub(crate) fn observe_all(
+        outer_to_inner: impl IntoIterator<Item = RenderObservationId>,
+        stmt: CStmt,
+    ) -> Self {
+        match ObservationSet::new(outer_to_inner.into_iter().collect()) {
+            Some(outer) => Self::observe_set(outer, stmt),
+            None => stmt,
         }
+    }
+
+    /// Attach a whole set outside any the occurrence already carries.
+    fn observe_set(outer: ObservationSet, stmt: CStmt) -> Self {
+        match stmt {
+            Self::Observed { ids: inner, stmt } => Self::Observed {
+                ids: outer.join(inner),
+                stmt,
+            },
+            stmt => Self::Observed {
+                ids: outer,
+                stmt: Box::new(stmt),
+            },
+        }
+    }
+
+    /// Restore one occurrence after a pass rewrote its statement in place.
+    ///
+    /// A pass that descends through an observation and replaces what it finds
+    /// there -- a block collapsing to its only statement, a conditional
+    /// rewritten into an assignment that carries markers of its own -- can
+    /// leave an observed statement directly under this one. Both sets belong
+    /// to the one occurrence, so the inner set joins this one as its innermost
+    /// ids. Constant time when there is nothing to join.
+    pub(crate) fn rejoin_observations(&mut self) {
+        if let Self::Observed { stmt, .. } = self
+            && matches!(stmt.as_ref(), Self::Observed { .. })
+            && let Self::Observed { ids, stmt } = std::mem::replace(self, Self::Empty)
+        {
+            *self = Self::observe_set(ids, *stmt);
+        }
+    }
+
+    /// The observations this occurrence carries, outermost first.
+    ///
+    /// Every id on the sets stacked over [`Self::unobserved`], so the two are
+    /// one decomposition: a walk or a rebuild that takes the semantic
+    /// statement from one and the ids from the other neither misses nor drops
+    /// an id. On a canonical tree that is the one set, borrowed. See
+    /// [`Self::unobserved`] for a tree some pass left nested.
+    pub(crate) fn observation_ids(&self) -> std::borrow::Cow<'_, [RenderObservationId]> {
+        stacked_observation_ids(self, |stmt| match stmt {
+            Self::Observed { ids, stmt } => Some((ids, stmt.as_ref())),
+            _ => None,
+        })
     }
 
     /// Separate only the leading statement-observation chain from its semantic
     /// node. Nested child observations remain in place.
+    ///
+    /// The by-value form of [`Self::observation_ids`] and
+    /// [`Self::unobserved`]: the ids of every set stacked on the occurrence
+    /// and the statement beneath them all. One step on a canonical tree.
     pub(crate) fn into_semantic_with_observations(self) -> (Self, StmtObservationChain) {
         let mut semantic = self;
         let mut outer_to_inner = Vec::new();
-        loop {
-            match semantic {
-                Self::Observed { id, stmt } => {
-                    outer_to_inner.push(id);
-                    semantic = *stmt;
-                }
-                semantic => {
-                    return (semantic, StmtObservationChain { outer_to_inner });
-                }
+        while let Self::Observed { ids, stmt } = semantic {
+            if outer_to_inner.is_empty() {
+                outer_to_inner = ids.into_ids();
+            } else {
+                outer_to_inner.extend(ids);
             }
+            semantic = *stmt;
         }
+        let set = ObservationSet::new(outer_to_inner);
+        (semantic, StmtObservationChain { set })
     }
 
-    /// Borrow the semantic statement beneath any internal observation markers.
+    /// Borrow the semantic statement beneath this occurrence's observations.
+    ///
+    /// One step: an occurrence carries all of its observations on one node.
+    /// A tree some pass left nested is still seen through, and
+    /// [`Self::observation_ids`] joins every set this steps over, so no pair
+    /// of the two loses an id on it. A rebuild from such a pair puts the ids
+    /// back as one set, canonical again. A read-only walk leaves the nesting
+    /// standing, and the seal refuses it as `NestedObservation`.
     pub(crate) fn unobserved(&self) -> &Self {
         let mut stmt = self;
         while let Self::Observed { stmt: inner, .. } = stmt {
@@ -1806,6 +2042,12 @@ pub(crate) enum RenderObservationStripError {
     Duplicate {
         id: RenderObservationId,
     },
+    /// An observed occurrence directly inside another: one occurrence's ids
+    /// split over two nodes. Every constructor fuses them, so this is a pass
+    /// that built the node by hand or rewrote a child without rejoining.
+    NestedObservation {
+        id: RenderObservationId,
+    },
 }
 
 impl std::fmt::Display for RenderObservationStripError {
@@ -1829,6 +2071,11 @@ impl std::fmt::Display for RenderObservationStripError {
             Self::Duplicate { id } => {
                 write!(f, "observation {} occurs more than once", id.index())
             }
+            Self::NestedObservation { id } => write!(
+                f,
+                "observation {} wraps another observed node instead of sharing its set",
+                id.index()
+            ),
         }
     }
 }
@@ -1866,8 +2113,20 @@ fn validate_render_observations(
         .map_err(|_| RenderObservationStripError::CapacityUnavailable { expected_count })?;
     reachable.resize(expected_count, false);
     let mut observations = ReachableObservations { reachable };
+    // Through the inspecting walk, which hands over the node beneath each
+    // set: canonical form is checked there in constant time per id, at the
+    // first node that breaks it, without following the chain it starts.
     for stmt in &function.body {
-        visit_stmt_observations(stmt, &mut |id| observations.record(id))?;
+        inspect_stmt_observations(stmt, &mut |id, node| {
+            let nested = match node {
+                RenderObservationNode::Expr(expr) => matches!(expr, CExpr::Observed { .. }),
+                RenderObservationNode::Stmt(stmt) => matches!(stmt, CStmt::Observed { .. }),
+            };
+            if nested {
+                return Err(RenderObservationStripError::NestedObservation { id });
+            }
+            observations.record(id)
+        })?;
     }
     Ok(observations)
 }
@@ -2001,8 +2260,10 @@ pub(crate) fn remap_render_observation_ids<E>(
         expr: &mut CExpr,
         remap: &mut impl FnMut(RenderObservationId) -> Result<RenderObservationId, E>,
     ) -> Result<(), E> {
-        if let CExpr::Observed { id, expr } = expr {
-            *id = remap(*id)?;
+        if let CExpr::Observed { ids, expr } = expr {
+            for id in ids.outer_to_inner.iter_mut() {
+                *id = remap(*id)?;
+            }
             return remap_expr(expr, remap);
         }
         match expr {
@@ -2061,8 +2322,10 @@ pub(crate) fn remap_render_observation_ids<E>(
         stmt: &mut CStmt,
         remap: &mut impl FnMut(RenderObservationId) -> Result<RenderObservationId, E>,
     ) -> Result<(), E> {
-        if let CStmt::Observed { id, stmt } = stmt {
-            *id = remap(*id)?;
+        if let CStmt::Observed { ids, stmt } = stmt {
+            for id in ids.outer_to_inner.iter_mut() {
+                *id = remap(*id)?;
+            }
             return remap_stmt(stmt, remap);
         }
         match stmt {
@@ -2154,8 +2417,10 @@ fn inspect_expr_observations<E>(
     expr: &CExpr,
     inspect: &mut impl FnMut(RenderObservationId, RenderObservationNode<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    if let CExpr::Observed { id, expr } = expr {
-        inspect(*id, RenderObservationNode::Expr(expr))?;
+    if let CExpr::Observed { ids, expr } = expr {
+        for id in ids.iter() {
+            inspect(id, RenderObservationNode::Expr(expr))?;
+        }
         return inspect_expr_observations(expr, inspect);
     }
     match expr {
@@ -2241,8 +2506,10 @@ fn visit_expr_observations<E>(
     expr: &CExpr,
     visit: &mut impl FnMut(RenderObservationId) -> Result<(), E>,
 ) -> Result<(), E> {
-    if let CExpr::Observed { id, expr } = expr {
-        visit(*id)?;
+    if let CExpr::Observed { ids, expr } = expr {
+        for id in ids.iter() {
+            visit(id)?;
+        }
         return visit_expr_observations(expr, visit);
     }
     match expr {
@@ -2298,8 +2565,9 @@ fn visit_expr_observations<E>(
 }
 
 fn strip_expr_observations(expr: &mut CExpr) {
-    while let CExpr::Observed { id, expr: inner } = expr {
-        let _ = id;
+    // A loop rather than one step: this also strips an audit that failed,
+    // whose tree is not known to be canonical.
+    while let CExpr::Observed { expr: inner, .. } = expr {
         *expr = std::mem::replace(inner.as_mut(), CExpr::IntLit(0));
     }
     match expr {
@@ -2357,8 +2625,10 @@ fn visit_stmt_observations<E>(
     stmt: &CStmt,
     visit: &mut impl FnMut(RenderObservationId) -> Result<(), E>,
 ) -> Result<(), E> {
-    if let CStmt::Observed { id, stmt } = stmt {
-        visit(*id)?;
+    if let CStmt::Observed { ids, stmt } = stmt {
+        for id in ids.iter() {
+            visit(id)?;
+        }
         return visit_stmt_observations(stmt, visit);
     }
     match stmt {
@@ -2444,8 +2714,10 @@ fn inspect_stmt_observations<E>(
     stmt: &CStmt,
     inspect: &mut impl FnMut(RenderObservationId, RenderObservationNode<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    if let CStmt::Observed { id, stmt } = stmt {
-        inspect(*id, RenderObservationNode::Stmt(stmt))?;
+    if let CStmt::Observed { ids, stmt } = stmt {
+        for id in ids.iter() {
+            inspect(id, RenderObservationNode::Stmt(stmt))?;
+        }
         return inspect_stmt_observations(stmt, inspect);
     }
     match stmt {
@@ -2527,19 +2799,28 @@ fn inspect_stmt_observations<E>(
     Ok(())
 }
 
-/// Move only a source expression's leading observation wrappers onto a
-/// replacement for that same occurrence.
-pub(crate) fn carry_outer_expr_observations(source: &CExpr, mut replacement: CExpr) -> CExpr {
+/// Move only a source expression's leading observations onto a replacement
+/// for that same occurrence.
+pub(crate) fn carry_outer_expr_observations(source: &CExpr, replacement: CExpr) -> CExpr {
+    CExpr::observe_all(source.observation_ids().iter().copied(), replacement)
+}
+
+/// Every observation in an expression, in pre-order and each occurrence's
+/// ids outermost first: the order a walk of the old one-wrapper-per-id chains
+/// met them.
+///
+/// An explicit stack over borrowed nodes. The walk this replaces cloned the
+/// subtree at every level to reach its children, which is quadratic in the
+/// height of the expression. Each node takes the ids of every set stacked on
+/// it before the walk descends from beneath them all.
+fn expr_observation_ids_in_preorder(expr: &CExpr) -> Vec<RenderObservationId> {
     let mut ids = Vec::new();
-    let mut source = source;
-    while let CExpr::Observed { id, expr } = source {
-        ids.push(*id);
-        source = expr;
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        ids.extend_from_slice(&expr.observation_ids());
+        pending.extend(expr.unobserved().children().into_iter().rev());
     }
-    for id in ids.into_iter().rev() {
-        replacement = CExpr::observed(id, replacement);
-    }
-    replacement
+    ids
 }
 
 /// Move every observation in a source expression onto a replacement that
@@ -2554,54 +2835,9 @@ pub(crate) fn carry_outer_expr_observations(source: &CExpr, mut replacement: CEx
 ///
 /// The replacement renders everything the source rendered, so it owns every
 /// occurrence the source owned. Order is preserved outermost-first so the
-/// rebuilt chain reads the same way round as the one it replaces.
-/// Strip the render markers wrapping an expression, keeping their ids in the
-/// order they were nested so they can be put back.
-fn peel_observations(
-    expr: &CExpr,
-) -> (Vec<crate::observation_journal::RenderObservationId>, &CExpr) {
-    let mut ids = Vec::new();
-    let mut cursor = expr;
-    while let CExpr::Observed { id, expr } = cursor {
-        ids.push(*id);
-        cursor = expr;
-    }
-    (ids, cursor)
-}
-
-/// Put peeled markers back, outermost last peeled.
-fn rewrap_observations(
-    ids: &[crate::observation_journal::RenderObservationId],
-    mut expr: CExpr,
-) -> CExpr {
-    for id in ids.iter().rev() {
-        expr = CExpr::Observed {
-            id: *id,
-            expr: Box::new(expr),
-        };
-    }
-    expr
-}
-
-pub(crate) fn carry_all_expr_observations(source: &CExpr, mut replacement: CExpr) -> CExpr {
-    fn collect(expr: &CExpr, ids: &mut Vec<crate::observation_journal::RenderObservationId>) {
-        if let CExpr::Observed { id, expr } = expr {
-            ids.push(*id);
-            collect(expr, ids);
-            return;
-        }
-        let _ = expr.clone().map_children(&mut |child| {
-            collect(&child, ids);
-            child
-        });
-    }
-
-    let mut ids = Vec::new();
-    collect(source, &mut ids);
-    for id in ids.into_iter().rev() {
-        replacement = CExpr::observed(id, replacement);
-    }
-    replacement
+/// rebuilt set reads the same way round as the ones it replaces.
+pub(crate) fn carry_all_expr_observations(source: &CExpr, replacement: CExpr) -> CExpr {
+    CExpr::observe_all(expr_observation_ids_in_preorder(source), replacement)
 }
 
 /// Move every marker in `source` onto its replacement, each at its own kind of position.
@@ -2609,32 +2845,26 @@ pub(crate) fn carry_all_stmt_observations(source: &[CStmt], replacement: CStmt) 
     let mut statement_ids = Vec::new();
     let mut expression_ids = Vec::new();
     for stmt in source {
-        let mut cursor = stmt;
-        while let CStmt::Observed { id, stmt: inner } = cursor {
-            statement_ids.push(*id);
-            cursor = inner;
-        }
-        let _ = visit_stmt_observations::<std::convert::Infallible>(cursor, &mut |id| {
+        statement_ids.extend_from_slice(&stmt.observation_ids());
+        let _ = visit_stmt_observations::<std::convert::Infallible>(stmt.unobserved(), &mut |id| {
             expression_ids.push(id);
             Ok(())
         });
     }
-    let mut replacement = match (replacement, expression_ids.is_empty()) {
-        (CStmt::Expr(expr), false) => CStmt::Expr(rewrap_observations(&expression_ids, expr)),
+    let replacement = match (replacement, expression_ids.is_empty()) {
+        (CStmt::Expr(expr), false) => CStmt::Expr(CExpr::observe_all(expression_ids, expr)),
         (replacement, _) => {
             statement_ids.extend(expression_ids);
             replacement
         }
     };
-    for id in statement_ids.into_iter().rev() {
-        replacement = CStmt::observed(id, replacement);
-    }
-    replacement
+    CStmt::observe_all(statement_ids, replacement)
 }
 
 fn strip_stmt_observations(stmt: &mut CStmt) {
-    while let CStmt::Observed { id, stmt: inner } = stmt {
-        let _ = id;
+    // A loop rather than one step: this also strips an audit that failed,
+    // whose tree is not known to be canonical.
+    while let CStmt::Observed { stmt: inner, .. } = stmt {
         *stmt = std::mem::replace(inner.as_mut(), CStmt::Empty);
     }
     match stmt {
@@ -2846,7 +3076,7 @@ mod tests {
             rewritten,
             CExpr::binary(
                 BinaryOp::Add,
-                CExpr::observed(id, CExpr::IntLit(2)),
+                CExpr::observe_one(id, CExpr::IntLit(2)),
                 CExpr::IntLit(2),
             )
         );
@@ -2983,8 +3213,10 @@ mod tests {
 
         assert!(serde_json::to_string(&function).is_err());
         assert!(
-            serde_json::from_str::<CStmt>(r#"{"Observed":{"id":0,"stmt":{"Expr":{"IntLit":1}}}}"#,)
-                .is_err()
+            serde_json::from_str::<CStmt>(
+                r#"{"Observed":{"ids":[0],"stmt":{"Expr":{"IntLit":1}}}}"#,
+            )
+            .is_err()
         );
 
         let reachable = strip_render_observations(&mut function, owner.expected_count())
@@ -3003,9 +3235,9 @@ mod tests {
     fn stripping_admits_a_repeated_observation_for_the_seal_to_judge() {
         let duplicate = RenderObservationId::from_index(0);
         let mut duplicate_function =
-            CFunction::new("duplicate", CType::Void).with_body(vec![CStmt::observed(
+            CFunction::new("duplicate", CType::Void).with_body(vec![CStmt::observe_one(
                 duplicate,
-                CStmt::Expr(CExpr::observed(duplicate, CExpr::IntLit(1))),
+                CStmt::Expr(CExpr::observe_one(duplicate, CExpr::IntLit(1))),
             )]);
         let reachable = strip_render_observations(&mut duplicate_function, 1)
             .expect("a repeat is not a strip failure");
@@ -3016,7 +3248,7 @@ mod tests {
     fn stripping_rejects_out_of_range_observations_without_mutation() {
         let out_of_range = RenderObservationId::from_index(1);
         let mut out_of_range_function = CFunction::new("range", CType::Void)
-            .with_body(vec![CStmt::observed(out_of_range, CStmt::Empty)]);
+            .with_body(vec![CStmt::observe_one(out_of_range, CStmt::Empty)]);
         let out_of_range_before = out_of_range_function.clone();
         assert_eq!(
             strip_render_observations(&mut out_of_range_function, 1),
@@ -3036,6 +3268,124 @@ mod tests {
                 Err(RenderObservationStripError::DomainTooLarge { expected_count })
             );
         }
+    }
+
+    /// An observed node directly inside another splits one occurrence's set.
+    ///
+    /// The constructors fuse, and a node built by hand around another -- the
+    /// only way to get one -- is refused by the seal with its own error and
+    /// the tree left as it was, found at the first layer rather than by
+    /// following the chain. A pass that rewrote a child in place puts the two
+    /// back together as one set, outer ids first.
+    #[test]
+    fn a_nested_observation_is_refused_and_rejoins_as_one_set() {
+        let outer = RenderObservationId::from_index(0);
+        let inner = RenderObservationId::from_index(1);
+        let nested = CStmt::Observed {
+            ids: ObservationSet::new(vec![outer]).expect("one id"),
+            stmt: Box::new(CStmt::observe_one(inner, CStmt::Empty)),
+        };
+        let mut function = CFunction::new("nested", CType::Void).with_body(vec![nested.clone()]);
+        assert_eq!(
+            strip_render_observations(&mut function, 2),
+            Err(RenderObservationStripError::NestedObservation { id: outer })
+        );
+        assert_eq!(function.body, vec![nested.clone()]);
+
+        let mut rejoined = nested;
+        rejoined.rejoin_observations();
+        assert!(matches!(
+            rejoined.observation_ids(),
+            std::borrow::Cow::Borrowed(ids) if ids == [outer, inner]
+        ));
+        assert_eq!(rejoined.unobserved(), &CStmt::Empty);
+        assert_eq!(
+            rejoined,
+            CStmt::observe_all([outer], CStmt::observe_one(inner, CStmt::Empty))
+        );
+        let mut function = CFunction::new("rejoined", CType::Void).with_body(vec![rejoined]);
+        let reachable = strip_render_observations(&mut function, 2).expect("one set");
+        assert_eq!(reachable.ids().collect::<Vec<_>>(), vec![outer, inner]);
+    }
+
+    /// A rebuild from a nested occurrence carries every set it stands in.
+    ///
+    /// The rebuilders take the semantic node from beneath every stacked set,
+    /// so they have to take the ids of every one of those sets too: an id
+    /// left behind with a discarded layer is a cell nothing answers, and the
+    /// seal would report it as unaccounted instead of naming the nesting.
+    /// Each rebuild comes out canonical, the sets joined outer first.
+    #[test]
+    fn a_rebuild_from_a_nested_occurrence_carries_every_set() {
+        let [outer, inner, child] = [0, 1, 2].map(RenderObservationId::from_index);
+        let nested_expr = |semantic: CExpr| CExpr::Observed {
+            ids: ObservationSet::new(vec![outer]).expect("one id"),
+            expr: Box::new(CExpr::observe_one(inner, semantic)),
+        };
+        let one_set = |semantic: CExpr| CExpr::observe_all([outer, inner], semantic);
+
+        assert_eq!(
+            *nested_expr(CExpr::IntLit(1)).observation_ids(),
+            [outer, inner]
+        );
+        assert_eq!(
+            carry_all_expr_observations(&nested_expr(CExpr::IntLit(1)), CExpr::IntLit(2)),
+            one_set(CExpr::IntLit(2))
+        );
+        assert_eq!(
+            carry_outer_expr_observations(&nested_expr(CExpr::IntLit(1)), CExpr::IntLit(2)),
+            one_set(CExpr::IntLit(2))
+        );
+        assert_eq!(
+            nested_expr(CExpr::IntLit(1)).into_semantic_with_observations(),
+            (CExpr::IntLit(1), vec![outer, inner])
+        );
+
+        // `(uint8_t)(uint32_t)7` narrows once; the markers on the dropped
+        // conversion land on what it converted.
+        let int = |bits| CType::Int {
+            bits,
+            signedness: r2types::Signedness::Unsigned,
+        };
+        let x = CExpr::UIntLit(7);
+        let widened = CExpr::Cast {
+            ty: int(32),
+            expr: Box::new(x.clone()),
+            role: CastRole::Conversion,
+        };
+        assert_eq!(
+            CExpr::cast_with_role(int(8), nested_expr(widened), CastRole::Conversion),
+            CExpr::Cast {
+                ty: int(8),
+                expr: Box::new(one_set(x)),
+                role: CastRole::Conversion,
+            }
+        );
+
+        let nested_stmt = CStmt::Observed {
+            ids: ObservationSet::new(vec![outer]).expect("one id"),
+            stmt: Box::new(CStmt::observe_one(
+                inner,
+                CStmt::Expr(CExpr::observe_one(child, CExpr::IntLit(1))),
+            )),
+        };
+        assert_eq!(*nested_stmt.observation_ids(), [outer, inner]);
+        let (semantic, chain) = nested_stmt.clone().into_semantic_with_observations();
+        assert_eq!(
+            semantic,
+            CStmt::Expr(CExpr::observe_one(child, CExpr::IntLit(1)))
+        );
+        assert_eq!(
+            chain.reapply(CStmt::Empty),
+            CStmt::observe_all([outer, inner], CStmt::Empty)
+        );
+        assert_eq!(
+            carry_all_stmt_observations(&[nested_stmt], CStmt::Expr(CExpr::IntLit(2))),
+            CStmt::observe_all(
+                [outer, inner],
+                CStmt::Expr(CExpr::observe_one(child, CExpr::IntLit(2)))
+            )
+        );
     }
 
     #[test]

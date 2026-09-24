@@ -1477,6 +1477,10 @@ pub enum BindingObservationJournalFailure {
     DuplicateObservation {
         observation_id: u32,
     },
+    /// One occurrence's observations were split over two nested nodes.
+    NestedObservation {
+        observation_id: u32,
+    },
 }
 
 impl BindingObservationJournalFailure {
@@ -1563,6 +1567,7 @@ impl BindingObservationJournalFailure {
             Self::ObservationCapacityUnavailable { .. } => "observation_capacity_unavailable",
             Self::ObservationOutOfRange { .. } => "observation_out_of_range",
             Self::DuplicateObservation { .. } => "duplicate_observation",
+            Self::NestedObservation { .. } => "nested_observation",
         }
     }
 }
@@ -1815,6 +1820,10 @@ pub enum PlacementAuditRefusal {
     DuplicateObservation {
         observation_id: u32,
     },
+    /// One occurrence's observations were split over two nested nodes.
+    NestedObservation {
+        observation_id: u32,
+    },
     MissingObservationTarget {
         observation_id: u32,
     },
@@ -1929,6 +1938,7 @@ impl PlacementAuditRefusal {
             Self::ObservationCapacityUnavailable { .. } => "observation_capacity_unavailable",
             Self::ObservationOutOfRange { .. } => "observation_out_of_range",
             Self::DuplicateObservation { .. } => "duplicate_observation",
+            Self::NestedObservation { .. } => "nested_observation",
             Self::MissingObservationTarget { .. } => "missing_observation_target",
             Self::InvalidUse { .. } => "invalid_use",
             Self::InvalidWrite { .. } => "invalid_write",

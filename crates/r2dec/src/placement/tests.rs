@@ -144,10 +144,10 @@ fn a_for_initializer_belongs_to_the_region_the_loop_sits_in() {
     let loop_body = CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1010, StructuredRegionKind::Loop),
         CStmt::For {
-            init: Some(Box::new(CStmt::observed(init_marker, CStmt::Empty))),
+            init: Some(Box::new(CStmt::observe_one(init_marker, CStmt::Empty))),
             cond: None,
             update: None,
-            body: Box::new(CStmt::observed(body_marker, CStmt::Empty)),
+            body: Box::new(CStmt::observe_one(body_marker, CStmt::Empty)),
         },
     );
     let (marked, regions) =
@@ -692,7 +692,7 @@ fn inline_replaces_only_the_exact_marked_assignment() {
         SymbolRole::Carrier,
     );
     let marker = observation(7);
-    let assignment = CStmt::observed(
+    let assignment = CStmt::observe_one(
         marker,
         CStmt::expr(CExpr::assign(CExpr::Var(symbol), CExpr::UIntLit(9))),
     );
@@ -729,8 +729,8 @@ fn final_scope_order_matches_do_while_execution() {
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
         CStmt::DoWhile {
-            body: Box::new(CStmt::observed(body_id, CStmt::Empty)),
-            cond: CExpr::observed(condition_id, CExpr::UIntLit(1)),
+            body: Box::new(CStmt::observe_one(body_id, CStmt::Empty)),
+            cond: CExpr::observe_one(condition_id, CExpr::UIntLit(1)),
         },
     ))
     .expect("sealed do-while");
@@ -753,10 +753,10 @@ fn final_scope_order_matches_for_execution_phases() {
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
         CStmt::For {
-            init: Some(Box::new(CStmt::observed(init_id, CStmt::Empty))),
-            cond: Some(CExpr::observed(condition_id, CExpr::UIntLit(1))),
-            update: Some(CExpr::observed(update_id, CExpr::UIntLit(0))),
-            body: Box::new(CStmt::observed(body_id, CStmt::Empty)),
+            init: Some(Box::new(CStmt::observe_one(init_id, CStmt::Empty))),
+            cond: Some(CExpr::observe_one(condition_id, CExpr::UIntLit(1))),
+            update: Some(CExpr::observe_one(update_id, CExpr::UIntLit(0))),
+            body: Box::new(CStmt::observe_one(body_id, CStmt::Empty)),
         },
     ))
     .expect("sealed for");
@@ -778,11 +778,11 @@ fn final_scope_sequences_comma_reads_output_write_and_later_read() {
     let output_write = observation(1);
     let later_read = observation(2);
     let expression = CExpr::Comma(vec![
-        CExpr::observed(
+        CExpr::observe_one(
             output_write,
-            CExpr::observed(operand_read, CExpr::UIntLit(1)),
+            CExpr::observe_one(operand_read, CExpr::UIntLit(1)),
         ),
-        CExpr::observed(later_read, CExpr::UIntLit(2)),
+        CExpr::observe_one(later_read, CExpr::UIntLit(2)),
     ]);
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
@@ -827,8 +827,8 @@ fn final_scope_refuses_alternative_write_phase() {
     let competing_read = observation(1);
     let expression = CExpr::Ternary {
         cond: Box::new(CExpr::UIntLit(1)),
-        then_expr: Box::new(CExpr::observed(branch_write, CExpr::UIntLit(2))),
-        else_expr: Box::new(CExpr::observed(competing_read, CExpr::UIntLit(3))),
+        then_expr: Box::new(CExpr::observe_one(branch_write, CExpr::UIntLit(2))),
+        else_expr: Box::new(CExpr::observe_one(competing_read, CExpr::UIntLit(3))),
     };
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
@@ -862,8 +862,8 @@ fn final_scope_refuses_unsequenced_write_phase() {
     let competing_read = observation(1);
     let expression = CExpr::binary(
         BinaryOp::Add,
-        CExpr::observed(operand_write, CExpr::UIntLit(1)),
-        CExpr::observed(competing_read, CExpr::UIntLit(2)),
+        CExpr::observe_one(operand_write, CExpr::UIntLit(1)),
+        CExpr::observe_one(competing_read, CExpr::UIntLit(2)),
     );
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
@@ -906,11 +906,11 @@ fn final_scope_sequences_direct_stack_assignment_after_its_value() {
         SymbolRole::StackLocal(-16),
     );
     let expression = CExpr::assign(
-        CExpr::observed(
+        CExpr::observe_one(
             elided_address_use,
-            CExpr::observed(stack_write, CExpr::Var(symbol)),
+            CExpr::observe_one(stack_write, CExpr::Var(symbol)),
         ),
-        CExpr::observed(value_read, CExpr::UIntLit(7)),
+        CExpr::observe_one(value_read, CExpr::UIntLit(7)),
     );
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
@@ -966,20 +966,20 @@ fn final_scope_sequences_direct_stack_array_assignment_after_its_index_and_value
         .borrow_mut()
         .declare("i", crate::ast::CType::u64(), SymbolRole::Carrier);
     let expression = CExpr::assign(
-        CExpr::observed(
+        CExpr::observe_one(
             address_use,
-            CExpr::observed(
+            CExpr::observe_one(
                 stack_write,
                 CExpr::Subscript {
                     base: Box::new(CExpr::cast(
                         crate::ast::CType::ptr(crate::ast::CType::i8()),
                         CExpr::Var(symbol),
                     )),
-                    index: Box::new(CExpr::observed(index_read, CExpr::Var(index))),
+                    index: Box::new(CExpr::observe_one(index_read, CExpr::Var(index))),
                 },
             ),
         ),
-        CExpr::observed(value_read, CExpr::UIntLit(7)),
+        CExpr::observe_one(value_read, CExpr::UIntLit(7)),
     );
     let sealed = seal_structured_body(CStmt::structured_region(
         StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),

@@ -1,0 +1,20 @@
+warning: build an observation node with `observe_one` or `observe_all`, which fuse its ids into one set
+  --> $DIR/observed_literal.rs:20:45
+   |
+LL |             Self::Observed { ids, stmt } => Self::Observed { ids, stmt },
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(r2dec_observed_literal_construction)]` on by default
+
+warning: build an observation node with `observe_one` or `observe_all`, which fuse its ids into one set
+  --> $DIR/observed_literal.rs:27:17
+   |
+LL |       CStmt::Expr(CExpr::Observed {
+   |  _________________^
+LL | |         ids,
+LL | |         expr: Box::new(expr),
+LL | |     })
+   | |_____^
+
+warning: 2 warnings emitted
+

@@ -1005,7 +1005,14 @@ fn strip_region_markers(stmt: &mut CStmt) {
         *stmt = std::mem::replace(inner.as_mut(), CStmt::Empty);
     }
     match stmt {
-        CStmt::Observed { stmt, .. } => strip_region_markers(stmt),
+        CStmt::Observed { stmt: inner, .. } => {
+            strip_region_markers(inner);
+            // Inert on the emission path, which strips region markers only
+            // after the seal discarded every observation. A tree that still
+            // carries them has lost the marker that stood between two
+            // observed layers, and the two sets are one occurrence's again.
+            stmt.rejoin_observations();
+        }
         CStmt::Block(stmts) => stmts.iter_mut().for_each(strip_region_markers),
         CStmt::If {
             then_body,
