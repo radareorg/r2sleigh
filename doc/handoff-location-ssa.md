@@ -31717,3 +31717,37 @@ Gate at the tip that closed the stretch: fmt and clippy clean; 1916 tests
 passed, 0 failed; structure at baseline; certify 96 rendered, 2 refused (the
 `__kuser_cmpxchg` carry flag, Q3), 0 undefined reads; coverage 561/562 with no
 regressions; diff_r2 px 22/2, pd 18/6, ie/iS/is 24/0.
+
+Also open, missed from the list above:
+
+- Deferred by the design pass and not in the queue: a per-revision discovery
+  table (`afl` block count and real size, `fcn.%08x` names, incremental re-walk
+  on patch); `afi` reporting body-proven effects on arguments and the return;
+  radare2 commands with facts already behind them but no verb (`afb`, `afx`,
+  `agc`, `ii`, `iE`, `izz`, `ao`/`aoj`); the per-instruction obligation ledger
+  and rendered-C provenance beside each `pdf` line; unverified x86 spelling of
+  segment-prefixed operands (`word ptr cs:[`).
+- From the completeness critic: handed-function discovery only recognises a
+  load from a constant address, so a slot address built across instructions is
+  missed; `BlockTransfer` may still be absent from the listing's and oracle's
+  memory-read set; ARM link-register calls outside the `mov lr, pc; bx`
+  pattern may not reach `Body.calls`.
+- radare2 upstream pull-request candidates judged but not raised: ARM BE8 code
+  endianness (`armeb_hello_static`, e_flags EF_ARM_BE8 means little-endian
+  instructions; radare2 decodes them big-endian) and the unnamed
+  `__gmon_start__` JUMP_SLOT stub (before-after-main 0x8048350).
+- Deliberate differences from radare2 that no test records: `px` and `pd`
+  stopping at unmapped bytes instead of printing 0xff fill, and ARM pool loads
+  keeping `ldr ip, [0x817c]` with the value in a note instead of naming it.
+- Cost: a full `ax` sweep of the first 40 radare2 ELF bins still takes about
+  175 s of CPU, dominated by the reduced SSA build for data references; `ax` on
+  programs with Thumb code pays an extra discovery pass.
+- `scripts/quality-gate.sh` (Dylint, mutants, Kani) was not rerun over the
+  final tip of this stretch.
+- Housekeeping: stale branches `wip/E02`, `wip/E03`, `wip/E07`,
+  `feat/scan-block-op`, `fix/cfg-contradiction-1e5e7` and the
+  `worktree-wf_*` / `worktree-agent-*` branches and worktrees are all merged
+  or superseded and can be deleted.
+- The new machine (192.168.1.38) holds the repositories as of before the last
+  merges with worktree paths rewritten and Rust installed; it still needs the
+  Command Line Tools, a fetch of `engine/inversion`, and the memory directory.
