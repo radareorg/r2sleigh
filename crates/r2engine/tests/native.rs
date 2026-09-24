@@ -821,7 +821,11 @@ const REPEATED_COMPARE: &[u8] = &[
 
 /// Render x86-64 bytes mapped at `BASE`, refusing nothing.
 fn rendered(bytes: &'static [u8], name: &'static str) -> String {
-    let machine = Machine::new("x86-64", "x86-64", 64);
+    rendered_on(&Machine::new("x86-64", "x86-64", 64), bytes, name)
+}
+
+/// Render bytes of `machine` mapped at `BASE`, refusing nothing.
+fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> String {
     let target = machine.target();
     let program = Fixture {
         bytes: bytes.to_vec(),
@@ -907,6 +911,220 @@ int main(void) {
         int got = (int32_t)compare((uint64_t)(uintptr_t)cases[i].dst,
                                    (uint64_t)(uintptr_t)cases[i].src, cases[i].n);
         if (got != want) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// mov rax, rdi; and rax, -2; ret
+///
+/// The constant clears one bit and keeps some bit of every byte, so every
+/// byte of the argument reaches the result.
+const CLEAR_LOW_BIT: &[u8] = &[
+    0x48, 0x89, 0xf8, // 0x1000 mov rax, rdi
+    0x48, 0x83, 0xe0, 0xfe, // 0x1003 and rax, -2
+    0xc3, // 0x1007 ret
+];
+
+/// An `and` that clears one bit reads the whole argument, not its low byte.
+#[test]
+fn an_and_that_clears_one_bit_takes_the_whole_argument() {
+    let text = rendered(CLEAR_LOW_BIT, "clear_low_bit");
+    assert!(
+        text.starts_with("uint64_t clear_low_bit(uint64_t "),
+        "{text}"
+    );
+    run_rendered(
+        "clear_low_bit",
+        &text,
+        r#"int main(void) {
+    const uint64_t cases[] = {
+        0x1234567890abcdefULL, 0, 1, 0xffffffffffffffffULL, 0x8000000000000001ULL,
+    };
+    for (int i = 0; i < 5; i++) {
+        if (clear_low_bit(cases[i]) != (cases[i] & ~(uint64_t)1)) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// mov eax, edi; and eax, 0xffffff; ret
+const MASK_24_OF_EDI: &[u8] = &[
+    0x89, 0xf8, // 0x1000 mov eax, edi
+    0x25, 0xff, 0xff, 0xff, 0x00, // 0x1002 and eax, 0xffffff
+    0xc3, // 0x1007 ret
+];
+
+/// mov rax, rdi; and rax, 0xffffff; ret
+const MASK_24_OF_RDI: &[u8] = &[
+    0x48, 0x89, 0xf8, // 0x1000 mov rax, rdi
+    0x48, 0x25, 0xff, 0xff, 0xff, 0x00, // 0x1003 and rax, 0xffffff
+    0xc3, // 0x1009 ret
+];
+
+/// and w0, w0, #0xffffff; ret
+const AARCH64_MASK_24_OF_W0: &[u8] = &[
+    0x00, 0x5c, 0x00, 0x12, // 0x1000 and w0, w0, #0xffffff
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1004 ret
+];
+
+/// An `and` that keeps three bytes reads three bytes of the argument, and
+/// no register has a three-byte lane, so the formal is the four-byte one
+/// that holds them rather than a width no interface can carry.
+#[test]
+fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
+    let text = rendered(MASK_24_OF_EDI, "mask24_of_edi");
+    assert!(
+        text.starts_with("uint32_t mask24_of_edi(uint32_t "),
+        "{text}"
+    );
+    run_rendered(
+        "mask24_of_edi",
+        &text,
+        r#"int main(void) {
+    if (mask24_of_edi(0xabcdef12u) != 0xcdef12u) {
+        return 1;
+    }
+    if (mask24_of_edi(0xffffffffu) != 0xffffffu) {
+        return 2;
+    }
+    if (mask24_of_edi(0) != 0) {
+        return 3;
+    }
+    return 0;
+}"#,
+    );
+
+    let text = rendered(MASK_24_OF_RDI, "mask24_of_rdi");
+    assert!(
+        text.starts_with("uint64_t mask24_of_rdi(uint32_t "),
+        "{text}"
+    );
+    run_rendered(
+        "mask24_of_rdi",
+        &text,
+        r#"int main(void) {
+    const uint64_t cases[] = {
+        0xffffffffffffffffULL, 0x1234567890abcdefULL, 0xabcdef12ULL, 0, 0x80000000ff000000ULL,
+    };
+    for (int i = 0; i < 5; i++) {
+        if (mask24_of_rdi(cases[i]) != (cases[i] & 0xffffff)) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+
+    let text = rendered_on(
+        &Machine::new("aarch64", "aarch64", 64),
+        AARCH64_MASK_24_OF_W0,
+        "mask24_of_w0",
+    );
+    assert!(
+        text.starts_with("uint32_t mask24_of_w0(uint32_t "),
+        "{text}"
+    );
+    run_rendered(
+        "mask24_of_w0",
+        &text,
+        r#"int main(void) {
+    if (mask24_of_w0(0xabcdef12u) != 0xcdef12u) {
+        return 1;
+    }
+    if (mask24_of_w0(0xffffffffu) != 0xffffffu) {
+        return 2;
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// and x0, x0, #0xffffffffffff; ret
+const AARCH64_MASK_48: &[u8] = &[
+    0x00, 0xbc, 0x40, 0x92, // 0x1000 and x0, x0, #0xffffffffffff
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1004 ret
+];
+
+/// and x0, x0, #0xffffffffffffff; ret -- the top-byte-ignore untag.
+const AARCH64_MASK_56: &[u8] = &[
+    0x00, 0xdc, 0x40, 0x92, // 0x1000 and x0, x0, #0xffffffffffffff
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1004 ret
+];
+
+/// An `and` that keeps six or seven bytes of a 64-bit register reads more
+/// than any narrower lane holds, so the formal is the whole register.
+#[test]
+fn an_and_that_keeps_six_or_seven_bytes_takes_the_whole_register() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    for (bytes, name, kept) in [
+        (AARCH64_MASK_48, "mask48", "0xffffffffffffULL"),
+        (AARCH64_MASK_56, "untag56", "0xffffffffffffffULL"),
+    ] {
+        let text = rendered_on(&machine, bytes, name);
+        assert!(
+            text.starts_with(&format!("uint64_t {name}(uint64_t ")),
+            "{text}"
+        );
+        run_rendered(
+            name,
+            &text,
+            &format!(
+                r#"int main(void) {{
+    const uint64_t cases[] = {{
+        0xabcd123456789abcULL, 0xffffffffffffffffULL, 0x8000000000000001ULL, 0,
+    }};
+    for (int i = 0; i < 4; i++) {{
+        if ({name}(cases[i]) != (cases[i] & {kept})) {{
+            return 1 + i;
+        }}
+    }}
+    return 0;
+}}"#
+            ),
+        );
+    }
+}
+
+/// The argument copied into both halves of a vector and read back out of
+/// the high one, which starts at the vector's eighth byte.
+///
+/// ```text
+///   1000  movq    xmm0, rdi
+///   1005  pshufd  xmm0, xmm0, 0x44
+///   100a  movhlps xmm0, xmm0
+///   100d  movq    rax, xmm0
+///   1012  ret
+/// ```
+const HIGH_QWORD: &[u8] = &[
+    0x66, 0x48, 0x0f, 0x6e, 0xc7, // 1000 movq xmm0, rdi
+    0x66, 0x0f, 0x70, 0xc0, 0x44, // 1005 pshufd xmm0, xmm0, 0x44
+    0x0f, 0x12, 0xc0, // 100a movhlps xmm0, xmm0
+    0x66, 0x48, 0x0f, 0x7e, 0xc0, // 100d movq rax, xmm0
+    0xc3, // 1012 ret
+];
+
+/// A read of a vector's high half observes the argument that filled it, so
+/// the argument is a parameter rather than a local nothing assigns.
+#[test]
+fn an_argument_read_back_from_the_high_half_of_a_vector_is_a_parameter() {
+    let text = rendered(HIGH_QWORD, "high_qword");
+    assert!(text.starts_with("uint64_t high_qword(uint64_t "), "{text}");
+    run_rendered(
+        "high_qword",
+        &text,
+        r#"int main(void) {
+    const uint64_t cases[] = {
+        0x1234567890abcdefULL, 0, 1, 0xffffffffffffffffULL, 0x8000000000000001ULL,
+    };
+    for (int i = 0; i < 5; i++) {
+        if (high_qword(cases[i]) != cases[i]) {
             return 1 + i;
         }
     }

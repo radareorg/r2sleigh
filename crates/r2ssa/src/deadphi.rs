@@ -55,8 +55,8 @@ pub struct DeadPhis {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProvenProgramObservations {
     values: BTreeSet<ValueId>,
-    /// The bits of each observed value some observation reaches.
-    bytes: std::collections::BTreeMap<ValueId, u64>,
+    /// The bytes of each observed value some observation reaches.
+    bytes: std::collections::BTreeMap<ValueId, ByteMask>,
     /// The value through which each observed value was reached, so a claim
     /// that something is observed can name the observation it rests on.
     parents: std::collections::BTreeMap<ValueId, ValueId>,
@@ -66,31 +66,130 @@ pub struct ProvenProgramObservations {
 
 struct Closure {
     values: BTreeSet<ValueId>,
-    bytes: std::collections::BTreeMap<ValueId, u64>,
+    bytes: std::collections::BTreeMap<ValueId, ByteMask>,
     parents: std::collections::BTreeMap<ValueId, ValueId>,
 }
 
-/// The bytes of a value an observation reaches, as one bit per byte.
+/// The bytes of a value an observation reaches, one bit per byte.
 ///
-/// A value wider than the mask is taken whole; nothing this decides is about
-/// vectors, and taking every byte is the conservative side.
-fn byte_mask(size_bytes: u32) -> u64 {
-    if size_bytes >= 8 {
-        u64::MAX
-    } else {
-        (1u64 << (8 * size_bytes)) - 1
+/// Bit `b` stands for byte `b`, least significant first, so a slice offset, a
+/// tile width, a widening and a constant's surviving bytes are all counted in
+/// the one unit a value's size is counted in. One word names 64 bytes; a
+/// value wider than that, and any shift that would carry an observed byte out
+/// of the word, is [`ByteMask::All`]. Saturating to every byte is the side
+/// this may err on: an unobserved byte called observed costs a formal or a
+/// merge that was not needed, while an observed byte called unobserved drops
+/// an argument the program reads and leaves its read uninitialised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteMask {
+    /// Exactly these bytes, bit `b` for byte `b`.
+    Bytes(u64),
+    /// Every byte of the value, however wide.
+    All,
+}
+
+impl ByteMask {
+    /// No byte.
+    pub const NONE: Self = Self::Bytes(0);
+
+    /// Every byte of a value `size_bytes` wide.
+    pub const fn whole(size_bytes: u32) -> Self {
+        match size_bytes {
+            0..64 => Self::Bytes((1u64 << size_bytes) - 1),
+            64 => Self::Bytes(u64::MAX),
+            _ => Self::All,
+        }
+    }
+
+    /// The bytes of a constant `size_bytes` wide that are not zero, which
+    /// are the only bytes an `and` with it lets through.
+    ///
+    /// A constant carries at most eight bytes of bits and is zero above them.
+    fn nonzero_bytes_of(bits: u64, size_bytes: u32) -> Self {
+        let mut mask = 0u64;
+        for byte in 0..size_bytes.min(8) {
+            if (bits >> (8 * byte)) & 0xff != 0 {
+                mask |= 1 << byte;
+            }
+        }
+        Self::Bytes(mask)
+    }
+
+    /// Whether the mask names no byte at all.
+    pub const fn is_empty(self) -> bool {
+        matches!(self, Self::Bytes(0))
+    }
+
+    /// The bytes in either mask.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bytes(a), Self::Bytes(b)) => Self::Bytes(a | b),
+            _ => Self::All,
+        }
+    }
+
+    /// The bytes in both masks.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bytes(a), Self::Bytes(b)) => Self::Bytes(a & b),
+            (Self::All, other) | (other, Self::All) => other,
+        }
+    }
+
+    /// The same bytes `bytes` places more significant, as a slice at offset
+    /// `bytes` asks of the value it is cut from.
+    ///
+    /// A byte carried past the word saturates to every byte rather than
+    /// falling off.
+    #[must_use]
+    pub const fn shifted_up(self, bytes: u32) -> Self {
+        match self {
+            Self::Bytes(0) => Self::NONE,
+            Self::Bytes(mask) if bytes < 64 && mask.leading_zeros() >= bytes => {
+                Self::Bytes(mask << bytes)
+            }
+            _ => Self::All,
+        }
+    }
+
+    /// The same bytes `bytes` places less significant, as a concatenation
+    /// asks of its high tile when the low tile is `bytes` wide.
+    ///
+    /// A byte below the shift belongs to the low tile. An exact mask names
+    /// nothing at or above byte 64, so nothing observed falls off the top.
+    #[must_use]
+    pub const fn shifted_down(self, bytes: u32) -> Self {
+        match self {
+            Self::Bytes(mask) => Self::Bytes(if bytes < 64 { mask >> bytes } else { 0 }),
+            Self::All => Self::All,
+        }
+    }
+
+    /// How many least significant bytes the mask names, when it names exactly
+    /// that low run and nothing above it; `None` for no byte, a gap, or a mask
+    /// saturated past what one word can say.
+    pub const fn low_bytes(self) -> Option<u32> {
+        let Self::Bytes(mask) = self else {
+            return None;
+        };
+        let bytes = mask.trailing_ones();
+        if bytes > 0 && (bytes == 64 || mask >> bytes == 0) {
+            Some(bytes)
+        } else {
+            None
+        }
     }
 }
 
-/// Which bytes of a constant could pass through an `and` with it.
-fn nonzero_byte_mask(bits: u64, size_bytes: u32) -> u64 {
-    let mut mask = 0u64;
-    for byte in 0..size_bytes.min(8) {
-        if (bits >> (8 * byte)) & 0xff != 0 {
-            mask |= 1 << byte;
+impl std::fmt::Display for ByteMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes(mask) => write!(f, "{mask:#x}"),
+            Self::All => f.write_str("all"),
         }
     }
-    mask
 }
 
 /// What an observation of `observed` bytes of a value asks of each input.
@@ -100,43 +199,52 @@ fn nonzero_byte_mask(bits: u64, size_bytes: u32) -> u64 {
 /// taken to read all of its operands. A byte no observation reaches is not
 /// observed, which is what stops a byte the program overwrote from admitting
 /// the caller's register as a parameter.
+///
+/// Every rule here may name more bytes than an input has; the closure trims
+/// each mask to its value's width, and a value whose width is unknown is
+/// taken whole.
 fn observed_input_bytes(
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
-    observed: u64,
-) -> Vec<(ValueId, u64)> {
+    observed: ByteMask,
+) -> Vec<(ValueId, ByteMask)> {
     use crate::graph::InstPayload;
-    let size_of = |value: ValueId| graph.value(value).map_or(8, |value| value.var.size);
+    let size_of = |value: ValueId| graph.value(value).map(|value| value.var.size);
     let constant = |value: ValueId| {
         graph
             .value(value)
             .and_then(|value| value.var.constant_bits())
     };
-    let whole = |value: ValueId| (value, byte_mask(size_of(value)));
+    // Every byte, which the closure trims to the input's own width.
+    let whole = |value: ValueId| (value, ByteMask::All);
     let inputs = &inst.inputs;
     match &inst.payload {
         InstPayload::Phi { .. } => inputs.iter().map(|input| (*input, observed)).collect(),
         InstPayload::Op(op) => match op {
             crate::SSAOp::Copy { .. } if inputs.len() == 1 => vec![(inputs[0], observed)],
             crate::SSAOp::Subpiece { offset, .. } if inputs.len() == 1 => {
-                vec![(inputs[0], observed.checked_shl(8 * offset).unwrap_or(0))]
+                vec![(inputs[0], observed.shifted_up(*offset))]
             }
-            crate::SSAOp::Piece { .. } if inputs.len() == 2 => {
-                let lo_bytes = size_of(inputs[1]);
-                let lo = observed & byte_mask(lo_bytes);
-                let hi = observed.checked_shr(8 * lo_bytes).unwrap_or(0);
-                vec![(inputs[0], hi), (inputs[1], lo)]
-            }
+            crate::SSAOp::Piece { .. } if inputs.len() == 2 => match size_of(inputs[1]) {
+                Some(lo_bytes) => vec![
+                    (inputs[0], observed.shifted_down(lo_bytes)),
+                    (inputs[1], observed.intersection(ByteMask::whole(lo_bytes))),
+                ],
+                None => inputs.iter().map(|input| whole(*input)).collect(),
+            },
             crate::SSAOp::IntZExt { .. } if inputs.len() == 1 => {
-                vec![(inputs[0], observed & byte_mask(size_of(inputs[0])))]
+                let source = size_of(inputs[0]).map_or(ByteMask::All, ByteMask::whole);
+                vec![(inputs[0], observed.intersection(source))]
             }
             crate::SSAOp::IntAnd { .. } if inputs.len() == 2 => {
                 let mask_of = |value: ValueId| {
-                    constant(value).map(|bits| nonzero_byte_mask(bits, size_of(value)))
+                    constant(value)
+                        .zip(size_of(value))
+                        .map(|(bits, size)| ByteMask::nonzero_bytes_of(bits, size))
                 };
                 match (mask_of(inputs[0]), mask_of(inputs[1])) {
-                    (None, Some(mask)) => vec![(inputs[0], observed & mask)],
-                    (Some(mask), None) => vec![(inputs[1], observed & mask)],
+                    (None, Some(mask)) => vec![(inputs[0], observed.intersection(mask))],
+                    (Some(mask), None) => vec![(inputs[1], observed.intersection(mask))],
                     _ => inputs.iter().map(|input| (*input, observed)).collect(),
                 }
             }
@@ -145,29 +253,42 @@ fn observed_input_bytes(
     }
 }
 
+/// Every value some root depends on, with the bytes of it that dependence
+/// reaches.
+///
+/// A mask only grows, by union, and is trimmed to its value's width, so a
+/// value is queued again only when it gains a byte or saturates -- at most 65
+/// times -- and the walk stays linear in the graph's edges.
 fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
-    let mut bytes: std::collections::BTreeMap<ValueId, u64> = std::collections::BTreeMap::new();
+    let width = |value: ValueId| {
+        graph
+            .value(value)
+            .map_or(ByteMask::All, |value| ByteMask::whole(value.var.size))
+    };
+    let mut bytes: std::collections::BTreeMap<ValueId, ByteMask> =
+        std::collections::BTreeMap::new();
     let mut parents = std::collections::BTreeMap::new();
     let mut pending = VecDeque::new();
     for value in roots {
-        let mask = byte_mask(graph.value(value).map_or(8, |value| value.var.size));
-        if mask != 0 && bytes.insert(value, mask).is_none() {
+        let mask = width(value);
+        if !mask.is_empty() && bytes.insert(value, mask).is_none() {
             pending.push_back(value);
         }
     }
     while let Some(value) = pending.pop_front() {
-        let observed = bytes.get(&value).copied().unwrap_or(0);
+        let observed = bytes.get(&value).copied().unwrap_or(ByteMask::NONE);
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
         for (input, mask) in observed_input_bytes(graph, inst, observed) {
-            if mask == 0 {
+            let mask = mask.intersection(width(input));
+            if mask.is_empty() {
                 continue;
             }
-            let entry = bytes.entry(input).or_insert(0);
+            let entry = bytes.entry(input).or_insert(ByteMask::NONE);
             let before = *entry;
-            *entry |= mask;
-            if before == 0 {
+            *entry = before.union(mask);
+            if before.is_empty() {
                 parents.insert(input, value);
             }
             if *entry != before {
@@ -219,19 +340,17 @@ impl ProvenProgramObservations {
         self.values.contains(&value)
     }
 
-    /// The bits of a value some observation reaches.
-    pub fn observed_bytes(&self, value: ValueId) -> Option<u64> {
+    /// The bytes of a value some observation reaches.
+    pub fn observed_bytes(&self, value: ValueId) -> Option<ByteMask> {
         self.bytes.get(&value).copied()
     }
 
     /// How many of a value's least significant bytes some observation
-    /// reaches, when the observed bits are exactly that low prefix of whole
-    /// bytes; `None` for a value nothing observes or one observed at a
-    /// higher lane only.
+    /// reaches, when the observed bytes are exactly that low run; `None` for
+    /// a value nothing observes, one observed at a higher lane only, or one
+    /// observed past the bytes a mask can name.
     pub fn observed_low_bytes(&self, value: ValueId) -> Option<u32> {
-        let mask = *self.bytes.get(&value)?;
-        let bits = mask.trailing_ones();
-        (bits > 0 && bits % 8 == 0 && mask.checked_shr(bits).unwrap_or(0) == 0).then_some(bits / 8)
+        self.bytes.get(&value)?.low_bytes()
     }
 
     /// The chain of values from the root that observes `value` down to it.
@@ -615,6 +734,172 @@ mod tests {
             "the value written to memory is observed"
         );
         assert_eq!(graph.use_sites(rax).len(), 1, "the store owns its use site");
+    }
+
+    /// Registers of the widths the observation masks have to count: a word,
+    /// a vector, and one wider than a mask word names.
+    fn wide_arch() -> ArchSpec {
+        let mut arch = arch();
+        arch.add_register(RegisterDef::new("XMM0", 0x1200, 16));
+        arch.add_register(RegisterDef::new("WIDE", 0x2000, 80));
+        arch
+    }
+
+    /// What the proven observations of `ops`, followed by a return of RAX,
+    /// reach of the value `register` holds on entry.
+    fn observed_on_entry(ops: Vec<R2ILOp>, register: &str) -> Option<ByteMask> {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        for op in ops {
+            block.push(op);
+        }
+        block.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let func = SSAFunction::from_blocks_with_arch(&[block], Some(&wide_arch())).expect("ssa");
+        let graph = SsaGraph::from_function(&func);
+        let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
+        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let observations =
+            ProvenProgramObservations::find(&graph, &live, &facts).expect("complete obligations");
+        let entry = graph
+            .values
+            .iter()
+            .find(|value| {
+                value.var.version == 0 && value.var.name().eq_ignore_ascii_case(register)
+            })?
+            .id;
+        let bytes = observations.observed_bytes(entry);
+        assert_eq!(
+            bytes.is_some(),
+            observations.contains(entry),
+            "a value is observed exactly when some byte of it is"
+        );
+        bytes
+    }
+
+    #[test]
+    fn a_slice_past_the_eighth_byte_observes_the_bytes_it_cuts() {
+        // movhlps then movq: the returned word is the vector's high half.
+        let high_half = observed_on_entry(
+            vec![R2ILOp::Subpiece {
+                dst: reg(0, 8),
+                src: reg(0x1200, 16),
+                offset: 8,
+            }],
+            "XMM0",
+        );
+        assert_eq!(high_half, Some(ByteMask::Bytes(0xff00)));
+
+        // pextrd lane 3: four bytes at offset twelve, widened into the result.
+        let top_lane = observed_on_entry(
+            vec![
+                R2ILOp::Subpiece {
+                    dst: reg(8, 4),
+                    src: reg(0x1200, 16),
+                    offset: 12,
+                },
+                R2ILOp::IntZExt {
+                    dst: reg(0, 8),
+                    src: reg(8, 4),
+                },
+            ],
+            "XMM0",
+        );
+        assert_eq!(top_lane, Some(ByteMask::Bytes(0xf000)));
+    }
+
+    #[test]
+    fn the_high_tile_of_a_concatenation_is_observed_through_the_bytes_above_the_low_one() {
+        // RAX = (RCX:RDX)[8..16], which is RCX and nothing of RDX.
+        let ops = || {
+            vec![
+                R2ILOp::Piece {
+                    dst: reg(0x1200, 16),
+                    hi: reg(8, 8),
+                    lo: reg(16, 8),
+                },
+                R2ILOp::Subpiece {
+                    dst: reg(0, 8),
+                    src: reg(0x1200, 16),
+                    offset: 8,
+                },
+            ]
+        };
+        assert_eq!(observed_on_entry(ops(), "RCX"), Some(ByteMask::whole(8)));
+        assert_eq!(observed_on_entry(ops(), "RDX"), None);
+    }
+
+    #[test]
+    fn an_and_that_clears_one_bit_still_reads_every_byte() {
+        // and rax, -2 keeps a bit of every byte, so the whole word is read.
+        let and = |constant: u64| {
+            vec![R2ILOp::IntAnd {
+                dst: reg(0, 8),
+                a: reg(8, 8),
+                b: Varnode::constant(constant, 8),
+            }]
+        };
+        let cleared_bit = observed_on_entry(and((-2i64).cast_unsigned()), "RCX");
+        assert_eq!(cleared_bit, Some(ByteMask::whole(8)));
+        assert_eq!(cleared_bit.and_then(ByteMask::low_bytes), Some(8));
+
+        // A constant that clears whole bytes still narrows what is read.
+        assert_eq!(
+            observed_on_entry(and(0xff), "RCX").and_then(ByteMask::low_bytes),
+            Some(1)
+        );
+        let second_byte = observed_on_entry(and(0xff00), "RCX");
+        assert_eq!(second_byte, Some(ByteMask::Bytes(0b10)));
+        assert_eq!(second_byte.and_then(ByteMask::low_bytes), None);
+    }
+
+    #[test]
+    fn a_value_wider_than_a_mask_word_saturates_rather_than_losing_bytes() {
+        let at = |offset: u32| {
+            observed_on_entry(
+                vec![R2ILOp::Subpiece {
+                    dst: reg(0, 8),
+                    src: reg(0x2000, 80),
+                    offset,
+                }],
+                "WIDE",
+            )
+        };
+        assert_eq!(at(0), Some(ByteMask::Bytes(0xff)));
+        assert_eq!(at(72), Some(ByteMask::All));
+        assert_eq!(at(72).and_then(ByteMask::low_bytes), None);
+    }
+
+    #[test]
+    fn a_byte_mask_counts_bytes_and_saturates_on_overflow() {
+        assert_eq!(ByteMask::whole(0), ByteMask::NONE);
+        assert_eq!(ByteMask::whole(16), ByteMask::Bytes(0xffff));
+        assert_eq!(ByteMask::whole(64), ByteMask::Bytes(u64::MAX));
+        assert_eq!(ByteMask::whole(65), ByteMask::All);
+        assert_eq!(ByteMask::whole(64).low_bytes(), Some(64));
+
+        assert_eq!(
+            ByteMask::Bytes(0xff).shifted_up(56),
+            ByteMask::Bytes(0xff << 56)
+        );
+        assert_eq!(ByteMask::Bytes(0xff).shifted_up(57), ByteMask::All);
+        assert_eq!(ByteMask::Bytes(1).shifted_up(64), ByteMask::All);
+        assert_eq!(ByteMask::NONE.shifted_up(64), ByteMask::NONE);
+
+        assert_eq!(
+            ByteMask::Bytes(0xff00).shifted_down(8),
+            ByteMask::Bytes(0xff)
+        );
+        assert_eq!(ByteMask::Bytes(u64::MAX).shifted_down(64), ByteMask::NONE);
+        assert_eq!(ByteMask::All.shifted_down(64), ByteMask::All);
+
+        assert_eq!(
+            ByteMask::All.intersection(ByteMask::whole(16)),
+            ByteMask::whole(16)
+        );
+        assert_eq!(ByteMask::Bytes(0xf0).union(ByteMask::All), ByteMask::All);
+        assert_eq!(ByteMask::Bytes(0b101).low_bytes(), None);
+        assert_eq!(ByteMask::NONE.low_bytes(), None);
     }
 
     #[test]

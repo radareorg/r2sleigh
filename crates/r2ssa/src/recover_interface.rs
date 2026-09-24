@@ -440,8 +440,15 @@ fn observed_entry_read_storages(
         {
             // Every register value is its root, so the width the program
             // read is the observed low lanes of it, not the register's.
+            // A lane is a power of two bytes wide, so the observed run is
+            // rounded up to the lane that holds it, as a stack parameter's
+            // is: three bytes read through `& 0xffffff` take the four-byte
+            // lane, and six take the whole register. Covering a byte the
+            // program did not read is the side a formal may err on; a lane
+            // no register has would leave the interface unmintable.
             let storage = observations
                 .observed_low_bytes(value.id)
+                .map(u32::next_power_of_two)
                 .filter(|bytes| *bytes < root.size)
                 .map_or(root, |size| CanonicalStorageId { size, ..root });
             // Which observation this parameter rests on is the whole question
@@ -469,9 +476,11 @@ fn observed_entry_read_storages(
                 .collect::<Vec<_>>();
             r2il::refusal_evidence!(
                 "interface-recovery",
-                "entry read {storage:?} ({:?}, bytes {:#x}) is observed from {}: {}",
+                "entry read {storage:?} ({:?}, bytes {}) is observed from {}: {}",
                 value.id,
-                observations.observed_bytes(value.id).unwrap_or(0),
+                observations
+                    .observed_bytes(value.id)
+                    .unwrap_or(crate::deadphi::ByteMask::NONE),
                 root.unwrap_or("?"),
                 steps.join(" <- ")
             );
