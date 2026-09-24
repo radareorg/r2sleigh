@@ -800,15 +800,22 @@ fn exit_stack_pointer_refuses_divergence_calls_and_partial_writes() {
     assert!(divergent_boundary.exit_stack_pointer.is_none());
     assert!(!divergent_boundary.complete);
 
-    for (case_index, destructive_op) in [
-        R2ILOp::Call {
-            target: Varnode::ram(0x9000, 8),
-        },
-        R2ILOp::CallOther {
-            output: None,
-            userop: 7,
-            inputs: Vec::new(),
-        },
+    // A call is destructive; a user operation with no output writes nothing, so SP survives it.
+    for (case_index, (op, destroys)) in [
+        (
+            R2ILOp::Call {
+                target: Varnode::ram(0x9000, 8),
+            },
+            true,
+        ),
+        (
+            R2ILOp::CallOther {
+                output: None,
+                userop: 7,
+                inputs: Vec::new(),
+            },
+            false,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -818,7 +825,7 @@ fn exit_stack_pointer_refuses_divergence_calls_and_partial_writes() {
             dst: Varnode::unique(0x130, 8),
             src: Varnode::register(32, 8),
         });
-        block.push(destructive_op);
+        block.push(op);
         block.push(R2ILOp::Return {
             target: Varnode::register(16, 8),
         });
@@ -835,11 +842,12 @@ fn exit_stack_pointer_refuses_divergence_calls_and_partial_writes() {
             .values()
             .next()
             .expect("closed return boundary");
-        assert!(
+        assert_eq!(
             boundary.exit_stack_pointer.is_none(),
-            "destructive SP case {case_index} retained a boundary: {boundary:?}"
+            destroys,
+            "SP case {case_index}: {boundary:?}"
         );
-        assert!(!boundary.complete, "destructive SP case {case_index}");
+        assert_eq!(!boundary.complete, destroys, "SP case {case_index}");
     }
 
     // A write to a lane of the stack pointer defines the whole register:

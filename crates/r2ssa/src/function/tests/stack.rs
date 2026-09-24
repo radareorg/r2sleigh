@@ -1288,9 +1288,17 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
             },
         ),
         (
-            "unknown effect",
+            "user operation",
             R2ILOp::CallOther {
                 output: None,
+                userop: 7,
+                inputs: Vec::new(),
+            },
+        ),
+        (
+            "user operation into the stack pointer",
+            R2ILOp::CallOther {
+                output: Some(make_reg(0x10, 8)),
                 userop: 7,
                 inputs: Vec::new(),
             },
@@ -1347,10 +1355,11 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
             !facts.stack_address_roots.is_empty(),
             "{name} must preserve source-declared stack roots"
         );
-        if name == "call" {
+        // A call preserves SP by convention; a user operation writes only its named output.
+        if name == "call" || name == "user operation" {
             assert!(
                 !facts.entry_stack_address_roots.is_empty(),
-                "a convention-preserved SP retains entry-relative roots without an FP role"
+                "{name} leaves SP as it was, so entry-relative roots stand"
             );
         } else {
             assert!(

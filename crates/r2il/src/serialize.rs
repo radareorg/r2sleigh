@@ -536,6 +536,10 @@ pub struct ArchSpec {
     #[serde(default)]
     pub user_ops: Vec<String>,
 
+    /// `CallOther` indices that enter the supervisor, whose kernel-written registers no contract names yet.
+    #[serde(default)]
+    pub supervisor_calls: Vec<u32>,
+
     /// What the processor specification's `<tracked_set>` says registers hold on entry to every function.
     #[serde(default)]
     pub tracked_entry_values: Vec<TrackedRegisterValue>,
@@ -564,6 +568,7 @@ impl ArchSpec {
             return_registers: Vec::new(),
             program_counter: None,
             user_ops: Vec::new(),
+            supervisor_calls: Vec::new(),
             tracked_entry_values: Vec::new(),
         }
     }

@@ -3343,6 +3343,13 @@ impl Decompiler {
             .and_then(r2types::ReturnTypeFact::decided)
             .cloned()
             .unwrap_or(CType::Unknown);
+        // A boundary that proves neither a value nor its absence leaves the return type a gap.
+        let return_unproven = matches!(
+            input.source_owned_facts().return_type(),
+            Some(r2types::ReturnTypeFact::Refused(
+                r2types::ReturnTypeRefusal::UnprovenBoundary
+            ))
+        );
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
@@ -3600,6 +3607,7 @@ impl Decompiler {
             // Parameters here come from the render signature, so an empty list
             // is a recovered empty list rather than an unknown one.
             params_known: true,
+            return_unproven,
         };
         // The fold named every constant address it converted, and declaring
         // the objects is part of naming them.

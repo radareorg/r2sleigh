@@ -17,6 +17,7 @@ impl SSAFunction {
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
+            supervisor_calls: BTreeSet::new(),
             promoted_slot_sites: BTreeSet::new(),
             stack_pointer_carrier: None,
             name: None,
@@ -552,6 +553,9 @@ impl SSAFunction {
         cfg.release_operations();
         let mut function = Self {
             call_preserved_carriers: None,
+            supervisor_calls: arch
+                .map(|arch| arch.supervisor_calls.iter().copied().collect())
+                .unwrap_or_default(),
             promoted_slot_sites: promoted.keys().copied().collect(),
             stack_pointer_carrier: None,
             name: None,

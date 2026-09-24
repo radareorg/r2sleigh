@@ -1021,21 +1021,9 @@ pub(crate) fn reaching_abi_value_before(
         // definition the overlap check below sees; the call itself is a
         // barrier only for the carrier the transfer moves.
         //
-        // A user operation is a barrier for every register. The operation is
-        // one the specification could not express in p-code, so what it writes
-        // is not limited to the output it names: `dmb` writes nothing and
-        // `cpuid` writes four registers it never mentions, and nothing here
-        // tells them apart. Trusting the class cost this walk its soundness --
-        // it kept a return boundary over a userop that may have moved the
-        // stack pointer, which is a fact claimed about the program that the
-        // program does not support.
-        //
-        // The nine `libarm.so` functions that a barrier before their return
-        // costs are recovered by modelling the barrier in the lift, so that it
-        // stops being a `CallOther` at all, rather than by widening what a
-        // `CallOther` is assumed not to do.
+        // A user operation writes only its named output, which the overlap check below sees.
         if policy.calls_are_barriers
-            && (matches!(op, SSAOp::CallOther { .. } | SSAOp::Return { .. })
+            && (matches!(op, SSAOp::Return { .. })
                 || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
                     && policy
                         .transfer_carrier

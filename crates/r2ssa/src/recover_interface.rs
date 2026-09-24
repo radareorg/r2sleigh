@@ -89,11 +89,6 @@ pub enum RecoveredFunctionResult {
 }
 
 impl RecoveredFunctionResult {
-    /// A carrier the walk found, or the void claim its absence makes.
-    fn from_slot(result: Option<RecoveredResult>) -> Self {
-        result.map_or(Self::Void, Self::Register)
-    }
-
     /// The carrier this result names, where it names one.
     pub const fn register(self) -> Option<RecoveredResult> {
         match self {
@@ -553,32 +548,43 @@ fn read_covers_slot(read: CanonicalStorageId, slot: CanonicalStorageId) -> bool 
 /// while a function that only defines the low half has a narrow logical result.
 /// Requiring every contributing value to belong to the convention's exact
 /// location keeps an unrelated register from becoming return-width evidence.
-/// Whether a call left this register undefined rather than returning it.
+/// What a live-out value says about the result, where a call defined it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReturnedByCall {
+    /// A value the program produced: no call, or a callee that returns one.
+    Produced,
+    /// The callee returns nothing, so the register holds no value.
+    Void,
+    /// The callee's result is stated nowhere, so what the register holds is unproven.
+    Unstated,
+}
+
+/// Whether a call left this register undefined, unstated, or returned it.
 ///
 /// A `CallDefine` stands for whatever a call may have written. When the
 /// boundary proves the callee returns nothing, the register holds no value
 /// the program produced, so reaching the exit through one is not a result.
-fn clobbered_by_a_void_call(
+fn returned_by_call(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     value: crate::ValueId,
-) -> bool {
+) -> ReturnedByCall {
     let Some(inst) = graph.def_inst(value) else {
-        return false;
+        return ReturnedByCall::Produced;
     };
     let Some(instruction) = graph.inst(inst) else {
-        return false;
+        return ReturnedByCall::Produced;
     };
     if !matches!(
         instruction.payload,
         crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. })
     ) {
-        return false;
+        return ReturnedByCall::Produced;
     }
     // A call and the definitions it stands for are separate instructions, so
     // the site is the nearest call above them in the same block.
     let Some(block) = graph.block(instruction.block) else {
-        return false;
+        return ReturnedByCall::Produced;
     };
     let Some(id) = block
         .insts
@@ -597,10 +603,10 @@ fn clobbered_by_a_void_call(
         .last()
         .and_then(|call| facts.call_sites.by_inst.get(call))
     else {
-        return false;
+        return ReturnedByCall::Produced;
     };
     let Some(boundary) = facts.boundaries.calls.get(id) else {
-        return false;
+        return ReturnedByCall::Produced;
     };
     r2il::refusal_evidence!(
         "interface-recovery",
@@ -608,13 +614,12 @@ fn clobbered_by_a_void_call(
         boundary.results_complete,
         boundary.result_kind
     );
-    // A boundary that names no result carrier proves none: the callee either
-    // returns nothing or is not known to, and neither produced a value here.
-    boundary.results_complete
-        && !matches!(
-            boundary.result_kind,
-            Some(crate::SourceCallResult::Register { .. })
-        )
+    // A declared void callee proves no value; a boundary naming no result kind proves nothing either way.
+    match (boundary.results_complete, boundary.result_kind) {
+        (true, Some(crate::SourceCallResult::Void)) => ReturnedByCall::Void,
+        (true, None) => ReturnedByCall::Unstated,
+        _ => ReturnedByCall::Produced,
+    }
 }
 
 /// The one carrier a body leaves defined at every exit, where the convention's
@@ -657,35 +662,52 @@ fn body_proven_result(
         .is_none()
         .then_some(first)
         .filter(|(candidate, live_out)| {
-            recovered_result(graph, facts, live_out, *candidate).is_some()
+            recovered_result(graph, facts, live_out, *candidate)
+                .register()
+                .is_some()
         })
 }
 
 /// The result the returns prove; a walk that reaches no return proves void only where non-returning calls close the body.
+///
+/// Where the carrier is also an argument slot, the caller fills it, so an untouched one may be returned.
 fn returned_result(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
-    slot: CanonicalStorageId,
+    slots: &SourceConventionSlots,
 ) -> RecoveredFunctionResult {
+    let Some(slot) = slots.result_slot() else {
+        return RecoveredFunctionResult::Unproven;
+    };
+    let entry_is_an_argument = slots
+        .argument_slots()
+        .iter()
+        .any(|argument| argument.location() == slot.location());
+    let untouched = live_out.unresolved_blocks().next().is_some();
     let result = if !live_out.has_returns() {
         if closed_by_calls_that_do_not_return(func) {
             RecoveredFunctionResult::Void
         } else {
             RecoveredFunctionResult::Unproven
         }
-    } else if live_out.unresolved_blocks().next().is_some() {
-        // A return the walk could not answer leaves the carrier as the caller, or an opaque operation, left it.
-        RecoveredFunctionResult::Void
+    } else if live_out.clobbered_blocks().next().is_some() || (untouched && entry_is_an_argument) {
+        // A call nothing states, a supervisor call, or an untouched argument register leaves the result unproven.
+        RecoveredFunctionResult::Unproven
     } else {
-        RecoveredFunctionResult::from_slot(recovered_result(graph, facts, live_out, slot))
+        // An untouched carrier the caller never filled holds no value: void if no return fills it, unproven if some do.
+        match recovered_result(graph, facts, live_out, slot) {
+            RecoveredFunctionResult::Register(_) if untouched => RecoveredFunctionResult::Unproven,
+            result => result,
+        }
     };
     r2il::refusal_evidence!(
         "interface-recovery",
-        "result at the returns: returns={} unresolved={} -> {result:?}",
+        "result at the returns: returns={} unresolved={} clobbered={} -> {result:?}",
         live_out.has_returns(),
-        live_out.unresolved_blocks().count()
+        live_out.unresolved_blocks().count(),
+        live_out.clobbered_blocks().count()
     );
     result
 }
@@ -704,20 +726,25 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
     })
 }
 
+/// The carrier the answered returns fill, void where none does, unproven where one is stated nowhere.
 fn recovered_result(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slot: CanonicalStorageId,
-) -> Option<RecoveredResult> {
+) -> RecoveredFunctionResult {
     let mut observed = None;
     for value in live_out.iter() {
-        if clobbered_by_a_void_call(graph, facts, value) {
-            continue;
+        match returned_by_call(graph, facts, value) {
+            ReturnedByCall::Void => continue,
+            ReturnedByCall::Unstated => return RecoveredFunctionResult::Unproven,
+            ReturnedByCall::Produced => {}
         }
-        let storage = graph.value(value)?.canonical_storage?;
+        let Some(storage) = graph.value(value).and_then(|value| value.canonical_storage) else {
+            return RecoveredFunctionResult::Unproven;
+        };
         if storage.location() != slot.location() || storage.size == 0 || storage.size > slot.size {
-            return None;
+            return RecoveredFunctionResult::Unproven;
         }
         let observed_size = if storage == slot {
             narrow_zero_extend_input_size(graph, value).unwrap_or(storage.size)
@@ -733,9 +760,8 @@ fn recovered_result(
             observed = Some(storage);
         }
     }
-    Some(RecoveredResult {
-        slot,
-        observed: observed?,
+    observed.map_or(RecoveredFunctionResult::Void, |observed| {
+        RecoveredFunctionResult::Register(RecoveredResult { slot, observed })
     })
 }
 
@@ -931,8 +957,10 @@ fn recover_interface_inner(
     {
         let candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, &graph, &[candidate]);
-        result = returned_result(func, &graph, &facts, &candidate_live_out, candidate);
-        if !candidate_live_out.is_empty() && candidate_live_out.unresolved_blocks().next().is_none()
+        result = returned_result(func, &graph, &facts, &candidate_live_out, slots);
+        if !candidate_live_out.is_empty()
+            && (candidate_live_out.unresolved_blocks().next().is_none()
+                || result.register().is_some())
         {
             live_out = candidate_live_out;
         }
@@ -941,15 +969,11 @@ fn recover_interface_inner(
     // independent code thunk returns the address a call pushed, in whichever
     // register its name says. Only one carrier may qualify, or the body has
     // proven nothing about which of them a caller reads.
-    if no_tail_boundary && loader_role.is_none() && result.register().is_none() {
+    // An unproven convention carrier may be what the caller reads, so no other carrier is the one result.
+    if no_tail_boundary && loader_role.is_none() && result == RecoveredFunctionResult::Void {
         let mut proven = body_proven_result(func, &graph, &facts, machine_context, slots);
         if let Some((candidate, candidate_live_out)) = proven.take() {
-            result = RecoveredFunctionResult::from_slot(recovered_result(
-                &graph,
-                &facts,
-                &candidate_live_out,
-                candidate,
-            ));
+            result = recovered_result(&graph, &facts, &candidate_live_out, candidate);
             live_out = candidate_live_out;
         }
     }
@@ -1889,15 +1913,15 @@ mod tests {
     }
 
     #[test]
-    fn a_result_carrier_the_function_never_defines_is_not_claimed() {
+    fn an_untouched_result_carrier_that_is_also_an_argument_is_unproven() {
         let mut block = R2ILBlock::new(0x1000, 4);
-        // x0 is only read, never written, so nothing was produced in it
+        // x0 is only read, so the caller may read back the argument it passed: neither a result nor void is proven
         block.push(R2ILOp::Copy {
             dst: Varnode::register(8, 8),
             src: Varnode::register(0, 8),
         });
         let interface = recovered(block);
-        assert_eq!(interface.result(), RecoveredFunctionResult::Void);
+        assert_eq!(interface.result(), RecoveredFunctionResult::Unproven);
     }
 
     #[test]

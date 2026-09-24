@@ -1415,6 +1415,18 @@ impl<'a> FoldingContext<'a> {
                         {
                             return Err(OpLoweringRefusal::missing_machine_projection());
                         }
+                        // The value a caller may read here is unproven, so a marked gap stands where it would be.
+                        if boundary.result_unproven {
+                            let gap = self
+                                .unproven_return_gap(block.addr, op_idx, source_inst)
+                                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
+                            stmts.push(FoldedOpStmt {
+                                site: self
+                                    .normalized_site(block.addr, op_idx)
+                                    .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
+                                stmt: gap,
+                            });
+                        }
                         (None, CStmt::Return(None))
                     }
                     [_] => {

@@ -2431,6 +2431,8 @@ impl DecompilePrepFacts {
 pub struct SSAFunction {
     /// Whether a call leaves the carriers that address this frame alone, as the call effect says.
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
+    /// The user operations that enter the supervisor, as the lift names them.
+    supervisor_calls: BTreeSet<u32>,
     /// The lifted memory operations promotion took out of memory.
     ///
     /// A promoted slot access is a copy of a variable in the prepared
@@ -2646,6 +2648,7 @@ impl Clone for SSAFunction {
     fn clone(&self) -> Self {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
+            supervisor_calls: self.supervisor_calls.clone(),
             promoted_slot_sites: self.promoted_slot_sites.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
@@ -3082,6 +3085,11 @@ impl SSAFunction {
     /// The architectural stack pointer, as the machine roles name it.
     pub const fn stack_pointer_carrier(&self) -> Option<CanonicalStorageId> {
         self.stack_pointer_carrier
+    }
+
+    /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
+    pub fn enters_supervisor(&self, op: &SSAOp) -> bool {
+        matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
 
     /// Which lifted memory operations promotion took out of memory.

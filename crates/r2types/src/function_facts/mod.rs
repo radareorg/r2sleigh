@@ -1080,6 +1080,101 @@ impl SourceOwnedFunctionFacts {
         self.report.return_type()
     }
 
+    /// The interface's formals as `(slot, width in bytes)`: the stated low lane, else the declared one, else the carrier.
+    pub fn interface_parameter_widths(&self) -> Vec<(u32, u32)> {
+        let Some(interface) = self.source.machine_context().function_interface() else {
+            return Vec::new();
+        };
+        interface
+            .parameters()
+            .iter()
+            .enumerate()
+            .map(|(position, parameter)| {
+                let carrier_bytes = parameter.location().size_bytes();
+                let lane = interface
+                    .parameter_logical_value(position)
+                    .and_then(|logical| match logical.carrier().kind() {
+                        r2ssa::SourceCarrierKind::LowBits => {
+                            u32::try_from(logical.carrier().size_bits() / 8).ok()
+                        }
+                        r2ssa::SourceCarrierKind::Full => None,
+                    });
+                let width = lane
+                    .or_else(|| {
+                        self.declared_parameter_width_bytes(parameter.index(), carrier_bytes)
+                    })
+                    .unwrap_or(carrier_bytes);
+                (parameter.index(), width)
+            })
+            .collect()
+    }
+
+    /// A declared width narrower than the carrier, where the declaration and the parameter's one frame home agree on it.
+    pub fn declared_parameter_width_bytes(&self, slot: u32, carrier_bytes: u32) -> Option<u32> {
+        let ptr_bits = self
+            .source
+            .machine_context()
+            .memory_model()
+            .default_address_bits();
+        let bits =
+            crate::declaration_type_width_bits(self.declared_parameter_type(slot)?, ptr_bits)?;
+        let bytes = (bits % 8 == 0).then_some(bits / 8)?;
+        if bytes == 0 || bytes >= carrier_bytes {
+            return None;
+        }
+        (self.parameter_home_width_bytes(slot) == Some(bytes)).then_some(bytes)
+    }
+
+    /// The width of the parameter's one home slot; two homes of different widths answer nothing.
+    fn parameter_home_width_bytes(&self, slot: u32) -> Option<u32> {
+        let mut homes = self
+            .report
+            .render()?
+            .certified_entities
+            .values()
+            .filter_map(|entity| match entity {
+                CertifiedEntity::StackSlot {
+                    size, source_slot, ..
+                } => source_slot
+                    .filter(|source| {
+                        matches!(
+                            source.role(),
+                            r2ssa::SourceStackSlotRole::ParameterHome { parameter_index, .. }
+                                if parameter_index == slot
+                        )
+                    })
+                    .and(*size),
+                _ => None,
+            });
+        let first = homes.next()?;
+        homes.all(|other| other == first).then_some(first)
+    }
+
+    /// What the parameter's declaration says it is, the certified entity's first.
+    fn declared_parameter_type(&self, slot: u32) -> Option<&CTypeLike> {
+        let exact = self
+            .report
+            .render()
+            .and_then(|render| {
+                render
+                    .certified_entities
+                    .get(&r2ssa::SemanticId::Parameter(slot))
+            })
+            .and_then(|entity| match entity {
+                CertifiedEntity::Parameter { ty, .. } => ty.as_ref(),
+                _ => None,
+            });
+        exact.or_else(|| {
+            self.report
+                .type_facts()
+                .render_authorized_signature()?
+                .params
+                .get(usize::try_from(slot).ok()?)?
+                .ty
+                .as_ref()
+        })
+    }
+
     /// The type parameter `slot` is declared with at this width: the signature's where it fits, else the certified entity's.
     pub fn parameter_declaration(&self, slot: usize, width_bits: u32) -> Option<CTypeLike> {
         let ptr_bits = self

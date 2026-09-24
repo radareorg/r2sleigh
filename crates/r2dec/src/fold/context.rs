@@ -894,6 +894,45 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// The marker a return carries when the interface proves no result, claiming that value's obligation.
+    pub(crate) fn unproven_return_gap(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+        source_inst: InstId,
+    ) -> Option<crate::ast::CStmt> {
+        let prepared = self.inputs.prepared_ssa?;
+        let journal = self.inputs.observation_journal?;
+        let obligation = prepared
+            .obligations()
+            .obligations_for_inst(source_inst)
+            .find(|obligation| {
+                obligation.id.kind == r2ssa::SemanticObligationKind::ReturnValue
+                    && obligation.id.component == r2ssa::SemanticObligationComponent::Whole
+                    && obligation.inputs.is_empty()
+            })?
+            .id;
+        let anchor = crate::shadow_report::GapAnchor {
+            block_addr,
+            op_idx: u32::try_from(op_idx).ok()?,
+        };
+        let marker = crate::ast::GapMarker {
+            kind: "UnprovenReturn".to_string(),
+            origin: "interface".to_string(),
+            block_addr,
+            op_idx,
+            ops: 1,
+        };
+        let cells = [crate::observation_journal::GapCell::Effect(obligation)];
+        match journal.borrow_mut().gap_stmt(anchor, marker, &cells) {
+            Ok(stmt) => Some(stmt),
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                None
+            }
+        }
+    }
+
     #[track_caller]
     pub(super) fn retain_first_observation_error(
         &self,

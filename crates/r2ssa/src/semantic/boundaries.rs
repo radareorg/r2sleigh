@@ -1201,11 +1201,13 @@ pub(crate) fn collect_source_boundary_facts(
                 // A void return carries no values, so nothing about it is an
                 // ABI question: there is no carrier to resolve and no
                 // convention to be coherent about. Only a returned value is.
+                use SourceFunctionReturn::{Unproven, Void};
                 match machine_context
                     .function_interface()
                     .map(|interface| interface.return_kind())
                 {
-                    Some(SourceFunctionReturn::Void) => complete = true,
+                    // An unproven result claims no value, so the return is as complete as a void one.
+                    Some(Void | Unproven) => complete = true,
                     Some(SourceFunctionReturn::Register { .. }) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.op_site_for_inst(inst.id) {
                             for slot in return_slots {
@@ -1275,6 +1277,9 @@ pub(crate) fn collect_source_boundary_facts(
                     );
                 }
             }
+            let result_unproven = machine_context
+                .and_then(SourceMachineContext::function_interface)
+                .is_some_and(|interface| interface.return_kind() == SourceFunctionReturn::Unproven);
             facts.returns.insert(
                 inst.id,
                 SourceReturnBoundaryFact {
@@ -1284,6 +1289,7 @@ pub(crate) fn collect_source_boundary_facts(
                     exit_stack_pointer,
                     complete,
                     machine_state_complete,
+                    result_unproven,
                 },
             );
         }
@@ -1735,8 +1741,8 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
         for (op_index, op) in ops.iter().enumerate() {
             // A call's clobbers are the `CallDefine`s that follow it, each a
             // definition checked for overlap below; the call itself touches
-            // only the carrier the transfer moves.
-            if matches!(op, SSAOp::CallOther { .. } | SSAOp::Return { .. })
+            // only the carrier the transfer moves. A user operation writes only its named output.
+            if matches!(op, SSAOp::Return { .. })
                 || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
                     && transfer_carrier
                         .is_some_and(|carrier| register_storages_overlap(carrier, storage)))

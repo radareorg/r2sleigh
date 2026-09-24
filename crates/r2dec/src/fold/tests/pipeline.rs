@@ -2113,7 +2113,12 @@ mod tests {
         let output = audit.output();
 
         assert_eq!(audit.render_refusal(), None, "{output}");
-        let gaps = output.matches("r2dec gap:").count();
+        // The body never returns, so its result is unproven too and the header says so.
+        assert!(
+            output.starts_with("/* r2dec gap: UnprovenReturn */ gap_between("),
+            "{output}"
+        );
+        let gaps = output.matches("r2dec gap: machine-projection").count();
         assert_eq!(gaps, 1, "one operation refused, so one marker: {output}");
         assert_eq!(
             output.matches(" + 7").count(),

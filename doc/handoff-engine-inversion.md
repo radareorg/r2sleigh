@@ -1151,11 +1151,14 @@ proved a frame slot restated that partial interface as the second pass's
 declaration. A dispatched body is now prepared once more before its slots are
 restated, so its interface is read off every arm.
 
-Open: a return the walk cannot answer (the register untouched, or behind a user
-operation such as `dmb` or `svc`) is still read as void. On ARM and AArch64 the
-result register is also the first argument, so an untouched one may be that
-argument returned; and a user operation with no output may or may not write
-it. Deciding that is a question about what the specification's silence means.
-`pdd`'s placement also drops trailing formals the body never mentions, so its
-arity can be shorter than `afi`'s (`vfold`, `main` with an unread `argv`); the
-per-slot types agree.
+Closed: a user operation writes only its named p-code output, so `dmb`
+writes nothing and the value before it is returned. A supervisor call (`svc`,
+`syscall`, named in `ArchSpec::supervisor_calls`) leaves the result register
+unproven until syscall contracts exist; so do an unstated callee's result and an
+untouched carrier that is also an argument register (ARM r0, AArch64 x0). An
+untouched x86 rax is still void: the caller never fills it. An unproven result
+renders `return;` behind a marked `UnprovenReturn` gap, with the header's return
+type spelled as that gap, and `afi` prints `/* unproven */`. `pdd` no longer
+trims unread trailing formals: both views take the interface's, and
+`r2types::SourceOwnedFunctionFacts::interface_parameter_widths` owns their
+widths. The corpus compile passes `-Wno-unused-parameter` for that reason.

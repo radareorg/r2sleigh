@@ -568,7 +568,7 @@ fn declare_imports(
     declared
 }
 
-/// One callee's body, prepared against what the binary declares about it and against no callee of its own.
+/// One callee's body, prepared against what the binary declares about it and its imports, and against no callee body of its own.
 ///
 /// This is what a caller learns about a callee -- its interface, and what its
 /// own body does through each parameter -- so every caller learns it the same way.
@@ -594,8 +594,20 @@ fn prepared_callee(
     // its instructions show, which for a result register is nothing, and
     // then the call site renders it as returning nothing.
     let declared = declaration_for(native, target, address, ptr_bits);
+    // An import's prototype is a declaration, not a body, so what the callee returns through one is known.
+    let targets = walked
+        .body
+        .calls
+        .iter()
+        .chain(walked.body.tail_calls.iter())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut imports = Callees::default();
+    declare_imports(native, target, &targets, ptr_bits, &mut imports);
     native
-        .prepare_restated(&walked, &Callees::default(), Vec::new(), declared, &[])
+        .prepare_restated(&walked, &imports, Vec::new(), declared, &[])
         .map_err(|_| Unreadable::NotPrepared)
 }
 

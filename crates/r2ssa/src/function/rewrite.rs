@@ -528,16 +528,13 @@ impl SSAFunction {
         let call_carriers_are_restored = self
             .call_preserved_carriers
             .is_some_and(|carriers| carriers.stack_pointer() && carriers.frame_pointer());
-        // A user operation writes only its output varnode, so one whose output
-        // is not a frame carrier -- a NEON reduction into a vector register --
-        // leaves the entry-relative facts standing; one without an output, a
-        // syscall, may have done anything.
+        // A user operation writes only its output varnode.
         let frame_carriers = [
             self.stack_pointer_carrier(),
             function_interface.and_then(SourceFunctionInterface::frame_pointer_storage),
         ];
         let writes_no_frame_carrier = |output: &Option<SSAVar>| {
-            output.as_ref().is_some_and(|dst| {
+            output.as_ref().is_none_or(|dst| {
                 self.canonical_storage_for_var(dst).is_none_or(|storage| {
                     !frame_carriers.iter().flatten().any(|carrier| {
                         crate::semantic::register_storages_overlap(storage, *carrier)

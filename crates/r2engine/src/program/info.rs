@@ -25,6 +25,8 @@ pub struct FunctionInfo {
     pub locals: Vec<Local>,
     /// What it returns, where r2types decided it.
     pub returns: Option<CTypeLike>,
+    /// Whether the boundary proves neither a result nor its absence.
+    pub return_unproven: bool,
     /// Whether the whole program proves control never comes back from it.
     pub noreturn: bool,
 }
@@ -90,6 +92,12 @@ impl FunctionInfo {
             convention: facts.type_facts().callconv.clone(),
             arguments: arguments(artifact, sealed, &entities),
             returns: returns(artifact, sealed),
+            return_unproven: matches!(
+                sealed.return_type(),
+                Some(r2types::ReturnTypeFact::Refused(
+                    r2types::ReturnTypeRefusal::UnprovenBoundary
+                ))
+            ),
             locals: locals(artifact, &entities),
             noreturn,
         }
@@ -218,6 +226,29 @@ fn arguments(
             })
         })
         .collect::<Vec<_>>();
+    // The interface owns arity: a formal the body never reads is still one of its parameters.
+    let interface = artifact.machine_context().function_interface();
+    for (slot, width_bytes) in sealed.interface_parameter_widths() {
+        if arguments.iter().any(|argument| argument.slot == slot) {
+            continue;
+        }
+        let width_bits = width_bytes * 8;
+        let storage = interface
+            .and_then(|interface| interface.parameters().iter().find(|p| p.index() == slot))
+            .and_then(|parameter| parameter.register_storage());
+        arguments.push(Argument {
+            slot,
+            storage,
+            name: sealed
+                .report()
+                .display_names()
+                .parameter(slot as usize)
+                .map(str::to_owned),
+            ty: sealed
+                .parameter_declaration(slot as usize, width_bits)
+                .unwrap_or_else(|| CTypeLike::machine_bits(width_bits)),
+        });
+    }
     arguments.sort_unstable_by_key(|argument| argument.slot);
     arguments
 }

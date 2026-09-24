@@ -93,6 +93,16 @@ impl ReturnTypeFact {
         {
             return Self::decided_by(CTypeLike::Void, ReturnTypeEvidence::VoidBoundary);
         }
+        // A return whose result r2ssa left unproven hands back something no exit can type.
+        if source
+            .facts()
+            .boundaries
+            .returns
+            .values()
+            .any(|boundary| boundary.result_unproven)
+        {
+            return Self::Refused(ReturnTypeRefusal::UnprovenBoundary);
+        }
         if let Some(ty) = graph {
             return Self::decided_by(ty, ReturnTypeEvidence::Carrier);
         }

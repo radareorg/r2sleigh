@@ -539,6 +539,18 @@ impl SemanticObligationInventory {
                 SemanticObligationComponent::Whole,
                 &mut required,
             );
+            // An unproven result is a value a caller may read that nothing here can render.
+            if boundary.result_unproven {
+                seed_instruction_with_inputs(
+                    boundary.at,
+                    SemanticObligationKind::ReturnValue,
+                    SemanticObligationComponent::Whole,
+                    Vec::new(),
+                    &mut required,
+                    &mut explicit_inputs,
+                    &mut duplicate_seeds,
+                );
+            }
             for value in &boundary.values {
                 let logical_value =
                     crate::semantic::exact_logical_return_projection(graph, machine_context, value)

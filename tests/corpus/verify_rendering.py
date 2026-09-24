@@ -52,6 +52,8 @@ STRICT_C_FLAGS = (
     "-Wconversion",
     "-Wsign-conversion",
     "-Werror",
+    # The interface owns arity, so a formal the body never reads is still declared.
+    "-Wno-unused-parameter",
     "-O0",
 )
 BINDING_AUDIT_PREFIX = "R2SLEIGH_BINDING_AUDIT__"

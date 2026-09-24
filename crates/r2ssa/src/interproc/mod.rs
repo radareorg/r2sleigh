@@ -2496,9 +2496,11 @@ fn apply_call_carrier_transfer(
     state: &mut CallCarrierMap,
     op: &SSAOp,
 ) {
-    if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
-        || has_volatile_or_unknown_effect(op)
-    {
+    // A user operation writes only its named output.
+    let clobbers_every_carrier = !matches!(op, SSAOp::CallOther { .. })
+        && (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+            || has_volatile_or_unknown_effect(op));
+    if clobbers_every_carrier {
         state
             .values_mut()
             .for_each(|value| *value = CallCarrierState::Unknown);

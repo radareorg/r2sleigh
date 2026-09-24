@@ -1550,6 +1550,8 @@ pub struct CFunction {
     /// asserts the function takes no arguments; a function whose interface is
     /// unknown must not make that claim.
     pub params_known: bool,
+    /// No return proves what the result carrier holds, so the return type is a marked gap.
+    pub return_unproven: bool,
     /// The functions this one calls, in the order their names sort.
     ///
     /// C requires a declaration before a call, and a decompiled function that
@@ -1724,6 +1726,7 @@ impl CFunction {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: true,
+            return_unproven: false,
             declaration_only: None,
         }
     }

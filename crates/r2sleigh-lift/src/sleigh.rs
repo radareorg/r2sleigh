@@ -211,6 +211,31 @@ fn derive_register_projections(
         .collect()
 }
 
+/// User operations that enter the supervisor, whose kernel-written result no specification states.
+const SUPERVISOR_CALLS: &[&str] = &[
+    // AArch64 `svc`, `hvc`, `smc`.
+    "CallSupervisor",
+    "CallHyperVisor",
+    "CallSecureMonitor",
+    // ARM `svc`/`swi`, `hvc`, `smc`.
+    "software_interrupt",
+    "software_hvc",
+    "software_smc",
+    // x86 `syscall` and `sysenter`; `int n` is already a call through the vector it reads.
+    "syscall",
+    "sysenter",
+];
+
+/// The `CallOther` indices of the supervisor calls this language declares.
+fn supervisor_calls(user_ops: &[String]) -> Vec<u32> {
+    user_ops
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| SUPERVISOR_CALLS.contains(&name.as_str()))
+        .filter_map(|(index, _)| u32::try_from(index).ok())
+        .collect()
+}
+
 fn validate_extracted_register_geometry(arch: ArchSpec) -> Result<ArchSpec, LiftError> {
     r2il::validate_register_geometry(&arch).map_err(|error| {
         LiftError::Parse(format!(
@@ -347,6 +372,7 @@ pub(crate) fn extract_architecture(
     // The language's user-defined operations, in the order it declares them.
     // A CALLOTHER names one by index, and the index means nothing without this.
     ctx.arch.user_ops = sleigh.user_op_names();
+    ctx.arch.supervisor_calls = supervisor_calls(&ctx.arch.user_ops);
 
     let arch = validate_extracted_register_geometry(ctx.finish())?;
 

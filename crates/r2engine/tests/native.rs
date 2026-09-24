@@ -650,21 +650,10 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
 }
 
 #[test]
-fn a_leaf_whose_barrier_is_only_a_user_operation_cannot_prove_its_frame() {
-    // No prologue, no epilogue: this function never touches the stack pointer,
-    // and it still cannot prove it. The barrier before the return is a
-    // `CALLOTHER` -- an operation the specification could not express in p-code
-    // -- so what it writes is not limited to the output it names, and the walk
-    // that proves the stack pointer survived has to stop at it. `dmb` writes
-    // nothing and `cpuid` writes four registers it never mentions; nothing
-    // here tells them apart, and assuming the first cost this walk its
-    // soundness.
-    //
-    // What recovers this function is modelling the barrier in the lift, so it
-    // stops being a `CALLOTHER` at all. That is the same route the exclusive
-    // pair below took, and it is blocked on stating the ordering the
-    // specification gives rather than one chosen to make this pass.
+fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
+    // `dmb` is a user operation with no output, and p-code says it writes nothing else.
     const BARRIER_LEAF: &[u8] = &[
+        0x07, 0x00, 0xa0, 0xe3, // mov r0, 7
         0x5f, 0xf0, 0x7f, 0xf5, // dmb sy
         0x1e, 0xff, 0x2f, 0xe1, // bx lr
     ];
@@ -675,11 +664,86 @@ fn a_leaf_whose_barrier_is_only_a_user_operation_cannot_prove_its_frame() {
         name: "order",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
     assert!(
-        response.render_refusal.is_some(),
-        "a user operation before the return proves nothing about the frame:\n{}",
-        response.output
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
     );
+    assert!(output.contains("DataMemoryBarrier("), "{output}");
+    assert!(output.contains("return 7;"), "{output}");
+    assert!(!output.contains("r2dec gap"), "{output}");
+}
+
+/// Whether a rendering marks its return as unproven, in the header and at the return.
+fn marks_an_unproven_return(output: &str) -> bool {
+    output.starts_with("/* r2dec gap: UnprovenReturn */")
+        && output.contains("r2dec gap: UnprovenReturn at")
+}
+
+#[test]
+fn a_system_call_leaves_the_return_a_marked_gap_and_the_function_still_renders() {
+    // The kernel writes x0 and no declared contract says so, so the result is neither `void` nor the value before the call.
+    const EXIT: &[u8] = &[
+        0x00, 0x00, 0x80, 0xd2, // mov x0, 0
+        0xa8, 0x0b, 0x80, 0xd2, // mov x8, 93
+        0x01, 0x00, 0x00, 0xd4, // svc 0
+        0xc0, 0x03, 0x5f, 0xd6, // ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: EXIT,
+        name: "start",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
+    );
+    assert!(output.contains("CallSupervisor("), "{output}");
+    assert!(marks_an_unproven_return(output), "{output}");
+    assert!(!output.contains("return 0;"), "{output}");
+}
+
+#[test]
+fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument() {
+    // On AArch64 x0 is arg1 and the result: leaving it alone may be returning it.
+    const READ_ONLY: &[u8] = &[
+        0x01, 0x00, 0x40, 0xb9, // ldr w1, [x0]
+        0xc0, 0x03, 0x5f, 0xd6, // ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: READ_ONLY,
+        name: "touch",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{output}",
+        response.render_refusal
+    );
+    assert!(marks_an_unproven_return(output), "{output}");
+
+    // On x86-64 rax is no argument, so a caller never filled it and nothing is returned.
+    const STORE: &[u8] = &[
+        0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, // mov dword [rdi], 1
+        0xc3, // ret
+    ];
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: STORE,
+        name: "store",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.starts_with("void store("), "{output}");
 }
 
 /// A loop entered at two blocks, whose counter climbs on every pass.
@@ -1123,7 +1187,13 @@ fn a_clear_direction_flag_survives_a_call() {
         let response = decompile(&machine.under(convention), &program, BASE).expect("decompile");
         let text = response.output.text();
         assert!(response.render_refusal.is_none(), "{convention}\n{text}");
-        assert!(!text.contains("r2dec gap"), "{convention}\n{text}");
+        // The import states no result, so the return is the only gap.
+        assert!(marks_an_unproven_return(text), "{convention}\n{text}");
+        assert_eq!(
+            text.matches("r2dec gap:").count(),
+            2,
+            "{convention}\n{text}"
+        );
         assert!(
             text.contains("to[transferred] = ((uint64_t*)RBP_0)[transferred];"),
             "{convention}\n{text}"

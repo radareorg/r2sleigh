@@ -256,116 +256,12 @@ pub(super) fn verified_stack_slot_role(
     }
 }
 
-/// The width of the parameter's one home slot, where the frame gave it exactly
-/// one. Two homes of different widths are two answers, and the rule below rests
-/// on the frame stating a single number, so it declines rather than picking.
-fn parameter_home_width_bytes(source_owned: &SourceOwnedFunctionFacts, slot: u32) -> Option<u32> {
-    let mut homes = source_owned
-        .report()
-        .render()?
-        .certified_entities
-        .values()
-        .filter_map(|entity| match entity {
-            r2types::CertifiedEntity::StackSlot {
-                size, source_slot, ..
-            } => source_slot
-                .filter(|source| {
-                    matches!(
-                        source.role(),
-                        r2ssa::SourceStackSlotRole::ParameterHome { parameter_index, .. }
-                            if parameter_index == slot
-                    )
-                })
-                .and(*size),
-            _ => None,
-        });
-    let first = homes.next()?;
-    homes.all(|other| other == first).then_some(first)
-}
-
-/// What the parameter's declaration says it is, exact first.
-fn declared_parameter_type(
-    source_owned: &SourceOwnedFunctionFacts,
-    slot: u32,
-) -> Option<&r2types::CTypeLike> {
-    let exact = source_owned
-        .report()
-        .render()
-        .and_then(|render| render.certified_entities.get(&SemanticId::Parameter(slot)))
-        .and_then(|entity| match entity {
-            r2types::CertifiedEntity::Parameter { ty, .. } => ty.as_ref(),
-            _ => None,
-        });
-    exact.or_else(|| {
-        source_owned
-            .report()
-            .type_facts()
-            .render_authorized_signature()?
-            .params
-            .get(usize::try_from(slot).ok()?)?
-            .ty
-            .as_ref()
-    })
-}
-
-/// The parameter's width, where its declaration and its home agree on one.
-///
-/// A register carrier is eight bytes because registers are; `int flags` in
-/// `esi` is four. Two independent statements settle it: the declared type's
-/// width, and the width of the home the compiler gave the parameter in the
-/// frame. Where they are the same number, that is the parameter, and its home
-/// is the variable it names. Where they differ, or either is missing, the
-/// carrier stands -- the same construction-and-seal twin the plan uses
-/// elsewhere, rather than one source trusted alone.
-fn declared_parameter_width_bytes(
-    source_owned: &SourceOwnedFunctionFacts,
-    slot: u32,
-    carrier_bytes: u32,
-    ptr_bits: u32,
-) -> Option<u32> {
-    let bits = declaration_type_width(declared_parameter_type(source_owned, slot)?, ptr_bits)?;
-    let bytes = (bits % 8 == 0).then_some(bits / 8)?;
-    if bytes == 0 || bytes >= carrier_bytes {
-        return None;
-    }
-    (parameter_home_width_bytes(source_owned, slot) == Some(bytes)).then_some(bytes)
-}
-
 pub(super) fn parameter_candidates(
     source_owned: &SourceOwnedFunctionFacts,
 ) -> Vec<Option<ParameterCandidate>> {
-    let ptr_bits = source_owned
-        .source()
-        .machine_context()
-        .memory_model()
-        .default_address_bits();
     let mut candidates = Vec::new();
-    if let Some(interface) = source_owned.source().machine_context().function_interface() {
-        for (position, parameter) in interface.parameters().iter().enumerate() {
-            // A parameter declared narrower than its carrier is the low lane
-            // of that carrier: `unsigned len` in rdx is four bytes wide, and
-            // its four-byte home is its home. The carrier width is only the
-            // answer where the interface states no narrower lane.
-            let carrier_bytes = parameter.location().size_bytes();
-            let width_bytes = interface
-                .parameter_logical_value(position)
-                .and_then(|logical| match logical.carrier().kind() {
-                    r2ssa::SourceCarrierKind::LowBits => {
-                        u32::try_from(logical.carrier().size_bits() / 8).ok()
-                    }
-                    r2ssa::SourceCarrierKind::Full => None,
-                })
-                .or_else(|| {
-                    declared_parameter_width_bytes(
-                        source_owned,
-                        parameter.index(),
-                        carrier_bytes,
-                        ptr_bits,
-                    )
-                })
-                .unwrap_or(carrier_bytes);
-            insert_formal_parameter_candidate(&mut candidates, parameter.index(), width_bytes);
-        }
+    for (slot, width_bytes) in source_owned.interface_parameter_widths() {
+        insert_formal_parameter_candidate(&mut candidates, slot, width_bytes);
     }
     let Some(render) = source_owned.report().render() else {
         return candidates;
@@ -412,13 +308,9 @@ pub(super) fn parameter_candidates(
             Some(ParameterCandidate::Refused(reason)) => ParameterCandidate::Refused(*reason),
             Some(ParameterCandidate::Exact { .. }) | None => ParameterCandidate::Exact {
                 entity: *id,
-                width_bytes: declared_parameter_width_bytes(
-                    source_owned,
-                    *slot,
-                    *carrier_width,
-                    ptr_bits,
-                )
-                .unwrap_or(*carrier_width),
+                width_bytes: source_owned
+                    .declared_parameter_width_bytes(*slot, *carrier_width)
+                    .unwrap_or(*carrier_width),
                 entry_values: entry_values.clone(),
             },
         });

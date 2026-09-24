@@ -714,6 +714,8 @@ pub struct SourceReturnBoundaryFact {
     /// independent of whether any ABI described the values the return carries,
     /// so it holds for functions with no recovered ABI at all.
     pub machine_state_complete: bool,
+    /// The interface proves no result, so what a caller reads in the result carrier here is unproven.
+    pub result_unproven: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

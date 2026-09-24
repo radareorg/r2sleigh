@@ -21,6 +21,7 @@
 //! one answer are a cross-check, two independently written statements of one
 //! rule are two answerers that drift.
 
+use crate::function::SSAFunction;
 use crate::op::SSAOp;
 
 /// Whether an operation overwrites the register a backward search is following.
@@ -28,8 +29,9 @@ use crate::op::SSAOp;
 /// A call owns the result register. The convention names the same register for
 /// a callee's result and for its caller's, so a call reached walking backwards
 /// has overwritten what came before it, and its predecessors cannot answer
-/// either -- they run before the call. A user operation is opaque and may write
-/// anything, which is the same situation without a convention to appeal to.
+/// either -- they run before the call.
+///
+/// A user operation writes only the output its p-code names, except one that enters the supervisor.
 ///
 /// Two operations are deliberately not here, and both were in one of the two
 /// walks before this rule was shared.
@@ -43,9 +45,6 @@ use crate::op::SSAOp;
 /// `CallDefine` is the operation that gives a call's result a name, so it *is*
 /// the definition a walk is looking for. Stopping on it refuses to see the
 /// value a function returning `f(x)` hands back.
-pub(crate) const fn op_ends_reaching_walk(op: &SSAOp) -> bool {
-    matches!(
-        op,
-        SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
-    )
+pub(crate) fn op_ends_reaching_walk(function: &SSAFunction, op: &SSAOp) -> bool {
+    matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) || function.enters_supervisor(op)
 }

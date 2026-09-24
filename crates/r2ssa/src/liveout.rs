@@ -29,6 +29,8 @@ pub struct FunctionLiveOut {
     by_return: BTreeMap<u64, BTreeSet<ValueId>>,
     /// Return blocks where no definition of a return register could be found.
     unresolved: BTreeSet<u64>,
+    /// The unresolved blocks a call or a supervisor call left holding a value nothing states.
+    clobbered: BTreeSet<u64>,
 }
 
 /// Whether a write puts some of the returned bytes in place.
@@ -73,15 +75,22 @@ impl FunctionLiveOut {
             // one unresolved block, and left the value the loop computed
             // observed by nothing.
             let mut complete = !return_storages.is_empty();
+            let mut clobbered = false;
             let mut here = BTreeSet::new();
             for storage in return_storages {
-                complete &= live.collect_reaching(func, graph, *storage, block.addr, &mut here);
+                let (found, clobbered_here) =
+                    live.collect_reaching(func, graph, *storage, block.addr, &mut here);
+                complete &= found && !clobbered_here;
+                clobbered |= clobbered_here;
             }
             if !here.is_empty() {
                 live.by_return.insert(block.addr, here);
             }
             if !complete {
                 live.unresolved.insert(block.addr);
+            }
+            if clobbered {
+                live.clobbered.insert(block.addr);
             }
         }
         live
@@ -93,6 +102,8 @@ impl FunctionLiveOut {
     /// The walk stops on a path as soon as that path defines the register, so a
     /// join is answered by its merge rather than by whatever lies beyond it, and
     /// a block already visited is not walked twice.
+    ///
+    /// Answers whether any definition was found, and whether a path was clobbered.
     fn collect_reaching(
         &mut self,
         func: &SSAFunction,
@@ -100,7 +111,7 @@ impl FunctionLiveOut {
         return_storage: CanonicalStorageId,
         from: u64,
         here: &mut BTreeSet<ValueId>,
-    ) -> bool {
+    ) -> (bool, bool) {
         let mut found = false;
         let mut clobbered_any = false;
         let mut seen = BTreeSet::new();
@@ -129,7 +140,7 @@ impl FunctionLiveOut {
                 // the register before it -- for a function whose final act is
                 // `warnx(fmt, ...)`, the format string -- as the value
                 // returned.
-                if crate::reaching_rules::op_ends_reaching_walk(op) {
+                if crate::reaching_rules::op_ends_reaching_walk(func, op) {
                     clobbered = true;
                     break;
                 }
@@ -190,7 +201,7 @@ impl FunctionLiveOut {
                 pending.push_back(predecessor);
             }
         }
-        found && !clobbered_any
+        (found, clobbered_any)
     }
 
     /// Whether the caller reads this value once the function returns.
@@ -222,6 +233,11 @@ impl FunctionLiveOut {
     /// Returning blocks whose outgoing register value this pass could not name.
     pub fn unresolved_blocks(&self) -> impl Iterator<Item = u64> + '_ {
         self.unresolved.iter().copied()
+    }
+
+    /// Unresolved returning blocks where a call or a supervisor call, not the entry, holds the register.
+    pub fn clobbered_blocks(&self) -> impl Iterator<Item = u64> + '_ {
+        self.clobbered.iter().copied()
     }
 
     /// Whether any block returns, resolved or not.

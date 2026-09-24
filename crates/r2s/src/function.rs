@@ -50,7 +50,12 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
 
 /// `signature: <ret> <name> (<type> <arg>, ...);`, as radare2's `afcf` spells one, where it is authorized.
 fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -> Option<String> {
-    let returns = info.returns.as_ref()?;
+    // An unproven return is spelled as the gap it is, so the arity still shows.
+    let returns = match &info.returns {
+        Some(returns) => returns.to_string(),
+        None if info.return_unproven => "/* unproven */".to_owned(),
+        None => return None,
+    };
     let parameters = info
         .arguments
         .iter()

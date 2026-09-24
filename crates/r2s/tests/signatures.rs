@@ -69,6 +69,24 @@ fn afi_states_the_signature_pdd_declares() {
 }
 
 #[test]
+fn pdd_declares_every_formal_the_interface_has_even_unread() {
+    // `vfold` spills six carriers for `va_start` and `main` never reads `argv`; the interface keeps both.
+    for (function, arity) in [("sym.vfold", 6), ("main", 3)] {
+        let info = r2s_on("shapes_gcc_x64_O0", &format!("afi @ {function}"));
+        let signature = info
+            .lines()
+            .find_map(|line| line.strip_prefix("signature: "))
+            .unwrap_or_else(|| panic!("afi states no signature:\n{info}"));
+        let rendered = r2s_on("shapes_gcc_x64_O0", &format!("pdd @ {function}"));
+        let header = rendered.lines().next().expect("a header");
+        let (_, afi) = header_types(signature.trim_end_matches(';'));
+        let (_, pdd) = header_types(header);
+        assert_eq!(pdd.len(), arity, "{header}");
+        assert_eq!(afi, pdd, "{signature}\n{header}");
+    }
+}
+
+#[test]
 fn afi_says_noreturn_only_where_the_program_proves_it() {
     let stub = r2s_on("branchy_gcc_x64_O0", "afi @ sym.imp.__stack_chk_fail");
     assert!(stub.lines().any(|line| line == "noreturn: true"), "{stub}");
