@@ -162,6 +162,11 @@ impl Program for Fixture {
         false
     }
 
+    /// Nothing here is loaded, so nothing is written by a loader.
+    fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
+        false
+    }
+
     fn extents(&self) -> &r2types::ProgramExtents {
         const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
         NONE
@@ -329,6 +334,11 @@ impl r2ssa::body::Program for Importing {
 
 impl Program for Importing {
     fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    /// Nothing here is loaded, so nothing is written by a loader.
+    fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
         false
     }
 
@@ -908,6 +918,11 @@ impl r2ssa::body::Program for ImportCaller {
 
 impl Program for ImportCaller {
     fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    /// Nothing here is loaded, so nothing is written by a loader.
+    fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
         false
     }
 

@@ -67,6 +67,9 @@ pub trait Program: r2ssa::body::Program {
     /// no section at all.
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
+    /// Whether the loader writes any byte of this range before the program runs, so the file's bytes there are not what it reads.
+    fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool;
+
     /// Where the program's loaded sections lie, code or data.
     ///
     /// A number nothing proves to move with the program names one of its

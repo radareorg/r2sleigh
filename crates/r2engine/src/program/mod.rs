@@ -560,6 +560,10 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
             .any(|section| !section.is_code)
     }
 
+    fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool {
+        self.source.container().loader_writes_any(range)
+    }
+
     fn extents(&self) -> &r2types::ProgramExtents {
         &self.extents
     }
@@ -620,6 +624,10 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
         self.program.holds_static_data(vaddr)
+    }
+
+    fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool {
+        self.program.loader_writes(range)
     }
 
     fn extents(&self) -> &r2types::ProgramExtents {

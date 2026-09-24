@@ -70,16 +70,25 @@ impl Memory<'_> {
         self.program.extents().holds(address)
     }
 
-    /// The text this revision holds at an address in a section of static data, where it holds text.
+    /// The text this revision holds at an address in a section of static data, where it holds text the loader leaves alone.
     pub(super) fn text(&self, address: u64) -> Option<String> {
-        crate::native::text_at(self.program, address)
+        let text = crate::native::text_at(self.program, address)?;
+        let end = address.saturating_add(text.len() as u64 + 1);
+        (!self.program.loader_writes(&(address..end))).then_some(text)
     }
 
-    /// The value this revision holds at an address, where it holds one.
+    /// The value this revision holds at an address, where it holds one the loader leaves alone.
     pub(super) fn word(&self, address: u64, width: u32) -> Option<u64> {
         let width = usize::try_from(width)
             .ok()
             .filter(|width| (1..=8).contains(width))?;
+        // A rebased pointer or an import's slot reads as what the loader wrote there, which the file does not hold.
+        if self
+            .program
+            .loader_writes(&(address..address.saturating_add(width as u64)))
+        {
+            return None;
+        }
         let read = self
             .program
             .read(address, width)
@@ -248,7 +257,7 @@ pub enum AnnotationKind {
         high: u64,
         stride: u64,
     },
-    /// The revision this answer names holds this value at that address.
+    /// The revision this answer names holds this value at that address, and the loader leaves it there.
     ///
     /// Not "the load returns it". Nothing here says the bytes will still be
     /// these when the instruction runs, and saying so would be the one claim

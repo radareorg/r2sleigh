@@ -8,6 +8,7 @@
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 pub mod debug;
+mod loader;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -546,6 +547,8 @@ pub struct Image {
     debug_prototypes: debug::DebugPrototypes,
     entry_points: Vec<EntryPoint>,
     relocations: Vec<Relocation>,
+    /// The bytes the loader writes before the program runs, sorted and disjoint.
+    loader_writes: Vec<std::ops::Range<u64>>,
     /// Bytes written over the file's own, by address.
     ///
     /// A patch is a layer rather than an edit: the file on disk is untouched
@@ -779,6 +782,8 @@ impl Image {
         relocations.extend(macho_indirect_symbols(&file, data.as_slice()));
         relocations.sort_by(|left, right| left.vaddr.cmp(&right.vaddr));
         relocations.dedup_by_key(|relocation| relocation.vaddr);
+        let loader_writes =
+            loader::writes(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
@@ -868,6 +873,7 @@ impl Image {
             debug_prototypes,
             entry_points,
             relocations,
+            loader_writes,
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),
@@ -908,6 +914,11 @@ impl Image {
     /// The slots the loader fills, in address order.
     pub fn relocations(&self) -> &[Relocation] {
         &self.relocations
+    }
+
+    /// The bytes the loader writes before the program runs, sorted and disjoint: what the file holds there is not what the program reads.
+    pub fn loader_writes(&self) -> &[std::ops::Range<u64>] {
+        &self.loader_writes
     }
 
     pub fn entry_points(&self) -> &[EntryPoint] {
@@ -1330,6 +1341,7 @@ mod tests {
             symbols: Vec::new(),
             entry_points: Vec::new(),
             relocations: Vec::new(),
+            loader_writes: Vec::new(),
             debug_prototypes: debug::DebugPrototypes::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,

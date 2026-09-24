@@ -4,7 +4,7 @@ expression: run.out
 ---
             0x00401000      f30f1efa       endbr64
             0x00401004      4883ec08       sub rsp, 0x8
-            0x00401008      488b05d12f..   mov rax, qword [reloc.__gmon_start__] ; [0x403fe0:8]=0x0 (decoded)
+            0x00401008      488b05d12f..   mov rax, qword [reloc.__gmon_start__]
             0x0040100f      4885c0         test rax, rax
             0x00401012      7402           je 0x401016
             0x00401014      ffd0           call rax
@@ -14,14 +14,14 @@ expression: run.out
             0x0040101d      0000           add byte [rax], al
             0x0040101f      00ff           add bh, bh
             0x00401021      35ca2f0000     xor eax, 0x2fca
-            0x00401026      ff25cc2f0000   jmp qword [0x403ff8] ; [0x403ff8:8]=0x0 (decoded)
+            0x00401026      ff25cc2f0000   jmp qword [0x403ff8]
             0x0040102c      0f1f4000       nop dword [rax]
             0x00401030      f30f1efa       endbr64
             0x00401034      6800000000     push 0x0
             0x00401039      e9e2ffffff     jmp 0x401020
             0x0040103e      6690           nop
             0x00401040      f30f1efa       endbr64
-            0x00401044      ff25b62f0000   jmp qword [reloc.__printf_chk] ; [0x404000:8]=0x401030 (decoded)
+            0x00401044      ff25b62f0000   jmp qword [reloc.__printf_chk]
             0x0040104a      660f1f440000   nop word [rax + rax*0x1]
             0x00401050      f30f1efa       endbr64
             0x00401054      4883ec08       sub rsp, 0x8

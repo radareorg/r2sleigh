@@ -37,9 +37,23 @@ pub struct Container {
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
     pub relocations: Vec<Relocation>,
+    /// The bytes the loader writes before the program runs, sorted and disjoint; what the file holds there is not what the program reads.
+    pub loader_writes: Vec<Range<u64>>,
     pub entries: Vec<Entry>,
     /// Prototypes the program's own debug information declares.
     pub declared: Vec<r2abi::Prototype>,
+}
+
+impl Container {
+    /// Whether the loader writes any byte of this range: one search over the sorted, disjoint writes.
+    pub fn loader_writes_any(&self, range: &Range<u64>) -> bool {
+        let first = self
+            .loader_writes
+            .partition_point(|written| written.end <= range.start);
+        self.loader_writes
+            .get(first)
+            .is_some_and(|written| written.start < range.end)
+    }
 }
 
 /// The container format, where it decides something the engine does.

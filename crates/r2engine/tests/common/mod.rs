@@ -280,6 +280,7 @@ impl Literal {
             vaddr: PLT_SLOT,
             symbol: "_Exit".to_owned(),
         }];
+        program.container.loader_writes.push(PLT_SLOT..PLT_SLOT + 8);
         program
     }
 
@@ -341,6 +342,8 @@ impl Literal {
             vaddr: SLOT,
             symbol: import.to_owned(),
         });
+        // The loader writes the import's address into the slot, as the container states for every relocation.
+        self.container.loader_writes.push(SLOT..SLOT + 8);
         self
     }
 

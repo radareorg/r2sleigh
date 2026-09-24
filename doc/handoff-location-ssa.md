@@ -31507,3 +31507,23 @@ constant a shift computes inside one block (`shr rsi, 0x3f` in
 four constant evaluators (`constant::fold_op`, `optimize::eval_const_op`, the
 SCCP, `BlockOrigins`); they want one owner. Text at a word a pool load holds is
 not claimed, because nothing on the line uses that word as an address.
+
+## A word the loader writes holds nothing the file states
+
+`r2image::Image::loader_writes` states every byte the loader rewrites: ELF
+relocation sections, the dynamic table read through the program headers (REL,
+RELA, JMPREL, RELR, Android's APS2 and RELR), and the GOT words the psABI
+reserves; Mach-O chained fixups, dyld-info streams (threaded binds included),
+dysymtab relocations and pointer sections; PE base relocations and IATs, each
+table walked once however many descriptors share it; an object's own
+relocations. Checked word by word against radare2's `irj` on 26 ELF bins and
+`dyld_info -fixups` on 16 Mach-O bins, nothing uncovered (r2image does not
+open MIPS). A listing claims no `Holds` or `Text` over such a word: `reads_pd`
+lost three notes, a `GLOB_DAT`, GOT[2] and a `JUMP_SLOT`, whose loaded values
+are the import, the resolver and the import again.
+
+Open: other readers still take the file's word as the loaded one. r2image
+reads `.init_array` raw, which an AArch64 PIE leaves zero with the target in
+the relocation's addend; jump tables in a text-relocated object; the slot
+loads handed-function discovery reads. A rebase states its target exactly, so
+the fact can carry the loaded value rather than only the refusal.

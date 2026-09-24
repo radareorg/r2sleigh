@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{BASE, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, TWO, opened};
+use common::{BASE, FORKED, JOINED, Literal, ONE, PASSES, SLOT, STEPPED, STUB, TWO, opened};
 use r2engine::program::OpenProgram;
 use r2engine::query::{AnnotationKind, Line, Listing, Stop, Support};
 
@@ -317,4 +317,22 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
         })
         .expect("it lists");
     assert!(bounds(&plain.value).is_empty(), "{:?}", plain.value);
+}
+
+#[test]
+fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() {
+    // jmp qword [rip + 2] reads the slot the loader fills with the import, whatever the file's bytes there are.
+    let mut program = OpenProgram::of(Literal::new().importing("_Exit"));
+    let listing = Listing {
+        start: STUB,
+        stop: Stop::After(1),
+    };
+    let read = AnnotationKind::Reads {
+        address: SLOT,
+        width: 8,
+    };
+    let run = program.listing(listing).expect("it lists").value;
+    assert_eq!(supported(&run[0]), [(read.clone(), Support::Decoded)]);
+    let whole = program.function_listing(STUB).expect("it lists").value;
+    assert_eq!(supported(&whole[0]), [(read, Support::Decoded)]);
 }

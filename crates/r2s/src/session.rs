@@ -137,6 +137,7 @@ fn container_of(image: &Image) -> Container {
                 symbol: relocation.symbol.clone(),
             })
             .collect(),
+        loader_writes: image.loader_writes().to_vec(),
         entries: image
             .entry_points()
             .iter()
