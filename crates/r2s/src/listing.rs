@@ -56,7 +56,7 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
 /// number. A span says which number is being claimed about, and the sign it
 /// was written with is part of it: a negative literal names no address however
 /// well its magnitude matches.
-fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> String {
+pub(crate) fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> String {
     let Some(syntax) = &line.syntax else {
         return String::new();
     };
@@ -129,7 +129,7 @@ fn claim(
 ) -> Option<r2engine::query::Support> {
     line.annotations
         .iter()
-        .filter(|annotation| annotation.operand == Some(number) && annotation.reference.is_some())
+        .filter(|annotation| annotation.operand == Some(number) && annotation.reference)
         .map(|annotation| annotation.support)
         .min()
 }
@@ -184,7 +184,7 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
 }
 
 /// The rung a claim stands on, as a reader reads it.
-fn rung(support: r2engine::query::Support) -> &'static str {
+pub(crate) fn rung(support: r2engine::query::Support) -> &'static str {
     use r2engine::query::Support;
     match support {
         Support::Decoded => "decoded",
@@ -247,7 +247,7 @@ mod tests {
                         },
                         support: r2engine::query::Support::Decoded,
                         operand: Some(*number),
-                        reference: Some(r2engine::query::ReferenceKind::Code),
+                        reference: true,
                     })
                 })
                 .collect(),

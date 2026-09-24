@@ -292,57 +292,6 @@ fn a_string_is_listed_as_itself_and_flagged_as_an_identifier() {
 }
 
 #[test]
-fn a_reference_is_a_query_over_the_lift() {
-    let all = r2s("ax");
-    assert!(all.ok, "{}", all.out);
-    let rows: Vec<&str> = all
-        .out
-        .lines()
-        .filter(|line| line.trim_start().starts_with("0x"))
-        .collect();
-    assert!(!rows.is_empty(), "{}", all.out);
-    // Every reference says whether the address is named as code or as data.
-    for row in &rows {
-        let kind = row.split_whitespace().nth(2).unwrap_or("");
-        assert!(kind == "c" || kind == "d", "{row}");
-    }
-    // And asking about one address gives back only the rows that name it.
-    let first: Vec<&str> = rows[0].split_whitespace().collect();
-    let one = r2s(&format!("axt {}", first[1]));
-    assert!(one.ok, "{}", one.out);
-    assert!(
-        one.out.contains(first[0]),
-        "{}\nlooking for {}",
-        one.out,
-        first[0]
-    );
-}
-
-#[test]
-fn no_reference_is_absence_within_what_was_read() {
-    // Nothing names the second byte of the ELF magic, and saying so is a
-    // claim about the functions read, not about the program.
-    let none = r2s("axt 0x400001");
-    assert!(none.ok, "{}", none.out);
-    assert!(
-        none.out.contains("0 references to 0x400001"),
-        "{}",
-        none.out
-    );
-    assert!(
-        none.out.contains("\n; none within the functions read"),
-        "{}",
-        none.out
-    );
-    assert!(none.out.contains("\n; covers "), "{}", none.out);
-    // And the whole index says the same scope beneath its rows.
-    let all = r2s("ax");
-    assert!(all.ok, "{}", all.out);
-    let last = all.out.trim_end().lines().last().unwrap_or("");
-    assert!(last.starts_with("; covers "), "{}", all.out);
-}
-
-#[test]
 fn a_patch_is_a_layer_the_analysis_reads_through() {
     // The file is untouched and every read sees the new bytes, so the
     // analysis of a patched program is the analysis of the program as
@@ -620,7 +569,8 @@ mod listing {
             run.out
         );
         let read = at(fixture, "axt 0x100004010");
-        assert!(read.out.starts_with("0x100000444 d\n"), "{}", read.out);
+        let named = "sym._table_dispatch 0x100000444 [DATA:r--] ldr x8, [x8, 0x10]\n";
+        assert!(read.out.starts_with(named), "{}", read.out);
         let plain = at(fixture, "s 0x100000420; pd 24");
         assert!(!plain.out.contains("0x100004010"), "{}", plain.out);
         insta::assert_snapshot!("table_dispatch_pdf", run.out);

@@ -7,10 +7,20 @@
 
 mod common;
 
-use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, STUB, TEXT, TWO};
+use std::sync::Arc;
+
+use common::{BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, SLOT, STEPPED, STUB, TEXT, TWO};
 use r2engine::program::OpenProgram;
-use r2engine::query::{AnnotationKind, Listing, ReferenceKind, Stop, Support, Unread};
+use r2engine::query::{AnnotationKind, Listing, Reference, Role, Stop, Support, Unread};
 use r2ssa::body::{Unresolved, UnresolvedReason};
+
+/// Every fact as `(from, to, role, support)`.
+fn listed(facts: &[Reference]) -> Vec<(u64, u64, Role, Support)> {
+    facts
+        .iter()
+        .map(|fact| (fact.from, fact.to, fact.role, fact.support))
+        .collect()
+}
 
 #[test]
 fn the_index_carries_the_scope_it_was_read_over() {
@@ -45,7 +55,7 @@ fn the_index_carries_the_scope_it_was_read_over() {
 fn a_program_that_states_no_function_has_an_empty_index() {
     let mut program = OpenProgram::of(Literal::of_code(&[0xc3], &[]));
     let index = program.references().expect("the index builds").value;
-    assert!(index.facts.is_empty(), "{:?}", index.facts);
+    assert!(index.facts().is_empty(), "{:?}", index.facts());
     assert!(index.coverage.read.is_empty(), "{:?}", index.coverage);
 }
 
@@ -59,32 +69,213 @@ fn an_index_over_bodies_walked_to_their_end_is_closed() {
 }
 
 #[test]
-fn a_program_linked_low_has_exactly_the_references_its_listing_claims() {
+fn each_reference_says_how_its_instruction_uses_the_address_and_what_shows_it() {
     // Linked at 0x1000, so a floor under which numbers are no addresses would
     // leave this empty. Every fact is a use, or a number that moves with the
     // program; `mov eax, 1` and the return address a call pushes are neither.
-    let mut program = common::opened();
-    let facts = program.references().expect("the index builds").value.facts;
-    let (code, data) = (ReferenceKind::Code, ReferenceKind::Data);
-    let listed = facts
-        .iter()
-        .map(|fact| (fact.from, fact.to, fact.kind))
-        .collect::<Vec<_>>();
+    let mut program = OpenProgram::of(Literal::new().importing("strlen"));
+    let facts = program.references().expect("the index builds").value;
+    use Support::{Certified, Decoded, Folded};
     assert_eq!(
-        listed,
+        listed(facts.facts()),
         [
             // call one
-            (CALLER, ONE, code),
+            (CALLER, ONE, Role::Call, Decoded),
             // je L, in forked and in joined
-            (FORKED + 9, FORKED + 0x10, code),
-            (JOINED + 2, JOINED + 0xb, code),
-            // lea rdi, [one], passed as it stands; then call one
-            (PASSES, ONE, data),
-            (PASSES + 7, ONE, code),
-            // add rax, 8 after lea rax, [one], in one block: the sum is what is returned
-            (STEPPED + 7, ONE + 8, data),
+            (FORKED + 9, FORKED + 0x10, Role::Jump, Decoded),
+            (JOINED + 2, JOINED + 0xb, Role::Jump, Decoded),
+            // lea rdi, [one], which the call after it takes as it stands; then call one
+            (PASSES, ONE, Role::Value, Folded),
+            (PASSES + 7, ONE, Role::Call, Decoded),
+            // add rax, 8 after lea rax, [one]: the sum is the result, and only the def-use sees past the ret; the lea is a step
+            (STEPPED + 7, ONE + 8, Role::Value, Certified),
+            // jmp qword [rip + 2] reads the slot, and jumps to nothing the index can name
+            (STUB, SLOT, Role::Read { width: 8 }, Decoded),
         ]
     );
+}
+
+/// `copies`: `lea rdi, [0x1020]; lea rsi, [0x1030]; mov ecx, 8; rep movsb; ret`.
+const COPIES: u64 = BASE;
+/// `calls`: `lea rax, [callee]; call rax; ret`.
+const CALLS: u64 = BASE + 0x40;
+/// `callee`: `mov eax, 1; ret`.
+const CALLEE: u64 = BASE + 0x50;
+
+const OPERATIONS: &[u8] = &{
+    let mut code = [0xcc_u8; 0x60];
+    let runs: [(usize, &[u8]); 3] = [
+        (
+            0x00,
+            &[
+                0x48, 0x8d, 0x3d, 0x19, 0, 0, 0, // lea rdi, [rip + 0x19]
+                0x48, 0x8d, 0x35, 0x22, 0, 0, 0, // lea rsi, [rip + 0x22]
+                0xb9, 8, 0, 0, 0, // mov ecx, 8
+                0xf3, 0xa4, // rep movsb
+                0xc3, // ret
+            ],
+        ),
+        (
+            0x40,
+            &[
+                0x48, 0x8d, 0x05, 0x09, 0, 0, 0, // lea rax, [rip + 9]
+                0xff, 0xd0, // call rax
+                0xc3, // ret
+            ],
+        ),
+        (0x50, &[0xb8, 1, 0, 0, 0, 0xc3]),
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            code[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    code
+};
+
+#[test]
+fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() {
+    let literal = Literal::of_code(
+        OPERATIONS,
+        &[
+            ("copies", COPIES, 0x16),
+            ("calls", CALLS, 10),
+            ("callee", CALLEE, 6),
+        ],
+    );
+    let mut program = OpenProgram::of(literal);
+    let index = program.references().expect("the index builds").value;
+    let movsb = COPIES + 0x13;
+    let byte = 1;
+    assert_eq!(
+        listed(index.facts()),
+        [
+            // rep movsb reads its first byte at rsi and writes it at rdi; rep movsb moves both, so neither lea is a result
+            (
+                movsb,
+                BASE + 0x20,
+                Role::Write { width: byte },
+                Support::Folded
+            ),
+            (
+                movsb,
+                BASE + 0x30,
+                Role::Read { width: byte },
+                Support::Folded
+            ),
+            // lea rax, [callee], which the call takes as it stands; then call rax
+            (CALLS, CALLEE, Role::Value, Support::Folded),
+            (CALLS + 7, CALLEE, Role::Call, Support::Folded),
+        ]
+    );
+    // The references to one address come back by source, each with the instruction and the function holding it.
+    let to = index
+        .to(CALLEE)
+        .map(|(fact, source)| (fact.from, source.line.address, source.owners.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        to,
+        [
+            (CALLS, CALLS, vec![CALLS]),
+            (CALLS + 7, CALLS + 7, vec![CALLS])
+        ]
+    );
+    let text = index
+        .to(CALLEE)
+        .filter_map(|(_, source)| Some(source.line.syntax.as_ref()?.text()))
+        .collect::<Vec<_>>();
+    assert_eq!(text, ["lea rax, 0x1050", "call rax"]);
+}
+
+/// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
+const SHARED: &[u8] = &[
+    0x85, 0xff, // 0x1000 test edi, edi
+    0x74, 0x0c, // je 0x1010
+    0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+    0xc3, // ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+    0xe8, 0x1b, 0x00, 0x00, 0x00, // 0x1010 call 0x1030
+    0xc3, // ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+    0xeb, 0xee, // 0x1020 jmp 0x1010
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+    0xb8, 0x02, 0x00, 0x00, 0x00, // 0x1030 mov eax, 2
+    0xc3, // ret
+];
+
+#[test]
+fn a_tail_two_functions_share_is_held_by_each() {
+    let (left, right, leaf) = (BASE, BASE + 0x20, BASE + 0x30);
+    let literal = Literal::of_code(
+        SHARED,
+        &[("left", left, 10), ("right", right, 2), ("leaf", leaf, 6)],
+    );
+    let mut program = OpenProgram::of(literal);
+    let index = program.references().expect("the index builds").value;
+    let held = index
+        .to(leaf)
+        .map(|(fact, source)| (fact.from, fact.role, source.owners.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(held, [(BASE + 0x10, Role::Call, vec![left, right])]);
+}
+
+/// ARM `movw r3, #0x1020; movt r3, #0; mov lr, pc; bx r3; bx lr`, then at 0x1020 `mov r0, #1; bx lr`.
+const LINKED: &[u8] = &[
+    0x20, 0x30, 0x01, 0xe3, // movw r3, #0x1020
+    0x00, 0x30, 0x40, 0xe3, // movt r3, #0
+    0x0f, 0xe0, 0xa0, 0xe1, // mov lr, pc
+    0x13, 0xff, 0x2f, 0xe1, // bx r3
+    0x1e, 0xff, 0x2f, 0xe1, // bx lr
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+    0x01, 0x00, 0xa0, 0xe3, // 0x1020 mov r0, #1
+    0x1e, 0xff, 0x2f, 0xe1, // bx lr
+];
+
+#[test]
+fn a_branch_that_leaves_its_return_address_in_the_link_register_is_a_call() {
+    let callee = BASE + 0x20;
+    let literal =
+        Literal::of_code(LINKED, &[("linked", BASE, 0x14), ("callee", callee, 8)]).in_arm();
+    let mut program = OpenProgram::of(literal);
+    let index = program.references().expect("the index builds").value;
+    // The lift spells `bx r3` after `mov lr, pc` as the call it is; the return address is a value the callee receives as it stands.
+    assert_eq!(
+        listed(index.facts()),
+        [
+            (BASE + 8, BASE + 0x10, Role::Value, Support::Folded),
+            (BASE + 0xc, callee, Role::Call, Support::Folded),
+        ]
+    );
+}
+
+#[test]
+fn the_index_is_read_once_per_state_of_the_program() {
+    let mut program = common::opened();
+    let first = program.references().expect("the index builds").value;
+    let again = program.references().expect("the index builds").value;
+    assert!(Arc::ptr_eq(&first, &again));
+    // caller: call two; ret -- a write moves the state, so the index is read again and says so.
+    let displacement = (TWO.wrapping_sub(CALLER + 5) as u32).to_le_bytes();
+    let mut call = vec![0xe8];
+    call.extend(displacement);
+    program.source_mut().write(CALLER, &call);
+    let after = program.references().expect("the index builds").value;
+    assert!(!Arc::ptr_eq(&first, &after));
+    let from_caller = |index: &r2engine::query::References| {
+        index
+            .facts()
+            .iter()
+            .filter(|fact| fact.from == CALLER)
+            .map(|fact| (fact.to, fact.role))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(from_caller(&first), [(ONE, Role::Call)]);
+    assert_eq!(from_caller(&after), [(TWO, Role::Call)]);
 }
 
 #[test]
@@ -99,7 +290,7 @@ fn the_index_is_what_each_function_listing_claims() {
         declared_callee(),
     ] {
         let mut program = OpenProgram::of(literal);
-        let facts = program.references().expect("the index builds").value.facts;
+        let index = program.references().expect("the index builds").value;
         let functions = program.functions().expect("discovery runs");
         let mut claimed = Vec::new();
         for function in &functions {
@@ -110,9 +301,9 @@ fn the_index_is_what_each_function_listing_claims() {
             claimed.extend(r2engine::query::references::claimed_by(&lines));
         }
         claimed.sort_unstable();
-        claimed.dedup();
-        assert_eq!(claimed, facts);
-        assert!(!facts.is_empty());
+        claimed.dedup_by_key(|fact| (fact.from, fact.to, fact.role));
+        assert_eq!(claimed, index.facts());
+        assert!(!claimed.is_empty());
     }
 }
 
@@ -144,8 +335,8 @@ fn declared_callee() -> Literal {
     literal
 }
 
-/// What the `mov edi, TEXT` line claims about TEXT in `pd`, and what `ax` holds from it.
-fn claimed_at_caller(literal: Literal) -> (Option<Support>, bool) {
+/// What the `mov edi, TEXT` line claims about TEXT in `pd`, and the support `ax` holds it on.
+fn claimed_at_caller(literal: Literal) -> (Option<Support>, Option<Support>) {
     let mut program = OpenProgram::of(literal);
     let listing = Listing {
         start: CALLER,
@@ -157,32 +348,32 @@ fn claimed_at_caller(literal: Literal) -> (Option<Support>, bool) {
         .iter()
         .find(|annotation| annotation.kind == AnnotationKind::Computes { value: TEXT })
         .map(|annotation| annotation.support);
-    let facts = program.references().expect("the index builds").value.facts;
-    let indexed = facts
-        .iter()
-        .any(|fact| fact.from == CALLER && fact.to == TEXT && fact.kind == ReferenceKind::Data);
+    let index = program.references().expect("the index builds").value;
+    let indexed = index
+        .to(TEXT)
+        .find(|(fact, _)| fact.from == CALLER && fact.role == Role::Value)
+        .map(|(fact, _)| fact.support);
     (support, indexed)
 }
 
 #[test]
 fn a_number_that_stays_put_is_an_address_only_where_a_callee_takes_one() {
     // The callee's own body loads through the parameter the number arrives in.
+    let dereferenced = Some(Support::Dereferenced);
     assert_eq!(
         claimed_at_caller(reading_callee()),
-        (Some(Support::Dereferenced), true)
+        (dereferenced, dereferenced)
     );
     // A declaration types the parameter as a pointer.
-    assert_eq!(
-        claimed_at_caller(declared_callee()),
-        (Some(Support::Declared), true)
-    );
+    let declared = Some(Support::Declared);
+    assert_eq!(claimed_at_caller(declared_callee()), (declared, declared));
     // `one` returns 1 and never reads its parameter, so the same number is only a number.
     let mut literal = Literal::new().with_data();
     passing_text(&mut literal, ONE);
-    assert_eq!(claimed_at_caller(literal), (None, false));
+    assert_eq!(claimed_at_caller(literal), (None, None));
     // Mapped but in no section the program loads, as NULL or the header would be, it names no object.
     let mut literal = Literal::new();
     literal.write(ONE, &[0x8b, 0x07, 0xc3]);
     passing_text(&mut literal, ONE);
-    assert_eq!(claimed_at_caller(literal), (None, false));
+    assert_eq!(claimed_at_caller(literal), (None, None));
 }

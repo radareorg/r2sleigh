@@ -12,7 +12,7 @@ use common::{
 };
 use r2engine::discovery::Confidence;
 use r2engine::program::{OpenProgram, Symbol, SymbolKind};
-use r2engine::query::{Listing, ReferenceKind, Stop};
+use r2engine::query::{Listing, Role, Stop};
 
 fn believed(program: &mut OpenProgram<Literal>) -> Vec<(u64, Confidence)> {
     program
@@ -93,23 +93,22 @@ fn every_reference_every_believed_body_makes_is_indexed_once_in_order() {
     program
         .source_mut()
         .write(TWO, &[0x8b, 0x04, 0x25, 0x80, 0x10, 0x00, 0x00, 0xc3]);
-    let facts = program.references().expect("the index builds").value.facts;
-    let mut sorted = facts.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    assert_eq!(facts, sorted);
+    let index = program.references().expect("the index builds").value;
+    let facts = index.facts();
+    assert!(facts.is_sorted());
+    assert!(
+        facts
+            .windows(2)
+            .all(|pair| (pair[0].from, pair[0].to, pair[0].role)
+                != (pair[1].from, pair[1].to, pair[1].role))
+    );
     let read = facts
         .iter()
         .filter(|one| [ONE, TWO].contains(&one.from))
-        .map(|one| (one.from, one.to, one.kind))
+        .map(|one| (one.from, one.to, one.role))
         .collect::<Vec<_>>();
-    assert_eq!(
-        read,
-        [
-            (ONE, STEPPED + 8, ReferenceKind::Data),
-            (TWO, STEPPED, ReferenceKind::Data)
-        ]
-    );
+    let word = Role::Read { width: 4 };
+    assert_eq!(read, [(ONE, STEPPED + 8, word), (TWO, STEPPED, word)]);
 }
 
 #[test]

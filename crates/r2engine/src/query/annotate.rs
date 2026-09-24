@@ -14,7 +14,6 @@ use super::Support;
 use super::Work;
 use super::decode::Lookahead;
 use super::records::{Annotation, AnnotationKind, Answered, Line, Memory, WalkedBody};
-use super::references::ReferenceKind;
 
 /// How far on a run is lifted again to see which numbers move with it.
 ///
@@ -111,7 +110,7 @@ pub(super) fn over_run(
             }
         }
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
-        if answered.spelled {
+        if answered.holdings {
             let revision = revision_at(memory, &claims);
             claims.extend(revision);
         }
@@ -142,20 +141,8 @@ pub(super) fn over_run(
 /// this program wherever the program maps it. What a read holds
 /// is data, and a pool word is a pc-relative or thread offset as often as a
 /// pointer, so the read is the reference and the word it holds is not.
-fn referenced(memory: &Memory<'_>, kind: &AnnotationKind) -> Option<ReferenceKind> {
-    match *kind {
-        AnnotationKind::Target { address, .. } => {
-            memory.maps(address).then_some(ReferenceKind::Code)
-        }
-        AnnotationKind::Reads { address, .. }
-        | AnnotationKind::Writes { address, .. }
-        | AnnotationKind::Computes { value: address } => {
-            memory.maps(address).then_some(ReferenceKind::Data)
-        }
-        AnnotationKind::Holds { .. }
-        | AnnotationKind::Text { .. }
-        | AnnotationKind::Bounds { .. } => None,
-    }
+fn referenced(memory: &Memory<'_>, kind: &AnnotationKind) -> bool {
+    kind.role().is_some() && memory.maps(kind.address())
 }
 
 /// Decoded where the instruction alone folds the number, folded where the block before it had to.
@@ -569,23 +556,42 @@ fn covers(outer: &Varnode, inner: &Varnode) -> bool {
 /// The addresses one operation names, as far as the block so far shows.
 fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
     let folded = |addr: &Varnode| origins.of(addr).and_then(ValueOrigin::constant);
-    let mut found = Vec::new();
-    match op {
-        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => found.extend(
-            encoded_target(target).map(|address| AnnotationKind::Target {
-                address,
-                call: false,
-            }),
-        ),
-        R2ILOp::Call { target } => {
-            found.extend(
-                encoded_target(target).map(|address| AnnotationKind::Target {
-                    address,
-                    call: true,
-                }),
-            )
+    // A direct transfer encodes its target; a computed one names it wherever the block folds it, a loaded one only the slot it read.
+    let target = match op {
+        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } | R2ILOp::Call { target } => {
+            encoded_target(target)
         }
-        // A conditional or linked access names the address it would use as surely as a plain one does.
+        R2ILOp::CallInd { target } | R2ILOp::BranchInd { target } => folded(target),
+        _ => None,
+    };
+    if let Some(address) = target {
+        let call = matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
+        return vec![AnnotationKind::Target { address, call }];
+    }
+    accessed(op)
+        .into_iter()
+        .filter_map(|(addr, width, access)| Some(access(folded(addr)?, width)))
+        .collect()
+}
+
+/// How an access is claimed at the address it folds to.
+type Access = fn(u64, u32) -> AnnotationKind;
+
+const fn reads(address: u64, width: u32) -> AnnotationKind {
+    AnnotationKind::Reads { address, width }
+}
+
+const fn writes(address: u64, width: u32) -> AnnotationKind {
+    AnnotationKind::Writes { address, width }
+}
+
+/// Each address one operation reads or writes memory through, with the bytes it accesses there.
+///
+/// A conditional or linked access names the address it would use as surely as
+/// a plain one does, and a repeated string operation names the first element
+/// at each address it reads or writes through.
+fn accessed(op: &R2ILOp) -> Vec<(&Varnode, u32, Access)> {
+    match op {
         R2ILOp::Load {
             dst,
             space: SpaceId::Ram,
@@ -602,10 +608,7 @@ fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
             space: SpaceId::Ram,
             addr,
             ..
-        } => found.extend(folded(addr).map(|address| AnnotationKind::Reads {
-            address,
-            width: dst.size,
-        })),
+        } => vec![(addr, dst.size, reads)],
         R2ILOp::Store {
             space: SpaceId::Ram,
             addr,
@@ -622,27 +625,29 @@ fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
             addr,
             val,
             ..
-        } => found.extend(folded(addr).map(|address| AnnotationKind::Writes {
-            address,
-            width: val.size,
-        })),
+        } => vec![(addr, val.size, writes)],
         R2ILOp::AtomicCAS {
             space: SpaceId::Ram,
             addr,
             expected,
             ..
-        } => {
-            let width = expected.size;
-            found.extend(folded(addr).into_iter().flat_map(|address| {
-                [
-                    AnnotationKind::Reads { address, width },
-                    AnnotationKind::Writes { address, width },
-                ]
-            }));
+        } => vec![(addr, expected.size, reads), (addr, expected.size, writes)],
+        R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
+            let (kind, width) = (transfer.kind, transfer.element_size);
+            let (source, destination) = (&transfer.source, &transfer.destination);
+            [
+                kind.source_is_address()
+                    .then_some((source, width, reads as Access)),
+                kind.stop().map(|_| (destination, width, reads as Access)),
+                kind.writes_memory()
+                    .then_some((destination, width, writes as Access)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
         }
-        _ => {}
+        _ => Vec::new(),
     }
-    found
 }
 
 /// The one number in the operands that spells this address, where there is one.

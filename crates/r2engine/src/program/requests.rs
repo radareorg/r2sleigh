@@ -10,9 +10,10 @@ use std::sync::Arc;
 use super::{OpenProgram, Source, SymbolKind};
 use crate::discovery::{Confidence, Discovered};
 use crate::native::{NativeRefusal, Prepared};
+use crate::query::references::Indexing;
 use crate::query::{
-    Answer, Answered, Completion, Decoders, Line, Listing, Memory, References, Stop, Unread,
-    WalkedBody, Work,
+    Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, References, Stop,
+    Unread, WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
 
@@ -171,20 +172,33 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Every reference the program makes, from every function discovery
-    /// believes, sorted and without repeats, with the coverage it was read over.
+    /// believes, with the coverage it was read over; read once per state of the program.
     ///
     /// Each body's blocks are listed as `pdf` lists them and the index is what
     /// those lines claim, in the instruction set discovery walked the body in.
-    pub fn references(&mut self) -> Result<Answer<References>, String> {
+    pub fn references(&mut self) -> Result<Answer<Arc<References>>, String> {
         self.start_request();
         // A callee's body is read in the instruction set discovery settled, so that is settled first.
         self.ensure_decodable()?;
         let revision = self.revision();
+        if let Some((at, held)) = &self.references
+            && *at == revision
+        {
+            return Ok(Answer::complete(Arc::clone(held), revision));
+        }
+        let index = Arc::new(self.indexed(revision)?);
+        self.references = Some((revision, Arc::clone(&index)));
+        Ok(Answer::complete(index, revision))
+    }
+
+    /// Read every believed body's references, at one revision.
+    fn indexed(&mut self, revision: crate::query::Revision) -> Result<References, String> {
         let walked = self.surveyed()?.walked;
-        let mut index = References::default();
+        let mut index = Indexing::default();
+        let mut coverage = Coverage::default();
         // A program that states no function is never assembled, and has nothing to index.
         if walked.is_empty() {
-            return Ok(Answer::complete(index, revision));
+            return Ok(index.finish(coverage));
         }
         let program = &*self;
         let walker = super::returns::Walking::new(program, true)?;
@@ -198,31 +212,26 @@ impl<S: Source> OpenProgram<S> {
             let (thumb, body) = match lifted {
                 Ok(lifted) => lifted,
                 Err(refusal) => {
-                    index
-                        .coverage
-                        .unread
-                        .insert(entry, Unread::Refused(refusal));
+                    coverage.unread.insert(entry, Unread::Refused(refusal));
                     continue;
                 }
             };
             if !body.unresolved.is_empty() {
-                index.coverage.unresolved.insert(entry, body.unresolved);
+                coverage.unresolved.insert(entry, body.unresolved);
             }
             let machine = walker.machine(thumb).ok_or("no machine")?;
             let decoder = (walker.target(thumb), machine);
             match claimed_by(program, decoder, body.blocks, revision) {
-                Ok(facts) => {
-                    index.coverage.read.push(entry);
-                    index.facts.extend(facts);
+                Ok(lines) => {
+                    coverage.read.push(entry);
+                    index.read(entry, lines);
                 }
                 Err(unread) => {
-                    index.coverage.unread.insert(entry, unread);
+                    coverage.unread.insert(entry, unread);
                 }
             }
         }
-        index.facts.sort_unstable();
-        index.facts.dedup();
-        Ok(Answer::complete(index, revision))
+        Ok(index.finish(coverage))
     }
 
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
@@ -299,13 +308,13 @@ impl<S: Source> OpenProgram<S> {
                 .and_then(|held| held.call_effect.as_ref()),
             prepared,
             body: None,
-            spelled: true,
+            holdings: true,
             parameters: Some(self),
         }
     }
 }
 
-/// What one body's listing claims about where it refers, or why it is unread.
+/// One body listed as the reference index reads it, or why it is unread.
 fn claimed_by<S: Source>(
     program: &OpenProgram<S>,
     (target, machine): (
@@ -314,7 +323,7 @@ fn claimed_by<S: Source>(
     ),
     blocks: Vec<r2ssa::body::BodyBlock>,
     revision: crate::query::Revision,
-) -> Result<Vec<crate::query::Reference>, Unread> {
+) -> Result<Vec<Line>, Unread> {
     let lifted = blocks
         .into_iter()
         .map(|block| block.lifted)
@@ -323,7 +332,7 @@ fn claimed_by<S: Source>(
     let answered = Answered {
         decoders: &Walked(machine),
         body: Some(&body),
-        spelled: false,
+        holdings: false,
         call_effect: target.call_effect,
         ..program.answered(None)
     };
@@ -332,5 +341,5 @@ fn claimed_by<S: Source>(
     if body.failed() {
         return Err(Unread::NoSsa);
     }
-    Ok(crate::query::references::claimed_by(&lines))
+    Ok(lines)
 }

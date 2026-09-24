@@ -202,6 +202,12 @@ impl NameDb {
             .find(|name| !matches!(name.namespace, Namespace::Section | Namespace::Segment))
     }
 
+    /// The function that begins at this address, spelled as a listing spells it, else as an unnamed one.
+    pub fn function(&self, entry: u64) -> String {
+        self.of(entry)
+            .map_or_else(|| r2source::unnamed_function(entry), Name::spelled)
+    }
+
     /// The plain name at exactly this address, which is what the engine keys
     /// prototypes and callee facts by.
     pub fn text_at(&self, vaddr: u64) -> Option<&str> {

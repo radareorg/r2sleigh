@@ -26,7 +26,7 @@ pub use records::{
     Annotation, AnnotationKind, Answered, Callee, Decoders, Line, Listing, Memory, Parameters,
     Stop, WalkedBody,
 };
-pub use references::{Coverage, Reference, ReferenceKind, References, Unread};
+pub use references::{Claimant, Coverage, Reference, References, Role, Unread};
 
 /// How much work a request permits.
 ///

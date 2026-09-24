@@ -72,7 +72,8 @@ impl Run {
             Stop::After(count) => run.lines.len() < count,
             Stop::At(end) => run.next < end,
         } {
-            let Some(one) = decoded(answered, run.next, answered.spelled, run.context) else {
+            // Every listed line is spelled, so a line Sleigh spells but cannot lift is still listed whole.
+            let Some(one) = decoded(answered, run.next, true, run.context) else {
                 run.completion = Completion::Unmapped { at: run.next };
                 break;
             };
@@ -307,7 +308,7 @@ mod tests {
             call_effect: None,
             prepared: None,
             body: None,
-            spelled: true,
+            holdings: true,
             parameters: None,
         };
         listing(
@@ -358,7 +359,7 @@ mod tests {
             call_effect: None,
             prepared: None,
             body: None,
-            spelled: true,
+            holdings: true,
             parameters: None,
         };
         let answer = listing(
@@ -396,34 +397,32 @@ mod tests {
                     .push(op.clone());
             }
         }
-        // A spelled run and a lift-only run read the same context.
-        for spelled in [true, false] {
-            let answered = Answered {
-                decoders: &thumb,
-                memory: Memory {
-                    program: &program,
-                    endian: Endianness::Little,
-                },
-                prepared: None,
-                body: None,
-                spelled,
-                call_effect: None,
-                parameters: None,
-            };
-            let request = Listing {
-                start: BASE,
-                stop: Stop::After(4),
-            };
-            let run = Run::read(&answered, request, Work::InstructionLocal);
-            for (line, lift) in run.lines.iter().zip(&run.lifts) {
-                let listed: &Vec<r2il::R2ILOp> = &lift.as_ref().expect("each lifts").ops;
-                assert_eq!(
-                    Some(listed),
-                    walked.get(&line.address),
-                    "{:#x}, spelled: {spelled}",
-                    line.address
-                );
-            }
+        // A spelled run reads the context the walk's lift-only decode read.
+        let answered = Answered {
+            decoders: &thumb,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            prepared: None,
+            body: None,
+            holdings: true,
+            call_effect: None,
+            parameters: None,
+        };
+        let request = Listing {
+            start: BASE,
+            stop: Stop::After(4),
+        };
+        let run = Run::read(&answered, request, Work::InstructionLocal);
+        for (line, lift) in run.lines.iter().zip(&run.lifts) {
+            let listed: &Vec<r2il::R2ILOp> = &lift.as_ref().expect("each lifts").ops;
+            assert_eq!(
+                Some(listed),
+                walked.get(&line.address),
+                "{:#x}",
+                line.address
+            );
         }
     }
 
@@ -654,7 +653,7 @@ mod tests {
             },
             prepared: None,
             body: Some(&body),
-            spelled: true,
+            holdings: true,
             call_effect: None,
             parameters: None,
         };
@@ -734,7 +733,7 @@ mod tests {
             },
             prepared: None,
             body: None,
-            spelled: true,
+            holdings: true,
             call_effect: None,
             parameters: None,
         };

@@ -7,6 +7,7 @@
 
 use crate::session::Session;
 use r2engine::RenderTier;
+use r2engine::query::Role;
 
 pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
     let line = line.trim();
@@ -260,23 +261,28 @@ fn revert(session: &mut Session) -> Result<String, String> {
     Ok(format!("{count} patched bytes reverted"))
 }
 
-/// Where each address is named from.
+/// Where each address is named from, how, and on what evidence.
 fn cross_references(session: &mut Session, argument: &str) -> Result<String, String> {
     if !argument.trim().is_empty() {
         return Err("r2s: ax takes no argument; use axt <address>".to_owned());
     }
     let index = session.program.references()?.value;
-    let mut out = String::from("from       to         kind\n");
-    out.push_str(&"-".repeat(34));
-    for fact in &index.facts {
+    let mut out = String::from("from       to         role     size support\n");
+    out.push_str(&"-".repeat(46));
+    for fact in index.facts() {
+        let size = match fact.role {
+            Role::Read { width } | Role::Write { width } => width.to_string(),
+            Role::Call | Role::Jump | Role::Value => "-".to_owned(),
+        };
         out.push_str(&format!(
-            "\n{:#010x} {:#010x} {}",
+            "\n{:#010x} {:#010x} {} {size:>4} {}",
             fact.from,
             fact.to,
-            fact.kind.as_str()
+            role(fact.role),
+            crate::listing::rung(fact.support)
         ));
     }
-    out.push_str(&format!("\n\n{} references", index.facts.len()));
+    out.push_str(&format!("\n\n{} references", index.facts().len()));
     for (entry, why) in &index.coverage.unread {
         let why = match why {
             r2engine::query::Unread::Refused(refusal) => refusal.to_string(),
@@ -288,15 +294,35 @@ fn cross_references(session: &mut Session, argument: &str) -> Result<String, Str
     Ok(out)
 }
 
-/// Every place one address is named from.
+/// A role as radare2 spells a reference's type and permissions.
+fn role(role: Role) -> &'static str {
+    match role {
+        Role::Call => "CALL:--x",
+        Role::Jump => "JUMP:--x",
+        Role::Read { .. } => "DATA:r--",
+        Role::Write { .. } => "DATA:-w-",
+        Role::Value => "DATA:---",
+    }
+}
+
+/// Every place one address is named from, one line per function holding it, as radare2 lays `axt` out.
 fn references_to(session: &mut Session, argument: &str) -> Result<String, String> {
     let wanted = parse_number(session, argument)?;
     let index = session.program.references()?.value;
+    let names = session.program.names();
     let mut out = String::new();
     let mut count = 0usize;
-    for fact in index.facts.iter().filter(|fact| fact.to == wanted) {
+    for (fact, source) in index.to(wanted) {
         count += 1;
-        out.push_str(&format!("{:#010x} {}\n", fact.from, fact.kind.as_str()));
+        let text = crate::listing::spelled(&source.line, names);
+        for owner in &source.owners {
+            out.push_str(&format!(
+                "{} {:#x} [{}] {text}\n",
+                names.function(*owner),
+                fact.from,
+                role(fact.role)
+            ));
+        }
     }
     out.push_str(&format!("\n{count} references to {wanted:#x}"));
     if count == 0 {

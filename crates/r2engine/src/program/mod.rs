@@ -111,6 +111,8 @@ pub struct OpenProgram<S: Source> {
     pointers: std::sync::Mutex<pointers::Pointers>,
     /// Whether control comes back from each function, derived on first use per state of the bytes.
     returns: std::sync::Mutex<returns::Returns>,
+    /// The reference index, and the state of the program it was read at.
+    references: Option<(Revision, std::sync::Arc<crate::query::References>)>,
 }
 
 impl<S: Source> OpenProgram<S> {
@@ -159,6 +161,7 @@ impl<S: Source> OpenProgram<S> {
             thumb_machine: None,
             pointers: std::sync::Mutex::default(),
             returns: std::sync::Mutex::default(),
+            references: None,
         }
     }
 

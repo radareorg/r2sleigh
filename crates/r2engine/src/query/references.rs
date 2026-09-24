@@ -11,53 +11,144 @@ use std::collections::BTreeMap;
 
 use r2ssa::body::{Unresolved, UnresolvedReason};
 
+use super::{Line, Support};
 use crate::native::NativeRefusal;
 
 /// Every reference the walked bodies make, and what the walks covered.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct References {
-    /// Sorted, without repeats.
-    pub facts: Vec<Reference>,
+    /// By source, then target and role, each with the smallest support any listing of it gave.
+    facts: Vec<Reference>,
+    /// Positions in `facts` ordered by target, so the references to one address are one run.
+    by_target: Vec<usize>,
+    /// Each instruction a fact is from, by address, as the index first listed it, with every function whose listing of it claims one.
+    sources: Vec<Claimant>,
+    /// Where in `sources` each fact's instruction is.
+    source_of: Vec<usize>,
     pub coverage: Coverage,
 }
 
-/// One instruction naming one address of this program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// One instruction naming one address of this program, how it uses it, and the smallest evidence that shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Reference {
     pub from: u64,
     pub to: u64,
-    pub kind: ReferenceKind,
+    pub role: Role,
+    pub support: Support,
 }
 
-/// Whether the instruction transfers control there or names it as data.
+/// What the instruction does with the address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ReferenceKind {
-    Code,
-    Data,
+pub enum Role {
+    /// It calls there.
+    Call,
+    /// It transfers control there without a call.
+    Jump,
+    /// It reads this many bytes there.
+    Read { width: u32 },
+    /// It writes this many bytes there.
+    Write { width: u32 },
+    /// It computes the address as a result it uses as it stands.
+    Value,
+}
+
+/// An instruction the index read references from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimant {
+    /// The line as the index listed it, whose claims are its references.
+    pub line: Line,
+    /// Every function whose listing of it claims a reference, by entry, ascending: a shared tail has more than one.
+    pub owners: Vec<u64>,
 }
 
 /// Every reference the lines of a listing claim, by the line that claims it.
-pub fn claimed_by(lines: &[super::Line]) -> Vec<Reference> {
-    lines
-        .iter()
-        .flat_map(|line| {
-            line.annotations.iter().filter_map(|annotation| {
-                Some(Reference {
-                    from: line.address,
-                    to: annotation.kind.address(),
-                    kind: annotation.reference?,
-                })
-            })
-        })
-        .collect()
+pub fn claimed_by(lines: &[Line]) -> Vec<Reference> {
+    lines.iter().flat_map(claims_of).collect()
 }
 
-impl ReferenceKind {
-    /// As radare2 spells the kind.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Code => "c",
-            Self::Data => "d",
+/// The references one line claims.
+fn claims_of(line: &Line) -> impl Iterator<Item = Reference> + '_ {
+    line.annotations.iter().filter_map(|annotation| {
+        Some(Reference {
+            from: line.address,
+            to: annotation.kind.address(),
+            role: annotation.role()?,
+            support: annotation.support,
+        })
+    })
+}
+
+impl References {
+    /// Every reference, by source.
+    pub fn facts(&self) -> &[Reference] {
+        &self.facts
+    }
+
+    /// Every reference to one address, by source, with the instruction it is from: a binary search, then the run.
+    pub fn to(&self, target: u64) -> impl Iterator<Item = (&Reference, &Claimant)> {
+        let start = self
+            .by_target
+            .partition_point(|at| self.facts[*at].to < target);
+        self.by_target[start..]
+            .iter()
+            .map(|at| (&self.facts[*at], &self.sources[self.source_of[*at]]))
+            .take_while(move |(fact, _)| fact.to == target)
+    }
+}
+
+/// An index being read body by body.
+#[derive(Default)]
+pub(crate) struct Indexing {
+    facts: Vec<Reference>,
+    sources: BTreeMap<u64, Claimant>,
+}
+
+impl Indexing {
+    /// Take one walked body's listing, keeping only the lines that claim a reference.
+    pub(crate) fn read(&mut self, entry: u64, lines: Vec<Line>) {
+        for line in lines {
+            let before = self.facts.len();
+            self.facts.extend(claims_of(&line));
+            if self.facts.len() == before {
+                continue;
+            }
+            let claimant = self.sources.entry(line.address).or_insert(Claimant {
+                line,
+                owners: Vec::new(),
+            });
+            // A body lists an instruction once per block that holds it, and the bodies come by entry.
+            if claimant.owners.last() != Some(&entry) {
+                claimant.owners.push(entry);
+            }
+        }
+    }
+
+    /// The index, in `O(R log R)` once: sorted by source, one support per reference, and ordered by target beside it.
+    pub(crate) fn finish(self, coverage: Coverage) -> References {
+        let mut facts = self.facts;
+        facts.sort_unstable();
+        // Sorted with the support last, so the first of a run is the smallest.
+        facts.dedup_by_key(|fact| (fact.from, fact.to, fact.role));
+        let mut by_target = (0..facts.len()).collect::<Vec<_>>();
+        by_target.sort_unstable_by_key(|at| (facts[*at].to, *at));
+        let sources = self.sources.into_values().collect::<Vec<_>>();
+        // Both are by address and every fact's instruction is a source, so one merge pairs them.
+        let mut next = 0;
+        let source_of = facts
+            .iter()
+            .map(|fact| {
+                while sources[next].line.address < fact.from {
+                    next += 1;
+                }
+                next
+            })
+            .collect();
+        References {
+            facts,
+            by_target,
+            sources,
+            source_of,
+            coverage,
         }
     }
 }

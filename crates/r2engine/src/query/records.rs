@@ -11,7 +11,7 @@ use r2sleigh_lift::{EmbeddedMachine, NumberSpan, Syntax};
 use r2ssa::fate::{Fate, Fates};
 
 use super::Support;
-use super::references::ReferenceKind;
+use super::references::Role;
 use crate::native::Program;
 
 /// Which decoder the code at an address is written in.
@@ -118,8 +118,8 @@ pub struct Answered<'a> {
     pub prepared: Option<&'a crate::native::Prepared>,
     /// The walked body the run is in: its blocks, and the def-use that says whether a number a line computes is a step.
     pub body: Option<&'a WalkedBody<'a>>,
-    /// Whether each line is spelled; the reference index reads only what the lines claim.
-    pub spelled: bool,
+    /// Whether a line states what this revision holds where its claims use an address; the reference index reads only the claims.
+    pub holdings: bool,
     /// Which parameters of each callee take an address, where the listing can ask.
     pub parameters: Option<&'a dyn Parameters>,
 }
@@ -231,8 +231,15 @@ pub struct Annotation {
     /// them spells it. Two operands holding the same value leave this empty
     /// rather than guessing which was meant.
     pub operand: Option<NumberSpan>,
-    /// Whether the claim names an address of this program, and how; the reference index is these.
-    pub reference: Option<ReferenceKind>,
+    /// Whether the claim names an address this program maps; the reference index is these.
+    pub reference: bool,
+}
+
+impl Annotation {
+    /// How the instruction uses the address, where the claim is a reference.
+    pub fn role(&self) -> Option<Role> {
+        self.reference.then(|| self.kind.role()).flatten()
+    }
 }
 
 /// What one annotation claims.
@@ -283,6 +290,18 @@ pub enum AnnotationKind {
 }
 
 impl AnnotationKind {
+    /// What the instruction does with the address, where the claim is about its use of one.
+    pub fn role(&self) -> Option<Role> {
+        match *self {
+            Self::Target { call: true, .. } => Some(Role::Call),
+            Self::Target { call: false, .. } => Some(Role::Jump),
+            Self::Reads { width, .. } => Some(Role::Read { width }),
+            Self::Writes { width, .. } => Some(Role::Write { width }),
+            Self::Computes { .. } => Some(Role::Value),
+            Self::Bounds { .. } | Self::Holds { .. } | Self::Text { .. } => None,
+        }
+    }
+
     /// The address this claim is about.
     pub fn address(&self) -> u64 {
         match *self {

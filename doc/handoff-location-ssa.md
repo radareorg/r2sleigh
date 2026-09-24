@@ -31599,3 +31599,30 @@ body closed by that edge as void and r2dec renders the edge as falling off the
 end. The fix is to give the run-on edge the tail-call contract (result is the
 entered function's, rendered as `return g();`), owned by r2ssa's body and
 machine context rather than patched in r2dec. It predates the return fixpoint.
+
+## A reference says how its instruction uses the address
+
+`Reference` carries a `Role` (Call, Jump, Read and Write with the width, or
+Value) and the claim's `Support`, projected from the listing claim that made
+it, so `ax` and `pdf` still have one owner. A folded `CallInd`/`BranchInd`
+target is a Call or Jump claim, a block operation names the first element at
+each address it reads or writes, and ARM's `mov lr, pc; bx r3` lifts as the
+call it is. The index is kept per revision; `to(address)` is a binary search
+over a by-target permutation plus the run, each fact paired with its listed
+line and every owner body, so `axt` prints radare2's `fn 0xfrom [TYPE:perm]
+insn`, one line per owner of a shared tail. Index lines are now spelled (that
+is the `axt` text); `ax` on `ls-focal` went 3.03 s to 3.07 s in a debug build.
+
+Judged against `aaa; axt` on crackme0x05, hashes_gcc_x64_O2 and
+bashbot.arm.gcc.O0.elf: radare2 says `CODE:--x` for a stub's slot read (it is a
+read, r2s is right), `STRN:r--` where r2s says `DATA:---` (no read happens),
+and `(nofunc)` only for its linear sweep of code no walk reaches, which r2s
+never indexes, so every r2s line has an owner. radare2 names `main` and
+`entry.fini0` where r2s names `sym.main` and `sym.__do_global_dtors_aux`.
+
+Open: a string handed to a local callee whose pointer parameter the body walk
+does not prove (hashes `mov edi, obj.msg.0` into `crc32_init`) is unindexed; an
+indexed read `movzx eax, byte [rax + table]` names no table; Sleigh's `hlt`
+self-branch and ARM's `bxeq lr` skip to the next instruction are indexed as
+jumps. `afi` in-degree could read `to(entry)` but would make `afi` pay for the
+whole index.
