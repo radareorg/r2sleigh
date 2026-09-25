@@ -28,7 +28,6 @@ pub(crate) mod control;
 pub(crate) mod deadphi;
 pub(crate) mod defuse;
 pub mod domtree;
-pub(crate) mod execution;
 pub mod fate;
 pub(crate) mod fingerprint;
 pub mod function;
@@ -85,11 +84,6 @@ pub use control::{
 };
 pub use defuse::{
     BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
-};
-pub use execution::{
-    ArtifactBlockId, ArtifactInstId, ArtifactValueId, EntryStorageError, ExecutionBlockRef,
-    ExecutionEffect, ExecutionInstRef, ExecutionOpcode, ExecutionOperands, ExecutionOperation,
-    ExecutionPhiIncoming, ExecutionValueRef, ExecutionViewError, SsaExecutionView,
 };
 pub use fingerprint::{SSA_SEMANTIC_FINGERPRINT_SCHEMA_VERSION, stable_ssa_semantic_fingerprint};
 pub use function::{
