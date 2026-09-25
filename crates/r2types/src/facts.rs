@@ -257,43 +257,6 @@ impl From<SignatureProjectionSource> for SignatureCertificateSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolvedFieldLayout {
-    pub owner_name: Option<String>,
-    pub field_name: String,
-    pub field_offset: u64,
-    pub element_stride: Option<u64>,
-}
-
-impl ResolvedFieldLayout {
-    pub fn direct(
-        owner_name: Option<String>,
-        field_offset: u64,
-        field_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            owner_name,
-            field_name: field_name.into(),
-            field_offset,
-            element_stride: None,
-        }
-    }
-
-    pub fn indexed(
-        owner_name: Option<String>,
-        element_stride: u64,
-        field_offset: u64,
-        field_name: impl Into<String>,
-    ) -> Self {
-        Self {
-            owner_name,
-            field_name: field_name.into(),
-            field_offset,
-            element_stride: Some(element_stride),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParamSpec {
     pub name: String,

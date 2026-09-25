@@ -9,7 +9,6 @@ pub(crate) mod facts;
 pub mod function_facts;
 pub(crate) mod lattice;
 pub(crate) mod model;
-pub(crate) mod oracle;
 pub(crate) mod prepare;
 mod register_identity;
 pub(crate) mod signature;
@@ -79,7 +78,6 @@ pub use function_facts::{
 };
 
 pub use model::{Signedness, Type};
-pub use oracle::TypeOracle;
 pub use prepare::{
     MetadataScalarKind, TypeHint, merge_type_hint, recover_signature_params_from_ssa,
     type_hint_from_value_metadata,
