@@ -297,6 +297,7 @@ fn the_index_is_what_each_function_listing_claims() {
             let lines = program
                 .function_listing(function.address)
                 .expect("it lists")
+                .lines
                 .value;
             claimed.extend(r2engine::query::references::claimed_by(&lines));
         }

@@ -136,7 +136,8 @@ pub(crate) fn disassemble_function(
     argument: &str,
 ) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
-    let answer = session.program.function_listing(addr)?;
+    let listing = session.program.function_listing(addr)?;
+    let answer = &listing.lines;
     if answer.value.is_empty() {
         return Err(format!("no blocks at {addr:#x}"));
     }
@@ -146,7 +147,21 @@ pub(crate) fn disassemble_function(
         .map(|line| listed(session, line))
         .collect();
     out.push_str(&stopped(answer.completion));
+    if let Some(refused) = &listing.refused {
+        out.push_str(&unanalysed(refused));
+    }
     Ok(out.trim_end().to_owned())
+}
+
+/// Why a listing carries no analysis, and each dispatch whose arms it therefore does not reach, as trailing comment lines.
+fn unanalysed(refused: &r2engine::program::AnalysisRefused) -> String {
+    let mut out = format!("            ; analysis refused: {}\n", refused.reason);
+    for dispatch in &refused.unresolved {
+        out.push_str(&format!(
+            "            ; indirect branch at {dispatch:#x} unresolved: what it reaches is not listed\n"
+        ));
+    }
+    out
 }
 
 /// Where a listing ended short of what was asked, as a trailing comment line.

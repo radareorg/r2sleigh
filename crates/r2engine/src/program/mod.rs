@@ -13,7 +13,7 @@ mod requests;
 mod returns;
 pub mod source;
 
-pub use requests::Rendering;
+pub use requests::{AnalysisRefused, FunctionListing, Rendering};
 
 pub use source::{
     Arch, Container, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section, Segment,

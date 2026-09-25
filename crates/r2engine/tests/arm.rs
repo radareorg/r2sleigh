@@ -227,6 +227,7 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
     let listed = program
         .function_listing(ARM)
         .expect("it lists")
+        .lines
         .value
         .iter()
         .map(|line| line.address - ARM)
@@ -393,7 +394,7 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
         })
         .expect("it lists");
     assert_eq!(spelled(&pd.value), Some(continuing.syntax.text()), "pd");
-    let pdf = program.function_listing(ARM).expect("it lists");
+    let pdf = program.function_listing(ARM).expect("it lists").lines;
     assert_eq!(spelled(&pdf.value), Some(continuing.syntax.text()), "pdf");
 }
 

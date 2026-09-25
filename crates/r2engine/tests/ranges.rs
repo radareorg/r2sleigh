@@ -12,6 +12,7 @@ fn proved_at(code: &'static [u8], address: u64) -> Vec<(u64, u64, u64)> {
     let lines = OpenProgram::of(literal)
         .function_listing(BASE)
         .expect("it lists")
+        .lines
         .value;
     lines
         .iter()
