@@ -35,6 +35,7 @@ fn a_branch_inside_a_function_stays_inside_it() {
         kind,
         defined,
         thumb: false,
+        ..Symbol::default()
     };
     for literal in [
         Literal::new(),

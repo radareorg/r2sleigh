@@ -69,7 +69,8 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "q" | "quit" | "exit" => Err("quit".to_owned()),
         "s" => seek(session, argument),
         "i" => info(session),
-        "ie" => entries(session),
+        "ie" => entries(session, false),
+        "iee" => entries(session, true),
         "iS" => sections(session),
         "is" => symbols(session),
         "ir" => relocations(session),
@@ -159,30 +160,32 @@ fn info(session: &Session) -> Result<String, String> {
     Ok(out)
 }
 
-fn entries(session: &Session) -> Result<String, String> {
-    let mut out = String::from("paddr      vaddr      type\n");
-    out.push_str(&"-".repeat(32));
-    for entry in session
-        .image()
-        .entry_points()
-        .iter()
-        .filter(|entry| entry.kind == r2image::EntryKind::Main)
-    {
-        let paddr = file_offset_of(session, entry.vaddr);
+/// `ie` and `iee`: where the loader starts the program, or what it runs
+/// before and after it, as radare2 lays them out.
+///
+/// radare2 splits them: `ie` is the program's entry, `iee` the functions an
+/// initialiser or terminator array names. `phaddr` and `vhaddr` are where the
+/// container states each: the header field, or the array slot.
+fn entries(session: &Session, initialisers: bool) -> Result<String, String> {
+    let mut out = String::from("paddr      vaddr      phaddr     vhaddr     type\n");
+    out.push_str(&"-".repeat(48));
+    let spelled = |value: Option<u64>| {
+        value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
+    };
+    for entry in session.image().entry_points() {
+        let kind = match entry.kind {
+            r2image::EntryKind::Main if !initialisers => "program",
+            r2image::EntryKind::Init if initialisers => "init",
+            r2image::EntryKind::Fini if initialisers => "fini",
+            r2image::EntryKind::Preinit if initialisers => "preinit",
+            _ => continue,
+        };
         out.push_str(&format!(
-            "\n{} {:#010x} {}",
-            paddr
-                .map(|offset| format!("{:#010x}", offset))
-                .unwrap_or_else(|| "----------".to_owned()),
+            "\n{} {:#010x} {} {} {kind}",
+            spelled(file_offset_of(session, entry.vaddr)),
             entry.vaddr,
-            match entry.kind {
-                r2image::EntryKind::Main => "program",
-                r2image::EntryKind::Init => "init",
-                r2image::EntryKind::Fini => "fini",
-                r2image::EntryKind::Symbol => "symbol",
-                r2image::EntryKind::CMain => "main",
-                r2image::EntryKind::Declared => "declared",
-            }
+            spelled(entry.stated_at.map(|at| at.offset)),
+            spelled(entry.stated_at.and_then(|at| at.vaddr)),
         ));
     }
     Ok(out)
@@ -559,32 +562,103 @@ fn macho_section_type(kind: u32) -> String {
         .map_or_else(|| format!("{kind:#x}"), |name| (*name).to_owned())
 }
 
-fn symbols(session: &Session) -> Result<String, String> {
-    let mut out = String::from("nth vaddr      size type name\n");
+/// `is`: every symbol the container states, then every import, as radare2 lays them out.
+///
+/// Each with the binding and type its table states and its index there. An
+/// import is listed at the stub that stands for it, where one does, which
+/// is the address a call to it names; the dynamic table states the imports
+/// where there is one, since the static table repeats them under versioned
+/// names.
+fn symbols(session: &mut Session) -> Result<String, String> {
+    // The stubs are read out of the code, so there must be a decoder first.
+    session.program.ensure_current()?;
+    let mut out = String::from("nth paddr      vaddr      bind   type   size lib name\n");
     out.push_str(&"-".repeat(60));
-    for (index, symbol) in session
+    let spelled = |value: Option<u64>| {
+        value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
+    };
+    let mut stated: Vec<&r2image::Symbol> = session
         .image()
         .symbols()
         .iter()
-        .filter(|symbol| symbol.defined)
-        .enumerate()
-    {
+        .filter(|symbol| !symbol.import)
+        .collect();
+    // Numbered as the static table numbers them, where it states them.
+    let nth = |symbol: &r2image::Symbol| {
+        symbol
+            .origin
+            .table
+            .map_or((true, symbol.origin.dynamic), |index| (false, Some(index)))
+    };
+    stated.sort_by_key(|symbol| nth(symbol));
+    for symbol in stated {
+        let mapped = symbol.defined.then_some(symbol.vaddr);
         out.push_str(&format!(
-            "\n{:<3} {:#010x} {:>4} {:<4} {}",
-            index,
-            symbol.vaddr,
+            "\n{:<3} {} {} {:<6} {:<6} {:<4}     {}",
+            nth(symbol).1.unwrap_or_default(),
+            spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
+            spelled(Some(symbol.vaddr)),
+            binding(symbol.binding),
+            symbol_type(symbol.kind),
             symbol.size,
-            match symbol.kind {
-                r2image::SymbolKind::Function => "FUNC",
-                r2image::SymbolKind::Data => "OBJ",
-                r2image::SymbolKind::Section => "SECT",
-                r2image::SymbolKind::Other => "NOTY",
-                r2image::SymbolKind::Mapping(_) => "SPCL",
-            },
+            symbol.name
+        ));
+    }
+    let dynamic = session
+        .image()
+        .symbols()
+        .iter()
+        .any(|symbol| symbol.import && symbol.origin.dynamic.is_some());
+    let index = |symbol: &r2image::Symbol| match dynamic {
+        true => symbol.origin.dynamic,
+        false => symbol.origin.table,
+    };
+    let mut imports: Vec<&r2image::Symbol> = session
+        .image()
+        .symbols()
+        .iter()
+        .filter(|symbol| symbol.import && index(symbol).is_some())
+        .collect();
+    imports.sort_by_key(|symbol| index(symbol));
+    let stubs = session.program.imports();
+    for symbol in imports {
+        let stub = stubs
+            .iter()
+            .find(|(_, name)| **name == symbol.name)
+            .map(|(stub, _)| *stub);
+        out.push_str(&format!(
+            "\n{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
+            index(symbol).unwrap_or_default(),
+            spelled(stub.and_then(|stub| file_offset_of(session, stub))),
+            spelled(stub),
+            binding(symbol.binding),
+            symbol_type(symbol.kind),
+            symbol.size,
             symbol.name
         ));
     }
     Ok(out)
+}
+
+/// A symbol's binding, as radare2 spells it.
+fn binding(binding: r2image::Binding) -> String {
+    match binding {
+        r2image::Binding::Local => "LOCAL".to_owned(),
+        r2image::Binding::Global => "GLOBAL".to_owned(),
+        r2image::Binding::Weak => "WEAK".to_owned(),
+        r2image::Binding::Other(other) => format!("{other}"),
+    }
+}
+
+/// A symbol's type, as radare2 spells it.
+fn symbol_type(kind: r2image::SymbolKind) -> &'static str {
+    match kind {
+        r2image::SymbolKind::Function => "FUNC",
+        r2image::SymbolKind::Data => "OBJ",
+        r2image::SymbolKind::Section => "SECT",
+        r2image::SymbolKind::File => "FILE",
+        r2image::SymbolKind::Other | r2image::SymbolKind::Mapping(_) => "NOTYPE",
+    }
 }
 
 fn hexdump(session: &Session, argument: &str) -> Result<String, String> {

@@ -51,7 +51,9 @@ pub fn of(source: &impl Source) -> NameDb {
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,
                     // An untyped symbol names a place, not an object, which is the difference `loc.` carries.
-                    SymbolKind::Other | SymbolKind::Mapping(_) => Namespace::Label,
+                    SymbolKind::Other | SymbolKind::File | SymbolKind::Mapping(_) => {
+                        Namespace::Label
+                    }
                 },
                 size: symbol.size,
             },
@@ -63,6 +65,7 @@ pub fn of(source: &impl Source) -> NameDb {
     // it, so it gets no second name here.
     let mut inits = 0;
     let mut finis = 0;
+    let mut preinits = 0;
     // Where the format names `main` outright, that address is `main` and not
     // also `entry0`: `LC_MAIN` carries the C function, not a start routine.
     let c_main: std::collections::BTreeSet<u64> = image
@@ -85,6 +88,10 @@ pub fn of(source: &impl Source) -> NameDb {
             EntryKind::Fini => {
                 finis += 1;
                 format!("entry.fini{}", finis - 1)
+            }
+            EntryKind::Preinit => {
+                preinits += 1;
+                format!("entry.preinit{}", preinits - 1)
             }
             // The symbol table names one of these already, and a stated
             // function start is a position rather than a name.
@@ -535,6 +542,7 @@ mod tests {
                 kind: SymbolKind::Function,
                 defined: true,
                 thumb: false,
+                ..Symbol::default()
             };
             assert!(!names_an_address(&symbol), "{name}");
         }

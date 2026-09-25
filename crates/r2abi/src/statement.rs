@@ -358,6 +358,8 @@ pub enum SymbolKind {
     Function,
     Data,
     Section,
+    /// The source file an object came from, which names no address.
+    File,
     #[default]
     Other,
     /// An ARM mapping symbol: where the bytes become code of one instruction
@@ -381,9 +383,28 @@ pub struct Symbol {
     pub kind: SymbolKind,
     /// Whether the symbol names a place in this program rather than an import.
     pub defined: bool,
+    /// Whether the symbol is undefined here: an import another image defines.
+    /// An absolute or a file symbol is neither defined in a section nor this.
+    pub import: bool,
     /// Whether the function it names is Thumb, which ARM states in the low bit
     /// of the symbol's value. False on every other machine.
     pub thumb: bool,
+    pub binding: Binding,
+    pub visibility: Visibility,
+    /// The section it is defined in, by the section's own index.
+    pub section: Option<usize>,
+    /// Where each symbol table states it: one name at one address is one
+    /// symbol, whichever of the two tables states it.
+    pub origin: SymbolOrigin,
+}
+
+/// Where each symbol table states a symbol, by its index there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SymbolOrigin {
+    /// The static table: ELF's `.symtab`, Mach-O's `LC_SYMTAB`.
+    pub table: Option<usize>,
+    /// The dynamic table the loader reads: ELF's `.dynsym`.
+    pub dynamic: Option<usize>,
 }
 
 /// One relocation record the loader, or the program's own start-up, applies.
@@ -568,9 +589,12 @@ pub enum EntryKind {
     /// The format's declared entry point.
     #[default]
     Main,
-    /// Listed in an initialiser or finaliser array.
+    /// Listed in an initialiser or finaliser array, or a Mach-O section of
+    /// initialiser or terminator pointers.
     Init,
     Fini,
+    /// Listed in the array run before any shared object's initialisers.
+    Preinit,
     /// Named by a symbol typed as a function.
     Symbol,
     /// The C `main` the format names outright.
@@ -599,6 +623,17 @@ pub struct Entry {
     /// symbol. A static ARM binary whose `e_entry` is odd starts in Thumb, and
     /// decoding it as ARM produces plausible instructions that are not there.
     pub thumb: bool,
+    /// Where the container states it: the header field or the array slot that
+    /// holds it.
+    pub stated_at: Option<StatedAt>,
+}
+
+/// Where in the file, and where in memory, a container states a value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatedAt {
+    pub offset: u64,
+    /// Where the loader maps it, where it maps it at all.
+    pub vaddr: Option<u64>,
 }
 
 #[cfg(test)]

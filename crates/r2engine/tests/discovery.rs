@@ -68,6 +68,7 @@ fn a_data_symbol_or_an_import_s_symbol_states_no_function() {
         kind,
         defined,
         thumb: false,
+        ..Symbol::default()
     };
     for literal in [
         Literal::new().declaring(symbol("table", SymbolKind::Data, true)),

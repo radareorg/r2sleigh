@@ -78,12 +78,14 @@ fn opened_as(endian: Endian) -> OpenProgram<Mixed> {
             kind: SymbolKind::Mapping(Mapping::Arm),
             defined: true,
             thumb: false,
+            ..Symbol::default()
         });
     }
     mixed.container.entries.push(Entry {
         vaddr: THUMB,
         kind: EntryKind::Main,
         thumb: true,
+        ..Entry::default()
     });
     OpenProgram::of(mixed)
 }
@@ -129,6 +131,7 @@ fn arm_only(code: &'static [u8], endian: Endian) -> Mixed {
                 kind: SymbolKind::Function,
                 defined: true,
                 thumb: false,
+                ..Symbol::default()
             }],
             ..Container::default()
         },
@@ -170,6 +173,7 @@ fn a_thumb_mapping_symbol_switches_one_arm_function_to_thumb() {
         kind: SymbolKind::Mapping(mapping),
         defined: true,
         thumb: false,
+        ..Symbol::default()
     };
     let mut mixed = arm_only(&CODE, Endian::Little);
     mixed.container.symbols.extend([
@@ -273,6 +277,7 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
         kind: SymbolKind::Function,
         defined: true,
         thumb: false,
+        ..Symbol::default()
     });
     let found = OpenProgram::of(mixed)
         .functions()

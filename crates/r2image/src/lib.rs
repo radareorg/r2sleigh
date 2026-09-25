@@ -67,8 +67,8 @@ fn is_arm32(arch: &Arch) -> bool {
     arch.name == "ARM" && arch.bits == 32
 }
 
-/// The address `LC_MAIN` names, where the Mach-O carries that command.
-fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<u64> {
+/// The address `LC_MAIN` names, and the file offset of the field that names it, where the Mach-O carries that command.
+fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<(u64, u64)> {
     match file {
         object::File::MachO64(macho) => c_main(macho, data),
         object::File::MachO32(macho) => c_main(macho, data),
@@ -79,7 +79,7 @@ fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<u64> {
 fn c_main<'data, Mach, R>(
     file: &object::read::macho::MachOFile<'data, Mach, R>,
     data: &'data [u8],
-) -> Option<u64>
+) -> Option<(u64, u64)>
 where
     Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
     R: object::ReadRef<'data>,
@@ -91,12 +91,16 @@ where
     let mut commands = file.macho_header().load_commands(endian, data, 0).ok()?;
     let mut text_base = None;
     let mut entryoff = None;
+    // Load commands follow the header back to back, so each starts where the last one's size ends.
+    let mut at = std::mem::size_of::<Mach>() as u64;
     while let Ok(Some(command)) = commands.next() {
         if command.cmd() == macho::LC_MAIN
             && let Ok(main) = command.data::<macho::EntryPointCommand<Mach::Endian>>()
         {
-            entryoff = Some(main.entryoff.get(endian));
+            // `entryoff` follows `cmd` and `cmdsize`.
+            entryoff = Some((main.entryoff.get(endian), at + 8));
         }
+        at += u64::from(command.cmdsize());
         if text_base.is_none()
             && let Ok(variant) = command.variant()
         {
@@ -116,7 +120,78 @@ where
         }
     }
     // `entryoff` is measured from the start of the mapped image.
-    text_base?.checked_add(entryoff?)
+    let (entryoff, field) = entryoff?;
+    Some((text_base?.checked_add(entryoff)?, field))
+}
+
+/// Where ELF's header states the entry point: `e_entry`, after the sixteen
+/// identification bytes and the type, machine and version fields.
+const ELF_ENTRY_FIELD: u64 = 0x18;
+
+/// Every function an initialiser or terminator array names, as the container states the array.
+///
+/// Found by the section's stated type -- ELF's `SHT_INIT_ARRAY`,
+/// `SHT_FINI_ARRAY` and `SHT_PREINIT_ARRAY`, Mach-O's
+/// `S_MOD_INIT_FUNC_POINTERS` and `S_MOD_TERM_FUNC_POINTERS` -- never by its
+/// name, and each slot read as the loader leaves it: a rebased pointer is the
+/// address the container states it writes there, which a PIE linked without
+/// applying its relocations does not hold in the file at all.
+fn initialisers(
+    sections: &[Section],
+    writes: &[LoaderWrite],
+    data: &[u8],
+    arch: &Arch,
+) -> Vec<Entry> {
+    const S_MOD_INIT_FUNC_POINTERS: u32 = 0x9;
+    const S_MOD_TERM_FUNC_POINTERS: u32 = 0xa;
+    let pointer = u64::from(arch.bits / 8);
+    let mut found = Vec::new();
+    for section in sections {
+        let kind = match section.stated {
+            SectionStatement::Elf { sh_type: 14, .. } => EntryKind::Init,
+            SectionStatement::Elf { sh_type: 15, .. } => EntryKind::Fini,
+            SectionStatement::Elf { sh_type: 16, .. } => EntryKind::Preinit,
+            SectionStatement::MachO { flags } if flags & 0xff == S_MOD_INIT_FUNC_POINTERS => {
+                EntryKind::Init
+            }
+            SectionStatement::MachO { flags } if flags & 0xff == S_MOD_TERM_FUNC_POINTERS => {
+                EntryKind::Fini
+            }
+            _ => continue,
+        };
+        let slots = section.file_size.min(section.vsize) / pointer;
+        for slot in 0..slots {
+            let place = section.vaddr + slot * pointer;
+            let offset = section.file_offset + slot * pointer;
+            let raw = match r2abi::statement::write_at(writes, place) {
+                Some(write) if write.place == place && write.width == pointer => write.value(),
+                // Written with a value the container does not state, or only in part.
+                Some(_) => None,
+                None => usize::try_from(offset)
+                    .ok()
+                    .and_then(|at| data.get(at..at.checked_add(pointer as usize)?))
+                    .map(|bytes| read_pointer(bytes, arch.endian)),
+            };
+            let Some(raw) = raw else {
+                continue;
+            };
+            let vaddr = code_address(arch, raw);
+            // Zero is an empty slot, and all ones the terminator an old `.ctors` ends with.
+            if vaddr == 0 || raw == u64::MAX >> (64 - arch.bits) {
+                continue;
+            }
+            found.push(Entry {
+                vaddr,
+                kind,
+                thumb: is_arm32(arch) && raw & 1 == 1,
+                stated_at: Some(StatedAt {
+                    offset,
+                    vaddr: Some(place),
+                }),
+            });
+        }
+    }
+    found
 }
 
 /// Every function start the Mach-O linker recorded.
@@ -430,7 +505,7 @@ impl Image {
         // Both tables, because a stripped shared library has no `.symtab` and
         // every name it still carries is in `.dynsym`. Reading only the first
         // is why such a library listed no functions at all.
-        let read_symbol = |symbol: object::read::Symbol<'_, '_>| {
+        let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
             let name = symbol.name().ok()?;
             if name.is_empty() {
                 return None;
@@ -455,24 +530,56 @@ impl Image {
                     // A name in code is a function; `__mh_execute_header` is
                     // typed as code and sits at the Mach-O header, where no
                     // instruction begins, so discovery walked the header.
-                    (None, object::SymbolKind::Text) if executable(address) => SymbolKind::Function,
+                    // An import's own type is the statement: nothing here is at its address.
+                    (None, object::SymbolKind::Text)
+                        if executable(address)
+                            || symbol.section() == object::SymbolSection::Undefined =>
+                    {
+                        SymbolKind::Function
+                    }
                     (None, object::SymbolKind::Data) => SymbolKind::Data,
                     (None, object::SymbolKind::Section) => SymbolKind::Section,
+                    (None, object::SymbolKind::File) => SymbolKind::File,
                     (None, _) => SymbolKind::Other,
                 },
                 // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
                 // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
                 defined: matches!(symbol.section(), object::SymbolSection::Section(_))
                     && symbol.kind() != object::SymbolKind::Tls,
+                import: symbol.section() == object::SymbolSection::Undefined,
                 thumb: is_arm32(&arch)
                     && symbol.kind() == object::SymbolKind::Text
                     && address & 1 == 1,
+                binding: symbol_binding(&symbol),
+                visibility: match symbol.flags() {
+                    object::SymbolFlags::Elf { st_other, .. } => match st_other & 3 {
+                        1 => Visibility::Internal,
+                        2 => Visibility::Hidden,
+                        3 => Visibility::Protected,
+                        _ => Visibility::Default,
+                    },
+                    _ => Visibility::Default,
+                },
+                section: symbol.section_index().map(|index| index.0),
+                origin: match dynamic {
+                    true => SymbolOrigin {
+                        table: None,
+                        dynamic: Some(symbol.index().0),
+                    },
+                    false => SymbolOrigin {
+                        table: Some(symbol.index().0),
+                        dynamic: None,
+                    },
+                },
             })
         };
         let mut symbols: Vec<Symbol> = file
             .symbols()
-            .filter_map(&read_symbol)
-            .chain(file.dynamic_symbols().filter_map(&read_symbol))
+            .filter_map(|symbol| read_symbol(symbol, false))
+            .chain(
+                file.dynamic_symbols()
+                    .filter_map(|symbol| read_symbol(symbol, true)),
+            )
             .collect();
         // One name at one address is one symbol, whichever table held it.
         symbols.sort_by(|left, right| {
@@ -481,7 +588,14 @@ impl Image {
                 .then_with(|| left.name.cmp(&right.name))
                 .then_with(|| right.defined.cmp(&left.defined))
         });
-        symbols.dedup_by(|left, right| left.vaddr == right.vaddr && left.name == right.name);
+        symbols.dedup_by(|later, kept| {
+            let same = later.vaddr == kept.vaddr && later.name == kept.name;
+            if same {
+                kept.origin.table = kept.origin.table.or(later.origin.table);
+                kept.origin.dynamic = kept.origin.dynamic.or(later.origin.dynamic);
+            }
+            same
+        });
 
         // Every record the loader applies, once each, and what it writes.
         let loader::Loaded {
@@ -499,6 +613,17 @@ impl Image {
         let mut entries = Vec::new();
         let declared_entry = file.entry();
         let entry = code_address(&arch, declared_entry);
+        let c_main = macho_c_main(&file, data.as_slice());
+        // Where the header states the entry: ELF's `e_entry`, Mach-O's `LC_MAIN`.
+        let entry_field = match format {
+            Format::Elf => Some(ELF_ENTRY_FIELD),
+            Format::MachO => c_main.map(|(_, field)| field),
+            _ => None,
+        }
+        .map(|offset| StatedAt {
+            offset,
+            vaddr: file_offset_to_vaddr(&segments, offset),
+        });
         if entry != 0 {
             // Mach-O states the entry as a file offset, so translate when unmapped.
             let vaddr = if executable(entry) {
@@ -511,6 +636,7 @@ impl Image {
                     vaddr,
                     kind: EntryKind::Main,
                     thumb: is_arm32(&arch) && declared_entry & 1 == 1,
+                    stated_at: entry_field,
                 });
             }
         }
@@ -520,39 +646,27 @@ impl Image {
                     vaddr: symbol.vaddr,
                     kind: EntryKind::Symbol,
                     thumb: symbol.thumb,
+                    stated_at: None,
                 });
             }
         }
-        let pointer_bytes = (arch.bits / 8) as usize;
-        for (section, kind) in [
-            (".init_array", EntryKind::Init),
-            (".fini_array", EntryKind::Fini),
-        ] {
-            let Some(section) = file.section_by_name(section) else {
-                continue;
-            };
-            let Ok(bytes) = section.data() else {
-                continue;
-            };
-            for slot in bytes.chunks_exact(pointer_bytes) {
-                let raw = read_pointer(slot, arch.endian);
-                let vaddr = code_address(&arch, raw);
-                if vaddr != 0 {
-                    entries.push(Entry {
-                        vaddr,
-                        kind,
-                        thumb: is_arm32(&arch) && raw & 1 == 1,
-                    });
-                }
-            }
-        }
-        if let Some(vaddr) = macho_c_main(&file, data.as_slice())
+        entries.extend(initialisers(
+            &sections,
+            &loader_writes,
+            data.as_slice(),
+            &arch,
+        ));
+        if let Some((vaddr, field)) = c_main
             && executable(vaddr)
         {
             entries.push(Entry {
                 vaddr,
                 kind: EntryKind::CMain,
                 thumb: false,
+                stated_at: Some(StatedAt {
+                    offset: field,
+                    vaddr: file_offset_to_vaddr(&segments, field),
+                }),
             });
         }
         // The linker wrote one entry per function it laid out, so a body no
@@ -563,6 +677,7 @@ impl Image {
                     vaddr,
                     kind: EntryKind::Declared,
                     thumb: false,
+                    stated_at: None,
                 });
             }
         }
@@ -1007,6 +1122,21 @@ fn section_statement(
             SectionStatement::Coff { characteristics }
         }
         _ => SectionStatement::Unstated,
+    }
+}
+
+/// A symbol's binding, as its table states it.
+fn symbol_binding(symbol: &object::read::Symbol<'_, '_>) -> Binding {
+    match symbol.flags() {
+        object::SymbolFlags::Elf { st_info, .. } => match st_info >> 4 {
+            0 => Binding::Local,
+            1 => Binding::Global,
+            2 => Binding::Weak,
+            other => Binding::Other(other),
+        },
+        _ if symbol.is_weak() => Binding::Weak,
+        _ if symbol.is_local() => Binding::Local,
+        _ => Binding::Global,
     }
 }
 

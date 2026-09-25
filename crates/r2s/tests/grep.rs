@@ -54,105 +54,130 @@ fn expect(table: &[(&str, &[&str])]) {
     }
 }
 
-const CRC32: [&str; 3] = [
-    "15  0x00401530   76 FUNC crc32_bitwise",
-    "16  0x00401580  170 FUNC crc32_init",
-    "17  0x00401630   67 FUNC crc32_table",
-];
-
 /// Scripts and the lines each prints: radare2's output for the same grep.
 const GRAMMAR: &[(&str, &[&str])] = &[
     // `,` is any word, `&` every word, and `~` another stage.
     (
         "is~fnv1a32,djb2",
         &[
-            "9   0x00401330   54 FUNC fnv1a32",
-            "11  0x004013b0   54 FUNC djb2",
+            "26  0x00001330 0x00401330 GLOBAL FUNC   54       fnv1a32",
+            "37  0x000013b0 0x004013b0 GLOBAL FUNC   54       djb2",
         ],
     ),
-    ("is~&FUNC,crc32", &CRC32),
-    ("is~FUNC~crc32", &CRC32),
+    (
+        "is~&FUNC,crc32",
+        &[
+            "27  0x00001530 0x00401530 GLOBAL FUNC   76       crc32_bitwise",
+            "40  0x00001630 0x00401630 GLOBAL FUNC   67       crc32_table",
+            "44  0x00001580 0x00401580 GLOBAL FUNC   170      crc32_init",
+        ],
+    ),
+    (
+        "is~FUNC~crc32",
+        &[
+            "27  0x00001530 0x00401530 GLOBAL FUNC   76       crc32_bitwise",
+            "40  0x00001630 0x00401630 GLOBAL FUNC   67       crc32_table",
+            "44  0x00001580 0x00401580 GLOBAL FUNC   170      crc32_init",
+        ],
+    ),
     (
         "is~!FUNC,OBJ",
         &[
-            "nth vaddr      size type name",
+            "nth paddr      vaddr      bind   type   size lib name",
             "------------------------------------------------------------",
-            "27  0x004022d0    0 NOTY __GNU_EH_FRAME_HDR",
-            "33  0x00404008    0 NOTY __data_start",
-            "34  0x00404008    0 NOTY data_start",
-            "37  0x00404018    0 NOTY _edata",
-            "38  0x00404020    0 NOTY __bss_start",
-            "41  0x00404440    0 NOTY _end",
+            "1   ---------- 0x00000000 LOCAL  FILE   0        crt1.o",
+            "3   ---------- 0x00000000 LOCAL  FILE   0        hashes.c",
+            "7   ---------- 0x00000000 LOCAL  FILE   0        crtstuff.c",
+            "19  0x000022d0 0x004022d0 LOCAL  NOTYPE 0        __GNU_EH_FRAME_HDR",
+            "24  0x00003008 0x00404008 WEAK   NOTYPE 0        data_start",
+            "28  ---------- 0x00404018 GLOBAL NOTYPE 0        _edata",
+            "33  0x00003008 0x00404008 GLOBAL NOTYPE 0        __data_start",
+            "41  ---------- 0x00404440 GLOBAL NOTYPE 0        _end",
+            "45  ---------- 0x00404020 GLOBAL NOTYPE 0        __bss_start",
+            "2   ---------- ---------- WEAK   NOTYPE 0        imp.__gmon_start__",
         ],
     ),
     // A trailing `$` anchors the end, `^` the start, `+` folds case.
     (
         "is~32$",
         &[
-            "9   0x00401330   54 FUNC fnv1a32",
-            "13  0x00401420  118 FUNC adler32",
-            "14  0x004014a0  142 FUNC fletcher32",
-            "18  0x00401680  196 FUNC murmur3_32",
-            "19  0x00401750  347 FUNC xxhash32",
+            "25  0x00001680 0x00401680 GLOBAL FUNC   196      murmur3_32",
+            "26  0x00001330 0x00401330 GLOBAL FUNC   54       fnv1a32",
+            "32  0x000014a0 0x004014a0 GLOBAL FUNC   142      fletcher32",
+            "39  0x00001420 0x00401420 GLOBAL FUNC   118      adler32",
+            "48  0x00001750 0x00401750 GLOBAL FUNC   347      xxhash32",
         ],
     ),
     (
         "is~+FNV",
         &[
-            "9   0x00401330   54 FUNC fnv1a32",
-            "10  0x00401370   52 FUNC fnv1a64",
+            "21  0x00001370 0x00401370 GLOBAL FUNC   52       fnv1a64",
+            "26  0x00001330 0x00401330 GLOBAL FUNC   54       fnv1a32",
         ],
     ),
     // Counting lines and bytes.
-    ("is~FUNC?", &["23"]),
-    ("is~FUNC~!crc32?", &["20"]),
-    ("is~FUNC~?.", &["826"]),
+    ("is~FUNC?", &["25"]),
+    ("is~FUNC~!crc32?", &["22"]),
+    ("is~FUNC~?.", &["1515"]),
     // Columns, rows, and both in one stage.
     (
-        "is~crc32[4]",
-        &["crc32_bitwise", "crc32_init", "crc32_table"],
+        "is~crc32[6]",
+        &["crc32_bitwise", "crc32_table", "crc32_init"],
     ),
-    ("is~FUNC:1..3[4]", &["main", "_start"]),
-    ("is~FUNC[-2--1]:0", &["FUNC _init"]),
+    (
+        "is~FUNC:1..3[6]",
+        &["register_tm_clones", "__do_global_dtors_aux"],
+    ),
+    ("is~FUNC[-2--1]:0", &["0 deregister_tm_clones"]),
     (
         "is~^1,2~:0..3",
         &[
-            "1   0x00401000    0 FUNC _init",
-            "2   0x00401050  493 FUNC main",
-            "10  0x00401370   52 FUNC fnv1a64",
+            "1   ---------- 0x00000000 LOCAL  FILE   0        crt1.o",
+            "2   0x0000038c 0x0040038c LOCAL  OBJ    32       __abi_tag",
+            "10  0x000012f0 0x004012f0 LOCAL  FUNC   0        __do_global_dtors_aux",
         ],
     ),
     // Rows before columns count the lines the words kept, so the
-    // separator is row 1 and has no column 4; columns before rows count
+    // separator is row 1 and has no column 6; columns before rows count
     // the projected lines (grep.c:354-356, radare2's `range` tests).
-    ("is~:1~[4]", &[]),
-    ("is~[4]~:1", &["__abi_tag"]),
+    ("is~:1~[6]", &[]),
+    ("is~[6]~:1", &["crt1.o"]),
     // A later row window is taken within the one before.
-    ("is~FUNC~:0..2~:1", &["2   0x00401050  493 FUNC main"]),
+    (
+        "is~FUNC~:0..2~:1",
+        &["9   0x000012b0 0x004012b0 LOCAL  FUNC   0        register_tm_clones"],
+    ),
     // Orders: sort, reverse sort, uniq, tac, and `$:n` keeping lines in place.
     (
-        "is~$!crc32[4]",
+        "is~$!crc32[6]",
         &["crc32_table", "crc32_init", "crc32_bitwise"],
     ),
-    ("is~$$FUNC[3]", &["FUNC"]),
-    ("is~[3]~$$", &["FUNC", "NOTY", "OBJ", "type"]),
-    ("is~$!!crc32", &[CRC32[2], CRC32[1], CRC32[0]]),
+    ("is~$$FUNC[4]", &["FUNC"]),
+    ("is~[4]~$$", &["FILE", "FUNC", "NOTYPE", "OBJ", "type"]),
+    (
+        "is~$!!crc32",
+        &[
+            "44  0x00001580 0x00401580 GLOBAL FUNC   170      crc32_init",
+            "40  0x00001630 0x00401630 GLOBAL FUNC   67       crc32_table",
+            "27  0x00001530 0x00401530 GLOBAL FUNC   76       crc32_bitwise",
+        ],
+    ),
     (
         "is~crc32,fnv~$:1",
         &[
-            "9   0x00401330   54 FUNC fnv1a32",
-            "10  0x00401370   52 FUNC fnv1a64",
-            CRC32[0],
-            CRC32[1],
-            CRC32[2],
+            "21  0x00001370 0x00401370 GLOBAL FUNC   52       fnv1a64",
+            "26  0x00001330 0x00401330 GLOBAL FUNC   54       fnv1a32",
+            "27  0x00001530 0x00401530 GLOBAL FUNC   76       crc32_bitwise",
+            "40  0x00001630 0x00401630 GLOBAL FUNC   67       crc32_table",
+            "44  0x00001580 0x00401580 GLOBAL FUNC   170      crc32_init",
         ],
     ),
     // Numbers sort by value, after the lines kept in place.
     (
-        "is~FUNC[2]~$:3",
+        "is~FUNC[5]~$:3",
         &[
-            "0", "493", "38", "0", "0", "0", "0", "0", "5", "43", "51", "52", "54", "54", "67",
-            "76", "80", "118", "142", "170", "196", "347", "608",
+            "0", "0", "0", "0", "0", "0", "0", "0", "5", "38", "43", "51", "52", "54", "54", "67",
+            "76", "80", "118", "142", "170", "196", "347", "493", "608",
         ],
     ),
     // Escapes, quotes and separators, as radare2's line reads them.
@@ -178,8 +203,8 @@ const GRAMMAR: &[(&str, &[&str])] = &[
     (
         "is~:-010..-08",
         &[
-            "32  0x00403fe8    0 OBJ  _GLOBAL_OFFSET_TABLE_",
-            "33  0x00404008    0 NOTY __data_start",
+            "43  0x00001240 0x00401240 GLOBAL FUNC   38       _start",
+            "44  0x00001580 0x00401580 GLOBAL FUNC   170      crc32_init",
         ],
     ),
 ];
@@ -195,7 +220,12 @@ fn a_sort_keeps_the_header_lines_in_place() {
     let run = r2s("is~[0]~$!:2");
     assert!(run.ok, "{}", run.stderr);
     let mut wanted = vec!["nth".to_owned(), "-".repeat(60)];
-    wanted.extend((0..=41).rev().map(|row: u32| row.to_string()));
+    // The symbols by their table index, then the imports by theirs.
+    let numbers = [
+        50, 49, 48, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 34, 33, 32, 31, 30, 29, 28, 27, 26,
+        25, 24, 22, 21, 20, 19, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 3, 2, 2, 1, 1,
+    ];
+    wanted.extend(numbers.iter().map(u32::to_string));
     assert_eq!(run.stdout, format!("{}\n", wanted.join("\n")));
 }
 
@@ -228,32 +258,35 @@ fn the_rows_count_the_lines_the_grep_kept() {
         // radare2 resolves a negative row against every line of the output
         // but indexes the lines the words kept (grep.c:875-896, 959); its help
         // says `i~:-2` is the second to last line. radare2: nothing.
-        ("is~FUNC:-1", &["23  0x00401ba0    0 FUNC _fini"]),
+        (
+            "is~FUNC:-1",
+            &["3   0x00001040 0x00401040 GLOBAL FUNC   0        imp.__printf_chk"],
+        ),
         // radare2 clears the count's window after the first line it shows
         // (grep.c:918, 967-969). radare2: `1`.
         ("is~FUNC:0..3?", &["3"]),
         // radare2 projects only the lines inside the row window, so the
         // unprojected header and separator hold rows 0 and 1 (grep.c:1100-1103).
-        // radare2: `__abi_tag`.
-        ("is~[4]:2", &["_init"]),
+        // radare2: `crt1.o`.
+        ("is~[6]:2", &["__abi_tag"]),
         // Rows in a stage before the columns count every line the words
-        // kept, so the separator takes row 0 and has no column 4. radare2
+        // kept, so the separator takes row 0 and has no column 6. radare2
         // keeps that order only without words (grep.c:897, 960) and skips the
-        // separator: `_init`, `main`, `_start`.
-        ("is~--,FUNC~:0..3~[4]", &["_init", "main"]),
-        // The same, with the rows in the words' stage. radare2: `0x00401000`,
-        // `0x00401050`.
-        ("is~-,FUNC:0..2~[1]", &["0x00401000"]),
+        // separator: `crt1.o`, `hashes.c`, `crc_tab`.
+        ("is~--,FUNC~:0..3~[6]", &["crt1.o", "hashes.c"]),
+        // The same, with the rows in the words' stage. radare2: `0x00000000`,
+        // `0x00000000`.
+        ("is~-,FUNC:0..2~[2]", &["0x00000000"]),
         // A later window stays within the one before it. radare2 adds the
         // bounds unclipped (grep.c:102-108) and starts at row 3, before it.
         (
             "is~:5..10~:-7..",
             &[
-                "3   0x00401240   38 FUNC _start",
-                "4   0x00401270    5 FUNC _dl_relocate_static_pie",
-                "5   0x00401280    0 FUNC deregister_tm_clones",
-                "6   0x004012b0    0 FUNC register_tm_clones",
-                "7   0x004012f0    0 FUNC __do_global_dtors_aux",
+                "4   ---------- 0x00404040 LOCAL  OBJ    1024     crc_tab",
+                "5   0x000020a0 0x004020a0 LOCAL  OBJ    256      pearson_tab",
+                "6   0x00002060 0x00402060 LOCAL  OBJ    62       msg.0",
+                "7   ---------- 0x00000000 LOCAL  FILE   0        crtstuff.c",
+                "8   0x00001280 0x00401280 LOCAL  FUNC   0        deregister_tm_clones",
             ],
         ),
     ]);

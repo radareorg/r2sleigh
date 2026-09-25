@@ -370,6 +370,7 @@ impl Literal {
             kind: SymbolKind::Function,
             defined: true,
             thumb: false,
+            ..Symbol::default()
         };
         Self {
             code: &CODE,
@@ -421,6 +422,7 @@ impl Literal {
                 kind: SymbolKind::Function,
                 defined: true,
                 thumb: false,
+                ..Symbol::default()
             })
             .collect();
         program
@@ -440,6 +442,7 @@ impl Literal {
             kind,
             defined: true,
             thumb,
+            ..Symbol::default()
         };
         program.container.symbols = vec![
             symbol("entry", ARM_ENTRY, SymbolKind::Function, false),
@@ -518,6 +521,7 @@ impl Literal {
             kind: SymbolKind::Function,
             defined: true,
             thumb: false,
+            ..Symbol::default()
         });
         self
     }
@@ -534,6 +538,7 @@ impl Literal {
             vaddr,
             kind,
             thumb: false,
+            ..Entry::default()
         });
         self
     }

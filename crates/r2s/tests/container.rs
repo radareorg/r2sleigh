@@ -116,6 +116,52 @@ fn is_states_each_sections_own_permissions_flags_and_identity() {
 }
 
 #[test]
+fn is_lists_every_symbol_with_its_binding_and_every_import_at_its_stub() {
+    // radare2's `is` on rv_O0g: `completed.0` is a local object in `.bss`,
+    // which the file holds no byte of; the imports are the dynamic table's,
+    // each at the stub a call to it lands on.
+    let out = run("rv_O0g", "is");
+    for row in [
+        "7   ---------- 0x00004020 LOCAL  OBJ    1        completed.0",
+        "48  0x00001549 0x00001549 GLOBAL FUNC   640      main",
+        "5   0x000010a0 0x000010a0 GLOBAL FUNC   0        imp.printf",
+        "6   ---------- ---------- WEAK   NOTYPE 0        imp.__gmon_start__",
+    ] {
+        assert!(out.lines().any(|line| line == row), "{row} missing:\n{out}");
+    }
+    // A stripped binary has no static table, and still states its imports.
+    let stripped = run("hashes_gcc_x64_O2_stripped", "is");
+    assert!(
+        stripped
+            .lines()
+            .any(|line| line == "3   0x00001040 0x00401040 GLOBAL FUNC   0        imp.__printf_chk"),
+        "{stripped}"
+    );
+}
+
+#[test]
+fn ie_lists_the_program_entry_and_iee_the_arrays_the_loader_runs_around_it() {
+    // `e_entry` is the header field at 0x18; the initialiser and terminator
+    // arrays each state one function, in the slots their relative
+    // relocations fill.
+    let entry = run("rv_O0g", "ie");
+    assert_eq!(
+        rows(&entry),
+        ["0x000010c0 0x000010c0 0x00000018 0x00000018 program"],
+        "{entry}"
+    );
+    let arrays = run("rv_O0g", "iee");
+    assert_eq!(
+        rows(&arrays),
+        [
+            "0x00001160 0x00001160 0x00002da8 0x00003da8 fini",
+            "0x000011a0 0x000011a0 0x00002da0 0x00003da0 init",
+        ],
+        "{arrays}"
+    );
+}
+
+#[test]
 fn iz_lists_the_programs_strings_and_none_of_the_loaders_tables() {
     // `.interp`'s path, the build note, `.dynstr`'s names and runs of the
     // unwind tables all read as text; none of them is a string of the

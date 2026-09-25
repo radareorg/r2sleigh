@@ -47,7 +47,11 @@ fn on(binary: PathBuf, script: &str) -> Run {
 fn symbols_are_listed_with_their_kind() {
     let run = r2s("is");
     assert!(run.ok, "{}", run.out);
-    assert!(run.out.contains("FUNC fnv1a32"), "{}", run.out);
+    assert!(
+        run.out.contains("GLOBAL FUNC   54       fnv1a32"),
+        "{}",
+        run.out
+    );
     assert!(
         run.out.contains(FNV1A32.trim_start_matches("0x")),
         "{}",
@@ -82,12 +86,11 @@ fn every_discovered_address_says_why_it_is_believed() {
             "no confidence on {row}"
         );
     }
-    // Discovery may not lose a function the format states outright.
-    assert!(
-        rows.len() >= r2s("is").out.matches("FUNC").count(),
-        "{}",
-        run.out
-    );
+    // Discovery may not lose a function the format states outright: every
+    // one the symbol table defines, which excludes the imports it lists.
+    let defined = r2s("is~FUNC~!imp.?").out;
+    let defined: usize = defined.trim().parse().expect("a count");
+    assert!(rows.len() >= defined, "{}", run.out);
 }
 
 #[test]
@@ -799,9 +802,21 @@ mod stripped {
 
     #[test]
     fn the_symbol_table_states_nothing() {
+        // No function is defined in any table; what the dynamic table still
+        // states is the imports.
         let run = r2s("is");
         assert!(run.ok, "{}", run.out);
-        assert!(!run.out.contains("FUNC"), "{}", run.out);
+        let functions: Vec<&str> = run
+            .out
+            .lines()
+            .filter(|line| line.contains("FUNC"))
+            .collect();
+        assert!(!functions.is_empty(), "{}", run.out);
+        assert!(
+            functions.iter().all(|line| line.contains(" imp.")),
+            "{}",
+            run.out
+        );
     }
 
     #[test]
