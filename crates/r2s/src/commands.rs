@@ -5,44 +5,68 @@
 //! yet are left out rather than filled with zeroes, so a diff reports a missing
 //! column rather than a wrong value.
 
+use crate::grep::Suffix;
+use crate::line::{Command, Statement};
 use crate::session::Session;
 use r2engine::RenderTier;
 use r2engine::query::Role;
 
-pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
-    let line = line.trim();
-    if line.is_empty() {
-        return Ok(String::new());
-    }
+/// Run one statement: its command, where it asks, then its grep. The answer
+/// is the text to print, as radare2 prints it: every line ends in a newline,
+/// so an empty line is printed and no line is nothing.
+///
+/// The statement arrives cut and its grep parsed, so a grep that cannot be
+/// honoured was refused before this runs anything. Only a line of the output
+/// that radare2's grep would print broken is refused after the command ran;
+/// every command that changes anything prints ASCII, so none reaches it.
+pub fn run(session: &mut Session, statement: &Statement) -> Result<String, String> {
+    let grep = match &statement.grep {
+        Some(Suffix::Help) => return Ok(format!("{}\n", crate::grep::help())),
+        Some(Suffix::Filter(grep)) => Some(grep),
+        None => None,
+    };
+    let output = match &statement.at {
+        Some(address) => elsewhere(session, address, &statement.command)?,
+        None => dispatch(session, &statement.command)?,
+    };
+    Ok(match grep {
+        Some(grep) => grep.apply(&output)?,
+        None => output,
+    })
+}
 
-    // `~` greps the output of the command to its left, as radare2 does.
-    if let Some((command, pattern)) = line.split_once('~') {
-        let output = run(session, command)?;
-        let (pattern, invert) = match pattern.strip_prefix('!') {
-            Some(rest) => (rest, true),
-            None => (pattern, false),
-        };
-        let kept: Vec<&str> = output
-            .lines()
-            .filter(|candidate| candidate.contains(pattern) != invert)
-            .collect();
-        return Ok(kept.join("\n"));
-    }
+/// `@`: run a command somewhere else and leave the cursor where it was.
+fn elsewhere(session: &mut Session, address: &str, command: &Command) -> Result<String, String> {
+    let address = parse_number(session, address)?;
+    let was = session.addr;
+    session.addr = address;
+    let answer = dispatch(session, command);
+    session.addr = was;
+    answer
+}
 
-    // `@` runs a command somewhere else and leaves the cursor where it was.
-    if let Some((command, address)) = line.split_once('@') {
-        let address = parse_number(session, address)?;
-        let was = session.addr;
-        session.addr = address;
-        let answer = run(session, command);
-        session.addr = was;
-        return answer;
-    }
+/// What a command prints. `?e` prints its line even when it is empty, as
+/// radare2's does; every other command's text is its lines, and an empty text
+/// is no line.
+fn dispatch(session: &mut Session, command: &Command) -> Result<String, String> {
+    let text = match command {
+        Command::Echo(line) => return Ok(format!("{line}\n")),
+        Command::Write(bytes) => write_text(session, bytes)?,
+        Command::Plain { verb, argument } => plain(session, verb, argument)?,
+    };
+    Ok(if text.is_empty() {
+        text
+    } else {
+        format!("{text}\n")
+    })
+}
 
-    let (verb, argument) = split_verb(line);
+/// A command whose argument is plain text: `?e` and `w` read theirs as the
+/// line does, so they are not here.
+fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, String> {
     match verb {
+        "" => Ok(String::new()),
         "q" | "quit" | "exit" => Err("quit".to_owned()),
-        "?e" => Ok(argument.to_owned()),
         "s" => seek(session, argument),
         "i" => info(session),
         "ie" => entries(session),
@@ -60,7 +84,6 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "ax" => cross_references(session, argument),
         "axt" => references_to(session, argument),
         "iz" => strings(session),
-        "w" => write_text(session, argument),
         "wx" => write_hex(session, argument),
         "wc" => patches(session),
         "wcr" => revert(session),
@@ -70,12 +93,6 @@ pub fn run(session: &mut Session, line: &str) -> Result<String, String> {
         "pddo" => obligations(session, argument),
         other => Err(format!("unknown command '{}'", other)),
     }
-}
-
-/// Split a command from its argument, honouring radare2's optional space.
-fn split_verb(line: &str) -> (&str, &str) {
-    let end = line.find(|c: char| c.is_whitespace()).unwrap_or(line.len());
-    (&line[..end], line[end..].trim())
 }
 
 /// An address as radare2 reads one: hex, decimal, or a name `f` lists.
@@ -205,9 +222,13 @@ fn discovered(session: &mut Session) -> Result<String, String> {
     Ok(out)
 }
 
-/// Write text at the cursor.
-fn write_text(session: &mut Session, argument: &str) -> Result<String, String> {
-    patch(session, argument.as_bytes())
+/// Write text at the cursor, as `w` read it. radare2 writes nothing, and says
+/// nothing, when the text is empty (cmd_write.inc.c:1673-1678).
+fn write_text(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    patch(session, bytes)
 }
 
 /// Write bytes spelled in hex at the cursor.

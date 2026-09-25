@@ -39,10 +39,15 @@ trap 'rm -f "$functions"' EXIT
 
 command_text=""
 while read -r addr name; do
-    command_text+="?e R2SLEIGH_COV_BEGIN__${name}"
+    # The marker is text: every character the shell's line reads as an
+    # operator (SPECIAL in crates/r2s/src/line.rs) is escaped, so a name such
+    # as `f#1` or `g;h` prints as itself rather than cutting the script, and
+    # so is a backslash, which `?e` would otherwise read as an escape.
+    marker=$(printf '%s' "$name" | sed 's/[\\@;~$#|`"'"'"'()<>]/\\&/g')
+    command_text+="?e R2SLEIGH_COV_BEGIN__${marker}"
     command_text+="; s ${addr}"
     command_text+="; pdd"
-    command_text+="; ?e R2SLEIGH_COV_END__${name}; "
+    command_text+="; ?e R2SLEIGH_COV_END__${marker}; "
 done < "$functions"
 
 # A refusal is what this sweep measures, and the shell reports one by exiting
