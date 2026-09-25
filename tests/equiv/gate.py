@@ -16,7 +16,9 @@ status is one of:
                           rendering read a local nothing wrote
 ``ub``                    UBSan reported, or the ``-O0`` and ``-O2`` builds
                           disagree
-``compile-error``         a build or its load failed; the diagnostic is kept
+``compile-error``         the compiler or the loader rejected a build; the
+                          diagnostic is kept (a compiler that timed out or
+                          could not run is the harness's: ``harness-error``)
 ``refused``               r2s refused the function, with its reason, in a
                           ``pddj`` that keeps the contract
 ``no-record``             r2s printed no usable ``pddj`` (crash, timeout,
@@ -81,6 +83,7 @@ class Config:
     timeout_ms: int = 1000
     keep: bool = False
     min_graded: int | None = None
+    compile_timeout: float = link.COMPILE_TIMEOUT
 
     def floor(self) -> int:
         """How many graded vectors an ``equal`` or ``residual-trap`` must rest on.
@@ -164,7 +167,7 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     identity = link.build_trampoline(config.cc, workdir, spec.address)
     builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition,
                                                    link.needed_libraries(str(binary)),
-                                                   spec.address)
+                                                   spec.address, config.compile_timeout)
     record.strict = strict
     if not identity.ok:
         record.status = "harness-error"
@@ -172,11 +175,15 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
                            "diagnostics": identity.diagnostics[:2000]}
         return record
     failed = [build for build in builds.values() if not build.ok]
+    unrun = [build for build in failed if not build.ran]
     if failed:
-        record.status = "compile-error"
+        # A compiler that gave no verdict (a timeout on a loaded machine, a
+        # missing compiler) says nothing about the rendering.
+        record.status = "harness-error" if unrun else "compile-error"
+        shown = (unrun or failed)[0]
         record.evidence = {
-            "variant": failed[0].variant,
-            "diagnostics": _clip(failed[0].diagnostics, 40),
+            "variant": shown.variant,
+            "diagnostics": _clip(shown.diagnostics, 40),
             "skipped_links": skipped,
         }
         return record

@@ -356,6 +356,37 @@ class ClassifyTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
+class CompilerVerdictTests(unittest.TestCase):
+    def test_a_compiler_that_gives_no_verdict_is_the_harness_s_failure(self):
+        # A compiler that hangs on the rendering (as gcc did for 120 s on a
+        # loaded machine) must not be charged to the engine as compile-error.
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            slow = tmp / "slow-cc"
+            slow.write_text("#!/bin/sh\ncase \"$*\" in *rendering.c*) sleep 30;; esac\n"
+                            "exec gcc \"$@\"\n")
+            slow.chmod(0o755)
+            binary = selftest.build_fixture("gcc", tmp)
+            dwarf = Dwarf.read(binary)
+            functions = [s for s in dwarf.subprograms() if s.name]
+            sub = next(s for s in functions if s.name == "st_add")
+            spec = call_spec(dwarf, sub, functions)
+            case = next(c for c in selftest.CASES if c.name == "identity-int")
+            answer = parse_pddj(sub.low_pc,
+                                json.dumps(selftest.synthetic_pddj(case, sub.low_pc, {})))
+            config = gate.Config(runtime=tmp / "unused", cc=str(slow), compile_timeout=1.0)
+            started = time.monotonic()
+            record = gate.grade("k", tmp / "work", binary, dwarf, spec, answer, config)
+            self.assertLess(time.monotonic() - started, 20.0)
+            self.assertEqual(record.status, "harness-error")
+            self.assertIn("timed out after 1s", record.evidence["diagnostics"])
+            refused = link.build_rendering("gcc", tmp / "bad", "int f(void) { return x; }\n",
+                                           [], "f")[0]
+            self.assertEqual({b.ran for b in refused.values()}, {True})
+            self.assertEqual({b.ok for b in refused.values()}, {False})
+
+
+@unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
 class BuildTests(unittest.TestCase):
     def test_the_shown_copy_has_a_directory_of_its_own_with_nothing_else_in_it(self):
         with tempfile.TemporaryDirectory() as tmp:

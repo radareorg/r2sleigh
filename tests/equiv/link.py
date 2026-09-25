@@ -65,6 +65,10 @@ class Built:
     ok: bool
     path: Path
     diagnostics: str
+    # False when the compiler never gave a verdict (it timed out, was not
+    # found, or died of a signal): the build failed for the harness, not for
+    # the rendering.
+    ran: bool = True
 
 
 def links_into_body(links: list[dict], guard: tuple[int, int]) -> list[str]:
@@ -138,17 +142,24 @@ def trampoline_source(symbol: str, address: int) -> str:
     )
 
 
-def _compile(cc: str, argv: list[str], timeout: float = 120.0) -> tuple[bool, str]:
+COMPILE_TIMEOUT = 120.0
+
+
+def _compile(cc: str, argv: list[str],
+             timeout: float = COMPILE_TIMEOUT) -> tuple[bool, str, bool]:
+    """``(built, diagnostics, ran)``: ``ran`` is False when the compiler gave no verdict."""
     try:
         proc = subprocess.run(
             [cc, *argv], capture_output=True, text=True, timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired:
-        return False, f"{cc} timed out after {timeout:g}s"
-    except FileNotFoundError:
-        return False, f"{cc} not found"
+        return False, f"{cc} timed out after {timeout:g}s", False
+    except (FileNotFoundError, PermissionError):
+        return False, f"{cc} could not be run", False
     diagnostics = (proc.stderr or "") + (proc.stdout or "")
-    return proc.returncode == 0, diagnostics.strip()
+    if proc.returncode < 0:
+        return False, f"{cc} was killed by signal {-proc.returncode}: {diagnostics.strip()}", False
+    return proc.returncode == 0, diagnostics.strip(), True
 
 
 @functools.lru_cache(maxsize=None)
@@ -171,7 +182,8 @@ def needed_libraries(binary: str) -> tuple[str, ...]:
 
 
 def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
-                    definition: str, needed: tuple[str, ...] = (), entry: int | None = None
+                    definition: str, needed: tuple[str, ...] = (), entry: int | None = None,
+                    timeout: float = COMPILE_TIMEOUT
                     ) -> tuple[dict[str, Built], str, list[str]]:
     """Compile a rendering four ways; returns the builds, the strict verdict, and skipped links.
 
@@ -186,11 +198,11 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
     builds: dict[str, Built] = {}
     for variant, flags in VARIANTS.items():
         out = workdir / f"rendering-{variant}.so"
-        ok, diagnostics = _compile(cc, [*COMMON, *flags, str(source), str(shim_path), *needed,
-                                        "-o", str(out)])
-        builds[variant] = Built(variant, ok, out, diagnostics)
-    ok, diagnostics = _compile(cc, [*STRICT, str(source)])
-    strict = "ok" if ok else "fail: " + _first_lines(diagnostics, 6)
+        ok, diagnostics, ran = _compile(cc, [*COMMON, *flags, str(source), str(shim_path),
+                                             *needed, "-o", str(out)], timeout)
+        builds[variant] = Built(variant, ok, out, diagnostics, ran)
+    ok, diagnostics, ran = _compile(cc, [*STRICT, str(source)], timeout)
+    strict = "ok" if ok else ("fail: " if ran else "not run: ") + _first_lines(diagnostics, 6)
     return builds, strict, skipped
 
 
@@ -224,8 +236,8 @@ def build_trampoline(cc: str, workdir: Path, address: int) -> Built:
     source = workdir / "identity.S"
     source.write_text(trampoline_source("equiv_identity", address), encoding="utf-8")
     out = workdir / "identity.so"
-    ok, diagnostics = _compile(cc, ["-shared", "-fPIC", str(source), "-o", str(out)])
-    return Built("identity", ok, out, diagnostics)
+    ok, diagnostics, ran = _compile(cc, ["-shared", "-fPIC", str(source), "-o", str(out)])
+    return Built("identity", ok, out, diagnostics, ran)
 
 
 def build_runtime(cc: str, rt_dir: Path, out_dir: Path) -> Path:
@@ -234,7 +246,7 @@ def build_runtime(cc: str, rt_dir: Path, out_dir: Path) -> Path:
     sources = [rt_dir / "equiv_rt.c", rt_dir / "call_x86_64.S"]
     if out.exists() and all(out.stat().st_mtime >= s.stat().st_mtime for s in sources):
         return out
-    ok, diagnostics = _compile(
+    ok, diagnostics, _ = _compile(
         cc, ["-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
              *map(str, sources), "-ldl", "-o", str(out)]
     )
