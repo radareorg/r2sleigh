@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use r2engine::discovery::Confidence;
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Section, Source, Symbol,
-    SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Section, Segment,
+    Source, Symbol, SymbolKind,
 };
 use r2engine::query::{AnnotationKind, Listing, Stop};
 
@@ -103,6 +103,15 @@ fn arm_only(code: &'static [u8], endian: r2il::Endianness) -> Mixed {
                 bits: 32,
                 endian,
             },
+            segments: vec![Segment {
+                vaddr: ARM,
+                vsize: code.len() as u64,
+                permissions: Permissions {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
+            }],
             sections: vec![Section {
                 name: ".text".to_owned(),
                 vaddr: ARM,
@@ -288,6 +297,17 @@ impl r2ssa::body::Program for Walked {
         let offset = usize::try_from(vaddr.checked_sub(ARM)?).ok()?;
         let rest = self.0.get(offset..).filter(|rest| !rest.is_empty())?;
         Some(rest[..max.min(rest.len())].to_vec())
+    }
+
+    /// The function's bytes are one run of code.
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let end = ARM + self.0.len() as u64;
+        (ARM..end).contains(&vaddr).then_some(r2ssa::body::Region {
+            start: ARM,
+            end,
+            execute: true,
+            write: false,
+        })
     }
 
     fn is_entry(&self, _vaddr: u64) -> bool {

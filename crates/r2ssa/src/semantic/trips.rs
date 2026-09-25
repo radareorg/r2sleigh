@@ -693,6 +693,19 @@ mod tests {
             Some(slice[..slice.len().min(max)].to_vec())
         }
 
+        /// The code is the one run it maps, and it runs.
+        fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
+            let end = self.base + self.bytes.len() as u64;
+            (self.base..end)
+                .contains(&vaddr)
+                .then_some(crate::body::Region {
+                    start: self.base,
+                    end,
+                    execute: true,
+                    write: false,
+                })
+        }
+
         fn is_entry(&self, _vaddr: u64) -> bool {
             false
         }

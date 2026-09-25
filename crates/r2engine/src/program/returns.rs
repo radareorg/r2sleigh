@@ -43,6 +43,10 @@ impl r2ssa::body::Program for Knowing<'_> {
         self.program.read(vaddr, max)
     }
 
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        self.program.region(vaddr)
+    }
+
     fn is_entry(&self, vaddr: u64) -> bool {
         self.program.is_entry(vaddr)
     }

@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Relocation, Section, Source,
-    Symbol, SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Relocation,
+    Section, Segment, Source, Symbol, SymbolKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -310,6 +310,19 @@ pub fn table_switch() -> Literal {
     Literal::of_code(TABLE_SWITCH, &[("pick", BASE, 0x2c)])
 }
 
+/// One run of code the loader maps readable and executable.
+pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
+    Segment {
+        vaddr,
+        vsize,
+        permissions: Permissions {
+            read: true,
+            write: false,
+            execute: true,
+        },
+    }
+}
+
 /// The bytes, the container's statement about them, and what has been written.
 pub struct Literal {
     code: &'static [u8],
@@ -341,6 +354,7 @@ impl Literal {
                     bits: 64,
                     endian: r2il::Endianness::Little,
                 },
+                segments: vec![code_segment(BASE, CODE.len() as u64)],
                 sections: vec![Section {
                     name: ".text".to_owned(),
                     vaddr: BASE,
@@ -366,6 +380,7 @@ impl Literal {
     pub fn of_code(code: &'static [u8], functions: &[(&str, u64, u64)]) -> Self {
         let mut program = Self::new();
         program.code = code;
+        program.container.segments = vec![code_segment(BASE, code.len() as u64)];
         program.container.sections[0].vsize = code.len() as u64;
         program.container.symbols = functions
             .iter()
@@ -386,6 +401,7 @@ impl Literal {
     pub fn arm_thumb() -> Self {
         let mut program = Self::new().in_arm();
         program.code = &ARM_THUMB;
+        program.container.segments = vec![code_segment(BASE, ARM_THUMB.len() as u64)];
         program.container.sections[0].vsize = ARM_THUMB.len() as u64;
         let symbol = |name: &str, vaddr, kind, thumb| Symbol {
             name: name.to_owned(),
@@ -418,6 +434,7 @@ impl Literal {
     pub fn plt() -> Self {
         let mut program = Self::new();
         program.code = &PLT;
+        program.container.segments = vec![code_segment(BASE, PLT.len() as u64)];
         program.container.sections = vec![
             Section {
                 name: ".plt".to_owned(),
@@ -554,6 +571,23 @@ impl Literal {
             vsize: stop - end,
             is_code,
             loaded: true,
+        });
+        self
+    }
+
+    /// The same program with its bytes from `end` on mapped as data: readable, and no instruction there can run.
+    pub fn data_mapped_after(mut self, end: u64) -> Self {
+        let code = &mut self.container.segments[0];
+        let stop = code.vaddr + code.vsize;
+        code.vsize = end - code.vaddr;
+        self.container.segments.push(Segment {
+            vaddr: end,
+            vsize: stop - end,
+            permissions: Permissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
         });
         self
     }

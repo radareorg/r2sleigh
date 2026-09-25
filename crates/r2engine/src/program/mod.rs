@@ -16,8 +16,8 @@ pub mod source;
 pub use requests::Rendering;
 
 pub use source::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, Relocation, Section, Source, Symbol,
-    SymbolKind,
+    Arch, Container, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section, Segment,
+    Source, Symbol, SymbolKind,
 };
 
 use std::collections::BTreeMap;
@@ -532,6 +532,19 @@ impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
         self.source.read(vaddr, max)
     }
 
+    /// The segment the container states holds this address. Read from the
+    /// container alone, so no write moves it and nothing need record asking.
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let segment = self.source.container().segment_at(vaddr)?;
+        let (start, end) = segment.range();
+        Some(r2ssa::body::Region {
+            start,
+            end,
+            execute: segment.permissions.execute,
+            write: segment.permissions.write,
+        })
+    }
+
     fn is_entry(&self, vaddr: u64) -> bool {
         // A stub is a function of the program's as much as a body is: control
         // that reaches one has left the function it came from.
@@ -610,6 +623,10 @@ impl<S: Source> r2ssa::body::Program for Recording<'_, S> {
             .read
             .push(vaddr..vaddr.saturating_add(read.len() as u64));
         Some(read)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        r2ssa::body::Program::region(self.program, vaddr)
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {

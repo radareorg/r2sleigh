@@ -381,6 +381,10 @@ mod tests {
             None
         }
 
+        fn region(&self, _vaddr: u64) -> Option<r2ssa::body::Region> {
+            None
+        }
+
         fn is_entry(&self, _vaddr: u64) -> bool {
             false
         }

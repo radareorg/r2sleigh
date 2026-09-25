@@ -35,6 +35,14 @@ pub trait Program {
     /// nothing is mapped.
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>>;
 
+    /// The one run of addresses the program maps with one set of permissions
+    /// that holds `vaddr`, or `None` where nothing is mapped.
+    ///
+    /// Whether an instruction can run at an address is the program's
+    /// statement and not the bytes': data decodes as well as code does on
+    /// most machines, and only the mapping says which one control can reach.
+    fn region(&self, vaddr: u64) -> Option<Region>;
+
     /// Whether another function begins here.
     ///
     /// This is what bounds a body. The walk can see that control transfers; it
@@ -58,6 +66,26 @@ pub trait Program {
     /// in, where the machine has more than one: Sleigh's `ISAModeSwitch`.
     fn mode_register(&self) -> Option<r2il::Varnode> {
         None
+    }
+}
+
+/// One run of addresses a program maps, and what it permits there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    /// The first address of the run.
+    pub start: u64,
+    /// The address after the last one.
+    pub end: u64,
+    /// Whether an instruction there can run.
+    pub execute: bool,
+    /// Whether the program may write there once it runs.
+    pub write: bool,
+}
+
+impl Region {
+    /// Whether every address of `start..end` lies in this run.
+    pub const fn holds(&self, start: u64, end: u64) -> bool {
+        self.start <= start && start <= end && end <= self.end
     }
 }
 

@@ -256,6 +256,19 @@ mod tests {
             Some(rest[..max.min(rest.len())].to_vec())
         }
 
+        /// The one run of bytes is code.
+        fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+            let end = self.base + self.bytes.len() as u64;
+            (self.base..end)
+                .contains(&vaddr)
+                .then_some(r2ssa::body::Region {
+                    start: self.base,
+                    end,
+                    execute: true,
+                    write: false,
+                })
+        }
+
         fn is_entry(&self, _vaddr: u64) -> bool {
             false
         }

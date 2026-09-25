@@ -44,6 +44,17 @@ impl r2ssa::body::Program for Fixture {
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
+    /// The bytes are one run of code.
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        let end = BASE + self.bytes.len() as u64;
+        (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
+            start: BASE,
+            end,
+            execute: true,
+            write: false,
+        })
+    }
+
     fn is_entry(&self, vaddr: u64) -> bool {
         self.entries.contains(&vaddr)
     }

@@ -1637,6 +1637,43 @@ impl Callees {
     }
 }
 
+/// What the container states about whether a table's bytes, as the file holds
+/// them, are what the dispatch reads when it runs.
+///
+/// The seam immutability arrives through. A writable region is `Unsealed`:
+/// the container has not yet been asked whether anything seals it after load
+/// (a RELRO range, a read-only Mach-O segment), and that statement is what
+/// turns it into one the program cannot change or refuses it. Until then it
+/// is read as it is today and the evidence names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableBytes {
+    /// No write permission: the bytes are the program's for its whole run.
+    ReadOnly,
+    /// Writable, and nothing the container states seals it after load.
+    Unsealed,
+    /// The loader writes some of them, so the file's bytes are not what runs.
+    LoaderWritten,
+}
+
+impl TableBytes {
+    fn of(
+        program: &dyn Program,
+        region: &r2ssa::body::Region,
+        range: std::ops::Range<u64>,
+    ) -> Self {
+        match (program.loader_writes(&range), region.write) {
+            (true, _) => Self::LoaderWritten,
+            (false, false) => Self::ReadOnly,
+            (false, true) => Self::Unsealed,
+        }
+    }
+
+    /// Whether the file's bytes may be read as the run's: not where the loader writes over them.
+    const fn read_as_run(self) -> bool {
+        !matches!(self, Self::LoaderWritten)
+    }
+}
+
 /// One function walked out of the program.
 struct Walked {
     name: String,
@@ -1734,11 +1771,19 @@ impl Native<'_> {
 
     /// One dispatch's table, read and validated, or why it is not one.
     ///
-    /// A resolved dispatch has at least one target and every entry decodes:
-    /// a table of no entries would resolve the branch to nowhere, which the
-    /// walk would read as a block with no successor rather than as a stop.
-    /// Each distinct target is decoded once, since a table repeats its default
-    /// arm for every hole in the case values.
+    /// **Nothing is read until the program is known to have the bytes.** The
+    /// value analysis proves how many entries the selector reaches, soundly
+    /// and however many; what it cannot prove is that a table that long
+    /// exists. The span is computed with checked arithmetic and must lie
+    /// inside the one region holding its first entry, which is an O(1)
+    /// question of the container's statement: a spilled 32-bit index reaching
+    /// 16 GiB of table is refused here with no byte read, never allocated.
+    ///
+    /// A resolved dispatch has at least one target and every entry decodes
+    /// where an instruction can run: a table of no entries would resolve the
+    /// branch to nowhere, which the walk would read as a block with no
+    /// successor rather than as a stop. Each distinct target is decoded once,
+    /// since a table repeats its default arm for every hole in the case values.
     fn pointer_table(
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
@@ -1763,6 +1808,27 @@ impl Native<'_> {
             ));
             return None;
         };
+        let Some(region) = self.program.region(at) else {
+            refused(format_args!("nothing is mapped there"));
+            return None;
+        };
+        let end = at
+            .checked_add(span as u64)
+            .filter(|end| region.holds(at, *end));
+        let Some(end) = end else {
+            refused(format_args!(
+                "{} entries by {} span {span} bytes, past the region ending at {:#x}",
+                read.count, read.stride, region.end
+            ));
+            return None;
+        };
+        let stated = TableBytes::of(self.program, &region, at..end);
+        if !stated.read_as_run() {
+            refused(format_args!(
+                "{stated:?}: the file's bytes are not what the dispatch reads"
+            ));
+            return None;
+        }
         let bytes = self.program.read(at, span).unwrap_or_default();
         if bytes.len() < span {
             refused(format_args!("{} of {span} bytes are mapped", bytes.len()));
@@ -2233,8 +2299,15 @@ pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
     crate::names::text_in(&bytes).map(str::to_owned)
 }
 
-/// Whether an instruction decodes at an address.
+/// Whether an instruction decodes at an address, in a region where one can run.
+///
+/// Data decodes as well as code on most machines, so the bytes alone cannot
+/// say an address is a place control goes; the region the program maps it in
+/// can.
 pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> bool {
+    if !program.region(at).is_some_and(|region| region.execute) {
+        return false;
+    }
     let Some(mut fetch) = program.read(at, WINDOW) else {
         return false;
     };
