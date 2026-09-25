@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Count the casts in a control_census.sh output: doc/phase1-design.md section 1.
+"""Count the casts in rendered C: doc/phase1-design.md section 1.
 
-usage: tests/corpus/cast_census.py <census-out>
+usage: tests/corpus/cast_census.py <file of rendered C>
+  tests/coverage/sweep_binary.sh ./binary > sweep.txt; tests/corpus/cast_census.py sweep.txt
 
 statements: lines ending in ';'. casts: every '(type)' applied to an operand,
 split into those on a bare name and those on a parenthesised expression.

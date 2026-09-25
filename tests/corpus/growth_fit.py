@@ -16,8 +16,7 @@ body. The `tail` column fits only the renders at or above the median size, which
 is where a superlinear term is visible at all.
 
 usage: tests/corpus/growth_fit.py <timing log> [<timing log> ...]
-  tests/corpus/locked_probe.sh ./bzip2-O0 'a:sla; aaa; pd:s @@F' \
-      R2SLEIGH_TIMING=1 2>&1 | tee sweep.log
+  R2SLEIGH_TIMING=1 tests/coverage/sweep_binary.sh ./bzip2-O0 > sweep.log
   tests/corpus/growth_fit.py sweep.log
 """
 

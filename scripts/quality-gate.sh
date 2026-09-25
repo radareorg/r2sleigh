@@ -226,11 +226,14 @@ run cargo mutants --no-config \
     --no-times \
     --output target/quality-gate/mutants-r2ssa-var
 
-phase "Corpus harness contracts"
-# The verifier decides whether every other corpus phase means anything, and
-# nothing ran its own unit tests: two of them had rotted against the code they
-# check. They are pure Python and cost a fraction of a second.
-run python3 tests/corpus/test_verify_rendering.py
+phase "Harness contracts"
+# The equivalence gate decides whether its own verdicts mean anything, so its
+# self-tests and unit tests run here; so do the DecBench backend's, and the
+# ban on driving radare2 with the deleted plugin. Pure Python; the self-tests
+# compile and run small x86-64 programs.
+run python3 -m unittest discover -s tests/equiv -p 'test_*.py'
+run python3 -m unittest discover -s tests/decbench -p 'test_*.py'
+run python3 -m unittest tests/test_no_plugin.py
 
 phase "Certification gate contracts"
 # The certification gate excuses an unassigned read only when the proof line
@@ -238,13 +241,19 @@ phase "Certification gate contracts"
 # engine printed; they run no binary.
 run python3 scripts/test_certify_render.py
 
-phase "Binding-spine cutover corpus"
-run tests/corpus/run_matrix.sh --gate cutover
+phase "Equivalence gate"
+# Replaces the plugin-driven 54-cell cutover corpus, which could no longer run:
+# every function of tests/corpus and tests/gold, GCC and Clang, O0/O1/O2,
+# rendered from the stripped build and run beside its original. No function
+# may leave `equal`; a new differs, uninit or ub blocks.
+run cargo build -p r2s --features sleigh
+run python3 tests/equiv/run_equiv.py --r2s "${CARGO_TARGET_DIR:-target}/debug/r2s" \
+    --baseline tests/equiv/baseline.json
 
 phase "Differential ESIL against radare2's own lifter"
-# Needs the plugin installed, so it is opt-in: R2SLEIGH_ESIL_DIFF_BINARY names an
-# x86-64 binary to step through. Without it the phase is skipped rather than
-# silently passing on nothing.
+# Needs radare2 (the reference) and the r2sleigh CLI, so it is opt-in:
+# R2SLEIGH_ESIL_DIFF_BINARY names an x86-64 binary to step through. Without it
+# the phase is skipped rather than silently passing on nothing.
 if [ -n "${R2SLEIGH_ESIL_DIFF_BINARY:-}" ]; then
     run python3 scripts/esil_differential.py \
         --binary "$R2SLEIGH_ESIL_DIFF_BINARY" \

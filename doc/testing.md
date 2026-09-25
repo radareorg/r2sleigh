@@ -99,6 +99,11 @@ python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30
 # Coverage: how much of a whole binary renders at all, against a
 # blessed baseline.
 ./tests/coverage/run_coverage.sh
+
+# Equivalence (x86-64 Linux): each rendering of a stripped build runs
+# beside its original inside the original's image, on boundary and random
+# inputs; no function may leave `equal`.
+tests/equiv/run_equiv.py --r2s target/debug/r2s --baseline tests/equiv/baseline.json
 ```
 
 A disagreement with radare2 is not automatically a defect in `r2s`. It may be
@@ -115,7 +120,7 @@ What each kind of change needs
 | New `pd`/`pdf` claim | A `verdict` arm in the claim oracle, and a function in its set that makes the claim |
 | New `r2s` command | Integration test in `crates/r2s/tests/` |
 | Optimization pass | Unit test in `r2ssa` with before and after SSA |
-| Decompiler change | The certification gate, plus a unit test for the rule |
+| Decompiler change | The certification gate and the equivalence gate, plus a unit test for the rule |
 | Bug fix | A regression test reproducing the original bug |
 | Discovery or naming change | The differential gate, with the disagreement judged |
 
@@ -129,9 +134,10 @@ reported and needs `--accept-baseline` to be recorded.
 
 **A baseline is re-blessed only after the new output has been read and judged
 correct**, never because it merely differs. The corpus is a canary, not a
-specification: the verifier rewrites the C it checks, so agreement with a
-recorded output is evidence that nothing moved, not evidence that the output is
-right.
+specification: agreement with a recorded output is evidence that nothing moved,
+not evidence that the output is right. The equivalence gate's baseline
+(`tests/equiv/baseline.json`) is the one that says what a rendering computes,
+and a non-`equal` record in it carries its cause.
 
 Diagnostics
 -----------

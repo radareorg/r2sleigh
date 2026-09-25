@@ -220,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
     config = gate.Config(runtime=runtime, cc=args.cc, vectors=args.vectors,
                          timeout_ms=args.timeout_ms, keep=args.keep)
 
+    if args.baseline is not None and not args.baseline.exists():
+        print(f"equiv: no baseline at {args.baseline}; measure without --baseline, read "
+              "records.json, and bless one with --write-baseline (a cause for every record "
+              "that is not equal)", file=sys.stderr)
+        return EXIT_SETUP
+
     started = time.monotonic()
     if not run_self_tests(config, args.out):
         return EXIT_SELF_TEST
