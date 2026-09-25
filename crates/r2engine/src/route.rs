@@ -123,15 +123,12 @@ impl EngineFunctionIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EngineRequestKind {
     Decompile,
-    Types,
     SymbolicQuery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EnginePlan {
     FastLocal,
-    PreparedOnly,
-    BoundedType,
     SemanticSummary,
     SemanticStructured,
     ReplayValidated,
@@ -166,54 +163,33 @@ pub struct EngineRouteDecision {
     pub route: r2types::DecompileRouteFacts,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EngineTypeRouteKind {
-    FullTypeEvidence,
-    BoundedCfg,
-    SemanticFallback,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineTypeRouteDecision {
-    pub request: EngineRequestKind,
-    pub plan: EnginePlan,
-    pub kind: EngineTypeRouteKind,
-    pub prefer_bounded_type_plan: bool,
-    pub reason: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineTypedRouteDecision {
     Decompile(Box<EngineRouteDecision>),
-    Types(EngineTypeRouteDecision),
 }
 
 impl EngineTypedRouteDecision {
     pub fn request(&self) -> EngineRequestKind {
         match self {
             Self::Decompile(decision) => decision.request,
-            Self::Types(decision) => decision.request,
         }
     }
 
     pub fn plan(&self) -> EnginePlan {
         match self {
             Self::Decompile(decision) => decision.plan,
-            Self::Types(decision) => decision.plan,
         }
     }
 
     pub fn reason(&self) -> Option<String> {
         match self {
             Self::Decompile(decision) => decision.route.reason.clone(),
-            Self::Types(decision) => decision.reason.clone(),
         }
     }
 
     pub fn refusal(&self) -> Option<String> {
         match self {
             Self::Decompile(decision) => decision.route.fallback_comment.clone(),
-            Self::Types(_) => None,
         }
     }
 
@@ -241,10 +217,6 @@ impl EngineRequestPlan {
         Self::new(EngineTypedRouteDecision::Decompile(Box::new(decision)))
     }
 
-    pub fn types(decision: EngineTypeRouteDecision) -> Self {
-        Self::new(EngineTypedRouteDecision::Types(decision))
-    }
-
     pub fn request(&self) -> EngineRequestKind {
         self.decision.request()
     }
@@ -258,17 +230,12 @@ impl EngineRequestPlan {
     }
 }
 
-pub fn should_guard_program_orchestrator_decompile(block_count: usize, op_count: usize) -> bool {
-    block_count > 4 || op_count > 96
-}
-
 pub fn select_engine_plan(
     request: EngineRequestKind,
     route: Option<&r2types::DecompileRouteFacts>,
     _function_facts: Option<&FunctionFacts>,
 ) -> EnginePlan {
     match request {
-        EngineRequestKind::Types => EnginePlan::PreparedOnly,
         EngineRequestKind::SymbolicQuery => EnginePlan::SemanticStructured,
         EngineRequestKind::Decompile => match route {
             Some(route) if route.kind == r2types::DecompileRouteKind::FallbackComment => {
@@ -304,18 +271,6 @@ pub(crate) fn plan_decompile_request(
         function_facts,
         prepared,
         cfg_summary,
-    ))
-}
-
-pub fn plan_type_request(
-    function_facts: &FunctionFacts,
-    cfg_summary: &CFGRiskSummary,
-    caller_prefers_bounded_type_plan: bool,
-) -> EngineRequestPlan {
-    EngineRequestPlan::types(type_route_decision(
-        function_facts,
-        cfg_summary,
-        caller_prefers_bounded_type_plan,
     ))
 }
 
@@ -360,86 +315,6 @@ pub(crate) fn semantic_route_reason(route: &r2types::DecompileRouteFacts) -> Opt
         .reason
         .clone()
         .or_else(|| route.fallback_comment.clone())
-}
-
-pub fn cfg_guard_reason_from_summary(summary: &CFGRiskSummary) -> Option<String> {
-    if summary.loop_count > 8 || summary.back_edge_count > 16 {
-        return Some(format!(
-            "complex loop graph (loops={}, back_edges={})",
-            summary.loop_count, summary.back_edge_count
-        ));
-    }
-
-    if summary.loop_count > 0 && summary.block_count >= 32 && summary.max_switch_cases >= 32 {
-        return Some(format!(
-            "dense switch in looped CFG (blocks={}, loops={}, max_switch_cases={})",
-            summary.block_count, summary.loop_count, summary.max_switch_cases
-        ));
-    }
-
-    if summary.loop_count > 4 && summary.block_count >= 96 && summary.max_switch_cases >= 32 {
-        return Some(format!(
-            "large dense switch in looped CFG (blocks={}, loops={}, max_switch_cases={})",
-            summary.block_count, summary.loop_count, summary.max_switch_cases
-        ));
-    }
-
-    None
-}
-
-pub fn type_cfg_prefers_bounded_plan(summary: &CFGRiskSummary) -> bool {
-    if cfg_guard_reason_from_summary(summary).is_some() {
-        return true;
-    }
-    summary.block_count >= 200
-        || (summary.block_count >= 96
-            && (summary.loop_count > 0
-                || summary.back_edge_count > 0
-                || summary.max_switch_cases >= 32))
-}
-
-pub fn type_cfg_forces_bounded_plan(summary: &CFGRiskSummary) -> bool {
-    cfg_guard_reason_from_summary(summary).is_some()
-}
-
-pub fn type_cfg_allows_semantic_plan(summary: &CFGRiskSummary) -> bool {
-    summary.block_count <= 96 && summary.loop_count <= 4 && summary.back_edge_count <= 8
-}
-
-pub fn type_cfg_bounded_reason(summary: &CFGRiskSummary) -> String {
-    cfg_guard_reason_from_summary(summary).unwrap_or_else(|| {
-        format!(
-            "bounded type plan for large CFG (blocks={}, loops={}, back_edges={}, max_switch_cases={})",
-            summary.block_count, summary.loop_count, summary.back_edge_count, summary.max_switch_cases
-        )
-    })
-}
-
-pub fn type_route_decision(
-    function_facts: &FunctionFacts,
-    cfg_summary: &CFGRiskSummary,
-    caller_prefers_bounded_type_plan: bool,
-) -> EngineTypeRouteDecision {
-    let prefer_cfg_bounded = (type_cfg_forces_bounded_plan(cfg_summary)
-        && !type_cfg_allows_semantic_plan(cfg_summary))
-        || (caller_prefers_bounded_type_plan && type_cfg_prefers_bounded_plan(cfg_summary));
-    if prefer_cfg_bounded {
-        return EngineTypeRouteDecision {
-            request: EngineRequestKind::Types,
-            plan: EnginePlan::BoundedType,
-            kind: EngineTypeRouteKind::BoundedCfg,
-            prefer_bounded_type_plan: true,
-            reason: Some(type_cfg_bounded_reason(cfg_summary)),
-        };
-    }
-
-    EngineTypeRouteDecision {
-        request: EngineRequestKind::Types,
-        plan: select_engine_plan(EngineRequestKind::Types, None, Some(function_facts)),
-        kind: EngineTypeRouteKind::FullTypeEvidence,
-        prefer_bounded_type_plan: false,
-        reason: None,
-    }
 }
 
 pub fn should_use_prepared_semantic_view(

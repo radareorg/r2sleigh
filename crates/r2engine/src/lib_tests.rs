@@ -502,14 +502,6 @@ fn engine_interproc_summary_json_preserves_supplied_scope_report() {
 }
 
 #[test]
-fn type_analysis_interproc_budget_policy_is_engine_owned() {
-    assert!(type_analysis_interproc_prefers_bounded_plan(0, false));
-    assert!(type_analysis_interproc_prefers_bounded_plan(1, false));
-    assert!(!type_analysis_interproc_prefers_bounded_plan(1, true));
-    assert!(!type_analysis_interproc_prefers_bounded_plan(2, false));
-}
-
-#[test]
 fn analyze_request_builders_own_semantic_mode_selection() {
     let parts = EngineAnalyzeRequestParts {
         function_name: "sym.builder".to_string(),
@@ -813,7 +805,7 @@ fn self_looping_blocks(base: u64, loop_count: usize) -> Vec<R2ILBlock> {
 }
 
 #[test]
-fn cfg_guard_reason_reads_the_same_counters_the_ssa_summary_reports() {
+fn cfg_risk_summary_reads_the_same_counters_the_ssa_summary_reports() {
     let blocks = self_looping_blocks(0x3000, 9);
     let prepared =
         r2ssa::SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
@@ -824,13 +816,9 @@ fn cfg_guard_reason_reads_the_same_counters_the_ssa_summary_reports() {
     assert_eq!(
         from_cfg,
         prepared.cfg_risk_summary(),
-        "the guard's cheap derivation must report what renamed SSA reports"
+        "the cheap CFG derivation must report what renamed SSA reports"
     );
-    assert_eq!(
-        cfg_guard_reason_from_summary(&from_cfg),
-        cfg_guard_reason_from_summary(&prepared.cfg_risk_summary()),
-    );
-    assert!(cfg_guard_reason_from_summary(&from_cfg).is_some());
+    assert_eq!(from_cfg.loop_count, 9);
 }
 
 #[test]
@@ -847,17 +835,12 @@ fn cfg_risk_summary_answers_for_input_whose_raw_ssa_will_not_form() {
     assert!(r2ssa::SSAFunction::from_blocks_raw_no_arch(&blocks).is_none());
     // The two derivations do not accept the same inputs. Anything that
     // reintroduces a block-level guard has to decide what this input is,
-    // because the CFG will happily call it complex while the SSA phase is
-    // going to refuse it as malformed under its own reason.
-    assert!(
-        cfg_guard_reason_from_summary(
-            &r2ssa::CFG::from_blocks(&blocks)
-                .expect("cfg should build")
-                .risk_summary()
-        )
-        .is_some(),
-        "the CFG alone is complex enough to trip the guard"
-    );
+    // because the CFG still summarizes it while the SSA phase is going to
+    // refuse it as malformed under its own reason.
+    let summary = r2ssa::CFG::from_blocks(&blocks)
+        .expect("cfg should build")
+        .risk_summary();
+    assert_eq!(summary.loop_count, 9, "the CFG alone still answers");
 }
 
 #[test]
@@ -1884,42 +1867,17 @@ fn cancellation_and_deadline_coexist_and_refuse_without_partial_c() {
 
 #[test]
 fn engine_owns_public_guard_fallback_comments() {
-    let block_comment = block_guard_fallback_comment("sym.big", 201, 200);
-    assert!(block_comment.contains("r2dec budget"));
-    assert!(block_comment.contains("sym.big"));
-    assert!(block_comment.contains("201"));
-    assert!(block_comment.contains("200"));
-
-    let cfg_comment = cfg_guard_fallback_comment(
-        "sym.loopy",
-        &CFGRiskSummary {
-            block_count: 107,
-            loop_count: 9,
-            back_edge_count: 17,
-            switch_block_count: 0,
-            max_switch_cases: 0,
-        },
-    )
-    .expect("complex CFG should produce a guard fallback");
-    assert!(cfg_comment.contains("r2sleigh refused"));
-    assert!(cfg_comment.contains("sym.loopy"));
-    assert!(cfg_comment.contains("complex loop graph"));
-
     let hostile_name = "sym.*/\r\nint forged(void)";
     let hostile_reason = "budget */\nreturn 7";
-    let hostile_comments = [
-        block_guard_fallback_comment(hostile_name, 201, 200),
-        artifact_guard_fallback_comment(hostile_name, hostile_reason),
-    ];
-    for comment in &hostile_comments {
-        let body = comment
-            .strip_suffix("*/")
-            .expect("engine fallback must remain one closed comment");
-        assert!(!body.contains("*/"), "comment closed early: {comment}");
-        assert!(!comment.contains(['\r', '\n']));
-        assert!(comment.contains("sym.* /  int forged(void)"));
-    }
-    assert!(hostile_comments[1].contains("budget * / return 7"));
+    let comment = artifact_guard_fallback_comment(hostile_name, hostile_reason);
+    let body = comment
+        .strip_suffix("*/")
+        .expect("engine fallback must remain one closed comment");
+    assert!(!body.contains("*/"), "comment closed early: {comment}");
+    assert!(!comment.contains(['\r', '\n']));
+    assert!(comment.contains("r2sleigh refused"));
+    assert!(comment.contains("sym.* /  int forged(void)"));
+    assert!(comment.contains("budget * / return 7"));
 }
 
 #[test]
@@ -1941,65 +1899,6 @@ fn function_identity_keeps_ordered_aliases_for_summary_and_type_routes() {
             "limfield",
             "dbg.limfield"
         ]
-    );
-}
-
-#[test]
-fn type_route_decision_allows_moderate_dense_semantic_plan() {
-    let cfg_summary = r2ssa::CFGRiskSummary {
-        block_count: 55,
-        loop_count: 1,
-        back_edge_count: 1,
-        switch_block_count: 1,
-        max_switch_cases: 48,
-    };
-    let function_facts = FunctionFacts::default();
-
-    assert!(type_cfg_forces_bounded_plan(&cfg_summary));
-    assert!(type_cfg_allows_semantic_plan(&cfg_summary));
-    assert_eq!(
-        type_route_decision(&function_facts, &cfg_summary, false).kind,
-        EngineTypeRouteKind::FullTypeEvidence
-    );
-}
-
-#[test]
-fn type_route_decision_bounds_large_loop_cfg() {
-    let cfg_summary = r2ssa::CFGRiskSummary {
-        block_count: 1977,
-        loop_count: 9,
-        back_edge_count: 17,
-        switch_block_count: 0,
-        max_switch_cases: 0,
-    };
-    let function_facts = FunctionFacts::default();
-    let decision = type_route_decision(&function_facts, &cfg_summary, false);
-
-    assert_eq!(decision.kind, EngineTypeRouteKind::BoundedCfg);
-    assert_eq!(decision.plan, EnginePlan::BoundedType);
-    assert!(decision.prefer_bounded_type_plan);
-    assert!(
-        decision
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("complex loop graph"))
-    );
-}
-
-#[test]
-fn type_route_decision_does_not_treat_name_only_workers_as_type_input() {
-    let cfg_summary = r2ssa::CFGRiskSummary {
-        block_count: 200,
-        loop_count: 8,
-        back_edge_count: 12,
-        switch_block_count: 0,
-        max_switch_cases: 0,
-    };
-    let function_facts = FunctionFacts::default();
-
-    assert_eq!(
-        type_route_decision(&function_facts, &cfg_summary, false).kind,
-        EngineTypeRouteKind::FullTypeEvidence
     );
 }
 
@@ -2054,42 +1953,6 @@ fn external_layout_names_rewrite_placeholder_field_certificates() {
             .field_type
             .as_deref(),
         Some("int32_t")
-    );
-}
-
-#[test]
-fn type_function_refuses_large_name_only_summary_preprobe() {
-    let mut blocks = const_return_blocks(0x55a0, 0);
-    for idx in 0..210 {
-        blocks.push(R2ILBlock::new(0x5600 + idx, 1));
-    }
-    let parsed_context = r2types::ParsedExternalContext::default();
-    let session = EngineSession::new();
-
-    let response = session.type_function(EngineTypeAnalysisRequest {
-        analysis: EngineAnalyzeRequest {
-            function_name: "dbg.main".to_string(),
-            function_addr: 0x55a0,
-            blocks,
-            arch: None,
-            source_snapshot: Some(test_source_snapshot("dbg.main/type/rev1")),
-            trusted_ssa: None,
-            callee_facts: Vec::new(),
-            declared_signatures: Vec::new(),
-            ptr_bits: 64,
-            semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
-            parsed_context,
-            semantic_mode: EngineSemanticMode::Full,
-            include_interproc_summary_set: true,
-            execution: EngineExecutionControl::default(),
-        },
-        caller_prefers_bounded_type_plan: false,
-    });
-
-    assert!(
-        response.is_none(),
-        "a large name-only fixture has no prepared semantic owner to authorize a summary route"
     );
 }
 
@@ -2717,7 +2580,7 @@ fn semantic_route_reason_preserves_exact_engine_route_reason() {
 }
 
 #[test]
-fn request_plans_cover_decompile_and_types() {
+fn request_plan_covers_decompile() {
     let blocks = const_return_blocks(0x3010, 0);
     let prepared = r2ssa::SsaArtifact::for_decompile(&blocks, None).expect("prepared");
     let cfg_summary = prepared.function().cfg_risk_summary();
@@ -2728,10 +2591,6 @@ fn request_plans_cover_decompile_and_types() {
     assert_eq!(decompile.request(), EngineRequestKind::Decompile);
     assert_eq!(decompile.engine_plan(), EnginePlan::FastLocal);
     assert_eq!(decompile.diagnostics().plan, Some(EnginePlan::FastLocal));
-
-    let types = plan_type_request(&function_facts, &cfg_summary, false);
-    assert_eq!(types.request(), EngineRequestKind::Types);
-    assert_eq!(types.engine_plan(), EnginePlan::PreparedOnly);
 }
 
 #[test]

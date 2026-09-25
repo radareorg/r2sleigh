@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use r2il::R2ILBlock;
-use r2ssa::{CFGRiskSummary, SsaArtifact};
+use r2ssa::SsaArtifact;
 #[cfg(test)]
 use r2types::FunctionTypeFacts;
 use r2types::{
@@ -50,11 +50,8 @@ pub use r2dec::{
 use route::decompile_route_decision;
 pub use route::{
     EngineDiagnostics, EngineFunctionIdentity, EnginePlan, EngineRequestKind, EngineRequestPlan,
-    EngineRouteDecision, EngineTypeRouteDecision, EngineTypeRouteKind, EngineTypedRouteDecision,
-    cfg_guard_reason_from_summary, plan_type_request, select_engine_plan,
-    should_guard_program_orchestrator_decompile, should_use_prepared_semantic_view,
-    type_cfg_allows_semantic_plan, type_cfg_bounded_reason, type_cfg_forces_bounded_plan,
-    type_cfg_prefers_bounded_plan, type_route_decision,
+    EngineRouteDecision, EngineTypedRouteDecision, select_engine_plan,
+    should_use_prepared_semantic_view,
 };
 #[cfg(test)]
 use route::{plan_decompile_request, semantic_route_reason};
@@ -582,27 +579,6 @@ impl EngineAnalysis {
     fn from_trusted_ssa(trusted: &r2ssa::TrustedSsaArtifact) -> Self {
         Self {
             ssa_func: trusted.shared_artifact(),
-        }
-    }
-}
-
-#[cfg(kani)]
-mod kani_proofs {
-    use super::*;
-
-    #[kani::proof]
-    fn bounded_type_plan_budget_policy_is_fail_closed() {
-        let interproc_max_iters = kani::any::<usize>();
-        let interproc_converged: bool = kani::any();
-        let prefers_bounded =
-            type_analysis_interproc_prefers_bounded_plan(interproc_max_iters, interproc_converged);
-
-        assert_eq!(
-            prefers_bounded,
-            interproc_max_iters <= 1 && !interproc_converged
-        );
-        if interproc_converged || interproc_max_iters > 1 {
-            assert!(!prefers_bounded);
         }
     }
 }
@@ -1935,12 +1911,6 @@ pub struct EngineSignatureInferenceRequest<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct EngineTypeAnalysisRequest {
-    pub analysis: EngineAnalyzeRequest,
-    pub caller_prefers_bounded_type_plan: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct EngineFunctionAnalysisArtifactRequest {
     pub analysis: EngineAnalyzeRequest,
 }
@@ -2046,79 +2016,6 @@ impl EngineInterprocSummaryReportRequest {
             converged,
             scope_report,
         }
-    }
-}
-
-impl EngineTypeAnalysisRequest {
-    pub fn from_interproc_budget(
-        analysis: EngineAnalyzeRequest,
-        interproc_max_iters: usize,
-        interproc_converged: bool,
-    ) -> Self {
-        Self {
-            analysis,
-            caller_prefers_bounded_type_plan: type_analysis_interproc_prefers_bounded_plan(
-                interproc_max_iters,
-                interproc_converged,
-            ),
-        }
-    }
-}
-
-pub fn type_analysis_interproc_prefers_bounded_plan(
-    interproc_max_iters: usize,
-    interproc_converged: bool,
-) -> bool {
-    interproc_max_iters <= 1 && !interproc_converged
-}
-
-#[derive(Debug)]
-pub struct EngineTypeAnalysisResponse {
-    type_analysis: r2types::TypeAnalysis,
-    cfg_summary: CFGRiskSummary,
-    route_decision: EngineTypeRouteDecision,
-    decompile_route: r2types::DecompileRouteFacts,
-    callsite_count: usize,
-    current_summary: Option<r2ssa::FunctionSemanticSummary>,
-    metrics: EngineMetrics,
-    diagnostics: EngineDiagnostics,
-}
-
-impl EngineTypeAnalysisResponse {
-    pub fn type_analysis(&self) -> &r2types::TypeAnalysis {
-        &self.type_analysis
-    }
-
-    pub fn function_facts(&self) -> &FunctionFacts {
-        self.type_analysis.function_facts()
-    }
-
-    pub fn cfg_summary(&self) -> &CFGRiskSummary {
-        &self.cfg_summary
-    }
-
-    pub fn route_decision(&self) -> &EngineTypeRouteDecision {
-        &self.route_decision
-    }
-
-    pub fn decompile_route(&self) -> &r2types::DecompileRouteFacts {
-        &self.decompile_route
-    }
-
-    pub fn callsite_count(&self) -> usize {
-        self.callsite_count
-    }
-
-    pub fn current_summary(&self) -> Option<&r2ssa::FunctionSemanticSummary> {
-        self.current_summary.as_ref()
-    }
-
-    pub fn metrics(&self) -> &EngineMetrics {
-        &self.metrics
-    }
-
-    pub fn diagnostics(&self) -> &EngineDiagnostics {
-        &self.diagnostics
     }
 }
 
@@ -2348,64 +2245,6 @@ impl EngineSession {
             artifact,
             metrics,
             diagnostics: EngineDiagnostics::default(),
-        })
-    }
-
-    pub fn type_function(
-        &self,
-        request: EngineTypeAnalysisRequest,
-    ) -> Option<EngineTypeAnalysisResponse> {
-        self.type_function_checked(request).ok()
-    }
-
-    pub fn type_function_checked(
-        &self,
-        request: EngineTypeAnalysisRequest,
-    ) -> Result<EngineTypeAnalysisResponse, EngineExecutionRefusal> {
-        let started = Instant::now();
-        let analysis_request = request.analysis.canonicalize_trusted();
-        let analyze_response = self.analyze_checked(analysis_request.clone())?;
-        let artifact = analyze_response.artifact;
-        let cfg_summary = artifact.ssa_func().function().cfg_risk_summary();
-        let route_decision = type_route_decision(
-            artifact.function_facts(),
-            &cfg_summary,
-            request.caller_prefers_bounded_type_plan,
-        );
-        if !matches!(route_decision.kind, EngineTypeRouteKind::FullTypeEvidence) {
-            return Err(engine_execution_refusal(
-                route_decision.reason.unwrap_or_else(|| {
-                    "bounded or summary-only type evidence cannot authorize full types".to_string()
-                }),
-                EnginePhase::Types,
-                analyze_response.metrics,
-            ));
-        }
-        let decompile_decision = decompile_route_decision(
-            &analysis_request.function_name,
-            artifact.function_facts(),
-            Some(artifact.ssa_func()),
-            &cfg_summary,
-        );
-        let callsite_count = count_prepared_callsites(artifact.ssa_func().local_ssa_blocks());
-        let current_summary = current_interproc_summary(artifact.function_facts());
-        let EngineAnalysisArtifact {
-            type_analysis,
-            trusted_ssa: _,
-        } = artifact;
-
-        Ok(EngineTypeAnalysisResponse {
-            type_analysis,
-            cfg_summary,
-            route_decision,
-            decompile_route: decompile_decision.route,
-            callsite_count,
-            current_summary,
-            metrics: EngineMetrics {
-                planning_time: started.elapsed(),
-                ..analyze_response.metrics
-            },
-            diagnostics: analyze_response.diagnostics,
         })
     }
 
@@ -3620,26 +3459,6 @@ fn build_source_owned_callee_signatures(
         .collect()
 }
 
-pub fn block_guard_fallback_comment(
-    function_name: &str,
-    blocks: usize,
-    max_blocks: usize,
-) -> String {
-    let function_name = sanitize_fallback_comment_text(function_name);
-    format!(
-        "/* r2dec budget: skipped decompilation for {} ({} blocks > limit {}). */",
-        function_name, blocks, max_blocks
-    )
-}
-
-pub fn cfg_guard_fallback_comment(
-    function_name: &str,
-    cfg_summary: &CFGRiskSummary,
-) -> Option<String> {
-    cfg_guard_reason_from_summary(cfg_summary)
-        .map(|reason| artifact_guard_fallback_comment(function_name, &reason))
-}
-
 pub fn artifact_guard_fallback_comment(function_name: &str, reason: &str) -> String {
     let function_name = sanitize_fallback_comment_text(function_name);
     let reason = sanitize_fallback_comment_text(reason);
@@ -3727,24 +3546,4 @@ fn build_engine_analysis_artifact(
 
 fn sanitize_fallback_comment_text(text: &str) -> String {
     text.replace("*/", "* /").replace(['\r', '\n'], " ")
-}
-
-fn current_interproc_summary(
-    function_facts: &FunctionFacts,
-) -> Option<r2ssa::FunctionSemanticSummary> {
-    function_facts
-        .interproc_summary_set()
-        .and_then(|summary_set| {
-            summary_set
-                .root
-                .and_then(|root| summary_set.summaries.get(&root).cloned())
-        })
-}
-
-fn count_prepared_callsites(ssa_blocks: &[r2ssa::SSABlock]) -> usize {
-    ssa_blocks
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .filter(|op| matches!(op, r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. }))
-        .count()
 }
