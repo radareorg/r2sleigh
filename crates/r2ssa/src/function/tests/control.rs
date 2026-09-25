@@ -1470,5 +1470,6 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
 
     assert_eq!(facts.canonical_root_of(left_dst), Some(&const_root));
     assert_eq!(facts.canonical_root_of(right_dst), Some(&const_root));
-    assert_eq!(facts.canonical_root_of(&const_root), Some(&const_root));
+    // A constant is its own representative.
+    assert_eq!(facts.canonical_root(&const_root), &const_root);
 }

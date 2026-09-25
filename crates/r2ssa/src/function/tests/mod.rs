@@ -2201,20 +2201,6 @@ fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
 }
 
 #[test]
-fn test_constant_display_names_do_not_supply_bits() {
-    let named_constant = SSAVar::new("const:0x1234", 0, 8);
-    assert_eq!(named_constant.constant_bits(), None);
-    assert_eq!(adapt_root_width(&named_constant, 4), None);
-
-    let canonical_constant = SSAVar::constant(0x1234, 8).renamed("not-a-constant");
-    assert_eq!(canonical_constant.constant_bits(), Some(0x1234));
-    assert_eq!(
-        adapt_root_width(&canonical_constant, 4),
-        Some(SSAVar::constant(0x1234, 4))
-    );
-}
-
-#[test]
 fn prepared_ssa_preserves_exact_widths_when_unique_offsets_are_reused() {
     // Sleigh unique-space offsets are local scratch locations reused by
     // unrelated instruction templates. A later 8-byte definition must not

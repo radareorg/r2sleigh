@@ -554,7 +554,13 @@ impl SSAFunction {
                 _ => true,
             })
         });
-        let mut facts = DecompilePrepFacts::default();
+        // Identity first: every stack-root question below names a value by its
+        // representative, and the representative is the view's answer.
+        let mut facts = DecompilePrepFacts {
+            views: crate::view::ValueViews::compute(self),
+            ..DecompilePrepFacts::default()
+        };
+        control.poll()?;
         let mut declared_stack_bases = BTreeMap::new();
         let mut entry_stack_address_size = None;
         // The stack pointer is a machine fact: the roles name it for every
@@ -681,9 +687,7 @@ impl SSAFunction {
                     let known = phi
                         .sources
                         .iter()
-                        .filter_map(|(_, source)| {
-                            resolve_stack_root(source, &facts.canonical_value_roots, roots)
-                        })
+                        .filter_map(|(_, source)| resolve_stack_root(source, &facts.views, roots))
                         .collect::<BTreeSet<_>>();
                     let [root] = known.into_iter().collect::<Vec<_>>()[..] else {
                         continue;
@@ -726,16 +730,13 @@ impl SSAFunction {
 
                 for phi in &block.phis {
                     control.poll()?;
-                    // Resolve each source's root once. The three questions
-                    // below all read it, and asking each of them separately
-                    // walked the root map three times per incoming edge and
-                    // copied a variable's name on every walk.
+                    // Resolve each source's representative once; both
+                    // questions below read it.
                     let source_roots = phi
                         .sources
                         .iter()
-                        .map(|(_, src)| canonical_root_in(&facts.canonical_value_roots, src))
+                        .map(|(_, src)| facts.views.representative(src))
                         .collect::<Vec<_>>();
-                    let common = common_root_of(&source_roots).cloned();
                     let stack_root = common_stack_root_of(
                         &phi.sources,
                         &source_roots,
@@ -755,13 +756,6 @@ impl SSAFunction {
                         })
                         .flatten();
                     drop(source_roots);
-                    if let Some(root) = common {
-                        changed |= insert_canonical_root(
-                            &mut facts.canonical_value_roots,
-                            phi.dst.clone(),
-                            root,
-                        );
-                    }
                     if let Some(root) = stack_root {
                         changed |= insert_stack_root(
                             &mut facts.stack_address_roots,
@@ -779,15 +773,15 @@ impl SSAFunction {
                 }
                 for op in &block.ops {
                     control.poll()?;
-                    // Each operand's root is resolved once for the questions
-                    // below. Asking the helpers to resolve it themselves cost a
-                    // walk of the root map and a copy of a variable's name per
-                    // question, and a sum asks six.
+                    // Each operand's representative is resolved once for the
+                    // questions below; a sum asks six.
                     match op {
                         SSAOp::Copy { dst, src }
                         | SSAOp::Cast { dst, src }
-                        | SSAOp::CallRestore { dst, src } => {
-                            let src_root = canonical_root_in(&facts.canonical_value_roots, src);
+                        | SSAOp::CallRestore { dst, src }
+                            if dst.size == src.size =>
+                        {
+                            let src_root = facts.views.representative(src);
                             let stack = stack_root_of(src, src_root, &facts.stack_address_roots);
                             let entry_stack = entry_stack_address_size
                                 .is_some_and(|size| dst.size == size && src.size == size)
@@ -795,12 +789,6 @@ impl SSAFunction {
                                     stack_root_of(src, src_root, &facts.entry_stack_address_roots)
                                 })
                                 .flatten();
-                            let src_root = src_root.clone();
-                            changed |= insert_canonical_root(
-                                &mut facts.canonical_value_roots,
-                                dst.clone(),
-                                src_root,
-                            );
                             if let Some(stack_root) = stack {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
@@ -816,19 +804,9 @@ impl SSAFunction {
                                 );
                             }
                         }
-                        SSAOp::Subpiece { dst, src, .. } => {
-                            let src_root = canonical_root_in(&facts.canonical_value_roots, src);
-                            let adapted = adapt_root_width(src_root, dst.size)
-                                .unwrap_or_else(|| src_root.clone());
-                            changed |= insert_canonical_root(
-                                &mut facts.canonical_value_roots,
-                                dst.clone(),
-                                adapted,
-                            );
-                        }
                         SSAOp::IntAdd { dst, a, b } => {
-                            let a_root = canonical_root_in(&facts.canonical_value_roots, a);
-                            let b_root = canonical_root_in(&facts.canonical_value_roots, b);
+                            let a_root = facts.views.representative(a);
+                            let b_root = facts.views.representative(b);
                             // An exact root is preferred; this records the
                             // object an address is inside when the offset
                             // within it is computed rather than stated.
@@ -888,8 +866,8 @@ impl SSAFunction {
                             }
                         }
                         SSAOp::IntSub { dst, a, b } => {
-                            let a_root = canonical_root_in(&facts.canonical_value_roots, a);
-                            let b_root = canonical_root_in(&facts.canonical_value_roots, b);
+                            let a_root = facts.views.representative(a);
+                            let b_root = facts.views.representative(b);
                             let exact = stack_address_root_from_sub(
                                 a,
                                 a_root,
@@ -945,15 +923,7 @@ impl SSAFunction {
                                 );
                             }
                         }
-                        SSAOp::IntZExt { .. } | SSAOp::IntSExt { .. } => {}
                         _ => {}
-                    }
-
-                    if let Some(dst) = op.dst() {
-                        changed |= ensure_value_root_identity(
-                            &mut facts.canonical_value_roots,
-                            dst.clone(),
-                        );
                     }
                 }
             }
