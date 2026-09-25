@@ -177,6 +177,28 @@ impl ValueViews {
         }
     }
 
+    /// The value `var` is a copy of: its root, where `var` carries every bit
+    /// of the root and nothing else, at the root's own width; otherwise `var`.
+    ///
+    /// Unlike the representative, which may be any member of a class, the
+    /// root dominates every value it is the copy root of: each transparent
+    /// step reads an operand, which dominates the step, and a phi takes a
+    /// root only when every input already has it, so the root dominates every
+    /// predecessor and so the phi. A pass that rewrites the graph may name it
+    /// in their place.
+    pub fn copy_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
+        match self.views.get(var) {
+            Some(view)
+                if view.extension == ViewExtension::Exact
+                    && view.prefix_bits == bits(var)
+                    && bits(&view.root) == bits(var) =>
+            {
+                &view.root
+            }
+            _ => var,
+        }
+    }
+
     /// The value `var` equals as an unsigned integer: its root, where `var`
     /// holds the root's whole width with zeros above; otherwise `var`.
     ///
