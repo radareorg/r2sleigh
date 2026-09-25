@@ -171,6 +171,33 @@ fn three_prepared_frame_slot_roots() -> r2ssa::DecompilePrepFacts {
     }
 }
 
+/// Storage that an access states only the width of is a type C spells at
+/// every width: an integer where C has one, the carrier past that, and no
+/// type for no bytes. Both renderers spell it one way, and it reads back as
+/// the type it was.
+#[test]
+fn storage_of_every_width_is_a_type_c_spells() {
+    assert_eq!(storage_type(0, Signedness::Signed), None);
+    for (bytes, signedness, spelling) in [
+        (4, Signedness::Signed, "int32_t"),
+        (8, Signedness::Unsigned, "uint64_t"),
+        (10, Signedness::Signed, "struct r2sleigh_bits_80"),
+        (16, Signedness::Signed, "__int128_t"),
+        (16, Signedness::Unsigned, "__uint128_t"),
+        (32, Signedness::Signed, "struct r2sleigh_bits_256"),
+    ] {
+        let ty = storage_type(bytes, signedness).expect("a width is storage");
+        assert_eq!(ty, CTypeLike::machine_storage(bytes * 8, signedness));
+        assert_eq!(render_c_type_like(&ty), spelling);
+        assert_eq!(render_signature_type(&ty, 64), spelling);
+        assert_eq!(parse_c_type_like(spelling, 64), Some(ty));
+    }
+    // A carrier states a width and nothing else, so any type outranks it. A
+    // 128-bit integer is an integer, like the narrower ones.
+    assert!(type_name_is_generic("struct r2sleigh_bits_256"));
+    assert!(!type_name_is_generic("__int128_t"));
+}
+
 #[test]
 fn type_name_policy_matches_planner_guard() {
     assert!(type_name_is_opaque_placeholder("struct type_0x1234 *"));

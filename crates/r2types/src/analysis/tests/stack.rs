@@ -381,11 +381,12 @@ fn stack_var_preference_renames_and_types_generic_stack_slots() {
         },
         spec,
     );
+    // A slot the recovery gave no type, which the external type fills.
     let vars = [RecoveredVariable {
         name: "var_10h".to_string(),
         kind: "b".to_string(),
         delta: -0x10,
-        var_type: "byte[4]".to_string(),
+        var_type: String::new(),
         isarg: false,
         reg: None,
     }];

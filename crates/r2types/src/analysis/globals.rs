@@ -101,9 +101,11 @@ pub(crate) fn score_global_type_links(
                     continue;
                 };
                 declared_offsets += 1;
-                if evidence.field_type.as_deref().is_some_and(|field_type| {
-                    decl_ty == &normalize_external_type_name(field_type).to_ascii_lowercase()
-                }) {
+                let observed = evidence
+                    .field_type
+                    .as_deref()
+                    .map(normalize_external_type_name);
+                if observed.is_some_and(|observed| observed.eq_ignore_ascii_case(decl_ty)) {
                     exact_matches += 1;
                     evidence_weight +=
                         1 + evidence.reads.min(4) as i32 + evidence.writes.min(4) as i32;

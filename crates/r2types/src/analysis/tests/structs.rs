@@ -223,7 +223,7 @@ fn external_stack_identity_refuses_without_a_structural_root() {
         name: "var_10h".to_string(),
         kind: "b".to_string(),
         delta: -0x10,
-        var_type: "byte[4]".to_string(),
+        var_type: "int32_t".to_string(),
         isarg: false,
         reg: None,
     }];

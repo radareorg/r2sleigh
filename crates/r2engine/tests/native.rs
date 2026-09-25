@@ -1198,10 +1198,7 @@ fn an_argument_read_back_from_the_high_half_of_a_vector_is_a_parameter() {
 ///   100f  ret
 /// ```
 ///
-/// The result leaves in two eight-byte stores because a sixteen-byte access
-/// is typed `byte[16]` upstream, which is not C and is not this defect; the
-/// two halves cover the same sixteen bytes. `eax` is the result so that the
-/// vector register is not mistaken for one.
+/// `eax` is the result so that the vector register is not mistaken for one.
 const PACKED_SIGN_EXTEND: &[u8] = &[
     0x66, 0x0f, 0x38, 0x21, 0x07, // 1000 pmovsxbd xmm0, dword [rdi]
     0x66, 0x0f, 0xd6, 0x06, // 1005 movq qword [rsi], xmm0
@@ -1416,6 +1413,105 @@ fn a_256_bit_packed_extension_compiles_on_its_own() {
             ),
         );
     }
+}
+
+/// `movdqu xmm0, [rdi]; movdqu [rsi], xmm0; xor eax, eax; ret`
+const COPY_16: &[u8] = &[
+    0xf3, 0x0f, 0x6f, 0x07, // 1000 movdqu xmm0, xmmword [rdi]
+    0xf3, 0x0f, 0x7f, 0x06, // 1004 movdqu xmmword [rsi], xmm0
+    0x31, 0xc0, // 1008 xor eax, eax
+    0xc3, // 100a ret
+];
+
+/// `movdqu xmm2, [rdi]; movq [rsi], xmm2; movhps [rsi + 8], xmm2; xor eax, eax; ret`
+const COPY_16_IN_HALVES: &[u8] = &[
+    0xf3, 0x0f, 0x6f, 0x17, // 1000 movdqu xmm2, xmmword [rdi]
+    0x66, 0x0f, 0xd6, 0x16, // 1004 movq qword [rsi], xmm2
+    0x0f, 0x17, 0x56, 0x08, // 1008 movhps qword [rsi + 8], xmm2
+    0x31, 0xc0, // 100c xor eax, eax
+    0xc3, // 100e ret
+];
+
+/// `pmovsxbd xmm0, dword [rdi]; movdqu [rsi], xmm0; xor eax, eax; ret`
+const SIGN_EXTEND_STORED_WHOLE: &[u8] = &[
+    0x66, 0x0f, 0x38, 0x21, 0x07, // 1000 pmovsxbd xmm0, dword [rdi]
+    0xf3, 0x0f, 0x7f, 0x06, // 1005 movdqu xmmword [rsi], xmm0
+    0x31, 0xc0, // 1009 xor eax, eax
+    0xc3, // 100b ret
+];
+
+/// `vmovdqu ymm0, [rdi]; vmovdqu [rsi], ymm0; xor eax, eax; vzeroupper; ret`
+const COPY_32: &[u8] = &[
+    0xc5, 0xfe, 0x6f, 0x07, // 1000 vmovdqu ymm0, ymmword [rdi]
+    0xc5, 0xfe, 0x7f, 0x06, // 1004 vmovdqu ymmword [rsi], ymm0
+    0x31, 0xc0, // 1008 xor eax, eax
+    0xc5, 0xf8, 0x77, // 100a vzeroupper
+    0xc3, // 100d ret
+];
+
+/// A load or store wider than eight bytes is typed as the storage it is --
+/// a 128-bit integer, or the carrier a wider value is -- so the rendering is
+/// C: it compiles, every byte it moves arrives, and none past them.
+///
+/// Such an access was typed `byte[N]` upstream, and `byte[16]` is not a C
+/// type, so `*(byte[16]*)p` did not compile.
+#[test]
+fn an_access_wider_than_eight_bytes_moves_every_byte() {
+    for (bytes, name, width) in [
+        (COPY_16, "copy_16", 16),
+        (COPY_16_IN_HALVES, "copy_16_in_halves", 16),
+        (COPY_32, "copy_32", 32),
+    ] {
+        let text = rendered(bytes, name);
+        assert!(!text.contains("byte["), "{text}");
+        run_rendered(
+            name,
+            &text,
+            &format!(
+                r#"int main(void) {{
+    _Alignas(32) uint8_t source[48];
+    _Alignas(32) uint8_t got[48];
+    for (int i = 0; i < 48; i++) {{
+        source[i] = (uint8_t)(0x80 + 7 * i);
+    }}
+    memset(got, 0xa5, sizeof got);
+    if ({name}((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {{
+        return 2;
+    }}
+    if (memcmp(got, source, {width}) != 0) {{
+        return 3;
+    }}
+    for (int i = {width}; i < 48; i++) {{
+        if (got[i] != 0xa5) {{
+            return 4;
+        }}
+    }}
+    return 0;
+}}"#
+            ),
+        );
+    }
+
+    let text = rendered(SIGN_EXTEND_STORED_WHOLE, "sign_extend_stored_whole");
+    assert_packed_extension_rendered(&text);
+    assert!(!text.contains("byte["), "{text}");
+    run_rendered(
+        "sign_extend_stored_whole",
+        &text,
+        r#"int main(void) {
+    const uint8_t source[4] = {0x01, 0x80, 0x7f, 0xfe};
+    const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
+    _Alignas(16) uint32_t got[8];
+    memset(got, 0xa5, sizeof got);
+    if (sign_extend_stored_whole((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {
+        return 2;
+    }
+    if (memcmp(got, want, sizeof want) != 0) {
+        return 3;
+    }
+    return got[4] != 0xa5a5a5a5u;
+}"#,
+    );
 }
 
 /// `movq xmm0, rdi; movq xmm1, rsi; pshufb xmm0, xmm1; movq rax, xmm0; ret`
