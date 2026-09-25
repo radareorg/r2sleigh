@@ -81,16 +81,21 @@ fn a_switch_whose_table_the_program_does_not_have_is_no_tail_call() {
 
 #[test]
 fn an_address_in_read_only_data_is_no_function() {
-    // 0x2018 is the jump table itself, in the segment mapped read-only.
-    for script in ["s 0x2018; pdd", "s 0x2018; pdf"] {
+    // 0x2020 is the third entry of classify's jump table, in the segment
+    // mapped read-only. Its bytes happen to decode, so the shell listed
+    // `xor eax, 0x3cfffff2` there and rendered `void fcn_2020(void)` under a
+    // clean proof line: data, presented as a function.
+    for script in ["s 0x2020; pdd", "s 0x2020; pdf"] {
         let run = bounded(script);
         assert!(!run.ok, "{script}: {}", run.out);
         assert!(
             run.out.contains(
-                "no instruction can run at 0x2018: the program maps it without execute permission"
+                "no instruction can run at 0x2020: the program maps it without execute permission"
             ),
             "{script}: {}",
             run.out
         );
+        assert!(!run.out.contains("fcn_2020"), "{script}: {}", run.out);
+        assert!(!run.out.contains("xor eax"), "{script}: {}", run.out);
     }
 }
