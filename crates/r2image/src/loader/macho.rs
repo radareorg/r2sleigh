@@ -102,10 +102,10 @@ fn span(data: &[u8], offset: u32, size: u64) -> Option<&[u8]> {
     data.get(start..end)
 }
 
-/// A symbol a bind names, which is an import unless it binds to this image itself.
-fn imported(name: String, weak: bool) -> RelocationSymbol {
+/// A symbol a bind names, by the C identifier it binds.
+fn imported(name: &str, weak: bool) -> RelocationSymbol {
     RelocationSymbol {
-        name,
+        name: crate::macho_identifier(name).to_owned(),
         defined: None,
         size: 0,
         binding: if weak { Binding::Weak } else { Binding::Global },
@@ -804,7 +804,7 @@ impl<'d> Macho<'d> {
                     (macho::S_SYMBOL_STUBS, Some(symbol)) => stubs.push(ImportStub {
                         vaddr,
                         size: stride,
-                        symbol,
+                        symbol: crate::macho_identifier(&symbol).to_owned(),
                     }),
                     (macho::S_SYMBOL_STUBS, None) => {}
                     (_, name) => pointers.push(Relocation {
@@ -822,7 +822,7 @@ impl<'d> Macho<'d> {
                             None if index & macho::INDIRECT_SYMBOL_ABS != 0 => Applies::Unknown,
                             None => Applies::Relative,
                         },
-                        symbol: name.map(|name| imported(name, false)),
+                        symbol: name.map(|name| imported(&name, false)),
                     }),
                 }
             }
@@ -930,7 +930,7 @@ impl Opcodes<'_> {
                 let symbol = self
                     .symbol
                     .clone()
-                    .map(|(name, weak_import)| imported(name, weak || weak_import));
+                    .map(|(name, weak_import)| imported(&name, weak || weak_import));
                 Relocation {
                     vaddr,
                     record,
@@ -1032,7 +1032,7 @@ impl Chain {
             Relocation {
                 addend: Some(addend + symbol.map_or(0, |(_, _, own)| *own)),
                 applies: Applies::SymbolPlusAddend,
-                symbol: symbol.map(|(name, weak, _)| imported(name.clone(), *weak)),
+                symbol: symbol.map(|(name, weak, _)| imported(name, *weak)),
                 ..unknown.clone()
             }
         };
@@ -1063,7 +1063,7 @@ impl Chain {
                     (true, true) => Relocation {
                         symbol: imports
                             .get(ordinal as usize)
-                            .map(|(name, weak, _)| imported(name.clone(), *weak)),
+                            .map(|(name, weak, _)| imported(name, *weak)),
                         ..unknown
                     },
                     (true, false) => unknown,
@@ -1169,14 +1169,16 @@ mod tests {
     }
 
     #[test]
-    fn a_chained_bind_names_its_import_by_ordinal() {
+    fn a_chained_bind_names_its_import_by_ordinal_and_by_its_c_identifier() {
         let chain = Chain::of(6).expect("decoded");
-        let imports = [("_memcpy".to_owned(), false, 0)];
+        // Mach-O links `__memcpy_chk` as `___memcpy_chk`: one underscore is
+        // the format's, and the other two are the identifier's own.
+        let imports = [("___memcpy_chk".to_owned(), false, 0)];
         let record = chain.record(0x1_0000_4000, 0x4000, 1 << 63, 0x1_0000_0000, &imports);
         assert_eq!(record.applies, Applies::SymbolPlusAddend);
         assert_eq!(
             record.symbol.map(|symbol| symbol.name).as_deref(),
-            Some("_memcpy")
+            Some("__memcpy_chk")
         );
     }
 }

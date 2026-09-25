@@ -66,7 +66,9 @@ fn a_pie_states_its_relative_records_with_their_addends_beside_its_symbol_bindin
 #[test]
 fn a_mach_o_stub_is_an_import_stub_and_never_a_relocation() {
     // `dyld_info -fixups manual_limits_O0`: one bind of `_memcpy` in `__got`,
-    // and two rebases in `__const`; the stub in `__stubs` is code.
+    // and two rebases in `__const`; the stub in `__stubs` is code. Each
+    // import is stated by the C identifier it binds, `memcpy`, with Mach-O's
+    // one underscore of decoration dropped, as radare2 spells it too.
     let limits = image(include_bytes!("../../../tests/fixtures/manual_limits_O0"));
     assert!(distinct(&limits));
     let stubs = limits
@@ -89,7 +91,7 @@ fn a_mach_o_stub_is_an_import_stub_and_never_a_relocation() {
             Some((relocation.vaddr, relocation.symbol.as_ref()?.name.as_str()))
         })
         .collect();
-    assert_eq!(bound, [(0x1_0000_4000, "_memcpy")]);
+    assert_eq!(bound, [(0x1_0000_4000, "memcpy")]);
     let rebased: Vec<(u64, Option<i64>)> = limits
         .relocations()
         .iter()
@@ -108,7 +110,16 @@ fn a_mach_o_stub_is_an_import_stub_and_never_a_relocation() {
         .iter()
         .map(|stub| (stub.vaddr, stub.size, stub.symbol.as_str()))
         .collect();
-    assert_eq!(declared, [(stubs.start, 12, "_memcpy")]);
+    assert_eq!(declared, [(stubs.start, 12, "memcpy")]);
+    let imported: Vec<&str> = limits
+        .symbols()
+        .iter()
+        .filter(|symbol| symbol.import)
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+    assert_eq!(imported, ["memcpy"]);
+    // A symbol the program defines keeps the name its table gives it.
+    assert!(limits.symbols().iter().any(|symbol| symbol.name == "_main"));
 }
 
 /// A static executable whose only relocation table is `.rela.iplt`, which

@@ -7,7 +7,7 @@
 mod common;
 
 use common::{
-    ARM_ENTRY, BASE, CALLER, FORKED, JOINED, Literal, ONE, PASSES, STEPPED, THUMB_CALLED,
+    ARM_ENTRY, BASE, CALLER, FORKED, GLIBC, JOINED, Literal, ONE, PASSES, STEPPED, THUMB_CALLED,
     THUMB_LEAF, TWO, VENEER,
 };
 use r2engine::discovery::Confidence;
@@ -44,7 +44,12 @@ fn every_function_the_container_states_is_found_as_stated() {
 fn a_function_handed_to_an_import_through_its_slot_is_found_as_handed() {
     // `atexit` is declared to take a function; the call reads the slot the
     // relocation names, and only that says which import is called.
-    let mut program = OpenProgram::of(Literal::new().stripped_of("two").importing("atexit"));
+    let mut program = OpenProgram::of(
+        Literal::new()
+            .stripped_of("two")
+            .importing("atexit")
+            .running_on(GLIBC),
+    );
     // lea rdi, [rip + 9] (two); call qword [rip + 0x7b] (the slot); ret
     program.source_mut().write(
         CALLER,

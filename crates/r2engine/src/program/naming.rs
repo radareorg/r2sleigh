@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use super::source::{EntryKind, Format, Section, Source, Symbol, SymbolKind};
+use super::source::{EntryKind, Section, Source, Symbol, SymbolKind};
 use crate::names::{Name, NameDb, Namespace};
 use r2il::R2ILOp;
 use r2sleigh_lift::Disassembler;
@@ -211,21 +211,16 @@ fn chance_run_length(runs: &[(u64, Vec<u8>)]) -> usize {
 
 /// Give each import stub the name of the import it stands for.
 ///
-/// Mach-O decorates a C name with one leading underscore, so the import the
-/// relocation calls `_printf` is `printf` -- the same decoration the prototype
-/// table already accounts for, and the spelling radare2 writes. ELF carries no
-/// such decoration, so nothing is stripped there.
-pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Stub>) {
-    let decorated = format == Format::MachO;
+/// The container states an import by the C identifier it binds -- the loader
+/// drops Mach-O's one underscore of decoration where it reads the bind -- so
+/// the name is the prototype table's key and the spelling radare2 writes, as
+/// stated.
+pub fn name_imports(db: &mut NameDb, imports: &BTreeMap<u64, Stub>) {
     for (stub, Stub { symbol, size }) in imports {
-        let undecorated = match decorated {
-            true => symbol.strip_prefix('_').unwrap_or(symbol),
-            false => symbol.as_str(),
-        };
         db.insert(
             *stub,
             Name {
-                text: undecorated.to_owned(),
+                text: symbol.clone(),
                 namespace: Namespace::Import,
                 size: *size,
             },
@@ -241,12 +236,10 @@ pub fn name_imports(db: &mut NameDb, format: Format, imports: &BTreeMap<u64, Stu
 /// container states outright.
 pub fn name_slots(
     db: &mut NameDb,
-    format: Format,
     slots: &BTreeMap<u64, String>,
     stubs: &BTreeMap<u64, Stub>,
     writes: &[super::source::LoaderWrite],
 ) {
-    let decorated = format == Format::MachO;
     for (slot, symbol) in slots {
         // Mach-O records its relocations against the stub itself, so the same
         // address is in both tables. A stub is code the program transfers to
@@ -255,11 +248,7 @@ pub fn name_slots(
         if stubs.contains_key(slot) {
             continue;
         }
-        let undecorated = match decorated {
-            true => symbol.strip_prefix('_').unwrap_or(symbol),
-            false => symbol.as_str(),
-        };
-        if undecorated.is_empty() {
+        if symbol.is_empty() {
             continue;
         }
         // As wide as the word the loader writes there.
@@ -269,7 +258,7 @@ pub fn name_slots(
         db.insert(
             *slot,
             Name {
-                text: undecorated.to_owned(),
+                text: symbol.clone(),
                 namespace: Namespace::Reloc,
                 size,
             },
@@ -575,7 +564,6 @@ mod tests {
         );
         name_imports(
             &mut db,
-            Format::Elf,
             &BTreeMap::from([(
                 0x1030,
                 Stub {

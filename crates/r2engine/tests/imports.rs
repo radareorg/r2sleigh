@@ -3,7 +3,7 @@
 mod common;
 
 use common::{BASE, Literal, MOVED_STUB, PLT_CALLER, PLT_STUB};
-use r2engine::program::OpenProgram;
+use r2engine::program::{Libc, OpenProgram, PlatformEvidence};
 use r2engine::query::{Listing, Stop};
 
 #[test]
@@ -65,4 +65,63 @@ fn a_stub_that_builds_its_slot_from_two_halves_is_named_for_the_import() {
         "{:?}",
         stub.value
     );
+}
+
+/// Each parameter's type, as the declaration a call to `import` is read against writes it.
+fn declared(import: &str, evidence: &[PlatformEvidence]) -> Option<Vec<String>> {
+    let mut program = OpenProgram::of(Literal::plt_importing(import).running_on(evidence));
+    // Describing the caller reads its call against the machine's declarations.
+    program.function_info(PLT_CALLER).expect("it is described");
+    let target = r2engine::native::Program::target_at(&program, PLT_CALLER).expect("a machine");
+    let prototype = target.prototypes.get(import)?;
+    Some(
+        prototype
+            .parameters
+            .iter()
+            .map(|parameter| parameter.spelling.as_written().to_owned())
+            .collect(),
+    )
+}
+
+#[test]
+fn a_call_is_read_against_the_c_library_the_container_names_and_no_other() {
+    use Libc::{Bionic, Glibc, Musl};
+    use PlatformEvidence::{Interpreter, Note, OsAbi};
+    let glibc = ["char *", "size_t", "int", "FILE *"]
+        .map(str::to_owned)
+        .to_vec();
+    let bionic = ["char *", "int", "FILE *", "size_t"]
+        .map(str::to_owned)
+        .to_vec();
+    // bionic's dynamic linker in `PT_INTERP` is an Android program, whose
+    // `__fgets_chk` takes the stream third; glibc's takes it last. Every ELF
+    // was read as glibc's once, so an Android call had its length and its
+    // stream swapped.
+    assert_eq!(
+        declared("__fgets_chk", &[Interpreter(Bionic)]),
+        Some(bionic.clone())
+    );
+    assert_eq!(
+        declared("__fgets_chk", &[Note(Bionic), OsAbi(3)]),
+        Some(bionic)
+    );
+    assert_eq!(
+        declared("__fgets_chk", &[Interpreter(Glibc), Note(Glibc)]),
+        Some(glibc)
+    );
+    // Nothing stated, two libraries named, a library r2abi declares nothing
+    // for, or another system's ABI: only what every library shares applies,
+    // so the call has no prototype rather than a guessed one.
+    for evidence in [
+        &[][..],
+        &[Interpreter(Bionic), Note(Glibc)],
+        &[Interpreter(Musl)],
+        &[Interpreter(Glibc), OsAbi(9)],
+    ] {
+        assert_eq!(declared("__fgets_chk", evidence), None, "{evidence:?}");
+    }
+    // What every library declares alike applies with or without any.
+    assert!(declared("__memcpy_chk", &[]).is_some());
+    // An identifier is looked up as it is: a program's own `_strlen` is not `strlen`.
+    assert_eq!(declared("_strlen", &[Interpreter(Glibc)]), None);
 }

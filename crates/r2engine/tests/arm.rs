@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use r2engine::discovery::Confidence;
 use r2engine::program::{
-    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Section,
-    SectionRole, Segment, Source, Symbol, SymbolKind,
+    Arch, Container, Endian, Entry, EntryKind, Format, Libc, Mapping, OpenProgram, Permissions,
+    PlatformEvidence, Section, SectionRole, Segment, Source, Symbol, SymbolKind,
 };
 use r2engine::query::{AnnotationKind, Listing, Stop};
 
@@ -270,6 +270,8 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
     // The pointer's low bit says Thumb, so the function is at the even
     // address and decodes as Thumb; the ARM decoder rejects its bytes.
     let mut mixed = arm_only(&HANDS_THUMB, Endian::Little);
+    // `atexit` is declared by each C library: this program is glibc's.
+    mixed.container.platform = [PlatformEvidence::Interpreter(Libc::Glibc)].into();
     mixed.container.symbols.push(Symbol {
         name: "atexit".to_owned(),
         vaddr: ARM + 0x10,

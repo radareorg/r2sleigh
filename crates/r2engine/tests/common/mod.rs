@@ -11,9 +11,15 @@ use std::ops::Range;
 
 use r2engine::program::{
     Applies, Arch, Container, Endian, Entry, EntryKind, Format, LoaderWrite, Mapping, OpenProgram,
-    Permissions, Relocation, RelocationSymbol, Section, SectionRole, Segment, Source, Symbol,
-    SymbolKind, WriteKind,
+    Permissions, PlatformEvidence, Relocation, RelocationSymbol, Section, SectionRole, Segment,
+    Source, Symbol, SymbolKind, WriteKind,
 };
+
+/// What a program linked against the GNU C library states of its platform:
+/// glibc's dynamic linker in `PT_INTERP`.
+pub const GLIBC: &[PlatformEvidence] = &[PlatformEvidence::Interpreter(
+    r2engine::program::Libc::Glibc,
+)];
 
 pub const BASE: u64 = 0x1000;
 /// `mov eax, 1; ret`
@@ -463,8 +469,13 @@ impl Literal {
         self
     }
 
-    /// A `.plt` holding PLT0, the zero pad after it, and one stub, then a caller.
+    /// A `.plt` holding PLT0, the zero pad after it, and one stub for `_Exit`, then a caller.
     pub fn plt() -> Self {
+        Self::plt_importing("_Exit")
+    }
+
+    /// The same `.plt`, its one stub standing for `import`.
+    pub fn plt_importing(import: &str) -> Self {
         let mut program = Self::new();
         program.code = &PLT;
         program.container.segments = vec![code_segment(BASE, PLT.len() as u64)];
@@ -487,7 +498,7 @@ impl Literal {
             },
         ];
         program.container.symbols.clear();
-        program.container.relocations = vec![import_slot(PLT_SLOT, "_Exit")];
+        program.container.relocations = vec![import_slot(PLT_SLOT, import)];
         // The two words before the slot are the ones the x86-64 psABI reserves
         // for the lazy resolver, which the loader writes with no relocation
         // naming them, and which the first entry reads.
@@ -497,9 +508,15 @@ impl Literal {
                 width: 0x10,
                 kind: WriteKind::Unknown,
             },
-            import_write(PLT_SLOT, 8, "_Exit"),
+            import_write(PLT_SLOT, 8, import),
         ];
         program
+    }
+
+    /// The same program, its container stating this of the platform it runs on.
+    pub fn running_on(mut self, evidence: &[PlatformEvidence]) -> Self {
+        self.container.platform = evidence.iter().copied().collect();
+        self
     }
 
     /// The same code as a `.plt`, stating a 32-bit slot at `slot` the loader fills with `import`.

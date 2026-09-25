@@ -101,15 +101,16 @@ fn a_librarys_default_visibility_definition_is_its_own_only_until_another_image_
 
 #[test]
 fn a_chained_rebase_states_its_target_and_a_bind_its_import() {
-    // `dyld_info -fixups manual_limits_O0`: `__got` binds `_memcpy`, and
-    // `__const` holds two rebases to strings in `__cstring`.
+    // `dyld_info -fixups manual_limits_O0`: `__got` binds `_memcpy`, which
+    // is the C identifier `memcpy`, and `__const` holds two rebases to
+    // strings in `__cstring`.
     let limits =
         r2image::Image::parse(include_bytes!("../../../tests/fixtures/manual_limits_O0").to_vec())
             .expect("the fixture parses");
     assert_eq!(
         at(&limits, 0x1_0000_4000),
         Some(r2image::WriteKind::Import {
-            symbol: "_memcpy".to_owned()
+            symbol: "memcpy".to_owned()
         })
     );
     assert_eq!(

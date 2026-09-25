@@ -220,15 +220,13 @@ impl<S: Source> OpenProgram<S> {
             return Ok(());
         }
         let machine = self.machine.as_ref().expect("the machine is loaded above");
-        let format = self.source.container().format;
         let mut names = naming::of(&self.source);
         naming::name_strings(&mut names, &self.source);
         // The import stubs can only be read once there is a decoder.
         let imports = naming::imports(&self.source, &machine.disasm, machine.arch.alignment);
-        naming::name_imports(&mut names, format, &imports);
+        naming::name_imports(&mut names, &imports);
         naming::name_slots(
             &mut names,
-            format,
             &self.slots,
             &imports,
             &self.source.container().loader_writes,
@@ -367,13 +365,10 @@ impl<S: Source> OpenProgram<S> {
                 size: register.size,
                 meta: None,
             });
-        // The format says which platform's own declarations apply: `_Exit` is
-        // declared by the platform, not by the table every target shares.
-        let mut prototypes = r2abi::Prototypes::embedded_for(match container.format {
-            Format::Elf => r2abi::Platform::Linux,
-            Format::MachO => r2abi::Platform::Darwin,
-            _ => r2abi::Platform::Unknown,
-        });
+        // Which C library's own declarations apply is what the container
+        // states of it, and nothing else: `_Exit` is each library's, and
+        // `__fgets_chk` is two interfaces under one name.
+        let mut prototypes = r2abi::Prototypes::embedded_for(platform(container));
         // What the binary's own debug information says beats the shared table:
         // the table describes what a library is expected to look like, and
         // this describes what this one is.
@@ -715,6 +710,45 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
         self.program.target_at(vaddr)
     }
 }
+
+/// Which platform's declarations a program's calls are read against, as its container states it.
+///
+/// Mach-O is Apple's format, so it is Darwin's libSystem. An ELF is the
+/// platform of the one C library its evidence names -- the dynamic linker
+/// `PT_INTERP` asks for, the notes that library's start files leave -- and
+/// runs on Linux as far as `EI_OSABI` says. Anything else is `Unknown`, which
+/// reads only the declarations every library shares: no evidence, evidence
+/// naming two libraries, an OS ABI that is not Linux's, and musl, which
+/// declares nothing r2abi keeps a table for. A call then has no prototype,
+/// which is visible, rather than another library's, which is wrong.
+fn platform(container: &Container) -> r2abi::Platform {
+    use r2abi::Platform;
+    match container.format {
+        Format::MachO => return Platform::Darwin,
+        Format::Elf => {}
+        _ => return Platform::Unknown,
+    }
+    let mut named = std::collections::BTreeSet::new();
+    for evidence in &container.platform {
+        match *evidence {
+            PlatformEvidence::Interpreter(libc) | PlatformEvidence::Note(libc) => {
+                named.insert(libc);
+            }
+            // GNU/Linux; zero, which states nothing, is never stated.
+            PlatformEvidence::OsAbi(ELFOSABI_GNU) => {}
+            PlatformEvidence::OsAbi(_) => return Platform::Unknown,
+        }
+    }
+    let mut named = named.into_iter();
+    match (named.next(), named.next()) {
+        (Some(Libc::Glibc), None) => Platform::Linux,
+        (Some(Libc::Bionic), None) => Platform::Android,
+        _ => Platform::Unknown,
+    }
+}
+
+/// `EI_OSABI` for GNU/Linux, which glibc and bionic both run on.
+const ELFOSABI_GNU: u8 = 3;
 
 /// Whether a function begins at each address the binary defines.
 ///

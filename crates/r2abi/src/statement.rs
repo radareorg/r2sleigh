@@ -10,6 +10,7 @@
 //! own terms, so a consumer that disagrees with one is disagreeing with the
 //! container and not with a reading of it.
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 /// Everything the container states that the engine reads.
@@ -46,6 +47,10 @@ pub struct Container {
     pub sealed: Vec<Range<u64>>,
     /// Prototypes the program's own debug information declares.
     pub declared: Vec<crate::Prototype>,
+    /// What the container states about the C library the program runs
+    /// against. Evidence only: which platform's declarations apply is decided
+    /// by the engine from it, and none of it is a guess from a symbol's name.
+    pub platform: BTreeSet<PlatformEvidence>,
 }
 
 impl Container {
@@ -135,11 +140,41 @@ pub fn write_at(writes: &[LoaderWrite], place: u64) -> Option<&LoaderWrite> {
     writes.get(first).filter(|written| written.place <= place)
 }
 
+/// A C library a container can name, by the files only it ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Libc {
+    /// The GNU C library: its dynamic linker is `ld-linux*.so.*` (`ld64.so.*`
+    /// on the 64-bit POWER and s390 ABIs), and its start files leave a `GNU`
+    /// ABI-tag note naming Linux.
+    Glibc,
+    /// Android's: its dynamic linker is `/system/bin/linker` or `linker64`, and
+    /// its start files leave an `Android` identification note.
+    Bionic,
+    /// musl: its dynamic linker is `ld-musl-<arch>.so.1`.
+    Musl,
+}
+
+/// One thing a container states that names the platform its program runs on.
+///
+/// ELF says it in three places, none of them a name the program chose: the
+/// dynamic linker `PT_INTERP` asks for, the notes a C library's start files
+/// put in every program linked against it, and the OS ABI byte of the header.
+/// Mach-O is Apple's format and says it by being one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PlatformEvidence {
+    /// `PT_INTERP` names this library's dynamic linker.
+    Interpreter(Libc),
+    /// A note only this library's start files leave in a program.
+    Note(Libc),
+    /// `e_ident[EI_OSABI]`, where it is not zero, which states nothing.
+    OsAbi(u8),
+}
+
 /// The container format the bytes were parsed as.
 ///
 /// Mach-O decorates a C name with a leading underscore and names its stubs
-/// rather than the slots they read; which platform's prototypes apply follows
-/// from it too.
+/// rather than the slots they read; the loader states each import by the C
+/// identifier it binds, the decoration dropped once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Format {
     Elf,
@@ -377,6 +412,9 @@ pub enum Mapping {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Symbol {
+    /// What the symbol table calls it. An import is named by the C identifier
+    /// it binds: Mach-O's one leading underscore of decoration is dropped
+    /// there, which is the name its declaration and radare2 know it by.
     pub name: String,
     pub vaddr: u64,
     pub size: u64,
@@ -450,6 +488,7 @@ pub struct Record {
 /// The symbol a relocation is computed against, as the table it names states it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelocationSymbol {
+    /// The C identifier the record binds, Mach-O's decoration dropped once.
     pub name: String,
     /// The address this image defines it at; `None` where it is an import.
     pub defined: Option<u64>,
@@ -575,7 +614,7 @@ pub enum WriteKind {
 /// Mach-O states it outright: a section of type `S_SYMBOL_STUBS` holds one
 /// stub per entry, `reserved2` bytes each, and the indirect symbol table says
 /// which import each stands for. The stub is code a call lands on, so it is
-/// never a relocation.
+/// never a relocation. `symbol` is the C identifier the import binds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportStub {
     pub vaddr: u64,

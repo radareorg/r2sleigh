@@ -9,6 +9,7 @@
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 pub mod debug;
 mod loader;
+mod platform;
 mod roles;
 
 use std::borrow::Cow;
@@ -518,8 +519,13 @@ impl Image {
                     .and_then(|index| file.section_by_index(index).ok())
                     .map_or(0, |section| placed(&section));
             let mapped = is_arm32(&arch).then(|| mapping(name)).flatten();
+            let import = symbol.section() == object::SymbolSection::Undefined;
             Some(Symbol {
-                name: name.to_owned(),
+                // An import is named by the C identifier it binds.
+                name: match (format, import) {
+                    (Format::MachO, true) => macho_identifier(name).to_owned(),
+                    _ => name.to_owned(),
+                },
                 vaddr: match symbol.kind() {
                     object::SymbolKind::Text => code_address(&arch, address),
                     _ => address,
@@ -546,7 +552,7 @@ impl Image {
                 // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
                 defined: matches!(symbol.section(), object::SymbolSection::Section(_))
                     && symbol.kind() != object::SymbolKind::Tls,
-                import: symbol.section() == object::SymbolSection::Undefined,
+                import,
                 thumb: is_arm32(&arch)
                     && symbol.kind() == object::SymbolKind::Text
                     && address & 1 == 1,
@@ -605,6 +611,7 @@ impl Image {
         } = loader::read(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
 
         let sealed = loader::sealed(&file);
+        let platform = platform::evidence(&file);
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
@@ -699,6 +706,7 @@ impl Image {
                 entries,
                 sealed,
                 declared,
+                platform,
             },
             patches: BTreeMap::new(),
             byte_revision: 0,
@@ -1037,6 +1045,17 @@ fn select_fat_slice(data: &[u8]) -> Result<Option<std::ops::Range<usize>>, Image
         .filter(|end| *end <= data.len())
         .ok_or_else(|| ImageError::Parse("universal slice runs past the file".to_owned()))?;
     Ok(Some(start..end))
+}
+
+/// The C identifier a Mach-O import binds: its linked name less the one
+/// leading underscore Mach-O writes every C name with.
+///
+/// Dropped exactly once, and only here, where the loader states the import:
+/// `___memcpy_chk` binds `__memcpy_chk`, which is another function from
+/// `memcpy_chk` or `memcpy`. A name with no leading underscore is an
+/// assembler symbol with no C name, and is stated as it is.
+pub(crate) fn macho_identifier(linked: &str) -> &str {
+    linked.strip_prefix('_').unwrap_or(linked)
 }
 
 /// Virtual address a file offset maps to, for a format that states one.

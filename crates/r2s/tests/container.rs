@@ -73,7 +73,8 @@ fn ir_never_lists_a_mach_o_stub() {
     let rows = rows(&out);
     assert_eq!(rows.len(), 3, "{out}");
     assert!(!out.contains("0x100000fd8"), "{out}");
-    assert!(rows[0].starts_with("0x100004000") && rows[0].ends_with("_memcpy"));
+    // The bind is stated by the C identifier it binds, as radare2 spells it.
+    assert!(rows[0].starts_with("0x100004000") && rows[0].ends_with(" memcpy"));
 }
 
 #[test]
