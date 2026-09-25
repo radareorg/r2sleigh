@@ -3609,32 +3609,15 @@ impl Decompiler {
                 ));
             }
         };
-        // A boundary that proves neither a value nor its absence leaves what
-        // the function returns unproven.
-        let return_unproven = matches!(
-            input.source_owned_facts().return_type(),
-            Some(r2types::ReturnTypeFact::Refused(
-                r2types::ReturnTypeRefusal::UnprovenBoundary
-            ))
-        );
-        // What the function returns is r2types' one decision. Where the
-        // boundary left it unproven, the declaration is the carrier a caller
-        // reads, at its width, and every return hands back a residual of it:
-        // the header claims only what the machine does, and the value is
-        // marked as the unproven thing it is. A refused type with no carrier
-        // is spelled as any unknown type is.
+        // What the function returns is r2types' one decision: the decided
+        // type, or where the boundary left the value unproven, the result
+        // carrier a caller reads, which every return hands back a residual of.
+        // A refused type is spelled as any unknown type is.
         let return_type = input
             .source_owned_facts()
             .return_type()
-            .and_then(r2types::ReturnTypeFact::decided)
+            .and_then(r2types::ReturnTypeFact::declared)
             .cloned()
-            .or_else(|| {
-                return_unproven
-                    .then(|| prepared.machine_context().return_value_carrier())
-                    .flatten()
-                    .map(|carrier| CType::uint(carrier.size.saturating_mul(8)))
-                    .filter(|ty| crate::prelude::ResidualType::of(ty).is_some())
-            })
             .unwrap_or(CType::Unknown);
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
@@ -3894,7 +3877,6 @@ impl Decompiler {
             // Parameters here come from the render signature, so an empty list
             // is a recovered empty list rather than an unknown one.
             params_known: true,
-            return_unproven,
         };
         // The fold named every constant address it converted, and declaring
         // the objects is part of naming them.

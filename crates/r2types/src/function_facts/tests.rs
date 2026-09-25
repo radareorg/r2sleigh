@@ -3841,7 +3841,7 @@ fn no_value_is_void_only_where_the_boundary_proves_it() {
             &BTreeMap::new(),
             &crate::EvidenceTypes::default()
         ),
-        ReturnTypeFact::Refused(ReturnTypeRefusal::UnprovenBoundary)
+        ReturnTypeFact::Unproven { carrier: None }
     );
 }
 

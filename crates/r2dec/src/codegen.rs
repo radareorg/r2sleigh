@@ -243,7 +243,6 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             params: func.params,
             locals: func.locals,
             params_known: func.params_known,
-            return_unproven: func.return_unproven,
             externs: func.externs,
             typedefs: func.typedefs,
             aggregates: func.aggregates,
@@ -1506,7 +1505,6 @@ mod tests {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: false,
-            return_unproven: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
@@ -1553,7 +1551,6 @@ mod tests {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: true,
-            return_unproven: false,
             symbols: std::rc::Rc::new(symbols),
         };
         let code = generate(&func);
@@ -1594,7 +1591,6 @@ mod tests {
                 CExpr::var(crate::symbol::declare(&symbols, "b")),
             )))],
             params_known: true,
-            return_unproven: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
@@ -1624,7 +1620,6 @@ mod tests {
                 init: None,
             }],
             params_known: true,
-            return_unproven: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
@@ -1661,7 +1656,6 @@ mod tests {
                 locals: Vec::new(),
                 body: Vec::new(),
                 params_known: true,
-                return_unproven: false,
                 symbols: std::rc::Rc::clone(&func_symbols(&symbols)),
             };
             generate(&func)
@@ -1722,7 +1716,6 @@ mod tests {
                 else_body: Some(Box::new(CStmt::Return(Some(CExpr::int(0))))),
             }],
             params_known: true,
-            return_unproven: false,
             symbols: std::rc::Rc::new(symbols),
         };
         let mut observed = plain.clone();
@@ -1975,7 +1968,6 @@ mod tests {
                 CStmt::Return(None),
             ],
             params_known: true,
-            return_unproven: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
