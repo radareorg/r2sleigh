@@ -2276,8 +2276,8 @@
    "status": "refused"
   },
   "tests/gold/review.c::clang-O2::fact": {
-   "cause": "[gate-limitation] This is a gate limitation, not UB. For n=1190360900 the -O0 build of the rendering overruns the rendering budget of 4 x timeout_ms (equiv_rt.c:857). The original and the -O2 build return. compare_runs turns a timeout-vs-return pair into an 'exit' mismatch (equiv_rt.c:577-579), and gate.py:378-380 reports any O0/O2 disagreement as ub. The rendering is correct. The -O0 build is slow because the vectorised pmuludq loop (9 pmuludq in the binary) is spelled as __uint128_t lane-merge chains (44 __uint128_t uses in the rendering), which is the known XMM lane noise (PE/P10). The census ran on a loa...",
-   "status": "ub"
+   "cause": "[gate-limitation] The -O0 build of the rendering overruns its budget of 4 x timeout_ms. The original and the -O2 build return. Since 1e53fc79 the gate grades a timeout as `slow` instead of as an O0/O2 `ub` disagreement; it grades `slow` both inside the full run and alone (--jobs 1). The rendering is correct. It is slow at -O0 because the vectorised pmuludq loop is spelled as __uint128_t lane-merge chains, the known XMM lane noise (PE, and lane-induction recovery).",
+   "status": "slow"
   },
   "tests/gold/review.c::clang-O2::fill": {
    "cause": "[P10 lowering] An unaligned movdqu store is spelled as a typed 16-byte dereference: `*(__uint128_t*)0x404054 = XMM1_2;` (rendering.c:26), and likewise at 0x404064 and 0x404074. __uint128_t requires 16-byte alignment and a __uint128_t effective type. The target is g_table+4 (int[16]), which is only 4-aligned, and movdqu has no alignment requirement. No effective-type or alignment proof is consulted (memory_renderer.rs:973-978). Unrelated known defects: the void function is rendered as uint32_t with a return value (critique:calls F8), plus XMM lane noise.",
