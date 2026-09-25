@@ -21,7 +21,9 @@ BEGIN = re.compile(r"^R2SLEIGH_COV_BEGIN__(?P<name>.+)$")
 # apart from a binary that simply holds fewer.
 ASKED = re.compile(r"^R2SLEIGH_COV_ASKED__(?P<count>\d+)$")
 END = re.compile(r"^R2SLEIGH_COV_END__(?P<name>.+)$")
-FALLBACK = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
+# A refusal is a comment and no definition, whichever renderer wrote it: the
+# plugin era's `r2sleigh refused`, or the engine renderer's `r2dec refused`.
+FALLBACK = re.compile(r"/\* r2(?:sleigh|dec) refused \S+: (?P<cause>.*) \*/")
 # The shell answering with an error instead of a rendering is a refusal too.
 # It was counted as rendered, so a function that stopped before the renderer
 # even ran -- `invalid owned source snapshot` -- raised the score.

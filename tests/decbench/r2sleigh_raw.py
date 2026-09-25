@@ -73,9 +73,12 @@ log = logging.getLogger(__name__)
 _BEGIN = "R2SLEIGH_DECBENCH_BEGIN__"
 _END = "R2SLEIGH_DECBENCH_END__"
 
-# What the plugin prints when it declines a function. The text carries the typed
-# cause, which is worth keeping in metadata even though the function is dropped.
-_REFUSAL = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
+# What the renderer prints when it declines a function: `r2sleigh refused` from
+# the plugin era, `r2dec refused` from the engine's own renderer. The text
+# carries the typed cause, which is worth keeping in metadata even though the
+# function is dropped. A refusal is a comment and no definition, and scored as a
+# rendering it would count a function nothing defined.
+_REFUSAL = re.compile(r"/\* r2(?:sleigh|dec) refused \S+: (?P<cause>.*) \*/")
 
 # What radare2 prints when no decompiler plugin is registered at all. It is not
 # output from a decompiler and must never be scored as one: counted as rendered
@@ -83,11 +86,19 @@ _REFUSAL = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
 # decompiler producing very poor C rather than as a plugin that never loaded.
 _NO_DECOMPILER = "r2pm -ci r2dec"
 
-# What the renderer prints where it could not prove a cell. The function is
+# What the renderer prints where it could not prove a construct: a residual, a
+# call that traps if it is reached, numbered by its site. The function is
 # rendered and is not fully proven; both facts belong in the census, because a
-# body that is mostly gap must never read as the same result as a body whose
-# every cell carries a certificate.
-_GAP = re.compile(r"/\* r2dec gap: (?P<kind>[^ ]+) at (?P<site>\S+) covering (?P<ops>\d+) op")
+# body that is mostly residual must never read as the same result as a body
+# whose every cell carries a certificate. Every residual is counted, not only
+# the ones a gap comment follows: an unproven return, an unassigned read and a
+# conversion C cannot state print no comment, and missing them scored those
+# functions as fully proven. Where a gap comment follows the residual, it names
+# what the residual stands for and how many operations it covers.
+_RESIDUAL = re.compile(
+    r"\br2sleigh_residual_(?P<type>[a-z0-9]+)\((?P<site>\d+)\)"
+    r"(?:; /\* r2dec gap: (?P<kind>\S+) at (?P<at>\S+)(?: covering (?P<ops>\d+) op)?)?"
+)
 
 _R2_FLAGS = ("-e", "scr.color=0", "-e", "bin.relocs.apply=true", "-q")
 
@@ -97,6 +108,29 @@ _R2_FLAGS = ("-e", "scr.color=0", "-e", "bin.relocs.apply=true", "-q")
 # `dbg.readError` matches nothing, so the prefix comes off. Everything left
 # unprefixed keeps whatever radare2 called it.
 _FLAG_PREFIXES = ("dbg.", "sym.", "fcn.", "loc.", "flirt.")
+
+
+def _refusal_cause(body: str) -> str | None:
+    """The typed cause a declined function's text states, if it declined."""
+    refusal = _REFUSAL.search(body)
+    return None if refusal is None else refusal.group("cause")
+
+
+def _residuals(code: str) -> list[dict[str, str]]:
+    """Every residual a rendering holds, in site order.
+
+    A residual under a gap comment carries the gap's kind and the operations it
+    covers; any other is named by the type it stands in for, and covers no
+    operation of its own.
+    """
+    return [
+        {
+            "kind": match.group("kind") or f"residual_{match.group('type')}",
+            "site": match.group("site"),
+            "ops": match.group("ops") or "0",
+        }
+        for match in _RESIDUAL.finditer(code)
+    ]
 
 
 def _retitle(code: str, flag: str, source_name: str) -> str:
@@ -499,9 +533,9 @@ class RawR2SleighDecompiler(Decompiler):
                     declined[name] = harness
                     unreached += 1
                     continue
-                refusal = _REFUSAL.search(body)
+                refusal = _refusal_cause(body)
                 if refusal is not None:
-                    declined[name] = refusal.group("cause")
+                    declined[name] = refusal
                     continue
                 if _NO_DECOMPILER in body:
                     declined[name] = (
@@ -512,7 +546,7 @@ class RawR2SleighDecompiler(Decompiler):
                 code = body.strip()
                 if not code:
                     continue
-                gaps = [match.groupdict() for match in _GAP.finditer(code)]
+                gaps = _residuals(code)
                 if gaps:
                     gapped[name] = gaps
                 code = _retitle(code, flag, name)
@@ -636,14 +670,16 @@ def _write_refusal_census(
                 gap_causes[gap["kind"]] = gap_causes.get(gap["kind"], 0) + 1
                 gap_ops += int(gap["ops"])
         payload = {
-            "schema_version": 3,
+            # 4: `gapped` counts every function holding a residual, where 3
+            # counted only those with a gap comment, so the two do not compare.
+            "schema_version": 4,
             "binary": binary_path.name,
             "binary_path": str(binary_path),
             "rendered": rendered,
             "declined": len(declined),
             "causes": dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))),
             "by_function": dict(sorted(declined.items())),
-            # A rendered function with a marked gap is counted in `rendered`
+            # A rendered function holding a residual is counted in `rendered`
             # and again here. `fully_proven` is what a reader wants beside
             # coverage: the functions whose every cell carries a certificate.
             "gapped": len(gapped),
