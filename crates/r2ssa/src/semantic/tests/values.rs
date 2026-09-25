@@ -235,6 +235,7 @@ fn stack_return_carrier_requires_stack_reload_certificate() {
     let object = ObjectId(7);
     let reload = StackReloadSourceCertificate {
         value: value.value,
+        relation: crate::view::ViewRelation::Identity,
         reload: value.value,
         source: value.value,
         canonical_source: value.value,

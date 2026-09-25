@@ -2448,7 +2448,14 @@ impl FunctionFacts {
             .iter()
             .map(|(slot, (value, _))| (*value, *slot))
             .collect::<BTreeMap<_, _>>();
-        for reload in prepared.certificates().stack_reloads.values() {
+        // Only a reload that is the stored bits is the parameter; a value
+        // computed from it -- the sign word a `cqo` makes of it -- is not.
+        for reload in prepared
+            .certificates()
+            .stack_reloads
+            .values()
+            .filter(|reload| reload.relation == r2ssa::ViewRelation::Identity)
+        {
             let mut slots = [reload.canonical_source, reload.source]
                 .into_iter()
                 .filter_map(|value| parameter_slot_by_value.get(&value).copied())

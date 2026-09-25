@@ -523,7 +523,9 @@ pub(crate) fn return_carrier_for_boundary_value(
     match boundary.slot {
         CallBoundarySlot::Register { .. } => return_carrier_for_boundary_slot(boundary.slot),
         CallBoundarySlot::Stack(offset) => {
-            let reload = stack_reloads.get(&boundary.value)?;
+            let reload = stack_reloads
+                .get(&boundary.value)
+                .filter(|reload| reload.relation == crate::view::ViewRelation::Identity)?;
             (reload.offset == offset).then_some(ReturnCarrier::StackSlot {
                 object: reload.object,
                 offset: reload.offset,

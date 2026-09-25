@@ -1268,10 +1268,12 @@ pub(crate) fn collect_prepared_function_certificates(
             }
         }
     }
-    // And the copies of those reads, which the reload certificates already
-    // followed through the operations that preserve a value.
+    // And the values that are those reads' bits, which the reload
+    // certificates state; a value only computed from a read -- an extension,
+    // a lane, a sign word of the same width as the slot -- is not the slot.
     for certificate in stack_reloads.values() {
-        if certificate.value_width != certificate.memory_width
+        if certificate.relation != crate::view::ViewRelation::Identity
+            || certificate.value_width != certificate.memory_width
             || !private_objects.contains(&certificate.object)
         {
             continue;

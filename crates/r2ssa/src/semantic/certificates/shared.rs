@@ -49,9 +49,17 @@ pub enum ReturnCarrier {
     },
 }
 
+/// A value read back from a stack slot, and how it relates to what was stored.
+///
+/// `relation` is the view's answer (`crate::view`): `Identity` where `value`
+/// is the reload's bits at the reload's width, `Derived` where it was only
+/// computed from them -- an extension, a lane, the sign word of one. Only an
+/// identity is the slot's value; a derived value is evidence of where its
+/// input came from and nothing more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackReloadSourceCertificate {
     pub value: ValueId,
+    pub relation: crate::view::ViewRelation,
     pub reload: ValueId,
     pub source: ValueId,
     pub canonical_source: ValueId,
