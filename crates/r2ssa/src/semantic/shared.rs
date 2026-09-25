@@ -1650,7 +1650,8 @@ pub(crate) fn callee_write_spans(
     spans
 }
 
-/// Where the body saves a register the convention preserves, and puts it back.
+/// Where the body saves a register the convention preserves, and puts it back
+/// on every path that returns.
 ///
 /// A store of a preserved register's entry value, by copies alone, at an
 /// exact frame place that some load of the same place returns to that
@@ -1660,16 +1661,26 @@ pub(crate) fn callee_write_spans(
 /// place in a buffer, however far an index's bound is proved to reach. That
 /// is evidence an object must end there -- the partition never absorbs one.
 ///
+/// A body with no path that returns -- every exit is a call that does not
+/// come back, or there is no exit at all -- owes the convention no restore,
+/// and restores nothing; the save is the compiler's all the same, since no
+/// statement of the source can name a register's entry value. So there the
+/// restore is vacuous and the save alone is the evidence. A body that leaves
+/// by any other transfer hands its frame to code not read here, and proves
+/// nothing without the restore.
+///
 /// One pass over the stores and loads, each copy chain walked once per access
-/// that starts it: O(instructions).
+/// that starts it, and one over the exits: O(instructions).
 pub(crate) fn saved_register_slots(
     facts: &DecompilePrepFacts,
+    function: &SSAFunction,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> BTreeSet<StackAddressRoot> {
     let Some(effect) = machine_context.and_then(SourceMachineContext::call_effect) else {
         return BTreeSet::new();
     };
+    let never_returns = never_returns(function);
     let mut saved = BTreeMap::<StackAddressRoot, CanonicalStorageId>::new();
     let mut loaded = BTreeMap::<StackAddressRoot, Vec<ValueId>>::new();
     for inst in &graph.insts {
@@ -1717,12 +1728,31 @@ pub(crate) fn saved_register_slots(
             });
             r2il::refusal_evidence!(
                 "saved-register-slot",
-                "{root:?} holds {storage:?} from entry; restored={restored}"
+                "{root:?} holds {storage:?} from entry; restored={restored} \
+                 never_returns={never_returns}"
             );
-            restored
+            restored || never_returns
         })
         .map(|(root, _)| root)
         .collect()
+}
+
+/// Whether no path through the body returns: every block that ends the body
+/// ends in a call that does not come back, and there may be none at all.
+///
+/// A block that leaves by any other transfer -- a jump to code not read here
+/// -- is not known not to return, and neither is a body with a return.
+fn never_returns(function: &SSAFunction) -> bool {
+    function
+        .blocks()
+        .iter()
+        .filter(|block| function.successors(block.addr).is_empty())
+        .all(|block| {
+            matches!(
+                terminal_past_call_boundary(&block.ops),
+                Some(SSAOp::Call { .. } | SSAOp::CallInd { .. })
+            )
+        })
 }
 
 pub(crate) fn evidenced_stack_roots(

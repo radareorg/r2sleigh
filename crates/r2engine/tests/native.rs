@@ -2611,3 +2611,32 @@ fn a_register_saved_beside_an_indexed_buffer_is_no_store_of_the_program() {
     assert!(!text.contains("RBX_0"), "{text}");
     assert!(text.contains("= SIL_0;"), "{text}");
 }
+
+/// The same save and buffer in a body that never returns: it ends in a loop
+/// with no exit, as a function that ends in `exit` or `abort` does, so no
+/// `pop rbx` ever puts the register back.
+const SAVE_BESIDE_AN_INDEXED_BUFFER_NEVER_RETURNING: &[u8] = &[
+    0x53, // 1000 push rbx
+    0x48, 0x83, 0xec, 0x60, // 1001 sub rsp, 0x60
+    0x89, 0xf8, // 1005 mov eax, edi
+    0x25, 0xf8, 0x00, 0x00, 0x00, // 1007 and eax, 0xf8
+    0x40, 0x88, 0x34, 0x04, // 100c mov [rsp+rax], sil
+    0x0f, 0xb6, 0x1c, 0x24, // 1010 movzx ebx, byte [rsp]
+    0xeb, 0xfe, // 1014 jmp 1014
+];
+
+/// A body with no path that returns owes the convention no restore, so the
+/// save is the compiler's without one. Before, the save counted only where a
+/// load put the register back, which a body that never returns has none of:
+/// the buffer's extent absorbed the slot and the push rendered as a store of
+/// `rbx`'s entry value, a residual that trapped on the first statement.
+#[test]
+fn a_register_saved_by_a_body_that_never_returns_is_no_store_of_the_program() {
+    let text = rendered(
+        SAVE_BESIDE_AN_INDEXED_BUFFER_NEVER_RETURNING,
+        "indexed_store_forever",
+    );
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(!text.contains("RBX_0"), "{text}");
+    assert!(text.contains("= SIL_0;"), "{text}");
+}

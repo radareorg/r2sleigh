@@ -1500,7 +1500,7 @@ impl<'a> ObjectModelBuilder<'a> {
                     .and_modify(|known| *known = (*known).max(end))
                     .or_insert(end);
             }
-            let saved_slots = saved_register_slots(facts, graph, self.machine_context);
+            let saved_slots = saved_register_slots(facts, function, graph, self.machine_context);
             let evidenced = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
