@@ -39,4 +39,9 @@ tests/coverage/artifacts/
 # nobody reads.
 tests/decbench/artifacts/
 
+# Equivalence gate output: builds, renderings, records. Only
+# tests/equiv/baseline.json is a record, and only once the integrator blesses it.
+tests/equiv/artifacts/
+__pycache__/
+
 .claude/settings.local.json
