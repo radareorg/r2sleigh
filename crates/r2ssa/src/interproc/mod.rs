@@ -5,6 +5,7 @@
 //! fixpoint over direct-call reachable functions without introducing a second
 //! whole-program SSA graph.
 
+mod dependence;
 #[cfg(test)]
 mod tests;
 
@@ -801,6 +802,11 @@ struct LocalSummaryFacts {
     /// The arguments the body itself loads or stores through: proof, where
     /// `arg_effects` also holds what an unknown call is assumed to do.
     dereferenced_args: BTreeSet<usize>,
+    /// The formals something the summary cannot place could reach through,
+    /// as `dependence` bits: an access at no stated place, a call, a formal
+    /// stored into memory. Their reach is unbounded; every other formal's is
+    /// what the accesses through it state.
+    unplaced_reach: u64,
 }
 
 #[derive(Debug)]
@@ -1332,9 +1338,6 @@ impl PreparedCalleeSummary {
         let mut scaled = BTreeMap::<usize, SummaryArgumentReach>::new();
         let mut reach = BTreeMap::<usize, u64>::new();
         let mut unbounded = BTreeSet::<usize>::new();
-        if self.local.has_unknown_calls {
-            return BTreeMap::new();
-        }
         for effect in &self.local.memory_effects {
             let SummaryMemoryRegion::Arg { index } = effect.location.region else {
                 continue;
@@ -1394,8 +1397,17 @@ impl PreparedCalleeSummary {
                 }
             }
         }
-        reach.retain(|index, _| !unbounded.contains(index));
-        scaled.retain(|index, _| !unbounded.contains(index));
+        // An access or a call nothing places could reach through exactly the
+        // formals its address or its arguments are computed from, and no
+        // others: an unknown call handed only an index leaves a pointer's
+        // reach alone, and an indexed read of a table at a constant address
+        // poisons no pointer at all.
+        let unplaced = self.local.unplaced_reach;
+        let bounded = |index: &usize| {
+            !unbounded.contains(index) && !dependence::names_formal(unplaced, *index)
+        };
+        reach.retain(|index, _| bounded(index));
+        scaled.retain(|index, _| bounded(index));
         let mut proven = scaled;
         for (index, bytes) in reach {
             // A constant span and a scaled one through the same argument both
@@ -1404,7 +1416,7 @@ impl PreparedCalleeSummary {
         }
         r2il::refusal_evidence!(
             "argument-reach",
-            "{:#x}: reach={proven:?} unbounded={unbounded:?} unknown_calls={} effects={:?}",
+            "{:#x}: reach={proven:?} unbounded={unbounded:?} unplaced={unplaced:#x} unknown_calls={} effects={:?}",
             self.id.0,
             self.local.has_unknown_calls,
             self.local
@@ -2285,6 +2297,27 @@ fn collect_local_summary_facts_with_obligation_authority(
         call_observations: BTreeMap::new(),
         call_carriers_converged: call_argument_state.converged,
         dereferenced_args: BTreeSet::new(),
+        unplaced_reach: 0,
+    };
+    // Which formals each value is computed from, and so which formals an
+    // access or a call this summary cannot place could reach through.
+    let dependence = dependence::FormalDependence::of(prepared, abi);
+    out.unplaced_reach |= dependence.passed_to_calls();
+    if source_requires_unknown_effects {
+        out.unplaced_reach = u64::MAX;
+    }
+    let bits_of_var = |var: &SSAVar| {
+        prepared
+            .graph()
+            .value_id_for_var(var)
+            .map_or(0, |value| dependence.bits_of(value))
+    };
+    // An access that names no argument region at a stated place could touch
+    // any formal's object its address is computed from.
+    let unplaced = |location: &SummaryMemoryLocation, addr: &SSAVar| match location.region {
+        SummaryMemoryRegion::Unknown => bits_of_var(addr),
+        SummaryMemoryRegion::Arg { .. } if location.range.is_none() => bits_of_var(addr),
+        _ => 0,
     };
 
     if source_requires_unknown_effects {
@@ -2347,6 +2380,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, dst.size);
+                    out.unplaced_reach |= unplaced(&location, addr);
                     mark_location_access(&mut out, location, true, false);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2367,6 +2401,8 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, space, expected.size);
+                    out.unplaced_reach |=
+                        unplaced(&location, addr) | bits_of_var(&swap.replacement);
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2394,6 +2430,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2429,6 +2466,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
+                    // A formal's pointer stored where this function does not
+                    // own the memory has escaped: whatever reads it later can
+                    // reach its object.
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
                     mark_location_access(&mut out, location, false, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Write,
@@ -2446,6 +2487,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                 }
                 SSAOp::CallOther { inputs, .. } => {
                     has_volatile_or_unknown_effects = true;
+                    out.unplaced_reach |= inputs
+                        .iter()
+                        .map(&bits_of_var)
+                        .fold(0, |left, right| left | right);
                     let args = inputs
                         .iter()
                         .map(|input| classify_var_operand(prepared, input))
@@ -2459,6 +2504,9 @@ fn collect_local_summary_facts_with_obligation_authority(
                 }
                 op if has_volatile_or_unknown_effect(op) => {
                     has_volatile_or_unknown_effects = true;
+                    // An operation whose effect nothing describes could read
+                    // or write through any register.
+                    out.unplaced_reach = u64::MAX;
                     mark_unknown_call_effects(
                         &mut out.has_unknown_calls,
                         &mut out.arg_effects,
@@ -2554,7 +2602,7 @@ fn classify_memory_access_location(
     let Some(value_id) = prepared.graph().value_id_for_var(addr) else {
         return unknown_location();
     };
-    classify_memory_access_location_value(prepared, abi, value_id, space, width, 0)
+    classify_memory_access_location_value(prepared, abi, value_id, space, width)
 }
 
 /// Which of the callee's own arguments a scaling value is, if it is one.
@@ -2571,32 +2619,67 @@ fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<usize
         .formal_parameter_of(var)
 }
 
+/// Where an access through `value_id` lands, as a summary region.
+///
+/// The address is read the way the value view reads it: a copy or a zero
+/// extension is the same address (the representative and the same-integer
+/// root are both asked), while a lane at an offset, a truncation or a sign
+/// extension is a different value and no address the walk follows. A constant
+/// displacement is followed back to its base, one step per definition --
+/// definitions are acyclic outside phis, and no phi is stepped through -- so
+/// the walk needs no depth bound.
 fn classify_memory_access_location_value(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
     value_id: ValueId,
     space: SpaceId,
     width: u32,
-    depth: u32,
 ) -> SummaryMemoryLocation {
-    if depth > 8 {
-        return unknown_location();
+    let mut value = value_id;
+    let mut delta = 0i64;
+    loop {
+        if let Some(location) = classify_address_root(prepared, abi, value, space, width) {
+            let mut location = location;
+            if delta != 0 {
+                location.range = shifted_range(location.range, delta, width);
+            }
+            return location;
+        }
+        match displacement_step(prepared, value) {
+            Some(Displacement::Base { base, offset }) => {
+                let Some(next) = delta.checked_add(offset) else {
+                    return unknown_location();
+                };
+                value = base;
+                delta = next;
+            }
+            // A table at a constant address read at an index: the index is
+            // scaled or widened from a narrower integer, which no pointer is,
+            // so the constant is the object and the index a place inside it.
+            Some(Displacement::IndexedGlobal { address }) => {
+                return global_location(address.wrapping_add(delta as u64), None, None);
+            }
+            None => return unknown_location(),
+        }
     }
+}
 
-    let rooted = canonical_root_value(prepared, value_id);
-    let mut candidates = vec![value_id];
-    if rooted != value_id {
-        candidates.push(rooted);
-    }
-
-    for candidate in &candidates {
-        if let Some(expression) = prepared.addresses().parameter_expression(*candidate) {
+/// What a value names on its own: an argument's object, a global, the heap.
+fn classify_address_root(
+    prepared: &SsaArtifact,
+    abi: &AbiProfile,
+    value_id: ValueId,
+    space: SpaceId,
+    width: u32,
+) -> Option<SummaryMemoryLocation> {
+    for candidate in address_candidates(prepared, value_id) {
+        if let Some(expression) = prepared.addresses().parameter_expression(candidate) {
             let parameter = match expression
                 .parameter_storage
                 .and_then(|storage| abi.exact_argument_index_for_storage(storage))
             {
                 Some(parameter) => parameter,
-                None if abi.is_source_owned() => return unknown_location(),
+                None if abi.is_source_owned() => return Some(unknown_location()),
                 None => expression.parameter,
             };
             r2il::refusal_evidence!(
@@ -2606,7 +2689,11 @@ fn classify_memory_access_location_value(
                 expression.terms
             );
             if expression.terms.is_empty() {
-                return arg_location(parameter, Some(expression.offset), Some(width));
+                return Some(arg_location(
+                    parameter,
+                    Some(expression.offset),
+                    Some(width),
+                ));
             }
             // One term scaled by another argument is an indexed read of what
             // this one points at, and the stride is the fact the caller needs:
@@ -2615,7 +2702,7 @@ fn classify_memory_access_location_value(
             if let [term] = expression.terms.as_slice()
                 && let Some(index) = scaled_argument_index(prepared, term.value)
             {
-                return scaled_arg_location(
+                return Some(scaled_arg_location(
                     parameter,
                     SummaryScaledOffset {
                         argument: index,
@@ -2623,161 +2710,132 @@ fn classify_memory_access_location_value(
                     },
                     expression.offset,
                     Some(width),
-                );
+                ));
             }
-            return arg_location(parameter, None, None);
+            return Some(arg_location(parameter, None, None));
         }
-        if let Some(address) = crate::constant::value_of(prepared.graph(), *candidate) {
-            return global_location(address, Some(0), Some(width));
+        if let Some(address) = crate::constant::value_of(prepared.graph(), candidate) {
+            return Some(global_location(address, Some(0), Some(width)));
         }
+        let Some(object) = prepared
+            .objects()
+            .object_for_value(candidate, space)
+            .and_then(|object| prepared.objects().object(object))
+        else {
+            continue;
+        };
+        match object.kind {
+            ObjectKind::Parameter { index, .. } => {
+                if abi.is_source_owned() {
+                    return Some(unknown_location());
+                }
+                return Some(arg_location(index, None, None));
+            }
+            ObjectKind::Global { address, .. } => {
+                return Some(global_location(address, Some(0), Some(width)));
+            }
+            ObjectKind::HeapAlloc { .. } => {
+                return Some(SummaryMemoryLocation {
+                    region: SummaryMemoryRegion::HeapReturn,
+                    range: exact_range(0, width),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
-        if let Some(object_id) = prepared.objects().object_for_value(*candidate, space)
-            && let Some(object) = prepared.objects().object(object_id)
-        {
-            match object.kind {
-                ObjectKind::Parameter { index, .. } => {
-                    if abi.is_source_owned() {
-                        return unknown_location();
-                    }
-                    return arg_location(index, None, None);
-                }
-                ObjectKind::Global { address, .. } => {
-                    return global_location(address, Some(0), Some(width));
-                }
-                ObjectKind::HeapAlloc { .. } => {
-                    return SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::HeapReturn,
-                        range: exact_range(0, width),
-                    };
-                }
-                ObjectKind::EscapedUnknown { .. } => {}
-                _ => {}
+/// The values that are `value_id`'s address: itself, its same-bits
+/// representative, and the value it zero-extends.
+fn address_candidates(prepared: &SsaArtifact, value_id: ValueId) -> Vec<ValueId> {
+    let mut candidates = vec![value_id];
+    let graph = prepared.graph();
+    if let (Some(facts), Some(var)) = (
+        prepared.function().decompile_prep_facts(),
+        prepared.value_var(value_id),
+    ) {
+        for root in [facts.canonical_root(var), facts.same_integer_root(var)] {
+            if let Some(root) = graph.value_id_for_var(root)
+                && !candidates.contains(&root)
+            {
+                candidates.push(root);
             }
         }
     }
+    candidates
+}
 
-    let Some((op_value_id, def_inst)) = candidates.iter().find_map(|candidate| {
-        prepared
-            .graph()
-            .def_inst(*candidate)
-            .map(|inst| (*candidate, inst))
-    }) else {
-        return unknown_location();
+/// One constant displacement an address is formed by.
+enum Displacement {
+    /// `base + offset`.
+    Base { base: ValueId, offset: i64 },
+    /// A constant address plus an index that is no pointer.
+    IndexedGlobal { address: u64 },
+}
+
+fn displacement_step(prepared: &SsaArtifact, value_id: ValueId) -> Option<Displacement> {
+    let graph = prepared.graph();
+    let (inst, op) = address_candidates(prepared, value_id)
+        .into_iter()
+        .find_map(|candidate| {
+            let inst = graph.inst(graph.def_inst(candidate)?)?;
+            match &inst.payload {
+                InstPayload::Op(op) => Some((inst, op)),
+                InstPayload::Phi { .. } => None,
+            }
+        })?;
+    let (sign, scale) = match op {
+        SSAOp::IntAdd { .. } => (1i64, 1i64),
+        SSAOp::IntSub { .. } => (-1, 1),
+        SSAOp::PtrAdd { element_size, .. } => (1, i64::from(*element_size)),
+        SSAOp::PtrSub { element_size, .. } => (-1, i64::from(*element_size)),
+        _ => return None,
     };
-    let Some(inst) = prepared.graph().inst(def_inst) else {
-        return unknown_location();
+    let (&left, &right) = (inst.inputs.first()?, inst.inputs.get(1)?);
+    let constant = |value| summary_const_value(prepared, value);
+    let offset = |k: u64| (k as i64).checked_mul(scale)?.checked_mul(sign);
+    match (constant(left), constant(right)) {
+        (_, Some(k)) if constant(left).is_none() => Some(Displacement::Base {
+            base: left,
+            offset: offset(k)?,
+        }),
+        (Some(k), None) if sign > 0 && scale == 1 && is_an_index(prepared, right) => {
+            Some(Displacement::IndexedGlobal { address: k })
+        }
+        (Some(k), None) if sign > 0 => Some(Displacement::Base {
+            base: right,
+            offset: offset(k)?,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a value is an integer index rather than an address: scaled by a
+/// constant other than one, or widened from an integer narrower than itself.
+/// A pointer is neither on any machine this lifts.
+fn is_an_index(prepared: &SsaArtifact, value_id: ValueId) -> bool {
+    let graph = prepared.graph();
+    let Some(inst) = graph.def_inst(value_id).and_then(|inst| graph.inst(inst)) else {
+        return false;
     };
     let InstPayload::Op(op) = &inst.payload else {
-        return unknown_location();
+        return false;
     };
-
+    let constant = |index: usize| {
+        inst.inputs
+            .get(index)
+            .and_then(|value| summary_const_value(prepared, *value))
+    };
     match op {
-        SSAOp::Copy { .. }
-        | SSAOp::IntZExt { .. }
-        | SSAOp::IntSExt { .. }
-        | SSAOp::Subpiece { .. } => inst
-            .inputs
-            .first()
-            .copied()
-            .map(|src| {
-                classify_memory_access_location_value(prepared, abi, src, space, width, depth + 1)
-            })
-            .unwrap_or_else(unknown_location),
-        SSAOp::IntAdd { .. } | SSAOp::PtrAdd { .. } => {
-            let Some(&left_id) = inst.inputs.first() else {
-                return unknown_location();
-            };
-            let Some(&right_id) = inst.inputs.get(1) else {
-                return unknown_location();
-            };
-            classify_memory_additive_location(
-                prepared,
-                abi,
-                left_id,
-                right_id,
-                AdditiveLocationCtx::new(space, width, depth + 1, 1, op),
-            )
-        }
-        SSAOp::IntSub { .. } | SSAOp::PtrSub { .. } => {
-            let Some(&left_id) = inst.inputs.first() else {
-                return unknown_location();
-            };
-            let Some(&right_id) = inst.inputs.get(1) else {
-                return unknown_location();
-            };
-            classify_memory_additive_location(
-                prepared,
-                abi,
-                left_id,
-                right_id,
-                AdditiveLocationCtx::new(space, width, depth + 1, -1, op),
-            )
-        }
-        _ if op_value_id != value_id => {
-            classify_memory_access_location_value(prepared, abi, value_id, space, width, depth + 1)
-        }
-        _ => unknown_location(),
+        SSAOp::IntMult { .. } => [constant(0), constant(1)]
+            .into_iter()
+            .flatten()
+            .any(|factor| factor > 1),
+        SSAOp::IntLeft { .. } => constant(1).is_some_and(|places| places > 0),
+        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => src.size < dst.size,
+        _ => false,
     }
-}
-
-#[derive(Clone, Copy)]
-struct AdditiveLocationCtx {
-    space: SpaceId,
-    width: u32,
-    depth: u32,
-    sign: i64,
-    element_scale: i64,
-}
-
-impl AdditiveLocationCtx {
-    fn new(space: SpaceId, width: u32, depth: u32, sign: i64, op: &SSAOp) -> Self {
-        let element_scale = match op {
-            SSAOp::PtrAdd { element_size, .. } | SSAOp::PtrSub { element_size, .. } => {
-                *element_size as i64
-            }
-            _ => 1,
-        };
-        Self {
-            space,
-            width,
-            depth,
-            sign,
-            element_scale,
-        }
-    }
-}
-
-fn classify_memory_additive_location(
-    prepared: &SsaArtifact,
-    abi: &AbiProfile,
-    left_id: ValueId,
-    right_id: ValueId,
-    ctx: AdditiveLocationCtx,
-) -> SummaryMemoryLocation {
-    let left_const = summary_const_value(prepared, left_id);
-    let right_const = summary_const_value(prepared, right_id);
-
-    if let Some(k) = right_const {
-        let mut base = classify_memory_access_location_value(
-            prepared, abi, left_id, ctx.space, ctx.width, ctx.depth,
-        );
-        let delta = (k as i64)
-            .saturating_mul(ctx.element_scale)
-            .saturating_mul(ctx.sign);
-        base.range = shifted_range(base.range, delta, ctx.width);
-        return base;
-    }
-    if ctx.sign > 0
-        && let Some(k) = left_const
-    {
-        let mut base = classify_memory_access_location_value(
-            prepared, abi, right_id, ctx.space, ctx.width, ctx.depth,
-        );
-        let delta = (k as i64).saturating_mul(ctx.element_scale);
-        base.range = shifted_range(base.range, delta, ctx.width);
-        return base;
-    }
-    unknown_location()
 }
 
 fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64> {

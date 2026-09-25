@@ -55,6 +55,7 @@ fn empty_local_summary(direct_callees: BTreeSet<u64>) -> LocalSummaryFacts {
         call_observations: BTreeMap::new(),
         call_carriers_converged: true,
         dereferenced_args: BTreeSet::new(),
+        unplaced_reach: 0,
     }
 }
 
@@ -1685,32 +1686,16 @@ fn symbolic_store_plus_constant_preserves_arg_offset_range() {
         [left, right] => [*left, *right],
         _ => panic!("expected additive store addr inputs"),
     };
-    let InstPayload::Op(op) = &inst.payload else {
-        panic!("expected op payload");
-    };
     assert_eq!(summary_const_value(&prepared, right_id), Some(2));
     assert_eq!(
-        classify_memory_access_location_value(&prepared, &abi, left_id, SpaceId::Ram, val.size, 0,),
+        classify_memory_access_location_value(&prepared, &abi, left_id, SpaceId::Ram, val.size),
         SummaryMemoryLocation {
             region: SummaryMemoryRegion::Arg { index: 0 },
             range: exact_range(0, val.size),
         }
     );
     assert_eq!(
-        classify_memory_additive_location(
-            &prepared,
-            &abi,
-            left_id,
-            right_id,
-            AdditiveLocationCtx::new(SpaceId::Ram, val.size, 1, 1, op),
-        ),
-        SummaryMemoryLocation {
-            region: SummaryMemoryRegion::Arg { index: 0 },
-            range: exact_range(2, val.size),
-        }
-    );
-    assert_eq!(
-        classify_memory_access_location_value(&prepared, &abi, addr_id, SpaceId::Ram, val.size, 0,),
+        classify_memory_access_location_value(&prepared, &abi, addr_id, SpaceId::Ram, val.size),
         SummaryMemoryLocation {
             region: SummaryMemoryRegion::Arg { index: 0 },
             range: exact_range(2, val.size),
@@ -1775,32 +1760,16 @@ fn symbolic_store_minus_constant_preserves_arg_offset_range() {
         [left, right] => [*left, *right],
         _ => panic!("expected additive store addr inputs"),
     };
-    let InstPayload::Op(op) = &inst.payload else {
-        panic!("expected op payload");
-    };
     assert_eq!(summary_const_value(&prepared, right_id), Some(1));
     assert_eq!(
-        classify_memory_access_location_value(&prepared, &abi, left_id, SpaceId::Ram, val.size, 0,),
+        classify_memory_access_location_value(&prepared, &abi, left_id, SpaceId::Ram, val.size),
         SummaryMemoryLocation {
             region: SummaryMemoryRegion::Arg { index: 0 },
             range: exact_range(0, val.size),
         }
     );
     assert_eq!(
-        classify_memory_additive_location(
-            &prepared,
-            &abi,
-            left_id,
-            right_id,
-            AdditiveLocationCtx::new(SpaceId::Ram, val.size, 1, -1, op),
-        ),
-        SummaryMemoryLocation {
-            region: SummaryMemoryRegion::Arg { index: 0 },
-            range: exact_range(-1, val.size),
-        }
-    );
-    assert_eq!(
-        classify_memory_access_location_value(&prepared, &abi, addr_id, SpaceId::Ram, val.size, 0,),
+        classify_memory_access_location_value(&prepared, &abi, addr_id, SpaceId::Ram, val.size),
         SummaryMemoryLocation {
             region: SummaryMemoryRegion::Arg { index: 0 },
             range: exact_range(-1, val.size),
@@ -2381,4 +2350,141 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
 
     assert_eq!(complete_args.first(), Some(&CallArgObservation::Const(9)));
     assert_eq!(incomplete_args.first(), Some(&CallArgObservation::Unknown));
+}
+
+/// x86-64 with two argument registers: rdi at 8 and rsi at 32.
+fn two_argument_arch() -> ArchSpec {
+    let mut arch = x86_64_arch();
+    arch.add_register(RegisterDef::new("rsi", 32, 8));
+    arch
+}
+
+/// What a callee's summary says it reaches through each argument.
+fn touch_reach(prepared: &SsaArtifact) -> BTreeMap<usize, SummaryArgumentReach> {
+    let abi = prepared.abi().expect("exact ABI");
+    PreparedCalleeSummary {
+        id: InterprocFunctionId(prepared.function().entry),
+        architecture_family: prepared.machine_context().architecture_family(),
+        blocks: Vec::new(),
+        local: collect_source_owned_summary_facts(prepared, &abi),
+        callee_names: BTreeMap::new(),
+    }
+    .argument_touch_reach()
+}
+
+/// `avg` at -O2 starts its walk at `v` or at `v + 8`, depending on the
+/// parity of `n`: the read through the merged pointer has no place a summary
+/// can state, but its address is computed from `v`. Reading the stated
+/// `*v` alone as the whole reach made the caller's array two objects.
+#[test]
+fn an_access_at_no_stated_place_leaves_the_formal_its_address_depends_on_unbounded() {
+    let arch = two_argument_arch();
+    let blocks = [
+        block(
+            0x4400,
+            vec![
+                R2ILOp::Load {
+                    dst: tmp(1, 8),
+                    space: SpaceId::Ram,
+                    addr: reg(8, 8),
+                },
+                R2ILOp::Copy {
+                    dst: reg(0, 8),
+                    src: reg(8, 8),
+                },
+                R2ILOp::CBranch {
+                    target: c(0x4408, 8),
+                    cond: reg(32, 1),
+                },
+            ],
+        ),
+        block(
+            0x4404,
+            vec![R2ILOp::IntAdd {
+                dst: reg(0, 8),
+                a: reg(8, 8),
+                b: c(8, 8),
+            }],
+        ),
+        block(
+            0x4408,
+            vec![
+                R2ILOp::Load {
+                    dst: tmp(2, 8),
+                    space: SpaceId::Ram,
+                    addr: reg(0, 8),
+                },
+                R2ILOp::Return { target: reg(16, 8) },
+            ],
+        ),
+    ];
+    let prepared =
+        exact_untyped_artifact(&blocks, &arch, b"merged-walk", "sysv64", &[8, 32], 16, 24);
+    let reach = touch_reach(&prepared);
+    assert!(
+        !reach.contains_key(&0),
+        "a read through v or v + 8 reaches past v's first word: {reach:?}"
+    );
+}
+
+/// `table[i]` with `table` a constant address: the index is scaled, which no
+/// pointer is, so the read is inside the global and touches no argument's
+/// object.
+#[test]
+fn a_constant_address_read_at_a_scaled_index_is_the_global() {
+    let arch = two_argument_arch();
+    let blocks = [block(
+        0x4600,
+        vec![
+            R2ILOp::IntMult {
+                dst: tmp(1, 8),
+                a: reg(8, 8),
+                b: c(4, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: tmp(2, 8),
+                a: c(0x2020, 8),
+                b: tmp(1, 8),
+            },
+            R2ILOp::Load {
+                dst: tmp(3, 4),
+                space: SpaceId::Ram,
+                addr: tmp(2, 8),
+            },
+            R2ILOp::Load {
+                dst: tmp(4, 4),
+                space: SpaceId::Ram,
+                addr: reg(32, 8),
+            },
+            R2ILOp::Return { target: reg(16, 8) },
+        ],
+    )];
+    let prepared = exact_untyped_artifact(
+        &blocks,
+        &arch,
+        b"constant-table",
+        "sysv64",
+        &[8, 32],
+        16,
+        24,
+    );
+    let abi = prepared.abi().expect("exact ABI");
+    let local = collect_source_owned_summary_facts(&prepared, &abi);
+    let regions = local
+        .memory_effects
+        .iter()
+        .map(|effect| effect.location.region)
+        .collect::<Vec<_>>();
+    assert!(
+        regions.contains(&SummaryMemoryRegion::Global { address: 0x2020 }),
+        "{regions:?}"
+    );
+    assert!(
+        !regions.contains(&SummaryMemoryRegion::Unknown),
+        "{regions:?}"
+    );
+    assert_eq!(
+        touch_reach(&prepared).get(&1),
+        Some(&SummaryArgumentReach::Bytes(4))
+    );
 }
