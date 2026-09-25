@@ -45,6 +45,10 @@ fn a_struct_parameter_costs_the_function_none_of_its_types() {
     assert!(!out.contains("(uint64_t)c"), "{out}");
     // The layout reached the graph, so the member has a name.
     assert!(out.contains("n->next"), "{out}");
+    assert!(
+        out.contains("struct node {"),
+        "the rendering defines what it reads through:\n{out}"
+    );
 }
 
 /// `main` declares `unsigned v[4]`, three `struct node`, `double d[3]` and

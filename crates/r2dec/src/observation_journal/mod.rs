@@ -1786,7 +1786,11 @@ impl SealedNativeFunction {
             // of text, and `aggregate_is_definable` already refuses the rest.
             let name = match &ty {
                 crate::ast::CType::Struct(name) | crate::ast::CType::Union(name) => name.clone(),
-                crate::ast::CType::Array(inner, _) | crate::ast::CType::Pointer(inner) => {
+                // A qualifier is on the tag it qualifies: `const struct node *n`
+                // reads `n->next` through the same layout.
+                crate::ast::CType::Array(inner, _)
+                | crate::ast::CType::Pointer(inner)
+                | crate::ast::CType::Const(inner) => {
                     pending.push(inner.as_ref().clone());
                     continue;
                 }
