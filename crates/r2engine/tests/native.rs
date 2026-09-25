@@ -2017,6 +2017,105 @@ fn a_bit_scan_renders_as_the_count_it_computes() {
     );
 }
 
+/// `__builtin_clzll(x)` as gcc and clang emit it: the index of the highest
+/// set bit, flipped. Sleigh writes BSR as a loop, lifted as `63 - Lzcount(x)`.
+const FLIPPED_HIGHEST_SET_BIT: &[u8] = &[
+    0x48, 0x0f, 0xbd, 0xc7, // bsr rax, rdi
+    0x48, 0x83, 0xf0, 0x3f, // xor rax, 63
+    0xc3, // ret
+];
+/// LZCNT, which Sleigh states as `lzcount` directly, and which counts the
+/// width at zero.
+const LEADING_ZEROS: &[u8] = &[
+    0xf3, 0x48, 0x0f, 0xbd, 0xc7, // lzcnt rax, rdi
+    0xc3, // ret
+];
+
+/// The translation unit a function renders as, refusing nothing: the unit
+/// defines every helper the function calls, so it compiles on its own.
+fn rendered_unit(bytes: &'static [u8], name: &'static str) -> String {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: bytes.to_vec(),
+        name,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{}",
+        response.render_refusal,
+        response.output
+    );
+    emission(&response).unit().to_owned()
+}
+
+/// A count of leading zeros is one machine operation, rendered as a call to a
+/// helper the unit defines, so `__builtin_clz*` code and `lzcnt` render and
+/// compute what the machine does -- the width at zero included, where the
+/// builtin itself would be undefined.
+#[test]
+fn a_leading_zero_count_renders_as_a_helper_exact_at_zero() {
+    let flipped = rendered_unit(FLIPPED_HIGHEST_SET_BIT, "flipped");
+    let leading = rendered_unit(LEADING_ZEROS, "leading");
+    for unit in [&flipped, &leading] {
+        assert!(
+            unit.contains("static inline uint32_t r2sleigh_lzcount_64(uint64_t x)\n"),
+            "{unit}"
+        );
+        assert!(!unit.contains("__builtin_clz"), "{unit}");
+    }
+    // Every single bit, every run of low bits, and a stretch of pseudo-random
+    // words: all the places the count turns.
+    let cases = r#"static uint64_t sample(int i) {
+    static uint64_t state = 0x9e3779b97f4a7c15ull;
+    if (i < 64) {
+        return 1ull << i;
+    }
+    if (i < 128) {
+        return ~0ull >> (i - 64);
+    }
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state >> (state & 63);
+}
+"#;
+    run_rendered(
+        "flipped",
+        &flipped,
+        &format!(
+            r#"{cases}int main(void) {{
+    for (int i = 0; i < 4096; i++) {{
+        uint64_t x = sample(i);
+        if (x != 0 && flipped(x) != (uint64_t)__builtin_clzll(x)) {{
+            return 1;
+        }}
+    }}
+    return 0;
+}}"#
+        ),
+    );
+    run_rendered(
+        "leading",
+        &leading,
+        &format!(
+            r#"{cases}int main(void) {{
+    if (leading(0) != 64) {{
+        return 1;
+    }}
+    for (int i = 0; i < 4096; i++) {{
+        uint64_t x = sample(i);
+        if (x != 0 && leading(x) != (uint64_t)__builtin_clzll(x)) {{
+            return 2;
+        }}
+    }}
+    return 0;
+}}"#
+        ),
+    );
+}
+
 /// `vpxor` of two 256-bit loads, whose high half is read back:
 ///
 /// ```text

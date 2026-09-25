@@ -678,45 +678,60 @@ fn arithmetic_flags_remain_distinct_typed_boolean_operations() {
     ));
 }
 
+/// A count of bits -- the set bits, or the zeros above the highest set bit --
+/// reads the whole input and produces an unsigned count wide enough to hold
+/// the input's width, which is the largest count either can be.
 #[test]
-fn population_count_is_an_exact_typed_machine_operation() {
-    let artifact = artifact_with_ops([R2ILOp::PopCount {
-        dst: Varnode::unique(0x10, 1),
-        src: Varnode::constant(0xf0f0, 8),
-    }]);
+fn bit_counts_are_exact_typed_machine_operations() {
+    let ops = [
+        R2ILOp::PopCount {
+            dst: Varnode::unique(0x10, 1),
+            src: Varnode::constant(0xf0f0, 8),
+        },
+        R2ILOp::Lzcount {
+            dst: Varnode::unique(0x10, 1),
+            src: Varnode::constant(0xf0f0, 8),
+        },
+    ];
+    for op in ops {
+        let lzcount = matches!(op, R2ILOp::Lzcount { .. });
+        let artifact = artifact_with_ops([op]);
 
-    let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
-    projection
-        .validate_against(&artifact)
-        .expect("population-count projection validation");
-    assert!(projection.failures().is_empty());
-    let entity = projection
-        .entities()
-        .first()
-        .expect("population-count entity");
-    let root = projection
-        .expr(entity.root())
-        .expect("population-count root");
-    assert_eq!(
-        root.ty(),
-        &MachineType::Integer {
-            width_bits: 8,
-            signedness: MachineSignedness::Unsigned,
+        let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
+        projection
+            .validate_against(&artifact)
+            .expect("bit-count projection validation");
+        assert!(projection.failures().is_empty());
+        let entity = projection.entities().first().expect("bit-count entity");
+        let root = projection.expr(entity.root()).expect("bit-count root");
+        assert_eq!(
+            root.ty(),
+            &MachineType::Integer {
+                width_bits: 8,
+                signedness: MachineSignedness::Unsigned,
+            }
+        );
+        if lzcount {
+            assert!(matches!(
+                root.kind(),
+                MachineExprKind::LeadingZeroCount { .. }
+            ));
+        } else {
+            assert!(matches!(
+                root.kind(),
+                MachineExprKind::PopulationCount { .. }
+            ));
         }
-    );
-    assert!(matches!(
-        root.kind(),
-        MachineExprKind::PopulationCount { .. }
-    ));
-    assert_eq!(
-        exact_use(&projection, &artifact, 0, 0),
-        MachineUseSlice {
-            bit_offset: 0,
-            width_bits: 64,
-            carrier_width_bits: 64,
-            conversion: None,
-        }
-    );
+        assert_eq!(
+            exact_use(&projection, &artifact, 0, 0),
+            MachineUseSlice {
+                bit_offset: 0,
+                width_bits: 64,
+                carrier_width_bits: 64,
+                conversion: None,
+            }
+        );
+    }
 }
 
 #[test]

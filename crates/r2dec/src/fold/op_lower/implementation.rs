@@ -2315,6 +2315,23 @@ impl<'a> FoldingContext<'a> {
                 );
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(CType::i32())))
             }
+            // The zeros are counted within the operand's own width, so the
+            // helper is the one of that width and takes the operand at it;
+            // it returns a `uint32_t`, which the assignment converts. It is
+            // defined at a zero operand, where it gives the width, as the
+            // operation does. A width no helper is made for has no spelling.
+            SSAOp::Lzcount { dst, src } => {
+                let helper = crate::prelude::Helper::leading_zeros(src.size.saturating_mul(8))
+                    .ok_or_else(OpLoweringRefusal::unrepresentable_operation)?;
+                let lhs = self.assignment_lhs_expr(dst)?;
+                let operand_ty = uint_type_from_size(src.size);
+                let operand = self.required_input(frame, 0, src, Some(&operand_ty))?;
+                self.assign_typed(
+                    lhs,
+                    helper.call(vec![operand]),
+                    Some(CValue::Typed(CType::u32())),
+                )
+            }
             SSAOp::BoolAnd { dst, a, b } => self.boolean_stmt(frame, dst, BinaryOp::And, a, b),
             SSAOp::BoolOr { dst, a, b } => self.boolean_stmt(frame, dst, BinaryOp::Or, a, b),
             SSAOp::BoolXor { dst, a, b } => self.boolean_stmt(frame, dst, BinaryOp::BitXor, a, b),
@@ -3095,17 +3112,27 @@ fn opaque_operations_are_typed_refusals_before_ast_lowering() {
 fn unsupported_live_definition_is_a_typed_refusal() {
     let ctx = FoldingContext::new(64);
     let frame = LowerFrame::for_expr();
-    let unsupported = SSAOp::Lzcount {
-        dst: SSAVar::new("tmp", 1, 8),
-        src: SSAVar::new("tmp", 0, 8),
-    };
+    // P-code's object allocation has no C form, and a leading-zero count of an
+    // operand wider than any count helper has no helper to call.
+    let unsupported = [
+        SSAOp::New {
+            dst: SSAVar::new("tmp", 1, 8),
+            src: SSAVar::new("tmp", 0, 8),
+        },
+        SSAOp::Lzcount {
+            dst: SSAVar::new("tmp", 1, 1),
+            src: SSAVar::new("tmp", 0, 16),
+        },
+    ];
 
-    assert_eq!(
-        ctx.op_to_stmt_impl(&unsupported, &frame),
-        Err(OpLoweringRefusal::unrepresentable_operation()),
-        "an operation the renderer has no lowering for is unrepresentable, \
-         not a machine projection this renderer was denied"
-    );
+    for op in unsupported {
+        assert_eq!(
+            ctx.op_to_stmt_impl(&op, &frame),
+            Err(OpLoweringRefusal::unrepresentable_operation()),
+            "an operation the renderer has no lowering for is unrepresentable, \
+             not a machine projection this renderer was denied: {op:?}"
+        );
+    }
 }
 
 #[cfg(test)]

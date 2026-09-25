@@ -986,6 +986,11 @@ pub enum MachineExprKind {
     PopulationCount {
         input: MachineExprId,
     },
+    /// The zero bits above the highest set bit of the input, counted within
+    /// the input's own width: the width itself where the input is zero.
+    LeadingZeroCount {
+        input: MachineExprId,
+    },
     Bitwise {
         op: MachineBitwiseOp,
         left: MachineExprId,
@@ -1108,6 +1113,7 @@ impl MachineExprKind {
             | Self::BooleanNot { input }
             | Self::Negate { input, .. }
             | Self::PopulationCount { input }
+            | Self::LeadingZeroCount { input }
             | Self::Cast { input, .. }
             | Self::FloatUnary { input, .. }
             | Self::Extract { input, .. } => vec![*input],
@@ -2924,7 +2930,8 @@ impl MachineFunction {
                     )
                     && child(*input)?.ty == expr.ty
             }
-            MachineExprKind::PopulationCount { input } => {
+            MachineExprKind::PopulationCount { input }
+            | MachineExprKind::LeadingZeroCount { input } => {
                 let input_bits = child(*input)?.ty.width_bits();
                 let required_output_bits = u32::BITS - input_bits.leading_zeros();
                 matches!(
@@ -4095,6 +4102,10 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
                 MachineExprKind::PopulationCount { .. }
             )
             | (
+                SSAOp::Lzcount { .. },
+                MachineExprKind::LeadingZeroCount { .. }
+            )
+            | (
                 SSAOp::IntCarry { .. },
                 MachineExprKind::ArithmeticFlag {
                     op: MachineArithmeticFlagOp::UnsignedCarry,
@@ -4447,6 +4458,7 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         | SSAOp::IntRem { .. }
         | SSAOp::IntNegate { .. }
         | SSAOp::PopCount { .. }
+        | SSAOp::Lzcount { .. }
         | SSAOp::IntAnd { .. }
         | SSAOp::IntOr { .. }
         | SSAOp::IntXor { .. }

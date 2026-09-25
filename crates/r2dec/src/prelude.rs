@@ -190,6 +190,8 @@ pub enum Helper {
     FloatFromBits { bits: u32 },
     /// The integer whose bits are this float.
     FloatToBits { bits: u32 },
+    /// `LZCOUNT` of a `bits`-wide operand: 8, 16, 32 or 64.
+    LeadingZeros { bits: u32 },
     /// A construct the rendering could not prove: it traps if executed.
     Residual(ResidualType),
 }
@@ -215,6 +217,12 @@ impl Helper {
         matches!(bits, 32 | 64).then_some(Self::FloatToBits { bits })
     }
 
+    /// The count of zeros above the highest set bit of a `bits`-wide
+    /// operand, where the width is a `uintN_t`'s no wider than `uint64_t`.
+    pub fn leading_zeros(bits: u32) -> Option<Self> {
+        matches!(bits, 8 | 16 | 32 | 64).then_some(Self::LeadingZeros { bits })
+    }
+
     /// The helper's name.
     pub fn name(self) -> String {
         match self {
@@ -222,6 +230,7 @@ impl Helper {
             Self::Float { op, bits } => format!("r2sleigh_float_{}_{bits}", op.spelling()),
             Self::FloatFromBits { bits } => format!("r2sleigh_float_from_bits_{bits}"),
             Self::FloatToBits { bits } => format!("r2sleigh_float_to_bits_{bits}"),
+            Self::LeadingZeros { bits } => format!("r2sleigh_lzcount_{bits}"),
             Self::Residual(ty) => format!("r2sleigh_residual_{}", ty.tag()),
         }
     }
@@ -267,6 +276,7 @@ impl Helper {
                      }}\n"
                 )
             }
+            Self::LeadingZeros { bits } => leading_zeros_definition(&name, bits),
             Self::Residual(ty) => format!(
                 "static inline {} {name}(uint32_t site)\n\
                  {{\n\
@@ -333,6 +343,43 @@ fn flag_definition(name: &str, op: FlagOp, bits: u32) -> String {
          \x20   const {wide} a = left;\n\
          \x20   const {wide} b = right;\n\
          {body}\
+         }}\n"
+    )
+}
+
+/// `LZCOUNT` of a `bits`-wide operand: the zeros above its highest set bit,
+/// counted within `bits`, and `bits` itself at zero.
+///
+/// A binary search for the highest set bit, halving the window each step:
+/// where the upper half of what is left holds a set bit, the count loses the
+/// half's width and the search moves up into it. What is left at the end is
+/// the highest set bit, one, or nothing at a zero operand, and the count is
+/// the width less every step taken less that bit. The operand is widened into
+/// an unsigned type no narrower than `unsigned int` first, and every shift is
+/// by at most half the operand's width, so the definition is exact at every
+/// operand, zero included, with no promotion to `int` and no builtin that is
+/// undefined at zero.
+fn leading_zeros_definition(name: &str, bits: u32) -> String {
+    let operand = format!("uint{bits}_t");
+    let wide = if bits == 64 { "uint64_t" } else { "uint32_t" };
+    let mut steps = String::new();
+    let mut step = bits / 2;
+    while step > 0 {
+        steps.push_str(&format!(
+            "    if ((v >> {step}) != 0u) {{\n\
+             \x20       n -= {step}u;\n\
+             \x20       v >>= {step};\n\
+             \x20   }}\n"
+        ));
+        step /= 2;
+    }
+    format!(
+        "static inline uint32_t {name}({operand} x)\n\
+         {{\n\
+         \x20   {wide} v = x;\n\
+         \x20   uint32_t n = {bits}u;\n\
+         {steps}\
+         \x20   return n - (uint32_t)v;\n\
          }}\n"
     )
 }
@@ -728,6 +775,9 @@ mod tests {
             helpers.insert(Helper::float_from_bits(bits).expect("float width"));
             helpers.insert(Helper::float_to_bits(bits).expect("float width"));
         }
+        for bits in [8, 16, 32, 64] {
+            helpers.insert(Helper::leading_zeros(bits).expect("integer width"));
+        }
         for ty in [
             ResidualType::Void,
             ResidualType::Bool,
@@ -780,6 +830,10 @@ int main(void)
     CHECK(r2sleigh_float_round_32(0.49999997f) == 0.0f && r2sleigh_float_round_32(-2.5f) == -2.0f);
     CHECK(r2sleigh_float_isnan_64(r2sleigh_float_from_bits_64(0x7ff8000000000000ull)) == 1);
     CHECK(r2sleigh_float_isnan_32(1.0f) == 0);
+    CHECK(r2sleigh_lzcount_8(0) == 8 && r2sleigh_lzcount_8(1) == 7 && r2sleigh_lzcount_8(0x80) == 0);
+    CHECK(r2sleigh_lzcount_16(0) == 16 && r2sleigh_lzcount_16(0x00ff) == 8);
+    CHECK(r2sleigh_lzcount_32(0) == 32 && r2sleigh_lzcount_32(0x80000000u) == 0);
+    CHECK(r2sleigh_lzcount_64(0) == 64 && r2sleigh_lzcount_64(1) == 63);
     return 0;
 }
 "#;
@@ -802,16 +856,35 @@ int main(void)
             unit.push_str(&helper.definition());
         }
         unit.push_str(CHECKS);
+        let (dir, binary) = compile_strictly(&cc, "checks", &unit);
+        let ran = std::process::Command::new(&binary)
+            .status()
+            .expect("run the checks");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            ran.code(),
+            Some(0),
+            "the check at that line failed:\n{unit}"
+        );
+    }
+
+    /// Compile `unit` with every warning an error, in a directory of its own:
+    /// the directory, and the program built in it.
+    fn compile_strictly(
+        cc: &str,
+        tag: &str,
+        unit: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "r2dec-prelude-{}-{:?}",
+            "r2dec-prelude-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&dir).expect("temporary directory");
         let source = dir.join("prelude.c");
         let binary = dir.join("prelude");
-        std::fs::write(&source, &unit).expect("write the unit");
-        let compiled = std::process::Command::new(&cc)
+        std::fs::write(&source, unit).expect("write the unit");
+        let compiled = std::process::Command::new(cc)
             .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-o"])
             .arg(&binary)
             .arg(&source)
@@ -822,15 +895,92 @@ int main(void)
             "{}\n{unit}",
             String::from_utf8_lossy(&compiled.stderr)
         );
+        (dir, binary)
+    }
+
+    /// Reads a width and an operand per line, and writes the count the
+    /// helper of that width gives.
+    const LEADING_ZEROS_DRIVER: &str = r#"
+#include <stdio.h>
+int main(void)
+{
+    unsigned bits;
+    unsigned long long x;
+    while (scanf("%u %llx", &bits, &x) == 2) {
+        uint32_t n;
+        switch (bits) {
+        case 8: n = r2sleigh_lzcount_8((uint8_t)x); break;
+        case 16: n = r2sleigh_lzcount_16((uint16_t)x); break;
+        case 32: n = r2sleigh_lzcount_32((uint32_t)x); break;
+        case 64: n = r2sleigh_lzcount_64((uint64_t)x); break;
+        default: return 1;
+        }
+        printf("%u\n", (unsigned)n);
+    }
+    return 0;
+}
+"#;
+
+    /// `LZCOUNT` at every width the prelude defines it for is the operation
+    /// r2il evaluates: at every 8- and 16-bit operand, and at 32 and 64 bits
+    /// at zero, at every single bit, at every run of low bits and at
+    /// pseudo-random words of every magnitude. Skipped where no C compiler is
+    /// installed.
+    #[test]
+    fn the_leading_zero_count_is_the_one_r2il_evaluates_at_every_width() {
+        let Some(cc) = compiler() else {
+            return;
+        };
+        let mut operands: Vec<(u32, u64)> = Vec::new();
+        operands.extend((0..=u64::from(u8::MAX)).map(|x| (8, x)));
+        operands.extend((0..=u64::from(u16::MAX)).map(|x| (16, x)));
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for bits in [32_u32, 64] {
+            let all = u64::MAX >> (64 - bits);
+            operands.push((bits, 0));
+            for at in 0..bits {
+                operands.push((bits, 1 << at));
+                operands.push((bits, all >> at));
+            }
+            for _ in 0..4096 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                operands.push((bits, (state >> (state & 63)) & all));
+            }
+        }
+        let mut unit = INCLUDES.join("\n");
+        unit.push('\n');
+        for bits in [8, 16, 32, 64] {
+            let helper = Helper::leading_zeros(bits).expect("integer width");
+            unit.push_str(&helper.definition());
+        }
+        unit.push_str(LEADING_ZEROS_DRIVER);
+        let (dir, binary) = compile_strictly(&cc, "lzcount", &unit);
+        let input = dir.join("operands");
+        let lines: String = operands
+            .iter()
+            .map(|(bits, x)| format!("{bits} {x:x}\n"))
+            .collect();
+        std::fs::write(&input, lines).expect("write the operands");
         let ran = std::process::Command::new(&binary)
-            .status()
-            .expect("run the checks");
+            .stdin(std::fs::File::open(&input).expect("the operands"))
+            .output()
+            .expect("run the helpers");
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(
-            ran.code(),
-            Some(0),
-            "the check at that line failed:\n{unit}"
-        );
+        assert!(ran.status.success(), "{:?}", ran.status);
+        let counts = String::from_utf8(ran.stdout).expect("decimal counts");
+        let counts: Vec<u128> = counts
+            .lines()
+            .map(|line| line.parse().expect("a count"))
+            .collect();
+        assert_eq!(counts.len(), operands.len());
+        for (&(bits, x), &count) in operands.iter().zip(&counts) {
+            let word = r2il::eval::Word::new(u128::from(x), bits / 8).expect("a width");
+            let expected = r2il::eval::apply(r2il::eval::Operation::Lzcount, &[word], 4)
+                .expect("LZCOUNT is modelled");
+            assert_eq!(count, expected, "LZCOUNT of the {bits}-bit {x:#x}");
+        }
     }
 
     /// The C compiler a test may use, when one is installed.

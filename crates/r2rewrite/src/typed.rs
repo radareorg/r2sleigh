@@ -649,6 +649,16 @@ impl Builder<'_> {
                 self.require(id, 0, CTypeLike::u64());
                 CValue::Typed(CTypeLike::int(32))
             }
+            // The zeros above the highest set bit are counted within the
+            // input's own width, so the helper takes the input at exactly
+            // that unsigned width -- widening it would count the zeros the
+            // widening added -- and returns the count as a `uint32_t`.
+            MachineExprKind::LeadingZeroCount { input } => {
+                self.produced(*input);
+                let from = self.width(*input);
+                self.require(id, 0, unsigned(from));
+                CValue::Typed(CTypeLike::u32())
+            }
             // The root and the lane are both brought to their own unsigned
             // widths; the mask and shift the spelling uses promote like any
             // other integer operator, and the assignment narrows back.

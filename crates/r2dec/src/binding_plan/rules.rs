@@ -2437,6 +2437,7 @@ fn expression_renders_inline(kind: &r2ssa::MachineExprKind) -> bool {
         | Kind::Phi { .. }
         | Kind::InsertLane { .. }
         | Kind::PopulationCount { .. }
+        | Kind::LeadingZeroCount { .. }
         | Kind::Divide { .. }
         | Kind::Remainder { .. }
         | Kind::ExclusiveStoreSucceeded { .. }

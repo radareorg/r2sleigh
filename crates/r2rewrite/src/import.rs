@@ -648,6 +648,7 @@ impl Importer<'_> {
             }
             MachineExprKind::Phi { .. }
             | MachineExprKind::PopulationCount { .. }
+            | MachineExprKind::LeadingZeroCount { .. }
             | MachineExprKind::Divide { .. }
             | MachineExprKind::Remainder { .. }
             // Whether a conditional store took is not a term the rewriter can

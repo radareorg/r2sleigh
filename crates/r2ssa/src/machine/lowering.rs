@@ -295,7 +295,9 @@ impl MachineBuilder {
                     },
                 ))
             }
-            SSAOp::PopCount { .. } => {
+            // A count of bits is at most the input's width, so the output
+            // has to hold that width; the count is exact at every input.
+            SSAOp::PopCount { .. } | SSAOp::Lzcount { .. } => {
                 if inst.inputs.len() != 1 {
                     return Err(MachineBuildError::WrongOperandCount {
                         inst: inst.id,
@@ -317,7 +319,13 @@ impl MachineBuilder {
                 }
                 let input = self.intern_value(input_value)?;
                 self.record_whole_use(graph, inst, 0)?;
-                Ok((unsigned, MachineExprKind::PopulationCount { input }))
+                Ok((
+                    unsigned,
+                    match op {
+                        SSAOp::PopCount { .. } => MachineExprKind::PopulationCount { input },
+                        _ => MachineExprKind::LeadingZeroCount { input },
+                    },
+                ))
             }
             SSAOp::IntCarry { .. } | SSAOp::IntSCarry { .. } | SSAOp::IntSBorrow { .. } => {
                 let inputs = self.operand_nodes(graph, inst, 2)?;
