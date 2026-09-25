@@ -713,8 +713,20 @@ fn a_table_longer_than_the_region_it_starts_in_is_refused_before_a_byte_of_it_is
             .collect::<Vec<_>>(),
         vec![(0x1020, r2ssa::body::UnresolvedReason::IndirectBranch)]
     );
-    // And the function still renders.
-    decompile(&target, &program, BASE).expect("decompile");
+}
+
+#[test]
+fn an_indirect_branch_the_walk_could_not_follow_is_no_tail_call() {
+    // The dispatch is where the walk stopped, so the block names no successor
+    // because none is known. Read as "control leaves here", it rendered as
+    // `return ((int32_t(*)(void))*(...))();` with nothing refused: a tail
+    // call the program never makes, in place of the switch it does.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let response = decompile(&machine.target(), &Unbounded::default(), BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.render_refusal.is_some(), "{output}");
+    assert!(!output.contains(")()"), "{output}");
+    assert!(!output.contains("return (("), "{output}");
 }
 
 #[test]

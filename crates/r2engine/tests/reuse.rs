@@ -234,6 +234,7 @@ fn rendered_returning_object(declared: Option<&str>) -> String {
             bytes: RETURNS_OBJECT.to_vec(),
             successors: Vec::new(),
             switch: None,
+            unresolved: false,
         }],
         calls: Vec::new(),
         string_literals: Vec::new(),

@@ -2052,6 +2052,11 @@ impl Native<'_> {
                         instruction: table.instruction,
                         cases: table.cases.clone(),
                     }),
+                unresolved: walked.body.unresolved.iter().any(|stop| {
+                    stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch
+                        && (block.lifted.addr..block.lifted.addr + u64::from(block.lifted.size))
+                            .contains(&stop.addr)
+                }),
             })
             .collect::<Vec<_>>();
         // The capture keeps an interface only where it is about the revision

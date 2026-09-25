@@ -326,6 +326,9 @@ pub struct OwnedFunctionBlock {
     bytes: Arc<[u8]>,
     successors: Box<[AdvisorySuccessor]>,
     switch_instruction: Option<u64>,
+    /// Whether the capture could not follow this block's last transfer: it
+    /// names no successor because none is known, not because control leaves.
+    transfer_unresolved: bool,
 }
 
 impl OwnedFunctionBlock {
@@ -343,6 +346,13 @@ impl OwnedFunctionBlock {
 
     pub const fn switch_instruction(&self) -> Option<u64> {
         self.switch_instruction
+    }
+
+    /// Whether the capture stopped at this block's last transfer without
+    /// learning where it goes, so its empty successor list says nothing about
+    /// whether control leaves the function.
+    pub const fn transfer_unresolved(&self) -> bool {
+        self.transfer_unresolved
     }
 }
 
@@ -528,6 +538,12 @@ impl OwnedFunctionImage {
                 return no("the blocks are longer than memory");
             };
             byte_sum = next_sum;
+            if block.transfer_unresolved && !block.successors.is_empty() {
+                return no(&format!(
+                    "block {:#x} states its transfer unresolved and names where it goes",
+                    block.address
+                ));
+            }
             if block
                 .switch_instruction
                 .is_some_and(|address| address < block.address || address >= end)
@@ -1171,6 +1187,7 @@ mod tests {
                     bytes: Arc::from([0xc3]),
                     successors: Box::new([]),
                     switch_instruction: None,
+                    transfer_unresolved: false,
                 }]
                 .into_boxed_slice(),
                 external_exits: Box::new([]),

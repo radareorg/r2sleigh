@@ -49,6 +49,10 @@ pub struct NativeBlock {
     pub successors: Vec<(AdvisorySuccessorKind, u64)>,
     /// The dispatch this block ends in, where a previous pass read its table.
     pub switch: Option<NativeSwitch>,
+    /// Whether the walk stopped at this block's last transfer without learning
+    /// where it goes. Such a block names no successor because none is known,
+    /// which is not the claim that control leaves the function there.
+    pub unresolved: bool,
 }
 
 /// A multiway dispatch, as the engine proved it.
@@ -177,6 +181,7 @@ pub fn capture(
                 })
                 .collect(),
             switch_instruction: block.switch.as_ref().map(|switch| switch.instruction),
+            transfer_unresolved: block.unresolved,
         })
         .collect::<Vec<_>>();
 
@@ -329,12 +334,14 @@ mod tests {
                     bytes: vec![0x48, 0x89, 0xf8, 0xc3],
                     successors: vec![(AdvisorySuccessorKind::Direct, 0x1004)],
                     switch: None,
+                    unresolved: false,
                 },
                 NativeBlock {
                     address: 0x1004,
                     bytes: vec![0xc3],
                     successors: Vec::new(),
                     switch: None,
+                    unresolved: false,
                 },
             ],
             calls: Vec::new(),

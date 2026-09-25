@@ -104,6 +104,9 @@ pub enum BlockTerminator {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeclaredSuccessors {
     by_block: BTreeMap<u64, BTreeSet<u64>>,
+    /// Blocks whose last transfer the source could not follow: no successor
+    /// is known, which is not the same as having none.
+    unresolved: BTreeSet<u64>,
     entry: Option<u64>,
 }
 
@@ -121,6 +124,9 @@ impl DeclaredSuccessors {
                     .iter()
                     .map(|successor| successor.target()),
             );
+            if block.transfer_unresolved() {
+                declared.unresolved.insert(block.address());
+            }
         }
         declared
     }
@@ -141,11 +147,14 @@ impl DeclaredSuccessors {
     ///
     /// Control leaves the function at the end of one of these, whatever the
     /// last instruction is: a return, a call that does not come back, or a
-    /// jump through a register that is therefore a tail call.
+    /// jump through a register that is therefore a tail call. A block whose
+    /// transfer the source could not follow is not one: it has no successor
+    /// the source knows, and reading that as control leaving turned an
+    /// unresolved switch into a tail call rendered with nothing refused.
     pub fn terminal_blocks(&self) -> BTreeSet<u64> {
         self.by_block
             .iter()
-            .filter(|(_, successors)| successors.is_empty())
+            .filter(|(block, successors)| successors.is_empty() && !self.unresolved.contains(block))
             .map(|(block, _)| *block)
             .collect()
     }
