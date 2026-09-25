@@ -30,10 +30,15 @@ r2s=${R2S:-${CARGO_TARGET_DIR:-$root/target}/debug/r2s}
 for tool in "$lldb_bin" "$lldb_mcp"; do
     [[ -x $tool ]] || { echo "missing $tool; install lldb (brew install lldb)" >&2; exit 69; }
 done
-[[ -x $r2s ]] || {
-    echo "missing $r2s; cargo build -p r2s --features sleigh" >&2
-    exit 69
-}
+# A fresh checkout has no r2s yet. The server still starts, with no target,
+# so the MCP client does not fail at launch; build r2s and then
+# `target create <path to r2s>` through the `command` tool.
+target=(-- "$r2s")
+if [[ ! -x $r2s ]]; then
+    echo "lldb_mcp: no $r2s yet (cargo build -p r2s --features sleigh);" \
+        "starting with no target" >&2
+    target=()
+fi
 
 env_vars="TMPDIR=${TMPDIR:-/tmp} R2DEC_TRACE_REFUSAL=1"
 
@@ -45,7 +50,7 @@ log=${LLDB_MCP_BACKEND_LOG:-/tmp/r2sleigh-lldb-mcp-backend.log}
     -O "settings set target.disable-aslr false" \
     -O "settings set target.load-cwd-lldbinit false" \
     -o "protocol start MCP" \
-    -- "$r2s" \
+    ${target[@]+"${target[@]}"} \
     <"$hold" >"$log" 2>&1 &
 backend=$!
 exec 3>"$hold"
