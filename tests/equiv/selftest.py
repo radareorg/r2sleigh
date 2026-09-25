@@ -242,7 +242,8 @@ def run_self_tests(config: gate.Config, workdir: Path,
         spec.constants = code_constants(binary, sub.low_pc, extents.get(sub.low_pc, ([], 0))[1])
         record = synthetic_pddj(case, sub.low_pc, symbols)
         if case.refused:
-            answer = Answer(sub.low_pc, "decline", record=record, cause=f"refused: {case.refused}")
+            answer = Answer(sub.low_pc, "decline", record=record, cause=f"refused: {case.refused}",
+                            refusal=case.refused)
         else:
             answer = Answer(sub.low_pc, "output", record=record)
         graded = gate.grade(f"selftest::{case.name}", workdir / case.name, binary, dwarf, spec,

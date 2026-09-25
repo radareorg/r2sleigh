@@ -14,17 +14,20 @@ status is one of:
 ``ub``                    UBSan reported, or the ``-O0`` and ``-O2`` builds
                           disagree
 ``compile-error``         a build or its load failed; the diagnostic is kept
-``refused``               r2s refused the function, with its reason
+``refused``               r2s refused the function, with its reason, in a
+                          ``pddj`` that keeps the contract
 ``no-record``             r2s printed no usable ``pddj`` (crash, timeout,
                           unknown command, broken contract), with the cause
 ``unsupported``           the thunk cannot call this signature (aggregate by
                           value, variadic definition, ...); the reason is kept
 ``untested``              no vector survived the original (all dropped) or the
                           harness could not reproduce the original
-``harness-error``         the runtime itself failed
+``harness-error``         the runtime itself failed, or r2s was never asked
 ========================  ====================================================
 
-The first seven grade the engine; the last four say the gate could not. A
+The first eight grade the engine -- a crash, a deadline or a broken contract
+is r2s failing to answer, which is the engine's to fix -- and the last three
+say the gate could not. A
 vector the original does not return or exit from is dropped as outside its
 domain. A vector on which the original, called twice (directly and through a
 trampoline in a loaded object), does not agree with itself is ``unstable`` and
@@ -52,8 +55,8 @@ ORIGINAL, IDENTITY, O0, PATTERN, O2, UBSAN = range(6)
 PAIRS = ((ORIGINAL, IDENTITY), (ORIGINAL, O0), (O0, PATTERN), (O0, O2))
 
 ENGINE_STATUSES = ("equal", "residual-trap", "differs", "uninit", "ub", "compile-error",
-                   "refused")
-HARNESS_STATUSES = ("no-record", "unsupported", "untested", "harness-error")
+                   "refused", "no-record")
+HARNESS_STATUSES = ("unsupported", "untested", "harness-error")
 STATUSES = ENGINE_STATUSES + HARNESS_STATUSES
 # Worst first, among the statuses a vector can have.
 _VECTOR_SEVERITY = ("ub", "uninit", "differs", "residual-trap", "equal")
@@ -103,18 +106,20 @@ def grade(key: str, workdir: Path, binary: Path, dwarf: Dwarf, spec: CallSpec,
     record = Record(key=key, function=spec.name, address=spec.address, status="harness-error",
                     signature=spec.describe())
     if answer is None:
-        record.status = "no-record"
+        record.status = "harness-error"
         record.evidence = {"cause": "harness: r2s was not asked for this address"}
         return record
     if answer.record is not None:
         record.definition = str(answer.record.get("definition", ""))
         proof = answer.record.get("proof")
         record.proof = proof if isinstance(proof, dict) else {}
-    if answer.kind == "decline" and answer.record is not None and answer.record.get("refused"):
+    if answer.refusal is not None:
         record.status = "refused"
         record.evidence = {"cause": answer.cause}
         return record
     if not answer.ok:
+        # A crash, a deadline, a failed statement or a record that breaks the
+        # contract -- including one that also says it refuses.
         record.status = "no-record"
         record.evidence = {"cause": answer.cause}
         return record

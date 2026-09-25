@@ -82,11 +82,11 @@ One record per function, always, in `artifacts/records.json`, sorted by key
 | `uninit` | engine | the rendering read a value nothing wrote |
 | `ub` | engine | UBSan reported, or `-O0` and `-O2` disagree |
 | `compile-error` | engine | a build or load failed; the diagnostic is kept |
-| `refused` | engine | r2s refused the function, with its reason |
-| `no-record` | harness | r2s printed no usable `pddj`, with the cause |
+| `refused` | engine | r2s refused the function, with its reason, in a `pddj` that keeps the contract |
+| `no-record` | engine | r2s printed no usable `pddj` (crash, deadline, failed statement, broken contract), with the cause |
 | `unsupported` | harness | the thunk cannot call the signature (aggregate by value, variadic definition, a compiler clone) |
 | `untested` | harness | no vector survived the original |
-| `harness-error` | harness | the gate itself failed |
+| `harness-error` | harness | the gate itself failed, or never asked r2s |
 
 Each record carries the first vector that shows its status (inputs, the field,
 the first differing address and bytes), the vector counts, the proof counters

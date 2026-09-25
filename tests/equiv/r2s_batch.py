@@ -57,7 +57,12 @@ ERROR_PREFIX = "r2s: "
 
 @dataclass
 class Answer:
-    """One address's answer. ``kind`` is ``output``, ``decline`` or ``crash``."""
+    """One address's answer. ``kind`` is ``output``, ``decline`` or ``crash``.
+
+    ``refusal`` is set only for a ``pddj`` that keeps the contract and says it
+    refuses, to the reason it gives: the one decline that is r2s's considered
+    answer rather than a failure to give one.
+    """
 
     address: int
     kind: str
@@ -65,6 +70,7 @@ class Answer:
     cause: str = ""
     record: dict | None = None
     seconds: float = 0.0
+    refusal: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -141,9 +147,9 @@ def parse_pddj(address: int, body: str) -> Answer:
                       cause="harness: pddj breaks its contract: " + "; ".join(problems))
     refused = record.get("refused")
     if refused:
-        reason = refused.get("reason") if isinstance(refused, dict) else str(refused)
+        reason = str(refused.get("reason") or "no reason given")
         return Answer(address, "decline", text=body, record=record,
-                      cause=f"refused: {reason or 'no reason given'}")
+                      cause=f"refused: {reason}", refusal=reason)
     return Answer(address, "output", text=body, record=record)
 
 

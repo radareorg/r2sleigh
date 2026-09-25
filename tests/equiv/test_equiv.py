@@ -30,8 +30,8 @@ import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
 from dwarf import Dwarf  # noqa: E402
-from r2s_batch import contract_problems, run_batch  # noqa: E402
-from spec import call_spec  # noqa: E402
+from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
+from spec import CallSpec, call_spec  # noqa: E402
 
 STUB = HERE / "testdata" / "stub_r2s.py"
 CAN_RUN = gate.environment_problem() is None and shutil.which("gcc") is not None
@@ -207,6 +207,33 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(
             contract_problems({"name": "f", "addr": 16, "refused": {"reason": "why"}}), []
         )
+
+
+class AnswerStatusTests(unittest.TestCase):
+    """Which status an answer that is not a rendering becomes, before anything runs."""
+
+    SPEC = CallSpec(name="f", address=0x1000, params=[], ret_kind="int", ret_bytes=4,
+                    ret_spelling="int")
+
+    def status(self, answer):
+        return gate.grade("k", Path("/nonexistent"), Path("/nonexistent"), None, self.SPEC,
+                          answer, gate.Config(runtime=Path("/nonexistent")))
+
+    def test_a_refusal_that_keeps_the_contract_is_refused(self):
+        body = json.dumps({"name": "f", "addr": 0x1000, "refused": {"reason": "P4"}})
+        record = self.status(parse_pddj(0x1000, body))
+        self.assertEqual((record.status, record.evidence["cause"]), ("refused", "refused: P4"))
+
+    def test_a_refusal_that_breaks_the_contract_is_no_record(self):
+        body = json.dumps({"name": "f", "addr": 0x1000, "refused": {"reason": "P4"},
+                           "links": "none"})
+        record = self.status(parse_pddj(0x1000, body))
+        self.assertEqual(record.status, "no-record")
+        self.assertIn("breaks its contract", record.evidence["cause"])
+        self.assertIn("no-record", gate.ENGINE_STATUSES)
+
+    def test_an_address_never_asked_is_the_harness_s(self):
+        self.assertEqual(self.status(None).status, "harness-error")
 
 
 class RatchetTests(unittest.TestCase):
