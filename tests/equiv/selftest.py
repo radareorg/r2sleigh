@@ -9,7 +9,7 @@ graded through the same path an engine rendering takes:
 * the identities (a source-equivalent, UB-free rendering of every fixture
   function) must be ``equal``: the harness produces no false positive for
   integer, 64-bit, float, pointer, string, linked-struct, global-writing,
-  buffer-writing, printing or stack-argument functions;
+  buffer-writing, printing, libm-calling or stack-argument functions;
 * one flipped operator, one off-by-one, two swapped stack-passed arguments and a
   32-bit parameter read as 64 bits must be ``differs`` (return);
 * a read of an uninitialised local must be ``uninit``;
@@ -114,6 +114,10 @@ CASES = [
         "    return (int32_t)(int8_t)p[0];\n}\n",
         "#include <stdint.h>\n#include <stdio.h>\n"),
         links=[("fputs", "import"), ("stderr", "import")]),
+    # cos is libm's: the rendering links against what the original needs.
+    Case("identity-libm-import", "st_cosine", "equal", _tu(
+        "double sub_cosine(double x)\n{\n    return cos(x) * 2.0;\n}\n",
+        "#include <math.h>\n"), links=[("cos", "import")]),
     Case("identity-stack-floats", "st_many_fp", "equal", _tu(
         "double sub_many_fp(double a, double b, double c, double d, double e, double f,\n"
         "                   double g, double h, double i)\n{\n"
@@ -195,7 +199,7 @@ def build_fixture(cc: str, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     binary = out_dir / "fixture"
     proc = subprocess.run(
-        [cc, "-g", "-O2", "-no-pie", "-fno-pie", str(FIXTURE), "-o", str(binary)],
+        [cc, "-g", "-O2", "-no-pie", "-fno-pie", str(FIXTURE), "-o", str(binary), "-lm"],
         capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0:

@@ -210,6 +210,10 @@ def summarize(records: list[gate.Record]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # The runtime runs with its work directory as cwd: every path it is handed
+    # must be absolute.
+    args.out = args.out.resolve()
+    args.r2s = args.r2s.resolve()
     problem = gate.environment_problem()
     if problem:
         print(f"equiv: {problem}; the gate cannot run here", file=sys.stderr)

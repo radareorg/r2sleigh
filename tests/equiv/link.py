@@ -15,7 +15,10 @@ rather than a re-created copy of it:
 
 ``-Wl,-Bsymbolic`` makes a recursive rendering call itself, and
 ``-Wl,--no-undefined`` turns an identifier the link map forgot into a link
-error that names it.
+error that names it. The rendering links against every library the original
+names in its ``DT_NEEDED`` (libm, say), resolved to the files the dynamic
+loader would map, so an import the original reaches through one of them binds
+the same way here rather than failing as a false compile error.
 
 Each rendering is built four ways. ``O0`` is the one graded against the
 original. ``pattern`` differs only in how uninitialised locals start
@@ -30,6 +33,7 @@ change the status.
 
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 from dataclasses import dataclass
@@ -116,9 +120,32 @@ def _compile(cc: str, argv: list[str], timeout: float = 120.0) -> tuple[bool, st
     return proc.returncode == 0, diagnostics.strip()
 
 
+@functools.lru_cache(maxsize=None)
+def needed_libraries(binary: str) -> tuple[str, ...]:
+    """The link arguments naming each ``DT_NEEDED`` library of ``binary``.
+
+    Each is the file ``ldd`` says the loader maps (the one the original's own
+    imports bind to), or ``-l:<soname>`` when ``ldd`` does not say.
+    """
+    dynamic = subprocess.run(["readelf", "-d", "-W", binary], capture_output=True, text=True,
+                             check=False).stdout
+    names = re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", dynamic)
+    mapped: dict[str, str] = {}
+    trace = subprocess.run(["ldd", binary], capture_output=True, text=True, check=False).stdout
+    for line in trace.splitlines():
+        found = re.match(r"\s*(\S+)\s+=>\s+(/\S+)", line)
+        if found:
+            mapped[found.group(1)] = found.group(2)
+    return tuple(mapped.get(name, f"-l:{name}") for name in names)
+
+
 def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
-                    definition: str) -> tuple[dict[str, Built], str, list[str]]:
-    """Compile a rendering four ways; returns the builds, the strict verdict, and skipped links."""
+                    definition: str, needed: tuple[str, ...] = ()
+                    ) -> tuple[dict[str, Built], str, list[str]]:
+    """Compile a rendering four ways; returns the builds, the strict verdict, and skipped links.
+
+    ``needed`` is what :func:`needed_libraries` says the original links against.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
     source = workdir / "rendering.c"
     source.write_text(code, encoding="utf-8")
@@ -128,7 +155,8 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
     builds: dict[str, Built] = {}
     for variant, flags in VARIANTS.items():
         out = workdir / f"rendering-{variant}.so"
-        ok, diagnostics = _compile(cc, [*COMMON, *flags, str(source), str(shim_path), "-o", str(out)])
+        ok, diagnostics = _compile(cc, [*COMMON, *flags, str(source), str(shim_path), *needed,
+                                        "-o", str(out)])
         builds[variant] = Built(variant, ok, out, diagnostics)
     ok, diagnostics = _compile(cc, [*STRICT, str(source)])
     strict = "ok" if ok else "fail: " + _first_lines(diagnostics, 6)

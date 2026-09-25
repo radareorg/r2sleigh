@@ -138,7 +138,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
                code: str, definition: str, links: list[dict], config: Config) -> Record:
     workdir.mkdir(parents=True, exist_ok=True)
     identity = link.build_trampoline(config.cc, workdir, spec.address)
-    builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition)
+    builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition,
+                                                   link.needed_libraries(str(binary)))
     record.strict = strict
     if not identity.ok:
         record.status = "harness-error"
@@ -208,7 +209,7 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
     try:
         proc = subprocess.run(
             [str(binary)], env=env, cwd=str(out.parent), capture_output=True, timeout=budget,
-            check=False,
+            check=False, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return False, f"the runtime ran past {budget:g}s", []

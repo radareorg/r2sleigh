@@ -370,12 +370,20 @@ class PipelineTests(unittest.TestCase):
     """The whole gate, with r2s replaced by a stub whose renderings are the original."""
 
     def run_gate(self, tmp: Path, *extra: str, **env: str) -> tuple[int, dict]:
+        # --out is given relative to the working directory, as a person types
+        # it: the runtime runs elsewhere and must be handed absolute paths.
+        tmp.mkdir(parents=True, exist_ok=True)
         argv = ["--r2s", str(STUB), "--sources", str(HERE / "selftest" / "fixture.c"),
-                "--compilers", "gcc", "--opts", "O0,O2", "--out", str(tmp), "--vectors", "24",
+                "--compilers", "gcc", "--opts", "O0,O2", "--out", "out", "--vectors", "24",
                 *extra]
-        with _StubEnv(**env):
-            code = run_equiv.main(argv)
-        records = json.loads((tmp / "records.json").read_text())["records"]
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            with _StubEnv(**env):
+                code = run_equiv.main(argv)
+        finally:
+            os.chdir(cwd)
+        records = json.loads((tmp / "out" / "records.json").read_text())["records"]
         return code, {r["key"]: r for r in records}
 
     def test_a_rendering_that_is_the_original_is_equal_everywhere(self):
@@ -384,7 +392,7 @@ class PipelineTests(unittest.TestCase):
                                           STUB_R2S_FAULTS="")
         self.assertEqual(code, run_equiv.EXIT_OK)
         self.assertEqual({r["status"] for r in records.values()}, {"equal"})
-        self.assertEqual(len(records), 2 * 14)  # thirteen functions and main, at two levels
+        self.assertEqual(len(records), 2 * 15)  # fourteen functions and main, at two levels
 
     def test_a_crash_is_one_record_and_the_ratchet_sees_it(self):
         with tempfile.TemporaryDirectory() as tmp_text:

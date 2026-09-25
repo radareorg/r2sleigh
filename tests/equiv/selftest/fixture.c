@@ -4,6 +4,7 @@
  * selftest.py is graded against. The renderings are known to be right or known
  * to be wrong in one specific way, so the gate's verdict on each is known in
  * advance; a gate that misses one of them may not grade the engine. */
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -99,6 +100,9 @@ NOINL int st_first(const char *p)
     return p[0];
 }
 
+/* Calls into libm, which only the original's DT_NEEDED brings in. */
+NOINL double st_cosine(double x) { return cos(x) * 2.0; }
+
 int main(void)
 {
     struct st_node b = { 2, 0 }, a = { 1, &b };
@@ -108,5 +112,6 @@ int main(void)
     st_fill(buf, sizeof buf, 1);
     return st_add(1, 2) + (int)st_mix(3, 4) + st_clamp(5) + (int)st_scale(d, 2) + st_print(1, 2)
         + (int)st_len("x") + st_sum_list(&a) + buf[0] + (int)st_many(1, 2, 3, 4, 5, 6, 7, 8)
-        + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + st_say(3) + st_first("x");
+        + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + st_say(3) + st_first("x")
+        + (int)st_cosine(0.5);
 }
