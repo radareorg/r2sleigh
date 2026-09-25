@@ -851,28 +851,24 @@ fn escaped_pointee_reach(
         .function_interface()
         .and_then(r2ssa::SourceFunctionInterface::type_graph);
     let callsites = source_owned.report().callsites()?;
-    // The argument is the address or a register's copy of it.
     let graph = source.graph();
-    let through_copies = |mut value: ValueId| {
-        for _ in 0..8 {
-            let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
-                break;
-            };
-            let r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) = inst.payload else {
-                break;
-            };
-            let Some(source) = inst.inputs.first() else {
-                break;
-            };
-            value = *source;
-        }
-        value
+    let identity = source.function().decompile_prep_facts();
+    // The argument is the address, or a value with its bits: a register's
+    // copy of it, as the value view says, however many copies away.
+    let is_the_address = |argument: ValueId| {
+        argument == value
+            || identity
+                .zip(graph.value(argument))
+                .zip(graph.value(value))
+                .is_some_and(|((identity, argument), address)| {
+                    identity.same_bits(&argument.var, &address.var)
+                })
     };
     callsites.by_callsite.values().find_map(|facts| {
         let argument = facts
             .argument_values
             .iter()
-            .find(|argument| through_copies(argument.value) == value)?;
+            .find(|argument| is_the_address(argument.value))?;
         r2il::refusal_evidence!(
             "escape-callee",
             "{value:?} is argument {} at {:?}: signature={:?}",
@@ -945,25 +941,18 @@ fn escaped_pointee_reach(
             return Some(EscapeReach::Frame);
         }
         // A bounded transfer into the argument writes at most its length,
-        // where the length is a constant at this call.
+        // where the length is a constant at this call: the literal the value
+        // view names the argument's bits by, through any copies and the zero
+        // extension a 32-bit register write makes.
         let constant_argument = |index: usize| {
             let value = facts
                 .argument_values
                 .iter()
                 .find(|argument| argument.index == index)?
                 .value;
-            let mut value = value;
-            for _ in 0..8 {
-                if let Some(bits) = graph.value(value)?.var.constant_bits() {
-                    return Some(bits);
-                }
-                let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-                let r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) = inst.payload else {
-                    return None;
-                };
-                value = *inst.inputs.first()?;
-            }
-            None
+            let var = &graph.value(value)?.var;
+            var.constant_bits()
+                .or_else(|| identity?.canonical_root(var).constant_bits())
         };
         let mut end = None::<i64>;
         for transfer in &summary.transfer_effects {
