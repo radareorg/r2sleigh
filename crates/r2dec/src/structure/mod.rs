@@ -187,7 +187,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let stmt = self.rewrite_stage("cleanup", &placed, &elisions, shaped, |tree| {
             Self::cleanup(
                 &symbols,
-                &|id| journal.is_some_and(|journal| journal.borrow().observation_is_write(id)),
+                &|id| {
+                    journal.map_or(crate::observation_journal::MarkerRole::Other, |journal| {
+                        journal.borrow().observation_role(id)
+                    })
+                },
                 &|symbol| {
                     journal.is_some_and(|journal| {
                         journal.borrow().merge_carries_only_to_return(symbol)

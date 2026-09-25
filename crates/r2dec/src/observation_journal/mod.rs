@@ -81,6 +81,17 @@ pub(crate) const fn test_render_observation_id(index: u32) -> RenderObservationI
     RenderObservationId::from_index(index)
 }
 
+/// What one marker stands for, to a rewrite that moves markers between nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkerRole {
+    /// A write: an object the text stores to.
+    Write,
+    /// A value, which the seal classifies by the binding the marked node spells.
+    Value,
+    /// Anything else: a read, an obligation, an address.
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObservationTarget {
     Value(ValueId),
@@ -2124,21 +2135,23 @@ impl LegacyObservationJournal {
             .any(|binding| self.names.symbol_for_binding(*binding) == Some(symbol))
     }
 
-    /// Whether this marker stands for a write rather than for a value or read.
+    /// What this marker stands for, as a rewrite that moves markers needs it.
     ///
     /// A rewrite that merges two arms into one assignment has to know: the
-    /// value each arm computed stays inside its arm, while the write they both
-    /// performed is the one store the merged assignment makes, and a write
+    /// obligations each arm discharged stay inside its arm, the write they
+    /// both performed is the one store the merged assignment makes (a write
     /// marker inside the right-hand side is an ordering the placement pass
-    /// cannot resolve.
-    pub(crate) fn observation_is_write(&self, id: RenderObservationId) -> bool {
-        matches!(
-            self.targets.get(id.index() as usize),
+    /// cannot resolve), and a value is classified by the node it marks, so a
+    /// value marker has to keep marking a node that spells the same binding.
+    pub(crate) fn observation_role(&self, id: RenderObservationId) -> MarkerRole {
+        match self.targets.get(id.index() as usize) {
             Some(
                 ObservationTarget::Write { .. }
-                    | ObservationTarget::StackAccess { is_write: true, .. }
-            )
-        )
+                | ObservationTarget::StackAccess { is_write: true, .. },
+            ) => MarkerRole::Write,
+            Some(ObservationTarget::Value(_)) => MarkerRole::Value,
+            _ => MarkerRole::Other,
+        }
     }
 
     pub(crate) fn observation_block(&self, id: RenderObservationId) -> Option<u64> {

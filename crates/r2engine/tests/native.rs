@@ -2631,3 +2631,80 @@ fn an_unknown_call_leaves_the_reach_through_an_argument_it_is_not_handed() {
     assert!(!reach.contains_key(&1), "{reach:?}");
     assert!(!reach.contains_key(&2), "{reach:?}");
 }
+
+/// `long mn(long a, long b) { long sa = a, sb = b; long r = sa < sb ? sa : sb; return r + sa; }`
+/// at clang -O0: the merge's two inputs are reloads of two other variables.
+///
+/// ```text
+///   1000  push rbp; mov rbp, rsp
+///   1004  mov [rbp-8], rdi; mov [rbp-0x10], rsi
+///   100c  mov rax, [rbp-8];    mov [rbp-0x18], rax    ; sa
+///   1014  mov rax, [rbp-0x10]; mov [rbp-0x20], rax    ; sb
+///   101c  mov rax, [rbp-0x18]; cmp rax, [rbp-0x20]; jge 1037
+///   102a  mov rax, [rbp-0x18]; mov [rbp-0x30], rax; jmp 103f
+///   1037  mov rax, [rbp-0x20]; mov [rbp-0x30], rax
+///   103f  mov rax, [rbp-0x30]; mov [rbp-0x28], rax
+///   1047  mov rax, [rbp-0x28]; add rax, [rbp-0x18]; pop rbp; ret
+/// ```
+const SELECTS_BETWEEN_TWO_VARIABLES: &[u8] = &[
+    0x55, 0x48, 0x89, 0xe5, // 1000
+    0x48, 0x89, 0x7d, 0xf8, 0x48, 0x89, 0x75, 0xf0, // 1004
+    0x48, 0x8b, 0x45, 0xf8, 0x48, 0x89, 0x45, 0xe8, // 100c
+    0x48, 0x8b, 0x45, 0xf0, 0x48, 0x89, 0x45, 0xe0, // 1014
+    0x48, 0x8b, 0x45, 0xe8, 0x48, 0x3b, 0x45, 0xe0, // 101c
+    0x0f, 0x8d, 0x0d, 0x00, 0x00, 0x00, // 1024 jge 1037
+    0x48, 0x8b, 0x45, 0xe8, 0x48, 0x89, 0x45, 0xd0, // 102a
+    0xe9, 0x08, 0x00, 0x00, 0x00, // 1032 jmp 103f
+    0x48, 0x8b, 0x45, 0xe0, 0x48, 0x89, 0x45, 0xd0, // 1037
+    0x48, 0x8b, 0x45, 0xd0, 0x48, 0x89, 0x45, 0xd8, // 103f
+    0x48, 0x8b, 0x45, 0xd8, 0x48, 0x03, 0x45, 0xe8, // 1047
+    0x5d, 0xc3, // 104f
+];
+
+/// Two arms that each assign one variable from another become one assignment
+/// of a conditional, and the merge each arm assigned is still the variable
+/// the assignment writes. The arm's value marker used to be moved onto the
+/// arm's right-hand side, which spells the *input's* variable, so the seal
+/// read the merge as two bindings and refused the function.
+#[test]
+fn a_merge_of_two_variables_is_one_assignment_of_a_conditional() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: SELECTS_BETWEEN_TWO_VARIABLES.to_vec(),
+        name: "select",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(
+        response.render_refusal.is_none(),
+        "{:?}\n{text}",
+        response.render_refusal
+    );
+    // One statement assigns the merge, choosing between the two variables.
+    let selection = text
+        .lines()
+        .find(|line| line.contains(" ? "))
+        .unwrap_or_else(|| panic!("no conditional assignment:\n{text}"));
+    let (merge, choice) = selection
+        .trim()
+        .split_once(" = ")
+        .unwrap_or_else(|| panic!("not an assignment: {selection}"));
+    let (_, arms) = choice
+        .split_once(" ? ")
+        .unwrap_or_else(|| panic!("not a selection: {choice}"));
+    let (then_arm, else_arm) = arms
+        .trim_end_matches(';')
+        .split_once(" : ")
+        .unwrap_or_else(|| panic!("not two arms: {arms}"));
+    assert_ne!(then_arm, else_arm, "{selection}");
+    assert!(
+        ![then_arm, else_arm].contains(&merge),
+        "the merge is not one of its inputs: {selection}"
+    );
+    // And the return reads the merge it assigned.
+    let returned = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("return"))
+        .unwrap_or_else(|| panic!("no return:\n{text}"));
+    assert!(returned.contains(merge), "{returned}\n{text}");
+}
