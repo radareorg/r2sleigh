@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{BASE, Literal, MOVED_STUB, PLT_CALLER, PLT_STUB};
+use common::{
+    ARM_PLT, ARM_PLT_SLOTS, BASE, Literal, MOVED_STUB, PLT_CALLER, PLT_STUB, import_write,
+};
 use r2engine::program::{Libc, OpenProgram, PlatformEvidence};
 use r2engine::query::{Listing, Stop};
 
@@ -64,6 +66,36 @@ fn a_stub_that_builds_its_slot_from_two_halves_is_named_for_the_import() {
         [(BASE, "_Exit")],
         "{:?}",
         stub.value
+    );
+}
+
+#[test]
+fn an_arm_plt0_whose_literal_word_decodes_as_a_conditional_instruction_still_holds_stubs() {
+    // `andeq` is lifted as a branch to the next instruction around its own
+    // effect, which transfers nowhere the straight line does not go; reading
+    // it as a branch of the section's own choosing left every ARM `.plt`
+    // unnamed.
+    let literal = Literal::of_code(ARM_PLT, &[])
+        .in_arm()
+        .in_plt(ARM_PLT_SLOTS[0], "_Exit")
+        .loader_written(import_write(ARM_PLT_SLOTS[1], 4, "abort"))
+        // The resolver's two words, which the loader writes with no record naming them.
+        .loader_written(r2engine::program::LoaderWrite {
+            place: 0x2014,
+            width: 8,
+            kind: r2engine::program::WriteKind::Unknown,
+        });
+    let mut program = OpenProgram::of(literal);
+    program.ensure_current().expect("it is current");
+    let imports: Vec<(u64, &str, u64)> = program
+        .imports()
+        .iter()
+        .map(|(at, stub)| (*at, stub.symbol.as_str(), stub.size))
+        .collect();
+    // Twelve-byte cells, measured between the two transfers and anchored at the section's end.
+    assert_eq!(
+        imports,
+        [(BASE + 0x14, "_Exit", 12), (BASE + 0x20, "abort", 12)]
     );
 }
 

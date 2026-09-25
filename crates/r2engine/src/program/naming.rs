@@ -395,12 +395,19 @@ fn section_stubs(
                 && target.offset >= section.vaddr
                 && target.offset < end_of_section
         };
+        // A conditional branch to the instruction's own fall-through, or
+        // within its own operations, transfers nowhere the straight line does
+        // not already go: it is how ARM makes one instruction's effect
+        // conditional, and the literal word after ARM's PLT0 decodes as one.
+        let next = pc + u64::from(lifted.size);
+        let within = |target: &r2il::Varnode| {
+            target.space == r2il::SpaceId::Const
+                || (target.space == r2il::SpaceId::Ram && target.offset == next)
+        };
         // A stub makes no call, does not return and takes no branch of its own choosing.
         let own_code = lifted.ops.iter().any(|op| match op {
-            R2ILOp::Call { .. }
-            | R2ILOp::CallInd { .. }
-            | R2ILOp::Return { .. }
-            | R2ILOp::CBranch { .. } => true,
+            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } | R2ILOp::Return { .. } => true,
+            R2ILOp::CBranch { target, .. } => !within(target),
             R2ILOp::Branch { target } => !stays(target),
             _ => false,
         });
@@ -425,14 +432,21 @@ fn section_stubs(
         }
         let terminal = run.ops.len().saturating_sub(1);
         if indirect {
-            // An indirect jump is a stub's only through a word the loader writes.
-            let Some(slot) = r2ssa::terminal_indirect_loaded_slot(&run, terminal)
-                .filter(|slot| container.loader_write_at(slot.offset).is_some())
-            else {
-                return Vec::new();
-            };
-            if let Some(found) = slots.get(&slot.offset) {
-                readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
+            match r2ssa::terminal_indirect_loaded_slot(&run, terminal) {
+                // An indirect jump through a word it places is a stub's only
+                // where the loader writes that word.
+                Some(slot) if container.loader_write_at(slot.offset).is_none() => {
+                    return Vec::new();
+                }
+                Some(slot) => {
+                    if let Some(found) = slots.get(&slot.offset) {
+                        readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
+                    }
+                }
+                // Through a word this reading cannot place -- ARM's PLT0 adds
+                // a literal it loads from memory -- the jump says nothing
+                // either way, and names nothing.
+                None => {}
             }
         }
         run = fresh_run(pc);

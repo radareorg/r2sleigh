@@ -204,6 +204,27 @@ pub const MOVED_STUB: &[u8] = &[
     0x00, 0xf0, 0x9c, 0xe5, // ldr pc, [ip]
 ];
 
+/// ARM's lazy `.plt`, as GNU ld and gold lay it out: PLT0, whose literal word
+/// is the distance to the GOT and decodes as a conditional `andeq`, then two
+/// stubs. The GOT is at 0x2010: PLT0 jumps through its third word, the
+/// resolver's, and the stubs through the fourth and fifth, the imports' slots.
+pub const ARM_PLT: &[u8] = &[
+    0x04, 0xe0, 0x2d, 0xe5, // 0x1000 str lr, [sp, #-4]!
+    0x04, 0xe0, 0x9f, 0xe5, // 0x1004 ldr lr, [pc, #4], the word at 0x1010
+    0x0e, 0xe0, 0x8f, 0xe0, // 0x1008 add lr, pc, lr: the GOT
+    0x08, 0xf0, 0xbe, 0xe5, // 0x100c ldr pc, [lr, #8]!: the resolver
+    0x00, 0x10, 0x00, 0x00, // 0x1010 .word 0x1000, which decodes as `andeq r1, r0, r0`
+    0x00, 0xc6, 0x8f, 0xe2, // 0x1014 add ip, pc, #0, 12
+    0x01, 0xca, 0x8c, 0xe2, // 0x1018 add ip, ip, #0x1000
+    0x00, 0xf0, 0xbc, 0xe5, // 0x101c ldr pc, [ip, #0]!: the slot at 0x201c
+    0x00, 0xc6, 0x8f, 0xe2, // 0x1020 add ip, pc, #0, 12
+    0x01, 0xca, 0x8c, 0xe2, // 0x1024 add ip, ip, #0x1000
+    0x08, 0xf0, 0x3c, 0xe5, // 0x1028 ldr pc, [ip, #-8]!: the slot at 0x2020
+];
+
+/// The import slots `ARM_PLT`'s two stubs read.
+pub const ARM_PLT_SLOTS: [u64; 2] = [0x201c, 0x2020];
+
 /// ARM `movw r0, #0x1010; movt r0, #0; ldr r1, [r0]; bx lr`, then the word at 0x1010: the pair builds one address.
 pub const MOVED: &[u8] = &[
     0x10, 0x00, 0x01, 0xe3, // movw r0, #0x1010
