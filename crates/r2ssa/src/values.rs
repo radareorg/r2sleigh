@@ -474,8 +474,7 @@ fn assumptions_by_block(
     function: &crate::SSAFunction,
     graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
-    class: &[ValueId],
-    state: &[StridedInterval],
+    solved: Solved<'_>,
 ) -> BTreeMap<u64, BTreeMap<ValueId, StridedInterval>> {
     if predicates.block_assumptions.is_empty() {
         return BTreeMap::new();
@@ -510,7 +509,7 @@ fn assumptions_by_block(
             else {
                 continue;
             };
-            assume(&mut held, graph, class, state, compare, assumption.truth);
+            assume(&mut held, graph, solved, compare, assumption.truth);
         }
         if !held.is_empty() {
             by_block.insert(addr, held);
@@ -532,31 +531,44 @@ pub(crate) fn edge_dominates(function: &crate::SSAFunction, predecessor: u64, bl
             .all(|other| function.dominates(block, other))
 }
 
-/// Narrow what a block holds by one comparison, taken the way `truth` says.
-///
-/// `held` is keyed by copy class (`class`, the view's): what the comparison
-/// proves of one side it proves of every value with that side's bits.
-fn assume(
-    held: &mut BTreeMap<ValueId, StridedInterval>,
-    graph: &SsaGraph,
-    class: &[ValueId],
-    state: &[StridedInterval],
-    compare: &crate::semantic::CompareProvenance,
-    truth: bool,
-) {
-    for side in [compare.lhs, compare.rhs] {
-        let now = (!wide(graph, side))
-            .then(|| narrowed_side(held, class, state, compare, truth, side))
-            .flatten();
-        if let Some(now) = now {
-            held.insert(class_of(class, side), now);
-        }
+/// The ranges solved so far, and the copy class (the view's) each value is
+/// held under: what a comparison proves of one side it proves of every value
+/// with that side's bits.
+#[derive(Clone, Copy)]
+struct Solved<'a> {
+    class: &'a [ValueId],
+    state: &'a [StridedInterval],
+}
+
+impl Solved<'_> {
+    fn class_of(self, value: ValueId) -> ValueId {
+        class_of(self.class, value)
     }
 }
 
 /// The copy class a value belongs to, where the table knows it.
 fn class_of(class: &[ValueId], value: ValueId) -> ValueId {
     class.get(value.0 as usize).copied().unwrap_or(value)
+}
+
+/// Narrow what a block holds by one comparison, taken the way `truth` says.
+///
+/// `held` is keyed by copy class.
+fn assume(
+    held: &mut BTreeMap<ValueId, StridedInterval>,
+    graph: &SsaGraph,
+    solved: Solved<'_>,
+    compare: &crate::semantic::CompareProvenance,
+    truth: bool,
+) {
+    for side in [compare.lhs, compare.rhs] {
+        let now = (!wide(graph, side))
+            .then(|| narrowed_side(held, solved, compare, truth, side))
+            .flatten();
+        if let Some(now) = now {
+            held.insert(solved.class_of(side), now);
+        }
+    }
 }
 
 /// One arm of a select, under what its condition proves on that arm.
@@ -593,16 +605,15 @@ fn selected_arm(
 /// exactly as it was, so the caller inserts only what it has learned.
 fn narrowed_side(
     held: &std::collections::BTreeMap<ValueId, StridedInterval>,
-    class: &[ValueId],
-    state: &[StridedInterval],
+    solved: Solved<'_>,
     compare: &crate::semantic::CompareProvenance,
     truth: bool,
     side: ValueId,
 ) -> Option<StridedInterval> {
     let known = |value: ValueId| {
-        held.get(&class_of(class, value))
+        held.get(&solved.class_of(value))
             .copied()
-            .or_else(|| state.get(value.0 as usize).copied())
+            .or_else(|| solved.state.get(value.0 as usize).copied())
     };
     let was = known(side)?;
     let now = narrow(&known, was, compare, truth, side);
@@ -733,7 +744,15 @@ fn narrow_where_defined(
     class: &[ValueId],
     state: &mut [StridedInterval],
 ) {
-    let assumed = assumptions_by_block(function, graph, predicates, class, state);
+    let assumed = assumptions_by_block(
+        function,
+        graph,
+        predicates,
+        Solved {
+            class,
+            state: &*state,
+        },
+    );
     if assumed.is_empty() {
         return;
     }
