@@ -77,6 +77,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "pd" => crate::listing::disassemble(session, argument),
         "pdf" => crate::listing::disassemble_function(session, argument),
         "pdd" => decompile(session, argument),
+        "pddj" => decompile_json(session, argument),
         "afl" => discovered(session),
         "afi" => crate::function::info(session, argument),
         "afv" => crate::function::variables(session, argument),
@@ -571,6 +572,23 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr, RenderTier::C)?;
     Ok(rendering.response.output.into_text())
+}
+
+/// `pddj`: the rendering `pdd` prints, as one object a tool reads.
+///
+/// The code is a translation unit that compiles on its own, with where each
+/// line came from, what each name is, where each outside name resolves in the
+/// program, and what became of every obligation. It is the same rendering, so
+/// the two cannot disagree.
+fn decompile_json(session: &mut Session, argument: &str) -> Result<String, String> {
+    let addr = parse_number(session, argument)?;
+    let rendering = session.program.rendered(addr, RenderTier::C)?;
+    let name = session
+        .program
+        .names()
+        .of(addr)
+        .map_or_else(|| format!("fcn.{addr:08x}"), r2engine::names::Name::spelled);
+    serde_json::to_string(&rendering.answer(&name, addr)).map_err(|error| error.to_string())
 }
 
 /// `pddo`: what became of every obligation the function's source imposes.

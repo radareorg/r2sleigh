@@ -14,10 +14,10 @@ r2engine = { path = "../r2engine" }
 r2il = { path = "../r2il" }
 r2image = { path = "../r2image" }
 clap.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-serde_json.workspace = true
 
 [features]
 default = []
