@@ -365,7 +365,12 @@ fn float_definition(name: &str, op: FloatOp, bits: u32) -> String {
                 FloatOp::SquareRoot => format!("__builtin_sqrt{suffix}(x)"),
                 FloatOp::Ceiling => format!("__builtin_ceil{suffix}(x)"),
                 FloatOp::Floor => format!("__builtin_floor{suffix}(x)"),
-                _ => format!("__builtin_floor{suffix}(x + ({float})0.5)"),
+                // P-code's FLOAT_ROUND is `floor(x + 0.5)` evaluated in double
+                // at every width, and so is this: in float, `0.49999997f + 0.5f`
+                // rounds up to 1 before the floor sees it. The floor of a float
+                // plus a half is a float again, so the conversion back is exact.
+                _ if bits == 32 => "(float)__builtin_floor((double)x + 0.5)".to_owned(),
+                _ => "__builtin_floor(x + 0.5)".to_owned(),
             };
             format!(
                 "static inline {float} {name}({float} x)\n\
@@ -772,6 +777,7 @@ int main(void)
     CHECK(r2sleigh_float_floor_64(-1.5) == -2.0 && r2sleigh_float_floor_32(1.75f) == 1.0f);
     CHECK(r2sleigh_float_round_64(2.5) == 3.0 && r2sleigh_float_round_64(-2.5) == -2.0);
     CHECK(r2sleigh_float_round_32(0.25f) == 0.0f);
+    CHECK(r2sleigh_float_round_32(0.49999997f) == 0.0f && r2sleigh_float_round_32(-2.5f) == -2.0f);
     CHECK(r2sleigh_float_isnan_64(r2sleigh_float_from_bits_64(0x7ff8000000000000ull)) == 1);
     CHECK(r2sleigh_float_isnan_32(1.0f) == 0);
     return 0;
