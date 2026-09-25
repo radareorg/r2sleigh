@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix.",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -93,8 +93,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::typed_compete": {
-   "cause": "[P1 identity (plus a P10 lowering guard: a store's access width is the op's width)] The 8-byte store `movsxd rax,[rbp-4]; mov QWORD PTR [0x404030],rax` (g_note = (long)q) renders as the 4-byte store `*(uint32_t*)0x404030 = (uint32_t)tmp_11f00_1;`. Bytes 4..7 of g_note keep their old value (for q=-1 the machine writes ffffffff and the rendering leaves 00000000). Origin: the stack-reload certificate treats SEXT as value-preserving. stack_reload_propagation_output follows IntSExt, so RAX_2 = SEXT(reload of the EDI home) is certified as a reload of parameter 0's home, and RAX_2 is rendered inline as the home's binding, which drops the SEXT. r2types then binds SemanticId::Param...",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O0::wide_tail": {
    "status": "equal"
@@ -410,8 +409,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O0::typed_compete": {
-   "cause": "[P1 identity (plus a P10 lowering guard)] Same as clang-O0. `mov eax,[rbp-4]; cdqe; mov QWORD PTR [0x404030],rax` renders as `*(uint32_t*)0x404030 = (uint32_t)tmp_11f00_1;`. RAX = SEXT(reload) is certified as a reload of parameter 0's home, and it gets the Parameter(0) binding. The Store lowering's type hint, the 32-bit parameter type, then replaces the op's 8-byte width. The upper 4 bytes of g_note are never written.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O0::wide_tail": {
    "status": "equal"
@@ -870,8 +868,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O1::siphash24": {
-   "cause": "[P10 lowering] The `v2 ^= 0xff` step (`xor dl,0xff`, an INSERT of the low byte into RDX) renders as `RDX_15 = (RDX_15 & ~((uint64_t)~(uint8_t)0U << 0U)) | (uint64_t)(uint8_t)((uint8_t)RDX_15 ^ 255) << 0;`. In C, `~(uint8_t)0U` promotes to int and gives -1. After the cast the mask is all 64 ones, so `RDX_15 & ~mask` is 0 and the upper 56 bits of v2 are erased. The rest of the function (the SIPROUNDs, the loop and the tail switch) matches the source step for step.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O1::unaligned_words": {
    "cause": "[P10 lowering] An unaligned load is spelled as a typed dereference: `*(uint32_t*)(RDI_0 + RDX_1 + 1)` at rendering.c:17, with no effective-type or alignment proof (memory_renderer.rs:973-978).",
@@ -921,8 +918,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O2::siphash24": {
-   "cause": "[P10 lowering] Identical to gcc-O1. The `xor dl,0xff` INSERT renders with the mask `~((uint64_t)~(uint8_t)0U << 0U)`, which is 0 after integer promotion (~(uint8_t)0 is int -1). v2 therefore loses bits 8..63 before the four final SIPROUNDs.",
-   "status": "differs"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::gcc-O2::unaligned_words": {
    "cause": "[P10 lowering] An unaligned load is spelled as a typed dereference: `uint32_t tmp_11f00_2 = *(uint32_t*)(RDI_0 + RDX_1 + 1);` at rendering.c:13 (memory_renderer.rs:973-978).",
