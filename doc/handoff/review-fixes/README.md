@@ -1,5 +1,22 @@
-Hand-off: the review-fixes program (paused)
-==========================================
+Hand-off: the review-fixes program
+==================================
+
+**Resumed 2026-09-25** on a larger machine (64 CPUs, 125 GB RAM). The program
+now follows [`plan-extension.md`](plan-extension.md), which extends
+[`plan.md`](plan.md). The extension adds eight tracks:
+
+- C: one confidence type
+- H: wire or delete the unused analyses
+- K: remove silent caps
+- I: read CFI and the other unread container facts
+- Q: a query database
+- S: command language
+- E: emulation and verify
+- A: agent surface
+
+It also amends binding decisions 1 and 2 and orders the work in waves W0–W7.
+The "before" manual review is [`eyeball-93934abc.md`](eyeball-93934abc.md).
+The rest of this file is the hand-off as written when the work paused.
 
 Written 2026-09-25 when work stopped because of machine limits: 4 CPUs,
 about 3 GB of free disk, and a cargo target of 5–8 GB per worktree. Start with
