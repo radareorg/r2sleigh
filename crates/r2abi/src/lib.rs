@@ -12,6 +12,7 @@
 
 pub mod compiler_spec;
 pub mod prototypes;
+pub mod statement;
 
 pub use compiler_spec::CompilerSpec;
 pub use prototypes::{

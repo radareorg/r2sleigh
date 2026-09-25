@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Relocation,
-    Section, Segment, Source, Symbol, SymbolKind,
+    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions,
+    Relocation, Section, Segment, Source, Symbol, SymbolKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -321,6 +321,7 @@ pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
             write: false,
             execute: true,
         },
+        ..Segment::default()
     }
 }
 
@@ -353,7 +354,7 @@ impl Literal {
                 arch: Arch {
                     name: "x86-64".to_owned(),
                     bits: 64,
-                    endian: r2il::Endianness::Little,
+                    endian: Endian::Little,
                 },
                 segments: vec![code_segment(BASE, CODE.len() as u64)],
                 sections: vec![Section {
@@ -362,6 +363,7 @@ impl Literal {
                     vsize: STUB - BASE,
                     is_code: true,
                     loaded: true,
+                    ..Section::default()
                 }],
                 symbols: vec![
                     function("one", ONE, 6),
@@ -426,7 +428,7 @@ impl Literal {
         self.container.arch = Arch {
             name: "arm".to_owned(),
             bits: 32,
-            endian: r2il::Endianness::Little,
+            endian: Endian::Little,
         };
         self
     }
@@ -443,6 +445,7 @@ impl Literal {
                 vsize: 0x20,
                 is_code: true,
                 loaded: true,
+                ..Section::default()
             },
             Section {
                 name: ".text".to_owned(),
@@ -450,6 +453,7 @@ impl Literal {
                 vsize: 6,
                 is_code: true,
                 loaded: true,
+                ..Section::default()
             },
         ];
         program.container.symbols.clear();
@@ -522,6 +526,7 @@ impl Literal {
             vsize,
             is_code,
             loaded: true,
+            ..Section::default()
         };
         // The code before the stub is the program's own; the stub and its slot are the loader's.
         let code = &mut self.container.sections[0];
@@ -547,6 +552,7 @@ impl Literal {
             vsize: 8,
             is_code: false,
             loaded: true,
+            ..Section::default()
         });
         self
     }
@@ -572,6 +578,7 @@ impl Literal {
             vsize: stop - end,
             is_code,
             loaded: true,
+            ..Section::default()
         });
         self
     }
@@ -600,6 +607,7 @@ impl Literal {
                 write,
                 execute: false,
             },
+            ..Segment::default()
         });
         self
     }

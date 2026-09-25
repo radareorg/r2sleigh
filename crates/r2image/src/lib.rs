@@ -28,110 +28,10 @@ pub enum ImageError {
     UnsupportedArchitecture(object::Architecture),
 }
 
-/// Container format the bytes were parsed as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Elf,
-    MachO,
-    Pe,
-    Coff,
-    Wasm,
-    Xcoff,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Endian {
-    Little,
-    Big,
-}
-
-/// Architecture identity, in the terms a Sleigh specification is selected by.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageArch {
-    /// Name as the lifter spells it, such as `x86-64` or `AArch64`.
-    pub name: &'static str,
-    pub bits: u32,
-    pub endian: Endian,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Permissions {
-    pub read: bool,
-    pub write: bool,
-    pub execute: bool,
-}
-
-impl Permissions {
-    const RX: Self = Self {
-        read: true,
-        write: false,
-        execute: true,
-    };
-}
-
-/// One loadable range, mapping a file extent onto a virtual address range.
-#[derive(Debug, Clone)]
-pub struct Segment {
-    pub vaddr: u64,
-    /// Virtual size, which exceeds `file_size` wherever the range is zero-filled.
-    pub vsize: u64,
-    pub file_offset: u64,
-    pub file_size: u64,
-    pub permissions: Permissions,
-    pub name: Option<String>,
-}
-
-impl Segment {
-    pub fn contains(&self, vaddr: u64) -> bool {
-        vaddr >= self.vaddr && vaddr - self.vaddr < self.vsize
-    }
-}
-
-/// One named range the format declares, finer-grained than a segment.
-#[derive(Debug, Clone)]
-pub struct Section {
-    pub name: String,
-    pub vaddr: u64,
-    pub vsize: u64,
-    pub file_offset: u64,
-    pub file_size: u64,
-    /// Whether the container states this section holds instructions.
-    ///
-    /// Stated, not inferred from a name: ELF says it with `SHF_EXECINSTR`,
-    /// COFF with `IMAGE_SCN_CNT_CODE` or `IMAGE_SCN_MEM_EXECUTE`, and Mach-O
-    /// with the `S_ATTR_PURE_INSTRUCTIONS` or `S_ATTR_SOME_INSTRUCTIONS`
-    /// attribute. Mach-O's `__stubs` and `__auth_stubs` state it too, so the
-    /// stub a call lands on is never data a string can be read out of.
-    pub is_code: bool,
-    /// Whether the loader maps this section, so `vaddr` is an address at all.
-    ///
-    /// A section the loader ignores -- `.shstrtab`, `.symtab`, the debug
-    /// sections -- is reported at address zero, which makes it appear to cover
-    /// the start of the image. A consumer asking what lives at an address got
-    /// `.shstrtab` for everything below its size, which is how a structure
-    /// offset of eighty came to be rendered as the string at address eighty.
-    pub loaded: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolKind {
-    Function,
-    Data,
-    Section,
-    Other,
-    /// An ARM mapping symbol: where the bytes become code of one instruction
-    /// set, or data.
-    Mapping(Mapping),
-}
-
-/// What an ARM mapping symbol (`$a`, `$t`, `$d`) says the bytes from it are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mapping {
-    Arm,
-    Thumb,
-    Data,
-}
+pub use r2abi::statement::{
+    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section,
+    Segment, Symbol, SymbolKind,
+};
 
 /// The mapping a symbol name states, per the ARM ELF ABI: `$a`, `$t` or `$d`,
 /// optionally followed by `.` and anything.
@@ -148,68 +48,6 @@ fn mapping(name: &str) -> Option<Mapping> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Symbol {
-    pub name: String,
-    pub vaddr: u64,
-    pub size: u64,
-    pub kind: SymbolKind,
-    /// False for an undefined symbol, which names an import rather than a body.
-    pub defined: bool,
-    /// Whether this function's code is Thumb, which ARM states in the low bit
-    /// of the symbol's value. False on every other machine.
-    pub thumb: bool,
-}
-
-/// Why an address is a place execution can begin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryKind {
-    /// The format's declared entry point.
-    Main,
-    /// Listed in an initialiser or finaliser array.
-    Init,
-    Fini,
-    /// Named by a symbol typed as a function.
-    Symbol,
-    /// The C `main` the format names outright.
-    ///
-    /// Mach-O's `LC_MAIN` carries the offset of `main` itself, not of the
-    /// runtime's start routine, so the language's own declaration applies:
-    /// `main` returns `int`. An ELF entry is `_start`, which is a different
-    /// function and returns nothing, so this kind is never used for one.
-    CMain,
-    /// Listed in the Mach-O function-starts table.
-    ///
-    /// The linker writes one entry per function it laid out, so this is the
-    /// binary's own statement of where its functions begin -- including the
-    /// ones no symbol names and nothing calls directly.
-    Declared,
-}
-
-#[derive(Debug, Clone)]
-pub struct EntryPoint {
-    pub vaddr: u64,
-    pub kind: EntryKind,
-    /// Whether the address selected Thumb, on a machine where bit 0 does.
-    ///
-    /// The bit is not part of the address and is masked out of `vaddr`; what
-    /// it said about the instruction set is kept here, exactly as it is for a
-    /// symbol. A static ARM binary whose `e_entry` is odd starts in Thumb, and
-    /// decoding it as ARM produces plausible instructions that are not there.
-    pub thumb: bool,
-}
-
-/// One slot the loader fills with the address of a symbol.
-///
-/// The slot is where the pointer goes, not where the code is: a call to an
-/// import reaches a stub that reads this slot, so naming the stub means
-/// following the stub's own read back to here.
-#[derive(Debug, Clone)]
-pub struct Relocation {
-    pub vaddr: u64,
-    pub symbol: String,
-}
-
 /// The address a code pointer names, with the mode bit taken off.
 ///
 /// On 32-bit ARM the low bit of a function's address selects Thumb rather than
@@ -219,7 +57,7 @@ pub struct Relocation {
 /// itself and every instruction after it read from the wrong place.
 ///
 /// The mode the bit selected is kept beside the address, as `Symbol::thumb`.
-fn code_address(arch: &ImageArch, value: u64) -> u64 {
+fn code_address(arch: &Arch, value: u64) -> u64 {
     match is_arm32(arch) {
         true => value & !1,
         false => value,
@@ -227,7 +65,7 @@ fn code_address(arch: &ImageArch, value: u64) -> u64 {
 }
 
 /// Whether the low bit of a function's address selects Thumb on this machine.
-fn is_arm32(arch: &ImageArch) -> bool {
+fn is_arm32(arch: &Arch) -> bool {
     arch.name == "ARM" && arch.bits == 32
 }
 
@@ -563,17 +401,9 @@ where
 #[derive(Debug, Clone)]
 pub struct Image {
     data: Vec<u8>,
-    format: Format,
-    arch: ImageArch,
-    base_address: u64,
-    segments: Vec<Segment>,
-    sections: Vec<Section>,
-    symbols: Vec<Symbol>,
-    debug_prototypes: debug::DebugPrototypes,
-    entry_points: Vec<EntryPoint>,
-    relocations: Vec<Relocation>,
-    /// The bytes the loader writes before the program runs, sorted and disjoint.
-    loader_writes: Vec<std::ops::Range<u64>>,
+    /// What the container states, read once: nothing after the parse changes
+    /// which sections, symbols or relocations exist.
+    container: Container,
     /// Bytes written over the file's own, by address.
     ///
     /// A patch is a layer rather than an edit: the file on disk is untouched
@@ -812,9 +642,9 @@ impl Image {
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
-        let debug_prototypes = debug::read(&file);
+        let declared = debug::read(&file).prototypes().collect();
 
-        let mut entry_points = Vec::new();
+        let mut entries = Vec::new();
         let declared_entry = file.entry();
         let entry = code_address(&arch, declared_entry);
         if entry != 0 {
@@ -825,7 +655,7 @@ impl Image {
                 file_offset_to_vaddr(&segments, entry).filter(|vaddr| executable(*vaddr))
             };
             if let Some(vaddr) = vaddr {
-                entry_points.push(EntryPoint {
+                entries.push(Entry {
                     vaddr,
                     kind: EntryKind::Main,
                     thumb: is_arm32(&arch) && declared_entry & 1 == 1,
@@ -834,7 +664,7 @@ impl Image {
         }
         for symbol in &symbols {
             if symbol.kind == SymbolKind::Function && symbol.defined && executable(symbol.vaddr) {
-                entry_points.push(EntryPoint {
+                entries.push(Entry {
                     vaddr: symbol.vaddr,
                     kind: EntryKind::Symbol,
                     thumb: symbol.thumb,
@@ -856,7 +686,7 @@ impl Image {
                 let raw = read_pointer(slot, arch.endian);
                 let vaddr = code_address(&arch, raw);
                 if vaddr != 0 {
-                    entry_points.push(EntryPoint {
+                    entries.push(Entry {
                         vaddr,
                         kind,
                         thumb: is_arm32(&arch) && raw & 1 == 1,
@@ -867,7 +697,7 @@ impl Image {
         if let Some(vaddr) = macho_c_main(&file, data.as_slice())
             && executable(vaddr)
         {
-            entry_points.push(EntryPoint {
+            entries.push(Entry {
                 vaddr,
                 kind: EntryKind::CMain,
                 thumb: false,
@@ -877,28 +707,30 @@ impl Image {
         // symbol names and nothing calls is still stated here.
         for vaddr in macho_function_starts(&file, data.as_slice()) {
             if executable(vaddr) {
-                entry_points.push(EntryPoint {
+                entries.push(Entry {
                     vaddr,
                     kind: EntryKind::Declared,
                     thumb: false,
                 });
             }
         }
-        entry_points.sort_by_key(|entry| (entry.vaddr, entry.kind as u8));
-        entry_points.dedup_by_key(|entry| (entry.vaddr, entry.kind as u8));
+        entries.sort_by_key(|entry| (entry.vaddr, entry.kind as u8));
+        entries.dedup_by_key(|entry| (entry.vaddr, entry.kind as u8));
 
         Ok(Self {
             data,
-            format,
-            arch,
-            base_address,
-            segments,
-            sections,
-            symbols,
-            debug_prototypes,
-            entry_points,
-            relocations,
-            loader_writes,
+            container: Container {
+                format,
+                arch,
+                base_address,
+                segments,
+                sections,
+                symbols,
+                relocations,
+                loader_writes,
+                entries,
+                declared,
+            },
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),
@@ -906,52 +738,51 @@ impl Image {
         })
     }
 
-    pub fn format(&self) -> Format {
-        self.format
+    /// Everything the container states, in the shape every reader shares.
+    pub const fn container(&self) -> &Container {
+        &self.container
     }
 
-    pub fn arch(&self) -> &ImageArch {
-        &self.arch
+    pub fn format(&self) -> Format {
+        self.container.format
+    }
+
+    pub fn arch(&self) -> &Arch {
+        &self.container.arch
     }
 
     pub fn base_address(&self) -> u64 {
-        self.base_address
+        self.container.base_address
     }
 
     pub fn segments(&self) -> &[Segment] {
-        &self.segments
+        &self.container.segments
     }
 
     pub fn sections(&self) -> &[Section] {
-        &self.sections
+        &self.container.sections
     }
 
     pub fn symbols(&self) -> &[Symbol] {
-        &self.symbols
-    }
-
-    /// What the binary's own debug information says its functions take and
-    /// return. Empty where it carries none.
-    pub fn debug_prototypes(&self) -> &debug::DebugPrototypes {
-        &self.debug_prototypes
+        &self.container.symbols
     }
 
     /// The slots the loader fills, in address order.
     pub fn relocations(&self) -> &[Relocation] {
-        &self.relocations
+        &self.container.relocations
     }
 
     /// The bytes the loader writes before the program runs, sorted and disjoint: what the file holds there is not what the program reads.
     pub fn loader_writes(&self) -> &[std::ops::Range<u64>] {
-        &self.loader_writes
+        &self.container.loader_writes
     }
 
-    pub fn entry_points(&self) -> &[EntryPoint] {
-        &self.entry_points
+    pub fn entry_points(&self) -> &[Entry] {
+        &self.container.entries
     }
 
     pub fn segment_at(&self, vaddr: u64) -> Option<&Segment> {
-        self.segments.iter().find(|segment| segment.contains(vaddr))
+        self.container.segment_at(vaddr)
     }
 
     /// Bytes at a virtual address, or `None` when the range is not all mapped.
@@ -1311,7 +1142,7 @@ fn map_architecture(
     arch: object::Architecture,
     is_64: bool,
     endianness: object::Endianness,
-) -> Result<ImageArch, ImageError> {
+) -> Result<Arch, ImageError> {
     let endian = match endianness {
         object::Endianness::Little => Endian::Little,
         object::Endianness::Big => Endian::Big,
@@ -1324,8 +1155,8 @@ fn map_architecture(
         object::Architecture::Arm => "ARM",
         other => return Err(ImageError::UnsupportedArchitecture(other)),
     };
-    Ok(ImageArch {
-        name,
+    Ok(Arch {
+        name: name.to_owned(),
         bits: if is_64 { 64 } else { 32 },
         endian,
     })
@@ -1354,20 +1185,16 @@ mod tests {
     fn image_with(segments: Vec<Segment>, data: Vec<u8>) -> Image {
         Image {
             data,
-            format: Format::Elf,
-            arch: ImageArch {
-                name: "x86-64",
-                bits: 64,
-                endian: Endian::Little,
+            container: Container {
+                format: Format::Elf,
+                arch: Arch {
+                    name: "x86-64".to_owned(),
+                    bits: 64,
+                    endian: Endian::Little,
+                },
+                segments,
+                ..Container::default()
             },
-            base_address: 0,
-            segments,
-            sections: Vec::new(),
-            symbols: Vec::new(),
-            entry_points: Vec::new(),
-            relocations: Vec::new(),
-            loader_writes: Vec::new(),
-            debug_prototypes: debug::DebugPrototypes::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),

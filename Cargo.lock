@@ -696,7 +696,6 @@ dependencies = [
  "clap",
  "insta",
  "r2engine",
- "r2il",
  "r2image",
  "serde_json",
 ]

@@ -26,6 +26,7 @@ fn a_session_starts_at_the_declared_entry_then_any_entry_then_the_code() {
             vsize,
             is_code,
             loaded: true,
+            ..Section::default()
         };
         assert_eq!(start(Literal::new().preceded_by(first)), Some(BASE));
     }

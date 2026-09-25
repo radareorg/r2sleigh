@@ -5,8 +5,8 @@ use std::ops::Range;
 
 use r2engine::discovery::Confidence;
 use r2engine::program::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Section, Segment,
-    Source, Symbol, SymbolKind,
+    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions, Section,
+    Segment, Source, Symbol, SymbolKind,
 };
 use r2engine::query::{AnnotationKind, Listing, Stop};
 
@@ -63,11 +63,11 @@ impl Source for Mixed {
 }
 
 fn opened() -> OpenProgram<Mixed> {
-    opened_as(r2il::Endianness::Little)
+    opened_as(Endian::Little)
 }
 
 /// ARM code, a Thumb function stated only by the entry point, and an ARM pool.
-fn opened_as(endian: r2il::Endianness) -> OpenProgram<Mixed> {
+fn opened_as(endian: Endian) -> OpenProgram<Mixed> {
     let mut mixed = arm_only(&CODE, endian);
     // `$a` at the ARM code too, which the Thumb function after it outranks.
     for vaddr in [ARM, DATA] {
@@ -88,12 +88,12 @@ fn opened_as(endian: r2il::Endianness) -> OpenProgram<Mixed> {
     OpenProgram::of(mixed)
 }
 
-fn opened_over(code: &'static [u8], endian: r2il::Endianness) -> OpenProgram<Mixed> {
+fn opened_over(code: &'static [u8], endian: Endian) -> OpenProgram<Mixed> {
     OpenProgram::of(arm_only(code, endian))
 }
 
 /// One ARM function spanning the whole of `code`.
-fn arm_only(code: &'static [u8], endian: r2il::Endianness) -> Mixed {
+fn arm_only(code: &'static [u8], endian: Endian) -> Mixed {
     Mixed {
         code,
         container: Container {
@@ -112,6 +112,7 @@ fn arm_only(code: &'static [u8], endian: r2il::Endianness) -> Mixed {
                     write: false,
                     execute: true,
                 },
+                ..Segment::default()
             }],
             sections: vec![Section {
                 name: ".text".to_owned(),
@@ -119,6 +120,7 @@ fn arm_only(code: &'static [u8], endian: r2il::Endianness) -> Mixed {
                 vsize: code.len() as u64,
                 is_code: true,
                 loaded: true,
+                ..Section::default()
             }],
             symbols: vec![Symbol {
                 name: "arm".to_owned(),
@@ -169,7 +171,7 @@ fn a_thumb_mapping_symbol_switches_one_arm_function_to_thumb() {
         defined: true,
         thumb: false,
     };
-    let mut mixed = arm_only(&CODE, r2il::Endianness::Little);
+    let mut mixed = arm_only(&CODE, Endian::Little);
     mixed.container.symbols.extend([
         mapping("$t", THUMB, Mapping::Thumb),
         mapping("$a", DATA, Mapping::Arm),
@@ -199,8 +201,8 @@ fn a_pool_word_reads_in_the_container_s_order_not_the_decoder_s() {
                 _ => None,
             })
     };
-    assert_eq!(holds(r2il::Endianness::Little), Some((DATA, 0xe3a0_0000)));
-    assert_eq!(holds(r2il::Endianness::Big), Some((DATA, 0x0000_a0e3)));
+    assert_eq!(holds(Endian::Little), Some((DATA, 0xe3a0_0000)));
+    assert_eq!(holds(Endian::Big), Some((DATA, 0x0000_a0e3)));
 }
 
 #[test]
@@ -208,7 +210,7 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
     // Sleigh lifts `sub pc, r3, 0x3f` as a branch, because that is the opcode;
     // the link register the specification names holding `0x100c` is what says
     // control comes back, so the transfer renders as a call.
-    let mut program = opened_over(&LINK_REGISTER_CALL, r2il::Endianness::Little);
+    let mut program = opened_over(&LINK_REGISTER_CALL, Endian::Little);
     let response = program
         .rendered(ARM, r2engine::RenderTier::C)
         .expect("it renders")
@@ -238,7 +240,7 @@ fn a_branch_that_leaves_a_return_address_is_a_call() {
 
 #[test]
 fn the_low_tier_spells_the_machine_registers() {
-    let mut program = opened_over(&LINK_REGISTER_CALL, r2il::Endianness::Little);
+    let mut program = opened_over(&LINK_REGISTER_CALL, Endian::Little);
     let lifted = program.lifted(ARM).expect("lifted");
     assert!(lifted.contains("Block 0x1000"), "{lifted}");
     // The link register is spelled, not offset-numbered, and the write to it
@@ -263,7 +265,7 @@ const HANDS_THUMB: [u8; 0x1c] = [
 fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
     // The pointer's low bit says Thumb, so the function is at the even
     // address and decodes as Thumb; the ARM decoder rejects its bytes.
-    let mut mixed = arm_only(&HANDS_THUMB, r2il::Endianness::Little);
+    let mut mixed = arm_only(&HANDS_THUMB, Endian::Little);
     mixed.container.symbols.push(Symbol {
         name: "atexit".to_owned(),
         vaddr: ARM + 0x10,
@@ -379,7 +381,7 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
     assert_eq!(walked, lifted.ops);
 
     // pd and pdf spell it as that decode does, not as a decoder starting at it.
-    let mut mixed = arm_only(&IT_BLOCK, r2il::Endianness::Little);
+    let mut mixed = arm_only(&IT_BLOCK, Endian::Little);
     mixed.container.symbols[0].thumb = true;
     let mut program = OpenProgram::of(mixed);
     let spelled = |lines: &[r2engine::query::Line]| {
@@ -402,7 +404,7 @@ fn an_instruction_an_it_predicates_is_listed_as_the_walk_decodes_it() {
 
 /// One Thumb function spanning the whole of `code`.
 fn thumb_over(code: &'static [u8]) -> OpenProgram<Mixed> {
-    let mut mixed = arm_only(code, r2il::Endianness::Little);
+    let mut mixed = arm_only(code, Endian::Little);
     mixed.container.symbols[0].thumb = true;
     OpenProgram::of(mixed)
 }

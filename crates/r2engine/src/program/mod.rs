@@ -16,8 +16,8 @@ pub mod source;
 pub use requests::{AnalysisRefused, FunctionListing, Rendering};
 
 pub use source::{
-    Arch, Container, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section, Segment,
-    Source, Symbol, SymbolKind,
+    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section,
+    Segment, Source, Symbol, SymbolKind,
 };
 
 use std::collections::BTreeMap;
@@ -358,7 +358,7 @@ impl<S: Source> OpenProgram<S> {
         let mut prototypes = r2abi::Prototypes::embedded_for(match container.format {
             Format::Elf => r2abi::Platform::Linux,
             Format::MachO => r2abi::Platform::Darwin,
-            Format::Other => r2abi::Platform::Unknown,
+            _ => r2abi::Platform::Unknown,
         });
         // What the binary's own debug information says beats the shared table:
         // the table describes what a library is expected to look like, and
@@ -517,7 +517,10 @@ impl<S: Source> OpenProgram<S> {
     /// Sleigh specification gives the wrong answer on exactly the binaries
     /// that have literal pools.
     pub fn endian(&self) -> r2il::Endianness {
-        self.source.container().arch.endian
+        match self.source.container().arch.endian {
+            Endian::Little => r2il::Endianness::Little,
+            Endian::Big => r2il::Endianness::Big,
+        }
     }
 }
 
