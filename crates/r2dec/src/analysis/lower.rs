@@ -72,6 +72,16 @@ pub(crate) enum OpLoweringRefusal {
     MissingProgramVariableAuthorization(RefusalOrigin),
     UnrepresentableOperation(RefusalOrigin),
     VariadicCallsiteArgumentCount(r2ssa::VariadicCallsiteArgumentCountRefusal),
+    /// A value the specification's user operation `userop` produces, which
+    /// the lift gave no semantics and the machine projection therefore
+    /// refused. The operation is sited in the function's SSA form, as `pdim`
+    /// prints it: `block` is the address of its block and `op` its index
+    /// among that block's operations.
+    UnmodelledUserOperation {
+        userop: u32,
+        block: u64,
+        op: usize,
+    },
 }
 
 impl std::fmt::Debug for OpLoweringRefusal {
@@ -84,6 +94,9 @@ impl std::fmt::Debug for OpLoweringRefusal {
         if let Self::VariadicCallsiteArgumentCount(refusal) = self {
             return write!(f, "VariadicCallsiteArgumentCount({})", refusal.kind());
         }
+        if let Self::UnmodelledUserOperation { userop, block, op } = self {
+            return write!(f, "UnmodelledUserOperation({userop} at {block:#x}:{op})");
+        }
         let (kind, origin) = match self {
             Self::MissingMachineProjectionAuthorization(origin) => {
                 ("MissingMachineProjectionAuthorization", origin)
@@ -92,7 +105,9 @@ impl std::fmt::Debug for OpLoweringRefusal {
                 ("MissingProgramVariableAuthorization", origin)
             }
             Self::UnrepresentableOperation(origin) => ("UnrepresentableOperation", origin),
-            Self::VariadicCallsiteArgumentCount(_) => unreachable!(),
+            Self::VariadicCallsiteArgumentCount(_) | Self::UnmodelledUserOperation { .. } => {
+                unreachable!()
+            }
         };
         write!(f, "{kind}({origin:?})")
     }
@@ -124,6 +139,11 @@ impl OpLoweringRefusal {
         Self::VariadicCallsiteArgumentCount(refusal)
     }
 
+    /// A value of a user operation the lift left without semantics.
+    pub(crate) const fn unmodelled_user_operation(userop: u32, block: u64, op: usize) -> Self {
+        Self::UnmodelledUserOperation { userop, block, op }
+    }
+
     #[track_caller]
     pub(crate) fn unrepresentable_operation() -> Self {
         Self::UnrepresentableOperation(Self::note("unrepresentable-operation"))
@@ -136,6 +156,7 @@ impl OpLoweringRefusal {
             Self::MissingProgramVariableAuthorization(_) => "program-variable",
             Self::UnrepresentableOperation(_) => "unrepresentable-operation",
             Self::VariadicCallsiteArgumentCount(refusal) => refusal.kind(),
+            Self::UnmodelledUserOperation { .. } => "unmodelled-user-operation",
         }
     }
 
@@ -150,6 +171,9 @@ impl OpLoweringRefusal {
             // A variadic count refusal is decided by the source facts rather
             // than at a lowering site, so it has no location to name.
             Self::VariadicCallsiteArgumentCount(_) => "source callsite facts".to_string(),
+            // Decided by the machine projection, which is where the operation
+            // was found to have no semantics; the renderer only reads it.
+            Self::UnmodelledUserOperation { .. } => "machine projection".to_string(),
         }
     }
 }

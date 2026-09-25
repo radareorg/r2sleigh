@@ -749,7 +749,7 @@ fn read_end_bits_through_merges(
     let member_width_bits = value_width_bits(source_owned, value)?;
     // A member C cannot spell is not declared at any width: rounding it up
     // would claim bits nothing defines.
-    if !declaration_width_is_supported(member_width_bits) {
+    if !crate::bitvector::is_field(member_width_bits) {
         return Ok(Err(ValueRefusal::UnsupportedDeclarationWidth {
             value,
             width_bits: member_width_bits,

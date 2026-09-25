@@ -712,7 +712,7 @@ pub fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
         CTypeLike::Float(32) => "float".to_string(),
         CTypeLike::Float(64) => "double".to_string(),
         CTypeLike::Float(bits) => format!("float{bits}"),
-        CTypeLike::BitVector(bits) => format!("struct r2sleigh_bits_{bits}"),
+        CTypeLike::BitVector(bits) => format!("struct {}", crate::convert::bit_vector_tag(bits)),
         CTypeLike::Pointer(inner) => format!("{}*", render_signature_type(&inner, ptr_bits)),
         CTypeLike::Array(inner, Some(size)) => {
             format!("{}[{}]", render_signature_type(&inner, ptr_bits), size)

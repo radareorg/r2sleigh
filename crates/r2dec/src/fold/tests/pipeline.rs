@@ -2118,7 +2118,9 @@ mod tests {
             output.starts_with("/* r2dec gap: UnprovenReturn */ gap_between("),
             "{output}"
         );
-        let gaps = output.matches("r2dec gap: machine-projection").count();
+        // The gap names the class of what it could not prove: a value of a
+        // user operation the lift gives no semantics.
+        let gaps = output.matches("r2dec gap: unmodelled-user-operation").count();
         assert_eq!(gaps, 1, "one operation refused, so one marker: {output}");
         assert_eq!(
             output.matches(" + 7").count(),

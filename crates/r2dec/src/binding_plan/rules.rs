@@ -48,7 +48,7 @@ use super::{
     BindingPlanBuildError, BindingPlanSourceMismatch, ParameterRefusal, SemanticId,
     certified_direct_call_target_values, certified_direct_control_target_values,
     certified_elided_read_instructions, certified_return_control_values,
-    certified_stack_frame_values, certified_stack_geometry_values, declaration_width_is_supported,
+    certified_stack_frame_values, certified_stack_geometry_values,
 };
 
 /// One ABI slot's evidence, before either derivation turns it into a
@@ -361,7 +361,7 @@ pub(super) fn parameter_width(
             slot,
             size_bytes: width_bytes,
         })?;
-    declaration_width_is_supported(width_bits)
+    crate::bitvector::is_field(width_bits)
         .then_some(width_bits)
         .ok_or(ParameterRefusal::UnsupportedWidth {
             entity,

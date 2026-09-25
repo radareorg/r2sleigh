@@ -1572,9 +1572,9 @@ def file_scope_preamble(section: str, name: str) -> list[str]:
     if body is None:
         return []
     start = section.find(body.rstrip())
-    # Top-level chunks, one declaration each, so a struct spanning several
-    # lines travels whole. The bit-vector structs are the prelude's own and
-    # would be redefined.
+    # Top-level chunks, one declaration each, so a struct or a helper spanning
+    # several lines travels whole. A wide carrier and the helpers called on it
+    # are the rendering's own definitions, and travel with it like any other.
     chunks: list[str] = []
     current: list[str] = []
     depth = 0
@@ -1588,7 +1588,7 @@ def file_scope_preamble(section: str, name: str) -> list[str]:
             current = []
     if current:
         chunks.append("\n".join(current))
-    return [chunk for chunk in chunks if not chunk.startswith("struct r2sleigh_bits_")]
+    return chunks
 
 
 def normalize_linkage_name(source: str, name: str) -> tuple[str, dict[str, Any]]:
@@ -1684,7 +1684,8 @@ def callee_definitions(
         if body is None:
             notes.append({"callee": bare, "status": "unparsable", "detail": error})
             continue
-        definitions.append("\n".join([*file_scope_preamble(section, bare), body]))
+        definitions.extend(file_scope_preamble(section, bare))
+        definitions.append(body)
         notes.append({"callee": bare, "status": "rendered"})
         pending.extend(
             spelled.removeprefix("sym__") for spelled in declared_callees(body)
@@ -2333,13 +2334,15 @@ def runner_source(
     # would contradict both (`size_t` is `unsigned long` there and a
     # `uint64_t` here; `snprintf` is a fortify macro). The harness main lives
     # in a second unit and reaches the function through its own prototype.
+    # Each rendering is its own translation unit and defines what it uses, so
+    # a caller and a callee that both use one wide carrier both define it.
+    # Put in one unit, a definition is stated once, where it first appears.
+    definitions = list(dict.fromkeys([*(preamble or []), *blobs, *(callee_sources or [])]))
     function_unit = "\n".join(
         [
             "#include <stdint.h>",
             BITVECTOR_PRELUDE,
-            *(preamble or []),
-            *blobs,
-            *(callee_sources or []),
+            *definitions,
             function_source,
             "",
         ]

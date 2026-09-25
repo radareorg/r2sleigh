@@ -51,7 +51,7 @@ pub use context::{
     sanitize_c_identifier,
 };
 pub use convert::{
-    CTypeLike, c_object_declaration, parse_c_type_like, spellable_c_type_like,
+    CTypeLike, bit_vector_tag, c_object_declaration, parse_c_type_like, spellable_c_type_like,
     spelling_names_a_type,
 };
 pub use data_object::{

@@ -2779,7 +2779,7 @@ impl EngineSession {
             );
         }
         if !rendering_stopped && let Some(refusal) = render_refusal {
-            let reason = render_refusal_reason(refusal);
+            let reason = render_refusal_reason(refusal, &response_function_facts);
             metrics.record_phase(
                 EnginePhase::Rendering,
                 EnginePhaseStatus::Refused,
@@ -2904,8 +2904,23 @@ fn refusal_variant_name(debug: &str) -> String {
         .to_string()
 }
 
-fn render_refusal_reason(refusal: DecompileRenderRefusal) -> String {
+/// Why the renderer refused, for a reader.
+///
+/// A user operation the lift gives no semantics is named from the
+/// specification's own table, so the next opaque instruction a compiler emits
+/// says which one it is rather than where in the renderer it was noticed.
+fn render_refusal_reason(refusal: DecompileRenderRefusal, facts: &FunctionFacts) -> String {
     match refusal {
+        DecompileRenderRefusal::UnmodelledUserOperation { userop, block, op } => {
+            match facts.user_operation_name(userop) {
+                Some(name) => format!(
+                    "native rendering refused: unmodelled machine operation {name} at {block:#x}:{op}"
+                ),
+                None => format!(
+                    "native rendering refused: unmodelled machine operation #{userop} at {block:#x}:{op}"
+                ),
+            }
+        }
         DecompileRenderRefusal::MissingMachineProjectionAuthorization(origin) => {
             format!(
                 "native rendering refused: missing machine projection authorization: {origin:?}"

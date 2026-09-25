@@ -74,6 +74,13 @@ impl EmissionReadyFunction {
         self.function.aggregates = aggregates;
     }
 
+    pub(crate) fn set_bitvector_helpers(
+        &mut self,
+        helpers: Vec<crate::bitvector::BitVectorHelper>,
+    ) {
+        self.function.bitvector_helpers = helpers;
+    }
+
     pub(crate) fn set_typedef_definitions(&mut self, typedefs: Vec<crate::ast::CTypedefDef>) {
         self.function.typedefs = typedefs;
     }
@@ -152,6 +159,7 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             externs: func.externs,
             typedefs: func.typedefs,
             aggregates: func.aggregates,
+            bitvector_helpers: func.bitvector_helpers,
             extern_objects: func.extern_objects,
             declaration_only: func.declaration_only,
         },
@@ -273,6 +281,13 @@ impl<'c> CodeGenerator<'c> {
             self.output.push_str("};\n");
         }
         if !func.aggregates.is_empty() {
+            self.output.push('\n');
+        }
+
+        // What the body calls on a carrier wider than any C integer, so the
+        // rendering compiles on its own.
+        for helper in &func.bitvector_helpers {
+            self.output.push_str(&helper.definition());
             self.output.push('\n');
         }
 
@@ -1187,6 +1202,7 @@ mod tests {
             }],
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "snprintf".to_string(),
             ret_type: CType::i32(),
@@ -1230,6 +1246,7 @@ mod tests {
                 },
             ],
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "f".to_string(),
             ret_type: CType::Void,
@@ -1260,6 +1277,7 @@ mod tests {
             externs: Vec::new(),
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "add".to_string(),
             ret_type: CType::i32(),
@@ -1298,6 +1316,7 @@ mod tests {
             externs: Vec::new(),
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "uses_stack_buffer".to_string(),
             ret_type: CType::Void,
@@ -1337,6 +1356,7 @@ mod tests {
                 }],
                 typedefs: Vec::new(),
                 aggregates: Vec::new(),
+                bitvector_helpers: Vec::new(),
                 extern_objects: Vec::new(),
                 name: "caller".to_string(),
                 ret_type: CType::Void,
@@ -1389,6 +1409,7 @@ mod tests {
             externs: Vec::new(),
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "observed".to_string(),
             ret_type: CType::i32(),
@@ -1635,6 +1656,7 @@ mod tests {
             externs: Vec::new(),
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "test".to_string(),
             ret_type: CType::Void,

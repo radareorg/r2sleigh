@@ -588,9 +588,10 @@ const MAX_SPELLABLE_CONSTANT_BITS: u32 = 128;
 /// Whether a constant of this width has a C spelling.
 ///
 /// A literal reaches 128 bits. Above that the value still has one wherever the
-/// bit-vector prelude carries the width, because a `u64` payload is spelled as
-/// its zero extension into the carrier -- which is exactly what a wider
-/// constant in this model is: a narrow value the lift gave a wide varnode.
+/// renderer defines a carrier helper for the width (`r2dec::bitvector`),
+/// because a `u64` payload is spelled as its zero extension into the carrier
+/// -- which is exactly what a wider constant in this model is: a narrow value
+/// the lift gave a wide varnode.
 const fn constant_width_is_spellable(width_bits: u32) -> bool {
     width_bits <= MAX_SPELLABLE_CONSTANT_BITS || matches!(width_bits, 256 | 512)
 }
@@ -839,6 +840,20 @@ pub enum MachineUseRefusal {
     InvalidBitRange,
     /// The value-producing instruction is outside the machine vocabulary.
     UnsupportedOperation,
+    /// The value-producing instruction is a user operation the specification
+    /// declares as `userop` and the lift gives no semantics.
+    ///
+    /// A class of its own because it names what is missing: the operation is
+    /// the specification's, its meaning is the lift's to state, and which one
+    /// it was is the whole of what a reader needs to act on it. Like every
+    /// refusal of an instruction that could not be projected, it is carried
+    /// by each of that instruction's own operands, so the use's instruction
+    /// is the operation; its write carries
+    /// [`MachineWriteRefusal::UnmodelledUserOperation`]. This is the one
+    /// place the class is decided, and consumers read it.
+    UnmodelledUserOperation {
+        userop: u32,
+    },
     /// Operand counts, widths, or slices were internally incoherent.
     IncoherentOperation,
 }
@@ -895,6 +910,10 @@ pub enum MachineWriteRefusal {
     RegisterGeometry(r2il::RegisterProjectionRefusal),
     InvalidBitRange,
     UnsupportedOperation,
+    /// See [`MachineUseRefusal::UnmodelledUserOperation`].
+    UnmodelledUserOperation {
+        userop: u32,
+    },
     IncoherentOperation,
 }
 
@@ -1816,7 +1835,22 @@ fn is_local_projection_failure(error: &MachineBuildError, inst: InstId) -> bool 
     )
 }
 
+/// The user operation a projection failure is, where it is one: an operation
+/// the specification names and the lift left without semantics.
+fn unmodelled_user_operation(error: &MachineBuildError) -> Option<u32> {
+    match error {
+        MachineBuildError::UnsupportedOperation { op, .. } => match op.as_ref() {
+            SSAOp::CallOther { userop, .. } => Some(*userop),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn use_refusal_for_error(error: &MachineBuildError) -> MachineUseRefusal {
+    if let Some(userop) = unmodelled_user_operation(error) {
+        return MachineUseRefusal::UnmodelledUserOperation { userop };
+    }
     match error {
         MachineBuildError::UnsupportedOperation { inst, op } => {
             // The flattened refusal keeps only the class, and the operation is
@@ -1832,6 +1866,9 @@ fn use_refusal_for_error(error: &MachineBuildError) -> MachineUseRefusal {
 }
 
 fn write_refusal_for_error(error: &MachineBuildError) -> MachineWriteRefusal {
+    if let Some(userop) = unmodelled_user_operation(error) {
+        return MachineWriteRefusal::UnmodelledUserOperation { userop };
+    }
     match error {
         MachineBuildError::UnsupportedOperation { .. } => MachineWriteRefusal::UnsupportedOperation,
         _ => MachineWriteRefusal::IncoherentOperation,

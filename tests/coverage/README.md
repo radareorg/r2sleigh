@@ -32,12 +32,23 @@ fifty-four cells matching and still stop a hundred other functions rendering.
 A function in the baseline that was not swept also fails, so a sweep that
 silently stopped covering something cannot pass.
 
+A function that rendered in the baseline and now gaps more of itself fails
+too. A marked gap renders -- the rest of the body is still shown -- and is not
+proven, and the proof line counts the obligations the gaps account for. A
+function whose count rises, or which moves from clean to gapped, has lost part
+of its body exactly as a refusal loses all of it: `_crc32_init` once scored
+`rendered` with 242 of its 274 obligations gapped. The baseline records the
+count for every gapped function; a baseline blessed before gaps were counted
+has no such record, and the report refuses to compare against it until it is
+re-blessed.
+
 Everything else is reported and does not fail. A function that now renders, a
-function that is new, and a refusal whose cause changed are all printed; the
-first two ask to be re-blessed. A cause is normalised before comparison --
-counts of refused obligations, and the line numbers inside a refusal's site --
-because a baseline that churns on those is a baseline nobody re-blesses
-honestly.
+function that is new, a gap that narrowed, and a refusal whose cause changed
+are all printed; the first three ask to be re-blessed. A cause is normalised
+before comparison -- counts of refused obligations, addresses, and the line
+numbers inside a refusal's site -- because a baseline that churns on those is a
+baseline nobody re-blesses honestly. A digit inside a name is kept, so the
+`vpmovsxbd_avx2` a refusal names stays distinct from `vpmovsxbd_avx512vl`.
 
 Why the compiler is recorded
 ----------------------------

@@ -257,7 +257,7 @@ impl<'a> EvidenceBuilder<'a> {
             let Some(bits) = var.size.checked_mul(8) else {
                 continue;
             };
-            if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
+            if !CTypeLike::is_integer_width(bits) {
                 continue;
             }
             for evidence in evidence {

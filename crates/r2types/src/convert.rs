@@ -1,5 +1,14 @@
 use crate::model::{Signedness, Type, TypeArena, TypeId};
 
+/// What every bit-vector struct tag starts with.
+const BIT_VECTOR_TAG_PREFIX: &str = "r2sleigh_bits_";
+
+/// The struct tag a bit vector of `bits` is declared at: the one spelling of
+/// it, which the type spellings here print and parse and the renderer defines.
+pub fn bit_vector_tag(bits: u32) -> String {
+    format!("{BIT_VECTOR_TAG_PREFIX}{bits}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum CTypeLike {
     Void,
@@ -10,11 +19,12 @@ pub enum CTypeLike {
     },
     Float(u32),
     /// An exact machine bitvector wider than, or not expressible in, C's native
-    /// integer domain.
+    /// integer domain, declared at the struct tag [`bit_vector_tag`] names.
     ///
-    /// Distinct from `Int` on purpose: the external C prelude owns the limb
-    /// representation, and keeping it apart is what stops ordinary C arithmetic
-    /// and casts being emitted for a value the language has no scalar for.
+    /// Distinct from `Int` on purpose: keeping it apart is what stops ordinary
+    /// C arithmetic and casts being emitted for a value the language has no
+    /// scalar for. The renderer owns the struct's layout and the helpers that
+    /// operate on it (`r2dec::bitvector`).
     BitVector(u32),
     Pointer(Box<CTypeLike>),
     Array(Box<CTypeLike>, Option<usize>),
@@ -121,15 +131,28 @@ impl CTypeLike {
         Self::uint(64)
     }
 
+    /// Whether C has an integer exactly `bits` wide: `uint8_t` through
+    /// `uint64_t`, or `__uint128_t`.
+    ///
+    /// The one statement of which machine widths are C integers. The supported
+    /// compiler contract has scalar integer spellings through 128 bits; any
+    /// other width is a [`CTypeLike::BitVector`] carrier rather than an
+    /// invented name such as `uint256_t`.
+    pub const fn is_integer_width(bits: u32) -> bool {
+        matches!(bits, 8 | 16 | 32 | 64 | 128)
+    }
+
     /// Exact unsigned machine storage of the given width.
     ///
-    /// C has scalar integer spellings through 128 bits in the supported
-    /// compiler contract. Wider or unaligned carriers use the limb-backed
-    /// external prelude instead of inventing names such as `uint256_t`.
+    /// An unsigned integer where [`Self::is_integer_width`] says C has one,
+    /// and otherwise a [`CTypeLike::BitVector`] carrier of the whole width,
+    /// whose representation the renderer defines in each rendering that
+    /// declares one.
     pub const fn machine_bits(bits: u32) -> Self {
-        match bits {
-            8 | 16 | 32 | 64 | 128 => Self::uint(bits),
-            _ => CTypeLike::BitVector(bits),
+        if Self::is_integer_width(bits) {
+            Self::uint(bits)
+        } else {
+            CTypeLike::BitVector(bits)
         }
     }
 
@@ -367,7 +390,7 @@ pub fn render_c_type_like(ty: &CTypeLike) -> String {
         CTypeLike::Float(32) => "float".to_string(),
         CTypeLike::Float(64) => "double".to_string(),
         CTypeLike::Float(bits) => format!("float{bits}"),
-        CTypeLike::BitVector(bits) => format!("struct r2sleigh_bits_{bits}"),
+        CTypeLike::BitVector(bits) => format!("struct {}", bit_vector_tag(*bits)),
         CTypeLike::Pointer(inner) => format!("{}*", render_c_type_like(inner)),
         CTypeLike::Array(inner, Some(size)) => format!("{}[{}]", render_c_type_like(inner), size),
         CTypeLike::Array(inner, None) => format!("{}[]", render_c_type_like(inner)),
@@ -553,7 +576,8 @@ fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
         ));
     }
     if let Some(bits) = spelling
-        .strip_prefix("struct r2sleigh_bits_")
+        .strip_prefix("struct ")
+        .and_then(|tag| tag.strip_prefix(BIT_VECTOR_TAG_PREFIX))
         .and_then(|bits| bits.parse::<u32>().ok())
     {
         return Some(CTypeLike::BitVector(bits));

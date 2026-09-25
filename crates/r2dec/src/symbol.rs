@@ -102,6 +102,9 @@ pub enum ExternalKind {
     Global,
     /// An operation the target defines that C has no operator for.
     Intrinsic,
+    /// An operation on a carrier wider than any C integer, which the
+    /// rendering defines above the function it is called from.
+    BitVector(crate::bitvector::BitVectorHelper),
 }
 
 impl std::fmt::Display for ExternalKind {
@@ -111,6 +114,7 @@ impl std::fmt::Display for ExternalKind {
             Self::Import => "import",
             Self::Global => "global",
             Self::Intrinsic => "intrinsic",
+            Self::BitVector(_) => "bit-vector helper",
         })
     }
 }

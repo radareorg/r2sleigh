@@ -161,10 +161,6 @@ pub(crate) enum ValueRefusal {
     },
 }
 
-const fn declaration_width_is_supported(width_bits: u32) -> bool {
-    matches!(width_bits, 8 | 16 | 32 | 64 | 128 | 256 | 512)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ValueDisposition {
     Bound {

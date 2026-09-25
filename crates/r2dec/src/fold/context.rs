@@ -1444,15 +1444,27 @@ impl<'a> FoldingContext<'a> {
         self.inputs.prepared_ssa?.inst_op_site(inst)
     }
 
-    pub(crate) fn current_source_op_site(&self) -> Option<(u64, usize)> {
-        let block_addr = self.current_block_addr.get()?;
+    /// The source instruction the operation being lowered implements, where
+    /// it implements one: an operation normalization inserted -- a phi-edge
+    /// copy, a relocated initializer -- implements none.
+    pub(crate) fn current_source_inst(&self) -> Option<InstId> {
         let op_idx = self.current_op_idx.get()?;
-        if let Some(block) = self.current_block_id.get() {
-            let inst =
+        match self.current_block_id.get() {
+            Some(block) => {
                 self.source_inst_for_normalized_site(crate::normalize::NormalizedOpSite {
                     block,
                     op_idx,
-                })?;
+                })
+            }
+            None => self.source_inst_for_normalized_op(self.current_block_addr.get()?, op_idx),
+        }
+    }
+
+    pub(crate) fn current_source_op_site(&self) -> Option<(u64, usize)> {
+        let block_addr = self.current_block_addr.get()?;
+        let op_idx = self.current_op_idx.get()?;
+        if self.current_block_id.get().is_some() {
+            let inst = self.current_source_inst()?;
             return self.inputs.prepared_ssa?.inst_op_site(inst);
         }
         self.source_op_site_for_normalized_op(block_addr, op_idx)

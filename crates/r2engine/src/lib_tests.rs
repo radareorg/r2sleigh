@@ -1551,7 +1551,7 @@ fn renderer_boundary_refusal_produces_a_typed_engine_refusal() {
     let render_refusal = DecompileRenderRefusal::MissingMachineProjectionAuthorization(
         r2dec::MachineProjectionRefusalOrigin::op_lowering(),
     );
-    let reason = render_refusal_reason(render_refusal);
+    let reason = render_refusal_reason(render_refusal, &FunctionFacts::default());
     let render_time = Duration::from_micros(19);
     let mut metrics = EngineMetrics::default();
     metrics.record_phase(
@@ -1598,9 +1598,12 @@ fn renderer_boundary_refusal_produces_a_typed_engine_refusal() {
 
 #[test]
 fn variadic_count_refusal_names_the_missing_callsite_evidence() {
-    let reason = render_refusal_reason(DecompileRenderRefusal::VariadicCallsiteArgumentCount(
-        r2ssa::VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral,
-    ));
+    let reason = render_refusal_reason(
+        DecompileRenderRefusal::VariadicCallsiteArgumentCount(
+            r2ssa::VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral,
+        ),
+        &FunctionFacts::default(),
+    );
     assert_eq!(
         reason,
         "native rendering refused: variadic callsite argument count: format_argument_not_literal"

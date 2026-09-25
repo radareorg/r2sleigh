@@ -287,9 +287,10 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
     if matches!(to, CType::Bool) {
         return expr;
     }
-    // Nothing is known about one side, or it has no C conversion at all:
-    // a limb-backed bitvector is converted by the prelude's helpers, and a
-    // structure or union by the access that names a member.
+    // Nothing is known about one side, or it has no C conversion at all: a
+    // wide carrier is converted only by a helper `crate::bitvector` defines
+    // in the rendering, and a structure or union by the access that names a
+    // member.
     if matches!(
         from,
         CType::Unknown | CType::Void | CType::BitVector(_) | CType::Struct(_) | CType::Union(_)

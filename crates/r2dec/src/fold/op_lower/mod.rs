@@ -117,6 +117,7 @@ use memory_renderer::CertifiedMemberRunStore;
 mod projection;
 mod subscript_renderer;
 mod typing;
+mod wide;
 
 #[derive(Debug, Clone, PartialEq)]
 enum LoweredOp {
@@ -426,36 +427,18 @@ fn linear_coeff_expr(term: CExpr, coeff: i64) -> Option<CExpr> {
     }
 }
 
-/// Get a C type from a bit size.
+/// The signed C type of a value `size` bytes wide: the signed integer where C
+/// has one, and otherwise what [`uint_type_from_size`] says.
 fn type_from_size(size: u32) -> CType {
-    match size {
-        0 => CType::Unknown,
-        1 => CType::Int {
-            bits: 8,
+    match uint_type_from_size(size) {
+        CType::Int { bits, .. } => CType::Int {
+            bits,
             signedness: r2types::Signedness::Signed,
         },
-        2 => CType::Int {
-            bits: 16,
-            signedness: r2types::Signedness::Signed,
-        },
-        4 => CType::Int {
-            bits: 32,
-            signedness: r2types::Signedness::Signed,
-        },
-        8 => CType::Int {
-            bits: 64,
-            signedness: r2types::Signedness::Signed,
-        },
-        16 => CType::Int {
-            bits: 128,
-            signedness: r2types::Signedness::Signed,
-        },
-        _ => CType::BitVector(size.saturating_mul(8)),
+        other => other,
     }
 }
 
-/// One constant, spelled as a literal or -- where the width is one only the
-/// bit-vector prelude carries -- as the zero extension of its `u64` payload.
 /// A floating constant's spelling: a finite value as the shortest literal
 /// that reads back exactly, an infinity as the builtin, the canonical quiet
 /// NaN as the builtin, and any other NaN payload as nothing, since no C
@@ -490,15 +473,12 @@ pub(super) fn float_literal(bits: u64, width_bits: u32) -> Option<CExpr> {
     Some(CExpr::FloatLit(value, width_bits))
 }
 
+/// One constant, spelled as a literal or -- where the width is a carrier
+/// `crate::bitvector` defines -- as the zero extension of its `u64` payload,
+/// through the helper the rendering defines for it.
 fn wide_aware_literal(bits: u64, width_bits: u32) -> CExpr {
-    if projection::c_bitvector_width_is_supported(width_bits) {
-        return CExpr::call(
-            CExpr::External {
-                name: format!("r2sleigh_bits_zero_extend_64_{width_bits}"),
-                kind: crate::symbol::ExternalKind::Intrinsic,
-            },
-            vec![CExpr::UIntLit(bits)],
-        );
+    if let Some(zero_extend) = crate::bitvector::BitVectorHelper::zero_extend(64, width_bits) {
+        return zero_extend.call(vec![CExpr::UIntLit(bits)]);
     }
     if bits > i64::MAX as u64 {
         CExpr::UIntLit(bits)
@@ -507,30 +487,12 @@ fn wide_aware_literal(bits: u64, width_bits: u32) -> CExpr {
     }
 }
 
+/// The unsigned C type of a value `size` bytes wide: nothing known of an
+/// empty one, and otherwise the machine storage of its width.
 fn uint_type_from_size(size: u32) -> CType {
     match size {
         0 => CType::Unknown,
-        1 => CType::Int {
-            bits: 8,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        2 => CType::Int {
-            bits: 16,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        4 => CType::Int {
-            bits: 32,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        8 => CType::Int {
-            bits: 64,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        16 => CType::Int {
-            bits: 128,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        _ => CType::BitVector(size.saturating_mul(8)),
+        _ => CType::machine_bits(size.saturating_mul(8)),
     }
 }
 

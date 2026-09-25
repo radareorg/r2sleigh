@@ -18,26 +18,8 @@ pub(super) enum MachineWriteProjectionError {
     UnsupportedIntegerWidth(u32),
 }
 
-const fn c_integer_width_is_spellable(width_bits: u32) -> bool {
-    matches!(width_bits, 8 | 16 | 32 | 64 | 128)
-}
-
-pub(super) const fn c_bitvector_width_is_supported(width_bits: u32) -> bool {
-    matches!(width_bits, 256 | 512)
-}
-
-fn bitvector_helper(name: String, args: Vec<CExpr>) -> CExpr {
-    CExpr::call(
-        CExpr::External {
-            name,
-            kind: crate::symbol::ExternalKind::Intrinsic,
-        },
-        args,
-    )
-}
-
 fn checked_uint_type(width_bits: u32) -> Result<CType, MachineUseProjectionError> {
-    c_integer_width_is_spellable(width_bits)
+    CType::is_integer_width(width_bits)
         .then_some(CType::Int {
             bits: width_bits,
             signedness: r2types::Signedness::Unsigned,
@@ -48,7 +30,7 @@ fn checked_uint_type(width_bits: u32) -> Result<CType, MachineUseProjectionError
 }
 
 fn checked_int_type(width_bits: u32) -> Result<CType, MachineUseProjectionError> {
-    c_integer_width_is_spellable(width_bits)
+    CType::is_integer_width(width_bits)
         .then_some(CType::Int {
             bits: width_bits,
             signedness: r2types::Signedness::Signed,
@@ -98,7 +80,7 @@ pub(super) fn project_machine_use_of(
             .cloned()
             .unwrap_or_else(|| CValue::Typed(CType::machine_bits(slice.carrier_width_bits())));
         (base, ty)
-    } else if c_integer_width_is_spellable(slice.carrier_width_bits()) {
+    } else if CType::is_integer_width(slice.carrier_width_bits()) {
         let carrier_type = checked_uint_type(slice.carrier_width_bits())?;
         let selected_type = checked_uint_type(slice.width_bits())?;
         let mut projected = convert(base, base_type, &carrier_type);
@@ -114,18 +96,16 @@ pub(super) fn project_machine_use_of(
         // carrier's type and the slice is narrower than it.
         let projected = CExpr::cast(selected_type.clone(), projected);
         (projected, CValue::Typed(selected_type))
-    } else if c_bitvector_width_is_supported(slice.carrier_width_bits()) {
-        if c_integer_width_is_spellable(slice.width_bits()) {
+    } else if crate::bitvector::is_supported(slice.carrier_width_bits()) {
+        if CType::is_integer_width(slice.width_bits())
+            && let Some(extract) = crate::bitvector::BitVectorHelper::extract(
+                slice.carrier_width_bits(),
+                slice.width_bits(),
+            )
+        {
             let selected_type = checked_uint_type(slice.width_bits())?;
             (
-                bitvector_helper(
-                    format!(
-                        "r2sleigh_bits_extract_{}_{}",
-                        slice.carrier_width_bits(),
-                        slice.width_bits()
-                    ),
-                    vec![base, CExpr::UIntLit(u64::from(slice.bit_offset()))],
-                ),
+                extract.call(vec![base, CExpr::UIntLit(u64::from(slice.bit_offset()))]),
                 CValue::Typed(selected_type),
             )
         } else {
@@ -155,11 +135,12 @@ pub(super) fn project_machine_use_of(
     };
     let target_width = conversion.to_width_bits();
     let source_width = slice.width_bits();
-    if c_bitvector_width_is_supported(source_width) || c_bitvector_width_is_supported(target_width)
+    if crate::bitvector::is_supported(source_width) || crate::bitvector::is_supported(target_width)
     {
         // A width-changing wide conversion needs its own source-owned semantic
-        // contract (especially for signed extension). The prelude currently
-        // certifies only exact extraction/insertion and zero-extending writes.
+        // contract (especially for signed extension). The helpers
+        // `crate::bitvector` defines are exact extraction, insertion and zero
+        // extension, and none of them is a conversion a use slice states.
         return Err(MachineUseProjectionError::UnsupportedIntegerWidth(
             target_width.max(source_width),
         ));
@@ -220,7 +201,7 @@ pub(super) fn project_machine_use_of(
 }
 
 fn checked_write_uint_type(width_bits: u32) -> Result<CType, MachineWriteProjectionError> {
-    c_integer_width_is_spellable(width_bits)
+    CType::is_integer_width(width_bits)
         .then_some(CType::Int {
             bits: width_bits,
             signedness: r2types::Signedness::Unsigned,
@@ -258,18 +239,23 @@ pub(super) fn project_machine_write(
             from_width_bits,
             to_width_bits,
         } => {
-            if c_bitvector_width_is_supported(to_width_bits) {
-                if !c_integer_width_is_spellable(from_width_bits) {
+            if crate::bitvector::is_supported(to_width_bits) {
+                let Some(zero_extend) = CType::is_integer_width(from_width_bits)
+                    .then(|| {
+                        crate::bitvector::BitVectorHelper::zero_extend(
+                            from_width_bits,
+                            to_width_bits,
+                        )
+                    })
+                    .flatten()
+                else {
                     return Err(MachineWriteProjectionError::UnsupportedIntegerWidth(
                         from_width_bits,
                     ));
-                }
+                };
                 return Ok((
                     lhs,
-                    bitvector_helper(
-                        format!("r2sleigh_bits_zero_extend_{from_width_bits}_{to_width_bits}"),
-                        vec![rhs],
-                    ),
+                    zero_extend.call(vec![rhs]),
                     Some(CValue::Typed(CType::BitVector(to_width_bits))),
                 ));
             }

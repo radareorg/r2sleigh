@@ -931,8 +931,9 @@ impl<'a> FoldingContext<'a> {
     ///
     /// Its operands are machine words of the widths the operation was given,
     /// which is all that is known about them: the specification names the
-    /// operation and says nothing about its C type.
-    fn record_machine_operation(&self, name: &str, output: Option<&SSAVar>, inputs: &[SSAVar]) {
+    /// operation and says nothing about its C type. It returns nothing, since
+    /// only an operation that writes nothing is rendered as a call.
+    fn record_machine_operation(&self, name: &str, inputs: &[SSAVar]) {
         let word = |size: u32| crate::ast::CType::Int {
             bits: size.saturating_mul(8).max(8),
             signedness: r2types::Signedness::Unsigned,
@@ -943,7 +944,7 @@ impl<'a> FoldingContext<'a> {
             .or_insert_with(|| crate::fold::context::RecordedCalleeDeclaration {
                 declaration: crate::ast::CExternDecl {
                     name: name.to_owned(),
-                    ret_type: output.map_or(crate::ast::CType::Void, |dst| word(dst.size)),
+                    ret_type: crate::ast::CType::Void,
                     params: Some(inputs.iter().map(|input| word(input.size)).collect()),
                     variadic: false,
                     noreturn: false,
@@ -1893,19 +1894,31 @@ impl<'a> FoldingContext<'a> {
         let input = |input_idx: usize, var: &SSAVar| -> OpLoweringResult<CExpr> {
             Ok(self.observed_input(frame, input_idx, self.get_expr(var)?))
         };
+        // A carrier wider than any C integer has no operators; see `wide`.
+        if wide::applies_an_operator_to_a_carrier(op) {
+            return Err(OpLoweringRefusal::unrepresentable_operation());
+        }
         Ok(match op {
-            // An operation the specification names and models no further is
-            // rendered as itself: a call to an operation of that name, with
-            // the operands it was given. That claims exactly what the machine
-            // does and nothing about what it means -- a barrier's ordering, a
-            // coprocessor access's effect -- which is the honest statement
-            // and the one a reader can act on. Refusing the whole function
-            // said less about more.
+            // An operation the specification names, models no further, and
+            // that writes nothing -- a barrier, a hint, a cache maintenance
+            // operation -- is rendered as itself: a call to an operation of
+            // that name, with the operands it was given. That claims exactly
+            // what the machine does and nothing about what it means, which is
+            // the honest statement and the one a reader can act on.
+            //
+            // One that produces a value has no rendering here. The value is
+            // the operation's meaning, which only a model states, and whether
+            // one exists is the machine projection's to say: the refusal is
+            // its answer for this instruction, read rather than re-derived,
+            // so it names the operation exactly when r2ssa does.
             SSAOp::CallOther {
                 output,
                 userop,
                 inputs,
             } => {
+                if output.is_some() {
+                    return Err(self.produced_user_operation_refusal());
+                }
                 let Some(name) = self
                     .inputs
                     .function_facts
@@ -1921,21 +1934,14 @@ impl<'a> FoldingContext<'a> {
                     .enumerate()
                     .map(|(index, var)| input(index, var))
                     .collect::<OpLoweringResult<Vec<_>>>()?;
-                self.record_machine_operation(&name, output.as_ref(), inputs);
-                let call = CExpr::call(
+                self.record_machine_operation(&name, inputs);
+                Some(CStmt::Expr(CExpr::call(
                     CExpr::External {
                         name,
                         kind: crate::symbol::ExternalKind::Intrinsic,
                     },
                     args,
-                );
-                match output {
-                    Some(dst) => {
-                        let lhs = self.assignment_lhs_expr(dst)?;
-                        Some(CStmt::Expr(CExpr::assign(lhs, call)))
-                    }
-                    None => Some(CStmt::Expr(call)),
-                }
+                )))
             }
             SSAOp::CpuId { .. } => {
                 return Err(OpLoweringRefusal::missing_machine_projection());
@@ -2320,12 +2326,19 @@ impl<'a> FoldingContext<'a> {
             // the produced type and nothing more is said; the assignment then
             // meets the declared object from that type.
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } | SSAOp::Cast { dst, src } => {
+                if wide::width_change_is_wide(dst, src) {
+                    return self.wide_width_change_stmt(frame, op, dst, src);
+                }
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let (rhs, rhs_type) = self.width_change_expr(frame, dst, src)?;
                 let rhs = self.resolve_predicate_rhs_for_var(dst, rhs);
                 self.assign_typed(lhs, rhs, rhs_type)
             }
             SSAOp::Piece { dst, hi, lo } => {
+                // A composition wider than any C integer is a bit vector.
+                if crate::bitvector::is_wide(dst.size.saturating_mul(8)) {
+                    return self.wide_piece_stmt(frame, dst, hi, lo);
+                }
                 let lhs = self.assignment_lhs_expr(dst)?;
                 let shift_bits = lo.size.saturating_mul(8);
                 let dst_ty = uint_type_from_size(dst.size);
@@ -2359,7 +2372,6 @@ impl<'a> FoldingContext<'a> {
                 let Some(lsb_bits) = position.constant_bits() else {
                     return Err(OpLoweringRefusal::unrepresentable_operation());
                 };
-                let width_bits = u64::from(value.size) * 8;
                 let root_bits = u64::from(dst.size) * 8;
                 let lane_ty = uint_type_from_size(value.size);
                 let dst_ty = uint_type_from_size(dst.size);
@@ -2368,51 +2380,10 @@ impl<'a> FoldingContext<'a> {
                 // The position is an operand of the operation, read here as
                 // the shift count so its use is the rendered one.
                 let shift = self.required_input(frame, 2, position, None)?;
-                // A root wider than any C integer is a bit vector, inserted by
-                // the prelude helper the wide write projection used to name.
-                if projection::c_bitvector_width_is_supported(
-                    u32::try_from(root_bits).unwrap_or(0),
-                ) {
-                    // A bit vector has no literal, so a zero carrier is
-                    // spelled as the prelude's zero-extension of a zero lane;
-                    // at position zero that extension is the whole write.
-                    let zero_extend = |value| {
-                        CExpr::call(
-                            CExpr::External {
-                                name: format!(
-                                    "r2sleigh_bits_zero_extend_{width_bits}_{root_bits}"
-                                ),
-                                kind: crate::symbol::ExternalKind::Intrinsic,
-                            },
-                            vec![value],
-                        )
-                    };
-                    if src.constant_bits() == Some(0) {
-                        let rhs = if lsb_bits == 0 {
-                            zero_extend(lane)
-                        } else {
-                            CExpr::call(
-                                CExpr::External {
-                                    name: format!(
-                                        "r2sleigh_bits_insert_{root_bits}_{width_bits}"
-                                    ),
-                                    kind: crate::symbol::ExternalKind::Intrinsic,
-                                },
-                                vec![
-                                    zero_extend(CExpr::cast(lane_ty, CExpr::UIntLit(0))),
-                                    lane,
-                                    shift,
-                                ],
-                            )
-                        };
-                        return Ok(self.assign_stmt(lhs, rhs));
-                    }
-                    let helper = CExpr::External {
-                        name: format!("r2sleigh_bits_insert_{root_bits}_{width_bits}"),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    };
-                    let rhs = CExpr::call(helper, vec![root, lane, shift]);
-                    return Ok(self.assign_stmt(lhs, rhs));
+                // A root wider than any C integer is a bit vector, and the lane
+                // goes in through the helper that inserts it.
+                if crate::bitvector::is_wide(u32::try_from(root_bits).unwrap_or(0)) {
+                    return self.wide_insert_stmt(insert, lsb_bits, lhs, [root, lane, shift]);
                 }
                 // The lane's own all-ones, at the root's width and shifted
                 // into place. Spelled rather than folded so a root wider than
@@ -2439,6 +2410,11 @@ impl<'a> FoldingContext<'a> {
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Subpiece { dst, src, offset } => {
+                // A source wider than any C integer is a bit vector, and its
+                // lane comes out through the helper that extracts it.
+                if crate::bitvector::is_wide(src.size.saturating_mul(8)) && dst.size < src.size {
+                    return self.wide_subpiece_stmt(frame, dst, src, *offset);
+                }
                 let lhs = self.assignment_lhs_expr(dst)?;
                 // The source is brought to its own unsigned width -- a
                 // pointer takes its address-width step there, so the low
@@ -2447,26 +2423,6 @@ impl<'a> FoldingContext<'a> {
                 // selection is spelled on that.
                 let src_expr =
                     self.required_input(frame, 0, src, Some(&uint_type_from_size(src.size)))?;
-                // A source wider than any C integer is a bit vector; its
-                // lane comes out through the prelude helper.
-                if projection::c_bitvector_width_is_supported(
-                    src.size.saturating_mul(8),
-                ) && dst.size < src.size
-                {
-                    let helper = CExpr::External {
-                        name: format!(
-                            "r2sleigh_bits_extract_{}_{}",
-                            u64::from(src.size) * 8,
-                            u64::from(dst.size) * 8
-                        ),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    };
-                    let rhs = CExpr::call(
-                        helper,
-                        vec![src_expr, CExpr::UIntLit(u64::from(*offset) * 8)],
-                    );
-                    return Ok(self.assign_stmt(lhs, rhs));
-                }
                 let dst_ty = uint_type_from_size(dst.size);
                 let rhs = if *offset == 0 {
                     // The low piece is a conversion from what the operand
@@ -2854,7 +2810,9 @@ impl<'a> FoldingContext<'a> {
         b: &SSAVar,
         operation: &str,
     ) -> OpLoweringResult<Option<CStmt>> {
-        if a.size != b.size || !matches!(a.size, 1 | 2 | 4 | 8 | 16) {
+        // The prelude defines the flag helpers at every C integer width, and
+        // at no other.
+        if a.size != b.size || !CType::is_integer_width(a.size.saturating_mul(8)) {
             return Err(OpLoweringRefusal::missing_machine_projection());
         }
         let lhs = self.assignment_lhs_expr(dst)?;
@@ -3057,26 +3015,47 @@ fn opaque_operations_are_typed_refusals_before_ast_lowering() {
     let output = SSAVar::new("X30", 1, 8);
     let frame = LowerFrame::for_expr();
 
+    // Which user operation a value is refused for is the machine projection's
+    // to say; the renderer does not classify one itself. With no sealed
+    // projection to ask, a user operation that produces a value is a missing
+    // projection even at a known site, however plainly the operation looks
+    // unmodelled. One that writes nothing, with no table to name it, and an
+    // operation with no machine model at all, are missing projections too.
+    let produces = SSAOp::CallOther {
+        output: Some(output),
+        userop: u32::MAX,
+        inputs: vec![input.clone()],
+    };
+    ctx.current_block_addr.set(Some(0x1000));
+    ctx.current_op_idx.set(Some(3));
+    assert_eq!(
+        ctx.op_to_stmt_impl(&produces, &frame),
+        Err(OpLoweringRefusal::missing_machine_projection())
+    );
+    ctx.current_block_addr.set(None);
+    ctx.current_op_idx.set(None);
     let opaque = [
-        SSAOp::CallOther {
-            output: Some(output),
-            userop: u32::MAX,
-            inputs: vec![input.clone()],
-        },
-        SSAOp::CallOther {
-            output: None,
-            userop: 7,
-            inputs: vec![input],
-        },
-        SSAOp::CpuId {
-            dst: SSAVar::new("EAX", 1, 4),
-        },
+        (produces, OpLoweringRefusal::missing_machine_projection()),
+        (
+            SSAOp::CallOther {
+                output: None,
+                userop: 7,
+                inputs: vec![input],
+            },
+            OpLoweringRefusal::missing_machine_projection(),
+        ),
+        (
+            SSAOp::CpuId {
+                dst: SSAVar::new("EAX", 1, 4),
+            },
+            OpLoweringRefusal::missing_machine_projection(),
+        ),
     ];
 
-    for op in opaque {
+    for (op, refusal) in opaque {
         assert_eq!(
             ctx.op_to_stmt_impl(&op, &frame),
-            Err(OpLoweringRefusal::missing_machine_projection()),
+            Err(refusal),
             "opaque operations must never manufacture an executable AST node"
         );
     }

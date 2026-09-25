@@ -221,6 +221,7 @@ mod tests {
             externs: Vec::new(),
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             name: "f".to_string(),
             ret_type: CType::Int {

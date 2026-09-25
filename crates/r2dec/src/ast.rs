@@ -1034,6 +1034,81 @@ impl CStmt {
 }
 
 impl CStmt {
+    /// Every expression this statement and its descendants hold at the top,
+    /// in pre-order; [`CExpr::visit`] reaches what is inside each.
+    pub fn visit_exprs(&self, f: &mut impl FnMut(&CExpr)) {
+        match self {
+            Self::Observed { stmt, .. } | Self::StructuredRegion { stmt, .. } => {
+                stmt.visit_exprs(f);
+            }
+            Self::Decl { init, .. } => {
+                if let Some(init) = init {
+                    f(init);
+                }
+            }
+            Self::Expr(expr) => f(expr),
+            Self::Block(stmts) => stmts.iter().for_each(|stmt| stmt.visit_exprs(f)),
+            Self::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                f(cond);
+                then_body.visit_exprs(f);
+                if let Some(body) = else_body {
+                    body.visit_exprs(f);
+                }
+            }
+            Self::While { cond, body } | Self::DoWhile { body, cond } => {
+                f(cond);
+                body.visit_exprs(f);
+            }
+            Self::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    init.visit_exprs(f);
+                }
+                if let Some(cond) = cond {
+                    f(cond);
+                }
+                if let Some(update) = update {
+                    f(update);
+                }
+                body.visit_exprs(f);
+            }
+            Self::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                f(expr);
+                for case in cases {
+                    f(&case.value);
+                    case.body.iter().for_each(|stmt| stmt.visit_exprs(f));
+                }
+                if let Some(default) = default {
+                    default.iter().for_each(|stmt| stmt.visit_exprs(f));
+                }
+            }
+            Self::Return(expr) => {
+                if let Some(expr) = expr {
+                    f(expr);
+                }
+            }
+            Self::Empty
+            | Self::Break
+            | Self::Continue
+            | Self::Goto(_)
+            | Self::Label(_)
+            | Self::Comment(_)
+            | Self::Gap(_) => {}
+        }
+    }
+
     /// Every type this statement and its descendants spell, in pre-order.
     pub fn visit_types(&self, f: &mut impl FnMut(&CType)) {
         match self {
@@ -1811,6 +1886,12 @@ pub struct CFunction {
     /// layout comes from the same type graph the declaration's type did, so
     /// defining it here costs nothing the declaration did not already claim.
     pub aggregates: Vec<CAggregateDef>,
+    /// The wide-carrier helpers the body calls, defined above the function.
+    ///
+    /// A carrier wider than any C integer has no operators, so every
+    /// operation on one is a call; the rendering defines what it calls, so it
+    /// compiles on its own. `crate::bitvector` is their one definition.
+    pub bitvector_helpers: Vec<crate::bitvector::BitVectorHelper>,
     /// Named data objects the body refers to, declared so the rendering stays a
     /// self-contained translation unit.
     ///
@@ -1957,6 +2038,7 @@ impl CFunction {
             externs: Vec::new(),
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             params: Vec::new(),
             locals: Vec::new(),

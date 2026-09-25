@@ -1515,6 +1515,80 @@ fn partial_projection_retains_unsupported_producer_and_supported_dependent() {
         .expect("valid partial projection");
 }
 
+/// A value a user operation produces is refused as that operation: the use
+/// and write cells say which one the specification declared, so the refusal a
+/// reader sees can name it. An operation that writes nothing is projected, and
+/// an unsupported operation of the ordinary vocabulary keeps its own class.
+#[test]
+fn an_unmodelled_user_operation_is_refused_by_its_index() {
+    let produced = Varnode::unique(0x10, 16);
+    let artifact = artifact_with_ops([
+        R2ILOp::CallOther {
+            userop: 204,
+            output: Some(produced.clone()),
+            inputs: vec![Varnode::register(0, 8), Varnode::register(8, 8)],
+        },
+        R2ILOp::CallOther {
+            userop: 12,
+            output: None,
+            inputs: vec![Varnode::constant(3, 8)],
+        },
+        R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: Varnode::register(0x10, 8),
+            val: produced,
+        },
+    ]);
+    let projection = MachineProjection::from_artifact(&artifact).expect("partial projection");
+    let graph = artifact.graph();
+    let producer = graph
+        .insts
+        .iter()
+        .find(|inst| {
+            matches!(
+                &inst.payload,
+                InstPayload::Op(SSAOp::CallOther { userop: 204, .. })
+            )
+        })
+        .expect("the value-producing user operation");
+    let refused = MachineUseRefusal::UnmodelledUserOperation { userop: 204 };
+    for input_idx in 0..producer.inputs.len() {
+        assert_eq!(
+            projection.use_disposition(UseSite {
+                inst: producer.id,
+                input_idx,
+            }),
+            Some(MachineUseDisposition::Refused(refused)),
+        );
+    }
+    assert_eq!(
+        projection.write_disposition(producer.id),
+        Some(&MachineWriteDisposition::Refused(
+            MachineWriteRefusal::UnmodelledUserOperation { userop: 204 }
+        ))
+    );
+    let effect = graph
+        .insts
+        .iter()
+        .find(|inst| {
+            matches!(
+                &inst.payload,
+                InstPayload::Op(SSAOp::CallOther { userop: 12, .. })
+            )
+        })
+        .expect("the user operation that writes nothing");
+    assert!(matches!(
+        projection.use_disposition(UseSite {
+            inst: effect.id,
+            input_idx: 0,
+        }),
+        Some(MachineUseDisposition::Exact(_))
+    ));
+    projection
+        .validate_against(&artifact)
+        .expect("valid partial projection");
+}
+
 #[test]
 fn malformed_arena_backedge_is_rejected() {
     let artifact = artifact_with_ops([R2ILOp::Copy {

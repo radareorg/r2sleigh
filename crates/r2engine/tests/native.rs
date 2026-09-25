@@ -1133,6 +1133,340 @@ fn an_argument_read_back_from_the_high_half_of_a_vector_is_a_parameter() {
     );
 }
 
+/// `pmovsxbd xmm0, [rdi]`, stored a quadword at a time, returning zero.
+///
+/// ```text
+///   1000  pmovsxbd xmm0, dword [rdi]
+///   1005  movq     qword [rsi], xmm0
+///   1009  movhps   qword [rsi + 8], xmm0
+///   100d  xor      eax, eax
+///   100f  ret
+/// ```
+///
+/// The result leaves in two eight-byte stores because a sixteen-byte access
+/// is typed `byte[16]` upstream, which is not C and is not this defect; the
+/// two halves cover the same sixteen bytes. `eax` is the result so that the
+/// vector register is not mistaken for one.
+const PACKED_SIGN_EXTEND: &[u8] = &[
+    0x66, 0x0f, 0x38, 0x21, 0x07, // 1000 pmovsxbd xmm0, dword [rdi]
+    0x66, 0x0f, 0xd6, 0x06, // 1005 movq qword [rsi], xmm0
+    0x0f, 0x17, 0x46, 0x08, // 1009 movhps qword [rsi + 8], xmm0
+    0x31, 0xc0, // 100d xor eax, eax
+    0xc3, // 100f ret
+];
+
+/// The same with `pmovzxbd`.
+const PACKED_ZERO_EXTEND: &[u8] = &[
+    0x66, 0x0f, 0x38, 0x31, 0x07, // 1000 pmovzxbd xmm0, dword [rdi]
+    0x66, 0x0f, 0xd6, 0x06, // 1005 movq qword [rsi], xmm0
+    0x0f, 0x17, 0x46, 0x08, // 1009 movhps qword [rsi + 8], xmm0
+    0x31, 0xc0, // 100d xor eax, eax
+    0xc3, // 100f ret
+];
+
+/// `movd xmm0, edi; pmovsxbd xmm1, xmm0`, stored a quadword at a time.
+const PACKED_SIGN_EXTEND_ARGUMENT: &[u8] = &[
+    0x66, 0x0f, 0x6e, 0xc7, // 1000 movd xmm0, edi
+    0x66, 0x0f, 0x38, 0x21, 0xc8, // 1004 pmovsxbd xmm1, xmm0
+    0x66, 0x0f, 0xd6, 0x0e, // 1009 movq qword [rsi], xmm1
+    0x0f, 0x17, 0x4e, 0x08, // 100d movhps qword [rsi + 8], xmm1
+    0xc3, // 1011 ret
+];
+
+/// `movd xmm0, edi; pmovsxwq xmm1, xmm0; pshufd xmm1, xmm1, 0x0e; movq rax, xmm1; ret`
+///
+/// The argument's high word, sign-extended to the upper quadword, and read
+/// back out of it.
+const PACKED_SIGN_EXTEND_HIGH_LANE: &[u8] = &[
+    0x66, 0x0f, 0x6e, 0xc7, // 1000 movd xmm0, edi
+    0x66, 0x0f, 0x38, 0x24, 0xc8, // 1004 pmovsxwq xmm1, xmm0
+    0x66, 0x0f, 0x70, 0xc9, 0x0e, // 1009 pshufd xmm1, xmm1, 0x0e
+    0x66, 0x48, 0x0f, 0x7e, 0xc8, // 100e movq rax, xmm1
+    0xc3, // 1013 ret
+];
+
+/// A packed extension renders as the lanes the SDM defines: no opaque
+/// operation is spelled and no part of the body is a marked gap.
+fn assert_packed_extension_rendered(text: &str) {
+    assert!(!text.contains("pmov"), "{text}");
+    assert!(!text.contains("r2dec gap"), "{text}");
+    assert!(text.contains(" 0 refused"), "{text}");
+}
+
+/// Sign and zero extension of each byte of a dword read from memory: all
+/// sixteen bytes of the result are what the SDM says, and the bytes chosen
+/// set the top bit, so the two extensions disagree.
+#[test]
+fn a_packed_extension_from_memory_renders_every_lane() {
+    for (bytes, name, lanes) in [
+        (
+            PACKED_SIGN_EXTEND,
+            "sign_extend_bytes",
+            "0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu",
+        ),
+        (
+            PACKED_ZERO_EXTEND,
+            "zero_extend_bytes",
+            "0x00000001u, 0x00000080u, 0x0000007fu, 0x000000feu",
+        ),
+    ] {
+        let text = rendered(bytes, name);
+        assert_packed_extension_rendered(&text);
+        run_rendered(
+            name,
+            &text,
+            &format!(
+                r#"int main(void) {{
+    const uint8_t source[4] = {{0x01, 0x80, 0x7f, 0xfe}};
+    const uint32_t want[4] = {{{lanes}}};
+    uint32_t got[4];
+    memset(got, 0xa5, sizeof got);
+    if ({name}((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {{
+        return 2;
+    }}
+    return memcmp(got, want, sizeof want) != 0;
+}}"#
+            ),
+        );
+    }
+}
+
+/// A packed extension of an argument reads the argument: the formals are the
+/// thirty-two bits `movd` takes and the destination, not a local nothing
+/// assigns, and the upper lane holds the sign of the argument's high word
+/// rather than zero.
+#[test]
+fn a_packed_extension_of_an_argument_takes_the_argument() {
+    let text = rendered(PACKED_SIGN_EXTEND_ARGUMENT, "sign_extend_argument");
+    assert_packed_extension_rendered(&text);
+    assert!(
+        text.starts_with("void sign_extend_argument(uint32_t "),
+        "{text}"
+    );
+    run_rendered(
+        "sign_extend_argument",
+        &text,
+        r#"int main(void) {
+    const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
+    uint32_t got[4];
+    memset(got, 0xa5, sizeof got);
+    sign_extend_argument(0xfe7f8001u, (uint64_t)(uintptr_t)got);
+    return memcmp(got, want, sizeof want) != 0;
+}"#,
+    );
+
+    let text = rendered(PACKED_SIGN_EXTEND_HIGH_LANE, "sign_extend_high_lane");
+    assert_packed_extension_rendered(&text);
+    assert!(
+        text.starts_with("uint64_t sign_extend_high_lane(uint32_t "),
+        "{text}"
+    );
+    run_rendered(
+        "sign_extend_high_lane",
+        &text,
+        r#"int main(void) {
+    if (sign_extend_high_lane(0x80000000u) != 0xffffffffffff8000ULL) {
+        return 1;
+    }
+    if (sign_extend_high_lane(0x7fff1234u) != 0x7fffULL) {
+        return 2;
+    }
+    if (sign_extend_high_lane(0xfffe0000u) != 0xfffffffffffffffeULL) {
+        return 3;
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// `vpmovzxbd ymm0, [rdi]`: eight bytes zero-extended to a 256-bit result,
+/// whose halves are stored a quadword at a time.
+///
+/// ```text
+///   1000  vpmovzxbd    ymm0, qword [rdi]
+///   1005  vextracti128 xmm1, ymm0, 1
+///   100b  vzeroupper
+///   100e  movq         qword [rsi], xmm0
+///   1012  movhps       qword [rsi + 8], xmm0
+///   1016  movq         qword [rsi + 0x10], xmm1
+///   101b  movhps       qword [rsi + 0x18], xmm1
+///   101f  xor          eax, eax
+///   1021  ret
+/// ```
+const WIDE_ZERO_EXTEND: &[u8] = &[
+    0xc4, 0xe2, 0x7d, 0x31, 0x07, // 1000 vpmovzxbd ymm0, qword [rdi]
+    0xc4, 0xe3, 0x7d, 0x39, 0xc1, 0x01, // 1005 vextracti128 xmm1, ymm0, 1
+    0xc5, 0xf8, 0x77, // 100b vzeroupper
+    0x66, 0x0f, 0xd6, 0x06, // 100e movq qword [rsi], xmm0
+    0x0f, 0x17, 0x46, 0x08, // 1012 movhps qword [rsi + 8], xmm0
+    0x66, 0x0f, 0xd6, 0x4e, 0x10, // 1016 movq qword [rsi + 0x10], xmm1
+    0x0f, 0x17, 0x4e, 0x18, // 101b movhps qword [rsi + 0x18], xmm1
+    0x31, 0xc0, // 101f xor eax, eax
+    0xc3, // 1021 ret
+];
+
+/// The same with `vpmovsxbd`.
+const WIDE_SIGN_EXTEND: &[u8] = &[
+    0xc4, 0xe2, 0x7d, 0x21, 0x07, // 1000 vpmovsxbd ymm0, qword [rdi]
+    0xc4, 0xe3, 0x7d, 0x39, 0xc1, 0x01, // 1005 vextracti128 xmm1, ymm0, 1
+    0xc5, 0xf8, 0x77, // 100b vzeroupper
+    0x66, 0x0f, 0xd6, 0x06, // 100e movq qword [rsi], xmm0
+    0x0f, 0x17, 0x46, 0x08, // 1012 movhps qword [rsi + 8], xmm0
+    0x66, 0x0f, 0xd6, 0x4e, 0x10, // 1016 movq qword [rsi + 0x10], xmm1
+    0x0f, 0x17, 0x4e, 0x18, // 101b movhps qword [rsi + 0x18], xmm1
+    0x31, 0xc0, // 101f xor eax, eax
+    0xc3, // 1021 ret
+];
+
+/// A 256-bit result is a wide carrier the rendering defines, composed and
+/// taken apart only by the helpers it also defines: the rendering compiles
+/// with nothing but `<stdint.h>` above it, and computes every lane.
+#[test]
+fn a_256_bit_packed_extension_compiles_on_its_own() {
+    for (bytes, name, widen) in [
+        (WIDE_ZERO_EXTEND, "zero_extend_wide", "(uint32_t)source[i]"),
+        (
+            WIDE_SIGN_EXTEND,
+            "sign_extend_wide",
+            "(uint32_t)(int32_t)(int8_t)source[i]",
+        ),
+    ] {
+        let text = rendered(bytes, name);
+        assert_packed_extension_rendered(&text);
+        assert!(
+            text.starts_with("struct r2sleigh_bits_256 {\n    uint8_t bytes[32];\n};\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("r2sleigh_bits_insert_256_128(r2sleigh_bits_zero_extend_128_256("),
+            "{text}"
+        );
+        run_rendered(
+            name,
+            &text,
+            &format!(
+                r#"int main(void) {{
+    const uint8_t source[8] = {{0x01, 0x80, 0x7f, 0xfe, 0x00, 0xff, 0x81, 0x7e}};
+    uint32_t want[8];
+    uint32_t got[8];
+    for (int i = 0; i < 8; i++) {{
+        want[i] = {widen};
+    }}
+    memset(got, 0xa5, sizeof got);
+    if ({name}((uint64_t)(uintptr_t)source, (uint64_t)(uintptr_t)got) != 0) {{
+        return 2;
+    }}
+    return memcmp(got, want, sizeof want) != 0;
+}}"#
+            ),
+        );
+    }
+}
+
+/// `movq xmm0, rdi; movq xmm1, rsi; pshufb xmm0, xmm1; movq rax, xmm0; ret`
+///
+/// `pshufb` is an operation the specification declares and gives no p-code,
+/// and the lift does not model it.
+const UNMODELLED_SHUFFLE: &[u8] = &[
+    0x66, 0x48, 0x0f, 0x6e, 0xc7, // 1000 movq xmm0, rdi
+    0x66, 0x48, 0x0f, 0x6e, 0xce, // 1005 movq xmm1, rsi
+    0x66, 0x0f, 0x38, 0x00, 0xc1, // 100a pshufb xmm0, xmm1
+    0x66, 0x48, 0x0f, 0x7e, 0xc0, // 100f movq rax, xmm0
+    0xc3, // 1014 ret
+];
+
+/// A value no model gives a meaning is refused, and the refusal names the
+/// specification's operation and where it stands, rather than the renderer
+/// predicate that noticed it.
+///
+/// Both are the machine projection's: r2ssa decides the operation has no
+/// projection and says which it is, and the renderer reads that. The site is
+/// the operation's place in the SSA form `pdim` prints -- the third operation
+/// of the block at 0x1000, after the two `movq` zero extensions.
+#[test]
+fn an_unmodelled_user_operation_is_refused_by_name() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: UNMODELLED_SHUFFLE.to_vec(),
+        name: "shuffle",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let text = response.output.text().to_string();
+    assert!(
+        matches!(
+            response.render_refusal,
+            Some(r2dec::DecompileRenderRefusal::UnmodelledUserOperation {
+                block: BASE,
+                op: 2,
+                ..
+            })
+        ),
+        "{:?}\n{text}",
+        response.render_refusal
+    );
+    assert!(
+        text.starts_with(
+            "/* r2sleigh refused shuffle: native rendering refused: unmodelled machine operation pshufb at 0x1000:2 */"
+        ),
+        "{text}"
+    );
+}
+
+/// `vpxor` of two 256-bit loads, whose high half is read back:
+///
+/// ```text
+///   1000  vmovdqu      ymm0, ymmword [rdi]
+///   1004  vmovdqu      ymm1, ymmword [rsi]
+///   1008  vpxor        ymm0, ymm0, ymm1
+///   100c  vextracti128 xmm1, ymm0, 1
+///   1012  vzeroupper
+///   1015  movq         rax, xmm1
+///   101a  ret
+/// ```
+///
+/// The exclusive or is a 256-bit `INT_XOR`, an operator on a value no C
+/// integer holds.
+const WIDE_EXCLUSIVE_OR: &[u8] = &[
+    0xc5, 0xfe, 0x6f, 0x07, // 1000 vmovdqu ymm0, ymmword [rdi]
+    0xc5, 0xfe, 0x6f, 0x0e, // 1004 vmovdqu ymm1, ymmword [rsi]
+    0xc5, 0xfd, 0xef, 0xc1, // 1008 vpxor ymm0, ymm0, ymm1
+    0xc4, 0xe3, 0x7d, 0x39, 0xc1, 0x01, // 100c vextracti128 xmm1, ymm0, 1
+    0xc5, 0xf8, 0x77, // 1012 vzeroupper
+    0x66, 0x48, 0x0f, 0x7e, 0xc8, // 1015 movq rax, xmm1
+    0xc3, // 101a ret
+];
+
+/// An operator on a carrier wider than any C integer has no C spelling: the
+/// carrier is a struct, and a struct has no `^`. The function is refused as
+/// such, rather than rendered as `struct r2sleigh_bits_256 x = a ^ b;`, which
+/// no C compiler accepts.
+#[test]
+fn an_operator_on_a_wide_carrier_is_refused() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: WIDE_EXCLUSIVE_OR.to_vec(),
+        name: "wide_xor",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let text = response.output.text().to_string();
+    assert_eq!(
+        response.render_refusal,
+        Some(r2dec::DecompileRenderRefusal::UnrepresentableOperation),
+        "{text}"
+    );
+    assert!(
+        text.starts_with(
+            "/* r2sleigh refused wide_xor: native rendering refused: unrepresentable operation"
+        ),
+        "{text}"
+    );
+    for operator in [" ^ ", " | ", " << ", " >> ", " & "] {
+        assert!(!text.contains(operator), "{operator:?} in {text}");
+    }
+}
+
 /// Two values held across a call to an import nothing declares, then stored:
 ///
 /// ```text

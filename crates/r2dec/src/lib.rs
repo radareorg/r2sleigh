@@ -30,6 +30,7 @@
 pub(crate) mod analysis;
 pub mod ast;
 mod binding_plan;
+pub mod bitvector;
 pub(crate) mod codegen;
 pub(crate) mod consumer_structured;
 pub mod control;
@@ -1425,6 +1426,12 @@ pub enum BindingObservationJournalFailure {
     RefusedRenderedUse {
         site: r2ssa::UseSite,
     },
+    /// A rendered use of a value the specification's user operation `userop`
+    /// produces, which the lift left without semantics.
+    UnmodelledUserOperation {
+        site: r2ssa::UseSite,
+        userop: u32,
+    },
     RefusedRenderedWrite {
         inst: r2ssa::InstId,
     },
@@ -1546,6 +1553,7 @@ impl BindingObservationJournalFailure {
             Self::InvalidNormalizedInput { .. } => "invalid_normalized_input",
             Self::MissingNormalizedOutput { .. } => "missing_normalized_output",
             Self::RefusedRenderedUse { .. } => "refused_rendered_use",
+            Self::UnmodelledUserOperation { .. } => "unmodelled_user_operation",
             Self::RefusedRenderedWrite { .. } => "refused_rendered_write",
             Self::RenderedValueRequired { .. } => "rendered_value_required",
             Self::PlannedElidedValueRendered { .. } => "planned_elided_value_rendered",
@@ -1622,6 +1630,7 @@ fn gap_anchor_for_native_failure(
         Journal::InvalidCertifiedValueRead { at, .. } => Some(*at),
         Journal::InvalidUse { site }
         | Journal::RefusedRenderedUse { site }
+        | Journal::UnmodelledUserOperation { site, .. }
         | Journal::ExactUseRequiresRenderedOccurrence { site }
         | Journal::ConflictingUse { site } => Some(site.inst),
         Journal::InvalidWrite { inst }
@@ -2121,6 +2130,16 @@ pub enum DecompileRenderRefusal {
     UnrepresentableControlFlow,
     IncompleteEffectInventory,
     UnrepresentableOperation,
+    /// A value the specification's user operation `userop` produces, which
+    /// the lift gave no semantics. The operation is sited in the function's
+    /// SSA form, as `pdim` prints it: `block` is the address of its block and
+    /// `op` its index among that block's operations. The engine names the
+    /// operation from the specification's own table.
+    UnmodelledUserOperation {
+        userop: u32,
+        block: u64,
+        op: usize,
+    },
 }
 
 impl DecompileRenderRefusal {
@@ -2139,6 +2158,7 @@ impl DecompileRenderRefusal {
             Self::UnrepresentableControlFlow => "unrepresentable_control_flow",
             Self::IncompleteEffectInventory => "incomplete_effect_inventory",
             Self::UnrepresentableOperation => "unrepresentable_operation",
+            Self::UnmodelledUserOperation { .. } => "unmodelled_user_operation",
         }
     }
 }
@@ -2236,6 +2256,11 @@ impl From<crate::fold::op_lower::OpLoweringRefusal> for DecompileRenderRefusal {
             crate::fold::op_lower::OpLoweringRefusal::VariadicCallsiteArgumentCount(refusal) => {
                 Self::VariadicCallsiteArgumentCount(refusal)
             }
+            crate::fold::op_lower::OpLoweringRefusal::UnmodelledUserOperation {
+                userop,
+                block,
+                op,
+            } => Self::UnmodelledUserOperation { userop, block, op },
         }
     }
 }
@@ -3599,6 +3624,7 @@ impl Decompiler {
             declaration_only: None,
             typedefs: Vec::new(),
             aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
             extern_objects: Vec::new(),
             externs: fold_ctx
                 .callee_declarations

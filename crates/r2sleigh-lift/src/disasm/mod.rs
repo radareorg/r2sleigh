@@ -4,6 +4,7 @@
 //! and translation to r2il using Ghidra's libsla library.
 
 pub mod syntax;
+pub(crate) mod user_operation;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::translate::{self, PcodeSource};
 use crate::{LiftError, Result};
+use user_operation::{Extension, ModelledUserOperation, PackedExtension};
 
 /// One parsed Sleigh specification: everything derived from the `.sla` and the
 /// processor spec, and nothing derived from who asked for it.
@@ -59,6 +61,9 @@ struct LoadedSpecification {
     /// Architecture exactly as `extract_architecture` derived it, before any
     /// processor-spec overlay a particular consumer wants.
     arch: Arc<r2il::ArchSpec>,
+    /// The operation each `CallOther` index names, where this lift models it,
+    /// resolved once from `arch.user_ops` so no lift compares a name.
+    modelled_user_ops: Vec<Option<ModelledUserOperation>>,
     /// Present only for a specification loaded from embedded bytes, which are
     /// the only ones that can certify.
     authority: Option<GenuineLiftAuthority>,
@@ -1475,6 +1480,7 @@ impl LoadedSpecification {
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
         extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
         let arch = Arc::new(extracted.arch);
+        let modelled_user_ops = user_operation::resolve_modelled_user_operations(&arch.user_ops);
         let authority = certifying.then(|| {
             GenuineLiftAuthority::new(
                 Arc::from(sla_bytes),
@@ -1490,6 +1496,7 @@ impl LoadedSpecification {
             reg_name_map,
             space_map: extracted.space_map,
             arch,
+            modelled_user_ops,
             authority,
             // No stamp is zero, so a fresh specification continues nothing.
             decode_state: Cell::new(0),
@@ -2341,13 +2348,11 @@ impl Disassembler {
         Ok(block)
     }
 
-    /// Translate a single P-code instruction to an r2il operation.
     /// The name the architecture gives the user-defined operation at `index`.
-    /// Read from the specification rather than from the trust profile. What
-    /// an operation is called is data the specification carries, and taking it
-    /// from the optional profile meant every lift outside the plugin -- the
-    /// engine's own route among them -- saw no names, and so got none of the
-    /// expansions below.
+    /// Read from the specification rather than from the trust profile: what
+    /// an operation is called is data the specification carries. Which of
+    /// them this lift models is resolved from the same table once, when the
+    /// specification is loaded, into `LoadedSpecification::modelled_user_ops`.
     fn user_op_name(&self, index: u32) -> Option<&str> {
         self.spec
             .arch
@@ -2363,8 +2368,12 @@ impl Disassembler {
     /// only refuse the instruction and, with it, the function. Where the
     /// operation's meaning is exactly expressible in the ordinary vocabulary,
     /// expanding it here is what keeps the rest of the pipeline free of any
-    /// vector-specific machinery. An operation this does not model is returned
+    /// vector-specific machinery. An operation this does not model, or one
+    /// whose operands are not the shape its model states, is returned
     /// untouched and still refuses, which is the honest answer.
+    ///
+    /// Which operation an index names was resolved once, when the
+    /// specification was loaded; this is one lookup.
     fn expand_user_operation(&self, op: R2ILOp, temp_base: u64) -> Vec<R2ILOp> {
         let R2ILOp::CallOther {
             userop,
@@ -2374,21 +2383,29 @@ impl Disassembler {
         else {
             return vec![op];
         };
-        let expanded = match self.user_op_name(*userop) {
-            Some("NEON_ext") => Self::expand_neon_ext(output.as_ref(), inputs, temp_base),
-            Some("NEON_ushl") => Self::expand_neon_ushl(output.as_ref(), inputs, temp_base),
-            Some("NEON_rev64") => Self::expand_neon_rev64(output.as_ref(), inputs, temp_base),
-            Some("NEON_umax") => Self::expand_neon_minmax(output.as_ref(), inputs, temp_base, true),
-            Some("NEON_umin") => {
-                Self::expand_neon_minmax(output.as_ref(), inputs, temp_base, false)
+        let modelled = usize::try_from(*userop)
+            .ok()
+            .and_then(|index| self.spec.modelled_user_ops.get(index))
+            .copied()
+            .flatten();
+        let output = output.as_ref();
+        let expanded = match modelled {
+            Some(ModelledUserOperation::NeonExt) => {
+                Self::expand_neon_ext(output, inputs, temp_base)
             }
-            Some("NEON_umaxv") => {
-                Self::expand_neon_minmax_across(output.as_ref(), inputs, temp_base, true)
+            Some(ModelledUserOperation::NeonUshl) => {
+                Self::expand_neon_ushl(output, inputs, temp_base)
             }
-            Some("NEON_uminv") => {
-                Self::expand_neon_minmax_across(output.as_ref(), inputs, temp_base, false)
+            Some(ModelledUserOperation::NeonRev64) => {
+                Self::expand_neon_rev64(output, inputs, temp_base)
             }
-            Some("a64_TBL") => Self::expand_neon_tbl(output.as_ref(), inputs, temp_base),
+            Some(ModelledUserOperation::NeonMinMax { max }) => {
+                Self::expand_neon_minmax(output, inputs, temp_base, max)
+            }
+            Some(ModelledUserOperation::NeonMinMaxAcross { max }) => {
+                Self::expand_neon_minmax_across(output, inputs, temp_base, max)
+            }
+            Some(ModelledUserOperation::A64Tbl) => Self::expand_neon_tbl(output, inputs, temp_base),
             // A trap, and the pipeline already has one. `R2ILOp::Breakpoint` is
             // seeded as `Kind::Trap` by the obligation ledger, which is exactly
             // what these are: control leaves for an exception handler and does
@@ -2401,17 +2418,100 @@ impl Disassembler {
             // which check failed and is still in the disassembly; what matters
             // for rendering is that control stops here, and that is preserved
             // exactly.
-            Some("SoftwareBreakpoint") | Some("UndefinedInstructionException") => {
-                Some(vec![R2ILOp::Breakpoint])
-            }
+            Some(ModelledUserOperation::Trap) => Some(vec![R2ILOp::Breakpoint]),
             // ARM `bx` switches instruction set by the target's low bit. The
             // p-code has already written the mode bit and masked the target
             // by the time this fires, so the operation itself spells nothing
             // more; which set a body decodes in is the function's own fact.
-            Some("setISAMode") => Some(Vec::new()),
-            _ => None,
+            Some(ModelledUserOperation::SetIsaMode) => Some(Vec::new()),
+            Some(ModelledUserOperation::PackedExtension(extension)) => {
+                Self::expand_packed_extension(output, inputs, temp_base, extension)
+            }
+            None => None,
         };
         expanded.unwrap_or_else(|| vec![op])
+    }
+
+    /// x86 `PMOVSX*` / `PMOVZX*`, in each encoding the specification names.
+    ///
+    /// Intel SDM, PMOVSX and PMOVZX, Operation: element `i` of the
+    /// destination is element `i` of the source's low part, sign- or
+    /// zero-extended -- `DEST[31:0] <- SignExtend(SRC[7:0])` up to
+    /// `DEST[127:96] <- SignExtend(SRC[31:24])` for `PMOVSXBD`. So, with `L`
+    /// elements of `d` bytes from elements of `s` bytes,
+    ///
+    /// `output = PIECE(i = L-1..0) EXT(SUBPIECE(source, i*s, s))`.
+    ///
+    /// The shape is the encoding's own, exactly:
+    ///
+    /// * legacy SSE4.1 is written `XmmReg = pmovsxbd(XmmReg, src)`. The first
+    ///   operand is the old destination, and it is dropped only because it *is*
+    ///   the destination -- the same varnode as the output -- and the
+    ///   instruction defines every bit of that register from the source;
+    /// * the VEX and EVEX forms pass the source alone, and produce the width
+    ///   their encoding states.
+    ///
+    /// `L` is a power of two of at least two, and the source holds at least
+    /// `L*s` bytes. Anything else is not the operation this models and is left
+    /// to refuse.
+    fn expand_packed_extension(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+        extension: PackedExtension,
+    ) -> Option<Vec<R2ILOp>> {
+        let output = output?;
+        let source = match inputs {
+            [old_destination, source]
+                if extension.form.passes_old_destination() && old_destination == output =>
+            {
+                source
+            }
+            [source] if !extension.form.passes_old_destination() => source,
+            _ => return None,
+        };
+        let PackedExtension {
+            from_bytes,
+            to_bytes,
+            extension: widening,
+            form,
+        } = extension;
+        if !form.produces(output.size) || to_bytes == 0 || output.size % to_bytes != 0 {
+            return None;
+        }
+        let lanes = output.size / to_bytes;
+        if lanes < 2 || !lanes.is_power_of_two() || source.size < lanes.checked_mul(from_bytes)? {
+            return None;
+        }
+        let mut ops = Vec::with_capacity(lanes as usize * 3);
+        let mut next = temp_base;
+        let mut widened = Vec::with_capacity(lanes as usize);
+        for lane in 0..lanes {
+            let element = Self::lane_temp(&mut next, from_bytes);
+            ops.push(R2ILOp::Subpiece {
+                dst: element.clone(),
+                src: source.clone(),
+                offset: lane * from_bytes,
+            });
+            let wide = Self::lane_temp(&mut next, to_bytes);
+            ops.push(match widening {
+                Extension::Sign => R2ILOp::IntSExt {
+                    dst: wide.clone(),
+                    src: element,
+                },
+                Extension::Zero => R2ILOp::IntZExt {
+                    dst: wide.clone(),
+                    src: element,
+                },
+            });
+            widened.push(wide);
+        }
+        let composed = Self::join_lanes(&mut ops, &mut next, widened, to_bytes)?;
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: composed,
+        });
+        Some(ops)
     }
 
     /// `NEON_ext(rn, rm, index, element_size)` -- AArch64 `EXT`.

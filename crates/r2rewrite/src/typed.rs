@@ -82,7 +82,7 @@ impl CValue {
 
 /// The C spelling of a machine type: the unsigned integer of an address or
 /// an unsigned integer, the signed integer of a signed one, `_Bool` for a
-/// boolean, and the limb-backed bitvector for a width C has no scalar for.
+/// boolean, and the bit-vector carrier for a width C has no integer for.
 pub fn c_type_of(ty: &MachineType) -> CTypeLike {
     match ty {
         MachineType::Bool { .. } => CTypeLike::Bool,
@@ -111,15 +111,15 @@ fn cast_operand(kind: &MachineCastKind, from: u32) -> CTypeLike {
 }
 
 fn integer(width_bits: u32, signedness: MachineSignedness) -> CTypeLike {
-    match width_bits {
-        8 | 16 | 32 | 64 | 128 => CTypeLike::Int {
-            bits: width_bits,
-            signedness: match signedness {
-                MachineSignedness::Unsigned => Signedness::Unsigned,
-                MachineSignedness::Signed => Signedness::Signed,
-            },
+    if !CTypeLike::is_integer_width(width_bits) {
+        return CTypeLike::BitVector(width_bits);
+    }
+    CTypeLike::Int {
+        bits: width_bits,
+        signedness: match signedness {
+            MachineSignedness::Unsigned => Signedness::Unsigned,
+            MachineSignedness::Signed => Signedness::Signed,
         },
-        _ => CTypeLike::BitVector(width_bits),
     }
 }
 

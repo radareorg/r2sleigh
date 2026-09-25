@@ -194,6 +194,13 @@ pub(crate) enum LegacyObservationJournalError {
     },
     MissingNormalizedOutput(NormalizedOpSite),
     RefusedRenderedUse(UseSite),
+    /// A rendered use of a value the specification's user operation `userop`
+    /// produces, which the machine projection refused because the lift gave
+    /// the operation no semantics.
+    UnmodelledUserOperation {
+        site: UseSite,
+        userop: u32,
+    },
     RefusedRenderedWrite(InstId),
     RenderedValueRequired {
         value: ValueId,
@@ -264,6 +271,17 @@ impl LegacyObservationJournalError {
             value,
             cause,
             disposition,
+        }
+    }
+
+    /// A rendered use the machine projection refused, keeping which user
+    /// operation it was when the refusal is that one had no semantics.
+    pub(crate) const fn refused_use(site: UseSite, refusal: r2ssa::MachineUseRefusal) -> Self {
+        match refusal {
+            r2ssa::MachineUseRefusal::UnmodelledUserOperation { userop } => {
+                Self::UnmodelledUserOperation { site, userop }
+            }
+            _ => Self::RefusedRenderedUse(site),
         }
     }
 }
@@ -569,6 +587,12 @@ impl From<&LegacyObservationJournalError> for BindingObservationJournalFailure {
             }
             LegacyObservationJournalError::RefusedRenderedUse(site) => {
                 Self::RefusedRenderedUse { site: *site }
+            }
+            LegacyObservationJournalError::UnmodelledUserOperation { site, userop } => {
+                Self::UnmodelledUserOperation {
+                    site: *site,
+                    userop: *userop,
+                }
             }
             LegacyObservationJournalError::RefusedRenderedWrite(inst) => {
                 Self::RefusedRenderedWrite { inst: *inst }
@@ -1739,6 +1763,9 @@ impl SealedNativeFunction {
             .function_interface()
             .and_then(r2ssa::SourceFunctionInterface::type_graph);
         let function = self.ready.function_for_aggregate_definitions();
+        // What the body calls on a wide carrier is defined above it, and each
+        // helper names the carriers it takes, which are defined here too.
+        let helpers = crate::bitvector::helpers_called(function);
         let mut wanted = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         let mut pending = std::iter::once(&function.ret_type)
@@ -1773,29 +1800,15 @@ impl SealedNativeFunction {
                 }
                 // Storage this decompiler synthesised a tag for, because C has
                 // no scalar of that width. Nothing outside the rendering can
-                // define it, so the rendering does: whole bytes of the extent
-                // the carrier has, which is exactly what the tag claims and
-                // keeps the type distinct from an integer so no arithmetic is
-                // emitted for it.
+                // define it, so the rendering does, as `crate::bitvector`
+                // states the carrier: its whole bytes, which is exactly what
+                // the tag claims and keeps it distinct from an integer, so no
+                // arithmetic is emitted for it.
                 crate::ast::CType::BitVector(bits) => {
-                    let bits = *bits;
-                    let name = format!("r2sleigh_bits_{bits}");
-                    if seen.insert(name.clone())
-                        && let Some(bytes) = usize::try_from(bits.div_ceil(8))
-                            .ok()
-                            .filter(|bytes| *bytes > 0)
+                    if let Some(definition) = crate::bitvector::carrier_definition(*bits)
+                        && seen.insert(definition.name.clone())
                     {
-                        wanted.push(crate::ast::CAggregateDef {
-                            is_union: false,
-                            name,
-                            members: vec![(
-                                crate::ast::CType::Array(
-                                    Box::new(crate::ast::CType::uint(8)),
-                                    Some(bytes),
-                                ),
-                                "bytes".to_string(),
-                            )],
-                        });
+                        wanted.push(definition);
                     }
                     continue;
                 }
@@ -1868,12 +1881,20 @@ impl SealedNativeFunction {
                 members,
             });
         }
+        for bits in helpers.iter().flat_map(|helper| helper.carriers()) {
+            if let Some(definition) = crate::bitvector::carrier_definition(bits)
+                && seen.insert(definition.name.clone())
+            {
+                wanted.push(definition);
+            }
+        }
         if r2il::refusal_evidence::tracing() {
             for entry in &wanted {
                 r2il::refusal_evidence!("declared-aggregate", "define {}", entry.name);
             }
         }
         self.ready.set_aggregate_definitions(wanted);
+        self.ready.set_bitvector_helpers(helpers);
     }
 
     pub(crate) fn effect_observations(&self) -> &SurvivingEffectObservations {
@@ -3033,7 +3054,7 @@ impl LegacyObservationJournal {
                     "refused-rendered-use",
                     "use {site:?} is rendered at the seal and the projection refused it: {refusal:?}"
                 );
-                Err(LegacyObservationJournalError::RefusedRenderedUse(site))
+                Err(LegacyObservationJournalError::refused_use(site, refusal))
             }
             None => Err(LegacyObservationJournalError::InvalidUse(site)),
         }

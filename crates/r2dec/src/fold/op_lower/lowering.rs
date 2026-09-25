@@ -146,11 +146,62 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Why the value of the user operation being lowered is refused, as the
+    /// machine projection states it.
+    ///
+    /// Whether an operation's value has a projection is r2ssa's to decide, and
+    /// when it has none because the lift gave the operation no semantics, the
+    /// sealed write disposition says so and names the operation. This reads
+    /// that answer for the source instruction being lowered and classifies
+    /// nothing itself. Any other answer -- and an operation with no source
+    /// instruction or no sealed projection to ask -- is a missing projection.
+    pub(super) fn produced_user_operation_refusal(&self) -> OpLoweringRefusal {
+        let (Some(inst), Some(names)) = (self.current_source_inst(), self.inputs.binding_names)
+        else {
+            return OpLoweringRefusal::missing_machine_projection();
+        };
+        match names.require_write(inst) {
+            Err(crate::binding_plan::RenderedIdentityRefusal::MachineWrite {
+                inst,
+                reason: r2ssa::MachineWriteRefusal::UnmodelledUserOperation { userop },
+            }) => self.unmodelled_user_operation_at(inst, userop),
+            _ => OpLoweringRefusal::missing_machine_projection(),
+        }
+    }
+
+    /// The refusal of the source instruction `inst`, a user operation the
+    /// machine projection found the lift left without semantics.
+    ///
+    /// Every such refusal is sited here, in one coordinate system: the
+    /// instruction's place in the function's SSA form, as `pdim` prints it --
+    /// the address of its block and its index among that block's operations.
+    /// That is the source instruction's own site, so an operation
+    /// normalization inserts ahead of it moves nothing. Without one there is
+    /// nothing to name it at, and it is a missing projection; a site is never
+    /// made up.
+    fn unmodelled_user_operation_at(&self, inst: r2ssa::InstId, userop: u32) -> OpLoweringRefusal {
+        match self
+            .prepared_ssa()
+            .and_then(|prepared| prepared.graph().op_site_for_inst(inst))
+        {
+            Some((block, op)) => OpLoweringRefusal::unmodelled_user_operation(userop, block, op),
+            None => OpLoweringRefusal::missing_machine_projection(),
+        }
+    }
+
     fn observation_lowering_refusal(
+        &self,
         error: &crate::observation_journal::LegacyObservationJournalError,
     ) -> OpLoweringRefusal {
         use crate::observation_journal::LegacyObservationJournalError as Error;
         match error {
+            // Which operation it was is the refusal, so it is kept. The
+            // projection refuses every operand of an operation it could not
+            // project, so the refused use is one of the operation's own and
+            // its instruction is the operation.
+            Error::UnmodelledUserOperation { site, userop } => {
+                self.unmodelled_user_operation_at(site.inst, *userop)
+            }
             Error::RenderedValueRequired { .. }
             | Error::InvalidPlannedInline { .. }
             | Error::PlannedElidedValueRendered { .. }
@@ -499,7 +550,7 @@ impl<'a> FoldingContext<'a> {
         match self.project_planned_assignment(Some(site), lhs, rhs) {
             Ok((lhs, rhs)) => Ok(CStmt::Expr(CExpr::assign(lhs, rhs))),
             Err(error) => {
-                let refusal = Self::observation_lowering_refusal(&error);
+                let refusal = self.observation_lowering_refusal(&error);
                 self.retain_first_observation_error(error);
                 Err(refusal)
             }
@@ -993,9 +1044,9 @@ impl<'a> FoldingContext<'a> {
             ),
             Kind::Flag { op, left, right } => {
                 let width = arena.term(left).width_bits();
-                if arena.term(right).width_bits() != width
-                    || !matches!(width, 8 | 16 | 32 | 64 | 128)
-                {
+                // The prelude defines the flag helpers at every C integer
+                // width, and at no other.
+                if arena.term(right).width_bits() != width || !CType::is_integer_width(width) {
                     return Err(invalid());
                 }
                 let operation = match op {
@@ -1272,10 +1323,10 @@ impl<'a> FoldingContext<'a> {
             Ok(r2ssa::MachineUseDisposition::Refused(_)) => {
                 unreachable!("require_use cannot return a refused disposition")
             }
-            Err(crate::binding_plan::RenderedIdentityRefusal::MachineUse { .. }) => {
+            Err(crate::binding_plan::RenderedIdentityRefusal::MachineUse { site, reason }) => {
                 return Err(
-                    crate::observation_journal::LegacyObservationJournalError::RefusedRenderedUse(
-                        first_site,
+                    crate::observation_journal::LegacyObservationJournalError::refused_use(
+                        site, reason,
                     ),
                 );
             }
@@ -1293,10 +1344,10 @@ impl<'a> FoldingContext<'a> {
                 Ok(r2ssa::MachineUseDisposition::Refused(_)) => {
                     unreachable!("require_use cannot return a refused disposition")
                 }
-                Err(crate::binding_plan::RenderedIdentityRefusal::MachineUse { .. }) => {
+                Err(crate::binding_plan::RenderedIdentityRefusal::MachineUse { site, reason }) => {
                     return Err(
-                        crate::observation_journal::LegacyObservationJournalError::RefusedRenderedUse(
-                            use_site,
+                        crate::observation_journal::LegacyObservationJournalError::refused_use(
+                            site, reason,
                         ),
                     );
                 }
@@ -1473,7 +1524,7 @@ impl<'a> FoldingContext<'a> {
         {
             Ok(marked) => marked,
             Err(error) => {
-                let refusal = Self::observation_lowering_refusal(&error);
+                let refusal = self.observation_lowering_refusal(&error);
                 self.retain_first_observation_error(error);
                 self.retain_first_lowering_refusal(refusal);
                 fallback
@@ -1495,7 +1546,7 @@ impl<'a> FoldingContext<'a> {
                 expr,
             )),
             Err(error) => {
-                let refusal = Self::observation_lowering_refusal(&error);
+                let refusal = self.observation_lowering_refusal(&error);
                 self.retain_first_observation_error(error);
                 Err(refusal)
             }
@@ -1600,7 +1651,7 @@ impl<'a> FoldingContext<'a> {
             let (expr, ty) = match self.planned_input_expr(frame, input_idx) {
                 Ok(planned) => planned,
                 Err(error) => {
-                    let refusal = Self::observation_lowering_refusal(&error);
+                    let refusal = self.observation_lowering_refusal(&error);
                     self.retain_first_observation_error(error);
                     self.retain_first_lowering_refusal(refusal);
                     return (expr, fallback);
@@ -1632,7 +1683,7 @@ impl<'a> FoldingContext<'a> {
         let expr = match self.planned_memory_input_expr(frame, input_idx, certified) {
             Ok(planned) => planned,
             Err(error) => {
-                let refusal = Self::observation_lowering_refusal(&error);
+                let refusal = self.observation_lowering_refusal(&error);
                 self.retain_first_observation_error(error);
                 self.retain_first_lowering_refusal(refusal);
                 return fallback;
@@ -1715,7 +1766,7 @@ impl<'a> FoldingContext<'a> {
             return Ok(self.callee_identity_expr(&self.callee_identity_for_direct_target(address)));
         }
         let (planned, _) = self.planned_input_expr(frame, 0).map_err(|error| {
-            let refusal = Self::observation_lowering_refusal(&error);
+            let refusal = self.observation_lowering_refusal(&error);
             self.retain_first_observation_error(error);
             refusal
         })?;

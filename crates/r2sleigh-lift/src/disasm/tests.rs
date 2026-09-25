@@ -848,6 +848,97 @@ fn callother_translation_preserves_numeric_id_and_operands() {
     );
 }
 
+/// A packed extension whose operands are not its encoding's exact shape keeps
+/// its `CallOther`, and so still refuses downstream.
+///
+/// The legacy form drops its first operand only because that operand is the
+/// destination itself; an operand of the same size that is some other
+/// register is read, and dropping it would lose a real input. A source too
+/// short for the lanes, a result the encoding does not produce, and an operand
+/// count the encoding does not pass are each not the operation modelled.
+#[cfg(feature = "x86")]
+#[test]
+fn a_packed_extension_of_any_other_shape_keeps_its_call_other() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::X86_64)
+        .expect("trusted x86-64 disassembler");
+    let index = |name: &str| {
+        let index = disassembler
+            .arch_spec()
+            .user_ops
+            .iter()
+            .position(|declared| declared == name)
+            .unwrap_or_else(|| panic!("x86-64 declares {name}"));
+        u32::try_from(index).expect("user-operation index")
+    };
+    let xmm0 = register_varnode(declared_register_storage(disassembler.arch_spec(), "XMM0"));
+    let xmm1 = register_varnode(declared_register_storage(disassembler.arch_spec(), "XMM1"));
+    let four = Varnode::unique(0x40, 4);
+    let expanded = |userop: u32, output: &Varnode, inputs: &[Varnode]| {
+        disassembler.expand_user_operation(
+            R2ILOp::CallOther {
+                userop,
+                output: Some(output.clone()),
+                inputs: inputs.to_vec(),
+            },
+            0x1000,
+        )
+    };
+    let keeps_call_other =
+        |ops: &[R2ILOp]| ops.len() == 1 && matches!(ops[0], R2ILOp::CallOther { .. });
+
+    let legacy = index("pmovsxbd");
+    let vex = index("vpmovsxbd_avx");
+    // The exact shapes expand.
+    assert!(!keeps_call_other(&expanded(
+        legacy,
+        &xmm1,
+        &[xmm1.clone(), four.clone()]
+    )));
+    assert!(!keeps_call_other(&expanded(
+        vex,
+        &Varnode::unique(0x80, 16),
+        std::slice::from_ref(&xmm0)
+    )));
+
+    for (userop, output, inputs, why) in [
+        (
+            legacy,
+            xmm1.clone(),
+            vec![xmm1.clone(), Varnode::unique(0x40, 3)],
+            "a three-byte source for four byte lanes",
+        ),
+        (
+            legacy,
+            xmm1.clone(),
+            vec![xmm0.clone(), four.clone()],
+            "a first operand that is not the destination",
+        ),
+        (
+            legacy,
+            xmm1.clone(),
+            vec![four.clone()],
+            "a legacy form without its old destination",
+        ),
+        (
+            vex,
+            Varnode::unique(0x80, 16),
+            vec![xmm1, four],
+            "a VEX form passed an old destination",
+        ),
+        (
+            vex,
+            Varnode::unique(0x80, 32),
+            vec![xmm0],
+            "a 256-bit result from the 128-bit encoding",
+        ),
+    ] {
+        assert!(
+            keeps_call_other(&expanded(userop, &output, &inputs)),
+            "{why} must keep the CallOther"
+        );
+    }
+}
+
 #[test]
 fn unsupported_pcode_is_explicitly_refused() {
     let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::X86_64)
