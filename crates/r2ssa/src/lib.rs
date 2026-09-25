@@ -40,7 +40,6 @@ pub(crate) mod liveout;
 pub(crate) mod machine;
 pub(crate) mod machine_context;
 pub(crate) mod mirror;
-pub mod mobility;
 pub mod name;
 mod naming;
 pub(crate) mod obligation;
