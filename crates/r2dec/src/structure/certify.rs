@@ -57,7 +57,8 @@ impl fmt::Display for Target {
 /// One clause of the certificate that the rendered body violates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Violation {
-    /// The first block the text runs is not the function's entry.
+    /// The first block the text runs is not the function's root (read through
+    /// to the entry where the root is the entry-edge block).
     EntryNotFirst {
         first: Option<u64>,
     },
@@ -1032,10 +1033,6 @@ pub(crate) fn certify(
         first_block,
         ..
     } = walker;
-    if first_block != Some(entry) {
-        violations.push(Violation::EntryNotFirst { first: first_block });
-    }
-
     let mut count = BTreeMap::<u64, usize>::new();
     for occurrence in &occurrences {
         *count.entry(occurrence.block).or_default() += 1;
@@ -1063,6 +1060,18 @@ pub(crate) fn certify(
         }
         Target::Block(addr)
     };
+    // The text starts at the root. The entry-edge block in front of a loop at
+    // the function's first instruction is the graph's own and renders nothing
+    // where no copy lands on its edge, so there the text starts where it is
+    // read through to.
+    let starts = if cfg.has_entry_edge() && entry == cfg.entry {
+        contract(entry)
+    } else {
+        Target::Block(entry)
+    };
+    if first_block.map(Target::Block) != Some(starts) {
+        violations.push(Violation::EntryNotFirst { first: first_block });
+    }
 
     let mut inversions = 0;
     for occurrence in &occurrences {

@@ -1109,12 +1109,18 @@ fn public_ssa_path_handles_a_deep_cycle_and_reports_its_back_edge() {
             op_metadata: Default::default(),
         })
         .collect::<Vec<_>>();
-    let expected_order = blocks.iter().map(|block| block.addr).collect::<Vec<_>>();
+    // The latch branches back to the first block, so control enters by the
+    // entry edge in front of it.
+    let expected_order = std::iter::once(crate::cfg::ENTRY_EDGE)
+        .chain(blocks.iter().map(|block| block.addr))
+        .collect::<Vec<_>>();
     let latch = BASE + (BLOCK_COUNT as u64 - 1) * 4;
 
     let function = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("SSA for deep cyclic CFG");
     let risk = function.cfg_risk_summary();
 
+    assert_eq!(function.entry, BASE);
+    assert_eq!(function.root(), crate::cfg::ENTRY_EDGE);
     assert_eq!(function.block_addrs(), expected_order);
     assert_eq!(risk.block_count, BLOCK_COUNT);
     assert_eq!(risk.loop_count, 1);

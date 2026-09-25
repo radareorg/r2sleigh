@@ -5,15 +5,23 @@ use super::*;
 impl SSAFunction {
     #[cfg(test)]
     pub(crate) fn from_exact_test_blocks(blocks: &[SSABlock], cfg: CFG) -> Self {
-        let entry = cfg
-            .entry_block()
-            .map(|block| block.addr)
-            .unwrap_or_default();
+        let entry = cfg.entered_at();
         let domtree = DomTree::compute(&cfg);
         let block_order = cfg.reverse_postorder();
+        // The entry-edge block is the graph's own, not one of the program's:
+        // a test that writes the program's blocks gets it from the graph.
         let ordered = block_order
             .iter()
-            .filter_map(|addr| blocks.iter().find(|block| block.addr == *addr).cloned())
+            .filter_map(|addr| {
+                blocks
+                    .iter()
+                    .find(|block| block.addr == *addr)
+                    .cloned()
+                    .or_else(|| {
+                        (*addr == crate::cfg::ENTRY_EDGE)
+                            .then(|| SSABlock::new(crate::cfg::ENTRY_EDGE, 0))
+                    })
+            })
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
@@ -379,7 +387,9 @@ impl SSAFunction {
         let cfg = CFG::from_blocks_with_declared_successors(blocks, declared_successors)
             .ok_or_else(malformed_ssa_input)?;
         control.poll()?;
-        let entry = cfg.entry;
+        // The function is named by the address it is entered at; the graph
+        // may be rooted in front of it (`cfg::ENTRY_EDGE`).
+        let entry = cfg.entered_at();
 
         // Compute dominator tree
         let domtree = DomTree::compute_with_control(&cfg, control)?;

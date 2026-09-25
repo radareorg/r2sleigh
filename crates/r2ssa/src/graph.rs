@@ -489,7 +489,7 @@ impl SsaGraph {
         }
 
         let entry = block_by_addr
-            .get(&function.entry)
+            .get(&function.root())
             .copied()
             .unwrap_or(BlockId(0));
 

@@ -114,10 +114,7 @@ impl PhaseRecorder {
         Self {
             tracing,
             who: if tracing {
-                format!(
-                    "{site}@{:#x}",
-                    function.entry_block().map_or(0, |block| block.addr)
-                )
+                format!("{site}@{:#x}", function.entry)
             } else {
                 String::new()
             },

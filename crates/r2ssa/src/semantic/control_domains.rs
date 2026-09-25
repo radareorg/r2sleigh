@@ -68,7 +68,7 @@ pub(crate) fn collect_control_domain_facts(
         })
         .collect::<BTreeMap<_, _>>();
     states.insert(
-        function.entry,
+        function.root(),
         Some(ControlDomainState {
             guards: BTreeSet::new(),
             complete: true,
@@ -105,7 +105,7 @@ pub(crate) fn collect_control_domain_facts(
     let mut updates = 0usize;
     while let Some(block_addr) = worklist.pop_front() {
         queued.remove(&block_addr);
-        if block_addr == function.entry || updates >= update_limit {
+        if block_addr == function.root() || updates >= update_limit {
             continue;
         }
         let predecessors = function.predecessors(block_addr);

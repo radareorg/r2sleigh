@@ -2844,13 +2844,10 @@ fn collect_call_arg_state_with_iteration_limit(
         changed = false;
         for &block_addr in function.block_addrs() {
             let preds = function.predecessors(block_addr);
-            let mut state = if block_addr == function.entry {
-                if preds.is_empty() {
-                    entry_state.clone()
-                } else {
-                    let merged = merge_pred_states(&out_states, &preds, &tracked);
-                    merge_call_carrier_states(&entry_state, &merged, &tracked)
-                }
+            // The root is the one way in: a loop through the function's first
+            // instruction merges at the block after it, like any other.
+            let mut state = if block_addr == function.root() {
+                entry_state.clone()
             } else if preds.is_empty() {
                 unknown_state.clone()
             } else {

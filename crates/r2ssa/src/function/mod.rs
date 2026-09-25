@@ -2449,7 +2449,8 @@ pub struct SSAFunction {
     stack_pointer_carrier: Option<CanonicalStorageId>,
     /// The function's name (if known).
     pub name: Option<String>,
-    /// Entry point address.
+    /// The address the function is entered at, which names it. Not always
+    /// the root of its graph: see [`Self::root`].
     pub entry: u64,
     /// Control flow graph.
     cfg: CFG,
@@ -2707,6 +2708,11 @@ impl<'a> RewrittenFunction<'a> {
         self.source.entry
     }
 
+    /// The block control enters by; see [`SSAFunction::root`].
+    pub const fn root(&self) -> u64 {
+        self.source.root()
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.source.name.as_deref()
     }
@@ -2736,8 +2742,9 @@ impl<'a> RewrittenFunction<'a> {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
+    /// The block control enters by; see [`SSAFunction::root`].
     pub fn entry_block(&self) -> Option<&SSABlock> {
-        self.get_block(self.entry())
+        self.get_block(self.root())
     }
 
     pub fn predecessors(&self, addr: u64) -> Vec<u64> {
@@ -2774,6 +2781,15 @@ impl<'a> RewrittenFunction<'a> {
 /// One function's blocks as text, shared by a function and by operations
 /// rewritten over it.
 fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAFunction) -> String {
+    // The entry-edge block has no address of its own; its key is spelled
+    // for what it stands for.
+    let block_name = |addr: u64| {
+        if addr == crate::cfg::ENTRY_EDGE {
+            "entry-edge".to_string()
+        } else {
+            format!("0x{addr:x}")
+        }
+    };
     let mut out = String::new();
 
     out.push_str(&format!("Function: {}\n", name.unwrap_or("<unnamed>")));
@@ -2783,7 +2799,7 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
     for block in blocks {
         {
             let addr = block.addr;
-            out.push_str(&format!("Block 0x{:x}:\n", addr));
+            out.push_str(&format!("Block {}:\n", block_name(addr)));
 
             // Predecessors
             let preds = shape.predecessors(addr);
@@ -2792,7 +2808,7 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
                     "  preds: {}\n",
                     preds
                         .iter()
-                        .map(|p| format!("0x{:x}", p))
+                        .map(|p| block_name(*p))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
@@ -2803,7 +2819,7 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
                 let sources: Vec<String> = phi
                     .sources
                     .iter()
-                    .map(|(pred, var)| format!("[0x{:x}]: {}", pred, var))
+                    .map(|(pred, var)| format!("[{}]: {}", block_name(*pred), var))
                     .collect();
                 out.push_str(&format!("  {} = phi({})\n", phi.dst, sources.join(", ")));
             }
@@ -3110,9 +3126,22 @@ impl SSAFunction {
         self
     }
 
-    /// Get the entry block.
+    /// The block control enters the function by: the root of the graph,
+    /// which no edge reaches.
+    ///
+    /// It is the block at [`Self::entry`] unless a branch in the body also
+    /// targets that address; then it is the empty [`crate::cfg::ENTRY_EDGE`]
+    /// block in front of it, where the values the function is entered with
+    /// are defined and from which they reach the merges at `entry`. A pass
+    /// that starts a walk, seeds an entry state or places an entry
+    /// definition starts here; `entry` names the function.
+    pub const fn root(&self) -> u64 {
+        self.cfg.entry
+    }
+
+    /// Get the entry block: the [`Self::root`].
     pub fn entry_block(&self) -> Option<&SSABlock> {
-        self.get_block(self.entry)
+        self.get_block(self.root())
     }
 
     /// Get a block by address.
@@ -3204,7 +3233,9 @@ impl SSAFunction {
             }
         }
 
-        let block_count = self.num_blocks().max(self.cfg.block_addrs().count());
+        // The program's blocks: the entry-edge block is the graph's own.
+        let block_count = self.num_blocks().max(self.cfg.block_addrs().count())
+            - usize::from(self.cfg.has_entry_edge());
 
         CFGRiskSummary {
             block_count,

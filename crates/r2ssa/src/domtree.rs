@@ -206,7 +206,11 @@ impl DomTree {
             self.frontier.insert(addr, HashSet::new());
         }
 
-        // For each block with multiple predecessors
+        // Only a merge is in a frontier: a block with one predecessor is
+        // dominated by it. The root has none -- the graph is rooted at the
+        // entry edge where a branch in the body targets the entry
+        // (`cfg::ENTRY_EDGE`) -- so every merge, the entry included, has two
+        // or more predecessors here.
         for addr in cfg.block_addrs() {
             control.poll()?;
             let preds = cfg.predecessors(addr);

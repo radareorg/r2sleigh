@@ -1252,6 +1252,10 @@ fn rendered_on(machine: &Machine, bytes: &'static [u8], name: &'static str) -> S
 }
 
 /// Compile the rendered function under a C harness and run it; the harness exits zero when every check holds.
+///
+/// A rendering that never returns is as wrong as one that returns the wrong
+/// value, so the harness is killed by `SIGALRM` if it is still running after
+/// thirty seconds, and the check fails instead of hanging the suite.
 fn run_rendered(name: &str, function: &str, harness: &str) {
     let dir = std::env::temp_dir().join(format!("r2engine-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("scratch directory");
@@ -1259,7 +1263,12 @@ fn run_rendered(name: &str, function: &str, harness: &str) {
     let binary = dir.join("rendered");
     std::fs::write(
         &source,
-        format!("#include <stdint.h>\n#include <string.h>\n{function}\n{harness}\n"),
+        format!(
+            "#define _POSIX_C_SOURCE 200809L\n#include <stdint.h>\n#include <string.h>\n\
+             #include <unistd.h>\n\
+             __attribute__((constructor)) static void r2engine_watchdog(void) {{ alarm(30); }}\n\
+             {function}\n{harness}\n"
+        ),
     )
     .expect("write the rendering");
     let compiled = std::process::Command::new("cc")
@@ -1326,6 +1335,159 @@ int main(void) {
                                    (uint64_t)(uintptr_t)cases[i].src, cases[i].n);
         if (got != want) {
             return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// A loop whose header is the function's entry: control reaches the first
+/// instruction both from the caller and from the latch.
+const ENTRY_LOOP: &[u8] = &[
+    0x48, 0x01, 0xfe, // 0x1000 add rsi, rdi
+    0x48, 0xff, 0xcf, // 0x1003 dec rdi
+    0x75, 0xf8, // 0x1006 jnz 0x1000
+    0x48, 0x89, 0xf0, // 0x1008 mov rax, rsi
+    0xc3, // 0x100b ret
+];
+
+/// The entry is a loop header with two latches, one of which also counts.
+const ENTRY_LOOP_TWO_LATCHES: &[u8] = &[
+    0x48, 0x85, 0xff, // 0x1000 test rdi, rdi
+    0x74, 0x0d, // 0x1003 je 0x1012
+    0x48, 0xff, 0xcf, // 0x1005 dec rdi
+    0x48, 0x85, 0xf6, // 0x1008 test rsi, rsi
+    0x74, 0xf3, // 0x100b je 0x1000
+    0x48, 0xff, 0xc2, // 0x100d inc rdx
+    0xeb, 0xee, // 0x1010 jmp 0x1000
+    0x48, 0x89, 0xd0, // 0x1012 mov rax, rdx
+    0xc3, // 0x1015 ret
+];
+
+/// `shape_mutual_even` and `shape_mutual_odd` of `tests/corpus/shapes.c` as
+/// GCC -O2 compiles them, each tail-jumping to the other; only `even` is a
+/// declared entry, so its body takes in `odd` and the jump back to the entry
+/// closes a loop.
+const MUTUAL_TAIL_RECURSION: &[u8] = &[
+    0x48, 0x85, 0xff, // 0x1000 even: test rdi, rdi
+    0x75, 0x09, // 0x1003 jne 0x100e
+    0xb8, 0xa5, 0xa5, 0xa5, 0xa5, // 0x1005 mov eax, 0xa5a5a5a5
+    0x48, 0x31, 0xf0, // 0x100a xor rax, rsi
+    0xc3, // 0x100d ret
+    0x48, 0x89, 0xf0, // 0x100e mov rax, rsi
+    0x48, 0xc1, 0xe0, 0x05, // 0x1011 shl rax, 5
+    0x48, 0x29, 0xf0, // 0x1015 sub rax, rsi
+    0x48, 0x8d, 0x34, 0x38, // 0x1018 lea rsi, [rax + rdi]
+    0x48, 0x83, 0xef, 0x01, // 0x101c sub rdi, 1
+    0xeb, 0x00, // 0x1020 jmp odd
+    0x48, 0x89, 0xf0, // 0x1022 odd: mov rax, rsi
+    0x48, 0x85, 0xff, // 0x1025 test rdi, rdi
+    0x75, 0x07, // 0x1028 jne 0x1031
+    0x48, 0x35, 0x5a, 0x5a, 0x5a, 0x5a, // 0x102a xor rax, 0x5a5a5a5a
+    0xc3, // 0x1030 ret
+    0x48, 0xc1, 0xe0, 0x04, // 0x1031 shl rax, 4
+    0x48, 0x01, 0xf0, // 0x1035 add rax, rsi
+    0x48, 0x8d, 0x34, 0xb8, // 0x1038 lea rsi, [rax + rdi*4]
+    0x48, 0x83, 0xef, 0x01, // 0x103c sub rdi, 1
+    0xeb, 0xbe, // 0x1040 jmp even
+];
+
+/// The first pass of a loop at the entry reads what the caller passed, and
+/// every later pass what the latch left: the latch's decrement is observed.
+#[test]
+fn a_loop_at_the_entry_carries_what_its_latch_writes() {
+    let text = rendered(ENTRY_LOOP, "entry_loop");
+    run_rendered(
+        "entry_loop",
+        &text,
+        r#"int main(void) {
+    const uint64_t n[] = {1, 2, 5, 10, 3};
+    const uint64_t acc[] = {0, 0, 0, 7, 100};
+    for (int i = 0; i < 5; i++) {
+        if (entry_loop(n[i], acc[i]) != acc[i] + n[i] * (n[i] + 1) / 2) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// Two latches and the caller all reach the entry, so each merge there has
+/// three ways in, and the one from the caller is the argument.
+#[test]
+fn an_entry_with_two_latches_merges_the_caller_and_both_latches() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: ENTRY_LOOP_TWO_LATCHES.to_vec(),
+        name: "two_latches",
+    };
+    let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+    let artifact = prepared.artifact();
+    let graph = artifact.graph();
+    let header = graph
+        .block_id_for_addr(BASE)
+        .and_then(|id| graph.block(id))
+        .expect("the entry block");
+    let dump = artifact.function().dump();
+    assert_eq!(header.predecessors.len(), 3, "{dump}");
+    // The counter is written on one latch only, so its merge is the one
+    // that has to take the caller's value, the counting latch's and the
+    // other latch's.
+    let merges_the_caller = header.insts.iter().any(|inst| {
+        let inst = graph.inst(*inst).expect("an instruction of the block");
+        matches!(&inst.payload, InstPayload::Phi { predecessors } if predecessors.len() == 3)
+            && inst
+                .inputs
+                .iter()
+                .any(|input| graph.caller_supplied(*input))
+    });
+    assert!(
+        merges_the_caller,
+        "no merge at the entry takes the caller's value:\n{dump}"
+    );
+
+    let text = rendered(ENTRY_LOOP_TWO_LATCHES, "two_latches");
+    run_rendered(
+        "two_latches",
+        &text,
+        r#"int main(void) {
+    const uint64_t n[] = {0, 1, 4, 4, 9};
+    const uint64_t flag[] = {1, 1, 1, 0, 3};
+    const uint64_t acc[] = {5, 0, 10, 10, 1};
+    for (int i = 0; i < 5; i++) {
+        uint64_t want = acc[i] + (flag[i] != 0 ? n[i] : 0);
+        if (two_latches(n[i], flag[i], acc[i]) != want) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// Mutual tail recursion walked into one body is a loop through the entry,
+/// and each pass takes both partners' steps.
+#[test]
+fn mutual_tail_recursion_takes_both_partners_steps() {
+    let text = rendered(MUTUAL_TAIL_RECURSION, "mutual_even");
+    run_rendered(
+        "mutual_even",
+        &text,
+        r#"static uint64_t ref_odd(uint64_t depth, uint64_t accumulator);
+static uint64_t ref_even(uint64_t depth, uint64_t accumulator) {
+    return depth == 0 ? accumulator ^ 0xa5a5a5a5u : ref_odd(depth - 1u, accumulator * 31u + depth);
+}
+static uint64_t ref_odd(uint64_t depth, uint64_t accumulator) {
+    return depth == 0 ? accumulator ^ 0x5a5a5a5au : ref_even(depth - 1u, accumulator * 17u + (depth << 2));
+}
+int main(void) {
+    for (uint64_t depth = 0; depth < 12; depth++) {
+        const uint64_t accumulator = 0x0123456789abcdefULL ^ (depth * 0x9e3779b97f4a7c15ULL);
+        if (mutual_even(depth, accumulator) != ref_even(depth, accumulator)) {
+            return 1 + (int)depth;
         }
     }
     return 0;

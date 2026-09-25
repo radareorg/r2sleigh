@@ -1164,9 +1164,9 @@ pub(crate) fn reaching_abi_value_before(
     }
     let predecessors = function.predecessors(block_addr);
     let mut values = Vec::new();
-    // The entry is one way in whatever loops come back to it: the value the
-    // function was entered with reaches its first boundary alongside what
-    // any back edge carries.
+    // The root is the way in, and nothing comes back to it: a loop through
+    // the function's first instruction comes back to the block after it
+    // (`cfg::ENTRY_EDGE`), which is a merge like any other.
     if graph.block_by_addr.get(&block_addr) == Some(&graph.entry) {
         let candidates = graph
             .values
@@ -1393,7 +1393,7 @@ pub(crate) fn block_entry_storage_state(
     block_addr: u64,
     storage: CanonicalStorageId,
 ) -> ReachingStorageState {
-    if block_addr == function.entry {
+    if block_addr == function.root() {
         return entry_storage_state(graph, storage);
     }
     let predecessors = function.predecessors(block_addr);

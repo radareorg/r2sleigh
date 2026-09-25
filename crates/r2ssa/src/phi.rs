@@ -131,6 +131,8 @@ impl PhiPlacement {
 
             for phi_block in phi_blocks {
                 control.poll()?;
+                // A merge has two or more ways in, the entry included: where
+                // the body branches back to it, the entry edge is one of them.
                 let preds = cfg.predecessors(phi_block);
                 if preds.len() >= 2 {
                     let storage = storage_by_identity.get(identity).copied();

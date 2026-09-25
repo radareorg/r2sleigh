@@ -1766,7 +1766,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
                 return false;
             }
         }
-        if candidate_addr == function.entry {
+        if candidate_addr == function.root() {
             reached_entry = true;
             continue;
         }

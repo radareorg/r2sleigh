@@ -168,7 +168,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         crate::stage_timing::mark("structure_prepare");
         let body = self.place_function(&placement)?;
         let stmt = CStmt::structured_region(
-            StructuredRegionMarker::unsealed(self.func.entry(), StructuredRegionKind::FunctionBody),
+            StructuredRegionMarker::unsealed(self.func.root(), StructuredRegionKind::FunctionBody),
             CStmt::Block(body),
         );
         crate::stage_timing::mark("structure_walk");
@@ -367,7 +367,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         certify::certify(
             stmt,
             self.func.cfg(),
-            self.func.entry(),
+            self.func.root(),
             &|id| {
                 journal
                     .as_ref()
