@@ -2397,10 +2397,14 @@ impl<'a> FoldingContext<'a> {
                 // sixty-four bits keeps every bit of its mask, and shifted by
                 // the position's value rather than by the operand: the mask is
                 // this lowering's own, and the operand is read once, below.
-                let lane_ones = CExpr::unary(
-                    UnaryOp::BitNot,
-                    CExpr::cast(lane_ty, CExpr::UIntLit(0)),
-                );
+                //
+                // The all-ones is `-1` converted to the lane's unsigned type,
+                // which C defines as the lane's maximum, 2^w - 1, at every
+                // width. It was `~(lane)0`, and a lane narrower than `int` is
+                // promoted before `~` applies: `~(uint8_t)0` is the `int` -1,
+                // widened to the root as all ones, so `root & ~mask` erased
+                // every root bit above the lane.
+                let lane_ones = CExpr::cast(lane_ty, CExpr::IntLit(-1));
                 let mask = CExpr::binary(
                     BinaryOp::Shl,
                     CExpr::cast(dst_ty.clone(), lane_ones),

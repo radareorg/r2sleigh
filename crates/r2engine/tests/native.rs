@@ -1460,6 +1460,99 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     );
 }
 
+/// `v ^= 0xff` on the low byte of a spilled `uint64_t`, as gcc -O0 writes
+/// siphash's `xor dl, 0xff`.
+const FLIP_LOW_BYTE: &[u8] = &[
+    0x55, // 0x1000 push rbp
+    0x48, 0x89, 0xe5, // 0x1001 mov rbp, rsp
+    0x48, 0x89, 0x7d, 0xf8, // 0x1004 mov [rbp-8], rdi
+    0x48, 0x8b, 0x45, 0xf8, // 0x1008 mov rax, [rbp-8]
+    0x34, 0xff, // 0x100c xor al, 0xff
+    0x48, 0x89, 0x45, 0xf8, // 0x100e mov [rbp-8], rax
+    0x48, 0x8b, 0x45, 0xf8, // 0x1012 mov rax, [rbp-8]
+    0x5d, // 0x1016 pop rbp
+    0xc3, // 0x1017 ret
+];
+
+/// mov rax, rdi; mov edx, esi; mov ah, dl; ret -- the second byte replaced.
+const REPLACE_SECOND_BYTE: &[u8] = &[
+    0x48, 0x89, 0xf8, // 0x1000 mov rax, rdi
+    0x89, 0xf2, // 0x1003 mov edx, esi
+    0x88, 0xd4, // 0x1005 mov ah, dl
+    0xc3, // 0x1007 ret
+];
+
+/// mov rax, rdi; mov ax, si; not rax; ret -- the low half-word replaced,
+/// and then the whole register read.
+const REPLACE_LOW_WORD: &[u8] = &[
+    0x48, 0x89, 0xf8, // 0x1000 mov rax, rdi
+    0x66, 0x89, 0xf0, // 0x1003 mov ax, si
+    0x48, 0xf7, 0xd0, // 0x1006 not rax
+    0xc3, // 0x1009 ret
+];
+
+/// A write to part of a register keeps the rest of the register.
+///
+/// The lane's mask was spelled `~(uint8_t)0`, which C promotes to the `int`
+/// -1 before the complement applies; widened to the register it is all ones,
+/// so `root & ~mask` kept nothing and every bit above the lane was lost. The
+/// renderings are compiled and run, so C's own promotion rules judge them.
+#[test]
+fn a_write_to_part_of_a_register_keeps_the_rest_of_it() {
+    let text = rendered(FLIP_LOW_BYTE, "flip_low_byte");
+    run_rendered(
+        "flip_low_byte",
+        &text,
+        r#"int main(void) {
+    const uint64_t cases[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL, 0xff00ULL};
+    for (int i = 0; i < 4; i++) {
+        if (flip_low_byte(cases[i]) != (cases[i] ^ 0xff)) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+
+    let text = rendered(REPLACE_SECOND_BYTE, "replace_second_byte");
+    run_rendered(
+        "replace_second_byte",
+        &text,
+        r#"int main(void) {
+    const uint64_t roots[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL};
+    const uint64_t lanes[] = {0xa5, 0x1ff, 0};
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            uint64_t want = (roots[i] & ~0xff00ULL) | (lanes[j] & 0xff) << 8;
+            if (replace_second_byte(roots[i], lanes[j]) != want) {
+                return 1 + 3 * i + j;
+            }
+        }
+    }
+    return 0;
+}"#,
+    );
+
+    let text = rendered(REPLACE_LOW_WORD, "replace_low_word");
+    run_rendered(
+        "replace_low_word",
+        &text,
+        r#"int main(void) {
+    const uint64_t roots[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL};
+    const uint64_t lanes[] = {0xa5a5, 0x1ffff, 0};
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            uint64_t want = ~((roots[i] & ~0xffffULL) | (lanes[j] & 0xffff));
+            if (replace_low_word(roots[i], lanes[j]) != want) {
+                return 1 + 3 * i + j;
+            }
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
 /// and x0, x0, #0xffffffffffff; ret
 const AARCH64_MASK_48: &[u8] = &[
     0x00, 0xbc, 0x40, 0x92, // 0x1000 and x0, x0, #0xffffffffffff

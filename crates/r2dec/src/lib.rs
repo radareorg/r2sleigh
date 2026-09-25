@@ -31,6 +31,8 @@ pub(crate) mod analysis;
 pub mod ast;
 mod binding_plan;
 pub mod bitvector;
+#[cfg(test)]
+pub(crate) mod c_semantics;
 pub(crate) mod codegen;
 pub(crate) mod consumer_structured;
 pub mod control;

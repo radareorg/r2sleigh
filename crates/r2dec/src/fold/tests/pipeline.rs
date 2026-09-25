@@ -4085,4 +4085,131 @@ mod tests {
             "a comparison fact whose condition ValueId does not own the terminal branch UseSite must refuse"
         );
     }
+
+    /// The rendering of a function made of `blocks`, through the whole
+    /// pipeline.
+    fn rendered_from_r2il(blocks: &[R2ILBlock], name: &str) -> crate::DecompileBindingAudit {
+        let arch = make_test_arch_x86_64();
+        let fixture = prepared_from_r2il_blocks(blocks, &arch).with_name(name);
+        crate::Decompiler::new(crate::DecompilerConfig::default())
+            .decompile_input_with_binding_audit(&crate::DecompilerInput::new(fixture.facts))
+    }
+
+    /// What a rendered function leaves in memory, interpreted under C's rules.
+    ///
+    /// Memory holds `inputs` (address, value, bytes) before the call, the
+    /// parameters hold `arguments`, and the answer is the `bytes` at `output`.
+    fn interpreted_memory_result(
+        function: &CFunction,
+        arguments: &[u128],
+        inputs: &[(u64, u128, u32)],
+        output: (u64, u32),
+    ) -> Result<u128, crate::c_semantics::Stop> {
+        let symbols = function.symbols.borrow();
+        let mut c = crate::c_semantics::Interpreter::new(&symbols);
+        for (address, value, bytes) in inputs {
+            c.write_memory(*address, *value, *bytes);
+        }
+        c.call(function, arguments)?;
+        c.read_memory(output.0, output.1)
+    }
+
+    /// P-code's INSERT: `root` with bits `lsb..lsb + lane_bits` replaced by
+    /// `lane`.
+    fn pcode_insert(root: u128, lane: u128, lsb: u32, lane_bits: u32, root_bits: u32) -> u128 {
+        let width = |bits: u32| {
+            if bits >= 128 {
+                u128::MAX
+            } else {
+                (1u128 << bits) - 1
+            }
+        };
+        let window = width(lane_bits) << lsb;
+        ((root & !window) | ((lane & width(lane_bits)) << lsb)) & width(root_bits)
+    }
+
+    /// Where the INSERT fixture reads its root and lane, and writes its result.
+    const INSERT_ROOT_AT: u64 = 0x3000;
+    const INSERT_LANE_AT: u64 = 0x3100;
+    const INSERT_OUT_AT: u64 = 0x3200;
+
+    /// A function that loads a root and a lane, inserts the lane at bit
+    /// `lsb`, and stores the result.
+    fn insert_function(root_bytes: u32, lane_bytes: u32, lsb: u32) -> R2ILBlock {
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::Load {
+            dst: Varnode::unique(0x100, root_bytes),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(INSERT_ROOT_AT, 8),
+        });
+        entry.push(R2ILOp::Load {
+            dst: Varnode::unique(0x200, lane_bytes),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(INSERT_LANE_AT, 8),
+        });
+        entry.push(R2ILOp::Insert {
+            dst: Varnode::unique(0x300, root_bytes),
+            src: Varnode::unique(0x100, root_bytes),
+            value: Varnode::unique(0x200, lane_bytes),
+            position: Varnode::constant(u64::from(lsb), 4),
+        });
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(INSERT_OUT_AT, 8),
+            val: Varnode::unique(0x300, root_bytes),
+        });
+        entry
+    }
+
+    /// A lane written into a root keeps every root bit outside the lane.
+    ///
+    /// Exhaustive over the roots C has an integer for (16, 32, 64 and 128
+    /// bits), every narrower lane of 8, 16, 32 or 64 bits, and every byte
+    /// position the lane fits at. Each rendering is interpreted under C's
+    /// integer rules, promotion included, and compared with P-code's INSERT.
+    /// The mask was spelled `~(uint8_t)0`, which C promotes to the `int` -1:
+    /// widened to the root it is all ones, and every root bit above an 8- or
+    /// 16-bit lane was erased (siphash's `xor dl, 0xff` zeroed bits 8..63 of
+    /// v2).
+    #[test]
+    fn an_inserted_lane_keeps_every_root_bit_outside_it() {
+        let pattern: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+        let configurations = [2u32, 4, 8, 16].into_iter().flat_map(|root| {
+            [1u32, 2, 4, 8]
+                .into_iter()
+                .filter(move |lane| *lane < root)
+                .flat_map(move |lane| (0..=root - lane).map(move |byte| (root, lane, byte * 8)))
+        });
+        let mut checked = 0;
+        for (root_bytes, lane_bytes, lsb) in configurations {
+            let block = insert_function(root_bytes, lane_bytes, lsb);
+            let rendered = rendered_from_r2il(&[block], "insert_lane");
+            let function = rendered.rendered().function();
+            // The convention's argument registers, which nothing reads.
+            let arguments = vec![0; function.params.len()];
+            for (root, lane) in [(pattern, !pattern), (u128::MAX, 0), (0, u128::MAX)] {
+                let result = interpreted_memory_result(
+                    function,
+                    &arguments,
+                    &[
+                        (INSERT_ROOT_AT, root, root_bytes),
+                        (INSERT_LANE_AT, lane, lane_bytes),
+                    ],
+                    (INSERT_OUT_AT, root_bytes),
+                );
+                assert_eq!(
+                    result,
+                    Ok(pcode_insert(root, lane, lsb, lane_bytes * 8, root_bytes * 8)),
+                    "a {}-bit lane at bit {lsb} of a {}-bit root, root {root:#x} lane {lane:#x}:\n{}",
+                    lane_bytes * 8,
+                    root_bytes * 8,
+                    rendered.output()
+                );
+                checked += 1;
+            }
+        }
+        // Positions: 16-bit root 2; 32-bit 4+3; 64-bit 8+7+5; 128-bit
+        // 16+15+13+9. Three vectors each.
+        assert_eq!(checked, 3 * (2 + 7 + 20 + 53));
+    }
 }
