@@ -1,0 +1,10 @@
+warning: a call is built with an empty argument list no callsite fact supplied; render the facts' arguments or residualize
+  --> $DIR/empty_call_arguments.rs:15:5
+   |
+LL |     CExpr::call(target, vec![])
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(r2dec_direct_zero_arg_call_fallback)]` on by default
+
+warning: 1 warning emitted
+

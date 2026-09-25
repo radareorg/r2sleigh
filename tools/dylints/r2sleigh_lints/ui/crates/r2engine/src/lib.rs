@@ -6,16 +6,6 @@ pub struct EngineFunctionDecompileRequest {
     function_addr: u64,
 }
 
-pub struct SemanticArtifact;
-pub struct EngineSemanticRoutePlan;
-pub struct FunctionFacts;
-
-pub struct EngineArtifacts {
-    semantic_artifact: Option<SemanticArtifact>,
-    function_facts: Option<FunctionFacts>,
-    route: Option<EngineSemanticRoutePlan>,
-}
-
 pub struct EngineSession;
 
 impl EngineSession {

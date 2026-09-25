@@ -1,0 +1,10 @@
+warning: display spellings are for rendering; classify behaviour from typed evidence instead
+  --> $DIR/callee_names.rs:22:5
+   |
+LL |     artifact.display_names().functions().len()
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(display_names_outside_rendering)]` on by default
+
+warning: 1 warning emitted
+

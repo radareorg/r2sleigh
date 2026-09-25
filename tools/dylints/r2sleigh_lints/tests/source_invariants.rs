@@ -54,6 +54,7 @@ fn r2engine_retired_route_cache_and_mutation_seams_stay_deleted() {
         "prepared evidence is derived by its r2types owner, not set by the engine";
     const CACHE: &str = "an analysis is request-local; no cache stands in for a new one";
     const DETACHED: &str = "no detached report or plan is promoted to authority";
+    const SUMMARY: &str = "a decompile always runs on prepared SSA; no summary-only entry renders";
     let engine = production("crates/r2engine/src");
     assert_retired(
         "r2engine",
@@ -111,6 +112,18 @@ fn r2engine_retired_route_cache_and_mutation_seams_stay_deleted() {
             ("EngineBoundedCfgTypePlan", DETACHED),
             ("semantic_fallback_type_plan", DETACHED),
             ("type_facts_with_summary_projection", DETACHED),
+            ("clear_analysis_artifacts_for_function", CACHE),
+            (
+                "struct EngineArtifacts",
+                "no artifact beside FunctionFacts duplicates its semantic or route evidence",
+            ),
+            ("EngineSummaryDecompileRequest", SUMMARY),
+            ("fn decompile_summary", SUMMARY),
+            ("named_worker_summary_route", SUMMARY),
+            (
+                "suppress_unrenderable",
+                "semantics are not cleared at render time; the route refuses before rendering",
+            ),
         ],
     );
 }
@@ -363,7 +376,20 @@ fn sealed_owners_expose_no_mutators() {
             .any(|word| word == detached);
         assert!(!reexported, "{detached} must not be exported");
     }
+    // A signature projected from a role's name is a name-owned summary: the
+    // evidence-backed role identity replaced it.
+    assert_retired(
+        "r2types",
+        types,
+        &[
+            ("signature_hint_for_name_candidates", NAME_HINT),
+            ("signature_hint_for_role_name", NAME_HINT),
+            ("type_projection_for_name_candidates", NAME_HINT),
+        ],
+    );
 }
+
+const NAME_HINT: &str = "a signature is projected from evidence-backed identity, not a name";
 
 /// Every rendering r2dec produces starts from the sealed `DecompilerInput`:
 /// no public entry takes raw SSA and renders it, and the context the renderer
@@ -577,6 +603,7 @@ fn r2dec_retired_renderer_repairs_stay_deleted() {
     const STANDARD: &str = "generic Standard rendering does not repair headers, calls or returns";
     const LOCAL: &str = "no local fallback stands in for a missing prepared fact";
     const SUMMARY: &str = "a summary route renders no executable C";
+    const CALL_ARGS: &str = "a call argument renders from callsite facts, not a name or a policy";
     let dec = production("crates/r2dec/src");
     assert_retired(
         "r2dec",
@@ -665,6 +692,47 @@ fn r2dec_retired_renderer_repairs_stay_deleted() {
             ("fn render_vm_semantic_summary", SUMMARY),
             ("fn render_semantic_worker_linearization", SUMMARY),
             ("structure_semantic_worker_islands", SUMMARY),
+            ("semantic_worker_structured_body", SUMMARY),
+            // Retired with the lints that guarded them, which could no
+            // longer fire once these names were gone.
+            ("fn is_imported_call_target", CALL_ARGS),
+            (
+                "imported_or_modeled_call_target_for_optional_site",
+                CALL_ARGS,
+            ),
+            ("source_var_name", CALL_ARGS),
+            ("call_args_for_site_with_direct_target", CALL_ARGS),
+            ("call_arg_binding_has_render_authority", CALL_ARGS),
+            ("recovered_owned_call_result_definition_rhs", OWNERS),
+            ("direct_definition_expr", OWNERS),
+            ("source_proof_for_call_expr", OWNERS),
+            ("source_matches_for_call_expr", OWNERS),
+            ("raw_call_exprs_match_for_source_owner_definition", OWNERS),
+            ("semantic_stack_owner_name_for_alias", OWNERS),
+            ("derive_stable_owned_call_result_name_for_alias", OWNERS),
+            (
+                "fallback_owned_call_result_register_name_from_matching",
+                OWNERS,
+            ),
+            ("should_preserve_owned_call_result_visible_name", OWNERS),
+            ("prune_duplicate_call_statements_by_source", OWNERS),
+            ("collect_rendered_call_sources_for_expr", OWNERS),
+            ("source_call_for_visible_owner_name", OWNERS),
+            ("prepared_result_owner_name_for_source", OWNERS),
+            ("stable_owned_call_result_expr_for", OWNERS),
+            ("render_stack_slot_for_name", LOCAL),
+            ("choose_more_specific_runtime_type", LOCAL),
+            ("certified_standard_mode", STANDARD),
+            ("enrich_known_function_signatures_from_names", RAW_NAMES),
+            ("guarded_dense_zero_based_switch_bias", LOCAL),
+            ("filter_switch_case_outliers", LOCAL),
+            ("resolve_switch_expr_for_block_with_selector", LOCAL),
+            ("switch_selector_expr_by_block", LOCAL),
+            ("typedef_name_looks_aggregate", AGGREGATE),
+            (
+                "VariableRecovery",
+                "signature parameters are recovered by r2types, not by the renderer",
+            ),
         ],
     );
 }
