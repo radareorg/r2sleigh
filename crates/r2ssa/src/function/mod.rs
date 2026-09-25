@@ -216,10 +216,6 @@ pub struct ArtifactLiveness {
     storage_spans: StorageSpans,
     live_out: crate::liveout::FunctionLiveOut,
     values: crate::liveness::ValueLiveness,
-    /// Pairs of values the memory facts prove hold one content -- reads of one
-    /// object with no write between -- for anyone who recomputes the liveness
-    /// with reads relocated.
-    same_content_pairs: Vec<(crate::graph::ValueId, crate::graph::ValueId)>,
     /// Reads the text never performs: a call's conventional read of a register
     /// the certified call does not pass.
     ignored_reads: std::collections::BTreeSet<crate::graph::UseSite>,
@@ -237,10 +233,6 @@ impl ArtifactLiveness {
     /// Where every value is live, the fact every coalescing decision is made from.
     pub const fn values(&self) -> &crate::liveness::ValueLiveness {
         &self.values
-    }
-
-    pub fn same_content_pairs(&self) -> &[(crate::graph::ValueId, crate::graph::ValueId)] {
-        &self.same_content_pairs
     }
 
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
@@ -264,7 +256,7 @@ impl ArtifactLiveness {
             graph,
             &self.live_out,
             relocations,
-            &self.same_content_pairs,
+            self.values.content().clone(),
             &self.ignored_reads,
         )
     }
@@ -502,7 +494,9 @@ impl SsaArtifact {
             .collect::<Vec<_>>();
         let live_out =
             crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
-        let mut liveness = crate::liveness::ValueLiveness::compute(&graph, &live_out);
+        let mut content = crate::liveness::ValueContent::of(&graph, Some(&machine_context));
+        let mut liveness =
+            crate::liveness::ValueLiveness::compute(&graph, &live_out, content.clone());
         let storage_spans = StorageSpans::compute(&graph, &liveness);
         let graph_built_bytes = r2il::allocation::live_bytes();
         let facts = PreparedFunctionFacts::collect_with_context_and_control(
@@ -530,7 +524,7 @@ impl SsaArtifact {
         // Two reads of one object with no write to it between are one
         // content, which the graph cannot see and the memory facts can. The
         // spans above were judged without this and are at worst finer.
-        let same_content_pairs = same_content_reads(&facts.structured);
+        content.declare_same_content(&same_content_reads(&facts.structured));
         // A call's conventional read of a register the certified call does
         // not pass is not a read the text performs, and held values live
         // across every call that the machine merely might have read. The
@@ -540,7 +534,7 @@ impl SsaArtifact {
             &graph,
             &live_out,
             &std::collections::BTreeMap::new(),
-            &same_content_pairs,
+            content,
             &ignored_reads,
         );
         function.install_formal_parameter_identity(&graph, &facts.addresses);
@@ -561,7 +555,6 @@ impl SsaArtifact {
                 storage_spans,
                 live_out,
                 values: liveness,
-                same_content_pairs,
                 ignored_reads,
             },
             unobserved_merges,
@@ -1062,11 +1055,6 @@ impl SsaArtifact {
     /// Where every value is live, the fact every coalescing decision is made from.
     pub const fn value_liveness(&self) -> &crate::liveness::ValueLiveness {
         self.liveness.values()
-    }
-
-    /// Pairs of values the memory facts prove hold one content.
-    pub fn same_content_pairs(&self) -> &[(crate::graph::ValueId, crate::graph::ValueId)] {
-        self.liveness.same_content_pairs()
     }
 
     /// Reads the text never performs, which hold nothing live.

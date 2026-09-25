@@ -438,7 +438,11 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(&graph, None),
+        );
         let spans = StorageSpans::compute(&graph, &liveness);
 
         let first = value_named(&graph, "RAX", 1);
@@ -471,7 +475,11 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(&graph, None),
+        );
         let spans = StorageSpans::compute(&graph, &liveness);
 
         let accumulator = value_named(&graph, "RAX", 1);
@@ -509,7 +517,11 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(&graph, None),
+        );
         let spans = StorageSpans::compute(&graph, &liveness);
 
         // The narrow write is the lane temporary the extension widens.
@@ -576,7 +588,11 @@ mod tests {
         )
         .expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(&graph, None),
+        );
         let spans = StorageSpans::compute(&graph, &liveness);
 
         let merged = value_named(&graph, "RAX", 2);
@@ -611,7 +627,11 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let liveness = ValueLiveness::compute(&graph, &crate::liveout::FunctionLiveOut::default());
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(&graph, None),
+        );
         let spans = StorageSpans::compute(&graph, &liveness);
 
         let seeded = value_named(&graph, "RAX", 1);
