@@ -326,12 +326,16 @@ pub struct SourceLine {
 
 /// One residual: a construct the rendering could not prove, written as a
 /// call that traps, numbered where it stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidualSite {
     /// The argument the call passes, counted from one in text order.
     pub site: u32,
     /// What the construct would have produced.
     pub ty: crate::prelude::ResidualType,
+    /// Why the construct is unproven.
+    pub cause: crate::prelude::ResidualCause,
+    /// For a marked gap, the kind its marker names.
+    pub gap: Option<String>,
     /// One-based, in the unit.
     pub line: usize,
 }
@@ -411,10 +415,21 @@ impl<'c> CodeGenerator<'c> {
     }
 
     /// Write a residual call: its helper, and the next site number.
-    fn emit_residual(&mut self, ty: crate::prelude::ResidualType) {
+    fn emit_residual(
+        &mut self,
+        ty: crate::prelude::ResidualType,
+        cause: crate::prelude::ResidualCause,
+        gap: Option<&str>,
+    ) {
         let site = u32::try_from(self.residuals.len() + 1).unwrap_or(u32::MAX);
         let line = self.current_line();
-        self.residuals.push(ResidualSite { site, ty, line });
+        self.residuals.push(ResidualSite {
+            site,
+            ty,
+            cause,
+            gap: gap.map(str::to_owned),
+            line,
+        });
         self.output
             .push_str(&crate::prelude::Helper::Residual(ty).name());
         self.output.push_str(&format!("({site})"));
@@ -924,7 +939,11 @@ impl<'c> CodeGenerator<'c> {
                 // What it stands for is not computed, so running it traps
                 // rather than going on as if the work were done.
                 self.emit_indent();
-                self.emit_residual(crate::prelude::ResidualType::Void);
+                self.emit_residual(
+                    crate::prelude::ResidualType::Void,
+                    crate::prelude::ResidualCause::Gap,
+                    Some(&marker.kind),
+                );
                 self.output.push_str("; /* ");
                 self.emit_comment_text(&marker.to_string());
                 self.output.push_str(" */\n");
@@ -1211,8 +1230,8 @@ impl<'c> CodeGenerator<'c> {
     /// Emit a call. A residual's argument is its site, which is where it
     /// stands in the text, so the emitter numbers it.
     fn emit_call(&mut self, func: &CExpr, args: &[CExpr], my_prec: u8) {
-        if let Some(ty) = crate::prelude::is_residual_callee(func) {
-            self.emit_residual(ty);
+        if let Some((ty, cause)) = crate::prelude::residual_callee(func) {
+            self.emit_residual(ty, cause, None);
             return;
         }
         self.emit_expr(func, my_prec);

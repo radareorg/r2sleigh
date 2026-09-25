@@ -2805,7 +2805,7 @@ impl<'a> FoldingContext<'a> {
             .inputs
             .function_return_type
             .filter(|ty| !matches!(ty, CType::Void))
-            .and_then(crate::prelude::residual);
+            .and_then(|ty| crate::prelude::residual(ty, crate::prelude::ResidualCause::UnprovenReturn));
         if let Some(residual) = residual {
             let (_, observations) = gap.into_semantic_with_observations();
             return Ok(observations.reapply(CStmt::Return(Some(residual))));

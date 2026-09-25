@@ -9,9 +9,11 @@
 //! that could say something different.
 //!
 //! A helper is a typed value, not a name. The lowering builds the call from
-//! [`Helper::call`], which is what puts [`ExternalKind::Helper`] on it, and the
-//! prelude is read back off those kinds ([`helpers_called`]); nothing parses a
-//! spelling to find out what a rendering needs.
+//! [`Helper::call`], which is what puts [`ExternalKind::Helper`] on it, or,
+//! for a residual, from [`residual`], which puts [`ExternalKind::Residual`] on
+//! it with the residual's cause; the prelude is read back off those kinds
+//! ([`helpers_called`]), and nothing parses a spelling to find out what a
+//! rendering needs.
 //!
 //! Every definition is exact for the P-code operation it stands for and has no
 //! undefined behaviour: arithmetic is done in an unsigned type at least as wide
@@ -24,6 +26,7 @@
 //! machine's types, and the two declarations would contradict each other.
 //!
 //! [`ExternalKind::Helper`]: crate::symbol::ExternalKind::Helper
+//! [`ExternalKind::Residual`]: crate::symbol::ExternalKind::Residual
 
 use std::collections::BTreeSet;
 
@@ -374,14 +377,60 @@ fn float_definition(name: &str, op: FloatOp, bits: u32) -> String {
     }
 }
 
-/// A residual of `ty`: an expression of that type which traps if evaluated.
+/// Why a residual stands where it does: which construct the rendering could
+/// not prove.
+///
+/// Carried on the residual's callee from where it is made to where the
+/// emitter numbers it, so a consumer of the unit reads each site's cause
+/// rather than guessing it from the text around the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ResidualCause {
+    /// The interface proves no result, and this return hands one back.
+    UnprovenReturn,
+    /// A read of a value the function entered holding, in storage no
+    /// convention argument slot delivers.
+    HeldFromEntry,
+    /// A read of an argument slot no recovered parameter admits.
+    UnadmittedArgument,
+    /// A read of an object nothing assigns and no entry supplies: a result a
+    /// call left that nothing claimed, for one.
+    NeverAssigned,
+    /// A conversion to or from a float C has no type for.
+    UnrepresentableFloat,
+    /// A marked gap: an operation, or a branch or dispatch test, the renderer
+    /// could not lower. The gap's own marker says which.
+    Gap,
+}
+
+impl ResidualCause {
+    /// The cause as a consumer of the unit reads it.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::UnprovenReturn => "unproven-return",
+            Self::HeldFromEntry => "held-from-entry",
+            Self::UnadmittedArgument => "unadmitted-argument",
+            Self::NeverAssigned => "never-assigned",
+            Self::UnrepresentableFloat => "unrepresentable-float",
+            Self::Gap => "gap",
+        }
+    }
+}
+
+/// A residual of `ty`: an expression of that type which traps if evaluated,
+/// standing for a construct unproven for `cause`.
 ///
 /// The site is the emitter's to number, so the call carries no argument until
 /// it is written: the number is where the residual stands in the text, and
 /// only the text knows that.
-pub(crate) fn residual(ty: &CType) -> Option<CExpr> {
+pub(crate) fn residual(ty: &CType, cause: ResidualCause) -> Option<CExpr> {
     let residual = ResidualType::of(ty)?;
-    let call = Helper::Residual(residual).call(Vec::new());
+    let call = CExpr::call(
+        CExpr::External {
+            name: Helper::Residual(residual).name(),
+            kind: crate::symbol::ExternalKind::Residual(residual, cause),
+        },
+        Vec::new(),
+    );
     // A `void *` converts to an object pointer on assignment and nowhere else,
     // so a pointer residual is cast to the pointer it stands for.
     Some(if residual == ResidualType::Pointer {
@@ -393,11 +442,16 @@ pub(crate) fn residual(ty: &CType) -> Option<CExpr> {
 
 /// Whether this expression node is a residual call's callee.
 pub(crate) fn is_residual_callee(expr: &CExpr) -> Option<ResidualType> {
+    residual_callee(expr).map(|(ty, _)| ty)
+}
+
+/// The type and the cause of the residual this callee names, if it names one.
+pub(crate) fn residual_callee(expr: &CExpr) -> Option<(ResidualType, ResidualCause)> {
     match expr.unobserved() {
         CExpr::External {
-            kind: crate::symbol::ExternalKind::Helper(Helper::Residual(ty)),
+            kind: crate::symbol::ExternalKind::Residual(ty, cause),
             ..
-        } => Some(*ty),
+        } => Some((*ty, *cause)),
         _ => None,
     }
 }
@@ -406,14 +460,21 @@ pub(crate) fn is_residual_callee(expr: &CExpr) -> Option<ResidualType> {
 /// order their definitions are emitted.
 pub(crate) fn helpers_called(function: &CFunction) -> BTreeSet<Helper> {
     let mut helpers = BTreeSet::new();
-    function.visit_body_exprs(&mut |expr| {
-        if let CExpr::External {
+    function.visit_body_exprs(&mut |expr| match expr {
+        CExpr::External {
             kind: crate::symbol::ExternalKind::Helper(helper),
             ..
-        } = expr
-        {
+        } => {
             helpers.insert(*helper);
         }
+        // One definition per type, whatever each site's cause.
+        CExpr::External {
+            kind: crate::symbol::ExternalKind::Residual(ty, _),
+            ..
+        } => {
+            helpers.insert(Helper::Residual(*ty));
+        }
+        _ => {}
     });
     if function.body.iter().any(stmt_holds_gap) {
         helpers.insert(Helper::Residual(ResidualType::Void));
@@ -599,7 +660,10 @@ mod tests {
     #[test]
     fn a_marker_covers_the_residuals_its_occurrence_evaluates() {
         let [test, arm, value, gap, clean] = [0, 1, 2, 3, 4].map(RenderObservationId::from_index);
-        let trap = || residual(&CType::uint(64)).expect("a residual of an integer");
+        let trap = || {
+            residual(&CType::uint(64), ResidualCause::NeverAssigned)
+                .expect("a residual of an integer")
+        };
         let body = vec![
             CStmt::observe_all(
                 [test],

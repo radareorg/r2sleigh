@@ -339,7 +339,10 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
         // comma is bracketed: unbracketed, it would split a call's arguments
         // or end a declaration's initializer.
         (CType::Float(_), _) | (_, CType::Float(_)) => {
-            return match crate::prelude::residual(to) {
+            return match crate::prelude::residual(
+                to,
+                crate::prelude::ResidualCause::UnrepresentableFloat,
+            ) {
                 Some(residual) => CExpr::Paren(Box::new(CExpr::Comma(vec![expr, residual]))),
                 None => expr,
             };
@@ -475,8 +478,11 @@ mod tests {
         assert_eq!(items[0], value);
         assert!(
             matches!(&items[1], CExpr::Call { func, .. }
-                if crate::prelude::is_residual_callee(func)
-                    == Some(crate::prelude::ResidualType::Unsigned(64))),
+            if crate::prelude::residual_callee(func)
+                == Some((
+                    crate::prelude::ResidualType::Unsigned(64),
+                    crate::prelude::ResidualCause::UnrepresentableFloat,
+                ))),
             "{:?}",
             items[1]
         );

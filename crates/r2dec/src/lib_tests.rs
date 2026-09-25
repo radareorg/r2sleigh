@@ -1805,7 +1805,11 @@ fn unproven_constructs_are_counted_through_nested_bodies() {
         CStmt::While {
             cond: CExpr::IntLit(1),
             body: Box::new(CStmt::Block(vec![CStmt::Expr(
-                crate::prelude::residual(&CType::uint(32)).expect("an integer residual"),
+                crate::prelude::residual(
+                    &CType::uint(32),
+                    crate::prelude::ResidualCause::NeverAssigned,
+                )
+                .expect("an integer residual"),
             )])),
         },
         CStmt::Return(Some(CExpr::IntLit(0))),

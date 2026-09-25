@@ -170,6 +170,28 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
             text.get(at - 1).is_some_and(|line| line.contains(&call)),
             "{label}: {call} is not on line {at}"
         );
+        // Each site says why it is unproven; a gap also names its marker's
+        // kind, which the comment after it spells.
+        let cause = residual["cause"].as_str().expect("a cause");
+        assert!(
+            [
+                "unproven-return",
+                "held-from-entry",
+                "unadmitted-argument",
+                "never-assigned",
+                "unrepresentable-float",
+                "gap",
+            ]
+            .contains(&cause),
+            "{label}: {call} has cause {cause}"
+        );
+        if cause == "gap" {
+            let kind = residual["gap"].as_str().expect("a gap's kind");
+            assert!(
+                text[at - 1].contains(&format!("r2dec gap: {kind} ")),
+                "{label}: {call} is a {kind} gap"
+            );
+        }
     }
     for link in answer["links"].as_array().expect("links") {
         let ident = link["ident"].as_str().expect("an identifier");
@@ -258,10 +280,16 @@ fn the_review_fixtures_are_units_that_compile() {
             if build == "rv_O0g" && answer["definition"] == "dispatch" {
                 dispatch_at_o0 = true;
                 let signature = answer["signature"].as_str().unwrap_or_default();
+                let returns_residual = answer["residuals"].as_array().is_some_and(|sites| {
+                    sites
+                        .iter()
+                        .any(|site| site["cause"] == "unproven-return" && site["type"] == "u64")
+                });
                 if !signature.starts_with("uint64_t dispatch(")
                     || !answer["code"]
                         .as_str()
                         .is_some_and(|code| code.contains("return r2sleigh_residual_u64("))
+                    || !returns_residual
                     || answer["proof"]["residual"].as_u64() == Some(0)
                 {
                     failures.push(format!("{build} dispatch: {answer}"));

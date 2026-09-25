@@ -453,6 +453,17 @@ pub(crate) enum UnassignedCause {
     Unassigned,
 }
 
+impl UnassignedCause {
+    /// The cause each residual standing for such a read carries.
+    const fn residual(self) -> crate::prelude::ResidualCause {
+        match self {
+            Self::Held => crate::prelude::ResidualCause::HeldFromEntry,
+            Self::UnadmittedArgument => crate::prelude::ResidualCause::UnadmittedArgument,
+            Self::Unassigned => crate::prelude::ResidualCause::NeverAssigned,
+        }
+    }
+}
+
 /// One object whose every read is now a residual, and why.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct UnassignedRead {
@@ -530,6 +541,18 @@ pub(crate) fn residualize_unassigned_reads(
     if declared.is_empty() {
         return Vec::new();
     }
+    let cause = |symbol: &SymbolId| match entry_supplied.get(symbol) {
+        Some(binding_plan::EntrySupply::Held) => UnassignedCause::Held,
+        Some(binding_plan::EntrySupply::UnadmittedArgument) => UnassignedCause::UnadmittedArgument,
+        None => UnassignedCause::Unassigned,
+    };
+    let declared = declared
+        .into_iter()
+        .map(|(symbol, ty)| {
+            let cause = cause(&symbol);
+            (symbol, (ty, cause))
+        })
+        .collect::<BTreeMap<_, _>>();
     for stmt in &mut func.body {
         stmt.visit_exprs_mut(&mut |root| {
             let expr = std::mem::replace(root, CExpr::IntLit(0));
@@ -549,15 +572,9 @@ pub(crate) fn residualize_unassigned_reads(
         .retain(|local| !declared.contains_key(&local.name));
     let symbols = func.symbols.borrow();
     let mut objects = declared
-        .keys()
-        .map(|symbol| UnassignedRead {
-            cause: match entry_supplied.get(symbol) {
-                Some(binding_plan::EntrySupply::Held) => UnassignedCause::Held,
-                Some(binding_plan::EntrySupply::UnadmittedArgument) => {
-                    UnassignedCause::UnadmittedArgument
-                }
-                None => UnassignedCause::Unassigned,
-            },
+        .iter()
+        .map(|(symbol, (_, cause))| UnassignedRead {
+            cause: *cause,
             name: symbols.name(*symbol).to_string(),
         })
         .collect::<Vec<_>>();
@@ -567,9 +584,14 @@ pub(crate) fn residualize_unassigned_reads(
 
 /// One expression with each read of a `declared` object replaced by a
 /// residual of its type, under the markers the read carried.
-fn residualize_reads_in(expr: CExpr, declared: &BTreeMap<SymbolId, CType>) -> CExpr {
+fn residualize_reads_in(
+    expr: CExpr,
+    declared: &BTreeMap<SymbolId, (CType, UnassignedCause)>,
+) -> CExpr {
     if let CExpr::Var(symbol) = expr.unobserved()
-        && let Some(residual) = declared.get(symbol).and_then(crate::prelude::residual)
+        && let Some(residual) = declared
+            .get(symbol)
+            .and_then(|(ty, cause)| crate::prelude::residual(ty, cause.residual()))
     {
         let (_, ids) = expr.into_semantic_with_observations();
         return CExpr::observe_all(ids, residual);
