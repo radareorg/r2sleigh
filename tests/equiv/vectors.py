@@ -39,6 +39,8 @@ REGION_SIZE = 32 * 1024
 REGIONS = ARENA_SIZE // REGION_SIZE
 
 LENGTHS = (0, 1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 61)
+# Entries in a pointer-to-pointer argument's table: past the largest length.
+POINTER_TABLE = 64
 MASK64 = (1 << 64) - 1
 
 RET_KINDS = {"void": 0, "int": 1, "f32": 2, "f64": 3, "int128": 4}
@@ -184,10 +186,16 @@ def _pointer_value(param: Param, dwarf: Dwarf, arena: _Arena, rng: random.Random
             _fill_struct(dwarf, pointee.type_offset, arena, offset, following, rng)
         return arena.address(offsets[0]), f"<{nodes} linked object(s)>"
     if pointee.shape == "pointers":
+        # A NULL after `count` entries serves a consumer that walks to the
+        # terminator (argv); valid pointers past it serve one that indexes
+        # (rows[i]), so an index inside the table never lands on filler.
         count = 1 + (choice % 5 if choice >= 0 else rng.randrange(5))
-        table = arena.reserve(8 * (count + 1))
+        table = arena.reserve(8 * POINTER_TABLE)
         words: list[int] = []
-        for _ in range(count):
+        for slot in range(POINTER_TABLE):
+            if slot == count:
+                words.append(0)
+                continue
             if pointee.element_is_char:
                 length = rng.choice(LENGTHS)
                 offset = arena.reserve(length + 1)
@@ -195,9 +203,8 @@ def _pointer_value(param: Param, dwarf: Dwarf, arena: _Arena, rng: random.Random
             else:
                 offset = arena.reserve(256)
             words.append(arena.address(offset))
-        words.append(0)
         arena.patch(table, struct.pack(f"<{len(words)}Q", *words))
-        return arena.address(table), f"<{count} pointer(s) and NULL>"
+        return arena.address(table), f"<{count} pointer(s), NULL, then {POINTER_TABLE - count - 1} more>"
     # A plain buffer: the arena filler is its contents. Offset by a multiple of
     # the element size so an aligned access stays aligned.
     offset = arena.reserve(REGION_SIZE // 2)
