@@ -90,3 +90,24 @@ fn text_in_a_data_section_is_a_string_and_text_in_code_is_not() {
         assert!(c.contains("puts(") && !c.contains("\"hello\""), "{c}");
     }
 }
+
+#[test]
+fn an_address_no_instruction_can_run_at_is_refused_rather_than_rendered_as_a_function() {
+    // `t` is stated a function and its bytes decode, `"1"` as `xor [rax],
+    // eax`, yet the program maps them as data. `s 0x2020; pdd` on a stripped
+    // binary rendered .rodata as `void fcn_2020(void)` with a clean proof line.
+    let data = common::transferring()
+        .with_data_after(common::TRANSFERRED)
+        .data_mapped_after(common::TRANSFERRED);
+    let mut program = OpenProgram::of(data);
+    let Err(refused) = program.rendered(common::TRANSFERRED, RenderTier::C) else {
+        panic!("data was rendered as a function");
+    };
+    assert_eq!(
+        refused,
+        "no instruction can run at 0x1100: the program maps it without execute permission"
+    );
+    // The code that calls it is still code, and still renders.
+    let c = c_of(&mut program, BASE);
+    assert!(c.contains(" f("), "{c}");
+}

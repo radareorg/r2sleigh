@@ -5,10 +5,14 @@
 //! function graph and lifted a block at a time; here the walk is the lift's,
 //! from an entry address and a reader over the program's bytes.
 //!
-//! Only direct transfers are followed. An indirect branch is recorded and its
-//! targets are not guessed, which is the same rule the rest of the engine
-//! keeps: a body with an unresolved transfer is an honest partial body, and
-//! resolving one needs a value domain that does not exist yet.
+//! Direct transfers are followed, and an indirect branch only to the arms a
+//! previous pass proved it reads (`dispatched`). Otherwise it is recorded and
+//! its targets are not guessed, which is the same rule the rest of the engine
+//! keeps: a body with an unresolved transfer is an honest partial body.
+//!
+//! No instruction is lifted where the program maps no execute permission.
+//! Data decodes as readily as code on most machines, so the bytes cannot
+//! say which one an address holds; the mapping can.
 //!
 //! A direct branch to another function's entry is a tail call and ends the
 //! body. Without that question the walk has no boundary at all: `frame_dummy`
@@ -134,6 +138,10 @@ pub enum UnresolvedReason {
     IndirectBranch,
     /// Control reaches an address the image does not map.
     Unmapped,
+    /// Control reaches an address the program maps where no instruction can
+    /// run: data decodes as readily as code, and the mapping is what says
+    /// which one it is.
+    NotExecutable,
     /// The bytes there do not decode.
     Undecodable,
     /// The instruction needs more bytes than the image maps at that address.
@@ -145,6 +153,8 @@ pub enum UnresolvedReason {
 pub enum BodyError {
     /// Nothing is mapped at the entry address.
     EntryUnmapped(u64),
+    /// The entry is mapped where no instruction can run, so it begins no function.
+    EntryNotExecutable(u64),
     /// The entry address does not decode, so there is no first instruction.
     EntryUndecodable(u64),
 }
@@ -153,6 +163,10 @@ impl std::fmt::Display for BodyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EntryUnmapped(addr) => write!(f, "nothing mapped at {addr:#x}"),
+            Self::EntryNotExecutable(addr) => write!(
+                f,
+                "no instruction can run at {addr:#x}: the program maps it without execute permission"
+            ),
             Self::EntryUndecodable(addr) => write!(f, "no instruction decodes at {addr:#x}"),
         }
     }
@@ -322,6 +336,7 @@ impl Walk {
         let Some(first) = walk.decode(entry, disasm, program) else {
             return Err(match walk.unresolved.last().map(|stop| stop.reason) {
                 Some(UnresolvedReason::Unmapped) => BodyError::EntryUnmapped(entry),
+                Some(UnresolvedReason::NotExecutable) => BodyError::EntryNotExecutable(entry),
                 _ => BodyError::EntryUndecodable(entry),
             });
         };
@@ -359,6 +374,9 @@ impl Walk {
         let Some(window) = program.read(addr, WINDOW) else {
             return self.stop(addr, UnresolvedReason::Unmapped);
         };
+        if !program.region(addr).is_some_and(|region| region.execute) {
+            return self.stop(addr, UnresolvedReason::NotExecutable);
+        }
         let available = window.len();
         // Sleigh fetches a whole window whatever the instruction needs, so a
         // short one is padded and the decoded size checked against what is real.
