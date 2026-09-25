@@ -3390,21 +3390,29 @@ pub fn format_phase_timing(metrics: &EngineMetrics) -> String {
     format!("/* r2dec timing: measured={total_us}us work={work}{measured} */")
 }
 
-/// Append the timing comment to a rendered body, or leave it exactly as it was.
 /// The response for a function whose type analysis or rendering panicked: a
 /// refusal that says where, so the defect is printed wherever the answer is.
+///
+/// `phase` is where the boundary that caught it begins; that phase and every
+/// one after it this response did not run are refused, and none before it is
+/// claimed, since the analysis this was read from ran those.
 pub(crate) fn panicked_decompile_response(
     function_name: &str,
     panicked: &isolation::Panicked,
+    phase: EnginePhase,
 ) -> EngineDecompileResponse {
-    refused_decompile_response(
+    let mut metrics = EngineMetrics::default();
+    metrics.refuse_from(phase);
+    refused_decompile_response_with_metrics(
         function_name,
         &format!("the analysis {panicked}"),
-        Duration::default(),
         None,
+        metrics,
+        EngineDiagnostics::default(),
     )
 }
 
+/// A refusal before any phase ran: every phase from the snapshot on is refused.
 fn refused_decompile_response(
     function_name: &str,
     reason: &str,

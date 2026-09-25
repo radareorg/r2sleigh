@@ -106,7 +106,8 @@ impl<S: Source> OpenProgram<S> {
     ///
     /// Sealing and reading are isolation boundaries: a panic in either is this
     /// function's refusal, saying where it was raised, and a sealing that
-    /// unwound is never held.
+    /// unwound is never held. The refusal names the phase its boundary begins
+    /// at: sealing is the type analysis on, reading is everything after it.
     fn read_sealed<R>(
         &self,
         entry: u64,
@@ -114,20 +115,18 @@ impl<S: Source> OpenProgram<S> {
         read: impl FnOnce(&SealedFunctionAnalysis) -> R,
     ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
         let target = self.target(entry)?;
-        let refused = |panicked: crate::isolation::Panicked| {
-            Box::new(crate::panicked_decompile_response(
-                prepared.name(),
-                &panicked,
-            ))
+        let refused = |phase| {
+            move |panicked: crate::isolation::Panicked| {
+                let name = prepared.name();
+                Box::new(crate::panicked_decompile_response(name, &panicked, phase))
+            }
         };
         let seal = || {
-            crate::isolation::isolated(|| {
-                crate::native::sealed(&target, entry, prepared, &self.control)
-            })
-            .unwrap_or_else(|panicked| Err(refused(panicked)))
+            isolated(|| crate::native::sealed(&target, entry, prepared, &self.control))
+                .unwrap_or_else(|panicked| Err(refused(crate::EnginePhase::Types)(panicked)))
         };
         let read = |sealed: &SealedFunctionAnalysis| {
-            crate::isolation::isolated(|| read(sealed)).map_err(refused)
+            isolated(|| read(sealed)).map_err(refused(crate::EnginePhase::Structuring))
         };
         Ok(self
             .memo
