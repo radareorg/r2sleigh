@@ -13,7 +13,6 @@
 //! - [`op`]: SSA operation types
 //! - [`phi`]: Phi-node placement algorithm
 //! - [`rename`]: SSA renaming algorithm
-//! - [`taint`]: Taint analysis on SSA def-use chains
 //! - [`var`]: SSA variable representation
 
 pub(crate) mod abi;
@@ -55,7 +54,6 @@ pub(crate) mod semantic;
 mod slice;
 pub mod span;
 mod strided;
-pub mod taint;
 #[cfg(test)]
 pub(crate) mod testing;
 mod values;
@@ -176,6 +174,5 @@ pub use semantic::{
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
-pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};

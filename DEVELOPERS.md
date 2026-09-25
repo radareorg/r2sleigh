@@ -19,7 +19,7 @@ crates/
 ├── r2sleigh-lift/    Sleigh/P-code → r2il translation, ESIL formatting
 ├── r2sleigh-export/  Instruction exporter (lift/ssa/defuse/dec)
 ├── r2sleigh-cli/     Sleigh toolchain (compile, disasm, info)
-├── r2ssa/            SSA: CFG, domtree, phi, liveness, taint, value ranges
+├── r2ssa/            SSA: CFG, domtree, phi, liveness, slicing, value ranges
 ├── r2source/         The facts a capture owns, and their contracts
 ├── r2types/          Type inference: constraint solver, arena, signatures
 ├── r2rewrite/        Term rewriting over the medium tier
@@ -72,7 +72,6 @@ Machine code bytes
    ESIL string                            SSAFunction { cfg, blocks, phis }
    (radare2 compat)                            │
                                                ├───── optimize_function()
-                                               ├───── TaintAnalysis::analyze()
                                                ├───── backward_slice_from_var()
                                                │
                                                ▼
@@ -98,7 +97,6 @@ Key Types
 | `SSAFunction` | r2ssa | `function.rs` | Complete function: CFG + SSA blocks |
 | `FunctionSSABlock` | r2ssa | `function.rs` | Block with phi nodes (used by r2dec) |
 | `BasicBlock` | r2ssa | `cfg.rs` | CFG node with terminator |
-| `TaintPolicy` | r2ssa | `taint.rs` | Trait for taint source/sink/sanitizer rules |
 | `ValueRanges` | r2ssa | `values.rs` | Strided interval per value, with widening |
 | `StridedInterval` | r2ssa | `strided.rs` | The value domain itself |
 | `Body` | r2ssa | `body.rs` | A walked function: blocks, calls, what it could not follow |
@@ -243,8 +241,8 @@ When fallback triggers, the output includes
 ### Architecture Assumptions
 
 Some code paths have hardcoded x86-64 assumptions (e.g., stack/frame pointer
-names in `fold.rs`, argument registers in `taint.rs`). These should be
-abstracted behind an ABI/calling-convention model in the future.
+names in `fold.rs`). These should be abstracted behind an ABI/calling-convention
+model in the future.
 
 Per-Topic Documentation
 -----------------------

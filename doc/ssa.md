@@ -216,7 +216,7 @@ pub struct PhiNode {
 ```
 
 **Important:** This is different from the single-instruction `SSABlock` in
-`r2ssa/block.rs`. The decompiler and taint analysis use `FunctionSSABlock`.
+`r2ssa/block.rs`. The decompiler uses `FunctionSSABlock`.
 
 Optimization Pipeline
 ---------------------

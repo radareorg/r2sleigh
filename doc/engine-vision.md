@@ -117,7 +117,7 @@ and cannot be tested at the interface.
 
 The engine already exists in outline. `r2il` is the substrate,
 `r2sleigh-lift` decodes and lifts, `r2ssa` carries the control-flow graph,
-dominator tree, def-use, liveness, taint, slicing and interprocedural facts,
+dominator tree, def-use, liveness, slicing and interprocedural facts,
 `r2types` carries constraint-based type inference, `r2dec` structures and
 renders, and `r2engine` orchestrates requests. `r2sleigh-cli` is already a
 standalone binary. What is missing is not analysis; it is the things radare2
@@ -252,8 +252,8 @@ per-architecture heuristics, variable recovery as stack-pointer heuristics, type
 inference in 799 lines, and binary diffing in 366 lines. The ESIL dataflow graph
 is 2219 lines down a dead end.
 
-r2sleigh already has constant propagation, taint, slicing, interprocedural
-facts, indirect-call handling, aggregate access, interface recovery, and
+r2sleigh already has constant propagation, slicing, interprocedural facts,
+indirect-call handling, aggregate access, interface recovery, and
 constraint-based type inference with a lattice and a solver.
 
 Neither has strided intervals, a points-to or alias model, loop and induction
@@ -372,8 +372,9 @@ retry.
 **Compound questions in one call.** The round-trip tax disappears only if the
 agent can express the whole question. *Which functions reach `memcpy` with a
 size derived from an argument and not bounded by a comparison* has to be one
-query, and the interprocedural, taint and slicing layers already compute the
-facts it needs. The facts exist; the query surface does not.
+query, and the interprocedural and slicing layers compute the facts it needs,
+with taint as the slicer's labelled forward mode. The facts exist; the query
+surface does not.
 
 **Confidence on every field, never optional.** Every returned fact is proven,
 inferred, guessed or unknown. An agent branches on that and a human ignores it,

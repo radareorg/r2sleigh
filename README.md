@@ -89,7 +89,7 @@ Crates
 | `r2sleigh-lift` | Sleigh and P-code to r2il |
 | `r2sleigh-export` | Instruction exporter (lift/ssa/defuse/dec) |
 | `r2sleigh-cli` | Sleigh toolchain: compile, disasm, info |
-| `r2ssa` | SSA: control flow, dominators, liveness, taint, value ranges |
+| `r2ssa` | SSA: control flow, dominators, liveness, slicing, value ranges |
 | `r2source` | The facts a capture owns, and their contracts |
 | `r2types` | Type inference: constraint solver, signatures, shapes |
 | `r2rewrite` | Term rewriting over the medium tier |
