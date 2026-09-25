@@ -1395,20 +1395,202 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
     FunctionCallRenderFacts { by_callsite }
 }
 
-pub(crate) fn prepared_memory_access_field_offset(
-    prepared: &r2ssa::SsaArtifact,
-    memory: &MemoryAccessRenderFact,
-) -> Option<u64> {
-    let offset = prepared_address_base_offset(prepared, memory.address, 0)?;
-    u64::try_from(offset).ok()
+/// Where each address a function forms is based: the value it is a constant
+/// displacement from.
+///
+/// Read through the one identity fact (`r2ssa::ValueViews`): a copy or a zero
+/// extension is the same address, while a lane, a truncation or a sign
+/// extension is not, which is what the recursion this replaces got wrong -- it
+/// followed any `SUBPIECE` and any extension, and stopped at a depth of eight.
+/// A reload that is the stored bits of an entry value (an identity reload
+/// certificate) is based at that entry value. A merge is based where every
+/// input is, at one displacement; an input not known (a load, a cycle through
+/// the merge itself) leaves the merge with no base rather than one borrowed
+/// from its other inputs.
+///
+/// Each value is resolved once and remembered, so a function costs `O(V)`
+/// however many accesses ask, and no depth bound is needed: outside phis a
+/// definition chain is acyclic, and a phi met again while it is being
+/// resolved has no single base yet.
+pub(crate) struct AddressBases<'a> {
+    prepared: &'a r2ssa::SsaArtifact,
+    resolved: BTreeMap<r2ssa::ValueId, Option<(r2ssa::ValueId, i64)>>,
 }
 
-pub(crate) fn prepared_memory_access_param_slot(
-    prepared: &r2ssa::SsaArtifact,
-    memory: &MemoryAccessRenderFact,
-    param_slots: &ParamSlotResolver,
-) -> Option<usize> {
-    prepared_address_base_param_slot(prepared, memory.address, param_slots, 0)
+/// How one value's base follows from its definition.
+enum AddressStep {
+    /// Known without looking further.
+    Settled(Option<(r2ssa::ValueId, i64)>),
+    /// The base of another value, displaced.
+    Displaced(r2ssa::ValueId, i64),
+    /// The base every input of a merge agrees on.
+    Merge(Vec<r2ssa::ValueId>),
+}
+
+impl<'a> AddressBases<'a> {
+    pub(crate) fn new(prepared: &'a r2ssa::SsaArtifact) -> Self {
+        Self {
+            prepared,
+            resolved: BTreeMap::new(),
+        }
+    }
+
+    /// The constant displacement of an access's address from its base.
+    pub(crate) fn field_offset(&mut self, memory: &MemoryAccessRenderFact) -> Option<u64> {
+        let (_, offset) = self.base(memory.address)?;
+        u64::try_from(offset).ok()
+    }
+
+    /// The parameter an access's address is based at.
+    pub(crate) fn param_slot(
+        &mut self,
+        memory: &MemoryAccessRenderFact,
+        param_slots: &ParamSlotResolver,
+    ) -> Option<usize> {
+        let (base, _) = self.base(memory.address)?;
+        param_slots.slot_for_value(base)
+    }
+
+    /// The value `value` is a constant displacement from, and the displacement.
+    pub(crate) fn base(&mut self, value: r2ssa::ValueId) -> Option<(r2ssa::ValueId, i64)> {
+        let mut pending = vec![(value, false)];
+        let mut visiting = BTreeSet::new();
+        while let Some((current, expanded)) = pending.pop() {
+            if self.resolved.contains_key(&current) {
+                continue;
+            }
+            let step = self.step(current);
+            let result = match step {
+                AddressStep::Settled(result) => result,
+                AddressStep::Displaced(input, delta) => {
+                    if !expanded && !self.resolved.contains_key(&input) {
+                        if visiting.contains(&input) {
+                            None
+                        } else {
+                            pending.push((current, true));
+                            pending.push((input, false));
+                            continue;
+                        }
+                    } else {
+                        self.resolved
+                            .get(&input)
+                            .copied()
+                            .flatten()
+                            .and_then(|(base, offset)| Some((base, offset.checked_add(delta)?)))
+                    }
+                }
+                AddressStep::Merge(inputs) => {
+                    if !expanded {
+                        visiting.insert(current);
+                        pending.push((current, true));
+                        pending.extend(
+                            inputs
+                                .iter()
+                                .filter(|input| {
+                                    !self.resolved.contains_key(input) && !visiting.contains(input)
+                                })
+                                .map(|input| (*input, false)),
+                        );
+                        continue;
+                    }
+                    visiting.remove(&current);
+                    let mut common = None;
+                    let mut agreed = true;
+                    for input in &inputs {
+                        let Some(known) = self.resolved.get(input).copied().flatten() else {
+                            agreed = false;
+                            break;
+                        };
+                        if common.is_some_and(|common| common != known) {
+                            agreed = false;
+                            break;
+                        }
+                        common = Some(known);
+                    }
+                    common.filter(|_| agreed)
+                }
+            };
+            self.resolved.insert(current, result);
+        }
+        self.resolved.get(&value).copied().flatten()
+    }
+
+    fn step(&self, value: r2ssa::ValueId) -> AddressStep {
+        let prepared = self.prepared;
+        let graph = prepared.graph();
+        let Some(var) = graph.value(value).map(|value| &value.var) else {
+            return AddressStep::Settled(None);
+        };
+        if const_var_i64(var).is_some() {
+            return AddressStep::Settled(None);
+        }
+        // The same address under another name: a copy, a zero extension, a
+        // merge of copies.
+        if let Some(facts) = prepared.function().decompile_prep_facts() {
+            let root = facts.same_integer_root(var);
+            if root != var {
+                return match graph.value_id_for_var(root) {
+                    Some(root) => AddressStep::Displaced(root, 0),
+                    None => AddressStep::Settled(None),
+                };
+            }
+        }
+        if let Some(reload) = prepared
+            .stack_reload_certificate_for_value(value)
+            .filter(|reload| reload.relation == r2ssa::ViewRelation::Identity)
+            && graph
+                .value(reload.canonical_source)
+                .is_some_and(|source| source.var.version == 0)
+        {
+            return AddressStep::Settled(Some((reload.canonical_source, 0)));
+        }
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            return AddressStep::Settled(Some((value, 0)));
+        };
+        let op = match &inst.payload {
+            r2ssa::InstPayload::Phi { .. } => return AddressStep::Merge(inst.inputs.clone()),
+            r2ssa::InstPayload::Op(op) => op,
+        };
+        let displaced = |base: &r2ssa::SSAVar, delta: Option<i64>| match (
+            graph.value_id_for_var(base),
+            delta,
+        ) {
+            (Some(base), Some(delta)) => AddressStep::Displaced(base, delta),
+            _ => AddressStep::Settled(None),
+        };
+        match op {
+            r2ssa::SSAOp::IntAdd { a, b, .. } => match (const_var_i64(a), const_var_i64(b)) {
+                (None, Some(delta)) => displaced(a, Some(delta)),
+                (Some(delta), None) => displaced(b, Some(delta)),
+                _ => AddressStep::Settled(None),
+            },
+            r2ssa::SSAOp::IntSub { a, b, .. } => match (const_var_i64(a), const_var_i64(b)) {
+                (None, Some(delta)) => displaced(a, delta.checked_neg()),
+                _ => AddressStep::Settled(None),
+            },
+            r2ssa::SSAOp::PtrAdd {
+                base,
+                index,
+                element_size,
+                ..
+            } => displaced(
+                base,
+                const_var_i64(index).and_then(|index| index.checked_mul(i64::from(*element_size))),
+            ),
+            r2ssa::SSAOp::PtrSub {
+                base,
+                index,
+                element_size,
+                ..
+            } => displaced(
+                base,
+                const_var_i64(index)
+                    .and_then(|index| index.checked_mul(i64::from(*element_size)))
+                    .and_then(i64::checked_neg),
+            ),
+            _ => AddressStep::Settled(None),
+        }
+    }
 }
 
 pub(crate) fn prepared_memory_access_ptr_bits(
@@ -1421,211 +1603,6 @@ pub(crate) fn prepared_memory_access_ptr_bits(
         .map(|value| value.var.size.saturating_mul(8))
         .filter(|bits| *bits > 0)
         .unwrap_or(64)
-}
-
-pub(crate) fn prepared_address_base_offset(
-    prepared: &r2ssa::SsaArtifact,
-    value: r2ssa::ValueId,
-    depth: usize,
-) -> Option<i64> {
-    if depth > 8 {
-        return None;
-    }
-    let graph = prepared.graph();
-    let var = &graph.value(value)?.var;
-    if const_var_i64(var).is_some() {
-        return None;
-    }
-    if prepared
-        .stack_reload_certificate_for_value(value)
-        .and_then(|reload| graph.value(reload.canonical_source))
-        .is_some_and(|source| source.var.version == 0 && source.var.is_register())
-    {
-        return Some(0);
-    }
-    let Some(def_inst) = graph.def_inst(value) else {
-        return Some(0);
-    };
-    let inst = graph.inst(def_inst)?;
-    if matches!(inst.payload, r2ssa::InstPayload::Phi { .. }) {
-        let mut resolved = None;
-        for input in &inst.inputs {
-            let Some(offset) = prepared_address_base_offset(prepared, *input, depth + 1) else {
-                continue;
-            };
-            if resolved.is_some_and(|existing| existing != offset) {
-                return None;
-            }
-            resolved = Some(offset);
-        }
-        return resolved;
-    }
-    let r2ssa::InstPayload::Op(op) = &inst.payload else {
-        unreachable!("handled phi instruction before op matching");
-    };
-    match op {
-        r2ssa::SSAOp::Copy { src, .. }
-        | r2ssa::SSAOp::New { src, .. }
-        | r2ssa::SSAOp::Cast { src, .. }
-        | r2ssa::SSAOp::Subpiece { src, .. }
-        | r2ssa::SSAOp::IntZExt { src, .. }
-        | r2ssa::SSAOp::IntSExt { src, .. } => prepared_var_base_offset(prepared, src, depth + 1),
-        r2ssa::SSAOp::IntAdd { a, b, .. } => {
-            prepared_binary_const_offset(prepared, a, b, depth + 1, 1)
-        }
-        r2ssa::SSAOp::IntSub { a, b, .. } => {
-            prepared_binary_const_offset(prepared, a, b, depth + 1, -1)
-        }
-        r2ssa::SSAOp::PtrAdd {
-            base,
-            index,
-            element_size,
-            ..
-        } => {
-            let delta = const_var_i64(index)?.checked_mul(i64::from(*element_size))?;
-            prepared_var_base_offset(prepared, base, depth + 1)?.checked_add(delta)
-        }
-        r2ssa::SSAOp::PtrSub {
-            base,
-            index,
-            element_size,
-            ..
-        } => {
-            let delta = const_var_i64(index)?.checked_mul(i64::from(*element_size))?;
-            prepared_var_base_offset(prepared, base, depth + 1)?.checked_sub(delta)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn prepared_var_base_offset(
-    prepared: &r2ssa::SsaArtifact,
-    var: &r2ssa::SSAVar,
-    depth: usize,
-) -> Option<i64> {
-    let value = prepared.graph().value_id_for_var(var)?;
-    prepared_address_base_offset(prepared, value, depth)
-}
-
-pub(crate) fn prepared_binary_const_offset(
-    prepared: &r2ssa::SsaArtifact,
-    a: &r2ssa::SSAVar,
-    b: &r2ssa::SSAVar,
-    depth: usize,
-    rhs_sign: i64,
-) -> Option<i64> {
-    match (const_var_i64(a), const_var_i64(b)) {
-        (None, Some(rhs)) => {
-            let delta = rhs.checked_mul(rhs_sign)?;
-            prepared_var_base_offset(prepared, a, depth)?.checked_add(delta)
-        }
-        (Some(lhs), None) if rhs_sign == 1 => {
-            prepared_var_base_offset(prepared, b, depth)?.checked_add(lhs)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn prepared_address_base_param_slot(
-    prepared: &r2ssa::SsaArtifact,
-    value: r2ssa::ValueId,
-    param_slots: &ParamSlotResolver,
-    depth: usize,
-) -> Option<usize> {
-    if depth > 8 {
-        return None;
-    }
-    let graph = prepared.graph();
-    let var = &graph.value(value)?.var;
-    if const_var_i64(var).is_some() {
-        return None;
-    }
-    if let Some(source) = prepared
-        .stack_reload_certificate_for_value(value)
-        .and_then(|reload| graph.value(reload.canonical_source))
-        && source.var.version == 0
-    {
-        return param_slots.slot_for_value(source.id);
-    }
-    let Some(def_inst) = graph.def_inst(value) else {
-        return param_slots.slot_for_value(value);
-    };
-    let inst = graph.inst(def_inst)?;
-    if matches!(inst.payload, r2ssa::InstPayload::Phi { .. }) {
-        let mut resolved = None;
-        for input in &inst.inputs {
-            let Some(slot) =
-                prepared_address_base_param_slot(prepared, *input, param_slots, depth + 1)
-            else {
-                continue;
-            };
-            if resolved.is_some_and(|existing| existing != slot) {
-                return None;
-            }
-            resolved = Some(slot);
-        }
-        return resolved;
-    }
-    let r2ssa::InstPayload::Op(op) = &inst.payload else {
-        unreachable!("handled phi instruction before op matching");
-    };
-    match op {
-        r2ssa::SSAOp::Copy { src, .. }
-        | r2ssa::SSAOp::New { src, .. }
-        | r2ssa::SSAOp::Cast { src, .. }
-        | r2ssa::SSAOp::Subpiece { src, .. }
-        | r2ssa::SSAOp::IntZExt { src, .. }
-        | r2ssa::SSAOp::IntSExt { src, .. } => {
-            prepared_var_base_param_slot(prepared, src, param_slots, depth + 1)
-        }
-        r2ssa::SSAOp::IntAdd { a, b, .. } => {
-            prepared_add_param_slot(prepared, a, b, param_slots, depth + 1)
-        }
-        r2ssa::SSAOp::IntSub { a, b, .. } => {
-            prepared_sub_param_slot(prepared, a, b, param_slots, depth + 1)
-        }
-        r2ssa::SSAOp::PtrAdd { base, .. } | r2ssa::SSAOp::PtrSub { base, .. } => {
-            prepared_var_base_param_slot(prepared, base, param_slots, depth + 1)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn prepared_var_base_param_slot(
-    prepared: &r2ssa::SsaArtifact,
-    var: &r2ssa::SSAVar,
-    param_slots: &ParamSlotResolver,
-    depth: usize,
-) -> Option<usize> {
-    let value = prepared.graph().value_id_for_var(var)?;
-    prepared_address_base_param_slot(prepared, value, param_slots, depth)
-}
-
-pub(crate) fn prepared_add_param_slot(
-    prepared: &r2ssa::SsaArtifact,
-    a: &r2ssa::SSAVar,
-    b: &r2ssa::SSAVar,
-    param_slots: &ParamSlotResolver,
-    depth: usize,
-) -> Option<usize> {
-    match (const_var_i64(a), const_var_i64(b)) {
-        (None, Some(_)) => prepared_var_base_param_slot(prepared, a, param_slots, depth),
-        (Some(_), None) => prepared_var_base_param_slot(prepared, b, param_slots, depth),
-        _ => None,
-    }
-}
-
-pub(crate) fn prepared_sub_param_slot(
-    prepared: &r2ssa::SsaArtifact,
-    a: &r2ssa::SSAVar,
-    b: &r2ssa::SSAVar,
-    param_slots: &ParamSlotResolver,
-    depth: usize,
-) -> Option<usize> {
-    match (const_var_i64(a), const_var_i64(b)) {
-        (None, Some(_)) => prepared_var_base_param_slot(prepared, a, param_slots, depth),
-        _ => None,
-    }
 }
 
 pub(crate) fn const_var_i64(var: &r2ssa::SSAVar) -> Option<i64> {

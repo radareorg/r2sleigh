@@ -1904,6 +1904,7 @@ impl FunctionFacts {
             return;
         };
         let mut member_facts = Vec::new();
+        let mut address_bases = AddressBases::new(prepared);
         for memory in self.render.memory_accesses() {
             // Offset zero is a member too when the access is narrower than the
             // object: the slot's name would stand for the whole aggregate.
@@ -1968,9 +1969,7 @@ impl FunctionFacts {
                                 _ => None,
                             })
                         })
-                        .or_else(|| {
-                            prepared_memory_access_param_slot(prepared, memory, param_slots)
-                        })
+                        .or_else(|| address_bases.param_slot(memory, param_slots))
                 })
                 .flatten();
             let declared_type =
@@ -2046,14 +2045,15 @@ impl FunctionFacts {
         }
 
         let mut member_facts = Vec::new();
+        let mut address_bases = AddressBases::new(prepared);
         for memory in self.render.memory_accesses() {
             if memory.width == 0 {
                 continue;
             }
-            let Some(field_offset) = prepared_memory_access_field_offset(prepared, memory) else {
+            let Some(field_offset) = address_bases.field_offset(memory) else {
                 continue;
             };
-            let param_slot = prepared_memory_access_param_slot(prepared, memory, param_slots);
+            let param_slot = address_bases.param_slot(memory, param_slots);
             let ptr_bits = prepared_memory_access_ptr_bits(prepared, memory);
             member_facts.extend(self.member_render_facts_for_memory(
                 memory,
