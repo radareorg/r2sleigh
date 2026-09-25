@@ -22,15 +22,18 @@
 //! account for, and where it goes next depends on who can read the place it
 //! was stored at. A frame object is private when no address naming it leaves
 //! the body (`SsaArtifact::stack_object_is_private`); only this body's own
-//! loads read it, and they carry the stored formal on. Any other object is
-//! exposed, and with it every place at or above it -- an escaped frame
-//! address reaches its object, and C lays an aggregate upward from the
-//! address it hands out, so the bytes above it may be the same object's
-//! members -- which is the model promotion keeps its slots in memory by. A
-//! formal stored at an exposed place can be read by whatever the address
-//! reached, as surely as if it were handed over, so the summary counts it as
-//! unplaced, and a call handed a frame address is handed every formal stored
-//! at an exposed place.
+//! loads read it, and they carry the stored formal on. Where any frame
+//! object's address leaves, every frame place is exposed: until the frame is
+//! partitioned into objects with extents (P4), an escaped address says
+//! nothing about where its object starts -- `&h.x` handed out reaches `h.p`
+//! below it (`container_of`) as well as anything above. That includes the
+//! slots promotion took out of memory: promotion keeps in memory only what
+//! lies at or above an escaped address, so a formal the machine stores below
+//! one is, in the prepared function, a write of a promoted slot, and it is
+//! exposed the same way. A formal stored at an exposed place can be read by
+//! whatever the address reached, as surely as if it were handed over, so the
+//! summary counts it as unplaced, and a call handed a frame address is handed
+//! every formal stored at an exposed place.
 //!
 //! Bits only grow, and each value holds one per formal, so every pass over the
 //! blocks either adds a bit or is the last: at most `k·V + 1` passes for `k`
@@ -43,7 +46,7 @@ use std::collections::BTreeMap;
 use r2il::SpaceId;
 
 use crate::abi::AbiProfile;
-use crate::function::{SsaArtifact, StackAddressBase};
+use crate::function::SsaArtifact;
 use crate::graph::{InstId, ValueId};
 use crate::op::SSAOp;
 use crate::semantic::{
@@ -110,18 +113,10 @@ impl FormalDependence {
         dependence
     }
 
-    /// Whether the store at an operation site puts its value where something
-    /// outside the function could read it: a frame place that is not private.
-    pub(crate) fn frame_store_is_exposed(
-        &self,
-        prepared: &SsaArtifact,
-        block: u64,
-        op: usize,
-    ) -> bool {
-        prepared
-            .graph()
-            .inst_id_for_op_site(block, op)
-            .is_some_and(|inst| self.frame.exposed.contains_key(&inst))
+    /// The formals stored where something outside the function can read
+    /// them: an exposed frame place, or a promoted slot of an escaping frame.
+    pub(crate) fn exposed_formals(&self) -> u64 {
+        self.exposed
     }
 
     /// The formals `value` is computed from.
@@ -228,7 +223,7 @@ impl FormalDependence {
         let exposed = self
             .frame
             .exposed
-            .values()
+            .iter()
             .map(|value| self.bits_of(*value))
             .fold(0, |left, right| left | right);
         let mut changed = exposed != self.exposed;
@@ -336,13 +331,14 @@ impl FormalDependence {
 }
 
 /// What the function's own frame carries: which stored values each load of it
-/// may read, and which stores something outside the function could read.
+/// may read, and which values something outside the function could read.
 #[derive(Default)]
 struct FrameTraffic {
     /// Each load of the frame, and the values stored where it may read.
     sources: BTreeMap<ValueId, Vec<ValueId>>,
-    /// Each store at an exposed frame place, and the value it stores.
-    exposed: BTreeMap<InstId, ValueId>,
+    /// Every value written to the frame where an escaping address can reach
+    /// it: stored to it, or written to a slot promotion took out of it.
+    exposed: Vec<ValueId>,
 }
 
 /// One access of the frame: where the memory facts put it, or `None` where
@@ -449,14 +445,47 @@ impl FrameTraffic {
             }
         }
 
-        let escape = FrameEscape::of(prepared);
-        let exposed = stores
-            .iter()
-            .filter(|(_, _, place)| escape.exposes(prepared, place.as_ref()))
-            .map(|(inst, value, _)| (*inst, *value))
-            .collect();
+        // Until the frame is laid out as objects with extents (P4), an address
+        // that leaves the function says nothing about where the object it
+        // names starts or ends. So one escaping frame address exposes every
+        // frame place, promoted ones included, and a function none escapes
+        // from exposes none.
+        let escapes = objects.objects.keys().any(|object| {
+            is_frame_object(objects, *object) && !prepared.stack_object_is_private(*object)
+        });
+        let exposed = if escapes {
+            stores
+                .iter()
+                .map(|(_, value, _)| *value)
+                .chain(promoted_slot_writes(prepared))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self { sources, exposed }
     }
+}
+
+/// Every value an operation writes to a frame slot promotion took out of
+/// memory: the machine stores it to the frame; the prepared function holds it
+/// in a variable.
+fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId> + '_ {
+    let graph = prepared.graph();
+    prepared
+        .function()
+        .blocks()
+        .iter()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(SSAOp::dst)
+        .filter_map(move |dst| {
+            let value = graph.value_id_for_var(dst)?;
+            graph
+                .value(value)?
+                .canonical_storage
+                .as_ref()
+                .and_then(crate::promote::promoted_slot_offset)
+                .map(|_| value)
+        })
 }
 
 /// Whether two frame places may share a byte; a place the facts do not state
@@ -475,88 +504,6 @@ fn is_frame_object(objects: &ObjectModel, object: ObjectId) -> bool {
             ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
         )
     })
-}
-
-/// The origin a frame place is measured from: the entry stack pointer, where
-/// the object model proved the object's place in it, or else the object's
-/// own base register. Two places from different origins cannot be ordered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum FrameOrigin {
-    Entry(StackAddressBase),
-    Base(StackAddressBase),
-}
-
-/// Where a frame object starts, from its origin.
-fn frame_start(objects: &ObjectModel, object: ObjectId) -> Option<(FrameOrigin, i128)> {
-    let (base, offset) = match objects.object(object)?.kind {
-        ObjectKind::StackSlot { base, offset, .. }
-        | ObjectKind::FrameObject { base, offset, .. } => (base, offset),
-        _ => return None,
-    };
-    Some(match objects.entry_stack_roots.get(&object) {
-        Some(root) => (FrameOrigin::Entry(root.base), i128::from(root.offset)),
-        None => (FrameOrigin::Base(base), i128::from(offset)),
-    })
-}
-
-/// The lowest place, from each origin, a frame object whose address leaves
-/// the function starts at. Everything at or above it is exposed.
-struct FrameEscape {
-    lowest: BTreeMap<FrameOrigin, i128>,
-    /// An escaping frame object the model gives no place: every place is
-    /// exposed.
-    unplaced: bool,
-}
-
-impl FrameEscape {
-    fn of(prepared: &SsaArtifact) -> Self {
-        let objects = prepared.objects();
-        let mut escape = Self {
-            lowest: BTreeMap::new(),
-            unplaced: false,
-        };
-        for object in objects.objects.keys().copied().filter(|object| {
-            is_frame_object(objects, *object) && !prepared.stack_object_is_private(*object)
-        }) {
-            match frame_start(objects, object) {
-                Some((origin, start)) => {
-                    escape
-                        .lowest
-                        .entry(origin)
-                        .and_modify(|lowest| *lowest = (*lowest).min(start))
-                        .or_insert(start);
-                }
-                None => escape.unplaced = true,
-            }
-        }
-        escape
-    }
-
-    /// Whether a store at `place` may put its value where something outside
-    /// the function can read it: its object is not private, or some byte of
-    /// it sits at or above an escaping object's start, or the two cannot be
-    /// ordered.
-    fn exposes(&self, prepared: &SsaArtifact, place: Option<&MemoryLocation>) -> bool {
-        let Some(place) = place else {
-            return true;
-        };
-        if !prepared.stack_object_is_private(place.object) || self.unplaced {
-            return true;
-        }
-        let objects = prepared.objects();
-        let Some((origin, start)) = frame_start(objects, place.object) else {
-            return true;
-        };
-        let end = match place.address {
-            RelativeMemoryAddress::Exact(offset) => {
-                Some(start + i128::from(offset) + i128::from(place.size.max(1)))
-            }
-            RelativeMemoryAddress::Affine { .. } | RelativeMemoryAddress::Unknown => None,
-        };
-        self.lowest
-            .iter()
-            .any(|(escaping, lowest)| *escaping != origin || end.is_none_or(|end| end > *lowest))
-    }
 }
 
 /// Every value that is a formal, and which argument of the summary it is.

@@ -2353,18 +2353,11 @@ fn collect_local_summary_facts_with_obligation_authority(
             .value_id_for_var(var)
             .map_or(0, |value| dependence.bits_of(value))
     };
-    // A formal stored into the frame has escaped exactly where the place it
-    // was stored at is exposed: a frame object whose address leaves the
-    // body, or a place at or above one. Anything the address reached can
-    // read it back and write through it. A private place is read only by
-    // this body's own loads, which carry the formal on in the dependence.
-    let stored_in_frame = |block: u64, op: usize, stored: u64| {
-        if dependence.frame_store_is_exposed(prepared, block, op) {
-            stored
-        } else {
-            0
-        }
-    };
+    // A formal stored into the frame has escaped wherever a frame address
+    // does: anything the address reached can read it back and write through
+    // it. A frame no address leaves is read only by this body's own loads,
+    // which carry the formal on in the dependence.
+    out.unplaced_reach |= dependence.exposed_formals();
     // An access that names no argument region at a stated place could touch
     // any formal's object its address is computed from.
     let unplaced = |location: &SummaryMemoryLocation, addr: &SSAVar| match location.region {
@@ -2449,14 +2442,13 @@ fn collect_local_summary_facts_with_obligation_authority(
                 }
                 SSAOp::AtomicCAS(swap) => {
                     let (addr, expected, space) = (&swap.addr, &swap.expected, swap.space);
-                    let stored = bits_of_var(&swap.replacement);
                     if memory_access_is_local_stack(prepared, addr, space) {
-                        out.unplaced_reach |= stored_in_frame(block.addr, op_idx, stored);
                         continue;
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, space, expected.size);
-                    out.unplaced_reach |= unplaced(&location, addr) | stored;
+                    out.unplaced_reach |=
+                        unplaced(&location, addr) | bits_of_var(&swap.replacement);
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2479,14 +2471,12 @@ fn collect_local_summary_facts_with_obligation_authority(
                 SSAOp::StoreConditional {
                     addr, val, space, ..
                 } => {
-                    let stored = bits_of_var(val);
                     if memory_access_is_local_stack(prepared, addr, *space) {
-                        out.unplaced_reach |= stored_in_frame(block.addr, op_idx, stored);
                         continue;
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
-                    out.unplaced_reach |= unplaced(&location, addr) | stored;
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2517,9 +2507,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                 | SSAOp::StoreGuarded {
                     addr, val, space, ..
                 } => {
-                    let stored = bits_of_var(val);
                     if memory_access_is_local_stack(prepared, addr, *space) {
-                        out.unplaced_reach |= stored_in_frame(block.addr, op_idx, stored);
                         continue;
                     }
                     let location =
@@ -2527,7 +2515,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     // A formal's pointer stored where this function does not
                     // own the memory has escaped: whatever reads it later can
                     // reach its object.
-                    out.unplaced_reach |= unplaced(&location, addr) | stored;
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
                     mark_location_access(&mut out, location, false, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Write,

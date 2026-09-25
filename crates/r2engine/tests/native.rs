@@ -2986,6 +2986,20 @@ const HANDS_A_DIRECT_CALLEE_THE_MEMBER_ABOVE_ITS_ARGUMENT: &[u8] = &[
     0xc3, // 1038 ret
 ];
 
+/// `container_of`: the callee is handed `&h.x` and reads `h.p` eight bytes
+/// below it. A frame address that leaves the function says nothing about
+/// where the object it names starts, so the formal stored below the address
+/// handed out is as reachable as one above it.
+#[test]
+fn a_formal_stored_below_the_frame_address_a_direct_callee_is_handed_is_unbounded() {
+    let reach = touch_reach_at(
+        HANDS_A_DIRECT_CALLEE_THE_MEMBER_ABOVE_ITS_ARGUMENT,
+        "fcont",
+        BASE,
+    );
+    assert!(!reach.contains_key(&0), "{reach:?}");
+}
+
 /// The callee's own reach: it reads eight bytes *below* the pointer it is
 /// handed. A reach is a span upward from that pointer, and `[-8, -1]` is no
 /// such span; taking its end alone stated `Bytes(0)`, that it touches none of
