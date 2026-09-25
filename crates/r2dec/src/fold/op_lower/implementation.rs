@@ -948,6 +948,7 @@ impl<'a> FoldingContext<'a> {
                     params: Some(inputs.iter().map(|input| word(input.size)).collect()),
                     variadic: false,
                     noreturn: false,
+                    address: None,
                 },
                 from_source_signature: false,
             });

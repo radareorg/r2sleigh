@@ -1027,6 +1027,7 @@ impl<'a> FoldingContext<'a> {
                     ),
                     variadic: signature.variadic,
                     noreturn: false,
+                    address: Some(target),
                 },
                 from_source_signature: true,
             });

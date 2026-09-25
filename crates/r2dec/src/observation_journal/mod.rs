@@ -1969,6 +1969,47 @@ impl SealedNativeFunction {
 }
 
 impl LegacyObservationJournal {
+    /// The instruction each allocated observation belongs to.
+    ///
+    /// A cell is a value an instruction defines, a use it makes, a write it
+    /// performs or an effect its obligation owes, so each names that one
+    /// instruction. A certified read of a value names the instruction that
+    /// computed the value, which is not the one the reading line accounts for,
+    /// so it names none. One pass over the targets, each a lookup.
+    pub(crate) fn observation_locations(&self) -> crate::codegen::ObservationLocations {
+        let graph = self.source.graph();
+        let obligations = self.source.obligations().obligations();
+        let at = |inst: InstId| graph.instruction_for_inst(inst);
+        let defined_at = |value: ValueId| graph.def_inst(value).and_then(at);
+        let owed_at = |id: SemanticObligationId| {
+            obligations
+                .get(&id)
+                .and_then(|obligation| obligation.source.graph_inst())
+                .and_then(at)
+        };
+        crate::codegen::ObservationLocations::new(
+            self.targets
+                .iter()
+                .map(|target| match *target {
+                    ObservationTarget::Value(value)
+                    | ObservationTarget::ObjectAddress { value, .. } => defined_at(value),
+                    ObservationTarget::Use { site, .. } => at(site.inst),
+                    ObservationTarget::Write { inst, .. } => at(inst),
+                    ObservationTarget::StackAccess { access, .. } => at(access.inst),
+                    ObservationTarget::Effect(id) => owed_at(id),
+                    ObservationTarget::Gapped { cell, .. } => match cell {
+                        GapCell::Value(value) => defined_at(value),
+                        GapCell::Use { site, .. } => at(site.inst),
+                        GapCell::Write(inst) => at(inst),
+                        GapCell::Effect(id) => owed_at(id),
+                    },
+                    ObservationTarget::CertifiedValueRead { .. }
+                    | ObservationTarget::CertifiedArrayIndexRead { .. } => None,
+                })
+                .collect(),
+        )
+    }
+
     fn expr_value_observations(&self, expr: &CExpr) -> BTreeSet<ValueId> {
         let mut values = BTreeSet::new();
         expr.visit_render_observations(&mut |id| {

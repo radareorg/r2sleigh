@@ -2,10 +2,13 @@
 //!
 //! This module generates readable C source code from the AST.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
 #[cfg(test)]
 use crate::ast::stmt_has_render_observations;
 use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType, has_render_observations};
-use crate::observation_journal::ObservationSealAuthority;
+use crate::observation_journal::{ObservationSealAuthority, RenderObservationId};
 
 /// Threshold for detecting 64-bit negative values stored as unsigned.
 /// Values above this are likely negative offsets (within ~65536 of u64::MAX).
@@ -60,6 +63,38 @@ impl Default for CodeGenConfig {
 /// after the provenance journal has certified a different tree.
 pub(crate) struct EmissionReadyFunction {
     function: CFunction,
+    /// The instruction each observation marker stands for, once the journal
+    /// has sealed this tree.
+    ///
+    /// A sealed tree keeps its markers: they are where each statement came
+    /// from, and the emitter reads them to say which instructions each line
+    /// accounts for. Before the seal there is no table and a marker must not
+    /// reach the emitter; after it, nothing may change what a marker names.
+    locations: Option<Rc<ObservationLocations>>,
+}
+
+/// The instruction address each observation marker of one sealed tree names,
+/// by the marker's dense index.
+///
+/// A marker names a cell -- a value a statement computes, a use it makes, a
+/// write it performs, an effect it discharges -- and each cell belongs to one
+/// instruction. A read of a value computed elsewhere names no instruction here:
+/// the line reading it does not account for the instruction that computed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ObservationLocations {
+    at: Box<[Option<u64>]>,
+}
+
+impl ObservationLocations {
+    pub(crate) fn new(at: Vec<Option<u64>>) -> Self {
+        Self {
+            at: at.into_boxed_slice(),
+        }
+    }
+
+    fn at(&self, id: RenderObservationId) -> Option<u64> {
+        self.at.get(id.index() as usize).copied().flatten()
+    }
 }
 
 impl EmissionReadyFunction {
@@ -95,16 +130,16 @@ impl EmissionReadyFunction {
 
     pub(crate) fn function(&self) -> &CFunction {
         assert!(
-            !has_render_observations(&self.function),
+            self.locations.is_some() || !has_render_observations(&self.function),
             "marked C AST reached an emission/public boundary without journal sealing"
         );
         &self.function
     }
 
-    /// Rewrite a function the journal has sealed.
+    /// Rewrite a function the journal has sealed, keeping what its markers name.
     ///
-    /// For the passes that run after the seal and put no marker back: the
-    /// proof note, and the residuals for reads of objects nothing assigns.
+    /// For the passes that run after the seal and change no marker: the proof
+    /// note, and the residuals for reads of objects nothing assigns.
     pub(crate) fn rewrite_sealed(&mut self, rewrite: impl FnOnce(&mut CFunction)) {
         rewrite(&mut self.function);
     }
@@ -116,11 +151,13 @@ impl EmissionReadyFunction {
         &mut self.function
     }
 
-    pub(crate) fn discard_observation_markers(
+    /// Keep the markers the journal just sealed, with what each one names.
+    pub(crate) fn seal_observation_markers(
         &mut self,
         _authority: &mut ObservationSealAuthority,
+        locations: ObservationLocations,
     ) {
-        crate::ast::discard_render_observations(&mut self.function);
+        self.locations = Some(Rc::new(locations));
     }
 
     /// Remove lexical proof markers only after exact observation sealing has
@@ -132,11 +169,13 @@ impl EmissionReadyFunction {
         crate::structured_region::strip_final_region_markers(&mut self.function.body, regions)
     }
 
-    pub(crate) fn into_function(self) -> CFunction {
+    /// The function as it leaves the decompiler, with no marker left in it.
+    pub(crate) fn into_function(mut self) -> CFunction {
         assert!(
-            !has_render_observations(&self.function),
+            self.locations.is_some() || !has_render_observations(&self.function),
             "marked C AST reached a public boundary without journal sealing"
         );
+        crate::ast::discard_render_observations(&mut self.function);
         self.function
     }
 
@@ -171,6 +210,7 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             extern_objects: func.extern_objects,
             declaration_only: func.declaration_only,
         },
+        locations: None,
     }
 }
 
@@ -179,13 +219,17 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
 /// One emission, read two ways. The definition is what a reader is shown: the
 /// function and the declarations it needs. The translation unit is that same
 /// text below its prelude -- the headers and the helper definitions -- and is
-/// what a compiler is handed. Residual sites are counted in the unit, so they
-/// name the text a consumer compiles.
+/// what a compiler is handed. Lines and residual sites are counted in the unit,
+/// so they name the text a consumer compiles.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Emission {
     definition: String,
     unit: String,
+    lines: Vec<SourceLine>,
     residuals: Vec<ResidualSite>,
+    signature: Option<String>,
+    variables: Vec<crate::report::RenderedVariable>,
+    links: Vec<crate::report::RenderedLink>,
 }
 
 impl Emission {
@@ -199,14 +243,45 @@ impl Emission {
         &self.unit
     }
 
+    /// Each line of the unit that accounts for an instruction, in line order.
+    pub fn lines(&self) -> &[SourceLine] {
+        &self.lines
+    }
+
     /// Every residual in the unit, in the order its site numbers run.
     pub fn residuals(&self) -> &[ResidualSite] {
         &self.residuals
     }
 
+    /// The definition's header, as it is written, when the unit defines the
+    /// function rather than stating why it does not.
+    pub fn signature(&self) -> Option<&str> {
+        self.signature.as_deref()
+    }
+
+    /// Every name the unit declares, as the text declares it.
+    pub fn variables(&self) -> &[crate::report::RenderedVariable] {
+        &self.variables
+    }
+
+    /// Every name outside the function the unit refers to, with where it
+    /// resolves in the program.
+    pub fn links(&self) -> &[crate::report::RenderedLink] {
+        &self.links
+    }
+
     pub(crate) fn into_definition(self) -> String {
         self.definition
     }
+}
+
+/// One line of a translation unit and the instructions it accounts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLine {
+    /// One-based, in the unit.
+    pub line: usize,
+    /// Instruction start addresses, ascending.
+    pub addrs: Vec<u64>,
 }
 
 /// One residual: a construct the rendering could not prove, written as a
@@ -226,11 +301,17 @@ pub(crate) struct CodeGenerator<'c> {
     config: CodeGenConfig,
     output: String,
     indent_level: usize,
+    /// What each marker in the tree being written names, when it was sealed.
+    locations: Option<Rc<ObservationLocations>>,
+    /// Instructions each line accounts for, by one-based line of `output`.
+    lines: BTreeMap<usize, BTreeSet<u64>>,
     /// The line the next character of `output` goes on, as of `counted` bytes.
     line: usize,
     counted: usize,
     /// Residuals written so far, whose count numbers the next one.
     residuals: Vec<ResidualSite>,
+    /// The header of the definition last written, as bytes of `output`.
+    signature: Option<std::ops::Range<usize>>,
     /// The names of the function being written, so a reference can be spelled.
     symbols: crate::symbol::SymbolTable,
     /// Where emission is counted. Writing the C out is the largest phase of a
@@ -250,9 +331,12 @@ impl<'c> CodeGenerator<'c> {
             config,
             output: String::new(),
             indent_level: 0,
+            locations: None,
+            lines: BTreeMap::new(),
             line: 1,
             counted: 0,
             residuals: Vec::new(),
+            signature: None,
             symbols: crate::symbol::SymbolTable::new(),
             work: None,
             stopped: false,
@@ -270,6 +354,22 @@ impl<'c> CodeGenerator<'c> {
         self.line
     }
 
+    /// Say that the line being written accounts for these markers' instructions.
+    fn note_observations(&mut self, ids: &[RenderObservationId]) {
+        let Some(locations) = self.locations.clone() else {
+            return;
+        };
+        let addrs = ids
+            .iter()
+            .filter_map(|id| locations.at(*id))
+            .collect::<Vec<_>>();
+        if addrs.is_empty() {
+            return;
+        }
+        let line = self.current_line();
+        self.lines.entry(line).or_default().extend(addrs);
+    }
+
     /// Write a residual call: its helper, and the next site number.
     fn emit_residual(&mut self, ty: crate::prelude::ResidualType) {
         let site = u32::try_from(self.residuals.len() + 1).unwrap_or(u32::MAX);
@@ -280,23 +380,37 @@ impl<'c> CodeGenerator<'c> {
         self.output.push_str(&format!("({site})"));
     }
 
-    /// Emit a function as a translation unit.
-    pub(crate) fn emit(&mut self, ready: &EmissionReadyFunction) -> Emission {
+    /// Emit a function as a translation unit, with where each line came from.
+    pub(crate) fn emit(&mut self, ready: &EmissionReadyFunction, pointer_bits: u32) -> Emission {
+        self.locations.clone_from(&ready.locations);
         let definition = self.generate_function(ready);
+        let signature = self
+            .signature
+            .take()
+            .and_then(|range| definition.get(range))
+            .map(str::to_owned);
         let func = ready.function();
+        let defines = func.declaration_only.is_none();
         let mut prelude = String::new();
         for include in crate::prelude::INCLUDES {
             prelude.push_str(include);
             prelude.push('\n');
         }
         prelude.push('\n');
-        if func.declaration_only.is_none() {
+        if defines {
             for helper in crate::prelude::helpers_called(func) {
                 prelude.push_str(&helper.definition());
                 prelude.push('\n');
             }
         }
         let offset = prelude.bytes().filter(|byte| *byte == b'\n').count();
+        let lines = std::mem::take(&mut self.lines)
+            .into_iter()
+            .map(|(line, addrs)| SourceLine {
+                line: line + offset,
+                addrs: addrs.into_iter().collect(),
+            })
+            .collect();
         let residuals = std::mem::take(&mut self.residuals)
             .into_iter()
             .map(|residual| ResidualSite {
@@ -308,7 +422,11 @@ impl<'c> CodeGenerator<'c> {
         Emission {
             definition,
             unit: prelude,
+            lines,
             residuals,
+            signature,
+            variables: crate::report::variables(func),
+            links: crate::report::links(func, pointer_bits),
         }
     }
 
@@ -366,7 +484,9 @@ impl<'c> CodeGenerator<'c> {
         self.output.clear();
         self.line = 1;
         self.counted = 0;
+        self.lines.clear();
         self.residuals.clear();
+        self.signature = None;
 
         // A declared address defines nothing: the reason stands where the body
         // would, and the declarations say what the address resolves to.
@@ -420,6 +540,7 @@ impl<'c> CodeGenerator<'c> {
         }
 
         // Function signature
+        let header = self.output.len();
         self.emit_type(&func.ret_type);
         self.output.push(' ');
         self.output.push_str(&func.name);
@@ -441,7 +562,9 @@ impl<'c> CodeGenerator<'c> {
             }
         }
 
-        self.output.push_str(")\n{\n");
+        self.output.push(')');
+        self.signature = Some(header..self.output.len());
+        self.output.push_str("\n{\n");
         self.indent_level += 1;
 
         // Declarations for what this function calls.
@@ -516,10 +639,6 @@ impl<'c> CodeGenerator<'c> {
             }
             self.output.push_str(");\n");
         }
-        // The address the name stands for travels with the declaration.
-        // A reader wants the name; a tool that has to resolve the object --
-        // the corpus verifier maps image addresses into a captured blob --
-        // needs the number the name replaced, and the name alone hides it.
         // A name already declared as a function is not also a data object. The
         // two declarations are a redefinition and the translation unit is
         // rejected: `__cxa_finalize` arrives as both a callee this function
@@ -533,16 +652,8 @@ impl<'c> CodeGenerator<'c> {
             if declared_functions.contains(object.name.as_str()) {
                 continue;
             }
-            // The address the name stands for travels with the declaration, as
-            // a define rather than a comment. A reader wants the name; a tool
-            // that has to resolve the object -- the corpus verifier maps image
-            // addresses into a captured blob -- needs the number the name
-            // replaced, and a comment does not survive every rewrite the
-            // verifier applies before it looks.
-            self.output.push_str(&format!(
-                "#define {}__r2sleigh_addr 0x{:x}ULL\n",
-                object.name, object.address
-            ));
+            // The address the name stands for is the link map's to carry,
+            // beside the text: a tool resolving the object reads it there.
             self.emit_indent();
             self.output.push_str("extern ");
             if let Some(type_fact) = &object.type_fact {
@@ -588,6 +699,10 @@ impl<'c> CodeGenerator<'c> {
     fn emit_stmt(&mut self, stmt: &CStmt) {
         if !self.charge() {
             return;
+        }
+        // An empty statement writes no line, so it accounts for none.
+        if !matches!(stmt.unobserved(), CStmt::Empty) {
+            self.note_observations(&stmt.observation_ids());
         }
         let stmt = stmt.unobserved();
         match stmt {
@@ -787,6 +902,9 @@ impl<'c> CodeGenerator<'c> {
 
     /// Emit a statement body (handles braces for single statements).
     fn emit_stmt_body(&mut self, stmt: &CStmt) {
+        if matches!(stmt.unobserved(), CStmt::Block(_)) {
+            self.note_observations(&stmt.observation_ids());
+        }
         let stmt = stmt.unobserved();
         match stmt {
             CStmt::Block(stmts) => {
@@ -810,6 +928,7 @@ impl<'c> CodeGenerator<'c> {
 
     /// Emit a statement inline (no newline, for for-loop init).
     fn emit_stmt_inline(&mut self, stmt: &CStmt) {
+        self.note_observations(&stmt.observation_ids());
         let stmt = stmt.unobserved();
         match stmt {
             CStmt::Expr(expr) => {
@@ -849,6 +968,7 @@ impl<'c> CodeGenerator<'c> {
         if !self.charge() {
             return;
         }
+        self.note_observations(&expr.observation_ids());
         let expr = expr.unobserved();
         let my_prec = expr.precedence();
         let need_parens = my_prec < parent_prec;
@@ -1333,6 +1453,7 @@ mod tests {
                 params: Some(vec![CType::ptr(CType::u8()), CType::u64()]),
                 variadic: true,
                 noreturn: false,
+                address: None,
             }],
             typedefs: Vec::new(),
             aggregates: Vec::new(),
@@ -1487,6 +1608,7 @@ mod tests {
                     params,
                     variadic,
                     noreturn: false,
+                    address: None,
                 }],
                 typedefs: Vec::new(),
                 aggregates: Vec::new(),

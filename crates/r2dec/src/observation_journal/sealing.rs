@@ -1129,10 +1129,13 @@ impl LegacyObservationJournal {
                 }
             }
         }
-        // Strip the proof markers only after every classification and coverage
+        // Seal the proof markers only after every classification and coverage
         // check succeeds. A binding failure leaves the marked draft intact.
+        // A sealed marker stays on the tree as where its statement came from,
+        // and the emitter reads it through the table this builds.
+        let locations = self.observation_locations();
         let mut seal_authority = ObservationSealAuthority::new();
-        ready.discard_observation_markers(&mut seal_authority);
+        ready.seal_observation_markers(&mut seal_authority, locations);
         Ok(LegacyObservationSeal::Complete(
             self.into_sealed_observations(source),
         ))

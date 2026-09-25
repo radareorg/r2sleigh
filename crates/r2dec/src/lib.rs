@@ -44,6 +44,7 @@ mod observation_journal;
 mod placement;
 pub(crate) mod planner;
 pub mod prelude;
+pub mod report;
 mod shadow_report;
 pub(crate) mod single_evaluation;
 pub(crate) mod stage_timing;
@@ -54,7 +55,7 @@ pub(crate) mod unrendered;
 mod variable;
 
 use crate::codegen::{CodeGenerator, EmissionReadyFunction, prepare_function_for_emission};
-pub use crate::codegen::{Emission, ResidualSite};
+pub use crate::codegen::{Emission, ResidualSite, SourceLine};
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
 use crate::observation_journal::{
@@ -2965,7 +2966,7 @@ impl Decompiler {
         render_work.poll()?;
         let output = CodeGenerator::new(self.config.codegen.clone())
             .with_work(control)
-            .emit(product.emission());
+            .emit(product.emission(), self.config.ptr_size);
         // This is deliberately the last production work-control decision.
         // Everything below classifies the already sealed observation journal.
         render_work.poll()?;
@@ -3088,7 +3089,8 @@ impl Decompiler {
         if let Err(stop) = render_work.poll() {
             // The run has already stopped; this writes the partial the caller
             // keeps, so it is not charged again against a spent budget.
-            let output = CodeGenerator::new(self.config.codegen.clone()).emit(product.emission());
+            let output = CodeGenerator::new(self.config.codegen.clone())
+                .emit(product.emission(), self.config.ptr_size);
             return Err((
                 stop,
                 Some(PendingDecompileBindingAudit::from_product(
@@ -3101,7 +3103,7 @@ impl Decompiler {
         crate::stage_timing::mark("audit");
         let output = CodeGenerator::new(self.config.codegen.clone())
             .with_work(control)
-            .emit(product.emission());
+            .emit(product.emission(), self.config.ptr_size);
         crate::stage_timing::mark("codegen");
         crate::stage_timing::report(&product.emission().function().name);
         if let Err(stop) = render_work.poll() {
@@ -4209,6 +4211,7 @@ impl Decompiler {
             params: Some(signature.params.clone()),
             variadic: signature.variadic,
             noreturn: false,
+            address: Some(entry),
         }];
         Some(prepare_function_for_emission(function))
     }

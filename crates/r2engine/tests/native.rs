@@ -238,6 +238,79 @@ fn a_call_is_rendered_from_the_callee_body() {
     );
 }
 
+/// The emission a response carries: the unit, its lines, its names.
+fn emission(response: &r2engine::EngineDecompileResponse) -> &r2dec::Emission {
+    match &response.output {
+        r2engine::EngineRendering::Function(rendered) => rendered.emission(),
+        r2engine::EngineRendering::Listing(text) => panic!("nothing rendered: {text}"),
+    }
+}
+
+/// The instructions one line of a unit names, by the text on it.
+fn named_by(emission: &r2dec::Emission, needle: &str) -> Vec<u64> {
+    let line = emission
+        .unit()
+        .lines()
+        .position(|line| line.contains(needle))
+        .map(|index| index + 1)
+        .unwrap_or_else(|| panic!("no line holds {needle}:\n{}", emission.unit()));
+    emission
+        .lines()
+        .iter()
+        .find(|entry| entry.line == line)
+        .map(|entry| entry.addrs.clone())
+        .unwrap_or_default()
+}
+
+/// Each line of the unit names the instructions it accounts for, only
+/// instructions the function has, and every name outside the function is
+/// linked to where it resolves.
+///
+/// `call 0x100a; ret`: the call statement is the call instruction's line and
+/// the return is the `ret`'s. The callee is a function of the program at
+/// 0x100a, and that address travels with its name.
+#[test]
+fn each_line_names_its_instructions_and_each_outside_name_its_address() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: CALLER.to_vec(),
+        name: "caller",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let emission = emission(&response);
+    let unit = emission.unit();
+
+    assert!(
+        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+        "{unit}"
+    );
+    assert!(named_by(emission, "return").contains(&0x1005), "{unit}");
+    let lines = unit.lines().count();
+    for line in emission.lines() {
+        assert!((1..=lines).contains(&line.line), "{line:?}\n{unit}");
+        assert!(
+            line.addrs
+                .iter()
+                .all(|addr| [0x1000, 0x1005].contains(addr)),
+            "{line:?} names an instruction the caller does not have:\n{unit}"
+        );
+    }
+
+    let links = emission.links();
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert_eq!(links[0].ident, "fcn_100a");
+    assert_eq!(links[0].kind, r2dec::report::LinkKind::Function);
+    assert_eq!(links[0].addr, Some(0x100a));
+
+    let signature = emission.signature().expect("the unit defines the caller");
+    assert!(signature.contains("caller("), "{signature}");
+    assert!(unit.contains(signature), "{signature}\n{unit}");
+    for variable in emission.variables() {
+        assert!(unit.contains(&variable.name), "{variable:?}\n{unit}");
+    }
+}
+
 #[test]
 fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let machine = Machine::new("x86-64", "x86-64", 64);

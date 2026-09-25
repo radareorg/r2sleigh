@@ -2216,6 +2216,10 @@ pub struct CExternDecl {
     /// Whether the source says the callee never returns: the block that
     /// calls it has no successor, and the prototype has to say so too.
     pub noreturn: bool,
+    /// Where in the program the name resolves: the entry a direct call
+    /// reaches, which is the stub for an import. `None` for a machine
+    /// operation, which is no place in the program at all.
+    pub address: Option<u64>,
 }
 
 /// A function parameter.
