@@ -78,10 +78,7 @@ pub use function_facts::{
 };
 
 pub use model::{Signedness, Type};
-pub use prepare::{
-    MetadataScalarKind, TypeHint, merge_type_hint, recover_signature_params_from_ssa,
-    type_hint_from_value_metadata,
-};
+pub use prepare::{MetadataScalarKind, TypeHint, merge_type_hint, type_hint_from_value_metadata};
 pub use r2source::DisplayNames;
 pub use r2ssa::AssumptionUsageReport;
 
