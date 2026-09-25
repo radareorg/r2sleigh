@@ -1228,8 +1228,7 @@ fn a_fallback_route_residualizes_the_tree_to_comments() {
         ),
     );
 
-    let audit =
-        Decompiler::new(DecompilerConfig::x86_64()).decompile_input_with_binding_audit(&input);
+    let audit = audited(&Decompiler::new(DecompilerConfig::x86_64()), &input);
     let built = audit.rendered().function();
 
     assert!(
@@ -1271,7 +1270,7 @@ fn malformed_return_boundary_refuses_before_effect_audit() {
     );
 
     let decompiler = Decompiler::new(DecompilerConfig::x86_64());
-    let audited = decompiler.decompile_input_with_binding_audit(&input);
+    let audited = audited(&decompiler, &input);
     assert_eq!(
         audited.render_refusal(),
         Some(
@@ -1285,7 +1284,7 @@ fn malformed_return_boundary_refuses_before_effect_audit() {
 }
 
 #[test]
-fn native_standard_path_builds_a_sound_non_consuming_binding_shadow() {
+fn native_standard_path_renders_its_internal_build() {
     let arch = test_arch_for_decompile();
     let prepared = prepared_from_ops(
         vec![
@@ -1327,7 +1326,7 @@ fn native_standard_path_builds_a_sound_non_consuming_binding_shadow() {
         prepared,
         (
             r2types::DecompileRouteKind::Standard,
-            "binding shadow production path",
+            "native production path",
             None,
         ),
     );
@@ -1365,27 +1364,9 @@ fn native_standard_path_builds_a_sound_non_consuming_binding_shadow() {
     let internal_output = CodeGenerator::new(config.codegen).generate_function(built.emission());
     let public_output = public_decompiler.decompile_input(&input);
     assert_eq!(internal_output, public_output);
-    let audited = public_decompiler.decompile_input_with_binding_audit(&input);
+    let audited = audited(&public_decompiler, &input);
     assert_eq!(audited.output(), public_output);
-    let BindingShadowAuditOutcome::Complete {
-        ledger,
-        observations,
-    } = audited.binding_shadow()
-    else {
-        panic!(
-            "public native path did not expose its complete shadow audit: {:?}",
-            audited.binding_shadow()
-        );
-    };
-    assert!(ledger.equations_hold());
-    assert!(ledger.passes_quality());
-    assert!(observations.equations_hold());
-    assert!(observations.passes_quality());
-    let mut corrupted_public_ledger = ledger;
-    corrupted_public_ledger.values.observed =
-        corrupted_public_ledger.values.observed.saturating_sub(1);
-    assert!(!corrupted_public_ledger.equations_hold());
-    assert!(!corrupted_public_ledger.passes_quality());
+    assert_eq!(audited.render_refusal(), None);
 }
 
 #[test]
@@ -1539,7 +1520,7 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
     ];
     let (baseline_spans, baseline_input) = exact_diamond_input(&baseline_blocks);
     let decompiler = Decompiler::new(DecompilerConfig::x86_64());
-    let baseline = decompiler.decompile_input_with_binding_audit(&baseline_input);
+    let baseline = audited(&decompiler, &baseline_input);
     let baseline_binding_signature = binding_signature(&baseline_input);
     let baseline_values = baseline_input
         .prepared_ssa()
@@ -1558,10 +1539,9 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
     assert_eq!(
         baseline.placement_audit(),
         PlacementAudit::Applied,
-        "baseline must reach placement: output={} refusal={:?} binding={:?} effects={:?} signature={baseline_binding_signature:?} values={baseline_values:?} type_facts={:?}",
+        "baseline must reach placement: output={} refusal={:?} effects={:?} signature={baseline_binding_signature:?} values={baseline_values:?} type_facts={:?}",
         baseline.output(),
         baseline.render_refusal(),
-        baseline.binding_shadow(),
         baseline.effect_obligations(),
         baseline_input.function_facts().type_facts(),
     );
@@ -1579,7 +1559,7 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
         let mut shuffled_blocks = vec![entry.clone()];
         shuffled_blocks.extend(schedule.map(|index| peers[index].clone()));
         let (shuffled_spans, shuffled_input) = exact_diamond_input(&shuffled_blocks);
-        let shuffled = decompiler.decompile_input_with_binding_audit(&shuffled_input);
+        let shuffled = audited(&decompiler, &shuffled_input);
 
         assert_eq!(baseline_spans, shuffled_spans, "schedule={schedule:?}");
         assert_eq!(
@@ -1590,11 +1570,6 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
         assert_eq!(
             baseline.placement_audit(),
             shuffled.placement_audit(),
-            "schedule={schedule:?}"
-        );
-        assert_eq!(
-            baseline.binding_shadow(),
-            shuffled.binding_shadow(),
             "schedule={schedule:?}"
         );
         assert_eq!(
@@ -1616,7 +1591,7 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
 }
 
 #[test]
-fn binding_shadow_adds_no_post_render_work_control_decision() {
+fn rendering_adds_no_work_control_decision_after_its_final_poll() {
     struct CountingControl {
         polls: std::cell::Cell<usize>,
         stop_at: Option<usize>,
@@ -1645,7 +1620,7 @@ fn binding_shadow_adds_no_post_render_work_control_decision() {
         prepared,
         (
             r2types::DecompileRouteKind::Standard,
-            "binding shadow work-control path",
+            "rendering work-control path",
             None,
         ),
     );
@@ -1655,8 +1630,8 @@ fn binding_shadow_adds_no_post_render_work_control_decision() {
         stop_at: None,
     };
     decompiler
-        .decompile_input_with_binding_audit_and_control(&input, &baseline)
-        .expect("unbounded audit");
+        .decompile_input_with_control(&input, &baseline)
+        .expect("unbounded rendering");
     let final_production_poll = baseline.polls.get();
 
     let stop_at_final = CountingControl {
@@ -1664,7 +1639,7 @@ fn binding_shadow_adds_no_post_render_work_control_decision() {
         stop_at: Some(final_production_poll),
     };
     let stop = decompiler
-        .decompile_input_with_binding_audit_and_control(&input, &stop_at_final)
+        .decompile_input_with_control(&input, &stop_at_final)
         .expect_err("the final production poll must remain observable");
     assert_eq!(stop.phase(), DecompileWorkPhase::Rendering);
     assert_eq!(stop.reason(), r2ssa::SsaExecutionStopReason::Cancelled);
@@ -1674,8 +1649,8 @@ fn binding_shadow_adds_no_post_render_work_control_decision() {
         stop_at: Some(final_production_poll + 1),
     };
     decompiler
-        .decompile_input_with_binding_audit_and_control(&input, &no_later_poll)
-        .expect("shadow capture and classification must not poll work control");
+        .decompile_input_with_control(&input, &no_later_poll)
+        .expect("nothing after the final production poll may poll work control");
     assert_eq!(no_later_poll.polls.get(), final_production_poll);
 }
 
@@ -1757,7 +1732,7 @@ fn audited_partial_retains_the_same_product_without_extra_polls() {
         assert_eq!(
             partial.as_ref(),
             Some(&baseline),
-            "the partial must classify the exact retained product"
+            "the partial must be the exact retained product"
         );
     }
 
@@ -2036,4 +2011,14 @@ fn a_c_conversion_is_spelled_only_where_the_conversion_rules_live() {
         offenders.is_empty(),
         "a C conversion is spelled outside the files that own the conversion rules: {offenders:?}"
     );
+}
+
+/// Render with the default control and assemble the build's audit product.
+fn audited(decompiler: &Decompiler, input: &DecompilerInput) -> DecompileBindingAudit {
+    decompiler
+        .decompile_input_keeping_partial_with_binding_audit(
+            input,
+            &r2ssa::SsaExecutionControl::default(),
+        )
+        .expect("default decompiler control never stops")
 }

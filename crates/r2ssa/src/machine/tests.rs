@@ -2645,12 +2645,6 @@ fn write_projection_refuses_missing_and_upstream_refused_geometry() {
             MachineWriteRefusal::MalformedRegisterGeometry
         ))
     );
-    assert_ne!(
-        missing_artifact.machine_context().semantic_identity_bytes(),
-        malformed_artifact
-            .machine_context()
-            .semantic_identity_bytes()
-    );
 }
 
 /// A lane the architecture does not name still belongs to the register

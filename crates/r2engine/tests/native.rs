@@ -2574,21 +2574,18 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
                 name: "stores",
             };
             let response = decompile(&machine.target(), &program, BASE).expect("decompile");
-            let observations = match response.binding_audit {
-                r2engine::BindingShadowAuditOutcome::Complete { observations, .. } => observations,
-                other => panic!("the gap accounts for every cell: {other:?}"),
-            };
             (
                 response.render_refusal.is_none(),
                 response.output.text().to_string(),
                 response.effect_obligations(),
-                observations,
             )
         })
         .expect("spawn the rendering thread")
         .join()
         .expect("the rendering finishes on half a megabyte of stack");
-    let (rendered, text, effects, observations) = rendering;
+    let (rendered, text, effects) = rendering;
+    // Rendered, so the observation journal sealed with every value, use and
+    // write accounted for and none refused: a seal short of that refuses.
     assert!(rendered, "{text}");
 
     // One marker, and it covers every store.
@@ -2600,17 +2597,6 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
         .and_then(|count| count.parse::<u32>().ok())
         .expect("the marker says how many operations it covers");
     assert!(covered > STORES_OF_AN_UNRENDERABLE_VALUE, "{text}");
-
-    // Every store is a write the gap answers for, and no cell is left over.
-    assert!(observations.equations_hold(), "{observations:?}");
-    for domain in [observations.values, observations.uses, observations.writes] {
-        assert_eq!(domain.unaccounted, 0, "{observations:?}");
-        assert_eq!(domain.refused, 0, "{observations:?}");
-    }
-    assert!(
-        observations.writes.gapped >= STORES_OF_AN_UNRENDERABLE_VALUE as usize,
-        "{observations:?}"
-    );
 
     // The proof line states what the ledger gapped, and that is every store.
     assert_eq!(effects.unaccounted, 0, "{effects:?}");

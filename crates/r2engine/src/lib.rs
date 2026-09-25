@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use r2il::R2ILBlock;
-use r2ssa::{CFGRiskSummary, SsaArtifact};
+use r2ssa::SsaArtifact;
 #[cfg(test)]
 use r2types::FunctionTypeFacts;
 use r2types::{
@@ -43,18 +43,14 @@ mod route;
 
 pub use r2dec::{
     BindingMachineProjectionFailure, BindingObservationAudit, BindingObservationDomainAudit,
-    BindingObservationJournalFailure, BindingShadowAuditFailure, BindingShadowAuditLedger,
-    BindingShadowAuditOutcome, BindingShadowDomainAudit, DecompileRenderRefusal,
+    BindingObservationJournalFailure, BindingShadowAuditFailure, DecompileRenderRefusal,
     EffectObligationAudit, EffectObligationDisposition, PlacementAudit, PlacementAuditRefusal,
 };
 use route::decompile_route_decision;
 pub use route::{
     EngineDiagnostics, EngineFunctionIdentity, EnginePlan, EngineRequestKind, EngineRequestPlan,
-    EngineRouteDecision, EngineTypeRouteDecision, EngineTypeRouteKind, EngineTypedRouteDecision,
-    cfg_guard_reason_from_summary, plan_type_request, select_engine_plan,
-    should_guard_program_orchestrator_decompile, should_use_prepared_semantic_view,
-    type_cfg_allows_semantic_plan, type_cfg_bounded_reason, type_cfg_forces_bounded_plan,
-    type_cfg_prefers_bounded_plan, type_route_decision,
+    EngineRouteDecision, EngineTypedRouteDecision, select_engine_plan,
+    should_use_prepared_semantic_view,
 };
 #[cfg(test)]
 use route::{plan_decompile_request, semantic_route_reason};
@@ -582,27 +578,6 @@ impl EngineAnalysis {
     fn from_trusted_ssa(trusted: &r2ssa::TrustedSsaArtifact) -> Self {
         Self {
             ssa_func: trusted.shared_artifact(),
-        }
-    }
-}
-
-#[cfg(kani)]
-mod kani_proofs {
-    use super::*;
-
-    #[kani::proof]
-    fn bounded_type_plan_budget_policy_is_fail_closed() {
-        let interproc_max_iters = kani::any::<usize>();
-        let interproc_converged: bool = kani::any();
-        let prefers_bounded =
-            type_analysis_interproc_prefers_bounded_plan(interproc_max_iters, interproc_converged);
-
-        assert_eq!(
-            prefers_bounded,
-            interproc_max_iters <= 1 && !interproc_converged
-        );
-        if interproc_converged || interproc_max_iters > 1 {
-            assert!(!prefers_bounded);
         }
     }
 }
@@ -1935,12 +1910,6 @@ pub struct EngineSignatureInferenceRequest<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct EngineTypeAnalysisRequest {
-    pub analysis: EngineAnalyzeRequest,
-    pub caller_prefers_bounded_type_plan: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct EngineFunctionAnalysisArtifactRequest {
     pub analysis: EngineAnalyzeRequest,
 }
@@ -2049,79 +2018,6 @@ impl EngineInterprocSummaryReportRequest {
     }
 }
 
-impl EngineTypeAnalysisRequest {
-    pub fn from_interproc_budget(
-        analysis: EngineAnalyzeRequest,
-        interproc_max_iters: usize,
-        interproc_converged: bool,
-    ) -> Self {
-        Self {
-            analysis,
-            caller_prefers_bounded_type_plan: type_analysis_interproc_prefers_bounded_plan(
-                interproc_max_iters,
-                interproc_converged,
-            ),
-        }
-    }
-}
-
-pub fn type_analysis_interproc_prefers_bounded_plan(
-    interproc_max_iters: usize,
-    interproc_converged: bool,
-) -> bool {
-    interproc_max_iters <= 1 && !interproc_converged
-}
-
-#[derive(Debug)]
-pub struct EngineTypeAnalysisResponse {
-    type_analysis: r2types::TypeAnalysis,
-    cfg_summary: CFGRiskSummary,
-    route_decision: EngineTypeRouteDecision,
-    decompile_route: r2types::DecompileRouteFacts,
-    callsite_count: usize,
-    current_summary: Option<r2ssa::FunctionSemanticSummary>,
-    metrics: EngineMetrics,
-    diagnostics: EngineDiagnostics,
-}
-
-impl EngineTypeAnalysisResponse {
-    pub fn type_analysis(&self) -> &r2types::TypeAnalysis {
-        &self.type_analysis
-    }
-
-    pub fn function_facts(&self) -> &FunctionFacts {
-        self.type_analysis.function_facts()
-    }
-
-    pub fn cfg_summary(&self) -> &CFGRiskSummary {
-        &self.cfg_summary
-    }
-
-    pub fn route_decision(&self) -> &EngineTypeRouteDecision {
-        &self.route_decision
-    }
-
-    pub fn decompile_route(&self) -> &r2types::DecompileRouteFacts {
-        &self.decompile_route
-    }
-
-    pub fn callsite_count(&self) -> usize {
-        self.callsite_count
-    }
-
-    pub fn current_summary(&self) -> Option<&r2ssa::FunctionSemanticSummary> {
-        self.current_summary.as_ref()
-    }
-
-    pub fn metrics(&self) -> &EngineMetrics {
-        &self.metrics
-    }
-
-    pub fn diagnostics(&self) -> &EngineDiagnostics {
-        &self.diagnostics
-    }
-}
-
 /// What one tier produced.
 ///
 /// The C tier produces a tree and the text the certified emitter wrote from
@@ -2178,7 +2074,6 @@ fn effect_obligations_of(
 #[derive(Debug, Clone)]
 pub struct EngineDecompileResponse {
     pub output: EngineRendering,
-    pub binding_audit: BindingShadowAuditOutcome,
     pub obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     pub placement_audit: PlacementAudit,
     pub render_refusal: Option<DecompileRenderRefusal>,
@@ -2351,64 +2246,6 @@ impl EngineSession {
         })
     }
 
-    pub fn type_function(
-        &self,
-        request: EngineTypeAnalysisRequest,
-    ) -> Option<EngineTypeAnalysisResponse> {
-        self.type_function_checked(request).ok()
-    }
-
-    pub fn type_function_checked(
-        &self,
-        request: EngineTypeAnalysisRequest,
-    ) -> Result<EngineTypeAnalysisResponse, EngineExecutionRefusal> {
-        let started = Instant::now();
-        let analysis_request = request.analysis.canonicalize_trusted();
-        let analyze_response = self.analyze_checked(analysis_request.clone())?;
-        let artifact = analyze_response.artifact;
-        let cfg_summary = artifact.ssa_func().function().cfg_risk_summary();
-        let route_decision = type_route_decision(
-            artifact.function_facts(),
-            &cfg_summary,
-            request.caller_prefers_bounded_type_plan,
-        );
-        if !matches!(route_decision.kind, EngineTypeRouteKind::FullTypeEvidence) {
-            return Err(engine_execution_refusal(
-                route_decision.reason.unwrap_or_else(|| {
-                    "bounded or summary-only type evidence cannot authorize full types".to_string()
-                }),
-                EnginePhase::Types,
-                analyze_response.metrics,
-            ));
-        }
-        let decompile_decision = decompile_route_decision(
-            &analysis_request.function_name,
-            artifact.function_facts(),
-            Some(artifact.ssa_func()),
-            &cfg_summary,
-        );
-        let callsite_count = count_prepared_callsites(artifact.ssa_func().local_ssa_blocks());
-        let current_summary = current_interproc_summary(artifact.function_facts());
-        let EngineAnalysisArtifact {
-            type_analysis,
-            trusted_ssa: _,
-        } = artifact;
-
-        Ok(EngineTypeAnalysisResponse {
-            type_analysis,
-            cfg_summary,
-            route_decision,
-            decompile_route: decompile_decision.route,
-            callsite_count,
-            current_summary,
-            metrics: EngineMetrics {
-                planning_time: started.elapsed(),
-                ..analyze_response.metrics
-            },
-            diagnostics: analyze_response.diagnostics,
-        })
-    }
-
     /// Type one function once and seal the facts every tier reads; a refusal is the response a rendering returns.
     pub(crate) fn seal_function(
         &self,
@@ -2482,7 +2319,6 @@ impl EngineSession {
                     metrics,
                     analyze_diagnostics,
                     Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
                     None,
                     PlacementAudit::NotRun,
                     None,
@@ -2499,7 +2335,6 @@ impl EngineSession {
                     metrics,
                     analyze_diagnostics,
                     Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
                     None,
                     PlacementAudit::NotRun,
                     None,
@@ -2518,7 +2353,6 @@ impl EngineSession {
                     *refusal.metrics,
                     *refusal.diagnostics,
                     Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
                     None,
                     PlacementAudit::NotRun,
                     None,
@@ -2559,7 +2393,6 @@ impl EngineSession {
                         metrics,
                         analyze_diagnostics,
                         Some(analyzed_function_facts),
-                        BindingShadowAuditOutcome::NotRun,
                         None,
                         PlacementAudit::NotRun,
                         None,
@@ -2659,7 +2492,6 @@ impl EngineSession {
                 sealed.metrics.clone(),
                 EngineDiagnostics::default(),
                 Some(response_function_facts),
-                BindingShadowAuditOutcome::NotRun,
                 None,
                 PlacementAudit::NotRun,
                 None,
@@ -2680,7 +2512,6 @@ impl EngineSession {
                 *refusal.metrics,
                 *refusal.diagnostics,
                 Some(response_function_facts),
-                BindingShadowAuditOutcome::NotRun,
                 None,
                 PlacementAudit::NotRun,
                 None,
@@ -2698,7 +2529,6 @@ impl EngineSession {
                     planning_time,
                     render_time,
                 );
-                let binding_audit = *stop.binding_audit;
                 let obligation_ledger = *stop.obligation_ledger;
                 let placement_audit = stop.placement_audit;
                 let render_refusal = stop.render_refusal.map(|refusal| *refusal);
@@ -2710,7 +2540,6 @@ impl EngineSession {
                     *refusal.metrics,
                     *refusal.diagnostics,
                     Some(response_function_facts),
-                    binding_audit,
                     obligation_ledger,
                     placement_audit,
                     render_refusal,
@@ -2762,7 +2591,7 @@ impl EngineSession {
         metrics.planning_time += planning_time;
         metrics.render_time = render_time;
         let rendering_stopped = rendered.stopped.is_some();
-        let (output, binding_audit, obligation_ledger, placement_audit, render_refusal) =
+        let (output, obligation_ledger, placement_audit, render_refusal) =
             rendered.product.finalize();
         if !rendering_stopped && let Some(reason) = placement_refusal_reason(placement_audit) {
             metrics.record_phase(
@@ -2777,7 +2606,6 @@ impl EngineSession {
                 metrics,
                 diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 render_refusal,
@@ -2797,7 +2625,6 @@ impl EngineSession {
                 metrics,
                 diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 Some(refusal),
@@ -2819,7 +2646,6 @@ impl EngineSession {
                 metrics,
                 diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 None,
@@ -2835,7 +2661,6 @@ impl EngineSession {
                 *refusal.metrics,
                 *refusal.diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 None,
@@ -2844,7 +2669,6 @@ impl EngineSession {
         metrics.work_spent = request.execution.work_spent();
         EngineDecompileResponse {
             output,
-            binding_audit,
             obligation_ledger,
             placement_audit,
             render_refusal,
@@ -3017,7 +2841,6 @@ impl EngineRenderedDecompile {
         Self {
             product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
                 output: EngineRendering::Listing(output),
-                binding_audit: BindingShadowAuditOutcome::NotRun,
                 obligation_ledger: None,
                 placement_audit: PlacementAudit::NotRun,
                 render_refusal: None,
@@ -3031,7 +2854,6 @@ impl EngineRenderedDecompile {
 
 struct ReadyEngineRenderedProduct {
     output: EngineRendering,
-    binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -3047,7 +2869,6 @@ impl EngineRenderedProduct {
         self,
     ) -> (
         EngineRendering,
-        BindingShadowAuditOutcome,
         Option<r2dec::ledger::ObligationLedger>,
         PlacementAudit,
         Option<DecompileRenderRefusal>,
@@ -3056,28 +2877,19 @@ impl EngineRenderedProduct {
             Self::Ready(ready) => {
                 let ReadyEngineRenderedProduct {
                     output,
-                    binding_audit,
                     obligation_ledger,
                     placement_audit,
                     render_refusal,
                 } = *ready;
-                (
-                    output,
-                    binding_audit,
-                    obligation_ledger,
-                    placement_audit,
-                    render_refusal,
-                )
+                (output, obligation_ledger, placement_audit, render_refusal)
             }
             Self::Pending(pending) => {
                 let audited = (*pending).finalize();
-                let binding_audit = audited.binding_shadow();
                 let obligation_ledger = audited.obligation_ledger().cloned();
                 let placement_audit = audited.placement_audit();
                 let render_refusal = audited.render_refusal();
                 (
                     EngineRendering::Function(Box::new(audited.into_rendered())),
-                    binding_audit,
                     obligation_ledger,
                     placement_audit,
                     render_refusal,
@@ -3091,7 +2903,6 @@ impl EngineRenderedProduct {
 struct EngineRenderExecutionStop {
     reason: String,
     phase: EnginePhase,
-    binding_audit: Box<BindingShadowAuditOutcome>,
     obligation_ledger: Box<Option<r2dec::ledger::ObligationLedger>>,
     placement_audit: PlacementAudit,
     render_refusal: Option<Box<DecompileRenderRefusal>>,
@@ -3137,7 +2948,6 @@ fn engine_render_stop_reason(
     EngineRenderExecutionStop {
         reason,
         phase,
-        binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
         obligation_ledger: Box::new(None),
         placement_audit: PlacementAudit::NotRun,
         render_refusal: None,
@@ -3170,7 +2980,6 @@ fn poll_engine_render_control_with_completion<C: r2ssa::SsaWorkControl + ?Sized>
 
 fn engine_render_stop_from_decompiler(
     stop: r2dec::DecompileExecutionStop,
-    binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -3181,7 +2990,6 @@ fn engine_render_stop_from_decompiler(
         r2dec::DecompileWorkPhase::Rendering => EnginePhase::Rendering,
     };
     let mut mapped = engine_render_stop_reason(stop.reason(), phase);
-    mapped.binding_audit = Box::new(binding_audit);
     mapped.obligation_ledger = Box::new(obligation_ledger);
     mapped.placement_audit = placement_audit;
     mapped.render_refusal = render_refusal.map(Box::new);
@@ -3216,7 +3024,6 @@ fn render_listing_tier<C: r2ssa::SsaWorkControl>(
     Some(listing.map_err(|stop| EngineRenderExecutionStop {
         reason: format!("{stop:?}"),
         phase: EnginePhase::Rendering,
-        binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
         obligation_ledger: Box::new(None),
         placement_audit: PlacementAudit::NotRun,
         render_refusal: None,
@@ -3235,7 +3042,6 @@ fn rendering_reached_before_the_stop(
     partial: r2dec::PendingDecompileBindingAudit,
 ) -> EngineRenderedDecompile {
     let audited = partial.finalize();
-    let binding_audit = audited.binding_shadow();
     let obligation_ledger = audited.obligation_ledger().cloned();
     let placement_audit = audited.placement_audit();
     let render_refusal = audited.render_refusal();
@@ -3243,7 +3049,6 @@ fn rendering_reached_before_the_stop(
     EngineRenderedDecompile {
         product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
             output,
-            binding_audit,
             obligation_ledger: obligation_ledger.clone(),
             placement_audit,
             render_refusal,
@@ -3256,7 +3061,6 @@ fn rendering_reached_before_the_stop(
         structuring_executed: true,
         stopped: Some(engine_render_stop_from_decompiler(
             stop,
-            binding_audit,
             obligation_ledger,
             placement_audit,
             render_refusal,
@@ -3290,27 +3094,17 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
             return Ok(rendering_reached_before_the_stop(stop, partial));
         }
         Err((stop, partial)) => {
-            let (binding_audit, obligation_ledger, placement_audit, render_refusal) = partial
+            let (obligation_ledger, placement_audit, render_refusal) = partial
                 .map(r2dec::PendingDecompileBindingAudit::finalize)
-                .map_or(
+                .map_or((None, PlacementAudit::NotRun, None), |audit| {
                     (
-                        BindingShadowAuditOutcome::NotRun,
-                        None,
-                        PlacementAudit::NotRun,
-                        None,
-                    ),
-                    |audit| {
-                        (
-                            audit.binding_shadow(),
-                            audit.obligation_ledger().cloned(),
-                            audit.placement_audit(),
-                            audit.render_refusal(),
-                        )
-                    },
-                );
+                        audit.obligation_ledger().cloned(),
+                        audit.placement_audit(),
+                        audit.render_refusal(),
+                    )
+                });
             return Err(engine_render_stop_from_decompiler(
                 stop,
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 render_refusal,
@@ -3327,7 +3121,6 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     }
 
     let audited = audited.finalize();
-    let binding_audit = audited.binding_shadow();
     let obligation_ledger = audited.obligation_ledger().cloned();
     let placement_audit = audited.placement_audit();
     let render_refusal = audited.render_refusal();
@@ -3340,7 +3133,6 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
                 )
                 .unwrap_or_default(),
             ),
-            binding_audit,
             obligation_ledger,
             placement_audit,
             render_refusal,
@@ -3451,7 +3243,6 @@ fn refused_decompile_response_with_metrics(
         metrics,
         diagnostics,
         None,
-        BindingShadowAuditOutcome::NotRun,
         None,
         PlacementAudit::NotRun,
         None,
@@ -3469,7 +3260,6 @@ fn refused_decompile_response_with_metrics_and_audits(
     metrics: EngineMetrics,
     mut diagnostics: EngineDiagnostics,
     existing_function_facts: Option<FunctionFacts>,
-    binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -3489,7 +3279,6 @@ fn refused_decompile_response_with_metrics_and_audits(
     diagnostics.refusal = route_diagnostics.refusal;
     EngineDecompileResponse {
         output,
-        binding_audit,
         obligation_ledger,
         placement_audit,
         render_refusal,
@@ -3620,26 +3409,6 @@ fn build_source_owned_callee_signatures(
         .collect()
 }
 
-pub fn block_guard_fallback_comment(
-    function_name: &str,
-    blocks: usize,
-    max_blocks: usize,
-) -> String {
-    let function_name = sanitize_fallback_comment_text(function_name);
-    format!(
-        "/* r2dec budget: skipped decompilation for {} ({} blocks > limit {}). */",
-        function_name, blocks, max_blocks
-    )
-}
-
-pub fn cfg_guard_fallback_comment(
-    function_name: &str,
-    cfg_summary: &CFGRiskSummary,
-) -> Option<String> {
-    cfg_guard_reason_from_summary(cfg_summary)
-        .map(|reason| artifact_guard_fallback_comment(function_name, &reason))
-}
-
 pub fn artifact_guard_fallback_comment(function_name: &str, reason: &str) -> String {
     let function_name = sanitize_fallback_comment_text(function_name);
     let reason = sanitize_fallback_comment_text(reason);
@@ -3727,24 +3496,4 @@ fn build_engine_analysis_artifact(
 
 fn sanitize_fallback_comment_text(text: &str) -> String {
     text.replace("*/", "* /").replace(['\r', '\n'], " ")
-}
-
-fn current_interproc_summary(
-    function_facts: &FunctionFacts,
-) -> Option<r2ssa::FunctionSemanticSummary> {
-    function_facts
-        .interproc_summary_set()
-        .and_then(|summary_set| {
-            summary_set
-                .root
-                .and_then(|root| summary_set.summaries.get(&root).cloned())
-        })
-}
-
-fn count_prepared_callsites(ssa_blocks: &[r2ssa::SSABlock]) -> usize {
-    ssa_blocks
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .filter(|op| matches!(op, r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. }))
-        .count()
 }

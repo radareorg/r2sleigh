@@ -25,7 +25,6 @@ use crate::cfg::{CFG, CFGEdge};
 use crate::control::{
     SsaExecutionStopReason, SsaPrepareError, SsaWorkControl, UncheckedSsaWorkControl,
 };
-use crate::defuse::{BackwardSlice, SliceOpRef, backward_slice_from_op, backward_slice_from_var};
 use crate::domtree::DomTree;
 use crate::graph::SsaGraph;
 use crate::integrity::{SsaIntegrityError, validate_ssa_function};
@@ -96,11 +95,11 @@ pub struct StackAddressRoot {
 pub struct DecompilePrepFacts {
     /// The canonical root of each value, as an unordered index.
     ///
-    /// Nothing iterates it -- the fingerprint sorts what it takes -- and the
-    /// root propagation asks it three and a half million times for one
-    /// five-hundred-block function, so every question was a walk down an
-    /// ordered tree comparing variable names. Hashing the variable once and
-    /// probing is the same answer for a fraction of the comparisons.
+    /// Nothing iterates it, and the root propagation asks it three and a half
+    /// million times for one five-hundred-block function, so every question
+    /// was a walk down an ordered tree comparing variable names. Hashing the
+    /// variable once and probing is the same answer for a fraction of the
+    /// comparisons.
     pub canonical_value_roots: HashMap<SSAVar, SSAVar>,
     pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
@@ -3384,11 +3383,6 @@ impl SSAFunction {
         }
     }
 
-    /// Compute a backward slice for a sink variable.
-    pub fn backward_slice(&self, sink: &SSAVar) -> BackwardSlice {
-        backward_slice_from_var(self, sink)
-    }
-
     /// Seal-check the complete SSA definition/use, phi, storage, and width contract.
     #[expect(
         clippy::result_large_err,
@@ -3396,22 +3390,6 @@ impl SSAFunction {
     )]
     pub fn validate_integrity(&self) -> Result<(), SsaIntegrityError> {
         validate_ssa_function(self)
-    }
-
-    /// Compute a backward slice starting from an SSA operation.
-    pub fn backward_slice_from_op(&self, block_addr: u64, op_idx: usize) -> BackwardSlice {
-        backward_slice_from_op(self, SliceOpRef::Op { block_addr, op_idx })
-    }
-
-    /// Compute a backward slice starting from a phi node.
-    pub fn backward_slice_from_phi(&self, block_addr: u64, phi_idx: usize) -> BackwardSlice {
-        backward_slice_from_op(
-            self,
-            SliceOpRef::Phi {
-                block_addr,
-                phi_idx,
-            },
-        )
     }
 
     /// Run SSA optimizations on this function.

@@ -1137,7 +1137,7 @@ impl LegacyObservationJournal {
         let mut seal_authority = ObservationSealAuthority::new();
         ready.seal_observation_markers(&mut seal_authority, locations);
         Ok(LegacyObservationSeal::Complete(
-            self.into_sealed_observations(source),
+            self.into_sealed_observations(),
         ))
     }
 

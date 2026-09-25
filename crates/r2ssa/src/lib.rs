@@ -13,7 +13,6 @@
 //! - [`op`]: SSA operation types
 //! - [`phi`]: Phi-node placement algorithm
 //! - [`rename`]: SSA renaming algorithm
-//! - [`taint`]: Taint analysis on SSA def-use chains
 //! - [`var`]: SSA variable representation
 
 pub(crate) mod abi;
@@ -28,9 +27,7 @@ pub(crate) mod control;
 pub(crate) mod deadphi;
 pub(crate) mod defuse;
 pub mod domtree;
-pub(crate) mod execution;
 pub mod fate;
-pub(crate) mod fingerprint;
 pub mod function;
 pub mod graph;
 pub mod indirect;
@@ -41,7 +38,6 @@ pub(crate) mod liveout;
 pub(crate) mod machine;
 pub(crate) mod machine_context;
 pub(crate) mod mirror;
-pub mod mobility;
 pub mod name;
 mod naming;
 pub(crate) mod obligation;
@@ -58,7 +54,6 @@ pub(crate) mod semantic;
 mod slice;
 pub mod span;
 mod strided;
-pub mod taint;
 #[cfg(test)]
 pub(crate) mod testing;
 mod values;
@@ -83,15 +78,7 @@ pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,
     SsaWorkControl, SsaWorkMeter,
 };
-pub use defuse::{
-    BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
-};
-pub use execution::{
-    ArtifactBlockId, ArtifactInstId, ArtifactValueId, EntryStorageError, ExecutionBlockRef,
-    ExecutionEffect, ExecutionInstRef, ExecutionOpcode, ExecutionOperands, ExecutionOperation,
-    ExecutionPhiIncoming, ExecutionValueRef, ExecutionViewError, SsaExecutionView,
-};
-pub use fingerprint::{SSA_SEMANTIC_FINGERPRINT_SCHEMA_VERSION, stable_ssa_semantic_fingerprint};
+pub use defuse::{DefUseInfo, def_use};
 pub use function::{
     CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
     GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
@@ -185,6 +172,5 @@ pub use semantic::{
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
-pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};

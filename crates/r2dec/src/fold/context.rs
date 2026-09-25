@@ -852,7 +852,7 @@ impl<'a> FoldingContext<'a> {
             );
             return None;
         };
-        let anchor = crate::shadow_report::GapAnchor {
+        let anchor = crate::observation_journal::GapAnchor {
             block_addr,
             op_idx: u32::try_from(op_idx).ok()?,
         };
@@ -912,7 +912,7 @@ impl<'a> FoldingContext<'a> {
                     && obligation.inputs.is_empty()
             })?
             .id;
-        let anchor = crate::shadow_report::GapAnchor {
+        let anchor = crate::observation_journal::GapAnchor {
             block_addr,
             op_idx: u32::try_from(op_idx).ok()?,
         };
@@ -951,7 +951,7 @@ impl<'a> FoldingContext<'a> {
         ) else {
             return crate::ast::CStmt::Gap(marker);
         };
-        let anchor = crate::shadow_report::GapAnchor {
+        let anchor = crate::observation_journal::GapAnchor {
             block_addr: marker.block_addr,
             op_idx,
         };

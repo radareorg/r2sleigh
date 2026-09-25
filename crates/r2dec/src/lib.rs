@@ -45,7 +45,6 @@ mod placement;
 pub(crate) mod planner;
 pub mod prelude;
 pub mod report;
-mod shadow_report;
 pub(crate) mod single_evaluation;
 pub(crate) mod stage_timing;
 pub mod structure;
@@ -767,23 +766,6 @@ pub(crate) fn unowned_report_requested() -> bool {
 /// a reader that a function is short without saying short of what. This names the
 /// kinds left undecided, the reasons given for eliding, and the layer behind every
 /// refusal, which is what turns those numbers into a place to start.
-/// Print the backward slice of the seed `R2SLEIGH_SLICE` names, if it is set.
-///
-/// The question every trace ends at is where a value came from; this answers it
-/// in one run instead of a rebuild per layer.
-fn debug_log_slice(prepared: &r2ssa::SsaArtifact) {
-    let Some(seed) = std::env::var_os("R2SLEIGH_SLICE") else {
-        return;
-    };
-    let Some(seed) = seed.to_str() else {
-        return;
-    };
-    match r2ssa::resolve_slice_seed(prepared, seed) {
-        Ok(seed) => eprintln!("{}", r2ssa::backward_slice(prepared, seed)),
-        Err(error) => eprintln!("r2sleigh: slice seed {seed:?}: {error}"),
-    }
-}
-
 fn debug_log_ledger(prepared: &r2ssa::SsaArtifact, ledger: &crate::ledger::ObligationLedger) {
     if !unowned_report_requested() {
         return;
@@ -1108,144 +1090,10 @@ impl DecompilerInput {
     }
 }
 
-#[derive(Debug)]
-enum BindingShadowFailure {
-    Pairing,
-    Report,
-    IncompleteObservations {
-        ledger: crate::shadow_report::ShadowLedger,
-        coverage: LegacyObservationCoverage,
-    },
-    NonQuality {
-        ledger: crate::shadow_report::ShadowLedger,
-        coverage: LegacyObservationCoverage,
-    },
-}
-
-#[derive(Debug)]
-struct BindingShadow {
-    ledger: crate::shadow_report::ShadowLedger,
-    coverage: LegacyObservationCoverage,
-}
-
-#[derive(Debug)]
-enum BindingShadowOutcome {
-    Complete(BindingShadow),
-    Failed(BindingShadowFailure),
-}
-
-impl BindingShadowOutcome {
-    fn build(
-        plan: &crate::binding_plan::BindingPlan,
-        source: &r2types::function_facts::SourceOwnedFunctionFacts,
-        legacy: &crate::shadow_report::LegacyAnalysisSnapshot,
-        coverage: LegacyObservationCoverage,
-    ) -> Self {
-        if crate::fold::op_lower::PlannedLoweringInput::try_new(source, plan).is_err() {
-            return Self::Failed(BindingShadowFailure::Pairing);
-        }
-        let report = match crate::shadow_report::ShadowReport::build(plan, source, legacy) {
-            Ok(report) => report,
-            Err(_) => return Self::Failed(BindingShadowFailure::Report),
-        };
-        if report.validate_against(plan, source, legacy).is_err() {
-            return Self::Failed(BindingShadowFailure::Report);
-        }
-        let ledger = report.ledger(source);
-        if !coverage.is_complete() {
-            return Self::Failed(BindingShadowFailure::IncompleteObservations { ledger, coverage });
-        }
-        if !ledger.passes_quality() || !coverage.passes_quality() {
-            return Self::Failed(BindingShadowFailure::NonQuality { ledger, coverage });
-        }
-        Self::Complete(BindingShadow { ledger, coverage })
-    }
-}
-
-/// Public, renderer-independent counts for one binding-shadow domain.
-///
-/// These are audit results, not rendering inputs. Keeping the complete ledger
-/// visible prevents a refusal or an unclassified cell from being counted as a
-/// successful shadow run merely because no C was emitted for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BindingShadowDomainAudit {
-    pub total: usize,
-    pub observed: usize,
-    pub agree_correct: usize,
-    pub old_wrong: usize,
-    pub shadow_wrong: usize,
-    pub both_wrong_equal: usize,
-    pub both_wrong_different: usize,
-    pub unclassified: usize,
-    pub refused: usize,
-    /// Cells a marked gap accounts for: neither account claimed them, and the
-    /// output says so where they stand.
-    pub gapped: usize,
-}
-
-impl BindingShadowDomainAudit {
-    pub const fn equations_hold(self) -> bool {
-        let Some(both_wrong) = self.both_wrong_equal.checked_add(self.both_wrong_different) else {
-            return false;
-        };
-        let Some(classified) = self.agree_correct.checked_add(self.old_wrong) else {
-            return false;
-        };
-        let Some(classified) = classified.checked_add(self.shadow_wrong) else {
-            return false;
-        };
-        let Some(classified) = classified.checked_add(both_wrong) else {
-            return false;
-        };
-        let Some(classified) = classified.checked_add(self.gapped) else {
-            return false;
-        };
-        let Some(accounted) = classified.checked_add(self.unclassified) else {
-            return false;
-        };
-        self.total == self.observed && self.observed == accounted
-    }
-
-    /// Quality admits a marked gap and refuses everything else that is not
-    /// proven. A gap is an accounted cell whose absence the output states; a
-    /// caller that needs a fully proven body reads `is_fully_proven`.
-    pub const fn passes_quality(self) -> bool {
-        self.equations_hold()
-            && self.shadow_wrong == 0
-            && self.both_wrong_equal == 0
-            && self.both_wrong_different == 0
-            && self.unclassified == 0
-            && self.refused == 0
-    }
-
-    pub const fn is_fully_proven(self) -> bool {
-        self.passes_quality() && self.gapped == 0
-    }
-}
-
-impl From<crate::shadow_report::DomainLedger> for BindingShadowDomainAudit {
-    fn from(ledger: crate::shadow_report::DomainLedger) -> Self {
-        Self {
-            total: ledger.total,
-            observed: ledger.observed,
-            agree_correct: ledger.agree_correct,
-            old_wrong: ledger.old_wrong,
-            shadow_wrong: ledger.shadow_wrong,
-            both_wrong_equal: ledger.both_wrong_equal,
-            both_wrong_different: ledger.both_wrong_different,
-            unclassified: ledger.unclassified,
-            refused: ledger.refused,
-            gapped: ledger.gapped,
-        }
-    }
-}
-
 /// Public count of exact legacy-render observations for one source domain.
 ///
-/// This is deliberately separate from the shadow classification ledger. A
-/// dense shadow report can classify `LegacyAbsent` as an old-renderer defect;
-/// only this equation proves that the renderer actually accounted for every
-/// source value, use, and write.
+/// This equation proves that the renderer actually accounted for every source
+/// value, use, and write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BindingObservationDomainAudit {
     pub total: usize,
@@ -1330,34 +1178,6 @@ impl From<LegacyObservationCoverage> for BindingObservationAudit {
             values: coverage.values.into(),
             uses: coverage.uses.into(),
             writes: coverage.writes.into(),
-        }
-    }
-}
-
-/// Observable Stage 4 ledger, kept separate from all renderer inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BindingShadowAuditLedger {
-    pub values: BindingShadowDomainAudit,
-    pub uses: BindingShadowDomainAudit,
-    pub writes: BindingShadowDomainAudit,
-}
-
-impl BindingShadowAuditLedger {
-    pub const fn equations_hold(self) -> bool {
-        self.values.equations_hold() && self.uses.equations_hold() && self.writes.equations_hold()
-    }
-
-    pub const fn passes_quality(self) -> bool {
-        self.values.passes_quality() && self.uses.passes_quality() && self.writes.passes_quality()
-    }
-}
-
-impl From<crate::shadow_report::ShadowLedger> for BindingShadowAuditLedger {
-    fn from(ledger: crate::shadow_report::ShadowLedger) -> Self {
-        Self {
-            values: ledger.values.into(),
-            uses: ledger.uses.into(),
-            writes: ledger.writes.into(),
         }
     }
 }
@@ -1835,25 +1655,15 @@ impl BindingObservationJournalFailure {
     }
 }
 
-/// Typed reason a production binding-shadow audit did not complete cleanly.
+/// Typed reason a native rendering's observation journal or declaration
+/// placement did not seal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingShadowAuditFailure {
-    PlanBuild,
-    SourcePairing,
     JournalConstruction(BindingObservationJournalFailure),
     JournalRecording(BindingObservationJournalFailure),
     JournalSeal(BindingObservationJournalFailure),
     Placement(PlacementAuditRefusal),
     NonQualityObservations {
-        observations: BindingObservationAudit,
-    },
-    Report,
-    IncompleteObservations {
-        ledger: BindingShadowAuditLedger,
-        observations: BindingObservationAudit,
-    },
-    NonQuality {
-        ledger: BindingShadowAuditLedger,
         observations: BindingObservationAudit,
     },
 }
@@ -1894,48 +1704,6 @@ fn gap_anchor_for_native_failure(
         | Journal::ExactWriteRequiresRenderedOccurrence { inst }
         | Journal::ConflictingWrite { inst } => Some(*inst),
         _ => None,
-    }
-}
-
-/// Non-consuming binding audit exposed to corpus and integration tooling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingShadowAuditOutcome {
-    Complete {
-        ledger: BindingShadowAuditLedger,
-        observations: BindingObservationAudit,
-    },
-    Failed(BindingShadowAuditFailure),
-    /// The selected route never entered the native Standard renderer.
-    NotRun,
-}
-
-impl BindingShadowAuditOutcome {
-    fn from_internal(outcome: &BindingShadowOutcome) -> Self {
-        match outcome {
-            BindingShadowOutcome::Complete(shadow) => Self::Complete {
-                ledger: shadow.ledger.into(),
-                observations: shadow.coverage.into(),
-            },
-            BindingShadowOutcome::Failed(BindingShadowFailure::Pairing) => {
-                Self::Failed(BindingShadowAuditFailure::SourcePairing)
-            }
-            BindingShadowOutcome::Failed(BindingShadowFailure::Report) => {
-                Self::Failed(BindingShadowAuditFailure::Report)
-            }
-            BindingShadowOutcome::Failed(BindingShadowFailure::IncompleteObservations {
-                ledger,
-                coverage,
-            }) => Self::Failed(BindingShadowAuditFailure::IncompleteObservations {
-                ledger: (*ledger).into(),
-                observations: (*coverage).into(),
-            }),
-            BindingShadowOutcome::Failed(BindingShadowFailure::NonQuality { ledger, coverage }) => {
-                Self::Failed(BindingShadowAuditFailure::NonQuality {
-                    ledger: (*ledger).into(),
-                    observations: (*coverage).into(),
-                })
-            }
-        }
     }
 }
 
@@ -2264,11 +2032,6 @@ impl PlacementAudit {
 /// last step to the reader.
 #[derive(Clone, Copy, Eq)]
 pub enum MachineProjectionRefusalOrigin {
-    ShadowAuditPlanBuild,
-    ShadowAuditSourcePairing,
-    ShadowAuditReport,
-    ShadowAuditIncompleteObservations,
-    ShadowAuditNonQuality,
     /// One of the lowering predicates declined, named by its site.
     ///
     /// Every lowering refusal in the pipeline arrived here as one word, and on
@@ -2307,13 +2070,6 @@ impl MachineProjectionRefusalOrigin {
 impl std::fmt::Debug for MachineProjectionRefusalOrigin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ShadowAuditPlanBuild => f.write_str("ShadowAuditPlanBuild"),
-            Self::ShadowAuditSourcePairing => f.write_str("ShadowAuditSourcePairing"),
-            Self::ShadowAuditReport => f.write_str("ShadowAuditReport"),
-            Self::ShadowAuditIncompleteObservations => {
-                f.write_str("ShadowAuditIncompleteObservations")
-            }
-            Self::ShadowAuditNonQuality => f.write_str("ShadowAuditNonQuality"),
             Self::OpLowering(site) => {
                 let file = site.file();
                 let base = file.rsplit('/').next().unwrap_or(file);
@@ -2457,27 +2213,6 @@ impl From<BindingShadowAuditFailure> for DecompileRenderRefusal {
             BindingShadowAuditFailure::JournalConstruction(failure)
             | BindingShadowAuditFailure::JournalRecording(failure)
             | BindingShadowAuditFailure::JournalSeal(failure) => Self::ObservationJournal(failure),
-            BindingShadowAuditFailure::PlanBuild => Self::MissingMachineProjectionAuthorization(
-                MachineProjectionRefusalOrigin::ShadowAuditPlanBuild,
-            ),
-            BindingShadowAuditFailure::SourcePairing => {
-                Self::MissingMachineProjectionAuthorization(
-                    MachineProjectionRefusalOrigin::ShadowAuditSourcePairing,
-                )
-            }
-            BindingShadowAuditFailure::Report => Self::MissingMachineProjectionAuthorization(
-                MachineProjectionRefusalOrigin::ShadowAuditReport,
-            ),
-            BindingShadowAuditFailure::IncompleteObservations { .. } => {
-                Self::MissingMachineProjectionAuthorization(
-                    MachineProjectionRefusalOrigin::ShadowAuditIncompleteObservations,
-                )
-            }
-            BindingShadowAuditFailure::NonQuality { .. } => {
-                Self::MissingMachineProjectionAuthorization(
-                    MachineProjectionRefusalOrigin::ShadowAuditNonQuality,
-                )
-            }
         }
     }
 }
@@ -2627,10 +2362,11 @@ impl RenderedFunction {
     }
 }
 
+/// Rendered C with what its native build decided: the obligation ledger, the
+/// declaration placement, and the refusal it crossed, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompileBindingAudit {
     rendered: RenderedFunction,
-    binding_shadow: BindingShadowAuditOutcome,
     ledger: Option<crate::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -2654,10 +2390,6 @@ impl DecompileBindingAudit {
         self.rendered
     }
 
-    pub const fn binding_shadow(&self) -> BindingShadowAuditOutcome {
-        self.binding_shadow
-    }
-
     pub fn effect_obligations(&self) -> EffectObligationAudit {
         self.ledger.as_ref().map_or(
             EffectObligationAudit::NOT_RUN,
@@ -2679,29 +2411,18 @@ impl DecompileBindingAudit {
     }
 }
 
-/// Rendered C whose same-run binding classification is deliberately deferred.
+/// Rendered C whose audit product is not yet assembled.
 ///
-/// The engine uses this boundary to make every production cancellation and
-/// deadline decision before the diagnostic shadow comparison runs. Finalizing
-/// consumes the exact rendered product; dropping it emits the same C without
-/// paying for or consulting the audit.
+/// Finalizing consumes the exact rendered product; dropping it emits the same
+/// C without cloning its ledger.
 pub struct PendingDecompileBindingAudit {
     output: Emission,
     product: InternalBuildProduct,
-    source: r2types::function_facts::SourceOwnedFunctionFacts,
 }
 
 impl PendingDecompileBindingAudit {
-    fn from_product(
-        output: Emission,
-        product: InternalBuildProduct,
-        source: r2types::function_facts::SourceOwnedFunctionFacts,
-    ) -> Self {
-        Self {
-            output,
-            product,
-            source,
-        }
+    fn from_product(output: Emission, product: InternalBuildProduct) -> Self {
+        Self { output, product }
     }
 
     pub fn output(&self) -> &str {
@@ -2713,18 +2434,12 @@ impl PendingDecompileBindingAudit {
     }
 
     pub fn finalize(self) -> DecompileBindingAudit {
-        let Self {
-            output,
-            product,
-            source,
-        } = self;
-        let binding_shadow = product.binding_shadow(&source);
+        let Self { output, product } = self;
         let ledger = product.obligation_ledger().cloned();
         let placement_audit = product.placement_audit();
         let render_refusal = product.render_refusal();
         DecompileBindingAudit {
             rendered: RenderedFunction::new(output, product.into_function()),
-            binding_shadow,
             ledger,
             placement_audit,
             render_refusal,
@@ -2746,7 +2461,9 @@ enum InternalBuildProduct {
     Refused {
         emission: EmissionReadyFunction,
         refusal: DecompileRenderRefusal,
-        binding_shadow: BindingShadowAuditOutcome,
+        /// The native failure behind the refusal, when native lowering was
+        /// admitted and then failed to seal.
+        failure: Option<BindingShadowAuditFailure>,
         placement_audit: PlacementAudit,
     },
 }
@@ -2756,7 +2473,7 @@ impl InternalBuildProduct {
         Self::Refused {
             emission: prepare_function_for_emission(function),
             refusal,
-            binding_shadow: BindingShadowAuditOutcome::NotRun,
+            failure: None,
             placement_audit: PlacementAudit::NotRun,
         }
     }
@@ -2774,7 +2491,7 @@ impl InternalBuildProduct {
         Self::Refused {
             emission: prepare_function_for_emission(function),
             refusal,
-            binding_shadow: BindingShadowAuditOutcome::Failed(failure),
+            failure: Some(failure),
             placement_audit,
         }
     }
@@ -2795,37 +2512,12 @@ impl InternalBuildProduct {
         }
     }
 
-    fn binding_shadow(
-        &self,
-        source: &r2types::SourceOwnedFunctionFacts,
-    ) -> BindingShadowAuditOutcome {
-        let native = match self {
-            Self::Native(native) => native,
-            Self::Refused { binding_shadow, .. } => return *binding_shadow,
-            Self::Residual(_) => return BindingShadowAuditOutcome::NotRun,
-        };
-        let (observations, coverage) = match native.audit_observations() {
-            Ok(observations) => observations,
-            Err(failure) => return BindingShadowAuditOutcome::Failed(failure),
-        };
-        let outcome = BindingShadowOutcome::build(native.plan(), source, observations, coverage);
-        BindingShadowAuditOutcome::from_internal(&outcome)
-    }
-
-    /// Whether the shadow audit fails, without building the classification.
-    ///
-    /// The gap loop asks only this: a failure names the cell to mark. Building
-    /// the whole comparison to answer it cost more than every other stage of
-    /// the audit put together and was then dropped.
-    fn binding_shadow_failure(&self) -> Option<BindingShadowAuditFailure> {
+    /// The native failure this build ended in, if any: the gap loop marks the
+    /// cell it names and renders again.
+    fn native_failure(&self) -> Option<BindingShadowAuditFailure> {
         match self {
-            Self::Native(native) => native.audit_observations().err(),
-            Self::Refused { binding_shadow, .. } => match binding_shadow {
-                BindingShadowAuditOutcome::Failed(failure) => Some(*failure),
-                BindingShadowAuditOutcome::Complete { .. } | BindingShadowAuditOutcome::NotRun => {
-                    None
-                }
-            },
+            Self::Native(native) => native.observation_failure(),
+            Self::Refused { failure, .. } => *failure,
             Self::Residual(_) => None,
         }
     }
@@ -2919,22 +2611,9 @@ impl Decompiler {
         input: &'a DecompilerInput,
         control: &'a dyn r2ssa::SsaWorkControl,
     ) -> Result<String, DecompileExecutionStop> {
-        self.decompile_input_with_binding_audit_and_control(input, control)
-            .map(DecompileBindingAudit::into_output)
-    }
-
-    /// Decompile and expose the non-consuming binding-shadow audit.
-    ///
-    /// The audit is constructed only after the final production poll. Its
-    /// outcome therefore cannot change the C output or a cancellation/deadline
-    /// decision made by the rendering path.
-    pub fn decompile_input_with_binding_audit(
-        &self,
-        input: &DecompilerInput,
-    ) -> DecompileBindingAudit {
-        let control = r2ssa::SsaExecutionControl::default();
-        self.decompile_input_with_binding_audit_and_control(input, &control)
-            .expect("default decompiler control never stops")
+        self.decompile_input_keeping_partial_with_pending_binding_audit(input, control)
+            .map(PendingDecompileBindingAudit::into_output)
+            .map_err(|(stop, _)| stop)
     }
 
     fn prepare_decompile_with_control<'a>(
@@ -2951,34 +2630,6 @@ impl Decompiler {
         // so it may say what native lowering could not prove; it may not
         // stand in for asking.
         self.build_product_from_input_with_control(input, control)
-    }
-
-    /// Controlled form of [`Self::decompile_input_with_binding_audit`].
-    pub fn decompile_input_with_binding_audit_and_control<'a>(
-        &self,
-        input: &'a DecompilerInput,
-        control: &'a dyn r2ssa::SsaWorkControl,
-    ) -> Result<DecompileBindingAudit, DecompileExecutionStop> {
-        let product = self.prepare_decompile_with_control(input, control)?;
-        let render_work = DecompileWorkControl::new(control, DecompileWorkPhase::Rendering);
-        render_work.poll()?;
-        let output = CodeGenerator::new(self.config.codegen.clone())
-            .with_work(control)
-            .emit(product.emission(), self.config.ptr_size);
-        // This is deliberately the last production work-control decision.
-        // Everything below classifies the already sealed observation journal.
-        render_work.poll()?;
-        let binding_shadow = product.binding_shadow(input.source_owned_facts());
-        let ledger = product.obligation_ledger().cloned();
-        let placement_audit = product.placement_audit();
-        let render_refusal = product.render_refusal();
-        Ok(DecompileBindingAudit {
-            rendered: RenderedFunction::new(output, product.into_function()),
-            binding_shadow,
-            ledger,
-            placement_audit,
-            render_refusal,
-        })
     }
 
     /// The structured tier for this function, printed.
@@ -3023,10 +2674,9 @@ impl Decompiler {
     /// Render, keeping whatever was produced when a phase stopped.
     ///
     /// `decompile_input_with_control` returns only the stop, so a caller has to
-    /// discard the rendering to report that a budget ran out. That is why
-    /// `RefusalReason::BudgetExhausted` has never been constructed: the ledger
-    /// that would record it lives in the rendering being thrown away, and a
-    /// function that ran out of time reports as one that produced nothing.
+    /// discard the rendering to report that a budget ran out: the ledger that
+    /// would record it lives in the rendering being thrown away, and a function
+    /// that ran out of time reports as one that produced nothing.
     ///
     /// A stop while building the C function has no partial to keep. A stop
     /// during rendering does -- the function is built by then, and generating it
@@ -3043,16 +2693,16 @@ impl Decompiler {
             })
     }
 
-    /// Render with a same-run binding audit, retaining both after a rendering stop.
+    /// Render with the build's audit product, retaining both after a rendering stop.
     ///
-    /// A product-bound partial is classified from the exact product that was
-    /// rendered. The audit is never rebuilt, and its construction performs no
+    /// A partial carries the ledger, placement and refusal of the exact product
+    /// that was rendered; nothing is rebuilt, and assembling it performs no
     /// work-control poll. Stops before a product exists therefore retain no
     /// partial; either rendering poll retains the already sealed product's C and
     /// audit together.
     #[expect(
         clippy::result_large_err,
-        reason = "a stopped request retains its exact same-run binding audit rather than a lossy or reconstructed diagnostic"
+        reason = "a stopped request retains its exact same-run audit product rather than a lossy or reconstructed one"
     )]
     pub fn decompile_input_keeping_partial_with_binding_audit<'a>(
         &self,
@@ -3065,11 +2715,10 @@ impl Decompiler {
             .map_err(|(stop, partial)| (stop, partial.map(PendingDecompileBindingAudit::finalize)))
     }
 
-    /// Render while deferring non-consuming binding classification until the
-    /// caller has made every production control decision.
+    /// Render, leaving the audit product to be assembled by the caller.
     #[expect(
         clippy::result_large_err,
-        reason = "a stopped request retains the sealed request-local product so classification cannot be rebuilt from different facts"
+        reason = "a stopped request retains the sealed request-local product so its audit cannot be rebuilt from different facts"
     )]
     pub fn decompile_input_keeping_partial_with_pending_binding_audit<'a>(
         &self,
@@ -3091,11 +2740,7 @@ impl Decompiler {
                 .emit(product.emission(), self.config.ptr_size);
             return Err((
                 stop,
-                Some(PendingDecompileBindingAudit::from_product(
-                    output,
-                    product,
-                    input.source_owned_facts().clone(),
-                )),
+                Some(PendingDecompileBindingAudit::from_product(output, product)),
             ));
         }
         crate::stage_timing::mark("audit");
@@ -3107,18 +2752,10 @@ impl Decompiler {
         if let Err(stop) = render_work.poll() {
             return Err((
                 stop,
-                Some(PendingDecompileBindingAudit::from_product(
-                    output,
-                    product,
-                    input.source_owned_facts().clone(),
-                )),
+                Some(PendingDecompileBindingAudit::from_product(output, product)),
             ));
         }
-        Ok(PendingDecompileBindingAudit::from_product(
-            output,
-            product,
-            input.source_owned_facts().clone(),
-        ))
+        Ok(PendingDecompileBindingAudit::from_product(output, product))
     }
 
     fn build_product_from_input_with_control<'a>(
@@ -3139,7 +2776,7 @@ impl Decompiler {
                 Self::new(self.config.clone()).with_context(input.context_projection());
             let product =
                 decompiler.build_function_internal_with_control(input, work, &seed_gaps)?;
-            if let Some(failure) = product.binding_shadow_failure()
+            if let Some(failure) = product.native_failure()
                 && let Some(anchor) = gap_anchor_for_native_failure(&failure, input.prepared_ssa())
                 && !seed_gaps.contains_key(&anchor)
             {
@@ -3191,7 +2828,6 @@ impl Decompiler {
 
         work.poll()?;
         let prepared = input.prepared_ssa();
-        debug_log_slice(prepared);
         let func = prepared.function();
         if let Some(declaration) = self.import_stub_declaration(prepared) {
             return Ok(InternalBuildProduct::Residual(declaration));

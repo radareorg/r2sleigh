@@ -2,8 +2,9 @@
 //!
 //! This module owns the only production allocator for render observation IDs.
 //! Callers mark exact occurrences, run every AST rewrite, then seal the dense
-//! source V/U/W snapshot from the final wrapped nodes.
+//! source V/U/W coverage from the final wrapped nodes.
 
+mod cells;
 mod recording;
 mod sealing;
 #[cfg(test)]
@@ -34,13 +35,13 @@ use crate::normalize::{
     NormalizationOriginError, NormalizationOrigins, NormalizedOpOrigin, NormalizedOpProjection,
     NormalizedOpSite,
 };
-use crate::shadow_report::{
-    GapAnchor, LegacyAnalysisSnapshot, LegacyBindingId, LegacyUseCell, LegacyUseObservation,
-    LegacyValueCell, LegacyValueObservation, LegacyWriteCell, LegacyWriteObservation,
-};
 use crate::symbol::{SymbolId, SymbolTable};
 use crate::{
     BindingMachineProjectionFailure, BindingObservationJournalFailure, BindingShadowAuditFailure,
+};
+pub(crate) use cells::{
+    GapAnchor, LegacyBindingId, LegacyUseObservation, LegacyValueObservation,
+    LegacyWriteObservation,
 };
 
 /// Opaque dense identity of one exact marked AST occurrence.
@@ -737,28 +738,31 @@ impl LegacyObservationCoverage {
         self.values.equations_hold() && self.uses.equations_hold() && self.writes.equations_hold()
     }
 
-    pub(crate) fn is_complete(self) -> bool {
-        self.values.is_complete() && self.uses.is_complete() && self.writes.is_complete()
-    }
-
     pub(crate) fn passes_quality(self) -> bool {
         self.values.passes_quality() && self.uses.passes_quality() && self.writes.passes_quality()
     }
 }
 
-/// One dense legacy snapshot and the independently visible coverage that
-/// produced it. Missing cells remain `LegacyAbsent` in the snapshot while the
-/// coverage keeps them distinguishable from explicit final decisions.
+/// The V/U/W coverage sealed from the final tree, and its effect stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SealedLegacyObservations {
-    snapshot: LegacyAnalysisSnapshot,
     coverage: LegacyObservationCoverage,
     effects: SurvivingEffectObservations,
+    /// Each graph use's final observation, `None` where nothing answered.
+    /// Production reads only the counts; tests ask what one exact use became.
+    #[cfg(test)]
+    uses: Box<[Box<[Option<LegacyUseObservation>]>]>,
 }
 
 impl SealedLegacyObservations {
-    pub(crate) const fn snapshot(&self) -> &LegacyAnalysisSnapshot {
-        &self.snapshot
+    /// What the rendering answered for `site`: `None` when the site is not a
+    /// graph use, `Some(None)` when it is one and nothing answered for it.
+    #[cfg(test)]
+    pub(crate) fn use_observation(&self, site: UseSite) -> Option<Option<LegacyUseObservation>> {
+        self.uses
+            .get(site.inst.0 as usize)?
+            .get(site.input_idx)
+            .copied()
     }
 
     pub(crate) const fn coverage(&self) -> LegacyObservationCoverage {
@@ -1449,7 +1453,6 @@ impl MarkedNativeDraft {
             &mut self.function,
             CFunction::new(String::new(), crate::ast::CType::Void),
         ));
-        let plan = Rc::clone(&self.journal.plan);
         let observations = self.journal.seal(source, &mut ready)?;
         Ok(SealedNativeFunction {
             ready,
@@ -1458,7 +1461,6 @@ impl MarkedNativeDraft {
             ledger: None,
             placement_audit: crate::PlacementAudit::NotRun,
             observation_failure: None,
-            plan,
         })
     }
 
@@ -1485,7 +1487,6 @@ impl MarkedNativeDraft {
             &mut self.function,
             CFunction::new(String::new(), crate::ast::CType::Void),
         ));
-        let plan = Rc::clone(&self.journal.plan);
         if let Some(error) = recording_failure {
             return Err(BindingShadowAuditFailure::JournalRecording(
                 BindingObservationJournalFailure::from(&error),
@@ -1544,7 +1545,6 @@ impl MarkedNativeDraft {
             ledger: None,
             placement_audit: crate::PlacementAudit::Applied,
             observation_failure: None,
-            plan,
         })
     }
 }
@@ -1559,7 +1559,6 @@ pub(crate) struct SealedNativeFunction {
     ledger: Option<crate::ledger::ObligationLedger>,
     placement_audit: crate::PlacementAudit,
     observation_failure: Option<BindingShadowAuditFailure>,
-    plan: Rc<BindingPlan>,
 }
 
 impl SealedNativeFunction {
@@ -1568,32 +1567,21 @@ impl SealedNativeFunction {
     }
 
     #[cfg(test)]
-    pub(crate) fn observations(&self) -> &LegacyAnalysisSnapshot {
+    pub(crate) fn observations(&self) -> &SealedLegacyObservations {
         self.observations
             .as_ref()
-            .map(SealedLegacyObservations::snapshot)
             .expect("strictly sealed native function must retain observations")
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "audit consumers receive the complete typed failure ledger rather than a lossy summary"
-    )]
-    pub(crate) fn audit_observations(
-        &self,
-    ) -> Result<(&LegacyAnalysisSnapshot, LegacyObservationCoverage), BindingShadowAuditFailure>
-    {
-        self.observations
-            .as_ref()
-            .map(|observations| (observations.snapshot(), observations.coverage()))
-            .ok_or_else(|| {
+    /// Why this function has no sealed observations, when it has none.
+    pub(crate) fn observation_failure(&self) -> Option<BindingShadowAuditFailure> {
+        match self.observations {
+            Some(_) => None,
+            None => Some(
                 self.observation_failure
-                    .expect("missing observations retain a typed failure category")
-            })
-    }
-
-    pub(crate) fn plan(&self) -> &BindingPlan {
-        &self.plan
+                    .expect("missing observations retain a typed failure category"),
+            ),
+        }
     }
 
     /// Declare the named types this rendering spells, and unspell the rest.
@@ -3225,10 +3213,7 @@ impl LegacyObservationJournal {
         ids
     }
 
-    fn into_sealed_observations(
-        mut self,
-        source: &SourceOwnedFunctionFacts,
-    ) -> SealedLegacyObservations {
+    fn into_sealed_observations(mut self) -> SealedLegacyObservations {
         if r2il::refusal_evidence::tracing() {
             for (id, count) in &self.effect_occurrences {
                 if *count != 0 {
@@ -3286,62 +3271,12 @@ impl LegacyObservationJournal {
                 dead_unused_value_effects: std::mem::take(&mut self.dead_unused_value_effects),
             }),
         };
-        let snapshot = self.into_snapshot(source);
         SealedLegacyObservations {
-            snapshot,
             coverage,
             effects,
+            #[cfg(test)]
+            uses: self.uses,
         }
-    }
-
-    fn into_snapshot(self, source: &SourceOwnedFunctionFacts) -> LegacyAnalysisSnapshot {
-        let values = self
-            .values
-            .into_vec()
-            .into_iter()
-            .enumerate()
-            .map(|(index, observation)| LegacyValueCell {
-                value: ValueId(index as u32),
-                observation: observation.unwrap_or(LegacyValueObservation::LegacyAbsent),
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let uses = self
-            .uses
-            .into_vec()
-            .into_iter()
-            .enumerate()
-            .map(|(inst, row)| {
-                row.into_vec()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(input_idx, observation)| LegacyUseCell {
-                        site: UseSite {
-                            inst: InstId(inst as u32),
-                            input_idx,
-                        },
-                        observation: observation.unwrap_or(LegacyUseObservation::LegacyAbsent),
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice()
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let writes = self
-            .writes
-            .into_vec()
-            .into_iter()
-            .zip(self.write_has_output)
-            .enumerate()
-            .map(|(index, (observation, has_output))| {
-                has_output.then_some(LegacyWriteCell {
-                    inst: InstId(index as u32),
-                    observation: observation.unwrap_or(LegacyWriteObservation::LegacyAbsent),
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        LegacyAnalysisSnapshot::new(source, values, uses, writes)
     }
 
     fn value_slot(

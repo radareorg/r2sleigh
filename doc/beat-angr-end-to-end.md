@@ -238,7 +238,8 @@ produce a claim about signedness the evidence does not support.
   deeper than the three fields: the probe, the preprobe risk summary and its two
   helpers, and `cfg_guard_reason` with its controlled variant were all
   unreachable — 291 lines. The size gate now refuses after one pass over the
-  block vector. `cfg_guard_reason_from_summary` stays; type routing uses it.
+  block vector. `cfg_guard_reason_from_summary` stayed for type routing; it was
+  later deleted with the type-request route, which only a test reached.
   Note for whoever is next: `CFG::risk_summary()` is now reached only by tests,
   and `SSAFunction::from_blocks_raw_with_control`'s control parameter has no
   caller passing anything but `UncheckedSsaWorkControl`.

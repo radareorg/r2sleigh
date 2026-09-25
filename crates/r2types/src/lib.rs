@@ -9,7 +9,6 @@ pub(crate) mod facts;
 pub mod function_facts;
 pub(crate) mod lattice;
 pub(crate) mod model;
-pub(crate) mod oracle;
 pub(crate) mod prepare;
 mod register_identity;
 pub(crate) mod signature;
@@ -47,8 +46,7 @@ pub use solver::{SolvedTypes, SolverConfig, SolverDiagnostics, TypeSolver};
 
 pub use context::{
     ExternalStackBase, ExternalStackSlotRole, ExternalStackSlotSpec, ParsedExternalContext,
-    ProgramExtents, StackSlotKey, is_generic_arg_name, parse_external_context_json,
-    sanitize_c_identifier,
+    ProgramExtents, StackSlotKey, is_generic_arg_name, sanitize_c_identifier,
 };
 pub use convert::{
     CTypeLike, bit_vector_tag, c_object_declaration, parse_c_type_like, spellable_c_type_like,
@@ -79,11 +77,7 @@ pub use function_facts::{
 };
 
 pub use model::{Signedness, Type};
-pub use oracle::TypeOracle;
-pub use prepare::{
-    MetadataScalarKind, TypeHint, merge_type_hint, recover_signature_params_from_ssa,
-    type_hint_from_value_metadata,
-};
+pub use prepare::{MetadataScalarKind, TypeHint, merge_type_hint, type_hint_from_value_metadata};
 pub use r2source::DisplayNames;
 pub use r2ssa::AssumptionUsageReport;
 

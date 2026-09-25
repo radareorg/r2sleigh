@@ -216,7 +216,7 @@ pub struct PhiNode {
 ```
 
 **Important:** This is different from the single-instruction `SSABlock` in
-`r2ssa/block.rs`. The decompiler and taint analysis use `FunctionSSABlock`.
+`r2ssa/block.rs`. The decompiler uses `FunctionSSABlock`.
 
 Optimization Pipeline
 ---------------------
@@ -294,21 +294,19 @@ pub struct DefUseInfo {
 
 ### Backward Slicing
 
-The backward slice from a variable answers "what operations affect this
-variable?":
+The backward slice from a seed answers "what operations affect this value?".
+There is one slicer, `r2ssa::backward_slice` (`slice.rs`), over the prepared
+artifact rather than a bare `SSAFunction`:
 
 ```rust
-let slice = backward_slice_from_var(&ssa_func, &target_var);
+let seed = resolve_slice_seed(&artifact, "0x4e3a:7")?; // or `v123`, or an SSA name
+let slice = backward_slice(&artifact, seed);
 ```
 
-The algorithm:
-
-1. Start with the target variable
-2. Find its definition (operation or phi node)
-3. Add the definition's source variables to the worklist
-4. For Load operations, find potentially-aliasing Stores
-5. Repeat until the worklist is empty
-6. Return all operations in the slice
+It follows value inputs through the SSA graph and memory reads through the
+prepared memory SSA (a load reaches the store or memory phi that defined its
+version, filtered by the alias relation), expanding each instruction at most
+once over ordered sets, so the result is deterministic.
 
 Value Ranges and Block Origins
 ------------------------------

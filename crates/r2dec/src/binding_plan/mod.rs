@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::CType;
 use r2ssa::span::SpanId;
 use r2ssa::{
-    InstId, MachineExprKind, MachineProjection, MachineUseDisposition, MachineWriteDisposition,
+    InstId, MachineProjection, MachineUseDisposition, MachineWriteDisposition,
     MachineWriteProjection, SemanticId, SsaArtifactAuthority, UseSite, ValueId,
 };
 use r2types::SourceOwnedFunctionFacts;
@@ -1325,65 +1325,6 @@ enum SealWidthEvidence {
     Refused(ValueRefusal),
 }
 
-/// Dense identity of one component resolved directly from upstream storage and
-/// semantic certificates by the independent sealing oracle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct CanonicalComponentId(u32);
-
-impl CanonicalComponentId {
-    pub(crate) const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// Canonical value answer recomputed for diagnostics without consulting the
-/// candidate plan's stored disposition or binding membership.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UpstreamValueDisposition {
-    Bound { component: CanonicalComponentId },
-    InlineConstant,
-    InlineExpression,
-    Elided(crate::ledger::ElisionReason),
-    Refused(ValueRefusal),
-}
-
-/// Transient Stage 4 validation oracle.
-///
-/// Every judgment here is deliberately re-derived from the exact source and no
-/// plan decision reaches it, so a wrong plan disposition is observable instead
-/// of validating itself. It is never retained by a [`BindingPlan`] or consumed
-/// by lowering; component membership is resolved by the sealing module's
-/// independent certificate walk.
-///
-/// The machine projection it reads is borrowed from the plan rather than built
-/// again. It is derived from the source alone and `BindingPlan::validate_source`
-/// has proven the borrowed one is what this source produces, so re-lowering the
-/// arena would be the same answer at the price of a whole render.
-#[derive(Debug)]
-pub(crate) struct UpstreamShadowOracle<'a> {
-    machine_projection: &'a MachineProjection,
-    components: Box<[Box<[ValueId]>]>,
-    values: Box<[UpstreamValueDisposition]>,
-}
-
-impl UpstreamShadowOracle<'_> {
-    pub(crate) fn component(&self, id: CanonicalComponentId) -> Option<&[ValueId]> {
-        self.components.get(id.index()).map(Box::as_ref)
-    }
-
-    pub(crate) fn value_disposition(&self, value: ValueId) -> Option<UpstreamValueDisposition> {
-        self.values.get(value.0 as usize).copied()
-    }
-
-    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<MachineUseDisposition> {
-        self.machine_projection.use_disposition(site)
-    }
-
-    pub(crate) fn write_disposition(&self, inst: InstId) -> Option<&MachineWriteDisposition> {
-        self.machine_projection.write_disposition(inst)
-    }
-}
-
 /// Complete renderer-side projection of one exact source-owned SSA artifact.
 ///
 /// Dense vectors make value and binding lookup O(1). Exact/refused use and
@@ -1518,7 +1459,6 @@ impl BindingPlan {
         })
     }
 }
-pub(crate) use seal::build_upstream_shadow_oracle;
 
 #[cfg(test)]
 use construction::binding_components;
@@ -1533,10 +1473,6 @@ impl BindingPlan {
     /// access, as the rewriter proved them equal to what the machine wrote.
     pub(crate) const fn canonical(&self) -> &r2rewrite::CanonicalRoots {
         &self.partition.canonical
-    }
-
-    pub(crate) const fn partition(&self) -> &rules::RewriteInliningPartition {
-        &self.partition
     }
 
     pub(crate) fn binding(&self, id: BindingId) -> Option<&Binding> {

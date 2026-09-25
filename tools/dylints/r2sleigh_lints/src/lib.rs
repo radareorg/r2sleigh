@@ -2198,7 +2198,8 @@ rustc_session::declare_lint!(
     /// vars.recover(&ssa);
     /// ```
     ///
-    /// Use `r2types::recover_signature_params_from_ssa` instead.
+    /// Signature parameters are r2types' answer from the prepared artifact:
+    /// ask `r2types::TypeAnalysis` instead.
     pub R2ENGINE_R2DEC_VARIABLE_RECOVERY_OWNERSHIP,
     Warn,
     "r2engine must not use r2dec VariableRecovery for signature inference"

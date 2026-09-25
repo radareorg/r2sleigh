@@ -644,22 +644,6 @@ fn unread_defined_value_is_elided_before_it_can_become_a_binding() {
             .iter()
             .all(|component| !component.members.contains(&dead))
     );
-    assert_eq!(
-        build_upstream_shadow_oracle(
-            &source_owned,
-            &test_projection(&source_owned),
-            &super::rules::rewrite_inlining_partition(
-                &source_owned,
-                &test_projection(&source_owned),
-            )
-            .expect("partition"),
-        )
-        .expect("upstream oracle")
-        .value_disposition(dead),
-        Some(UpstreamValueDisposition::Elided(
-            crate::ledger::ElisionReason::DeadUnusedTemporary
-        ))
-    );
     assert!(plan.validate_seal(&source_owned).is_ok());
 }
 
@@ -706,22 +690,6 @@ fn exact_source_return_address_fact_alone_authorizes_control_target_elision() {
             .expect("independent components")
             .iter()
             .all(|component| !component.members.contains(&return_control))
-    );
-    assert_eq!(
-        build_upstream_shadow_oracle(
-            &source_owned,
-            &test_projection(&source_owned),
-            &super::rules::rewrite_inlining_partition(
-                &source_owned,
-                &test_projection(&source_owned),
-            )
-            .expect("partition"),
-        )
-        .expect("upstream oracle")
-        .value_disposition(return_control),
-        Some(UpstreamValueDisposition::Elided(
-            crate::ledger::ElisionReason::ReturnControl
-        ))
     );
 
     let semantic_return_certificate = source
@@ -814,22 +782,6 @@ fn direct_cfg_target_is_elided_only_when_every_use_is_control_topology() {
             proof,
         }) if proof.authority == *source.authority() && proof.value == target_value
     ));
-    assert_eq!(
-        build_upstream_shadow_oracle(
-            &source_owned,
-            &test_projection(&source_owned),
-            &super::rules::rewrite_inlining_partition(
-                &source_owned,
-                &test_projection(&source_owned),
-            )
-            .expect("partition"),
-        )
-        .expect("independent direct-control oracle")
-        .value_disposition(target_value),
-        Some(UpstreamValueDisposition::Elided(
-            crate::ledger::ElisionReason::DirectControlTarget
-        ))
-    );
 
     let mut mixed_entry = R2ILBlock::new(0x1000, 0x10);
     // The literal is added to a register, not to another literal. Adding two
@@ -977,18 +929,6 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
             .iter()
             .all(|component| !component.members.contains(&dead))
     );
-    let projection = test_projection(&source_owned);
-    let partition =
-        super::rules::rewrite_inlining_partition(&source_owned, &projection).expect("partition");
-    let oracle = build_upstream_shadow_oracle(&source_owned, &projection, &partition)
-        .expect("upstream oracle");
-    assert_eq!(
-        oracle.value_disposition(dead),
-        Some(UpstreamValueDisposition::Elided(
-            crate::ledger::ElisionReason::UnobservedMerge
-        ))
-    );
-
     let mut forged = plan;
     forged.dispositions[dead.0 as usize] = ValueDisposition::Elided {
         reason: crate::ledger::ElisionReason::UnobservedMerge,

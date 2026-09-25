@@ -117,7 +117,7 @@ and cannot be tested at the interface.
 
 The engine already exists in outline. `r2il` is the substrate,
 `r2sleigh-lift` decodes and lifts, `r2ssa` carries the control-flow graph,
-dominator tree, def-use, liveness, taint, slicing and interprocedural facts,
+dominator tree, def-use, liveness, slicing and interprocedural facts,
 `r2types` carries constraint-based type inference, `r2dec` structures and
 renders, and `r2engine` orchestrates requests. `r2sleigh-cli` is already a
 standalone binary. What is missing is not analysis; it is the things radare2
@@ -252,9 +252,9 @@ per-architecture heuristics, variable recovery as stack-pointer heuristics, type
 inference in 799 lines, and binary diffing in 366 lines. The ESIL dataflow graph
 is 2219 lines down a dead end.
 
-r2sleigh already has constant propagation, taint, slicing, interprocedural
-facts, indirect-call handling, aggregate access, interface recovery,
-fingerprinting, and constraint-based type inference with a lattice and a solver.
+r2sleigh already has constant propagation, slicing, interprocedural facts,
+indirect-call handling, aggregate access, interface recovery, and
+constraint-based type inference with a lattice and a solver.
 
 Neither has strided intervals, a points-to or alias model, loop and induction
 variable analysis, exception-handler recovery, or deobfuscation.
@@ -314,7 +314,8 @@ research risk.
 **Binary diffing at current state of the art**, in two layers: structural
 matching over the call graph and control-flow graphs, propagating outward from
 confident anchors, and feature-vector matching over the decompiled IL for the
-fuzzy case. `fingerprint.rs` is already the seed of the second layer. This is
+fuzzy case. The second layer is to be built on the callee summaries, not on a
+hash of one prepared artifact (an unused `fingerprint.rs` was deleted). This is
 the highest user-visible value per line of code on the list.
 
 **Corpus-scale similarity and library identification.** FLIRT is exact-pattern
@@ -371,8 +372,9 @@ retry.
 **Compound questions in one call.** The round-trip tax disappears only if the
 agent can express the whole question. *Which functions reach `memcpy` with a
 size derived from an argument and not bounded by a comparison* has to be one
-query, and the interprocedural, taint and slicing layers already compute the
-facts it needs. The facts exist; the query surface does not.
+query, and the interprocedural and slicing layers compute the facts it needs,
+with taint as the slicer's labelled forward mode. The facts exist; the query
+surface does not.
 
 **Confidence on every field, never optional.** Every returned fact is proven,
 inferred, guessed or unknown. An agent branches on that and a human ignores it,
