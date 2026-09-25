@@ -1923,6 +1923,58 @@ fn an_unmodelled_user_operation_is_refused_by_name() {
     );
 }
 
+/// The byte widening a vectorised count does between its compare and its
+/// accumulate (`mem_scan2` at clang -O2), and a word reversal:
+///
+/// ```text
+///   widen:   movd xmm0, edi; punpcklbw xmm0, xmm0; pshuflw xmm0, xmm0, 0x50
+///            pshufd xmm0, xmm0, 0x50; movq rax, xmm0; ret
+///   reverse: movq xmm0, rdi; pshuflw xmm0, xmm0, 0x1b; movq rax, xmm0; ret
+/// ```
+const WIDENED_BYTE: &[u8] = &[
+    0x66, 0x0f, 0x6e, 0xc7, // movd xmm0, edi
+    0x66, 0x0f, 0x60, 0xc0, // punpcklbw xmm0, xmm0
+    0xf2, 0x0f, 0x70, 0xc0, 0x50, // pshuflw xmm0, xmm0, 0x50
+    0x66, 0x0f, 0x70, 0xc0, 0x50, // pshufd xmm0, xmm0, 0x50
+    0x66, 0x48, 0x0f, 0x7e, 0xc0, // movq rax, xmm0
+    0xc3, // ret
+];
+const REVERSED_WORDS: &[u8] = &[
+    0x66, 0x48, 0x0f, 0x6e, 0xc7, // movq xmm0, rdi
+    0xf2, 0x0f, 0x70, 0xc0, 0x1b, // pshuflw xmm0, xmm0, 0x1b
+    0x66, 0x48, 0x0f, 0x7e, 0xc0, // movq rax, xmm0
+    0xc3, // ret
+];
+
+/// `pshuflw` is a user operation the specification declares without p-code,
+/// and the lift gives it the SDM's meaning, so a function using it renders,
+/// and the C computes what the machine does: the low byte repeated eight
+/// times, and the four words in reverse order.
+#[test]
+fn a_word_shuffle_renders_what_the_machine_computes() {
+    let widen = rendered(WIDENED_BYTE, "widen");
+    let reverse = rendered(REVERSED_WORDS, "reverse");
+    run_rendered(
+        "word_shuffle",
+        &format!("{widen}\n{reverse}"),
+        r#"int main(void) {
+    const uint64_t cases[] = {0, 1, 0xff, 0x1234, 0x80c3, 0x0123456789abcdefull, ~0ull};
+    for (int i = 0; i < 7; i++) {
+        uint64_t x = cases[i];
+        if (widen(x) != (x & 0xff) * 0x0101010101010101ull) {
+            return 1 + i;
+        }
+        uint64_t reversed = (x >> 48) | ((x >> 16) & 0xffff0000ull)
+            | ((x << 16) & 0xffff00000000ull) | (x << 48);
+        if (reverse(x) != reversed) {
+            return 10 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
 /// `tzcnt rax, rdi; ret`, and `mov rax, rsi; bsf rax, rdi; ret`.
 ///
 /// Both are p-code loops in the specification. TZCNT counts the width at

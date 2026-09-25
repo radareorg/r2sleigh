@@ -36,6 +36,36 @@ pub(crate) enum ModelledUserOperation {
     SetIsaMode,
     /// x86 `PMOVSX*` / `PMOVZX*`.
     PackedExtension(PackedExtension),
+    /// x86 `PSHUFLW`, `PSHUFHW` and `PSHUFW`.
+    WordShuffle(WordShuffle),
+}
+
+/// One x86 word shuffle: in each 128-bit lane, four 16-bit elements of one
+/// quadword are chosen by the immediate's four 2-bit fields, and the lane's
+/// other quadword is copied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WordShuffle {
+    pub(crate) quadword: ShuffledQuadword,
+    pub(crate) form: EncodingForm,
+}
+
+/// Which quadword of each lane the immediate shuffles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShuffledQuadword {
+    /// `PSHUFLW`, and `PSHUFW`, whose MMX register is that quadword alone.
+    Low,
+    /// `PSHUFHW`.
+    High,
+}
+
+impl ShuffledQuadword {
+    /// Where the shuffled quadword begins within its lane.
+    pub(crate) const fn offset(self) -> u32 {
+        match self {
+            Self::Low => 0,
+            Self::High => 8,
+        }
+    }
 }
 
 /// One x86 packed sign or zero extension: every element of `from_bytes` in
@@ -67,6 +97,9 @@ pub(crate) enum Extension {
 /// * `Vex256` -- `local tmp:32 = vpmovsxbd_avx2(src)`.
 /// * `EvexVl` -- the AVX512VL forms, `XmmResult` or `YmmResult`: 16 or 32 bytes.
 /// * `Evex512` -- the AVX512F and AVX512BW forms, `ZmmResult`: 64 bytes.
+/// * `Mmx` -- `mmxreg1 = pshufw(mmxreg1, src, imm8:8)`: like the legacy form,
+///   the old destination is passed first, and the result is the 8-byte
+///   register.
 ///
 /// What happens to the bits above the written result -- the XMM sub-register
 /// write of the legacy form, `ZmmReg1 = zext(tmp)` of VEX, the opmask merge of
@@ -79,6 +112,7 @@ pub(crate) enum EncodingForm {
     Vex256,
     EvexVl,
     Evex512,
+    Mmx,
 }
 
 impl EncodingForm {
@@ -89,14 +123,16 @@ impl EncodingForm {
             Self::Vex256 => bytes == 32,
             Self::EvexVl => bytes == 16 || bytes == 32,
             Self::Evex512 => bytes == 64,
+            Self::Mmx => bytes == 8,
         }
     }
 
     /// Whether the specification passes the old destination ahead of the
-    /// source. Only the legacy form does, and the architecture reads none of
-    /// it: every bit of the written register is defined from the source.
+    /// source. Only the legacy and MMX forms do, and the architecture reads
+    /// none of it: every bit of the written register is defined from the
+    /// source.
     pub(crate) const fn passes_old_destination(self) -> bool {
-        matches!(self, Self::Legacy)
+        matches!(self, Self::Legacy | Self::Mmx)
     }
 }
 
@@ -268,6 +304,43 @@ const PACKED_EXTENSIONS: [PackedExtensionRow; 12] = [
     },
 ];
 
+/// Intel SDM `PSHUFLW`, `PSHUFHW` and `PSHUFW`, by the exact name each
+/// encoding is declared under (`ia.sinc`, `avx.sinc`, `avx2.sinc`,
+/// `avx512.sinc`). The 512-bit forms are AVX512BW.
+const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
+    ("pshufw", ShuffledQuadword::Low, EncodingForm::Mmx),
+    ("pshuflw", ShuffledQuadword::Low, EncodingForm::Legacy),
+    ("vpshuflw_avx", ShuffledQuadword::Low, EncodingForm::Vex128),
+    ("vpshuflw_avx2", ShuffledQuadword::Low, EncodingForm::Vex256),
+    (
+        "vpshuflw_avx512vl",
+        ShuffledQuadword::Low,
+        EncodingForm::EvexVl,
+    ),
+    (
+        "vpshuflw_avx512bw",
+        ShuffledQuadword::Low,
+        EncodingForm::Evex512,
+    ),
+    ("pshufhw", ShuffledQuadword::High, EncodingForm::Legacy),
+    ("vpshufhw_avx", ShuffledQuadword::High, EncodingForm::Vex128),
+    (
+        "vpshufhw_avx2",
+        ShuffledQuadword::High,
+        EncodingForm::Vex256,
+    ),
+    (
+        "vpshufhw_avx512vl",
+        ShuffledQuadword::High,
+        EncodingForm::EvexVl,
+    ),
+    (
+        "vpshufhw_avx512bw",
+        ShuffledQuadword::High,
+        EncodingForm::Evex512,
+    ),
+];
+
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
 const NAMED: [(&str, ModelledUserOperation); 11] = [
@@ -309,7 +382,13 @@ pub(crate) fn modelled_user_operations()
             )
         })
     });
-    NAMED.into_iter().chain(packed)
+    let shuffles = WORD_SHUFFLES.into_iter().map(|(name, quadword, form)| {
+        (
+            name,
+            ModelledUserOperation::WordShuffle(WordShuffle { quadword, form }),
+        )
+    });
+    NAMED.into_iter().chain(packed).chain(shuffles)
 }
 
 /// The modelled operation at each index of a specification's user-operation
@@ -340,7 +419,10 @@ mod tests {
         for (name, _) in modelled_user_operations() {
             assert!(seen.insert(name), "{name} is claimed twice");
         }
-        assert_eq!(seen.len(), NAMED.len() + 12 * PACKED_FORMS.len());
+        assert_eq!(
+            seen.len(),
+            NAMED.len() + 12 * PACKED_FORMS.len() + WORD_SHUFFLES.len()
+        );
     }
 
     /// An index resolves by the specification's exact name, and a name that

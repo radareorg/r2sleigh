@@ -30,7 +30,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::translate::{self, PcodeSource};
 use crate::{LiftError, Result};
-use user_operation::{Extension, ModelledUserOperation, PackedExtension};
+use user_operation::{
+    Extension, ModelledUserOperation, PackedExtension, ShuffledQuadword, WordShuffle,
+};
 
 /// One parsed Sleigh specification: everything derived from the `.sla` and the
 /// processor spec, and nothing derived from who asked for it.
@@ -2429,6 +2431,9 @@ impl Disassembler {
             Some(ModelledUserOperation::PackedExtension(extension)) => {
                 Self::expand_packed_extension(output, inputs, temp_base, extension)
             }
+            Some(ModelledUserOperation::WordShuffle(shuffle)) => {
+                Self::expand_word_shuffle(output, inputs, temp_base, shuffle)
+            }
             None => None,
         };
         expanded.unwrap_or_else(|| vec![op])
@@ -2509,6 +2514,75 @@ impl Disassembler {
             widened.push(wide);
         }
         let composed = Self::join_lanes(&mut ops, &mut next, widened, to_bytes)?;
+        ops.push(R2ILOp::Copy {
+            dst: output.clone(),
+            src: composed,
+        });
+        Some(ops)
+    }
+
+    /// x86 `PSHUFLW`, `PSHUFHW` and `PSHUFW`, in each encoding the
+    /// specification names.
+    ///
+    /// Intel SDM, PSHUFLW, Operation: in each 128-bit lane,
+    /// `DEST[15:0] <- (SRC >> (imm[1:0] * 16))[15:0]` up to
+    /// `DEST[63:48] <- (SRC >> (imm[7:6] * 16))[15:0]`, and
+    /// `DEST[127:64] <- SRC[127:64]`. PSHUFHW is the same on the high
+    /// quadword, copying the low one; PSHUFW is PSHUFLW's four words over a
+    /// 64-bit MMX register, which is that quadword alone. So word `k` of the
+    /// shuffled quadword is
+    ///
+    /// `SUBPIECE(source, lane + quadword + 2 * ((imm >> 2k) & 3), 2)`,
+    ///
+    /// the immediate being the constant the encoding holds. The shape is the
+    /// encoding's own, as for [`Self::expand_packed_extension`]: the legacy
+    /// and MMX forms pass the old destination first, and it is dropped only
+    /// because it is the output and the instruction defines every bit of it
+    /// from the source; the VEX and EVEX forms pass the source alone. What
+    /// happens above the written result, and the EVEX opmask merge, is the
+    /// specification's own p-code around the operation.
+    fn expand_word_shuffle(
+        output: Option<&Varnode>,
+        inputs: &[Varnode],
+        temp_base: u64,
+        shuffle: WordShuffle,
+    ) -> Option<Vec<R2ILOp>> {
+        let output = output?;
+        let (source, order) = match inputs {
+            [old_destination, source, order]
+                if shuffle.form.passes_old_destination() && old_destination == output =>
+            {
+                (source, order)
+            }
+            [source, order] if !shuffle.form.passes_old_destination() => (source, order),
+            _ => return None,
+        };
+        let order = (order.space == SpaceId::Const)
+            .then_some(order.offset)
+            .filter(|order| *order <= 0xff)?;
+        let lane_bytes = output.size.min(16);
+        if !shuffle.form.produces(output.size)
+            || source.size != output.size
+            || shuffle.quadword.offset() + 8 > lane_bytes
+        {
+            return None;
+        }
+        let mut expansion = WordShuffleExpansion {
+            source,
+            order,
+            quadword: shuffle.quadword,
+            lane_bytes,
+            ops: Vec::new(),
+            next: temp_base,
+        };
+        let lanes = (0..output.size)
+            .step_by(lane_bytes as usize)
+            .map(|lane| expansion.lane(lane))
+            .collect::<Option<Vec<_>>>()?;
+        let WordShuffleExpansion {
+            mut ops, mut next, ..
+        } = expansion;
+        let composed = Self::join_lanes(&mut ops, &mut next, lanes, lane_bytes)?;
         ops.push(R2ILOp::Copy {
             dst: output.clone(),
             src: composed,
@@ -3387,6 +3461,58 @@ impl Disassembler {
                 space.name, space.id
             ))
         })
+    }
+}
+
+/// The operations one word shuffle expands to, built lane by lane.
+struct WordShuffleExpansion<'a> {
+    source: &'a Varnode,
+    order: u64,
+    quadword: ShuffledQuadword,
+    lane_bytes: u32,
+    ops: Vec<R2ILOp>,
+    next: u64,
+}
+
+impl WordShuffleExpansion<'_> {
+    /// The lane at byte `lane`: its shuffled quadword beside its other
+    /// quadword, copied from the source, or the shuffled quadword alone where
+    /// it is the whole lane (PSHUFW).
+    fn lane(&mut self, lane: u32) -> Option<Varnode> {
+        let shuffled_at = lane + self.quadword.offset();
+        let words = (0..4u64)
+            .map(|k| {
+                let chosen = u32::try_from((self.order >> (2 * k)) & 3).ok()?;
+                Some(self.subpiece(shuffled_at + 2 * chosen, 2))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let shuffled = Disassembler::join_lanes(&mut self.ops, &mut self.next, words, 2)?;
+        if self.lane_bytes == 8 {
+            return Some(shuffled);
+        }
+        let copied = self.subpiece(lane + 8 - self.quadword.offset(), 8);
+        let (hi, lo) = match self.quadword {
+            ShuffledQuadword::Low => (copied, shuffled),
+            ShuffledQuadword::High => (shuffled, copied),
+        };
+        let joined = Disassembler::lane_temp(&mut self.next, 16);
+        self.ops.push(R2ILOp::Piece {
+            dst: joined.clone(),
+            hi,
+            lo,
+        });
+        Some(joined)
+    }
+
+    /// `size` bytes of the source from byte `offset`.
+    fn subpiece(&mut self, offset: u32, size: u32) -> Varnode {
+        let part = Disassembler::lane_temp(&mut self.next, size);
+        self.ops.push(R2ILOp::Subpiece {
+            dst: part.clone(),
+            src: self.source.clone(),
+            offset,
+        });
+        part
     }
 }
 
