@@ -160,50 +160,55 @@ impl<'d> Macho<'d> {
         Some(macho)
     }
 
+    /// One segment, and each section it holds, as its load command states them.
+    ///
+    /// `reserved` reads a section's `reserved1` and `reserved2`, which the
+    /// 32- and 64-bit section headers both carry and no trait names.
+    fn take_segment<S>(
+        &mut self,
+        segment: &S,
+        sections: &'d [u8],
+        endian: object::Endianness,
+        reserved: impl Fn(&S::Section) -> (u32, u32),
+    ) where
+        S: object::read::macho::Segment<Endian = object::Endianness>,
+    {
+        use object::read::macho::Section as _;
+        self.segments.push(Segment {
+            vmaddr: segment.vmaddr(endian).into(),
+            fileoff: segment.fileoff(endian).into(),
+            filesize: segment.filesize(endian).into(),
+            writable: segment.initprot(endian) & macho::VM_PROT_WRITE != 0,
+        });
+        for section in segment.sections(endian, sections).unwrap_or_default() {
+            let (first_indirect, stride) = reserved(section);
+            self.sections.push(Section {
+                addr: section.addr(endian).into(),
+                size: section.size(endian).into(),
+                flags: section.flags(endian),
+                first_indirect,
+                stride,
+            });
+        }
+    }
+
     /// Take what one load command says.
     fn read_command(
         &mut self,
         variant: LoadCommandVariant<'d, object::Endianness>,
         endian: object::Endianness,
     ) {
-        use object::read::macho::Section as _;
         let data = self.data;
         match variant {
             LoadCommandVariant::Segment32(segment, sections) => {
-                self.segments.push(Segment {
-                    vmaddr: u64::from(segment.vmaddr.get(endian)),
-                    fileoff: u64::from(segment.fileoff.get(endian)),
-                    filesize: u64::from(segment.filesize.get(endian)),
-                    writable: segment.initprot.get(endian) & macho::VM_PROT_WRITE != 0,
+                self.take_segment(segment, sections, endian, |section| {
+                    (section.reserved1.get(endian), section.reserved2.get(endian))
                 });
-                let sections = object::read::macho::Segment::sections(segment, endian, sections);
-                for section in sections.unwrap_or_default() {
-                    self.sections.push(Section {
-                        addr: u64::from(section.addr(endian)),
-                        size: u64::from(section.size(endian)),
-                        flags: section.flags(endian),
-                        first_indirect: section.reserved1.get(endian),
-                        stride: section.reserved2.get(endian),
-                    });
-                }
             }
             LoadCommandVariant::Segment64(segment, sections) => {
-                self.segments.push(Segment {
-                    vmaddr: segment.vmaddr.get(endian),
-                    fileoff: segment.fileoff.get(endian),
-                    filesize: segment.filesize.get(endian),
-                    writable: segment.initprot.get(endian) & macho::VM_PROT_WRITE != 0,
+                self.take_segment(segment, sections, endian, |section| {
+                    (section.reserved1.get(endian), section.reserved2.get(endian))
                 });
-                let sections = object::read::macho::Segment::sections(segment, endian, sections);
-                for section in sections.unwrap_or_default() {
-                    self.sections.push(Section {
-                        addr: section.addr(endian),
-                        size: section.size(endian),
-                        flags: section.flags(endian),
-                        first_indirect: section.reserved1.get(endian),
-                        stride: section.reserved2.get(endian),
-                    });
-                }
             }
             LoadCommandVariant::LinkeditData(linkedit)
                 if linkedit.cmd.get(endian) == macho::LC_DYLD_CHAINED_FIXUPS =>
@@ -513,10 +518,10 @@ impl<'d> Macho<'d> {
                 found.ranges.push(written(base, size));
                 continue;
             };
+            let chained = Chained { header, imports };
             for first in self.page_starts(starts, usize::from(pages), start) {
-                let end = base.saturating_add(size);
                 let at = base.saturating_add(u64::from(first));
-                self.chain(chain, at, end, header, imports, found);
+                self.chain(chain, at..base.saturating_add(size), chained, found);
             }
         }
     }
@@ -540,21 +545,14 @@ impl<'d> Macho<'d> {
     }
 
     /// One chain, from its first fixup to the one whose link is zero; a chain never leaves its page.
-    fn chain(
-        &self,
-        chain: Chain,
-        mut at: u64,
-        end: u64,
-        header: u64,
-        imports: &[(String, bool, i64)],
-        found: &mut Found,
-    ) {
+    fn chain(&self, chain: Chain, page: Range<u64>, chained: Chained<'_>, found: &mut Found) {
+        let Range { start: mut at, end } = page;
         while at < end {
             let Some((offset, value)) = self.word(at, chain.width) else {
                 found.ranges.push(written(at, chain.width));
                 return;
             };
-            found.push(chain.record(at, offset, value, header, imports));
+            found.push(chain.record(at, (offset, value), chained));
             let next = (value >> chain.shift) & chain.mask;
             if next == 0 {
                 return;
@@ -700,7 +698,11 @@ impl<'d> Macho<'d> {
                 let end = segment.vmaddr.saturating_add(segment.filesize);
                 // Its binds index a table the stream built, which this reader does not keep: the writes are stated, their values are not.
                 let mut threaded = Found::default();
-                self.chain(chain, start, end, self.header()?, &[], &mut threaded);
+                let chained = Chained {
+                    header: self.header()?,
+                    imports: &[],
+                };
+                self.chain(chain, start..end, chained, &mut threaded);
                 for mut record in threaded.records {
                     record.applies = Applies::Unknown;
                     found.push(record);
@@ -772,62 +774,70 @@ impl<'d> Macho<'d> {
     /// a pointer otherwise); the table says which symbol each entry stands for.
     fn indirect_entries(&self) -> (Vec<ImportStub>, Vec<Relocation>) {
         let (mut stubs, mut pointers) = (Vec::new(), Vec::new());
-        let Some((table, count)) = self.indirect else {
-            return (stubs, pointers);
-        };
         for section in &self.sections {
             let kind = section.flags & macho::SECTION_TYPE;
             let stride = match kind {
                 macho::S_SYMBOL_STUBS => u64::from(section.stride),
                 macho::S_NON_LAZY_SYMBOL_POINTERS | macho::S_LAZY_SYMBOL_POINTERS => self.pointer,
-                _ => continue,
+                _ => 0,
             };
-            if stride == 0 {
-                continue;
-            }
-            let first = u64::from(section.first_indirect);
-            for entry in 0..section.size / stride {
-                if first + entry >= count {
-                    break;
-                }
-                let at = table + (first + entry) * 4;
-                let Some(index) = usize::try_from(at)
-                    .ok()
-                    .and_then(|at| self.u32(self.data, at))
-                else {
-                    break;
-                };
-                let vaddr = section.addr + entry * stride;
+            for (vaddr, at, index) in self.indirect_of(section, stride) {
                 let local = index & (macho::INDIRECT_SYMBOL_LOCAL | macho::INDIRECT_SYMBOL_ABS);
                 let name = (local == 0).then(|| self.symbol_name(index)).flatten();
-                match (kind, name) {
-                    (macho::S_SYMBOL_STUBS, Some(symbol)) => stubs.push(ImportStub {
+                match kind {
+                    macho::S_SYMBOL_STUBS => stubs.extend(name.map(|symbol| ImportStub {
                         vaddr,
                         size: stride,
                         symbol: crate::macho_identifier(&symbol).to_owned(),
-                    }),
-                    (macho::S_SYMBOL_STUBS, None) => {}
-                    (_, name) => pointers.push(Relocation {
-                        vaddr,
-                        record: Record {
-                            table: at,
-                            index: 0,
-                        },
-                        ntype: 0,
-                        width: stride,
-                        addend: None,
-                        applies: match name {
-                            Some(_) => Applies::Symbol,
-                            // A local entry is rebased where it is not absolute.
-                            None if index & macho::INDIRECT_SYMBOL_ABS != 0 => Applies::Unknown,
-                            None => Applies::Relative,
-                        },
-                        symbol: name.map(|name| imported(&name, false)),
-                    }),
+                    })),
+                    _ => pointers.push(pointer_entry(vaddr, (at, index), stride, name)),
                 }
             }
         }
         (stubs, pointers)
+    }
+
+    /// Each entry the indirect symbol table states for one section of
+    /// `stride`-byte entries: where the entry is, where its table word is,
+    /// and the symbol index that word holds.
+    fn indirect_of(&self, section: &Section, stride: u64) -> Vec<(u64, u64, u32)> {
+        let Some((table, count)) = self.indirect.filter(|_| stride != 0) else {
+            return Vec::new();
+        };
+        let first = u64::from(section.first_indirect);
+        (0..section.size / stride)
+            .take_while(|entry| first + entry < count)
+            .map_while(|entry| {
+                let at = table + (first + entry) * 4;
+                let index = usize::try_from(at)
+                    .ok()
+                    .and_then(|at| self.u32(self.data, at))?;
+                Some((section.addr + entry * stride, at, index))
+            })
+            .collect()
+    }
+}
+
+/// The record of one symbol pointer the indirect symbol table names: `entry`
+/// is where its table word is and the index that word holds.
+fn pointer_entry(vaddr: u64, entry: (u64, u32), width: u64, name: Option<String>) -> Relocation {
+    let (at, index) = entry;
+    Relocation {
+        vaddr,
+        record: Record {
+            table: at,
+            index: 0,
+        },
+        ntype: 0,
+        width,
+        addend: None,
+        applies: match name {
+            Some(_) => Applies::Symbol,
+            // A local entry is rebased where it is not absolute.
+            None if index & macho::INDIRECT_SYMBOL_ABS != 0 => Applies::Unknown,
+            None => Applies::Relative,
+        },
+        symbol: name.map(|name| imported(&name, false)),
     }
 }
 
@@ -879,20 +889,22 @@ impl Opcodes<'_> {
     fn sleb(&mut self) -> Option<i64> {
         let mut value = 0i64;
         let mut shift = 0u32;
-        loop {
+        let last = loop {
             let byte = self.byte()?;
             value |= i64::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
             shift += 7;
             if byte & 0x80 == 0 {
-                if shift < 64 && byte & 0x40 != 0 {
-                    value |= -1i64 << shift;
-                }
-                return Some(value);
+                break byte;
             }
             if shift >= 70 {
                 return None;
             }
+        };
+        // The last byte's sixth bit is the sign, extended over every bit above those read.
+        if shift < 64 && last & 0x40 != 0 {
+            value |= -1i64 << shift;
         }
+        Some(value)
     }
 
     fn string(&mut self) -> Option<String> {
@@ -959,6 +971,28 @@ impl Opcodes<'_> {
     }
 }
 
+/// What decoding a chained fixup needs besides its word: where the image's
+/// header is, which the offset formats count from, and the imports a bind
+/// names by ordinal.
+#[derive(Clone, Copy)]
+struct Chained<'a> {
+    header: u64,
+    imports: &'a [(String, bool, i64)],
+}
+
+/// What one chained fixup word says, whatever its format.
+enum Fixup {
+    /// A rebase to this target, in link coordinates.
+    Rebase(u64),
+    /// A bind to the import at this ordinal, plus an addend.
+    Bind { ordinal: u64, addend: i64 },
+    /// A bind arm64e signs: its bits are not its value until authenticated.
+    SignedBind(u64),
+    /// A write whose value this does not state: a signed rebase, or a format
+    /// whose fields are not decoded.
+    Unstated,
+}
+
 /// How one chained pointer format links a fixup to the next, and what a fixup says.
 #[derive(Clone, Copy)]
 struct Chain {
@@ -1004,21 +1038,15 @@ impl Chain {
     /// `_OFFSET` and userland formats. A pointer arm64e signs, and every
     /// format this does not decode the fields of, is a write whose value is
     /// not stated.
-    fn record(
-        &self,
-        vaddr: u64,
-        offset: u64,
-        word: u64,
-        header: u64,
-        imports: &[(String, bool, i64)],
-    ) -> Relocation {
-        let record = Record {
-            table: offset,
-            index: 0,
-        };
+    /// `fixup` is the word's file offset, which identifies the record, and the word itself.
+    fn record(&self, vaddr: u64, fixup: (u64, u64), chained: Chained<'_>) -> Relocation {
+        let (offset, word) = fixup;
         let unknown = Relocation {
             vaddr,
-            record,
+            record: Record {
+                table: offset,
+                index: 0,
+            },
             // A chained fixup has no type number of its own; its pointer format is the chain's.
             ntype: 0,
             width: self.width,
@@ -1026,65 +1054,64 @@ impl Chain {
             symbol: None,
             applies: Applies::Unknown,
         };
-        let bits = |low: u32, count: u32| (word >> low) & ((1u64 << count) - 1);
-        let bind = |ordinal: u64, addend: i64| {
-            let symbol = imports.get(ordinal as usize);
-            Relocation {
-                addend: Some(addend + symbol.map_or(0, |(_, _, own)| *own)),
+        let import = |ordinal: u64| chained.imports.get(ordinal as usize);
+        match self.fixup(word, chained.header) {
+            Fixup::Rebase(target) => Relocation {
+                addend: Some(target as i64),
+                applies: Applies::Relative,
+                ..unknown
+            },
+            Fixup::Bind { ordinal, addend } => Relocation {
+                addend: Some(addend + import(ordinal).map_or(0, |(_, _, own)| *own)),
                 applies: Applies::SymbolPlusAddend,
-                symbol: symbol.map(|(name, weak, _)| imported(name, *weak)),
-                ..unknown.clone()
-            }
-        };
-        let rebase = |target: u64| Relocation {
-            addend: Some(target as i64),
-            applies: Applies::Relative,
-            ..unknown.clone()
-        };
-        match self.format {
-            // DYLD_CHAINED_PTR_64 and _64_OFFSET: bind:1 at 63; ordinal:24, addend:8; or target:36, high8:8.
-            2 | 6 => match bits(63, 1) {
-                1 => bind(bits(0, 24), bits(24, 8) as i64),
-                _ => {
-                    let target = bits(0, 36);
-                    let base = if self.format == 6 { header } else { 0 };
-                    rebase(base.wrapping_add(target) | bits(36, 8) << 56)
-                }
+                symbol: import(ordinal).map(|(name, weak, _)| imported(name, *weak)),
+                ..unknown
             },
-            // DYLD_CHAINED_PTR_ARM64E and the userland forms: auth:1 at 63, bind:1 at 62.
-            1 | 9 | 12 => {
-                let (auth, is_bind) = (bits(63, 1) == 1, bits(62, 1) == 1);
-                let ordinal = match self.format {
-                    12 => bits(0, 24),
-                    _ => bits(0, 16),
-                };
-                match (auth, is_bind) {
-                    // A signed pointer's bits are not its value until authenticated.
-                    (true, true) => Relocation {
-                        symbol: imports
-                            .get(ordinal as usize)
-                            .map(|(name, weak, _)| imported(name, *weak)),
-                        ..unknown
-                    },
-                    (true, false) => unknown,
-                    (false, true) => {
-                        // addend:19 at 32, sign-extended.
-                        let addend = ((bits(32, 19) << 45) as i64) >> 45;
-                        bind(ordinal, addend)
-                    }
-                    (false, false) => {
-                        let target = bits(0, 43);
-                        let base = if self.format == 1 { 0 } else { header };
-                        rebase(base.wrapping_add(target) | bits(43, 8) << 56)
-                    }
-                }
-            }
-            // DYLD_CHAINED_PTR_32: bind:1 at 31; ordinal:20, addend:6; or target:26.
-            3 => match bits(31, 1) {
-                1 => bind(bits(0, 20), bits(20, 6) as i64),
-                _ => rebase(bits(0, 26)),
+            Fixup::SignedBind(ordinal) => Relocation {
+                symbol: import(ordinal).map(|(name, weak, _)| imported(name, *weak)),
+                ..unknown
             },
-            _ => unknown,
+            Fixup::Unstated => unknown,
+        }
+    }
+
+    /// What one fixup word says in this chain's `DYLD_CHAINED_PTR_*` format.
+    fn fixup(&self, word: u64, header: u64) -> Fixup {
+        let bits = |low: u32, count: u32| (word >> low) & ((1u64 << count) - 1);
+        let arm64e_ordinal = match self.format {
+            12 => bits(0, 24),
+            _ => bits(0, 16),
+        };
+        match (self.format, bits(63, 1), bits(62, 1)) {
+            // _64 and _64_OFFSET: bind:1 at 63; ordinal:24, addend:8; or target:36, high8:8.
+            (2 | 6, 1, _) => Fixup::Bind {
+                ordinal: bits(0, 24),
+                addend: bits(24, 8) as i64,
+            },
+            (2 | 6, _, _) => {
+                let base = if self.format == 6 { header } else { 0 };
+                Fixup::Rebase(base.wrapping_add(bits(0, 36)) | bits(36, 8) << 56)
+            }
+            // ARM64E and the userland forms: auth:1 at 63, bind:1 at 62. A
+            // signed pointer's bits are not its value until authenticated.
+            (1 | 9 | 12, 1, 1) => Fixup::SignedBind(arm64e_ordinal),
+            (1 | 9 | 12, 1, _) => Fixup::Unstated,
+            // addend:19 at 32, sign-extended.
+            (1 | 9 | 12, _, 1) => Fixup::Bind {
+                ordinal: arm64e_ordinal,
+                addend: ((bits(32, 19) << 45) as i64) >> 45,
+            },
+            (1 | 9 | 12, _, _) => {
+                let base = if self.format == 1 { 0 } else { header };
+                Fixup::Rebase(base.wrapping_add(bits(0, 43)) | bits(43, 8) << 56)
+            }
+            // _32: bind:1 at 31; ordinal:20, addend:6; or target:26.
+            (3, _, _) if bits(31, 1) == 1 => Fixup::Bind {
+                ordinal: bits(0, 20),
+                addend: bits(20, 6) as i64,
+            },
+            (3, _, _) => Fixup::Rebase(bits(0, 26)),
+            _ => Fixup::Unstated,
         }
     }
 }
@@ -1156,13 +1183,11 @@ mod tests {
     fn a_chained_offset_rebase_is_its_target_above_the_header() {
         // DYLD_CHAINED_PTR_64_OFFSET: target 0x3c0, next 2 (eight bytes on), at a header placed at 0x1_0000_0000.
         let chain = Chain::of(6).expect("decoded");
-        let record = chain.record(
-            0x1_0000_4000,
-            0x4000,
-            0x0010_0000_0000_03c0,
-            0x1_0000_0000,
-            &[],
-        );
+        let chained = Chained {
+            header: 0x1_0000_0000,
+            imports: &[],
+        };
+        let record = chain.record(0x1_0000_4000, (0x4000, 0x0010_0000_0000_03c0), chained);
         assert_eq!(record.applies, Applies::Relative);
         assert_eq!(record.addend, Some(0x1_0000_03c0));
         assert_eq!((0x0010_0000_0000_03c0u64 >> chain.shift) & chain.mask, 2);
@@ -1174,7 +1199,11 @@ mod tests {
         // Mach-O links `__memcpy_chk` as `___memcpy_chk`: one underscore is
         // the format's, and the other two are the identifier's own.
         let imports = [("___memcpy_chk".to_owned(), false, 0)];
-        let record = chain.record(0x1_0000_4000, 0x4000, 1 << 63, 0x1_0000_0000, &imports);
+        let chained = Chained {
+            header: 0x1_0000_0000,
+            imports: &imports,
+        };
+        let record = chain.record(0x1_0000_4000, (0x4000, 1 << 63), chained);
         assert_eq!(record.applies, Applies::SymbolPlusAddend);
         assert_eq!(
             record.symbol.map(|symbol| symbol.name).as_deref(),

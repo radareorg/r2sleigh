@@ -389,29 +389,7 @@ fn section_stubs(
                 continue;
             }
         };
-        let end_of_section = end;
-        let stays = |target: &r2il::Varnode| {
-            target.space == r2il::SpaceId::Ram
-                && target.offset >= section.vaddr
-                && target.offset < end_of_section
-        };
-        // A conditional branch to the instruction's own fall-through, or
-        // within its own operations, transfers nowhere the straight line does
-        // not already go: it is how ARM makes one instruction's effect
-        // conditional, and the literal word after ARM's PLT0 decodes as one.
-        let next = pc + u64::from(lifted.size);
-        let within = |target: &r2il::Varnode| {
-            target.space == r2il::SpaceId::Const
-                || (target.space == r2il::SpaceId::Ram && target.offset == next)
-        };
-        // A stub makes no call, does not return and takes no branch of its own choosing.
-        let own_code = lifted.ops.iter().any(|op| match op {
-            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } | R2ILOp::Return { .. } => true,
-            R2ILOp::CBranch { target, .. } => !within(target),
-            R2ILOp::Branch { target } => !stays(target),
-            _ => false,
-        });
-        if own_code {
+        if chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size)) {
             return Vec::new();
         }
         let leaves = lifted
@@ -431,33 +409,58 @@ fn section_stubs(
             continue;
         }
         let terminal = run.ops.len().saturating_sub(1);
-        if indirect {
-            match r2ssa::terminal_indirect_loaded_slot(&run, terminal) {
-                // An indirect jump through a word it places is a stub's only
-                // where the loader writes that word.
-                Some(slot) if container.loader_write_at(slot.offset).is_none() => {
-                    return Vec::new();
-                }
-                Some(slot) => {
-                    if let Some(found) = slots.get(&slot.offset) {
-                        readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
-                    }
-                }
-                // Through a word this reading cannot place -- ARM's PLT0 adds
-                // a literal it loads from memory -- the jump says nothing
-                // either way, and names nothing.
-                None => {}
-            }
+        let slot = indirect
+            .then(|| r2ssa::terminal_indirect_loaded_slot(&run, terminal))
+            .flatten()
+            .map(|slot| slot.offset);
+        // An indirect jump through a word it places is a stub's only where
+        // the loader writes that word. Through a word this reading cannot
+        // place -- ARM's PLT0 adds a literal it loads from memory -- the jump
+        // says nothing either way, and names nothing.
+        if slot.is_some_and(|slot| container.loader_write_at(slot).is_none()) {
+            return Vec::new();
+        }
+        if let Some(found) = slot.and_then(|slot| slots.get(&slot)) {
+            readers.push((leaving_at, stub_start(&run, &starts), (*found).to_owned()));
         }
         run = fresh_run(pc);
         starts.clear();
     }
+    cells(readers, end)
+}
 
-    // The stubs are uniform cells filling the section's tail: whatever header
-    // the linker put first, the last cell ends where the section ends. That
-    // anchors every cell without deciding what a landing pad or an alignment
-    // nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
-    // twenty-byte header alike.
+/// Whether one instruction's operations make a choice no stub makes.
+///
+/// A stub makes no call, does not return, and leaves only for somewhere in
+/// its own section or through a word. A conditional branch to the
+/// instruction's own fall-through, or within its own operations, transfers
+/// nowhere the straight line does not already go: it is how ARM makes one
+/// instruction's effect conditional, and the literal word after ARM's PLT0
+/// decodes as one.
+fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
+    let stays = |target: &r2il::Varnode| {
+        target.space == r2il::SpaceId::Ram && section.contains(&target.offset)
+    };
+    let within = |target: &r2il::Varnode| {
+        target.space == r2il::SpaceId::Const
+            || (target.space == r2il::SpaceId::Ram && target.offset == next)
+    };
+    ops.iter().any(|op| match op {
+        R2ILOp::Call { .. } | R2ILOp::CallInd { .. } | R2ILOp::Return { .. } => true,
+        R2ILOp::CBranch { target, .. } => !within(target),
+        R2ILOp::Branch { target } => !stays(target),
+        _ => false,
+    })
+}
+
+/// Each stub's cell, from where each reader transfers and the section's end.
+///
+/// The stubs are uniform cells filling the section's tail: whatever header
+/// the linker put first, the last cell ends where the section ends. That
+/// anchors every cell without deciding what a landing pad or an alignment
+/// nop belongs to, and it holds for x86's PLT0, its `.plt.sec`, and ARM's
+/// twenty-byte header alike.
+fn cells(readers: Vec<(u64, u64, String)>, end: u64) -> Vec<(u64, Stub)> {
     let stride = match readers.as_slice() {
         [first, second, ..] => second.0.saturating_sub(first.0),
         // One stub has no neighbour to measure against: its cell runs from where it starts to the section's end, which anchors every cell.

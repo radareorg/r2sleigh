@@ -1891,6 +1891,31 @@ impl Native<'_> {
         tables
     }
 
+    /// Where each of a table's `count` entries sends the dispatch: the value
+    /// the container states for its word when the dispatch runs, read through
+    /// the one reader of stated memory, turned into a target as the read
+    /// says. Every entry lies inside the table's span, which the caller has
+    /// placed inside what the file holds of one region. The first entry
+    /// nothing states the value of is the error, by index and place.
+    fn stated_targets(
+        &self,
+        read: &r2ssa::indirect::DispatchTableRead,
+        count: usize,
+    ) -> Result<Vec<u64>, (usize, u64)> {
+        let endian = match self.machine.endianness {
+            SourceEndianness::Little => r2il::Endianness::Little,
+            SourceEndianness::Big => r2il::Endianness::Big,
+        };
+        (0..count)
+            .map(|k| {
+                let place = read.address + k as u64 * read.stride;
+                crate::stated::stated_word(self.program, place, read.size, endian)
+                    .map(|word| read.transform.target(word.value(), read.size))
+                    .ok_or((k, place))
+            })
+            .collect()
+    }
+
     /// One dispatch's table, read and validated, or why it is not one.
     ///
     /// **Nothing is read until the program is known to have the bytes.** The
@@ -1921,11 +1946,9 @@ impl Native<'_> {
             refused(format_args!("a table of no entries sends control nowhere"));
             return None;
         }
-        let (Some(span), Ok(count), Ok(stride), Ok(size)) = (
+        let (Some(span), Ok(count)) = (
             read.span().and_then(|span| usize::try_from(span).ok()),
             usize::try_from(read.count),
-            usize::try_from(read.stride),
-            usize::try_from(read.size),
         ) else {
             refused(format_args!(
                 "{} entries of {} bytes by {} span more than this machine addresses",
@@ -1961,27 +1984,15 @@ impl Native<'_> {
         if !stated.read_as_run(at) {
             return None;
         }
-        let endian = match self.machine.endianness {
-            SourceEndianness::Little => r2il::Endianness::Little,
-            SourceEndianness::Big => r2il::Endianness::Big,
-        };
-        // Every entry lies inside the span, which lies inside what the file holds of one region.
-        let mut entries = Vec::with_capacity(count);
-        for k in 0..count {
-            let place = at + (k * stride) as u64;
-            let width = u32::try_from(size).unwrap_or(u32::MAX);
-            let Some(word) = crate::stated::stated_word(self.program, place, width, endian) else {
+        let targets = match self.stated_targets(read, count) {
+            Ok(targets) => targets,
+            Err((k, place)) => {
                 refused(format_args!(
                     "entry {k} at {place:#x}: nothing the container states is what it holds when the dispatch runs"
                 ));
                 return None;
-            };
-            entries.push(word.value());
-        }
-        let targets = entries
-            .into_iter()
-            .map(|entry| read.transform.target(entry, read.size))
-            .collect::<Vec<_>>();
+            }
+        };
         let distinct = targets.iter().copied().collect::<BTreeSet<_>>();
         // An arm is code the container states is instructions, and decodes there.
         let arm = |target: u64| self.program.holds_code(target) && self.decodes(target);

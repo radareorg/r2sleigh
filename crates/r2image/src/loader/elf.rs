@@ -7,7 +7,7 @@
 //! states each of its records once. The dynamic table's route is the loader's
 //! own, so its order is the order of application.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use object::read::elf::{
@@ -72,6 +72,10 @@ enum Symbols {
     None,
 }
 
+/// One entry as its table encodes it: where its bytes are, where it writes,
+/// its type, its symbol's index and its addend.
+type Encoded = (Record, u64, u32, u32, Option<i64>);
+
 /// One table of relocation records, located in the file.
 #[derive(Debug, Clone, Copy)]
 struct View {
@@ -110,17 +114,17 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         views.extend(self.sectioned());
         // A record is where its bytes are; the first view to reach it -- the
         // loader's own, where it has one -- says when it is applied.
-        let mut seen: BTreeMap<Record, usize> = BTreeMap::new();
-        let mut records: Vec<(u8, Relocation)> = Vec::new();
-        for view in &views {
-            for record in self.records(view) {
-                if seen.contains_key(&record.record) {
-                    continue;
-                }
-                seen.insert(record.record, records.len());
-                records.push((view.phase, record));
-            }
-        }
+        let mut seen: BTreeSet<Record> = BTreeSet::new();
+        let mut records: Vec<(u8, Relocation)> = views
+            .iter()
+            .flat_map(|view| {
+                let phase = view.phase;
+                self.records(view)
+                    .into_iter()
+                    .map(move |record| (phase, record))
+            })
+            .filter(|(_, record)| seen.insert(record.record))
+            .collect();
         // Stable: within one phase, table order is application order.
         records.sort_by_key(|(phase, _)| *phase);
         let relocations: Vec<Relocation> = records.into_iter().map(|(_, record)| record).collect();
@@ -341,13 +345,41 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
 
     /// The records of one table.
     fn records(&self, view: &View) -> Vec<Relocation> {
+        let machine = self.file.elf_header().e_machine(self.endian);
+        self.encoded(view)
+            .into_iter()
+            .filter_map(|(record, vaddr, ntype, symbol, addend)| {
+                // A packed relative word is a relative relocation of a pointer, whatever the machine numbers it.
+                let (applies, width) = match view.form {
+                    Form::Relr => (Applies::Relative, self.pointer),
+                    _ => applies(machine, ntype, self.pointer)?,
+                };
+                let symbol = (symbol != 0)
+                    .then(|| self.symbol(view.symbols, symbol))
+                    .flatten();
+                Some(Relocation {
+                    vaddr,
+                    record,
+                    ntype,
+                    width,
+                    addend,
+                    symbol,
+                    applies,
+                })
+            })
+            .collect()
+    }
+
+    /// Each entry of one table as its form encodes it: where its bytes are,
+    /// where it writes, its type, its symbol's index and its addend.
+    fn encoded(&self, view: &View) -> Vec<Encoded> {
         let bytes = self.bytes(view.offset, view.size);
         let (endian, mips64el) = (self.endian, self.file.elf_header().is_mips64el(self.endian));
         let at = |index: usize, size: usize| Record {
             table: view.offset + (index * size) as u64,
             index: 0,
         };
-        let raw: Vec<(Record, u64, u32, u32, Option<i64>)> = match view.form {
+        match view.form {
             Form::Rela => whole::<E::Rela>(bytes)
                 .iter()
                 .enumerate()
@@ -405,29 +437,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     })
                     .collect()
             }
-        };
-        let machine = self.file.elf_header().e_machine(endian);
-        raw.into_iter()
-            .filter_map(|(record, vaddr, ntype, symbol, addend)| {
-                // A packed relative word is a relative relocation of a pointer, whatever the machine numbers it.
-                let (applies, width) = match view.form {
-                    Form::Relr => (Applies::Relative, self.pointer),
-                    _ => applies(machine, ntype, self.pointer)?,
-                };
-                let symbol = (symbol != 0)
-                    .then(|| self.symbol(view.symbols, symbol))
-                    .flatten();
-                Some(Relocation {
-                    vaddr,
-                    record,
-                    ntype,
-                    width,
-                    addend,
-                    symbol,
-                    applies,
-                })
-            })
-            .collect()
+        }
     }
 
     /// The symbol one index names, in the table the view's records index.

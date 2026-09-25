@@ -206,6 +206,16 @@ fn held(session: &Session, line: &r2engine::query::Line) -> String {
         .collect()
 }
 
+/// What the program calls the address a word holds, after a space, or nothing where it calls it nothing.
+fn named(session: &Session, value: u64) -> String {
+    session
+        .program
+        .names()
+        .of(value)
+        .map(|name| format!(" {}", name.spelled()))
+        .unwrap_or_default()
+}
+
 /// One annotation, as a reader reads it.
 fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> Option<String> {
     match *kind {
@@ -213,33 +223,19 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
             address,
             width,
             value,
-        } => {
-            let named = session
-                .program
-                .names()
-                .of(value)
-                .map(r2engine::names::Name::spelled);
-            Some(format!(
-                "[{address:#x}:{width}]={value:#x}{}",
-                named.map(|name| format!(" {name}")).unwrap_or_default()
-            ))
-        }
+        } => Some(format!(
+            "[{address:#x}:{width}]={value:#x}{}",
+            named(session, value)
+        )),
         // What the loader writes there, which the file does not hold: spelled apart from what the revision holds.
         r2engine::query::AnnotationKind::Loaded {
             address,
             width,
             value,
-        } => {
-            let named = session
-                .program
-                .names()
-                .of(value)
-                .map(r2engine::names::Name::spelled);
-            Some(format!(
-                "[{address:#x}:{width}] loaded {value:#x}{}",
-                named.map(|name| format!(" {name}")).unwrap_or_default()
-            ))
-        }
+        } => Some(format!(
+            "[{address:#x}:{width}] loaded {value:#x}{}",
+            named(session, value)
+        )),
         // The value this line defines, over its whole life: not what the storage holds at this point.
         r2engine::query::AnnotationKind::Bounds {
             storage, low, high, ..
