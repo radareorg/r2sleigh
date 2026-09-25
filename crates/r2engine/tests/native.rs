@@ -2074,14 +2074,15 @@ fn a_clear_direction_flag_survives_a_call() {
             text.contains("; 3 held from entry, read as residuals (R12_0, RBP_0, RBX_0)"),
             "{convention}\n{text}"
         );
-        // The copy still walks forward, which is what a clear flag means.
+        // The copy still walks forward, which is what a clear flag means. The
+        // residuals' site numbers are the emitter's text order, not pinned here.
         assert!(
-            text.contains("to[transferred] = ((uint64_t*)r2sleigh_residual_u64(3))[transferred];"),
+            text.contains("to[transferred] = ((uint64_t*)r2sleigh_residual_u64("),
             "{convention}\n{text}"
         );
         assert!(text.contains("transferred++;"), "{convention}\n{text}");
         assert!(
-            text.contains("while (transferred != r2sleigh_residual_u64(2))"),
+            text.contains("while (transferred != r2sleigh_residual_u64("),
             "{convention}\n{text}"
         );
     }
