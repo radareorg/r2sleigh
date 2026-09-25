@@ -759,6 +759,13 @@ impl Image {
         self.container.segment_at(vaddr)
     }
 
+    /// The file's own bytes at a file offset, whether or not the loader maps them.
+    pub fn file_bytes(&self, offset: u64, len: u64) -> Option<&[u8]> {
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        self.data.get(start..end)
+    }
+
     /// Bytes at a virtual address, or `None` when the range is not all mapped.
     ///
     /// A range reaching past a segment's file extent reads as zero, which is how

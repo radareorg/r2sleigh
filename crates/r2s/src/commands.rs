@@ -86,6 +86,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         "ax" => cross_references(session, argument),
         "axt" => references_to(session, argument),
         "iz" => strings(session),
+        "izz" => every_string(session),
         "wx" => write_hex(session, argument),
         "wc" => patches(session),
         "wcr" => revert(session),
@@ -410,21 +411,129 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
 }
 
 /// Every string the data sections hold.
+/// `iz`: every string the program's own data holds, as radare2 lays them out.
+///
+/// The strings the name table holds, which it reads only out of sections the
+/// container states hold the program's data, and only where the loader
+/// leaves the bytes alone. Spelled with escapes, one per line.
 fn strings(session: &mut Session) -> Result<String, String> {
     // The strings are read out of the image, so a patched image has other ones.
     session.program.ensure_current()?;
-    let mut out = String::from("vaddr       size string\n");
-    out.push_str(&"-".repeat(46));
-    let mut count = 0usize;
-    for (vaddr, name) in session.program.names().iter() {
-        if name.namespace != r2engine::names::Namespace::String {
+    let found: Vec<(u64, String)> = session
+        .program
+        .names()
+        .iter()
+        .filter(|(_, name)| name.namespace == r2engine::names::Namespace::String)
+        .map(|(vaddr, name)| (vaddr, name.text.clone()))
+        .collect();
+    Ok(string_table(session, &found))
+}
+
+/// `izz`: every run of text in every section's bytes, whatever the section holds.
+///
+/// A list of candidates, not of strings the program has: the interpreter's
+/// path, the loader's names and a run of the unwind tables all read as text.
+/// It spells radare2's `izz`, whose runs are at least four characters long.
+fn every_string(session: &Session) -> Result<String, String> {
+    const RADARE2_IZZ_MINIMUM: usize = 4;
+    let image = session.image();
+    let mut found = Vec::new();
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| section.file_size > 0)
+    {
+        let Some(bytes) = image.file_bytes(section.file_offset, section.file_size) else {
             continue;
+        };
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let Some(text) = r2engine::names::text_in(&bytes[at..]) else {
+                at += 1;
+                continue;
+            };
+            if text.chars().count() >= RADARE2_IZZ_MINIMUM {
+                let vaddr = match section.loaded {
+                    true => section.vaddr + at as u64,
+                    false => 0,
+                };
+                found.push((section.file_offset + at as u64, vaddr, text.to_owned()));
+            }
+            at += text.len() + 1;
         }
-        count += 1;
-        out.push_str(&format!("\n{:#010x} {:>5} {}", vaddr, name.size, name.text));
     }
-    out.push_str(&format!("\n\n{count} strings"));
+    let mut out = String::from("nth paddr      vaddr      len size section         type  string\n");
+    out.push_str(&"-".repeat(66));
+    for (nth, (paddr, vaddr, text)) in found.iter().enumerate() {
+        out.push_str(&format!(
+            "\n{nth:<3} {paddr:#010x} {vaddr:#010x} {:<3} {:<4} {:<15} {:<5} {}",
+            text.chars().count(),
+            text.len() + 1,
+            section_of(session, *paddr, true),
+            text_type(text),
+            escaped(text)
+        ));
+    }
     Ok(out)
+}
+
+/// The rows of a string listing, as radare2's `iz` lays them out.
+fn string_table(session: &Session, found: &[(u64, String)]) -> String {
+    let mut out = String::from("nth paddr      vaddr      len size section type  string\n");
+    out.push_str(&"-".repeat(55));
+    for (nth, (vaddr, text)) in found.iter().enumerate() {
+        let paddr = file_offset_of(session, *vaddr).map_or_else(
+            || "----------".to_owned(),
+            |offset| format!("{offset:#010x}"),
+        );
+        out.push_str(&format!(
+            "\n{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
+            text.chars().count(),
+            text.len() + 1,
+            section_of(session, *vaddr, false),
+            text_type(text),
+            escaped(text)
+        ));
+    }
+    out
+}
+
+/// The name of the section holding an address, or a file offset where `file` is set.
+fn section_of(session: &Session, at: u64, file: bool) -> String {
+    let holds = |section: &&r2image::Section| match file {
+        true => at >= section.file_offset && at - section.file_offset < section.file_size,
+        false => section.loaded && at >= section.vaddr && at - section.vaddr < section.vsize,
+    };
+    session
+        .image()
+        .sections()
+        .iter()
+        .find(holds)
+        .map_or_else(String::new, |section| section.name.clone())
+}
+
+/// What radare2 calls a string's encoding: `ascii`, or `utf8` where it is not.
+fn text_type(text: &str) -> &'static str {
+    match text.is_ascii() {
+        true => "ascii",
+        false => "utf8",
+    }
+}
+
+/// A string as radare2 prints one: each control character escaped, so one string is one line.
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.

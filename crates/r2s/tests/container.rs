@@ -166,13 +166,23 @@ fn iz_lists_the_programs_strings_and_none_of_the_loaders_tables() {
     // `.interp`'s path, the build note, `.dynstr`'s names and runs of the
     // unwind tables all read as text; none of them is a string of the
     // program's, and the container states which sections are its data.
+    // radare2's own `iz` of this binary, line for line, the newline escaped.
     let out = run("rv_O0g", "iz");
-    let addresses: Vec<&str> = rows(&out)
-        .iter()
-        .filter(|row| row.starts_with("0x"))
-        .map(|row| &row[..10])
-        .collect();
-    assert_eq!(addresses, ["0x00002008", "0x00002038"], "{out}");
+    assert_eq!(
+        rows(&out),
+        [
+            "0   0x00002008 0x00002008 12  13   .rodata ascii hello global",
+            "1   0x00002038 0x00002038 6   7    .rodata ascii %d %s\\n",
+        ],
+        "{out}"
+    );
+    // `izz` scans every section's bytes, the loader's tables with them.
+    let every = run("rv_O0g", "izz");
+    assert!(
+        every.contains(".interp         ascii /lib64/ld-linux-x86-64.so.2"),
+        "{every}"
+    );
+    assert!(every.contains(".rodata         ascii %d %s\\n"), "{every}");
 }
 
 #[test]

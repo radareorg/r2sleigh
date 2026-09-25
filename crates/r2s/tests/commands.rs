@@ -658,8 +658,9 @@ mod listing {
         // The stubs are 0x100000fd8 to 0x100000fe4, and the first string is `__cstring`'s at the end of them.
         let strings = at(fixture, "iz");
         assert!(strings.ok, "{}", strings.out);
+        // The vaddr column, the third of radare2's `nth paddr vaddr`.
         let listed = strings.out.lines().filter_map(|line| {
-            let address = line.split_whitespace().next()?.strip_prefix("0x")?;
+            let address = line.split_whitespace().nth(2)?.strip_prefix("0x")?;
             u64::from_str_radix(address, 16).ok()
         });
         let listed = listed.collect::<Vec<_>>();
