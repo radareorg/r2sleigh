@@ -397,6 +397,27 @@ class CompilerVerdictTests(unittest.TestCase):
             self.assertEqual({b.ran for b in refused.values()}, {True})
             self.assertEqual({b.ok for b in refused.values()}, {False})
 
+    def test_where_a_run_keeps_its_files_does_not_move_a_rendering_s_data(self):
+        # A rendering that reads past a literal (review.c's classify at -O2
+        # reads its switch table through "\n") was graded ub under one --out
+        # path and differs under another. UBSan had stored the absolute source
+        # name in .rodata, so the literal moved with the path's length. Every
+        # variant must place its data the same way wherever the run writes.
+        code = ('#include <stdint.h>\n'
+                'uint32_t f(uint32_t i) { return *(uint32_t*)((uint64_t)i * 4 + (uint64_t)"\\n"); }\n')
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            short = link.build_rendering("gcc", tmp / "a", code, [], "f")[0]
+            long = link.build_rendering("gcc", tmp / ("b" * 120) / "deeper", code, [], "f")[0]
+            for variant in link.VARIANTS:
+                self.assertTrue(short[variant].ok and long[variant].ok, variant)
+                sections = []
+                for built in (short[variant], long[variant]):
+                    dump = subprocess.run(["objdump", "-s", "-j", ".rodata", str(built.path)],
+                                          capture_output=True, text=True, check=True).stdout
+                    sections.append(dump.split("Contents of section .rodata:", 1)[-1])
+                self.assertEqual(sections[0], sections[1], variant)
+
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")
 class BuildTests(unittest.TestCase):

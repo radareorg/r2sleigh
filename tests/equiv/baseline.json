@@ -2215,8 +2215,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O1::classify": {
-   "cause": "[P8 data] The switch lookup table (int[8] {10,21,32,43,54,65,-1,87} in .rodata at 0x402068) is symbolised as the string literal \"\\n\" from its first bytes 0a 00: `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). This reads past a 2-byte literal in the rendering's own image, at a misaligned address. The machine is `mov eax,[rax*4+0x402068]`.",
-   "status": "ub"
+   "cause": "[P8 data] The switch lookup table (int[8] {10,21,32,43,54,65,-1,87} in .rodata at 0x402068) is symbolised as the string literal \"\\n\" from its first bytes 0a 00: `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). This reads past a 2-byte literal in the rendering's own image, at a misaligned address. The machine is `mov eax,[rax*4+0x402068]`. The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
+   "status": "differs"
   },
   "tests/gold/review.c::clang-O1::copy_name": {
    "status": "equal"
@@ -2265,8 +2265,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::clang-O2::classify": {
-   "cause": "[P8 data] The same as clang-O1: the lookup table is mis-symbolised as \"\\n\" (rendering.c:10).",
-   "status": "ub"
+   "cause": "[P8 data] The same as clang-O1: the lookup table is mis-symbolised as \"\\n\" (rendering.c:10). The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
+   "status": "differs"
   },
   "tests/gold/review.c::clang-O2::copy_name": {
    "status": "equal"
@@ -2417,8 +2417,8 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O2::classify": {
-   "cause": "[P8 data] gcc's CSWTCH.12 int[8] table is rendered as the string literal \"\\n\": `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10).",
-   "status": "ub"
+   "cause": "[P8 data] gcc's CSWTCH.12 int[8] table is rendered as the string literal \"\\n\": `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)\"\\n\")` (rendering.c:10). The read goes past the 2-byte literal, so the value returned is wrong (differs). Before the gate compiled renderings from their work directory, the grade flipped to ub whenever the --out path length put the literal at an odd address and UBSan reported the misaligned load.",
+   "status": "differs"
   },
   "tests/gold/review.c::gcc-O2::copy_name": {
    "status": "equal"

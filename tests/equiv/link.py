@@ -145,12 +145,12 @@ def trampoline_source(symbol: str, address: int) -> str:
 COMPILE_TIMEOUT = 120.0
 
 
-def _compile(cc: str, argv: list[str],
-             timeout: float = COMPILE_TIMEOUT) -> tuple[bool, str, bool]:
+def _compile(cc: str, argv: list[str], timeout: float = COMPILE_TIMEOUT,
+             cwd: Path | None = None) -> tuple[bool, str, bool]:
     """``(built, diagnostics, ran)``: ``ran`` is False when the compiler gave no verdict."""
     try:
         proc = subprocess.run(
-            [cc, *argv], capture_output=True, text=True, timeout=timeout, check=False
+            [cc, *argv], capture_output=True, text=True, timeout=timeout, check=False, cwd=cwd
         )
     except subprocess.TimeoutExpired:
         return False, f"{cc} timed out after {timeout:g}s", False
@@ -188,20 +188,27 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
     """Compile a rendering four ways; returns the builds, the strict verdict, and skipped links.
 
     ``needed`` is what :func:`needed_libraries` says the original links against.
+
+    The compiler runs inside ``workdir`` and is given relative names, so the
+    objects it writes do not depend on where the run keeps its files. UBSan
+    stores each check's source file name in ``.rodata``. An absolute name would
+    move every literal after it by the length of the ``--out`` path, and a
+    rendering that reads outside a literal would then be graded differently
+    for the same code.
     """
     workdir.mkdir(parents=True, exist_ok=True)
-    source = workdir / "rendering.c"
-    source.write_text(code, encoding="utf-8")
+    source = "rendering.c"
+    (workdir / source).write_text(code, encoding="utf-8")
     shim, skipped = shim_source(links, definition, entry)
-    shim_path = workdir / "shim.S"
-    shim_path.write_text(shim, encoding="utf-8")
+    shim_path = "shim.S"
+    (workdir / shim_path).write_text(shim, encoding="utf-8")
     builds: dict[str, Built] = {}
     for variant, flags in VARIANTS.items():
-        out = workdir / f"rendering-{variant}.so"
-        ok, diagnostics, ran = _compile(cc, [*COMMON, *flags, str(source), str(shim_path),
-                                             *needed, "-o", str(out)], timeout)
-        builds[variant] = Built(variant, ok, out, diagnostics, ran)
-    ok, diagnostics, ran = _compile(cc, [*STRICT, str(source)], timeout)
+        out = f"rendering-{variant}.so"
+        ok, diagnostics, ran = _compile(cc, [*COMMON, *flags, source, shim_path,
+                                             *needed, "-o", out], timeout, cwd=workdir)
+        builds[variant] = Built(variant, ok, workdir / out, diagnostics, ran)
+    ok, diagnostics, ran = _compile(cc, [*STRICT, source], timeout, cwd=workdir)
     strict = "ok" if ok else ("fail: " if ran else "not run: ") + _first_lines(diagnostics, 6)
     return builds, strict, skipped
 
