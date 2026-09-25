@@ -459,6 +459,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual({r["status"] for r in records.values()}, {"differs"})
         self.assertEqual({r["evidence"].get("guard") for r in records.values()}, {"delegated"})
 
+    def test_two_runs_write_the_same_records(self):
+        # The delegating renderings' evidence carries whole runs (their
+        # faults, their registers): nothing in it may depend on timing or on
+        # where the loader put a shared object.
+        with tempfile.TemporaryDirectory() as tmp_text:
+            tmp = Path(tmp_text)
+            written = []
+            for _ in range(2):
+                self.run_gate(tmp, "--opts", "O2", STUB_R2S_MODE="delegate", STUB_R2S_FAULTS="")
+                written.append((tmp / "out" / "records.json").read_bytes())
+        self.assertEqual(written[0], written[1])
+        self.assertNotIn(b"elapsed", written[0])
+
     def test_a_crash_is_one_record_and_the_ratchet_sees_it(self):
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)

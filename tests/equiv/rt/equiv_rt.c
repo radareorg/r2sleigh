@@ -51,7 +51,6 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -171,7 +170,6 @@ struct run_state {
     /* Filled per vector by the parent. */
     int outcome;
     int status;
-    long elapsed_us;
     size_t out_len;
     size_t err_len;
     char *out_buf;
@@ -500,8 +498,6 @@ static void run_one(struct run_state *run, const struct job_vector *vec, int tim
         return;
     }
     fflush(NULL);
-    struct timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
     pid_t pid = fork();
     if (pid < 0) {
         run->outcome = OUT_UNAVAILABLE;
@@ -513,8 +509,6 @@ static void run_one(struct run_state *run, const struct job_vector *vec, int tim
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
     }
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    run->elapsed_us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000L;
 
     if (run->slot->guard_error) {
         run->outcome = OUT_UNAVAILABLE;
@@ -707,8 +701,6 @@ static void emit_run(size_t index, const struct run_state *run)
             }
         }
     }
-    if (run->outcome != OUT_SKIPPED && run->outcome != OUT_UNAVAILABLE)
-        fprintf(g_out, ",\"elapsed_us\":%ld", run->elapsed_us);
     if (run->outcome == OUT_RETURN) {
         fputs(",\"rax\":", g_out);
         json_hex(g_out, (const uint8_t *)&run->slot->ret.rax, 8);

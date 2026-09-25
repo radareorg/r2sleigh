@@ -45,6 +45,7 @@ already found a defect.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import signal
@@ -218,23 +219,42 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     return record
 
 
+@functools.lru_cache(maxsize=None)
+def fixed_layout_prefix() -> tuple[str, ...]:
+    """The command prefix that runs a program with address randomisation off.
+
+    With it, every address a record's evidence carries -- a fault in a loaded
+    rendering, a pointer a function returned, the stack -- is the same on
+    every run, so two runs of the gate write the same records. Empty where the
+    personality cannot be set (some container sandboxes refuse it); the run
+    then says so in its config.
+    """
+    prefix = ("setarch", os.uname().machine, "-R")
+    try:
+        proc = subprocess.run([*prefix, "/bin/true"], capture_output=True, check=False)
+    except FileNotFoundError:
+        return ()
+    return prefix if proc.returncode == 0 else ()
+
+
 def run_driver(binary: Path, job: Path, out: Path, config: Config,
                vector_count: int) -> tuple[bool, str, list[dict]]:
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "LC_ALL": "C",
-        "LD_PRELOAD": str(config.runtime),
-        "LD_BIND_NOW": "1",
-        "EQUIV_JOB": str(job),
-        "EQUIV_OUT": str(out),
-        "UBSAN_OPTIONS": "print_stacktrace=0:halt_on_error=1:exitcode=86",
-    }
+    # The runtime's variables are set by env(1), the last program before the
+    # binary: setarch, which runs first, must not load the runtime itself.
+    assignments = [
+        f"LD_PRELOAD={config.runtime}",
+        "LD_BIND_NOW=1",
+        f"EQUIV_JOB={job}",
+        f"EQUIV_OUT={out}",
+        "UBSAN_OPTIONS=print_stacktrace=0:halt_on_error=1:exitcode=86",
+    ]
+    argv = [*fixed_layout_prefix(), "/usr/bin/env", *assignments, str(binary)]
     budget = max(120.0, vector_count * config.timeout_ms * 22 / 1000.0 + 60.0)
     out.unlink(missing_ok=True)
     try:
         proc = subprocess.run(
-            [str(binary)], env=env, cwd=str(out.parent), capture_output=True, timeout=budget,
-            check=False, stdin=subprocess.DEVNULL,
+            argv, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, cwd=str(out.parent),
+            capture_output=True, timeout=budget, check=False, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return False, f"the runtime ran past {budget:g}s", []
@@ -329,10 +349,12 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
             o0 = runs[O0] if len(runs) > O0 else {}
             helper = helpers.reached(o0) if residual > 0 else None
             if helper is not None:
-                found["residual-trap"] = {"fault_pc": o0.get("fault_pc"), "helper": helper}
+                found["residual-trap"] = {"helper": helper,
+                                          "fault_offset": _run_evidence(o0).get("fault_offset")}
             else:
-                found["differs"] = {**_pair_evidence(primary), "original": runs[ORIGINAL],
-                                    "rendering": o0}
+                found["differs"] = {**_pair_evidence(primary),
+                                    "original": _run_evidence(runs[ORIGINAL]),
+                                    "rendering": _run_evidence(o0)}
                 if o0.get("guard") == "delegated":
                     found["differs"]["guard"] = "delegated"
                     found["differs"]["cause"] = (
@@ -379,6 +401,16 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
     if unstable_example is not None:
         evidence["unstable_example"] = unstable_example
     return status, evidence, counts
+
+
+def _run_evidence(run: dict) -> dict:
+    """A run as a record keeps it: a fault as an offset into its object."""
+    kept = {key: value for key, value in run.items() if key not in ("fault_pc", "fault_base")}
+    try:
+        kept["fault_offset"] = hex(int(str(run["fault_pc"]), 16) - int(str(run["fault_base"]), 16))
+    except (KeyError, ValueError):
+        pass
+    return kept
 
 
 def _pair_evidence(pair: dict | None) -> dict:

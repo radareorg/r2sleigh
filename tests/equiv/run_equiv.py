@@ -257,14 +257,16 @@ def main(argv: list[str] | None = None) -> int:
             records.extend(grade_binary(binary, args, config, only, pool))
     records.sort(key=lambda r: r.key)
 
+    # Nothing in the file depends on when or how fast it ran: two runs over the
+    # same inputs write the same bytes.
     payload = {
         "schema": 1,
         "r2s": str(args.r2s),
         "r2s_sha256": sha256(args.r2s),
         "config": {"vectors": args.vectors, "timeout_ms": args.timeout_ms, "cc": args.cc,
                    "compilers": args.compilers, "opts": args.opts, "only": args.only,
-                   "sources": [build.Binary(s, "", "", s, s).source_key for s in sources]},
-        "seconds": round(time.monotonic() - started, 1),
+                   "sources": [build.Binary(s, "", "", s, s).source_key for s in sources],
+                   "fixed_layout": bool(gate.fixed_layout_prefix())},
         "records": [record.to_json() for record in records],
     }
     (args.out / "records.json").write_text(json.dumps(payload, indent=1) + "\n",
@@ -272,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarize(records)
     (args.out / "summary.txt").write_text(summary + "\n", encoding="utf-8")
     print(summary)
-    print(f"records: {args.out / 'records.json'}")
+    print(f"records: {args.out / 'records.json'} ({time.monotonic() - started:.1f}s)")
 
     status = EXIT_OK
     if args.baseline is not None:
