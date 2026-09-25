@@ -9,7 +9,8 @@ to survive. It is never a rendering source for a real measurement.
     stub_r2s.py -q -c '<statements>' <binary>
 
 ``?e`` prints its text, ``s`` seeks, ``pddj`` answers for the current address,
-anything else is an unknown command. ``STUB_R2S_MODE`` picks the answer:
+``afl`` lists ``$STUB_R2S_AFL`` (``0x1000 main,0x2000 -``), anything else is an
+unknown command. ``STUB_R2S_MODE`` picks the answer:
 
 * ``minimal``   a valid record with an empty body (the default);
 * ``delegate``  a rendering that calls the original function through its
@@ -125,6 +126,11 @@ def main() -> int:
             print(statement[3:], flush=True)
         elif statement.startswith("s "):
             address = int(statement[2:], 0)
+        elif statement == "afl":
+            # radare2's headerless layout: addr nbbs size name.
+            for item in filter(None, os.environ.get("STUB_R2S_AFL", "").split(",")):
+                where, _, name = item.partition(" ")
+                print(f"{where} 1 16 {name or '-'}", flush=True)
         elif statement == "pddj":
             fault = faults.get(address, "")
             if fault.startswith("once-"):

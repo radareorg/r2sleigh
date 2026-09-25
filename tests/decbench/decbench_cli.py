@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Launch DecBench with a compatibility registration for its VJ-GED helper.
 
+    decbench_cli.py <decbench arguments>                  # the `decbench` CLI
+    decbench_cli.py run-benchmark <run_benchmark args>    # the official driver
+
+The r2sleigh backend is not registered here: ``install_backend.py`` puts it
+inside the DecBench checkout, which is the only way the per-binary
+``decompile_one.py`` subprocess of the official driver can see it, and one
+place to register it keeps the measured backend the installed one.
+
 The benchmark host and DecBench upstream currently ship
 ``decbench.metrics.vj_ged.vj_ged`` but do not expose it through the metric
 registry. If a future DecBench does register ``vj_ged`` natively, this launcher
@@ -10,8 +18,8 @@ it never aliases the separately budgeted/approximated ``ged`` metric.
 
 from __future__ import annotations
 
-import importlib.util
 import math
+import runpy
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,17 +29,6 @@ from decbench.metrics.base import Metric
 from decbench.metrics.registry import MetricRegistry, register_metric
 from decbench.models.metrics import AggregationType, MetricValue
 from phase_timing import install_phase_timing
-
-
-def register_tree_backend() -> None:
-    """Make the benchmark use the adapter shipped by the measured tree."""
-    path = Path(__file__).with_name("r2sleigh_raw.py")
-    spec = importlib.util.spec_from_file_location("r2sleigh_benchmark_backend", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load r2sleigh DecBench backend from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
 
 
 def register_vj_ged_if_needed() -> None:
@@ -93,11 +90,25 @@ def register_vj_ged_if_needed() -> None:
             )
 
 
-register_tree_backend()
+def run_benchmark(arguments: list[str]) -> None:
+    """Run DecBench's own ``scripts/run_benchmark.py`` in this process."""
+    import decbench
+
+    script = Path(decbench.__file__).resolve().parents[1] / "scripts" / "run_benchmark.py"
+    if not script.exists():
+        raise SystemExit(f"no {script}: DecBench must be installed from a checkout (pip -e)")
+    sys.argv = [str(script), *arguments]
+    sys.path.insert(0, str(script.parent))
+    runpy.run_path(str(script), run_name="__main__")
+
+
 register_vj_ged_if_needed()
 install_phase_timing()
 
 if __name__ == "__main__":
-    from decbench.cli import main
+    if len(sys.argv) > 1 and sys.argv[1] == "run-benchmark":
+        run_benchmark(sys.argv[2:])
+    else:
+        from decbench.cli import main
 
-    main()
+        main()

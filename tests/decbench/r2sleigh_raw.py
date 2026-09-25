@@ -1,63 +1,62 @@
-"""Raw r2sleigh backend (native, via the ``r2`` CLI).
+"""DecBench backend for r2sleigh, driven through its own shell, ``r2s``.
 
-r2sleigh (https://github.com/0verflowme/r2sleigh) is a radare2 plugin whose
-decompiler is a Rust pipeline: Ghidra Sleigh lift -> its own IL -> SSA -> machine
-projection -> a sealed binding plan -> C rendering. It is a *refusal-first*
-decompiler: where it cannot prove what a construct means it emits a typed
-refusal instead of plausible C, so a function is either rendered or reported as
-declined, never guessed.
+r2sleigh (https://github.com/radareorg/r2sleigh) is a refusal-first
+decompiler: Ghidra Sleigh lift, its own IL, SSA, a sealed binding plan, C. It
+renders a function it can account for and refuses one it cannot, with the
+reason. ``r2s`` is its shell; this backend asks it one question per function,
 
-Like ``glaurung`` and ``kuna`` it is driven as a CLI rather than imported, but
-unlike them the CLI is radare2 itself. One ``r2`` process per binary does the
-whole job::
+    r2s -q -c '?e BEGIN i; s <addr>; pddj; ?e END i; ...' <stripped binary>
 
-    r2 -e scr.color=0 -q -c 'a:sla; aaa; <per-function seek and pd:s>' <binary>
+and reads the structured answer ``pddj`` prints: the C translation unit, the
+identifier the function is defined as, its variables, which instruction
+addresses each line came from, and the proof counters. The streaming, the
+restart after a crash and the reading of an answer live in ``r2s_batch.py``,
+shared with the repository's equivalence gate so the two cannot read r2s
+differently.
 
-``a:sla`` swaps radare2's architecture plugin for the Sleigh-backed one, which
-is what makes ``pd:s`` available; the stock ``pdd`` stays r2dec's,
-so it must run before analysis. Functions are marked in the stream with
-``R2SLEIGH_DECBENCH_BEGIN__<index>`` / ``..._END__<index>`` sentinels and split
-back out here; one process amortises the ``aaa`` that dominates the wall time.
+What this backend guarantees, against the official driver
+(``scripts/run_benchmark.py``), which hands it a ``strip --strip-all`` copy
+and the DWARF ``low_pc`` of every source function:
 
-Discovery comes from radare2's own analysis (``aflj``), so this works on
-stripped binaries, and addresses are normalised the way the dockerized r2dec
-driver does it -- ``addr - baddr + elf_min_vaddr`` -- because radare2 loads at
-its own ``baddr``.
+* It renders exactly the addresses it was given (``function_names`` and
+  ``functions``), with no symbol lookup; with no targets at all it renders
+  what ``afl`` (the engine's own discovery) finds, through DecBench's shared
+  skip rule.
+* Addresses pass through unchanged. r2s reports ELF link addresses, which are
+  DecBench's ELF-file-space for PIE and non-PIE alike; nothing is rebased.
+* ``FunctionDecompilation.name`` is the identifier the rendering itself
+  defines (``pddj.definition``), so DecBench's relabel to the DWARF name
+  rewrites the code and the key together. When the caller named the function,
+  the definition is renamed to that name the same way.
+* Every requested function is either rendered or declined with a typed cause:
+  ``refused: <reason>`` (r2s's own), ``r2s: <message>`` (a failed statement),
+  or ``harness: <how r2s ended> while rendering <addr>`` (a crash or a
+  deadline, after which r2s is restarted at the next function).
+  ``rendered + declined == requested`` is checked before returning.
+* After every function the partial result is pickled to ``progress_path``, so
+  the driver's hard kill loses nothing already answered.
+* It fails closed on a binary carrying ``.debug_info`` or ``.symtab``: r2s
+  reads the declarations of the file it opens, and DecBench scores types
+  against that same DWARF. Such a binary is declined whole with the reason.
+* ``variables`` and ``line_mappings`` come from ``pddj``, never from parsing C.
 
-A declined function is *omitted* rather than emitted as its refusal comment.
-Scoring a refusal marker as if it were decompiled C would report a parse failure
-where the tool actually reported an honest decline, and both are zero on every
-metric anyway; the counts are kept in the result metadata so the decline rate
-stays visible.
-
-Two very different things can leave a function with no output, and this adapter
-keeps them apart. r2sleigh declining is an answer. The ``r2`` process dying
-part-way through the batch is the harness failing to ask, and because the batch
-is one process, every function past the cut would otherwise look exactly like a
-decline -- which is how five zlib binaries reported zero functions apiece
-without anyone reading it as a crash. Those functions are declined with a
-``harness:`` cause naming how the process ended and where the stream stopped,
-and the run's metadata records the ending of both ``r2`` passes.
-
-Locate the CLI via ``$R2SLEIGH_R2_BIN`` (an explicit ``r2`` path) or ``r2`` on
-``$PATH``. The plugin itself must already be installed into radare2's plugin
-directory (``make -C r2plugin install`` in the r2sleigh tree); availability is
-probed by checking that ``a:sla`` actually switches the architecture.
+Locate the shell with ``$R2SLEIGH_R2S_BIN`` or ``r2s`` on ``$PATH``.
+Per-function deadline: ``$R2SLEIGH_FUNCTION_TIMEOUT`` seconds (default 300).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
-import signal
+import struct
 import subprocess
+import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from decbench.decompilers.base import Decompiler, DecompilerConfig
 from decbench.decompilers.raw import common
@@ -66,109 +65,27 @@ from decbench.models.decompilation import (
     DecompilationResult,
     DecompilerMetadata,
     FunctionDecompilation,
+    LineMapping,
+    VariableInfo,
 )
+
+try:  # installed beside this file inside DecBench's tree
+    from decbench.decompilers.raw import r2s_batch  # type: ignore[attr-defined]
+except ImportError:  # loaded from the r2sleigh tree: tests/equiv owns the runner
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "equiv"))
+    import r2s_batch  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
 
-_BEGIN = "R2SLEIGH_DECBENCH_BEGIN__"
-_END = "R2SLEIGH_DECBENCH_END__"
+BACKEND = "r2sleigh_native"
 
-# What the plugin prints when it declines a function. The text carries the typed
-# cause, which is worth keeping in metadata even though the function is dropped.
-_REFUSAL = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
+# Sections whose presence means r2s would read facts DecBench grades against.
+FAIL_CLOSED_SECTIONS = (".debug_info", ".symtab")
 
-# What radare2 prints when no decompiler plugin is registered at all. It is not
-# output from a decompiler and must never be scored as one: counted as rendered
-# it would give every function of the binary a body of prose, which reads as a
-# decompiler producing very poor C rather than as a plugin that never loaded.
-_NO_DECOMPILER = "r2pm -ci r2dec"
-
-# What the renderer prints where it could not prove a cell. The function is
-# rendered and is not fully proven; both facts belong in the census, because a
-# body that is mostly gap must never read as the same result as a body whose
-# every cell carries a certificate.
-_GAP = re.compile(r"/\* r2dec gap: (?P<kind>[^ ]+) at (?P<site>\S+) covering (?P<ops>\d+) op")
-
-_R2_FLAGS = ("-e", "scr.color=0", "-e", "bin.relocs.apply=true", "-q")
-
-# radare2 prefixes a function flag with where it learned the name -- `dbg.` from
-# debug info, `sym.` from the symbol table, `fcn.` from its own analysis. The
-# benchmark matches a decompiled function to its source by name, and
-# `dbg.readError` matches nothing, so the prefix comes off. Everything left
-# unprefixed keeps whatever radare2 called it.
-_FLAG_PREFIXES = ("dbg.", "sym.", "fcn.", "loc.", "flirt.")
+_STACK_OFFSET = re.compile(r"([+-])\s*(0x[0-9a-fA-F]+|\d+)\s*\]?\s*$")
 
 
-def _retitle(code: str, flag: str, source_name: str) -> str:
-    """Give the emitted C the source's own name for the function.
-
-    The renderer spells a function after radare2's flag with the characters C
-    will not take replaced, so `dbg.readError` is emitted as `dbg_readError`.
-    The benchmark parses the C and matches the resulting control-flow graph to
-    the source function by name, so leaving the flag's spelling in the code
-    means the graph is never matched and the metric is skipped rather than
-    scored.
-    """
-    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", flag)
-    if not sanitized or sanitized == source_name:
-        return code
-    return re.sub(rf"\b{re.escape(sanitized)}\b", source_name, code)
-
-
-def _requested_by_address(
-    functions: list[tuple[str, int]] | None,
-) -> dict[int, str] | None:
-    """What the benchmark asked for, keyed by address.
-
-    ``None`` when it asked for everything. A duplicate address keeps the first
-    name, because two requests at one address are one function however the
-    benchmark spelled them.
-    """
-    if functions is None:
-        return None
-    by_addr: dict[int, str] = {}
-    for name, addr in functions:
-        by_addr.setdefault(int(addr), name)
-    return by_addr
-
-
-def _requested_name(
-    requested_by_addr: dict[int, str] | None, *addresses: int
-) -> str | None:
-    """The benchmark's own name for a function at one of these addresses."""
-    if requested_by_addr is None:
-        return None
-    for addr in addresses:
-        name = requested_by_addr.get(addr)
-        if name is not None:
-            return name
-    return None
-
-
-def _source_name(flag: str) -> str:
-    """The name the source would use for a radare2 function flag."""
-    name = flag
-    changed = True
-    while changed:
-        changed = False
-        for prefix in _FLAG_PREFIXES:
-            if name.startswith(prefix):
-                name = name[len(prefix) :]
-                changed = True
-    return name or flag
-
-
-def _r2_bin() -> Path | None:
-    explicit = os.environ.get("R2SLEIGH_R2_BIN")
-    if explicit:
-        candidate = Path(explicit)
-        return candidate if candidate.exists() else None
-    found = shutil.which("r2") or shutil.which("radare2")
-    return Path(found) if found else None
-
-
-def _r2s_bin() -> Path | None:
-    """The engine's own shell, which answers without radare2 in the process."""
+def r2s_bin() -> Path | None:
     explicit = os.environ.get("R2SLEIGH_R2S_BIN")
     if explicit:
         candidate = Path(explicit)
@@ -177,211 +94,177 @@ def _r2s_bin() -> Path | None:
     return Path(found) if found else None
 
 
-def _signal_name(number: int) -> str:
-    """``SIGSEGV`` rather than ``11``; the bare number hides which bug it is."""
+def elf_section_names(binary: Path) -> list[str] | None:
+    """The section names of an ELF file, or None when it is not one we can read."""
     try:
-        return signal.Signals(number).name
-    except ValueError:
-        return "unknown"
+        data = binary.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return None
+    is64 = data[4] == 2
+    order = "<" if data[5] == 1 else ">"
+    try:
+        if is64:
+            shoff, = struct.unpack_from(order + "Q", data, 0x28)
+            shentsize, shnum, shstrndx = struct.unpack_from(order + "HHH", data, 0x3A)
+        else:
+            shoff, = struct.unpack_from(order + "I", data, 0x20)
+            shentsize, shnum, shstrndx = struct.unpack_from(order + "HHH", data, 0x2E)
+        if shoff == 0 or shnum == 0 or shstrndx >= shnum:
+            return []
+
+        def header(index: int) -> tuple[int, int, int]:
+            base = shoff + index * shentsize
+            if is64:
+                name, _, _, _, offset, size = struct.unpack_from(order + "IIQQQQ", data, base)
+            else:
+                name, _, _, _, offset, size = struct.unpack_from(order + "IIIIII", data, base)
+            return name, offset, size
+
+        _, str_offset, str_size = header(shstrndx)
+        strings = data[str_offset:str_offset + str_size]
+        names: list[str] = []
+        for index in range(shnum):
+            name_offset, _, _ = header(index)
+            end = strings.find(b"\0", name_offset)
+            names.append(strings[name_offset:end if end >= 0 else None].decode("latin-1"))
+        return names
+    except struct.error:
+        return None
 
 
-def _subprocess_text(value: Any) -> str:
-    """Whatever a subprocess handed back, as text, without ever raising.
-
-    ``TimeoutExpired`` carries its partial stdout as *bytes* even under
-    ``text=True``: the POSIX reader joins the raw chunks into the exception
-    before the decode that text mode would otherwise apply. The stream is also
-    cut wherever the kill landed, so it can end mid-character. Replacing rather
-    than raising matters here -- output lost to a decode error is exactly the
-    evidence this adapter is trying to keep.
-    """
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return ""
+def leaked_sections(binary: Path) -> list[str]:
+    names = elf_section_names(binary) or []
+    return [name for name in FAIL_CLOSED_SECTIONS if name in names]
 
 
-@dataclass(frozen=True)
-class _R2Run:
-    """What one ``r2`` invocation printed, together with how the process ended.
-
-    Handing back bare stdout makes a crash indistinguishable from a quiet run: a
-    truncated stream simply has fewer function markers in it, and everything
-    past the cut is dropped as though the decompiler had declined it. Carrying
-    the exit status alongside the text is what lets a caller tell "r2sleigh had
-    nothing to say" from "r2 was not alive to be asked".
-    """
-
-    stdout: str
-    returncode: int | None
-    """``None`` when the process was killed on timeout and so has no status."""
-    timeout: float
-
-    @property
-    def ended_early(self) -> bool:
-        """Whether it finished any way other than a clean exit."""
-        return self.returncode != 0
-
-    @property
-    def ending(self) -> str:
-        """How it finished, in the words the census and metadata should carry."""
-        if self.returncode is None:
-            return f"timed out after {self.timeout:g}s"
-        if self.returncode < 0:
-            # POSIX reports a fatal signal as the negated signal number, and the
-            # number on its own is not something a reader should have to look
-            # up: SIGSEGV and SIGKILL point at very different bugs.
-            return f"killed by signal {-self.returncode} ({_signal_name(-self.returncode)})"
-        if self.returncode:
-            return f"exited {self.returncode}"
-        return "completed"
-
-
-def _run_r2(
-    binary: Path,
-    commands: str,
-    timeout: float,
-    executable: Path | None = None,
-    flags: tuple[str, ...] = _R2_FLAGS,
-) -> _R2Run:
-    executable = executable or _r2_bin()
-    if executable is None:
-        raise RuntimeError("no r2 on PATH and $R2SLEIGH_R2_BIN unset")
-    argv = [str(executable), *flags, "-c", commands, str(binary)]
+def discover(executable: Path, binary: Path, timeout: float) -> tuple[list[tuple[str, int]], str]:
+    """What ``afl`` lists: ``(name, address)``, with a placeholder for an unnamed one."""
     try:
         proc = subprocess.run(  # noqa: S603
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+            [str(executable), "-q", "-c", "afl", str(binary)],
+            capture_output=True, text=True, timeout=timeout, check=False,
         )
-    except subprocess.TimeoutExpired as expired:
-        # Letting this propagate loses the whole binary -- its census with it --
-        # when the process had in fact answered for most of the batch. Partial
-        # output is strictly more informative than none, and it cannot be
-        # mistaken for a complete run because the result says how it ended.
-        log.warning("r2 timed out after %ss on %s", timeout, binary.name)
-        return _R2Run(stdout=_subprocess_text(expired.stdout), returncode=None, timeout=timeout)
-    if proc.returncode != 0:
-        log.warning("r2 exited %s on %s", proc.returncode, binary.name)
-    return _R2Run(stdout=proc.stdout, returncode=proc.returncode, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return [], f"harness: r2s afl timed out after {timeout:g}s"
+    functions: list[tuple[str, int]] = []
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if not fields or not fields[0].startswith("0x"):
+            continue
+        try:
+            address = int(fields[0], 16)
+        except ValueError:
+            continue
+        name = fields[-1] if len(fields) > 1 else "-"
+        functions.append((f"sub_{address:x}" if name == "-" else name, address))
+    ending = "" if proc.returncode == 0 else f"r2s afl exited {proc.returncode}"
+    return functions, ending
 
 
-@register_decompiler("r2sleigh")
-class RawR2SleighDecompiler(Decompiler):
-    """r2sleigh (Sleigh-lifted, refusal-first) driven through the r2 CLI."""
+def stack_offset(location: str) -> int | None:
+    """``stack-0x14``, ``[rbp-0x14]`` or ``sp+8`` -> the signed offset."""
+    found = _STACK_OFFSET.search(location.strip())
+    if not found:
+        return None
+    value = int(found.group(2), 0)
+    return -value if found.group(1) == "-" else value
 
-    name = "r2sleigh"
-    display_name = "r2sleigh"
+
+def to_function(record: dict, address: int, requested: str | None) -> FunctionDecompilation:
+    """A pddj record as DecBench's function record, filed under ``requested`` if given."""
+    definition = str(record.get("definition") or "")
+    code = str(record.get("code") or "")
+    name = definition or f"sub_{address:x}"
+    if requested and requested != definition and definition:
+        # The caller knows the function by a name; the definition takes it, in
+        # the code and in the key, exactly as DecBench's own relabel does.
+        code = re.sub(rf"\b{re.escape(definition)}\b", requested, code)
+        name = requested
+    elif requested and not definition:
+        name = requested
+    code_lines = code.splitlines()
+    mappings = [
+        LineMapping(line_number=int(entry["line"]),
+                    addresses=sorted({int(a) for a in entry.get("addrs", [])}))
+        for entry in record.get("lines", [])
+        if isinstance(entry, dict) and entry.get("addrs")
+    ]
+    variables: list[VariableInfo] = []
+    arg_index = 0
+    for entry in record.get("variables", []):
+        if not isinstance(entry, dict) or entry.get("kind") not in ("param", "local"):
+            continue
+        var_name = str(entry.get("name", ""))
+        pattern = re.compile(rf"\b{re.escape(var_name)}\b") if var_name else None
+        line_numbers = [n + 1 for n, text in enumerate(code_lines)
+                        if pattern is not None and pattern.search(text)]
+        if entry["kind"] == "param":
+            variables.append(VariableInfo(
+                name=var_name, type=str(entry.get("type", "")), kind="arg",
+                arg_index=arg_index, line_numbers=line_numbers,
+            ))
+            arg_index += 1
+        else:
+            variables.append(VariableInfo(
+                name=var_name, type=str(entry.get("type", "")), kind="stack",
+                stack_offset=stack_offset(str(entry.get("location", ""))),
+                line_numbers=line_numbers,
+            ))
+    proof = record.get("proof") if isinstance(record.get("proof"), dict) else {}
+    metadata = dict(common.extract_metrics(code))
+    metadata.update({
+        "definition": definition,
+        "signature": record.get("signature", ""),
+        "proof": proof,
+        "residual": int(proof.get("residual", 0) or 0),
+    })
+    return FunctionDecompilation(
+        name=name,
+        address=address,
+        decompiled_code=code,
+        line_count=len(code_lines),
+        line_mappings=mappings,
+        variables=variables,
+        metadata=metadata,
+    )
+
+
+@register_decompiler(BACKEND)
+class R2sDecompiler(Decompiler):
+    """r2sleigh through ``r2s pddj``: typed declines, pass-through addresses."""
+
+    name = BACKEND
+    display_name = "r2sleigh (r2s)"
 
     def __init__(self, config: DecompilerConfig | None = None):
         super().__init__(config)
-        self._version_value: str | None = None
-        self._version_probed = False
-
-    #
-    # Decompiler interface
-    #
-
-    #
-    # The route: what is asked, and of which shell. The plugin route asks
-    # radare2 with the architecture swapped; the native route asks the engine's
-    # own shell, which has no radare2 in the process at all. Everything else
-    # below -- naming, refusal parsing, the census, where a batch stopped -- is
-    # the same question of both and is asked once.
-    #
-
-    def _executable(self) -> Path | None:
-        return _r2_bin()
-
-    def _flags(self) -> tuple[str, ...]:
-        return _R2_FLAGS
-
-    def _prologue(self) -> list[str]:
-        return ["a:sla", "aaa"]
-
-    def _render_command(self) -> str:
-        return "pd:s"
-
-    def _ask(self, binary: Path, commands: str, timeout: float) -> _R2Run:
-        return _run_r2(binary, commands, timeout, self._executable(), self._flags())
+        self._version: str | None = None
 
     def is_available(self) -> bool:
-        if _r2_bin() is None:
+        executable = r2s_bin()
+        if executable is None or not os.access(executable, os.X_OK):
             return False
-        # The plugin is what we are benchmarking, not radare2: probe that
-        # `a:sla` actually swaps the architecture rather than that r2 exists.
-        try:
-            out = _run_r2(Path("/bin/ls"), "a:sla; e asm.arch", timeout=60.0).stdout
-        except Exception:  # noqa: BLE001
-            return False
-        return "sla: loaded architecture" in out or "sleigh" in out.lower()
-
-    def get_version(self) -> str | None:
-        if self._version_probed:
-            return self._version_value
-        self._version_probed = True
-        executable = _r2_bin()
-        if executable is None:
-            return None
+        shell = shutil.which("sh") or "/bin/sh"
         try:
             proc = subprocess.run(  # noqa: S603
-                [str(executable), "-v"], capture_output=True, text=True, timeout=30, check=False
+                [str(executable), "-q", "-c", "?e r2s-alive", shell],
+                capture_output=True, text=True, timeout=60, check=False,
             )
-            first = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
-        except Exception:  # noqa: BLE001
-            first = ""
-        self._version_value = f"r2sleigh via {first}" if first else "r2sleigh"
-        return self._version_value
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return "r2s-alive" in proc.stdout
 
-    #
-    # Discovery
-    #
-
-    def _discover(
-        self, binary_path: Path, timeout: float
-    ) -> tuple[list[tuple[str, int]], int, _R2Run]:
-        """Every function radare2 finds, its address, the load base, and the run.
-
-        The run comes back because an empty function list has two causes that
-        look identical from here: a binary radare2 genuinely found nothing in,
-        and an `aaa` that never finished. The caller has to be able to say which
-        one it is reporting, otherwise the fix for the batch pass just moves the
-        silence one step earlier.
-        """
-        run = self._ask(binary_path, "a:sla; aaa; e bin.baddr; aflj", timeout)
-        out = run.stdout
-        # `e bin.baddr` answers with a bare integer, decimal or `0x`-prefixed,
-        # and prints `0` for a position-independent executable.
-        baddr = 0
-        payload = None
-        for line in out.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("["):
-                payload = stripped
-                break
-            try:
-                baddr = int(stripped, 0)
-            except ValueError:
-                continue
-        if payload is None:
-            return [], baddr, run
-        try:
-            functions = json.loads(payload)
-        except json.JSONDecodeError:
-            return [], baddr, run
-        # `aflj` names the entry `addr`; older builds used `offset`.
-        return (
-            [(f.get("name", ""), int(f.get("addr", f.get("offset", 0)))) for f in functions],
-            baddr,
-            run,
-        )
-
-    #
-    # Decompilation
-    #
+    def get_version(self) -> str | None:
+        """The exact build: a result names the r2s that produced it."""
+        if self._version is None:
+            executable = r2s_bin()
+            if executable is None:
+                return None
+            digest = hashlib.sha256(executable.read_bytes()).hexdigest()[:16]
+            self._version = f"r2s sha256:{digest}"
+        return self._version
 
     def decompile_binary(
         self,
@@ -392,394 +275,134 @@ class RawR2SleighDecompiler(Decompiler):
         progress_path: Path | None = None,
     ) -> DecompilationResult:
         started = time.time()
-        binary_timeout = float(self.config.binary_timeout_seconds)
+        binary_path = Path(binary_path)
+        executable = r2s_bin()
+        timeout = float(os.environ.get("R2SLEIGH_FUNCTION_TIMEOUT", "300"))
 
-        discovered, baddr, discovery = self._discover(binary_path, binary_timeout)
-        min_vaddr = common.elf_min_vaddr(binary_path)
-        text_range = common.elf_text_ranges(binary_path)
+        # What was asked, by address, with the caller's name when it gave one.
+        requested: dict[int, str | None] = {}
+        for name, address in functions or []:
+            requested.setdefault(int(address), name or None)
+        for address in sorted(common.addr_targets_of(function_names)):
+            requested.setdefault(address, None)
+        source = "targets" if requested else "afl"
 
-        def to_file_addr(addr: int) -> int:
-            return addr - baddr + min_vaddr
-
-        # Counted at every stage, because a binary that reports no functions
-        # says nothing about which of the three filters removed them, and an
-        # empty list is written out as a census of zero refusals -- which reads
-        # as a decompiler that was never asked rather than a harness that
-        # discarded the work. Five zlib binaries reported zero functions each
-        # this way.
-        stages: list[tuple[str, int]] = [("discovered", len(discovered))]
-        # A function sitting on one of the driver's DWARF `low_pc` targets is a
-        # verified source function and `should_skip_function` keeps it whatever
-        # section it landed in -- the rule its own docstring says applies
-        # everywhere. Calling it without that set made this backend drop
-        # functions the others keep, and they were then counted as a decompiler
-        # that said nothing rather than one that was never asked.
-        addr_targets = common.addr_targets_of(function_names)
-        candidates = [
-            (name, addr)
-            for (name, addr) in discovered
-            if not common.should_skip_function(
-                name, to_file_addr(addr), text_range, addr_targets
-            )
-        ]
-        stages.append(("after skip-list", len(candidates)))
-        # What the benchmark asked for, keyed by the address it asked at. The
-        # address is the only identifier both sides agree on: radare2 spells a
-        # function from wherever it learned the name, and the benchmark spells
-        # one it has no name for as `sub_401165`, which no prefix rule can turn
-        # into radare2's `fcn.00401165`. Matching on names dropped every such
-        # cell -- 118 of 118 in the recorded sweep -- before the decompiler was
-        # ever asked.
-        requested_by_addr = _requested_by_address(functions)
-        if requested_by_addr is not None:
-            # Address or name, not address alone: the two sides may disagree on
-            # which address space they name a function in, and a filter that
-            # empties the list costs a whole sweep to discover.
-            requested_names = {_source_name(name) for (name, _) in functions or []}
-            candidates = [
-                (name, addr)
-                for (name, addr) in candidates
-                if _requested_name(requested_by_addr, to_file_addr(addr), addr)
-                or _source_name(name) in requested_names
-            ]
-            stages.append(("after requested filter", len(candidates)))
-        # The benchmark hands a stripped binary and names its own targets by
-        # DWARF low_pc, so narrowing is by address, not by symbol.
-        narrowed = common.narrow_to_source(
-            [(name, to_file_addr(addr)) for (name, addr) in candidates],
-            common.addr_targets_of(function_names),
-            backend="r2sleigh",
-            binary_name=binary_path.name,
-        )
-        kept = {name for (name, _) in narrowed}
-        candidates = [(name, addr) for (name, addr) in candidates if name in kept]
-        stages.append(("after source narrowing", len(candidates)))
-
-        rendered: dict[str, FunctionDecompilation] = {}
         declined: dict[str, str] = {}
-        gapped: dict[str, list[dict[str, str]]] = {}
-        decompile: _R2Run | None = None
-        unreached = 0
+        rendered: dict[str, FunctionDecompilation] = {}
+        extra: dict = {"requested_from": source}
 
-        if candidates:
-            script = list(self._prologue())
-            render = self._render_command()
-            for index, (_, addr) in enumerate(candidates):
-                script.append(f"?e {_BEGIN}{index}")
-                script.append(f"s {addr}")
-                script.append(render)
-                script.append(f"?e {_END}{index}")
-            decompile = self._ask(binary_path, "; ".join(script), binary_timeout)
+        def result() -> DecompilationResult:
+            extra.update({
+                "requested": len(requested),
+                "rendered": len(rendered),
+                "declined": len(declined),
+                "decline_causes": dict(sorted(declined.items())),
+            })
+            return DecompilationResult(
+                binary_path=binary_path,
+                binary_name=binary_path.stem,
+                decompiler=DecompilerMetadata(
+                    decompiler_name=self.id,
+                    decompiler_version=self.get_version(),
+                    total_time_seconds=time.time() - started,
+                    failed_functions=sorted(declined),
+                    extra=dict(extra),
+                ),
+                functions=dict(rendered),
+                output_dir=output_dir,
+            )
 
-            # Slice once and keep the answers, because where the slices stop is
-            # itself the finding. The batch is a single process, so the first
-            # function it fails to bracket is where r2 stopped being alive, and
-            # every later one is missing for that same reason rather than for
-            # anything about its own code -- one cause, named once, counted by
-            # how many functions carry it.
-            bodies = [_slice(decompile.stdout, index) for index in range(len(candidates))]
-            stopped_at = next((i for i, body in enumerate(bodies) if body is None), None)
-            harness = ""
-            if stopped_at is not None:
-                harness = _harness_cause(decompile, stopped_at, len(candidates))
+        leaked = leaked_sections(binary_path)
+        if leaked:
+            # Fail closed: nothing r2s says about this file is admissible.
+            cause = (f"harness: the binary carries {' and '.join(leaked)}; r2s would read the "
+                     "declarations DecBench scores against (strip --strip-all it, as "
+                     "scripts/run_benchmark.py does)")
+            for address, name in requested.items() or [(0, None)]:
+                declined[name or (f"0x{address:x}" if address else binary_path.name)] = cause
+            extra["fail_closed"] = leaked
+            return result()
+        if executable is None:
+            cause = "harness: no r2s ($R2SLEIGH_R2S_BIN unset and r2s not on PATH)"
+            for address, name in requested.items() or [(0, None)]:
+                declined[name or (f"0x{address:x}" if address else binary_path.name)] = cause
+            return result()
 
-            for index, (name, addr) in enumerate(candidates):
-                # Filed under the benchmark's own name throughout, so a decline
-                # lands on the same cell a rendering would have.
-                name = _requested_name(
-                    requested_by_addr, to_file_addr(addr), addr
-                ) or _source_name(name)
-                flag = candidates[index][0]
-                body = bodies[index]
-                if body is None:
-                    # Skipping quietly here is the whole defect: it makes a dead
-                    # process read as a decompiler with nothing to say. Nothing
-                    # was produced, so it is recorded as declined, but with a
-                    # cause that says the reason is ours.
-                    declined[name] = harness
-                    unreached += 1
-                    continue
-                refusal = _REFUSAL.search(body)
-                if refusal is not None:
-                    declined[name] = refusal.group("cause")
-                    continue
-                if _NO_DECOMPILER in body:
-                    declined[name] = (
-                        "harness: radare2 has no decompiler plugin registered; "
-                        "the r2sleigh plugin did not load"
-                    )
-                    continue
-                code = body.strip()
-                if not code:
-                    continue
-                gaps = [match.groupdict() for match in _GAP.finditer(code)]
-                if gaps:
-                    gapped[name] = gaps
-                code = _retitle(code, flag, name)
-                rendered[name] = FunctionDecompilation(
-                    name=name,
-                    address=to_file_addr(addr),
-                    decompiled_code=code,
-                    line_count=len(code.splitlines()),
-                    metadata=common.extract_metrics(code),
+        if not requested:
+            found, ending = discover(executable, binary_path, timeout)
+            text = common.elf_text_ranges(binary_path)
+            kept = [(n, a) for n, a in found
+                    if not common.should_skip_function(n, a, text, set())]
+            for _, address in kept:
+                requested.setdefault(address, None)
+            extra["discovered"] = len(found)
+            if not requested:
+                declined[binary_path.name] = (
+                    f"harness: afl found no function to render"
+                    + (f" ({ending})" if ending else "")
                 )
+                return result()
 
-        # Unconditionally, and after the harness causes have been folded in. A
-        # crashed process is the case where the census is most worth having and
-        # was previously the one case that never wrote one, because the timeout
-        # escaped before this line.
-        if not candidates:
-            # Name the stage that emptied the list, and count the loss against
-            # what discovery found, so the census records a harness failure
-            # rather than an absence of work.
-            trail = ", ".join(f"{label}={count}" for label, count in stages)
-            if stages[0][1] == 0:
-                # Discovery itself came back empty, which is the case the
-                # filters cannot explain. `_discover` returns its run for
-                # exactly this: a binary radare2 genuinely found nothing in and
-                # an `aaa` that never finished look identical from here, and
-                # only the run says which.
-                declined[f"harness: {binary_path.name}"] = (
-                    "harness: radare2 reported no functions; "
-                    f"the discovery run {discovery.ending}"
-                )
+        def file_answer(answer: "r2s_batch.Answer") -> None:
+            name = requested.get(answer.address)
+            key = name or f"0x{answer.address:x}"
+            if answer.ok and answer.record is not None:
+                function = to_function(answer.record, answer.address, name)
+                if function.name in rendered:
+                    function.name = f"{function.name}_{answer.address:x}"
+                rendered[function.name] = function
             else:
-                emptied = next(
-                    (label for label, count in stages[1:] if count == 0),
-                    "discovery",
-                )
-                declined[f"harness: {binary_path.name}"] = (
-                    "harness: no function reached the decompiler; "
-                    f"the candidate list was emptied {emptied} ({trail})"
-                )
-        _write_refusal_census(
-            output_dir, binary_path, declined, gapped, len(rendered), stages
+                declined[key] = answer.cause or "harness: no answer"
+            common.dump_progress(progress_path, result())
+
+        report = r2s_batch.run_batch(
+            executable, binary_path, list(requested), function_timeout=timeout,
+            on_answer=file_answer,
         )
-
-        ended_early = discovery.ended_early or (decompile is not None and decompile.ended_early)
-
-        elapsed = time.time() - started
-        return DecompilationResult(
-            binary_path=binary_path,
-            binary_name=binary_path.stem,
-            decompiler=DecompilerMetadata(
-                decompiler_name=self.id,
-                decompiler_version=self.get_version(),
-                total_time_seconds=elapsed,
-                extra={
-                    "requested": len(candidates),
-                    "rendered": len(rendered),
-                    "declined": len(declined),
-                    "decline_causes": declined,
-                    # A sweep is read by comparing its counts against the last
-                    # one's, and a count that fell because r2 died means the
-                    # opposite of a count that fell because the decompiler got
-                    # worse. Both passes report, since a discovery that never
-                    # finished yields no candidates at all and would otherwise
-                    # be indistinguishable from a binary with no functions.
-                    "process_ended_early": ended_early,
-                    "process_ending": {
-                        "discovery": discovery.ending,
-                        "decompile": decompile.ending if decompile is not None else "not run",
-                    },
-                    "unreached": unreached,
-                },
-            ),
-            functions=rendered,
-            output_dir=output_dir,
-        )
+        extra["processes"] = report.processes
+        extra["process_endings"] = report.endings
+        if len(rendered) + len(declined) != len(requested):
+            raise RuntimeError(
+                f"{binary_path.name}: {len(rendered)} rendered + {len(declined)} declined "
+                f"!= {len(requested)} requested"
+            )
+        _write_census(output_dir, binary_path, declined, rendered)
+        return result()
 
 
-def _write_refusal_census(
-    output_dir: Path | None,
-    binary_path: Path,
-    declined: dict[str, str],
-    gapped: dict[str, list[dict[str, str]]],
-    rendered: int,
-    stages: list[tuple[str, int]] | None = None,
-) -> None:
-    """Record why each function was declined, beside the run's own results.
+def _write_census(output_dir: Path | None, binary_path: Path, declined: dict[str, str],
+                  rendered: dict[str, FunctionDecompilation]) -> None:
+    """Why each function was declined and how much of each rendering is residual.
 
-    The benchmark keeps a per-function ``decompiled`` boolean and discards
-    everything else this adapter learned, so a sweep says *how many* functions
-    refused and never *why*. Reading a refusal census off fifty-four corpus
-    cells and then prioritising work for a sixteen-hundred-function population
-    is how a cause that dominates the wide set stays invisible; this makes the
-    wide census a by-product of every sweep instead of a separate exercise.
-
-    Failure to write is deliberately silent. This is measurement about a
-    measurement, and it must never be the reason a sweep fails.
+    DecBench keeps one ``decompiled`` boolean per function, so a sweep says how
+    many were declined and never why. This file, beside the run, is the why.
+    Failure to write is deliberately silent: it is measurement about a
+    measurement and must never fail a sweep.
     """
-    # The benchmark does not always hand the decompiler an output directory, and
-    # when it does not, a census that silently declines to write is a census that
-    # is never there when it is wanted. Fall back to the binary's own directory,
-    # which by construction exists and is inside the run being garbage-collected.
-    # The benchmark builds each project in a temporary directory it deletes, so
-    # the binary's own parent does not outlive the run and the first fallback
-    # wrote a census nobody could read. The harness sets this to a directory
-    # inside the run it keeps.
     override = os.environ.get("R2SLEIGH_REFUSAL_CENSUS_DIR")
-    if override:
-        target = Path(override)
-    elif output_dir is not None:
-        target = Path(output_dir)
-    else:
-        target = binary_path.parent
+    target = Path(override) if override else Path(output_dir) if output_dir else binary_path.parent
     try:
         counts: dict[str, int] = {}
         for cause in declined.values():
             counts[cause] = counts.get(cause, 0) + 1
-        gap_causes: dict[str, int] = {}
-        gap_ops = 0
-        for gaps in gapped.values():
-            for gap in gaps:
-                gap_causes[gap["kind"]] = gap_causes.get(gap["kind"], 0) + 1
-                gap_ops += int(gap["ops"])
+        residual = {name: f.metadata.get("residual", 0) for name, f in rendered.items()
+                    if f.metadata.get("residual", 0)}
         payload = {
-            "schema_version": 3,
+            "schema_version": 4,
+            "backend": BACKEND,
             "binary": binary_path.name,
             "binary_path": str(binary_path),
-            "rendered": rendered,
+            "rendered": len(rendered),
             "declined": len(declined),
             "causes": dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))),
             "by_function": dict(sorted(declined.items())),
-            # A rendered function with a marked gap is counted in `rendered`
-            # and again here. `fully_proven` is what a reader wants beside
-            # coverage: the functions whose every cell carries a certificate.
-            "gapped": len(gapped),
-            "fully_proven": rendered - len(gapped),
-            "gap_ops": gap_ops,
-            "gap_causes": dict(sorted(gap_causes.items(), key=lambda kv: (-kv[1], kv[0]))),
-            "gaps_by_function": dict(sorted(gapped.items())),
-            # What each filter between discovery and the decompiler removed.
-            # Recorded always: it used to be reported only when the list emptied
-            # completely, so a filter that halved the work said nothing, and half
-            # the gap to the reference decompiler sat in that silence.
-            "candidates": [
-                {"stage": label, "functions": count} for label, count in (stages or [])
-            ],
+            "with_residual": len(residual),
+            "fully_proven": len(rendered) - len(residual),
+            "residual_by_function": dict(sorted(residual.items())),
         }
-        # Named from the whole path, not the binary's name. One run decompiles
-        # the same names at every optimization level -- zlib builds `example`
-        # under O0 and again under O2 -- into one census directory, so keying on
-        # the name alone silently overwrote the earlier level's census with the
-        # later one's. The path is the binary's identity here; using all of it
-        # cannot collide, and the payload carries it back for the reader.
         stem = str(binary_path).strip("/").replace("/", "_")
         path = target / f"r2sleigh-refusals-{stem}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except OSError:
         return
-
-
-def _harness_cause(run: _R2Run, stopped_at: int, total: int) -> str:
-    """The cause for a function the batch produced no output for at all.
-
-    A refusal is r2sleigh saying it could not prove what the code means; this is
-    the harness saying it never got to ask. Spelling them the same way is how
-    five zlib binaries reported zero functions each -- 68% of the benchmark's
-    refusals -- while looking like an unusually shy decompiler. The `harness:`
-    prefix separates the two at a glance in the census, the ending names which
-    failure it was, and the stop point says how far the batch got before it
-    died; the number of functions carrying the string is the size of the loss.
-    """
-    if not run.ended_early:
-        # A missing marker under a clean exit is a hole rather than a
-        # truncation, so it says something swallowed the sentinels, not that r2
-        # stopped. Worth a distinct cause: the two want different investigations.
-        return "harness: r2 exited cleanly but printed no markers for this function"
-    return f"harness: r2 process {run.ending}; output stopped at function {stopped_at} of {total}"
-
-
-def _slice(out: str, index: int) -> str | None:
-    """The text one function's markers enclose."""
-    begin = out.find(f"{_BEGIN}{index}")
-    if begin < 0:
-        return None
-    begin = out.find("\n", begin)
-    if begin < 0:
-        return None
-    end = out.find(f"{_END}{index}", begin)
-    if end < 0:
-        return None
-    return out[begin + 1 : end]
-
-
-@register_decompiler("r2sleigh_native")
-class RawR2SleighNativeDecompiler(RawR2SleighDecompiler):
-    """The same engine asked through its own shell, with no radare2 present.
-
-    The plugin route and this one share a decompiler and differ in who supplies
-    the capture: radare2's analysis there, the engine's own image reader, body
-    walk and value analysis here. Registering both measures that difference
-    against the source rather than against each other, which is the only
-    reference that does not move as the engine improves past whatever it is
-    being compared to.
-    """
-
-    name = "r2sleigh_native"
-    display_name = "r2sleigh (native)"
-
-    def _executable(self) -> Path | None:
-        return _r2s_bin()
-
-    def _flags(self) -> tuple[str, ...]:
-        # The engine's shell has no colour or analysis settings to turn off.
-        return ()
-
-    def _prologue(self) -> list[str]:
-        return []
-
-    def _render_command(self) -> str:
-        return "pdd"
-
-    def is_available(self) -> bool:
-        executable = _r2s_bin()
-        if executable is None:
-            return False
-        try:
-            out = self._ask(Path("/bin/ls"), "i", timeout=60.0).stdout
-        except Exception:  # noqa: BLE001
-            return False
-        return "format" in out
-
-    def get_version(self) -> str | None:
-        if self._version_probed:
-            return self._version_value
-        self._version_probed = True
-        executable = _r2s_bin()
-        self._version_value = f"r2sleigh native via {executable}" if executable else None
-        return self._version_value
-
-    def _discover(
-        self, binary_path: Path, timeout: float
-    ) -> tuple[list[tuple[str, int]], int, _R2Run]:
-        """Every function the image's own symbol tables name, and the load base.
-
-        Discovery here is the engine's, so it reads both symbol tables rather
-        than radare2's analysis. A stripped binary therefore lists what
-        `.dynsym` still carries and nothing more, which is the honest answer
-        until prelude scanning exists.
-        """
-        run = self._ask(binary_path, "i; is", timeout)
-        baddr = 0
-        functions: list[tuple[str, int]] = []
-        for line in run.stdout.splitlines():
-            fields = line.split()
-            if len(fields) >= 2 and fields[0] == "baddr":
-                try:
-                    baddr = int(fields[1], 0)
-                except ValueError:
-                    pass
-                continue
-            # `is` prints `nth vaddr size type name`, and only a function with
-            # a body is a candidate.
-            if len(fields) >= 5 and fields[3] == "FUNC":
-                try:
-                    address = int(fields[1], 0)
-                except ValueError:
-                    continue
-                if address and int(fields[2], 0) > 0:
-                    functions.append((fields[4], address))
-        return functions, baddr, run
