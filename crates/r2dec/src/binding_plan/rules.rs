@@ -384,7 +384,10 @@ pub(super) fn component_eligible_values(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
 ) -> Result<Vec<bool>, BindingPlanBuildError> {
-    Ok(rewrite_inlining_partition(source_owned, projection)?.component_eligible)
+    Ok(
+        rewrite_inlining_partition(source_owned, projection, &super::BindingSplits::default())?
+            .component_eligible,
+    )
 }
 
 /// Which values can be an object at all.
@@ -1333,16 +1336,13 @@ pub(super) fn literal_defined(graph: &SsaGraph, value: ValueId) -> bool {
 pub(crate) struct RewriteInliningPartition {
     pub(super) canonical: r2rewrite::CanonicalRoots,
     pub(super) inlinable: BTreeSet<ValueId>,
+    #[cfg(test)]
     pub(super) component_eligible: Vec<bool>,
     /// The one partition: every value that can be an object, grouped once,
     /// before anything is inlined. A member later inlined stays a member
     /// whose definition prints nothing; a component none of whose members is
     /// bound gets no binding.
     pub(super) components: Vec<super::BindingComponent>,
-    /// Liveness as the text has it: reads a folded definition made happen at
-    /// its reader. The components were judged against this, and the seal
-    /// judges them again against the same.
-    pub(super) liveness: r2ssa::liveness::ValueLiveness,
 }
 
 /// The partition and the inlining, brought to agreement.
@@ -1360,6 +1360,7 @@ pub(crate) struct RewriteInliningPartition {
 pub(super) fn rewrite_inlining_partition(
     source_owned: &SourceOwnedFunctionFacts,
     projection: &r2ssa::MachineProjection,
+    splits: &super::BindingSplits,
 ) -> Result<RewriteInliningPartition, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -1401,8 +1402,12 @@ pub(super) fn rewrite_inlining_partition(
             .enumerate()
             .map(|(index, eligible)| *eligible && !inlined.contains(&ValueId(index as u32)))
             .collect::<Vec<_>>();
-        let components =
-            super::construction::binding_components_with(source_owned, &round_eligible, &liveness)?;
+        let components = super::construction::binding_components_with(
+            source_owned,
+            &round_eligible,
+            &liveness,
+            splits,
+        )?;
         crate::stage_timing::mark("plan_components");
         // Which component each value belongs to; a value that is no object has none.
         let mut groups = vec![u32::MAX; graph.values.len()];
@@ -1506,9 +1511,9 @@ pub(super) fn rewrite_inlining_partition(
             return Ok(RewriteInliningPartition {
                 canonical: round_canonical,
                 inlinable: inlined,
+                #[cfg(test)]
                 component_eligible: round_eligible,
                 components,
-                liveness,
             });
         }
         inlined = next;

@@ -77,6 +77,7 @@ pub(super) fn binding_components(
         source_owned,
         &eligible,
         source_owned.source().value_liveness(),
+        &BindingSplits::default(),
     )
 }
 
@@ -282,6 +283,7 @@ pub(super) fn binding_components_with(
     source_owned: &SourceOwnedFunctionFacts,
     eligible: &[bool],
     liveness: &r2ssa::liveness::ValueLiveness,
+    splits: &BindingSplits,
 ) -> Result<Vec<BindingComponent>, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -400,6 +402,27 @@ pub(super) fn binding_components_with(
         let first = identities.pop_first();
         first.zip(identities.pop_first())
     };
+    // Which binding of the partition being refined each run belongs to: a
+    // union never joins two, so the partition refines that one
+    // (`BindingSplits`).
+    let mut class_by_root = (0..value_count)
+        .map(|value| splits.previous_class(value))
+        .collect::<Vec<_>>();
+    let joined_class = |parent: &mut Vec<usize>,
+                        class_by_root: &[Option<u32>],
+                        values: &BTreeSet<ValueId>|
+     -> Result<Option<u32>, ()> {
+        let mut classes = values
+            .iter()
+            .filter_map(|value| class_by_root[find(parent, value.0 as usize)])
+            .collect::<BTreeSet<_>>();
+        let first = classes.pop_first();
+        if classes.is_empty() {
+            Ok(first)
+        } else {
+            Err(())
+        }
+    };
     let merge_would_interfere = |parent: &mut Vec<usize>,
                                  ring: &[u32],
                                  live_by_root: &mut Vec<
@@ -460,12 +483,15 @@ pub(super) fn binding_components_with(
                             value,
                         }));
                     }
-                    (eligible[index] && !literal_defined(value)).then_some(Ok(value))
+                    (eligible[index] && !literal_defined(value) && !splits.evicted(value))
+                        .then_some(Ok(value))
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?;
             if values.is_empty() {
                 continue;
             }
+            // A split keeps apart what an earlier round held apart.
+            let class = joined_class(&mut parent, &class_by_root, &values);
             // A certificate says these values are one object. It cannot say so
             // about two values that are read by one instruction, because that
             // instruction needs both at once. Where it does, the coalescing is
@@ -488,10 +514,13 @@ pub(super) fn binding_components_with(
                     );
                     continue;
                 }
-                if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
+                if class.is_err()
+                    || merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values)
+                {
                     r2il::refusal_evidence!(
                         "coalescing-declined",
-                        "entity {:?} members {values:?}: a member is live where another is written",
+                        "entity {:?} members {values:?}: a member is live where another is \
+                         written, or a split keeps them apart",
                         entity.id()
                     );
                     continue;
@@ -506,6 +535,7 @@ pub(super) fn binding_components_with(
                     live_by_root[find(&mut parent, first.0 as usize)] = None;
                 }
                 identity_by_root[find(&mut parent, first.0 as usize)] = joined;
+                class_by_root[find(&mut parent, first.0 as usize)] = class.ok().flatten();
                 r2il::refusal_evidence!(
                     "coalescing-union",
                     "entity {:?} members {values:?} identity {joined:?}",
@@ -520,9 +550,14 @@ pub(super) fn binding_components_with(
     }
 
     for (span, values) in &values_by_span {
-        let values = values.clone();
+        let values = values
+            .iter()
+            .copied()
+            .filter(|value| !splits.evicted(*value))
+            .collect::<BTreeSet<_>>();
         let span = *span;
         if values.len() > 1 {
+            let class = joined_class(&mut parent, &class_by_root, &values);
             // A storage span says these values share a machine location. That
             // is not on its own a licence to share a C object, and this asked
             // nothing before unioning: the certificate path below has always
@@ -539,7 +574,9 @@ pub(super) fn binding_components_with(
                 );
                 continue;
             }
-            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
+            if class.is_err()
+                || merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values)
+            {
                 r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
                 continue;
             }
@@ -552,6 +589,7 @@ pub(super) fn binding_components_with(
                 live_by_root[find(&mut parent, first.0 as usize)] = None;
             }
             identity_by_root[find(&mut parent, first.0 as usize)] = joined;
+            class_by_root[find(&mut parent, first.0 as usize)] = class.ok().flatten();
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
         }
     }
@@ -570,15 +608,20 @@ pub(super) fn binding_components_with(
             let Some(mates) = entity.coalescing_values() else {
                 continue;
             };
-            let Some(mate) = mates
-                .into_iter()
-                .find(|value| (value.0 as usize) < value_count && eligible[value.0 as usize])
-            else {
+            let Some(mate) = mates.into_iter().find(|value| {
+                (value.0 as usize) < value_count
+                    && eligible[value.0 as usize]
+                    && !splits.evicted(*value)
+            }) else {
                 continue;
             };
             for stored in stored_values.iter().copied() {
                 let index = stored.0 as usize;
-                if index >= value_count || !eligible[index] || literal_defined(stored) {
+                if index >= value_count
+                    || !eligible[index]
+                    || literal_defined(stored)
+                    || splits.evicted(stored)
+                {
                     continue;
                 }
                 if find(&mut parent, index) == find(&mut parent, mate.0 as usize) {
@@ -606,6 +649,7 @@ pub(super) fn binding_components_with(
                     continue;
                 }
                 let proposed = BTreeSet::from([stored, mate]);
+                let class = joined_class(&mut parent, &class_by_root, &proposed);
                 // A value that is already another object -- a parameter, a
                 // different slot -- was copied into this slot, not renamed by
                 // it. The conflict check below sees that only when the mate
@@ -629,7 +673,9 @@ pub(super) fn binding_components_with(
                     );
                     continue;
                 }
-                if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed) {
+                if class.is_err()
+                    || merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed)
+                {
                     r2il::refusal_evidence!(
                         "store-declined",
                         "{id:?} stored {stored:?} stays a copy"
@@ -646,6 +692,7 @@ pub(super) fn binding_components_with(
                 let root = find(&mut parent, mate.0 as usize);
                 live_by_root[root] = None;
                 identity_by_root[root] = Some(*id);
+                class_by_root[root] = class.ok().flatten();
                 certificate_sets.push((BindingCertificateSource::CertifiedEntity(*id), proposed));
             }
         }
@@ -657,13 +704,19 @@ pub(super) fn binding_components_with(
     for (span, literals) in literals_by_span {
         let Some(mate) = values_by_span
             .get(&span)
-            .and_then(|values| values.first().copied())
+            .and_then(|values| values.iter().copied().find(|value| !splits.evicted(*value)))
         else {
             continue;
         };
         for literal in literals {
+            if splits.evicted(literal) {
+                continue;
+            }
             let proposed = BTreeSet::from([literal, mate]);
-            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed) {
+            let class = joined_class(&mut parent, &class_by_root, &proposed);
+            if class.is_err()
+                || merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed)
+            {
                 r2il::refusal_evidence!(
                     "span-declined",
                     "{span:?} literal {literal:?} stays alone"
@@ -672,6 +725,7 @@ pub(super) fn binding_components_with(
             }
             union(&mut parent, &mut rank, &mut ring, mate, literal);
             live_by_root[find(&mut parent, mate.0 as usize)] = None;
+            class_by_root[find(&mut parent, mate.0 as usize)] = class.ok().flatten();
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), proposed));
         }
     }
@@ -923,7 +977,11 @@ impl BindingPlan {
     pub(crate) fn build_shadow(
         source_owned: &SourceOwnedFunctionFacts,
     ) -> Result<Self, BindingPlanBuildError> {
-        Self::build_shadow_with_control(source_owned, &r2ssa::SsaExecutionControl::default())
+        Self::build_shadow_with_control(
+            source_owned,
+            &BindingSplits::default(),
+            &r2ssa::SsaExecutionControl::default(),
+        )
     }
 
     /// The same plan, counting its work.
@@ -934,6 +992,7 @@ impl BindingPlan {
     /// almost nothing for the phase it most needed to bound.
     pub(crate) fn build_shadow_with_control(
         source_owned: &SourceOwnedFunctionFacts,
+        splits: &BindingSplits,
         control: &dyn r2ssa::SsaWorkControl,
     ) -> Result<Self, BindingPlanBuildError> {
         let source = source_owned.source();
@@ -977,7 +1036,7 @@ impl BindingPlan {
         // could only ever produce this same answer -- at the price of a whole
         // term arena per derivation, six per function before this.
         let partition =
-            super::rules::rewrite_inlining_partition(source_owned, &machine_projection)?;
+            super::rules::rewrite_inlining_partition(source_owned, &machine_projection, splits)?;
         crate::stage_timing::mark("plan_canonical");
         let canonical = &partition.canonical;
         // A value every reader stopped reading when the terms were rewritten is

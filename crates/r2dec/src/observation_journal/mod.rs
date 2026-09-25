@@ -1043,6 +1043,9 @@ enum NativePlacementFailure {
         count: usize,
     },
     RegionFinalization(crate::structured_region::StructuredRegionFinalizationError),
+    /// A rendered read does not see the value it stands for, and this is
+    /// how to split the variables so that it does.
+    StaleReads(Box<crate::binding_plan::ReachingRepair>),
 }
 
 fn region_marker_refusal(
@@ -1269,6 +1272,14 @@ impl From<NativePlacementFailure> for crate::PlacementAuditRefusal {
             },
             NativePlacementFailure::UndeclaredNames { count } => Self::UndeclaredNames { count },
             NativePlacementFailure::RegionFinalization(error) => region_marker_refusal(error),
+            NativePlacementFailure::StaleReads(repair) => Self::StaleRead {
+                value_index: repair
+                    .evict
+                    .first()
+                    .copied()
+                    .or_else(|| repair.unsplittable.first().map(|read| read.read.value))
+                    .map_or(0, |value| value.0 as usize),
+            },
         }
     }
 }
@@ -1317,6 +1328,21 @@ impl MarkedNativeDraft {
             |id| self.journal.placement_target(id),
         )
         .map_err(NativePlacementFailure::Analysis)?;
+        let repair = crate::placement::reaching_values(
+            source.source(),
+            &placement.regions,
+            &placement.names,
+            &occurrences,
+        );
+        if !repair.is_empty() {
+            r2il::refusal_evidence!(
+                "stale-read",
+                "evict {:?}; unsplittable {:?}",
+                repair.evict,
+                repair.unsplittable
+            );
+            return Err(NativePlacementFailure::StaleReads(Box::new(repair)));
+        }
         let mut externally_declared = BTreeSet::new();
         let mut entry_declared = BTreeSet::new();
         for (binding, _) in placement.names.plan().bindings() {
@@ -1471,15 +1497,43 @@ impl MarkedNativeDraft {
         clippy::result_large_err,
         reason = "the typed refusal retains the complete value/use/write ledger at the final audit boundary"
     )]
+    #[cfg(test)]
     pub(crate) fn finish_enforcing(
-        mut self,
+        self,
         source: &SourceOwnedFunctionFacts,
         recording_failure: Option<LegacyObservationJournalError>,
     ) -> Result<SealedNativeFunction, BindingShadowAuditFailure> {
-        let placement_failure = self
-            .derive_and_apply_placement(source)
-            .err()
-            .map(crate::PlacementAuditRefusal::from);
+        self.finish_splitting(source, recording_failure)
+            .map_err(|refusal| refusal.failure)
+    }
+
+    /// Seal the final native tree, handing back how to split the plan's
+    /// variables where a rendered read did not see its value.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the typed refusal retains the complete value/use/write ledger at the final audit boundary"
+    )]
+    pub(crate) fn finish_splitting(
+        mut self,
+        source: &SourceOwnedFunctionFacts,
+        recording_failure: Option<LegacyObservationJournalError>,
+    ) -> Result<SealedNativeFunction, NativeRefusal> {
+        let mut repair = None;
+        let placement_failure = match self.derive_and_apply_placement(source) {
+            Ok(()) => None,
+            Err(NativePlacementFailure::StaleReads(stale)) => {
+                let refusal = crate::PlacementAuditRefusal::from(
+                    NativePlacementFailure::StaleReads(stale.clone()),
+                );
+                repair = Some(stale);
+                Some(refusal)
+            }
+            Err(failure) => Some(crate::PlacementAuditRefusal::from(failure)),
+        };
+        let refuse = |failure| NativeRefusal {
+            failure,
+            repair: None,
+        };
         crate::stage_timing::mark("placement");
         let mut ready = prepare_function_for_emission(std::mem::replace(
             &mut self.function,
@@ -1487,9 +1541,9 @@ impl MarkedNativeDraft {
         ));
         let plan = Rc::clone(&self.journal.plan);
         if let Some(error) = recording_failure {
-            return Err(BindingShadowAuditFailure::JournalRecording(
+            return Err(refuse(BindingShadowAuditFailure::JournalRecording(
                 BindingObservationJournalFailure::from(&error),
-            ));
+            )));
         }
         // A placement that ran and refused is reported before the seal, because
         // it is the cause of the seal failure it produces rather than an
@@ -1505,7 +1559,10 @@ impl MarkedNativeDraft {
         if self.placement.is_some()
             && let Some(refusal) = placement_failure
         {
-            return Err(BindingShadowAuditFailure::Placement(refusal));
+            return Err(NativeRefusal {
+                failure: BindingShadowAuditFailure::Placement(refusal),
+                repair,
+            });
         }
         let regions = self.placement.as_ref().map(|placement| &placement.regions);
         let observations = match self
@@ -1514,28 +1571,33 @@ impl MarkedNativeDraft {
         {
             Ok(LegacyObservationSeal::Complete(observations)) => observations,
             Ok(LegacyObservationSeal::BindingFailure(error)) | Err(error) => {
-                return Err(BindingShadowAuditFailure::JournalSeal(
+                return Err(refuse(BindingShadowAuditFailure::JournalSeal(
                     BindingObservationJournalFailure::from(&error),
-                ));
+                )));
             }
         };
         if let Some(refusal) = placement_failure {
-            return Err(BindingShadowAuditFailure::Placement(refusal));
+            return Err(NativeRefusal {
+                failure: BindingShadowAuditFailure::Placement(refusal),
+                repair,
+            });
         }
         if let Some(placement) = self.placement.as_ref() {
             ready
                 .strip_structured_region_markers(&placement.regions)
                 .map_err(|error| {
-                    BindingShadowAuditFailure::Placement(crate::PlacementAuditRefusal::from(
-                        NativePlacementFailure::RegionFinalization(error),
+                    refuse(BindingShadowAuditFailure::Placement(
+                        crate::PlacementAuditRefusal::from(
+                            NativePlacementFailure::RegionFinalization(error),
+                        ),
                     ))
                 })?;
         }
         let coverage = observations.coverage();
         if !coverage.passes_quality() {
-            return Err(BindingShadowAuditFailure::NonQualityObservations {
+            return Err(refuse(BindingShadowAuditFailure::NonQualityObservations {
                 observations: coverage.into(),
-            });
+            }));
         }
         Ok(SealedNativeFunction {
             ready,
@@ -1547,6 +1609,14 @@ impl MarkedNativeDraft {
             plan,
         })
     }
+}
+
+/// Why the final native tree was not sealed, and, where a rendered read did
+/// not see its value, how to split the plan's variables so that it does.
+#[derive(Debug)]
+pub(crate) struct NativeRefusal {
+    pub(crate) failure: BindingShadowAuditFailure,
+    pub(crate) repair: Option<Box<crate::binding_plan::ReachingRepair>>,
 }
 
 /// Marker-free exact emission tree paired with the observations sealed from it.

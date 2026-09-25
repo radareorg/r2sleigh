@@ -95,9 +95,12 @@ pub struct RenderRefusalJson {
 ///
 /// The columns partition `total`: every obligation is in exactly one, so they
 /// sum to it. `residual` counts the obligations a residual in the text stands
-/// in for. `split`, `compiler_inserted` and `assumed` are the columns the
-/// reaching-values check, the compiler-inserted idioms and assumed arities
-/// answer into; nothing answers into them yet, so they are zero.
+/// in for. `split` counts the obligations rendered through a variable the
+/// reaching-values check split out of a shared one, so that every read sees
+/// the value it stands for; they are not also counted as `rendered`.
+/// `compiler_inserted` and `assumed` are the columns compiler-inserted idioms
+/// and assumed arities answer into; nothing answers into them yet, so they
+/// are zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct RenderProofJson {
     pub total: usize,
@@ -167,12 +170,15 @@ pub struct RenderedResidualJson {
 
 impl RenderProofJson {
     fn of(ledger: Option<&r2dec::ledger::ObligationLedger>) -> Self {
-        let Some(closure) = ledger.map(r2dec::ledger::ObligationLedger::close) else {
+        let Some(ledger) = ledger else {
             return Self::default();
         };
+        let closure = ledger.close();
+        let split = ledger.split_rendered();
         Self {
             total: closure.total,
-            rendered: closure.rendered,
+            rendered: closure.rendered - split,
+            split,
             elided: closure.elided,
             refused: closure.refused,
             residual: closure.gapped,

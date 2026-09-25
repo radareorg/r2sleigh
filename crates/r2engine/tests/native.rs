@@ -2527,6 +2527,62 @@ fn a_call_does_not_redefine_the_register_the_platform_reserves() {
     );
 }
 
+/// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
+/// `a` and `b` spilled to the frame and reloaded for each division.
+const DIVIDE_AFTER_RELOAD: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0x55, // 1004 push rbp
+    0x48, 0x89, 0xe5, // 1005 mov rbp, rsp
+    0x48, 0x89, 0x7d, 0xf8, // 1008 mov [rbp-8], rdi
+    0x48, 0x89, 0x75, 0xf0, // 100c mov [rbp-0x10], rsi
+    0x48, 0x83, 0x7d, 0xf0, 0x00, // 1010 cmp qword [rbp-0x10], 0
+    0x75, 0x07, // 1015 jne 0x101e
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 1017 mov eax, 0
+    0xeb, 0x27, // 101c jmp 0x1045
+    0x48, 0x8b, 0x55, 0xf8, // 101e mov rdx, [rbp-8]
+    0x48, 0x89, 0xd0, // 1022 mov rax, rdx
+    0x48, 0xc1, 0xe0, 0x03, // 1025 shl rax, 3
+    0x48, 0x29, 0xd0, // 1029 sub rax, rdx
+    0x48, 0x99, // 102c cqo
+    0x48, 0xf7, 0x7d, 0xf0, // 102e idiv qword [rbp-0x10]
+    0x48, 0x89, 0xc1, // 1032 mov rcx, rax
+    0x48, 0x8b, 0x45, 0xf8, // 1035 mov rax, [rbp-8]
+    0x48, 0x99, // 1039 cqo
+    0x48, 0xf7, 0x7d, 0xf0, // 103b idiv qword [rbp-0x10]
+    0x48, 0x89, 0xd0, // 103f mov rax, rdx
+    0x48, 0x01, 0xc8, // 1042 add rax, rcx
+    0x5d, // 1045 pop rbp
+    0xc3, // 1046 ret
+];
+
+/// The second division's dividend is `a` reloaded from its slot, and `cqo`
+/// then writes the reload's sign into `rdx`, which the slot's variable also
+/// holds. Read through that variable after the sign was written into it, the
+/// reload is stale: the remainder divided the sign word by `b` twice over and
+/// returned `a * 7 / b` plus nonsense. The reaching-values check sees the read
+/// and gives the reload a variable of its own, so the function computes what
+/// the machine does.
+#[test]
+fn a_reload_read_after_its_variable_is_overwritten_gets_a_variable_of_its_own() {
+    let text = rendered(DIVIDE_AFTER_RELOAD, "mul_div");
+    assert!(text.contains("through a split variable"), "{text}");
+    run_rendered(
+        "mul_div",
+        &text,
+        r#"int main(void) {
+    const int64_t cases[][2] = {{7, 3}, {-7, 3}, {100, -9}, {0, 5}, {5, 0}, {-1, 1}};
+    for (int i = 0; i < 6; i++) {
+        int64_t a = cases[i][0], b = cases[i][1];
+        int64_t want = b == 0 ? 0 : a * 7 / b + a % b;
+        if ((int64_t)mul_div((uint64_t)a, (uint64_t)b) != want) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
 /// `rbx` pushed and popped around a frame whose buffer is indexed by a byte
 /// nothing bounds below 0xf8: the index's reach covers the slot `rbx` is saved
 /// in, and the return address beyond it.

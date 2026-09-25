@@ -143,7 +143,7 @@ pub(crate) struct ValueElisionProof {
 }
 
 /// Typed reason that a value cannot be represented honestly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ValueRefusal {
     MissingBindingCertificate {
         value: ValueId,
@@ -1323,6 +1323,56 @@ struct BindingComponent {
     sources: BTreeSet<BindingCertificateSource>,
 }
 
+/// The values the partition keeps apart because a rendered read of one of
+/// them saw another value of its variable (`stale_reads`), and the partition
+/// they were taken from.
+///
+/// A partition built with these splits unions no evicted value with
+/// anything, and nothing that was apart in `previous`: so it refines
+/// `previous`, and each round of splitting only makes the partition finer.
+/// Every round evicts a value no earlier round did, so the rounds end.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BindingSplits {
+    evicted: BTreeSet<ValueId>,
+    /// The binding each value had when the latest split was asked for;
+    /// `u32::MAX` where it had none.
+    previous: Option<std::rc::Rc<[u32]>>,
+}
+
+impl BindingSplits {
+    /// Take `evict` out of `partition` as well. Whether that split anything
+    /// these splits had not.
+    pub(crate) fn split(
+        &mut self,
+        partition: std::rc::Rc<[u32]>,
+        evict: &BTreeSet<ValueId>,
+    ) -> bool {
+        if evict.is_subset(&self.evicted) {
+            return false;
+        }
+        self.evicted.extend(evict.iter().copied());
+        self.previous = Some(partition);
+        true
+    }
+
+    /// The values these splits took out of their variables.
+    pub(crate) fn evicted_values(&self) -> &BTreeSet<ValueId> {
+        &self.evicted
+    }
+
+    fn evicted(&self, value: ValueId) -> bool {
+        self.evicted.contains(&value)
+    }
+
+    /// The binding `value` had in the partition being refined.
+    fn previous_class(&self, value: usize) -> Option<u32> {
+        self.previous
+            .as_ref()
+            .and_then(|previous| previous.get(value).copied())
+            .filter(|class| *class != u32::MAX)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BindingWidth {
     Exact(u32),
@@ -1365,11 +1415,12 @@ pub(crate) enum UpstreamValueDisposition {
 
 /// Transient Stage 4 validation oracle.
 ///
-/// Every judgment here is deliberately re-derived from the exact source and no
-/// plan decision reaches it, so a wrong plan disposition is observable instead
-/// of validating itself. It is never retained by a [`BindingPlan`] or consumed
-/// by lowering; component membership is resolved by the sealing module's
-/// independent certificate walk.
+/// Every disposition here is deliberately re-derived from the exact source, so
+/// a wrong plan disposition is observable instead of validating itself. It is
+/// never retained by a [`BindingPlan`] or consumed by lowering. Component
+/// membership is the plan's partition: re-deriving it could only repeat the
+/// procedure that chose it, and the reaching-values check over the rendered
+/// text is what proves it.
 ///
 /// The machine projection it reads is borrowed from the plan rather than built
 /// again. It is derived from the source alone and `BindingPlan::validate_source`
@@ -1536,11 +1587,13 @@ impl BindingPlan {
     }
 }
 pub(crate) use seal::build_upstream_shadow_oracle;
+pub(crate) use seal::{
+    ElidedDefinition, ElidedSource, ReachingFacts, ReachingMerge, ReachingRepair, RenderedRead,
+    RenderedWrite, StaleRead, reaching_repair, stale_reads,
+};
 
 #[cfg(test)]
 use construction::binding_components;
-#[cfg(test)]
-use seal::seal_binding_components;
 impl BindingPlan {
     pub(crate) const fn machine_projection(&self) -> &MachineProjection {
         &self.machine_projection
@@ -1554,6 +1607,17 @@ impl BindingPlan {
 
     pub(crate) const fn partition(&self) -> &rules::RewriteInliningPartition {
         &self.partition
+    }
+
+    /// The binding each value is bound to, `u32::MAX` for none.
+    pub(crate) fn partition_classes(&self) -> std::rc::Rc<[u32]> {
+        self.dispositions
+            .iter()
+            .map(|disposition| match disposition {
+                ValueDisposition::Bound { binding } => binding.0,
+                _ => u32::MAX,
+            })
+            .collect()
     }
 
     pub(crate) fn binding(&self, id: BindingId) -> Option<&Binding> {

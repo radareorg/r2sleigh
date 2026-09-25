@@ -412,6 +412,7 @@ fn the_review_fixtures_are_units_that_compile() {
     // that does not answer does not hide the rest.
     let mut failures = Vec::new();
     let mut dispatch_at_o0 = false;
+    let mut split_at_o0 = false;
     let mut judged_at_o2 = BTreeSet::new();
     for build in ["rv_O0g", "rv_O2"] {
         let binary = fixtures.join(build);
@@ -435,6 +436,16 @@ fn the_review_fixtures_are_units_that_compile() {
                 judged_at_o2.insert(definition.to_owned());
                 failures.extend(unassigned_reads_at_o2(definition, &answer));
             }
+            // `mul_div` reloads `a` for its second division after `cqo` has
+            // written the first reload's sign into the variable `a` shares;
+            // the reload is read through a variable of its own, and the proof
+            // counts what that split renders.
+            if build == "rv_O0g" && definition == "mul_div" {
+                split_at_o0 = true;
+                if answer["proof"]["split"].as_u64().unwrap_or_default() == 0 {
+                    failures.push(format!("{build} mul_div splits nothing: {answer}"));
+                }
+            }
             if build == "rv_O0g" && definition == "dispatch" {
                 dispatch_at_o0 = true;
                 if !dispatch_marks_its_unproven_return(&answer) {
@@ -444,6 +455,7 @@ fn the_review_fixtures_are_units_that_compile() {
         }
     }
     assert!(dispatch_at_o0, "rv_O0g has no dispatch");
+    assert!(split_at_o0, "rv_O0g has no mul_div");
     assert_eq!(
         judged_at_o2,
         BTreeSet::from(["main".to_owned(), "sext".to_owned()]),

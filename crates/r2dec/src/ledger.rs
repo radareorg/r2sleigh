@@ -14,7 +14,7 @@
 //! counts and they sum to the total by construction, so the gap that used to be
 //! silent is now a number with a name on it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +307,9 @@ impl LedgerClosure {
 pub struct ObligationLedger {
     outcomes: BTreeMap<SemanticObligationId, Outcome>,
     conflicts: BTreeMap<SemanticObligationId, usize>,
+    /// Obligations of definitions whose values were split out of a shared
+    /// variable, so that every rendered read sees the value it stands for.
+    split: BTreeSet<SemanticObligationId>,
 }
 
 impl ObligationLedger {
@@ -323,6 +326,7 @@ impl ObligationLedger {
                 .map(|id| (id, Outcome::Unattributed))
                 .collect(),
             conflicts: BTreeMap::new(),
+            split: BTreeSet::new(),
         }
     }
 
@@ -350,6 +354,22 @@ impl ObligationLedger {
     /// has one owner for every source cell. The conflict is an independent
     /// admission failure, keyed by that same canonical source identity so a
     /// refusal can name where the incompatible answers occurred.
+    /// Name the obligations of definitions split out of a shared variable.
+    pub fn mark_split(&mut self, ids: impl IntoIterator<Item = SemanticObligationId>) {
+        self.split
+            .extend(ids.into_iter().filter(|id| self.outcomes.contains_key(id)));
+    }
+
+    /// How many rendered obligations the text discharges through a variable
+    /// split out of a shared one: rendered, and rendered only because the
+    /// reaching-values check split them.
+    pub fn split_rendered(&self) -> usize {
+        self.split
+            .iter()
+            .filter(|id| matches!(self.outcomes.get(id), Some(Outcome::Rendered { .. })))
+            .count()
+    }
+
     pub fn record_conflict(&mut self, id: SemanticObligationId) -> Record {
         let Some(existing) = self.outcomes.get(&id).copied() else {
             return Record::Unknown;
