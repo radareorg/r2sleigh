@@ -1996,6 +1996,14 @@ impl FunctionFacts {
                 declined("no member covers exactly that offset and width");
                 continue;
             };
+            // Only a scalar is what one access reads or writes. A member that
+            // is an array or a record is bytes to a scalar access -- `c.tag`
+            // written by one eight-byte store is not an assignment C has --
+            // and a bit-field is fewer bits than any access.
+            if !member_is_scalar_leaf(graph, member) {
+                declined("the member is not one scalar the access reads whole");
+                continue;
+            }
             r2il::refusal_evidence!(
                 "member-access-named",
                 "object={:?} offset_bits={offset_bits} width={} aggregate={} member={}",

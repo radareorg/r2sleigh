@@ -67,6 +67,9 @@ fn a_declared_array_and_a_declared_struct_are_one_object_each() {
     }
     // One array, not four scalars that happen to sit together.
     assert!(!out.contains("stack_m196"), "{out}");
+    // `c.tag` is `char tag[8]`, which one eight-byte store does not assign
+    // in C; the store is bytes of `c`, not a member.
+    assert!(!out.contains("c.tag ="), "{out}");
 }
 
 /// The review fixture's globals are typed by their DWARF: they rendered as

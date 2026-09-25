@@ -997,6 +997,26 @@ pub(crate) fn parameter_pointee_type(
     }
 }
 
+/// Whether a member is one scalar of its own whole width: what a single
+/// access can read or write by name.
+pub(crate) fn member_is_scalar_leaf(
+    graph: &r2ssa::SourceTypeGraph,
+    member: &r2ssa::SourceAggregateMember,
+) -> bool {
+    let Some(ty) = graph.types().get(member.type_id() as usize) else {
+        return false;
+    };
+    !member.is_bit_field()
+        && ty.size_bits() == member.size_bits()
+        && matches!(
+            ty.kind(),
+            r2ssa::SourceTypeKind::SignedInteger
+                | r2ssa::SourceTypeKind::UnsignedInteger
+                | r2ssa::SourceTypeKind::Float
+                | r2ssa::SourceTypeKind::Pointer { .. }
+        )
+}
+
 pub(crate) fn aggregate_layout_for_type(
     graph: &r2ssa::SourceTypeGraph,
     type_id: u32,
