@@ -323,9 +323,17 @@ impl<S: Source> OpenProgram<S> {
         let bits = container.arch.bits;
         let conventions = r2abi::Conventions::for_arch(key.0.as_str(), bits)
             .ok_or_else(|| format!("no calling conventions for {} {bits}", key.0))?;
-        let call_effect = conventions
-            .default_convention()
-            .and_then(|convention| crate::native::call_effect(&machine.arch, convention));
+        // The format says which platform's ABI applies beyond the convention:
+        // which register it reserves for the thread pointer, and which control
+        // registers it makes callee-saved.
+        let platform = match container.format {
+            Format::Elf => r2abi::Platform::Linux,
+            Format::MachO => r2abi::Platform::Darwin,
+            Format::Other => r2abi::Platform::Unknown,
+        };
+        let call_effect = conventions.default_convention().and_then(|convention| {
+            crate::native::call_effect(&machine.arch, bits, platform, convention)
+        });
         let compiler = r2abi::CompilerSpec::parse(machine.compiler_spec);
         // The specification names the register; the architecture says where it
         // lives, and the lift spells writes to it in those coordinates.
@@ -355,11 +363,7 @@ impl<S: Source> OpenProgram<S> {
             });
         // The format says which platform's own declarations apply: `_Exit` is
         // declared by the platform, not by the table every target shares.
-        let mut prototypes = r2abi::Prototypes::embedded_for(match container.format {
-            Format::Elf => r2abi::Platform::Linux,
-            Format::MachO => r2abi::Platform::Darwin,
-            Format::Other => r2abi::Platform::Unknown,
-        });
+        let mut prototypes = r2abi::Prototypes::embedded_for(platform);
         // What the binary's own debug information says beats the shared table:
         // the table describes what a library is expected to look like, and
         // this describes what this one is.

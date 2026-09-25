@@ -3694,6 +3694,47 @@ mod tests {
         }));
     }
 
+    /// A register the platform reserves to the system survives every call
+    /// without being preserved: no callee writes it, so the call is not a
+    /// definition of it, and a register named both reserved and clobbered is a
+    /// contradiction like one named clobbered and preserved.
+    #[test]
+    fn a_reserved_register_is_neither_clobbered_nor_preserved() {
+        let effect =
+            SourceCallEffect::new([register_storage(0x00, 8)], [register_storage(0x18, 8)])
+                .and_then(|effect| effect.with_system_reserved([register_storage(0x110, 8)]))
+                .expect("a call effect");
+        assert_eq!(
+            effect.effect_on(register_storage(0x110, 8)),
+            SourceCallRegisterEffect::SystemReserved
+        );
+        assert_eq!(
+            effect.effect_on(register_storage(0x110, 4)),
+            SourceCallRegisterEffect::SystemReserved
+        );
+        assert!(!effect.clobbers(register_storage(0x110, 8)));
+        assert!(!effect.preserves(register_storage(0x110, 8)));
+        assert!(effect.reserves(register_storage(0x110, 8)));
+        assert_eq!(
+            effect.effect_on(register_storage(0x18, 8)),
+            SourceCallRegisterEffect::Preserved
+        );
+        // Reserved and preserved together still leave a byte neither covers clobbered.
+        assert_eq!(
+            effect.effect_on(register_storage(0x10c, 8)),
+            SourceCallRegisterEffect::Clobbered
+        );
+        assert_eq!(
+            effect.effect_on(register_storage(0x00, 8)),
+            SourceCallRegisterEffect::Clobbered
+        );
+        assert_eq!(
+            SourceCallEffect::new([register_storage(0x110, 8)], [])
+                .and_then(|effect| effect.with_system_reserved([register_storage(0x114, 4)])),
+            Err(SourceMachineRolesError::ContradictoryCallEffect)
+        );
+    }
+
     /// One register named both clobbered and preserved, even through an alias, is a contradiction.
     #[test]
     fn a_call_effect_naming_one_register_both_ways_refuses() {
@@ -3765,12 +3806,28 @@ impl SourceCallPreservedCarriers {
     }
 }
 
-/// What a call does to the registers: one the convention preserves survives it, and no other does.
+/// What a call does to one register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceCallRegisterEffect {
+    /// The call may leave it holding anything.
+    Clobbered,
+    /// The callee may change it and restores it before it returns.
+    Preserved,
+    /// The platform reserves it to the system: conforming code never writes
+    /// it, so it holds across the call the one value it held before. The
+    /// thread pointer is the example every platform has.
+    SystemReserved,
+}
+
+/// What a call does to the registers: one the convention preserves survives it,
+/// one the platform reserves to the system is never touched by it, and every
+/// other may come back changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceCallEffect {
     /// Also what a callee's body is asked to prove it leaves alone.
     clobbered: Box<[CanonicalStorageId]>,
     preserved: Box<[CanonicalStorageId]>,
+    system_reserved: Box<[CanonicalStorageId]>,
 }
 
 impl SourceCallEffect {
@@ -3779,14 +3836,8 @@ impl SourceCallEffect {
         clobbered: impl IntoIterator<Item = CanonicalStorageId>,
         preserved: impl IntoIterator<Item = CanonicalStorageId>,
     ) -> Result<Self, SourceMachineRolesError> {
-        let sorted = |storages: Vec<CanonicalStorageId>| {
-            let mut storages = storages;
-            storages.sort_unstable();
-            storages.dedup();
-            storages.into_boxed_slice()
-        };
-        let clobbered = sorted(clobbered.into_iter().collect());
-        let preserved = sorted(preserved.into_iter().collect());
+        let clobbered = sorted_storages(clobbered);
+        let preserved = sorted_storages(preserved);
         if clobbered
             .iter()
             .chain(preserved.iter())
@@ -3794,16 +3845,40 @@ impl SourceCallEffect {
         {
             return Err(SourceMachineRolesError::InvalidRegisterStorage);
         }
-        if clobbered.iter().any(|clobbered| {
-            preserved
-                .iter()
-                .any(|preserved| register_storages_overlap(*clobbered, *preserved))
-        }) {
+        if storage_sets_overlap(&clobbered, &preserved) {
             return Err(SourceMachineRolesError::ContradictoryCallEffect);
         }
         Ok(Self {
             clobbered,
             preserved,
+            system_reserved: Box::default(),
+        })
+    }
+
+    /// The same effect, with the registers the platform reserves to the system.
+    ///
+    /// A reserved register named clobbered or preserved as well is a
+    /// contradiction: the three answers are exclusive, and a register the
+    /// convention says a callee may destroy is not one no callee writes.
+    pub fn with_system_reserved(
+        self,
+        system_reserved: impl IntoIterator<Item = CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let system_reserved = sorted_storages(system_reserved);
+        if system_reserved
+            .iter()
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        if storage_sets_overlap(&system_reserved, &self.clobbered)
+            || storage_sets_overlap(&system_reserved, &self.preserved)
+        {
+            return Err(SourceMachineRolesError::ContradictoryCallEffect);
+        }
+        Ok(Self {
+            system_reserved,
+            ..self
         })
     }
 
@@ -3817,32 +3892,80 @@ impl SourceCallEffect {
         &self.preserved
     }
 
+    /// The registers the platform reserves to the system, sorted.
+    pub const fn system_reserved(&self) -> &[CanonicalStorageId] {
+        &self.system_reserved
+    }
+
+    /// What a call does to a storage.
+    ///
+    /// Reserved when every byte lies in reserved registers, preserved when
+    /// every byte lies in preserved ones, and clobbered otherwise: a storage
+    /// only partly covered may come back changed in the part that is not.
+    pub fn effect_on(&self, storage: CanonicalStorageId) -> SourceCallRegisterEffect {
+        if covers_every_byte(&self.system_reserved, storage) {
+            SourceCallRegisterEffect::SystemReserved
+        } else if covers_every_byte(&self.preserved, storage) {
+            SourceCallRegisterEffect::Preserved
+        } else {
+            SourceCallRegisterEffect::Clobbered
+        }
+    }
+
     /// Whether every byte of a storage lies in registers the convention preserves.
     pub fn preserves(&self, storage: CanonicalStorageId) -> bool {
-        let Some(end) = storage.offset.checked_add(u64::from(storage.size)) else {
-            return false;
-        };
-        if storage.space != CanonicalStorageSpace::Register || storage.size == 0 {
-            return false;
-        }
-        // One sweep over the preserved ranges in offset order, extending the covered prefix.
-        let mut covered = storage.offset;
-        for preserved in &self.preserved {
-            if preserved.offset > covered {
-                return false;
-            }
-            covered = covered.max(preserved.offset + u64::from(preserved.size));
-            if covered >= end {
-                return true;
-            }
-        }
-        false
+        self.effect_on(storage) == SourceCallRegisterEffect::Preserved
+    }
+
+    /// Whether every byte of a storage lies in registers the platform reserves.
+    pub fn reserves(&self, storage: CanonicalStorageId) -> bool {
+        self.effect_on(storage) == SourceCallRegisterEffect::SystemReserved
     }
 
     /// Whether a call may leave this storage changed.
     pub fn clobbers(&self, storage: CanonicalStorageId) -> bool {
-        !self.preserves(storage)
+        self.effect_on(storage) == SourceCallRegisterEffect::Clobbered
     }
+}
+
+fn sorted_storages(
+    storages: impl IntoIterator<Item = CanonicalStorageId>,
+) -> Box<[CanonicalStorageId]> {
+    let mut storages = storages.into_iter().collect::<Vec<_>>();
+    storages.sort_unstable();
+    storages.dedup();
+    storages.into_boxed_slice()
+}
+
+fn storage_sets_overlap(left: &[CanonicalStorageId], right: &[CanonicalStorageId]) -> bool {
+    left.iter().any(|left| {
+        right
+            .iter()
+            .any(|right| register_storages_overlap(*left, *right))
+    })
+}
+
+/// Whether every byte of a register storage lies in `ranges`, sorted by offset.
+///
+/// One sweep over the ranges in offset order, extending the covered prefix.
+fn covers_every_byte(ranges: &[CanonicalStorageId], storage: CanonicalStorageId) -> bool {
+    let Some(end) = storage.offset.checked_add(u64::from(storage.size)) else {
+        return false;
+    };
+    if storage.space != CanonicalStorageSpace::Register || storage.size == 0 {
+        return false;
+    }
+    let mut covered = storage.offset;
+    for range in ranges {
+        if range.offset > covered {
+            return false;
+        }
+        covered = covered.max(range.offset + u64::from(range.size));
+        if covered >= end {
+            return true;
+        }
+    }
+    false
 }
 
 /// Where the calling convention would place arguments and the result.

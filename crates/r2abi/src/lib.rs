@@ -11,9 +11,11 @@
 //! a convention is spelled `cc.<name>.<what>`.
 
 pub mod compiler_spec;
+pub mod platform;
 pub mod prototypes;
 
 pub use compiler_spec::CompilerSpec;
+pub use platform::{PlatformRegister, RegisterDuty, platform_registers};
 pub use prototypes::{
     FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
     dwarf_frame_register,

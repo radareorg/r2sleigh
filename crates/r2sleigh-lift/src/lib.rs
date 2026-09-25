@@ -41,6 +41,7 @@ pub use disasm::{
 };
 pub use disasm::{
     EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
+    lifted_register_storage,
 };
 pub use esil::{OpEsil, block_to_esil, format_op, op_esil, op_to_esil};
 use r2il::ArchSpec;

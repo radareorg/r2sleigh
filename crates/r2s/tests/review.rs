@@ -99,3 +99,32 @@ fn an_address_in_read_only_data_is_no_function() {
         assert!(!run.out.contains("xor eax"), "{script}: {}", run.out);
     }
 }
+
+/// Every `FS_OFFSET_<n>` a rendering names.
+fn thread_pointer_versions(text: &str) -> std::collections::BTreeSet<String> {
+    text.match_indices("FS_OFFSET_")
+        .map(|(at, _)| {
+            text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn both_canary_reads_go_through_the_thread_pointer_the_function_entered_with() {
+    // `main` reads the stack-protector canary through %fs at entry and again
+    // before it returns, with a dozen calls in between. The platform reserves
+    // %fs to the system, so no call redefines it: before that was read, the
+    // second load named `FS_OFFSET_15`, a register the calls "defined" and
+    // nothing ever assigned.
+    let run = bounded("pdd @ sym.main");
+    assert!(run.ok, "{}", run.out);
+    assert_eq!(
+        thread_pointer_versions(&run.out),
+        std::collections::BTreeSet::from(["FS_OFFSET_0".to_owned()]),
+        "{}",
+        run.out
+    );
+}

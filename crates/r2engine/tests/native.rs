@@ -2,11 +2,11 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{CompilerSpec, Conventions, Prototypes};
+use r2abi::{CompilerSpec, Conventions, Platform, Prototypes};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
 use r2source::SourceCallEffect;
@@ -68,13 +68,21 @@ struct Machine {
 
 impl Machine {
     fn new(sleigh: &str, family: &str, bits: u32) -> Self {
+        Self::on(sleigh, family, bits, Platform::Unknown)
+    }
+
+    /// The machine as a platform's ABI describes it, beyond its conventions.
+    fn on(sleigh: &str, family: &str, bits: u32, platform: Platform) -> Self {
         let embedded = r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine");
         let conventions = Conventions::for_arch(family, bits).expect("conventions");
         let effects = conventions
             .names()
             .map(|name| {
                 let convention = conventions.get(name).expect("named convention");
-                (name.to_owned(), call_effect(&embedded.arch, convention))
+                (
+                    name.to_owned(),
+                    call_effect(&embedded.arch, bits, platform, convention),
+                )
             })
             .collect();
         let compiler = CompilerSpec::parse(embedded.compiler_spec);
@@ -2458,5 +2466,63 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
     assert!(
         text.contains(&format!(", {} residual;", effects.gapped)),
         "{text}"
+    );
+}
+
+/// A stack-protector check around a call: the canary is read through the
+/// thread pointer before the call and again after it.
+const CANARY_AROUND_A_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp+8], rax
+    0xe8, 0x19, 0x00, 0x00, 0x00, // 1012 call 0x1030
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1017 mov rax, [rsp+8]
+    0x64, 0x48, 0x2b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 101c sub rax, fs:[0x28]
+    0x48, 0x83, 0xc4, 0x18, // 1025 add rsp, 0x18
+    0xc3, // 1029 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 102a padding
+    0x31, 0xc0, // 1030 xor eax, eax
+    0xc3, // 1032 ret
+];
+
+/// Every `FS_OFFSET_<n>` a rendering names.
+fn thread_pointer_versions(text: &str) -> BTreeSet<String> {
+    text.match_indices("FS_OFFSET_")
+        .map(|(at, _)| {
+            text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// The platform reserves the thread pointer to the system, so no call is a
+/// definition of it: both reads of the canary go through the one value the
+/// function entered with. The convention's lists say nothing about `fs`, and
+/// before the platform's table was read the call redefined it, so the second
+/// read named a register nothing ever assigned.
+#[test]
+fn a_call_does_not_redefine_the_register_the_platform_reserves() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: CANARY_AROUND_A_CALL.to_vec(),
+        name: "canary",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    assert_eq!(
+        thread_pointer_versions(response.output.text()),
+        BTreeSet::from(["FS_OFFSET_0".to_owned()]),
+        "{}",
+        response.output
+    );
+    // Without the platform the convention alone decides, and it calls the
+    // register clobbered: that is the precision the table buys.
+    let unknown = Machine::new("x86-64", "x86-64", 64);
+    let without = decompile(&unknown.target(), &program, BASE).expect("decompile");
+    assert!(
+        thread_pointer_versions(without.output.text()).contains("FS_OFFSET_1"),
+        "{}",
+        without.output
     );
 }

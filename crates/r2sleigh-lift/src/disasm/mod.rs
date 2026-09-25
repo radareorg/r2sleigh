@@ -300,19 +300,42 @@ fn register_storages_are_disjoint(first: CanonicalStorageId, second: CanonicalSt
         })
 }
 
+/// The registers radare2 and the Sleigh specifications name differently, and
+/// not only in case.
+///
+/// radare2 takes an x86 segment base's name from the operating system's
+/// register file (`fs_base`, as `struct user_regs_struct` spells it), and the
+/// x87 control word's from the FXSAVE image (`cwd`); Sleigh names the first by
+/// its role in forming an address (`FS_OFFSET`, what `segWide` exports for an
+/// `fs:` override) and the second in full. Each row is one register under two
+/// names, checked against both specifications, not a pattern.
+const SOURCE_SPELLINGS: &[(&str, &str)] = &[
+    ("fs_base", "FS_OFFSET"),
+    ("gs_base", "GS_OFFSET"),
+    ("cwd", "FPUControlWord"),
+];
+
 /// Where the lifted architecture puts the register the source named.
 ///
 /// Spelling differs between the two: radare2 writes x86 register names in lower
 /// case where the Sleigh specification writes them in upper case, and that is a
 /// difference in spelling, not in register. Case is therefore folded, and
-/// nothing else is: a name the architecture does not define resolves to
-/// nothing, because placing an unrecognised carrier by guesswork is how a
-/// carrier ends up at another register's offset.
-fn arch_register_storage(arch: &r2il::ArchSpec, name: &str) -> Option<CanonicalStorageId> {
-    let register = arch
-        .get_register(name)
-        .or_else(|| arch.get_register(&name.to_ascii_uppercase()))
-        .or_else(|| arch.get_register(&name.to_ascii_lowercase()))?;
+/// beyond that only the registers `SOURCE_SPELLINGS` lists are renamed: a name
+/// the architecture does not define resolves to nothing, because placing an
+/// unrecognised carrier by guesswork is how a carrier ends up at another
+/// register's offset.
+pub fn lifted_register_storage(arch: &r2il::ArchSpec, name: &str) -> Option<CanonicalStorageId> {
+    let lookup = |name: &str| {
+        arch.get_register(name)
+            .or_else(|| arch.get_register(&name.to_ascii_uppercase()))
+            .or_else(|| arch.get_register(&name.to_ascii_lowercase()))
+    };
+    let register = lookup(name).or_else(|| {
+        SOURCE_SPELLINGS
+            .iter()
+            .find(|(source, _)| source.eq_ignore_ascii_case(name))
+            .and_then(|(_, lifted)| lookup(lifted))
+    })?;
     Some(CanonicalStorageId {
         space: r2source::CanonicalStorageSpace::Register,
         offset: register.offset,
@@ -332,7 +355,7 @@ fn arch_resolved_source(
     source: OwnedFunctionSnapshot,
     arch: &r2il::ArchSpec,
 ) -> Result<OwnedFunctionSnapshot> {
-    let resolve = |name: Option<&str>| name.and_then(|name| arch_register_storage(arch, name));
+    let resolve = |name: Option<&str>| name.and_then(|name| lifted_register_storage(arch, name));
     let interface = match source.function_interface() {
         Some(interface) => {
             let names = interface.role_register_names();

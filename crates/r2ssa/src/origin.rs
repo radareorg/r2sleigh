@@ -182,7 +182,7 @@ impl BlockOrigins {
     pub fn step_under(&mut self, op: &R2ILOp, call_effect: Option<&crate::SourceCallEffect>) {
         match (op, call_effect) {
             (R2ILOp::Call { .. } | R2ILOp::CallInd { .. }, Some(effect)) => {
-                self.origins.retain(|storage, _| effect.preserves(*storage));
+                self.origins.retain(|storage, _| !effect.clobbers(*storage));
             }
             _ => self.step(op),
         }

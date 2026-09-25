@@ -2520,53 +2520,86 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
     })
 }
 
-/// What a convention says a call does here; a name the arch lacks costs precision, never soundness.
-pub fn call_effect(arch: &ArchSpec, convention: &Convention) -> Option<SourceCallEffect> {
+/// What a call does here: what the convention says it destroys and restores,
+/// and what the platform's ABI adds -- the registers it reserves to the system
+/// and the control registers it makes callee-saved.
+///
+/// Every name is placed by the lifter's register naming, the one owner of
+/// where the lifted architecture puts a register the source spells. A name the
+/// arch lacks costs precision, never soundness: an unplaced preserved or
+/// reserved register reads as clobbered by every call.
+pub fn call_effect(
+    arch: &ArchSpec,
+    bits: u32,
+    platform: r2abi::Platform,
+    convention: &Convention,
+) -> Option<SourceCallEffect> {
     if convention.clobbered.is_empty() && convention.preserved.is_empty() {
         return None;
     }
-    // One sorted index, so each name is placed in `O(log R)`.
-    let mut named = BTreeMap::<String, Option<CanonicalStorageId>>::new();
-    for register in arch.registers.iter().filter(|register| {
-        register.size != 0
-            && register
-                .offset
-                .checked_add(u64::from(register.size))
-                .is_some()
-    }) {
-        let storage = CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset: register.offset,
-            size: register.size,
-        };
-        named
-            .entry(register.name.trim().to_ascii_lowercase())
-            .and_modify(|placed| *placed = None)
-            .or_insert(Some(storage));
-    }
-    let place = |names: &[String]| {
-        names
-            .iter()
-            .filter_map(|name| {
-                let placed = named.get(&name.to_ascii_lowercase()).copied().flatten();
-                if placed.is_none() {
-                    r2il::refusal_evidence!(
-                        "call-effect",
-                        "{}: {} names no single register of {}",
-                        convention.name,
-                        name,
-                        arch.name
-                    );
-                }
-                placed
-            })
-            .collect::<Vec<_>>()
+    let place = |name: &str| {
+        let placed =
+            r2sleigh_lift::lifted_register_storage(arch, name).filter(|storage| storage.size != 0);
+        if placed.is_none() {
+            r2il::refusal_evidence!(
+                "call-effect",
+                "{}: {} names no single register of {}",
+                convention.name,
+                name,
+                arch.name
+            );
+        }
+        placed
     };
-    SourceCallEffect::new(place(&convention.clobbered), place(&convention.preserved))
-        .inspect_err(|error| {
-            r2il::refusal_evidence!("call-effect", "{}: {error:?}", convention.name);
-        })
-        .ok()
+    let mut preserved = convention
+        .preserved
+        .iter()
+        .filter_map(|name| place(name))
+        .collect::<Vec<_>>();
+    let mut system_reserved = Vec::new();
+    for row in r2abi::platform_registers(&arch.name, bits, platform) {
+        let Some(storage) = place(row.register) else {
+            continue;
+        };
+        let into = match row.duty {
+            r2abi::RegisterDuty::SystemReserved => &mut system_reserved,
+            r2abi::RegisterDuty::CalleeSaved => &mut preserved,
+        };
+        into.extend(covered_runs(storage, row));
+    }
+    SourceCallEffect::new(
+        convention.clobbered.iter().filter_map(|name| place(name)),
+        preserved,
+    )
+    .and_then(|effect| effect.with_system_reserved(system_reserved))
+    .inspect_err(|error| {
+        r2il::refusal_evidence!("call-effect", "{}: {error:?}", convention.name);
+    })
+    .ok()
+}
+
+/// The runs of whole bytes of `storage` a platform row's duty covers.
+///
+/// A row that speaks for the whole register is the register; one that speaks
+/// for some of its bits claims only the bytes those bits fill, each run of
+/// adjacent ones as one storage.
+fn covered_runs(
+    storage: CanonicalStorageId,
+    row: &r2abi::PlatformRegister,
+) -> Vec<CanonicalStorageId> {
+    let mut runs = Vec::<CanonicalStorageId>::new();
+    for byte in row.covered_bytes(storage.size) {
+        let offset = storage.offset + u64::from(byte);
+        match runs.last_mut() {
+            Some(run) if run.offset + u64::from(run.size) == offset => run.size += 1,
+            _ => runs.push(CanonicalStorageId {
+                space: storage.space,
+                offset,
+                size: 1,
+            }),
+        }
+    }
+    runs
 }
 
 /// The machine tuple the trusted lift selects a Sleigh profile by.

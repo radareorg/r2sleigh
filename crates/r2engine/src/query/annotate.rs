@@ -512,11 +512,11 @@ fn op_fate(
     let (held, built) = (reads(holders), reads(derived));
     match op {
         R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
-            // A register the convention does not preserve no longer holds the number.
+            // A register the call may change no longer holds the number.
             holders.retain(|held| {
                 call_effect.is_none_or(|effect| {
                     held.space != SpaceId::Register
-                        || effect.preserves(CanonicalStorageId::from_varnode(held))
+                        || !effect.clobbers(CanonicalStorageId::from_varnode(held))
                 })
             });
             return built.then_some(Fate::Step);

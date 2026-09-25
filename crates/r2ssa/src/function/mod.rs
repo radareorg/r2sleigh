@@ -2987,10 +2987,20 @@ fn decompile_call_boundary_config(
         return Ok(None);
     };
     // A body that never calls has no call to clobber anything.
+    // What a call keeps is what the convention preserves and what the
+    // platform reserves to the system alike: neither is a definition the call
+    // makes, so both are gaps in any wider root it does write.
     let (clobbered, preserved) = match machine_context.call_effect().filter(|_| calls) {
         Some(effect) => (
             machine_context.call_clobbered_carriers().to_vec(),
-            effect.preserved().to_vec(),
+            effect
+                .preserved()
+                .iter()
+                .chain(effect.system_reserved())
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         ),
         None => (Vec::new(), Vec::new()),
     };
