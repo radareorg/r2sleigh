@@ -1923,6 +1923,48 @@ fn an_unmodelled_user_operation_is_refused_by_name() {
     );
 }
 
+/// `tzcnt rax, rdi; ret`, and `mov rax, rsi; bsf rax, rdi; ret`.
+///
+/// Both are p-code loops in the specification. TZCNT counts the width at
+/// zero; BSF writes nothing the machine defines at zero, and the destination
+/// keeps what the `mov` put there.
+const TRAILING_ZEROS: &[u8] = &[
+    0xf3, 0x48, 0x0f, 0xbc, 0xc7, // tzcnt rax, rdi
+    0xc3, // ret
+];
+const LOWEST_SET_BIT: &[u8] = &[
+    0x48, 0x89, 0xf0, // mov rax, rsi
+    0x48, 0x0f, 0xbc, 0xc7, // bsf rax, rdi
+    0xc3, // ret
+];
+
+/// A bit scan is lifted as the count it computes, not as a loop the renderer
+/// cannot follow, so functions using `tzcnt` and `bsf` render, and compute
+/// what the machine does at every source, zero included.
+#[test]
+fn a_bit_scan_renders_as_the_count_it_computes() {
+    let trailing = rendered(TRAILING_ZEROS, "trailing");
+    let lowest = rendered(LOWEST_SET_BIT, "lowest");
+    run_rendered(
+        "bit_scan",
+        &format!("{trailing}\n{lowest}"),
+        r#"int main(void) {
+    const uint64_t cases[] = {0, 1, 2, 0x80, 0x100, 0x8000000000000000ull, 0x0123456789abcde0ull, ~0ull};
+    for (int i = 0; i < 8; i++) {
+        uint64_t x = cases[i];
+        uint64_t count = x ? (uint64_t)__builtin_ctzll(x) : 64;
+        if (trailing(x) != count) {
+            return 1 + i;
+        }
+        if (lowest(x, 0x5a5a5a5a5a5a5a5aull) != (x ? count : 0x5a5a5a5a5a5a5a5aull)) {
+            return 10 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
 /// `vpxor` of two 256-bit loads, whose high half is read back:
 ///
 /// ```text

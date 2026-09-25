@@ -1,4 +1,4 @@
-//! Every instruction-local loop the lift unrolls computes what the
+//! Every instruction-local loop the lift rewrites computes what the
 //! specification's own p-code loop computes.
 //!
 //! Each instruction is taken twice from the same bytes: as Sleigh's p-code,
@@ -6,8 +6,13 @@
 //! the lift gives it, which has none left. Both run through `r2il::eval`, the
 //! engine's one statement of what each operation computes, from the same
 //! state, and every register either writes and every byte either stores must
-//! agree, on every single bit, every run of low and of high bits, and
-//! pseudo-random values.
+//! agree. The 16-bit scans are run on every source; the wider forms on every
+//! single bit, every run of low and of high bits, and pseudo-random values.
+//!
+//! The one place the rewrite departs from the specification is stated and
+//! checked on its own: where BSF's or BSR's source is zero, the specification
+//! writes the loop's starting index, which no documentation gives, and the
+//! lift keeps the destination as it was instead.
 #![cfg(feature = "x86")]
 
 use super::*;
@@ -18,7 +23,7 @@ use r2il::eval::{AccessKind, Flow, Mapped, State, step};
 const AT: u64 = 0x1000;
 /// Where `[rbp - 0x20]` points in the memory forms.
 const FRAME: u64 = 0x8000;
-/// What the destination holds before every run.
+/// What the destination holds before every run: no count any scan produces.
 const OLD_DESTINATION: u128 = 0x5a5a_5a5a_5a5a_5a5a;
 
 /// Each register either program writes, and each store, in order.
@@ -194,6 +199,117 @@ fn samples(bits: u32) -> Vec<u128> {
         values.push(wide & mask);
     }
     values
+}
+
+/// One scan instruction: its bytes, the operand width, and whether it is BSF
+/// or BSR, whose zero source the lift departs from the specification on.
+struct Scan {
+    name: &'static str,
+    bytes: &'static [u8],
+    bits: u32,
+    zero_keeps_destination: bool,
+}
+
+/// A BSF or BSR, whose zero source keeps the destination.
+const fn bit_search(name: &'static str, bytes: &'static [u8], bits: u32) -> Scan {
+    Scan {
+        name,
+        bytes,
+        bits,
+        zero_keeps_destination: true,
+    }
+}
+
+/// A TZCNT, whose zero source counts the width.
+const fn count(name: &'static str, bytes: &'static [u8], bits: u32) -> Scan {
+    Scan {
+        name,
+        bytes,
+        bits,
+        zero_keeps_destination: false,
+    }
+}
+
+const SCANS: [Scan; 12] = [
+    bit_search("bsr rax, rcx", &[0x48, 0x0f, 0xbd, 0xc1], 64),
+    bit_search("bsr eax, ecx", &[0x0f, 0xbd, 0xc1], 32),
+    bit_search("bsr ax, cx", &[0x66, 0x0f, 0xbd, 0xc1], 16),
+    bit_search("bsr rax, [rbp - 0x20]", &[0x48, 0x0f, 0xbd, 0x45, 0xe0], 64),
+    bit_search("bsf rax, rcx", &[0x48, 0x0f, 0xbc, 0xc1], 64),
+    bit_search("bsf eax, ecx", &[0x0f, 0xbc, 0xc1], 32),
+    bit_search("bsf ax, cx", &[0x66, 0x0f, 0xbc, 0xc1], 16),
+    bit_search("bsf eax, [rbp - 0x20]", &[0x0f, 0xbc, 0x45, 0xe0], 32),
+    count("tzcnt rax, rcx", &[0xf3, 0x48, 0x0f, 0xbc, 0xc1], 64),
+    count("tzcnt eax, ecx", &[0xf3, 0x0f, 0xbc, 0xc1], 32),
+    count("tzcnt ax, cx", &[0xf3, 0x66, 0x0f, 0xbc, 0xc1], 16),
+    count(
+        "tzcnt rax, [rbp - 0x20]",
+        &[0xf3, 0x48, 0x0f, 0xbc, 0x45, 0xe0],
+        64,
+    ),
+];
+
+#[test]
+fn bit_scans_compute_what_their_p_code_loops_compute() {
+    let disassembler = x86();
+    let [rax, rcx, rbp] = ["RAX", "RCX", "RBP"].map(|name| register(&disassembler, name));
+    for scan in &SCANS {
+        let (raw, lifted) = both(&disassembler, scan.bytes);
+        assert!(
+            raw.ops.iter().any(|op| matches!(op, R2ILOp::Branch { .. })),
+            "{} is a loop in the specification: {:?}",
+            scan.name,
+            raw.ops
+        );
+        assert_no_local_control(scan.name, &lifted);
+        let memory_form = scan.bytes.ends_with(&[0x45, 0xe0]);
+        let every = match scan.bits {
+            16 => (0..=0xffffu128).collect(),
+            bits => samples(bits),
+        };
+        let mask = u128::MAX >> (128 - scan.bits);
+        for source in every {
+            // A memory form reads the frame, a register form RCX; the other
+            // holds something else.
+            let (in_register, in_frame) = match memory_form {
+                true => (!source & mask, source),
+                false => (source, !source & mask),
+            };
+            let inputs = [
+                (rax.clone(), OLD_DESTINATION),
+                (rcx.clone(), in_register),
+                (rbp.clone(), u128::from(FRAME + 0x20)),
+            ];
+            let blocks = (&raw, &lifted);
+            if source == 0 && scan.zero_keeps_destination {
+                assert_zero_source_keeps_destination(scan.name, blocks, &inputs, in_frame);
+            } else {
+                assert_agrees(scan.name, blocks, &inputs, in_frame);
+            }
+        }
+    }
+}
+
+/// Where BSF's or BSR's source is zero, every register but the destination
+/// agrees with the specification, ZF among them, and the destination keeps
+/// what it held.
+fn assert_zero_source_keeps_destination(
+    name: &str,
+    blocks: (&R2ILBlock, &R2ILBlock),
+    inputs: &[(Varnode, u128)],
+    frame: u128,
+) {
+    let (registers, [expected, got]) = compare(blocks, inputs, frame);
+    let destination = &inputs[0].0;
+    for ((register, expected), got) in registers.iter().zip(&expected.0).zip(&got.0) {
+        if register.offset == destination.offset {
+            let held = OLD_DESTINATION & (u128::MAX >> (128 - 8 * register.size));
+            assert_eq!(*got, Some(held), "{name}: {register:?} at a zero source");
+        } else {
+            assert_eq!(got, expected, "{name}: {register:?} at a zero source");
+        }
+    }
+    assert_eq!(got.1, expected.1, "{name}: stores at a zero source");
 }
 
 #[test]

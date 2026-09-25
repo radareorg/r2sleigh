@@ -3,12 +3,14 @@
 //! Ghidra usually encodes instruction-local branches with a constant-space
 //! target whose signed offset is relative to the branch operation's index.
 //! Some specifications instead resolve a skip to the RAM address of the next
-//! instruction. Those edges are not machine CFG edges. A local loop every
-//! decision of which is a constant is unrolled ([`unroll`]). Forward branches
+//! instruction. Those edges are not machine CFG edges. A local loop is replaced
+//! by what it computes where that is proven ([`unroll`] for loops every
+//! decision of which is a constant, [`scan`] for bit scans). Forward branches
 //! over speculatable value operations are converted to explicit value selects;
 //! unsupported local control becomes `Unimplemented` so downstream consumers
 //! refuse instead of inventing a CFG.
 
+mod scan;
 mod unroll;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -35,8 +37,9 @@ pub(crate) fn normalize_instruction_local_control(
     // speculated past. The whole sequence is one linked load or one
     // conditional store, and the vocabulary already has both.
     rewrite_exclusive_access(block, names);
-    // Any other loop decided by constants runs as many passes as they say. A
-    // loop that is not is left for the guard below.
+    // Any other loop is either decided by constants, and runs as many passes
+    // as they say, or is a bit scan, and computes a count. A loop that is
+    // neither is left for the guard below.
     resolve_local_loops(block);
     loop {
         let Some((branch_index, branch, target_index)) = block
@@ -99,7 +102,9 @@ pub(crate) fn normalize_instruction_local_control(
     }
 }
 
-/// Unroll an instruction's local loop where every decision in it is a constant.
+/// Replace an instruction's local loop with what it computes, where that is
+/// proven: unrolled where every decision is a constant, a count where the loop
+/// is a bit scan.
 fn resolve_local_loops(block: &mut R2ILBlock) {
     let loops = block
         .ops
@@ -113,6 +118,9 @@ fn resolve_local_loops(block: &mut R2ILBlock) {
     if let Some((ops, metadata)) = unroll::unrolled(block) {
         block.ops = ops;
         block.op_metadata = metadata;
+    } else if let Some(ops) = scan::closed_form(block) {
+        block.ops = ops;
+        block.op_metadata = BTreeMap::new();
     }
 }
 
@@ -1420,6 +1428,118 @@ mod tests {
         normalize_instruction_local_control(&mut block, &|_| None);
 
         assert_eq!(block.ops, vec![branch]);
+    }
+
+    /// `i = 63; zf = x == 0; if (zf) goto done; loop: if ((x >> i) != 0)
+    /// goto done; i = i - 1; goto loop; done: rax = i` -- BSR's shape, with
+    /// the walk's start and step given.
+    fn descending_scan(start: u64, step: u64) -> R2ILBlock {
+        let (index, found, shifted) = (
+            Varnode::unique(0x100, 8),
+            Varnode::unique(0x110, 1),
+            Varnode::unique(0x118, 8),
+        );
+        let (source, zero_flag, destination) = (
+            Varnode::register(0x8, 8),
+            Varnode::register(0x206, 1),
+            Varnode::register(0x0, 8),
+        );
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.ops = vec![
+            R2ILOp::Copy {
+                dst: index.clone(),
+                src: Varnode::constant(start, 8),
+            },
+            R2ILOp::IntEqual {
+                dst: zero_flag.clone(),
+                a: source.clone(),
+                b: Varnode::constant(0, 8),
+            },
+            R2ILOp::CBranch {
+                target: Varnode::constant(6, 4),
+                cond: zero_flag,
+            },
+            R2ILOp::IntRight {
+                dst: shifted.clone(),
+                a: source,
+                b: index.clone(),
+            },
+            R2ILOp::IntNotEqual {
+                dst: found.clone(),
+                a: shifted,
+                b: Varnode::constant(0, 8),
+            },
+            R2ILOp::CBranch {
+                target: Varnode::constant(3, 4),
+                cond: found,
+            },
+            R2ILOp::IntSub {
+                dst: index.clone(),
+                a: index.clone(),
+                b: Varnode::constant(step, 8),
+            },
+            R2ILOp::Branch {
+                target: Varnode::constant(u64::from((-4i32) as u32), 4),
+            },
+            R2ILOp::Copy {
+                dst: destination,
+                src: index,
+            },
+        ];
+        block
+    }
+
+    #[test]
+    fn a_descending_scan_from_the_top_bit_becomes_its_count() {
+        let mut block = descending_scan(63, 1);
+
+        normalize_instruction_local_control(&mut block, &|_| None);
+
+        assert!(
+            block
+                .ops
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Lzcount { .. })),
+            "{:?}",
+            block.ops
+        );
+        assert!(
+            !block.ops.iter().any(|op| matches!(
+                op,
+                R2ILOp::Unimplemented | R2ILOp::Branch { .. } | R2ILOp::CBranch { .. }
+            )),
+            "{:?}",
+            block.ops
+        );
+    }
+
+    /// A walk that could run past the register, or that skips positions, is
+    /// no count this module states, and stays the refusal it was rather than
+    /// becoming one.
+    #[test]
+    fn a_scan_with_another_start_or_step_stays_refused() {
+        for (start, step) in [(62, 1), (64, 1), (63, 2)] {
+            let mut block = descending_scan(start, step);
+
+            normalize_instruction_local_control(&mut block, &|_| None);
+
+            assert!(
+                block
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, R2ILOp::Unimplemented)),
+                "start {start}, step {step}: {:?}",
+                block.ops
+            );
+            assert!(
+                !block
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, R2ILOp::Lzcount { .. } | R2ILOp::PopCount { .. })),
+                "start {start}, step {step}: {:?}",
+                block.ops
+            );
+        }
     }
 
     /// `i = 0; loop: i = i + 1; if (i != r) goto loop` counts to a register:
