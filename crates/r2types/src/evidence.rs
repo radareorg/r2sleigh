@@ -83,13 +83,14 @@ pub fn solve_evidence_types(
     // Refinement rounds: a type learned in one round decides which operand of an
     // address computation is the pointer, which is new evidence about the width
     // it points at, which is a constraint the next round solves with. Rounds
-    // stop as soon as one adds nothing.
-    const MAX_REFINEMENT_ROUNDS: usize = 4;
+    // stop as soon as one adds nothing, and that is the whole termination
+    // argument: a round continues only by inserting a pair into `asserted`,
+    // and the pairs it can insert are (an operand of a certified access's
+    // address sum, the pointee of that access's width) -- at most two per
+    // certified memory access. So there are at most 2A + 1 solves for A
+    // accesses, and the loop stops at its fixpoint rather than at a count.
     let mut solved = builder.solve();
-    for _ in 0..MAX_REFINEMENT_ROUNDS {
-        if !builder.gather_indexed_pointer_bases(&solved) {
-            break;
-        }
+    while builder.gather_indexed_pointer_bases(&solved) {
         solved = builder.solve();
     }
     builder.read_back(&solved)
