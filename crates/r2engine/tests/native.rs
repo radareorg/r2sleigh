@@ -2795,6 +2795,164 @@ fn an_unknown_call_leaves_the_reach_through_an_argument_it_is_not_handed() {
     assert!(!reach.contains_key(&2), "{reach:?}");
 }
 
+/// `long f(char *buf, void (*cb)(char **)) { char *local = buf; cb(&local); return *buf; }`:
+///
+/// ```text
+///   1000  push rbx
+///   1001  sub rsp, 0x10
+///   1005  mov rbx, rdi           ; buf, kept across the call
+///   1008  mov [rsp+8], rdi       ; local = buf
+///   100d  lea rdi, [rsp+8]       ; the call is handed &local
+///   1012  call rsi
+///   1014  movsx rax, byte [rbx]  ; *buf
+///   1018  add rsp, 0x10
+///   101c  pop rbx
+///   101d  ret
+/// ```
+const HANDS_ON_A_FRAME_OBJECT_HOLDING_ITS_FIRST_ARGUMENT: &[u8] = &[
+    0x53, // 1000 push rbx
+    0x48, 0x83, 0xec, 0x10, // 1001 sub rsp, 0x10
+    0x48, 0x89, 0xfb, // 1005 mov rbx, rdi
+    0x48, 0x89, 0x7c, 0x24, 0x08, // 1008 mov [rsp+8], rdi
+    0x48, 0x8d, 0x7c, 0x24, 0x08, // 100d lea rdi, [rsp+8]
+    0xff, 0xd6, // 1012 call rsi
+    0x48, 0x0f, 0xbe, 0x03, // 1014 movsx rax, byte [rbx]
+    0x48, 0x83, 0xc4, 0x10, // 1018 add rsp, 0x10
+    0x5b, // 101c pop rbx
+    0xc3, // 101d ret
+];
+
+/// A formal stored into a frame object whose address a call is handed reaches
+/// that call as surely as the formal handed over itself: the callee reads the
+/// object and writes through what it holds. The first argument is never in an
+/// argument register at the call, so only the frame object carries it there,
+/// and a reach of one byte through it would let the caller split an object
+/// the callee may write anywhere in.
+#[test]
+fn a_formal_laundered_through_a_frame_object_a_call_is_handed_is_unbounded() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: HANDS_ON_A_FRAME_OBJECT_HOLDING_ITS_FIRST_ARGUMENT.to_vec(),
+        name: "launders",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let shared = prepared.shared_artifact();
+    let summary = r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(BASE), &shared)
+        .expect("a summary");
+    let reach = summary.argument_touch_reach();
+    assert!(!reach.contains_key(&0), "{reach:?}");
+}
+
+/// `long g(char *buf, long c, void (*cb)(char *)) { long x = buf[0]; if (c) buf += 1; cb(buf); return x; }`
+/// at -O0: the call is handed a reload of `buf`'s home that two stores reach.
+///
+/// ```text
+///   1000  push rbp; mov rbp, rsp; sub rsp, 0x20
+///   1008  mov [rbp-8], rdi; mov [rbp-0x10], rsi; mov [rbp-0x18], rdx
+///   1014  mov rax, [rbp-8]; movsx rax, byte [rax]; mov [rbp-0x20], rax
+///   1020  cmp qword [rbp-0x10], 0; je 102c
+///   1027  add qword [rbp-8], 1
+///   102c  mov rax, [rbp-8]; mov rdi, rax     ; buf, from either store
+///   1033  mov rax, [rbp-0x18]; call rax
+///   1039  mov rax, [rbp-0x20]; leave; ret
+/// ```
+const HANDS_ON_A_MERGED_RELOAD_OF_ITS_FIRST_ARGUMENT: &[u8] = &[
+    0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20, // 1000
+    0x48, 0x89, 0x7d, 0xf8, 0x48, 0x89, 0x75, 0xf0, 0x48, 0x89, 0x55, 0xe8, // 1008
+    0x48, 0x8b, 0x45, 0xf8, 0x48, 0x0f, 0xbe, 0x00, 0x48, 0x89, 0x45, 0xe0, // 1014
+    0x48, 0x83, 0x7d, 0xf0, 0x00, 0x74, 0x05, // 1020
+    0x48, 0x83, 0x45, 0xf8, 0x01, // 1027
+    0x48, 0x8b, 0x45, 0xf8, 0x48, 0x89, 0xc7, // 102c
+    0x48, 0x8b, 0x45, 0xe8, 0xff, 0xd0, // 1033
+    0x48, 0x8b, 0x45, 0xe0, 0xc9, 0xc3, // 1039
+];
+
+/// A load of the frame reads whatever was stored where it reads, whether or
+/// not one store alone reaches it. The reload of `buf`'s home after the
+/// branch is reached by the prologue's spill and by the increment, so no
+/// reload certificate names one source; it is still `buf`, and the call it
+/// is handed may touch any of `buf`'s object.
+#[test]
+fn a_frame_load_two_stores_reach_carries_the_formal_they_stored() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: HANDS_ON_A_MERGED_RELOAD_OF_ITS_FIRST_ARGUMENT.to_vec(),
+        name: "merged_reload",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let shared = prepared.shared_artifact();
+    let summary = r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(BASE), &shared)
+        .expect("a summary");
+    let reach = summary.argument_touch_reach();
+    assert!(!reach.contains_key(&0), "{reach:?}");
+}
+
+/// What the summary of the function at `entry` says it reaches through each
+/// argument.
+fn touch_reach_at(
+    bytes: &[u8],
+    name: &'static str,
+    entry: u64,
+) -> std::collections::BTreeMap<usize, r2ssa::SummaryArgumentReach> {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: bytes.to_vec(),
+        name,
+    };
+    let prepared =
+        r2engine::native::prepared(&machine.target(), &program, entry).expect("prepared");
+    let shared = prepared.shared_artifact();
+    r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(entry), &shared)
+        .expect("a summary")
+        .argument_touch_reach()
+}
+
+/// clang -O2 of `struct holder { char *p; long x; };`
+/// `void ws(struct holder *h) { h->p[12] = 5; }` and
+/// `void fstruct(char *buf) { struct holder h; h.p = buf; h.x = 0; buf[0] = 1; ws(&h); }`:
+///
+/// ```text
+///   1000  sub rsp, 0x18
+///   1004  mov [rsp+8], rdi          ; h.p = buf
+///   1009  mov qword [rsp+0x10], 0   ; h.x = 0
+///   1012  mov byte [rdi], 1         ; buf[0] = 1
+///   1015  lea rdi, [rsp+8]          ; &h
+///   101a  call 0x1030               ; ws
+///   101f  add rsp, 0x18
+///   1023  ret
+///   1030  mov rax, [rdi]            ; ws: h->p
+///   1033  mov byte [rax+0xc], 5     ;     h->p[12] = 5
+///   1037  ret
+/// ```
+const HANDS_A_DIRECT_CALLEE_A_STRUCT_HOLDING_ITS_ARGUMENT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x48, 0x89, 0x7c, 0x24, 0x08, // 1004 mov [rsp+8], rdi
+    0x48, 0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00, // 1009 mov qword [rsp+0x10], 0
+    0xc6, 0x07, 0x01, // 1012 mov byte [rdi], 1
+    0x48, 0x8d, 0x7c, 0x24, 0x08, // 1015 lea rdi, [rsp+8]
+    0xe8, 0x11, 0x00, 0x00, 0x00, // 101a call 0x1030
+    0x48, 0x83, 0xc4, 0x18, // 101f add rsp, 0x18
+    0xc3, // 1023 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1024
+    0x48, 0x8b, 0x07, // 1030 mov rax, [rdi]
+    0xc6, 0x40, 0x0c, 0x05, // 1033 mov byte [rax+0xc], 5
+    0xc3, // 1037 ret
+];
+
+/// A formal stored into a struct whose address a direct call is handed
+/// reaches that callee: `ws` writes `buf[12]` through `h.p`. The body itself
+/// touches `buf[0]` only, and a reach of one byte let the caller split its
+/// buffer at the second byte.
+#[test]
+fn a_formal_stored_in_a_struct_a_direct_callee_is_handed_is_unbounded() {
+    let reach = touch_reach_at(
+        HANDS_A_DIRECT_CALLEE_A_STRUCT_HOLDING_ITS_ARGUMENT,
+        "fstruct",
+        BASE,
+    );
+    assert!(!reach.contains_key(&0), "{reach:?}");
+}
+
 /// `long mn(long a, long b) { long sa = a, sb = b; long r = sa < sb ? sa : sb; return r + sa; }`
 /// at clang -O0: the merge's two inputs are reloads of two other variables.
 ///

@@ -12,24 +12,46 @@
 //!
 //! `dep(v) ⊆ formals` is a forward union over def-use. A formal seeds its own
 //! bit; an operation unions its operands'; a merge unions its inputs'. A load
-//! is computed from nothing, unless it reads back a stack slot, when it is
-//! computed from what was stored there: a pointer read out of an argument's
-//! object is a pointee (`crate::address`), whose accesses belong to another
-//! object and are summarized on their own path. A call's definitions may be
-//! computed from whatever it was passed.
+//! of memory the function does not own is computed from nothing: a pointer
+//! read out of an argument's object is a pointee (`crate::address`), whose
+//! accesses belong to another object and are summarized on their own path. A
+//! load of the function's own frame is computed from every value stored where
+//! it may read, and a call's definitions from whatever it was passed.
+//!
+//! **The frame.** A formal stored into the frame is still the function's to
+//! account for, and where it goes next depends on who can read the place it
+//! was stored at. A frame object is private when no address naming it leaves
+//! the body (`SsaArtifact::stack_object_is_private`); only this body's own
+//! loads read it, and they carry the stored formal on. Any other object is
+//! exposed, and with it every place at or above it -- an escaped frame
+//! address reaches its object, and C lays an aggregate upward from the
+//! address it hands out, so the bytes above it may be the same object's
+//! members -- which is the model promotion keeps its slots in memory by. A
+//! formal stored at an exposed place can be read by whatever the address
+//! reached, as surely as if it were handed over, so the summary counts it as
+//! unplaced, and a call handed a frame address is handed every formal stored
+//! at an exposed place.
 //!
 //! Bits only grow, and each value holds one per formal, so every pass over the
 //! blocks either adds a bit or is the last: at most `k·V + 1` passes for `k`
-//! formals, and in practice the loop nesting depth plus two.
+//! formals, and in practice the loop nesting depth plus two. The frame's
+//! store-to-load relation is computed once, over distinct locations, before
+//! the passes.
 
 use std::collections::BTreeMap;
 
+use r2il::SpaceId;
+
 use crate::abi::AbiProfile;
-use crate::function::SsaArtifact;
+use crate::function::{SsaArtifact, StackAddressBase};
 use crate::graph::{InstId, ValueId};
 use crate::op::SSAOp;
-use crate::semantic::{ReachingStorageState, SourceCallArgumentValue};
-use crate::{CallBoundarySlot, CanonicalStorageId};
+use crate::semantic::{
+    MemoryLocation, ObjectKind, ObjectModel, ReachingStorageState, RelativeMemoryAddress,
+    SourceCallArgumentValue, memory_locations_may_alias,
+};
+use crate::var::SSAVar;
+use crate::{CallBoundarySlot, CanonicalStorageId, ObjectId};
 
 /// The formals a bit stands for: bit `i` is formal `i`, and the last bit every
 /// formal from there on.
@@ -47,6 +69,10 @@ pub(crate) struct FormalDependence {
     /// What each argument register holds before each instruction, for the
     /// calls no callee states the arity of: only computed where one exists.
     carriers: BTreeMap<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>,
+    /// What the frame carries from the stores into it to the loads out of it.
+    frame: FrameTraffic,
+    /// The formals stored at an exposed frame place, as of the last pass.
+    exposed: u64,
 }
 
 impl FormalDependence {
@@ -77,9 +103,25 @@ impl FormalDependence {
             bits,
             unseen: 0,
             carriers,
+            frame: FrameTraffic::of(prepared),
+            exposed: 0,
         };
         while dependence.pass(prepared) {}
         dependence
+    }
+
+    /// Whether the store at an operation site puts its value where something
+    /// outside the function could read it: a frame place that is not private.
+    pub(crate) fn frame_store_is_exposed(
+        &self,
+        prepared: &SsaArtifact,
+        block: u64,
+        op: usize,
+    ) -> bool {
+        prepared
+            .graph()
+            .inst_id_for_op_site(block, op)
+            .is_some_and(|inst| self.frame.exposed.contains_key(&inst))
     }
 
     /// The formals `value` is computed from.
@@ -109,7 +151,7 @@ impl FormalDependence {
             .arguments
             .iter()
             .map(|argument| match argument.value {
-                SourceCallArgumentValue::Value(value) => self.bits_of(value),
+                SourceCallArgumentValue::Value(value) => self.handed(prepared, value),
                 SourceCallArgumentValue::PreservedEntry => match argument.slot {
                     CallBoundarySlot::Register { storage, .. } => {
                         self.entry_bits(prepared, storage)
@@ -139,7 +181,7 @@ impl FormalDependence {
             .iter()
             .filter(|(storage, _)| !named.contains(storage))
             .map(|(storage, states)| match states.get(&boundary.at) {
-                Some(ReachingStorageState::Value(value)) => self.bits_of(*value),
+                Some(ReachingStorageState::Value(value)) => self.handed(prepared, *value),
                 Some(ReachingStorageState::PreservedEntry) => self.entry_bits(prepared, *storage),
                 Some(ReachingStorageState::Unknown | ReachingStorageState::Conflict) | None => {
                     u64::MAX
@@ -151,6 +193,17 @@ impl FormalDependence {
     /// The formals whose objects every call this function makes can reach.
     pub(crate) fn passed_to_calls(&self) -> u64 {
         self.unseen
+    }
+
+    /// The formals a call handed `value` is handed: the value's own, and,
+    /// where it is a frame address, every formal stored at a place of the
+    /// frame the address exposes.
+    fn handed(&self, prepared: &SsaArtifact, value: ValueId) -> u64 {
+        let names_frame = prepared
+            .objects()
+            .object_for_value(value, SpaceId::Ram)
+            .is_some_and(|object| is_frame_object(prepared.objects(), object));
+        self.bits_of(value) | if names_frame { self.exposed } else { 0 }
     }
 
     /// The formal an entry register holds, as a bit.
@@ -172,7 +225,14 @@ impl FormalDependence {
 
     /// One pass over the blocks in order; whether any value gained a bit.
     fn pass(&mut self, prepared: &SsaArtifact) -> bool {
-        let mut changed = false;
+        let exposed = self
+            .frame
+            .exposed
+            .values()
+            .map(|value| self.bits_of(*value))
+            .fold(0, |left, right| left | right);
+        let mut changed = exposed != self.exposed;
+        self.exposed = exposed;
         for block in prepared.function().blocks() {
             for phi in &block.phis {
                 let inputs = phi
@@ -221,6 +281,13 @@ impl FormalDependence {
             | SSAOp::LoadLinked { dst, .. }
             | SSAOp::LoadGuarded { dst, .. } => self.reloaded_bits(prepared, dst),
             SSAOp::CallDefine { .. } => last_call,
+            SSAOp::AtomicCAS(swap) => {
+                self.reloaded_bits(prepared, &swap.dst)
+                    | op.sources()
+                        .into_iter()
+                        .map(|source| self.var_bits(prepared, source))
+                        .fold(0, |left, right| left | right)
+            }
             op => op
                 .sources()
                 .into_iter()
@@ -229,23 +296,32 @@ impl FormalDependence {
         }
     }
 
-    /// A load's bits: what was stored in the stack slot it reads back.
-    fn reloaded_bits(&self, prepared: &SsaArtifact, dst: &crate::SSAVar) -> u64 {
-        prepared
-            .graph()
-            .value_id_for_var(dst)
-            .and_then(|value| prepared.stack_reload_certificate_for_value(value))
-            .map_or(0, |reload| self.bits_of(reload.source))
+    /// A load's bits: what was stored where it may read, where that is the
+    /// function's own frame, and what the stack-reload certificate names.
+    fn reloaded_bits(&self, prepared: &SsaArtifact, dst: &SSAVar) -> u64 {
+        let Some(value) = prepared.graph().value_id_for_var(dst) else {
+            return 0;
+        };
+        let certified = prepared
+            .stack_reload_certificate_for_value(value)
+            .map_or(0, |reload| self.bits_of(reload.source));
+        self.frame
+            .sources
+            .get(&value)
+            .into_iter()
+            .flatten()
+            .map(|stored| self.bits_of(*stored))
+            .fold(certified, |left, right| left | right)
     }
 
-    fn var_bits(&self, prepared: &SsaArtifact, var: &crate::SSAVar) -> u64 {
+    fn var_bits(&self, prepared: &SsaArtifact, var: &SSAVar) -> u64 {
         prepared
             .graph()
             .value_id_for_var(var)
             .map_or(0, |value| self.bits_of(value))
     }
 
-    fn raise(&mut self, prepared: &SsaArtifact, var: &crate::SSAVar, bits: u64) -> bool {
+    fn raise(&mut self, prepared: &SsaArtifact, var: &SSAVar, bits: u64) -> bool {
         let Some(value) = prepared.graph().value_id_for_var(var) else {
             return false;
         };
@@ -256,6 +332,230 @@ impl FormalDependence {
         let changed = raised != *held;
         *held = raised;
         changed
+    }
+}
+
+/// What the function's own frame carries: which stored values each load of it
+/// may read, and which stores something outside the function could read.
+#[derive(Default)]
+struct FrameTraffic {
+    /// Each load of the frame, and the values stored where it may read.
+    sources: BTreeMap<ValueId, Vec<ValueId>>,
+    /// Each store at an exposed frame place, and the value it stores.
+    exposed: BTreeMap<InstId, ValueId>,
+}
+
+/// One access of the frame: where the memory facts put it, or `None` where
+/// they give it no place, which may be anywhere in the frame.
+type FramePlace = Option<MemoryLocation>;
+
+impl FrameTraffic {
+    /// One pass over the operations for the frame's accesses; the may-alias
+    /// relation is asked once per pair of distinct places, not per pair of
+    /// accesses, and a slot read and written many times is one place.
+    fn of(prepared: &SsaArtifact) -> Self {
+        let graph = prepared.graph();
+        let objects = prepared.objects();
+        let mut loads = Vec::<(ValueId, FramePlace)>::new();
+        let mut stores = Vec::<(InstId, ValueId, FramePlace)>::new();
+        for block in prepared.function().blocks() {
+            for (index, op) in block.ops.iter().enumerate() {
+                let Some(inst) = graph.inst_id_for_op_site(block.addr, index) else {
+                    continue;
+                };
+                let (addr, space, loaded, stored) = match op {
+                    SSAOp::Load { dst, addr, space }
+                    | SSAOp::LoadLinked {
+                        dst, addr, space, ..
+                    }
+                    | SSAOp::LoadGuarded {
+                        dst, addr, space, ..
+                    } => (addr, *space, Some(dst), None),
+                    SSAOp::Store { addr, val, space }
+                    | SSAOp::StoreGuarded {
+                        addr, val, space, ..
+                    }
+                    | SSAOp::StoreConditional {
+                        addr, val, space, ..
+                    } => (addr, *space, None, Some(val)),
+                    SSAOp::AtomicCAS(swap) => (
+                        &swap.addr,
+                        swap.space,
+                        Some(&swap.dst),
+                        Some(&swap.replacement),
+                    ),
+                    _ => continue,
+                };
+                let is_frame = prepared
+                    .object_for_var(addr, space)
+                    .is_some_and(|object| is_frame_object(objects, object));
+                if !is_frame {
+                    continue;
+                }
+                let place = |facts: Option<&[MemoryLocation]>| -> FramePlace {
+                    let [location] = facts? else {
+                        return None;
+                    };
+                    let mut location = location.clone();
+                    // An indexed address is somewhere in its object the
+                    // machine computes; the memory facts state its base.
+                    if graph
+                        .value_id_for_var(addr)
+                        .is_some_and(|value| objects.index_for_address(value).is_some())
+                    {
+                        location.address = RelativeMemoryAddress::Unknown;
+                    }
+                    Some(location)
+                };
+                if let Some(value) = loaded.and_then(|dst| graph.value_id_for_var(dst)) {
+                    let uses = prepared.memory().uses_by_inst.get(&inst).map(|uses| {
+                        uses.iter()
+                            .map(|fact| fact.location.clone())
+                            .collect::<Vec<_>>()
+                    });
+                    loads.push((value, place(uses.as_deref())));
+                }
+                if let Some(value) = stored.and_then(|val| graph.value_id_for_var(val)) {
+                    let defs = prepared.memory().defs_by_inst.get(&inst).map(|defs| {
+                        defs.iter()
+                            .map(|fact| fact.location.clone())
+                            .collect::<Vec<_>>()
+                    });
+                    stores.push((inst, value, place(defs.as_deref())));
+                }
+            }
+        }
+
+        let mut stored_at = BTreeMap::<&FramePlace, Vec<ValueId>>::new();
+        for (_, value, place) in &stores {
+            stored_at.entry(place).or_default().push(*value);
+        }
+        let mut read_at = BTreeMap::<&FramePlace, Vec<ValueId>>::new();
+        for (value, place) in &loads {
+            read_at.entry(place).or_default().push(*value);
+        }
+        let mut sources = BTreeMap::<ValueId, Vec<ValueId>>::new();
+        for (read, readers) in &read_at {
+            let reached = stored_at
+                .iter()
+                .filter(|(written, _)| places_may_alias(objects, read, written))
+                .flat_map(|(_, values)| values.iter().copied())
+                .collect::<Vec<_>>();
+            if reached.is_empty() {
+                continue;
+            }
+            for reader in readers {
+                sources.insert(*reader, reached.clone());
+            }
+        }
+
+        let escape = FrameEscape::of(prepared);
+        let exposed = stores
+            .iter()
+            .filter(|(_, _, place)| escape.exposes(prepared, place.as_ref()))
+            .map(|(inst, value, _)| (*inst, *value))
+            .collect();
+        Self { sources, exposed }
+    }
+}
+
+/// Whether two frame places may share a byte; a place the facts do not state
+/// may share one with anything.
+fn places_may_alias(objects: &ObjectModel, left: &FramePlace, right: &FramePlace) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => memory_locations_may_alias(objects, left, right),
+        _ => true,
+    }
+}
+
+fn is_frame_object(objects: &ObjectModel, object: ObjectId) -> bool {
+    objects.object(object).is_some_and(|fact| {
+        matches!(
+            fact.kind,
+            ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
+        )
+    })
+}
+
+/// The origin a frame place is measured from: the entry stack pointer, where
+/// the object model proved the object's place in it, or else the object's
+/// own base register. Two places from different origins cannot be ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FrameOrigin {
+    Entry(StackAddressBase),
+    Base(StackAddressBase),
+}
+
+/// Where a frame object starts, from its origin.
+fn frame_start(objects: &ObjectModel, object: ObjectId) -> Option<(FrameOrigin, i128)> {
+    let (base, offset) = match objects.object(object)?.kind {
+        ObjectKind::StackSlot { base, offset, .. }
+        | ObjectKind::FrameObject { base, offset, .. } => (base, offset),
+        _ => return None,
+    };
+    Some(match objects.entry_stack_roots.get(&object) {
+        Some(root) => (FrameOrigin::Entry(root.base), i128::from(root.offset)),
+        None => (FrameOrigin::Base(base), i128::from(offset)),
+    })
+}
+
+/// The lowest place, from each origin, a frame object whose address leaves
+/// the function starts at. Everything at or above it is exposed.
+struct FrameEscape {
+    lowest: BTreeMap<FrameOrigin, i128>,
+    /// An escaping frame object the model gives no place: every place is
+    /// exposed.
+    unplaced: bool,
+}
+
+impl FrameEscape {
+    fn of(prepared: &SsaArtifact) -> Self {
+        let objects = prepared.objects();
+        let mut escape = Self {
+            lowest: BTreeMap::new(),
+            unplaced: false,
+        };
+        for object in objects.objects.keys().copied().filter(|object| {
+            is_frame_object(objects, *object) && !prepared.stack_object_is_private(*object)
+        }) {
+            match frame_start(objects, object) {
+                Some((origin, start)) => {
+                    escape
+                        .lowest
+                        .entry(origin)
+                        .and_modify(|lowest| *lowest = (*lowest).min(start))
+                        .or_insert(start);
+                }
+                None => escape.unplaced = true,
+            }
+        }
+        escape
+    }
+
+    /// Whether a store at `place` may put its value where something outside
+    /// the function can read it: its object is not private, or some byte of
+    /// it sits at or above an escaping object's start, or the two cannot be
+    /// ordered.
+    fn exposes(&self, prepared: &SsaArtifact, place: Option<&MemoryLocation>) -> bool {
+        let Some(place) = place else {
+            return true;
+        };
+        if !prepared.stack_object_is_private(place.object) || self.unplaced {
+            return true;
+        }
+        let objects = prepared.objects();
+        let Some((origin, start)) = frame_start(objects, place.object) else {
+            return true;
+        };
+        let end = match place.address {
+            RelativeMemoryAddress::Exact(offset) => {
+                Some(start + i128::from(offset) + i128::from(place.size.max(1)))
+            }
+            RelativeMemoryAddress::Affine { .. } | RelativeMemoryAddress::Unknown => None,
+        };
+        self.lowest
+            .iter()
+            .any(|(escaping, lowest)| *escaping != origin || end.is_none_or(|end| end > *lowest))
     }
 }
 

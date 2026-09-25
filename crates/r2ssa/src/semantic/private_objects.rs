@@ -49,7 +49,10 @@ pub(crate) fn private_stack_objects(
         ) {
             continue;
         }
+        // No value names the object, so no address of it exists to leave
+        // the function: nothing outside can reach it, vacuously.
         let Some(addresses) = addresses_by_object.get(object) else {
+            private.insert(*object);
             continue;
         };
         match stack_address_escape(

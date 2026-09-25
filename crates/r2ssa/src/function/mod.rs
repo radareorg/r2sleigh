@@ -1185,6 +1185,12 @@ impl SsaArtifact {
         &self.facts.memory
     }
 
+    /// Whether nothing outside the function can reach a frame object: no
+    /// address naming it leaves the body.
+    pub fn stack_object_is_private(&self, object: ObjectId) -> bool {
+        self.facts.private_stack_objects.contains(&object)
+    }
+
     pub fn predicates(&self) -> &PredicateFacts {
         &self.facts.predicates
     }

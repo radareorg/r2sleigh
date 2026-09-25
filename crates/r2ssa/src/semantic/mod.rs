@@ -71,6 +71,10 @@ pub struct PreparedFunctionFacts {
     pub boundaries: SourceBoundaryFacts,
     pub structured: StructuredDataflowFacts,
     pub control_domains: ControlDomainFacts,
+    /// The frame objects no address naming them ever leaves the function:
+    /// not stored, handed to a call, returned, or used by an access the model
+    /// could not place. Nothing outside the function can read or write them.
+    pub private_stack_objects: BTreeSet<ObjectId>,
     pub certificates: PreparedFunctionCertificates,
     pub obligations: SemanticObligationInventory,
     pub assumptions: AssumptionSet,
@@ -364,6 +368,7 @@ impl PreparedFunctionFacts {
             boundaries,
             structured,
             control_domains,
+            private_stack_objects,
             certificates,
             obligations,
             assumptions: assumptions.clone(),
