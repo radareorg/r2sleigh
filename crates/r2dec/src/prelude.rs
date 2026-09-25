@@ -654,7 +654,7 @@ fn count_gaps(stmt: &CStmt) -> usize {
 pub(crate) const INCLUDES: &[&str] = &["#include <stdint.h>"];
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ast::RenderObservationId;
 

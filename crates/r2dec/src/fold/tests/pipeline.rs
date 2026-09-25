@@ -4086,130 +4086,269 @@ mod tests {
         );
     }
 
-    /// The rendering of a function made of `blocks`, through the whole
-    /// pipeline.
-    fn rendered_from_r2il(blocks: &[R2ILBlock], name: &str) -> crate::DecompileBindingAudit {
-        let arch = make_test_arch_x86_64();
-        let fixture = prepared_from_r2il_blocks(blocks, &arch).with_name(name);
-        crate::Decompiler::new(crate::DecompilerConfig::default())
-            .decompile_input_with_binding_audit(&crate::DecompilerInput::new(fixture.facts))
-    }
-
-    /// What a rendered function leaves in memory, interpreted under C's rules.
+    /// INSERT, rendered through the whole pipeline and judged by a C compiler.
     ///
-    /// Memory holds `inputs` (address, value, bytes) before the call, the
-    /// parameters hold `arguments`, and the answer is the `bytes` at `output`.
-    fn interpreted_memory_result(
-        function: &CFunction,
-        arguments: &[u128],
-        inputs: &[(u64, u128, u32)],
-        output: (u64, u32),
-    ) -> Result<u128, crate::c_semantics::Stop> {
-        let symbols = function.symbols.borrow();
-        let mut c = crate::c_semantics::Interpreter::new(&symbols);
-        for (address, value, bytes) in inputs {
-            c.write_memory(*address, *value, *bytes);
+    /// The renderings read and write one page at a fixed address, which the
+    /// harness maps with a Linux mapping before any of them runs.
+    #[cfg(target_os = "linux")]
+    mod inserted_lane {
+        use super::*;
+
+        /// The page the fixture reads its root and lane from and writes its
+        /// result to.
+        const PAGE: u64 = 0x4100_0000;
+        const ROOT_AT: u64 = PAGE;
+        const LANE_AT: u64 = PAGE + 0x100;
+        const OUT_AT: u64 = PAGE + 0x200;
+
+        /// Every root C has an integer for (16, 32, 64 and 128 bits), with
+        /// every narrower lane of 8, 16, 32 or 64 bits, in bytes.
+        const ROOTS_AND_LANES: [(u32, u32); 10] = [
+            (2, 1),
+            (4, 1),
+            (4, 2),
+            (8, 1),
+            (8, 2),
+            (8, 4),
+            (16, 1),
+            (16, 2),
+            (16, 4),
+            (16, 8),
+        ];
+
+        /// A root and a lane that differ in every bit, then all ones into
+        /// zero, then zero into all ones.
+        const PATTERN: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+        const VECTORS: [(u128, u128); 3] = [(PATTERN, !PATTERN), (u128::MAX, 0), (0, u128::MAX)];
+
+        /// One INSERT: a lane of `lane_bytes` at bit `lsb` of a root of
+        /// `root_bytes`.
+        #[derive(Debug, Clone, Copy)]
+        struct Insert {
+            root_bytes: u32,
+            lane_bytes: u32,
+            lsb: u32,
         }
-        c.call(function, arguments)?;
-        c.read_memory(output.0, output.1)
-    }
 
-    /// P-code's INSERT: `root` with bits `lsb..lsb + lane_bits` replaced by
-    /// `lane`.
-    fn pcode_insert(root: u128, lane: u128, lsb: u32, lane_bits: u32, root_bits: u32) -> u128 {
-        let width = |bits: u32| {
-            if bits >= 128 {
-                u128::MAX
-            } else {
-                (1u128 << bits) - 1
-            }
-        };
-        let window = width(lane_bits) << lsb;
-        ((root & !window) | ((lane & width(lane_bits)) << lsb)) & width(root_bits)
-    }
+        /// Every INSERT of [`ROOTS_AND_LANES`], at every byte position the
+        /// lane fits at.
+        fn every_insert() -> Vec<Insert> {
+            ROOTS_AND_LANES
+                .iter()
+                .flat_map(|&(root_bytes, lane_bytes)| {
+                    (0..=root_bytes - lane_bytes).map(move |byte| Insert {
+                        root_bytes,
+                        lane_bytes,
+                        lsb: byte * 8,
+                    })
+                })
+                .collect()
+        }
 
-    /// Where the INSERT fixture reads its root and lane, and writes its result.
-    const INSERT_ROOT_AT: u64 = 0x3000;
-    const INSERT_LANE_AT: u64 = 0x3100;
-    const INSERT_OUT_AT: u64 = 0x3200;
+        /// The all-ones value of `bits`.
+        fn ones(bits: u32) -> u128 {
+            u128::MAX >> (128 - bits)
+        }
 
-    /// A function that loads a root and a lane, inserts the lane at bit
-    /// `lsb`, and stores the result.
-    fn insert_function(root_bytes: u32, lane_bytes: u32, lsb: u32) -> R2ILBlock {
-        let mut entry = R2ILBlock::new(0x1000, 4);
-        entry.push(R2ILOp::Load {
-            dst: Varnode::unique(0x100, root_bytes),
-            space: SpaceId::Ram,
-            addr: Varnode::constant(INSERT_ROOT_AT, 8),
-        });
-        entry.push(R2ILOp::Load {
-            dst: Varnode::unique(0x200, lane_bytes),
-            space: SpaceId::Ram,
-            addr: Varnode::constant(INSERT_LANE_AT, 8),
-        });
-        entry.push(R2ILOp::Insert {
-            dst: Varnode::unique(0x300, root_bytes),
-            src: Varnode::unique(0x100, root_bytes),
-            value: Varnode::unique(0x200, lane_bytes),
-            position: Varnode::constant(u64::from(lsb), 4),
-        });
-        entry.push(R2ILOp::Store {
-            space: SpaceId::Ram,
-            addr: Varnode::constant(INSERT_OUT_AT, 8),
-            val: Varnode::unique(0x300, root_bytes),
-        });
-        entry
-    }
-
-    /// A lane written into a root keeps every root bit outside the lane.
-    ///
-    /// Exhaustive over the roots C has an integer for (16, 32, 64 and 128
-    /// bits), every narrower lane of 8, 16, 32 or 64 bits, and every byte
-    /// position the lane fits at. Each rendering is interpreted under C's
-    /// integer rules, promotion included, and compared with P-code's INSERT.
-    /// The mask was spelled `~(uint8_t)0`, which C promotes to the `int` -1:
-    /// widened to the root it is all ones, and every root bit above an 8- or
-    /// 16-bit lane was erased (siphash's `xor dl, 0xff` zeroed bits 8..63 of
-    /// v2).
-    #[test]
-    fn an_inserted_lane_keeps_every_root_bit_outside_it() {
-        let pattern: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
-        let configurations = [2u32, 4, 8, 16].into_iter().flat_map(|root| {
-            [1u32, 2, 4, 8]
-                .into_iter()
-                .filter(move |lane| *lane < root)
-                .flat_map(move |lane| (0..=root - lane).map(move |byte| (root, lane, byte * 8)))
-        });
-        let mut checked = 0;
-        for (root_bytes, lane_bytes, lsb) in configurations {
-            let block = insert_function(root_bytes, lane_bytes, lsb);
-            let rendered = rendered_from_r2il(&[block], "insert_lane");
-            let function = rendered.rendered().function();
-            // The convention's argument registers, which nothing reads.
-            let arguments = vec![0; function.params.len()];
-            for (root, lane) in [(pattern, !pattern), (u128::MAX, 0), (0, u128::MAX)] {
-                let result = interpreted_memory_result(
-                    function,
-                    &arguments,
-                    &[
-                        (INSERT_ROOT_AT, root, root_bytes),
-                        (INSERT_LANE_AT, lane, lane_bytes),
-                    ],
-                    (INSERT_OUT_AT, root_bytes),
-                );
-                assert_eq!(
-                    result,
-                    Ok(pcode_insert(root, lane, lsb, lane_bytes * 8, root_bytes * 8)),
-                    "a {}-bit lane at bit {lsb} of a {}-bit root, root {root:#x} lane {lane:#x}:\n{}",
-                    lane_bytes * 8,
-                    root_bytes * 8,
-                    rendered.output()
-                );
-                checked += 1;
+        /// The unsigned C type of `bytes`, as the harness spells it.
+        fn c_uint(bytes: u32) -> String {
+            match bytes {
+                16 => "unsigned __int128".to_string(),
+                _ => format!("uint{}_t", bytes * 8),
             }
         }
-        // Positions: 16-bit root 2; 32-bit 4+3; 64-bit 8+7+5; 128-bit
-        // 16+15+13+9. Three vectors each.
-        assert_eq!(checked, 3 * (2 + 7 + 20 + 53));
+
+        /// `value`, cut to `bytes`, as a C constant of that type.
+        fn c_value(value: u128, bytes: u32) -> String {
+            let value = value & ones(bytes * 8);
+            let (high, low) = ((value >> 64) as u64, value as u64);
+            match bytes {
+                16 => format!("(((unsigned __int128){high:#x}ULL << 64) | {low:#x}ULL)"),
+                _ => format!("({}){low:#x}ULL", c_uint(bytes)),
+            }
+        }
+
+        impl Insert {
+            fn name(self) -> String {
+                let (root, lane) = (self.root_bytes * 8, self.lane_bytes * 8);
+                format!("insert_r{root}_l{lane}_b{}", self.lsb)
+            }
+
+            /// P-code's INSERT: `root` with the lane's bits replaced by `lane`.
+            fn pcode(self, root: u128, lane: u128) -> u128 {
+                let (root_bits, lane_bits) = (self.root_bytes * 8, self.lane_bytes * 8);
+                let window = ones(lane_bits) << self.lsb;
+                ((root & !window) | ((lane & ones(lane_bits)) << self.lsb)) & ones(root_bits)
+            }
+
+            /// A function that loads a root and a lane, inserts the lane, and
+            /// stores the result.
+            fn block(self) -> R2ILBlock {
+                let mut entry = R2ILBlock::new(0x1000, 4);
+                entry.push(R2ILOp::Load {
+                    dst: Varnode::unique(0x100, self.root_bytes),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(ROOT_AT, 8),
+                });
+                entry.push(R2ILOp::Load {
+                    dst: Varnode::unique(0x200, self.lane_bytes),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(LANE_AT, 8),
+                });
+                entry.push(R2ILOp::Insert {
+                    dst: Varnode::unique(0x300, self.root_bytes),
+                    src: Varnode::unique(0x100, self.root_bytes),
+                    value: Varnode::unique(0x200, self.lane_bytes),
+                    position: Varnode::constant(u64::from(self.lsb), 4),
+                });
+                entry.push(R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(OUT_AT, 8),
+                    val: Varnode::unique(0x300, self.root_bytes),
+                });
+                entry
+            }
+
+            /// The harness statements that run `call` on every vector and
+            /// compare what it stores with P-code's answer, naming the
+            /// function and the vector where they differ.
+            fn checks(self, call: &str) -> String {
+                VECTORS
+                    .iter()
+                    .map(|&(root, lane)| self.check(call, root, lane))
+                    .collect()
+            }
+
+            /// One vector's check: store the root and the lane, run `call`,
+            /// and compare what it stored with P-code's answer.
+            fn check(self, call: &str, root: u128, lane: u128) -> String {
+                let (root_ty, lane_ty) = (c_uint(self.root_bytes), c_uint(self.lane_bytes));
+                let root = root & ones(self.root_bytes * 8);
+                let lane = lane & ones(self.lane_bytes * 8);
+                let (stored_root, stored_lane) =
+                    (c_value(root, self.root_bytes), c_value(lane, self.lane_bytes));
+                let want = c_value(self.pcode(root, lane), self.root_bytes);
+                let name = self.name();
+                format!(
+                    "    *(volatile {root_ty} *){ROOT_AT:#x} = {stored_root};\n\
+                     \x20   *(volatile {lane_ty} *){LANE_AT:#x} = {stored_lane};\n\
+                     \x20   {call};\n\
+                     \x20   if (*(volatile {root_ty} *){OUT_AT:#x} != {want}) {{\n\
+                     \x20       puts(\"{name} root {root:#x} lane {lane:#x}\");\n\
+                     \x20       return 1;\n\
+                     \x20   }}\n"
+                )
+            }
+        }
+
+        /// The rendering of `insert`, through the whole pipeline.
+        fn rendered(insert: Insert) -> crate::DecompileBindingAudit {
+            let arch = make_test_arch_x86_64();
+            let fixture = prepared_from_r2il_blocks(&[insert.block()], &arch).with_name(insert.name());
+            crate::Decompiler::new(crate::DecompilerConfig::default())
+                .decompile_input_with_binding_audit(&crate::DecompilerInput::new(fixture.facts))
+        }
+
+        /// A harness that maps the fixture's page, then runs `checks`.
+        fn harness(prototypes: &str, checks: &str) -> String {
+            format!(
+                "#define _GNU_SOURCE\n\
+                 #include <stdint.h>\n\
+                 #include <stdio.h>\n\
+                 #include <sys/mman.h>\n\
+                 {prototypes}\n\
+                 int main(void) {{\n\
+                 \x20   void *page = mmap((void *){PAGE:#x}, 4096, PROT_READ | PROT_WRITE,\n\
+                 \x20                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);\n\
+                 \x20   if (page != (void *){PAGE:#x}) {{\n\
+                 \x20       puts(\"the fixture page is not mapped\");\n\
+                 \x20       return 2;\n\
+                 \x20   }}\n\
+                 {checks}\
+                 \x20   return 0;\n\
+                 }}\n"
+            )
+        }
+
+        /// Link `harness` with every unit under the undefined-behaviour
+        /// sanitizer, fatal, and run it: what it printed, or why it did not
+        /// build or failed.
+        fn compiled_and_run(cc: &str, dir: &std::path::Path, units: &[std::path::PathBuf]) -> Result<(), String> {
+            let binary = dir.join("insert");
+            let compiled = std::process::Command::new(cc)
+                .args(["-std=c11", "-w", "-fsanitize=undefined", "-fno-sanitize-recover=undefined", "-o"])
+                .arg(&binary)
+                .args(units)
+                .output()
+                .expect("run the compiler");
+            if !compiled.status.success() {
+                return Err(String::from_utf8_lossy(&compiled.stderr).into_owned());
+            }
+            let ran = std::process::Command::new(&binary).output().expect("run the harness");
+            match ran.status.success() {
+                true => Ok(()),
+                false => Err(format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&ran.stdout),
+                    String::from_utf8_lossy(&ran.stderr)
+                )),
+            }
+        }
+
+        /// A lane written into a root keeps every root bit outside the lane.
+        ///
+        /// Exhaustive over [`ROOTS_AND_LANES`] and every byte position the
+        /// lane fits at. Each rendering is compiled as the translation unit
+        /// it is emitted as, all of them are linked under one harness with
+        /// the undefined-behaviour sanitizer fatal, and each is run on
+        /// [`VECTORS`] against P-code's INSERT. The mask was spelled
+        /// `~(uint8_t)0`, which C promotes to the `int` -1: widened to the
+        /// root it is all ones, and every root bit above an 8- or 16-bit lane
+        /// was erased (siphash's `xor dl, 0xff` zeroed bits 8..63 of v2).
+        /// Skipped where no C compiler is installed.
+        #[test]
+        fn an_inserted_lane_keeps_every_root_bit_outside_it() {
+            let Some(cc) = crate::prelude::tests::compiler() else {
+                return;
+            };
+            let dir = std::env::temp_dir().join(format!(
+                "r2dec-insert-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).expect("temporary directory");
+            let mut units = vec![dir.join("harness.c")];
+            let (mut prototypes, mut checks) = (String::new(), String::new());
+            let mut renderings = BTreeMap::new();
+            for insert in every_insert() {
+                let audit = rendered(insert);
+                assert_eq!(audit.render_refusal(), None, "{}", audit.output());
+                let emission = audit.rendered().emission();
+                let signature = emission.signature().expect("a defined function");
+                let unit = dir.join(format!("{}.c", insert.name()));
+                std::fs::write(&unit, emission.unit()).expect("write the unit");
+                units.push(unit);
+                prototypes.push_str(&format!("{signature};\n"));
+                // The convention's argument registers, which nothing reads.
+                let function = audit.rendered().function();
+                let arguments = vec!["0"; function.params.len()].join(", ");
+                checks.push_str(&insert.checks(&format!("{}({arguments})", function.name)));
+                renderings.insert(insert.name(), audit.output().to_string());
+            }
+            // Positions: 16-bit root 2; 32-bit 4+3; 64-bit 8+7+5; 128-bit
+            // 16+15+13+9.
+            assert_eq!(renderings.len(), 2 + 7 + 20 + 53);
+            std::fs::write(&units[0], harness(&prototypes, &checks)).expect("write the harness");
+            let outcome = compiled_and_run(&cc, &dir, &units);
+            let _ = std::fs::remove_dir_all(&dir);
+            if let Err(failure) = outcome {
+                let failed = failure.split_whitespace().next().unwrap_or_default();
+                let shown = renderings
+                    .get(failed)
+                    .cloned()
+                    .unwrap_or_else(|| renderings.into_values().collect::<Vec<_>>().join("\n"));
+                panic!("{failure}\n{shown}");
+            }
+        }
     }
 }
