@@ -1,0 +1,16 @@
+USER TASK (verbatim, binding):
+## Goal
+`r2il::R2ILOp::Lzcount` (and `r2ssa::SSAOp::Lzcount`) has no machine projection and no rendering. Every function whose lift contains it is refused as `native rendering refused: unrepresentable operation` (or, at -O0, `observation journal: ConflictingValue`). Make Lzcount a first-class machine expression that renders as a total C helper, as `PopCount` already does.
+## Why
+- x86 `LZCNT` lifts to `Lzcount` directly from Sleigh's `lzcount()`, so it is refused today.
+- The core-lift track (branch `track/core-lift`, commit "BSF, BSR and TZCNT are lifted as the count their p-code loop computes...") lifts BSR as `(w-1) - Lzcount(x)`. That is the canonical closed form of Sleigh's BSR loop. So `__builtin_clz*` code (BSR) is now refused only because Lzcount does not render.
+- Evidence: in an uncommitted experiment, BSR was spelled `PopCount(x | x>>1 | ... | x>>32) - 1`. All six `tests/corpus/values.c::{clang,gcc}-O{0,1,2}::value_count_bits` records then graded `equal` in `tests/equiv/run_equiv.py`. So Lzcount rendering is the only remaining blocker. Do NOT fix this by changing the lift's spelling: Lzcount is the one IL op for count-leading-zeros.
+## Where
+- `crates/r2ssa/src/machine/lowering.rs`: `SSAOp::PopCount` maps to `MachineExprKind::PopulationCount` there (around line 298). Add the Lzcount arm and a new `MachineExprKind` variant (defined in `crates/r2ssa/src/machine/mod.rs`, around line 986), with the same width checks.
+- `crates/r2rewrite/src/typed.rs` (PopulationCount near line 647) and `crates/r2rewrite/src/import.rs` (around line 650): add the typing rule. The spelling must be total at zero, e.g. a static inline helper returning the width when the input is 0, never a bare `__builtin_clzll(0)`. Per the plan's decision 1, output C must be UB-free.
+- `crates/r2dec/src/binding_plan/rules.rs` (around line 2439) and wherever PopulationCount is rendered. `crates/r2dec/src/fold/op_lower/implementation.rs` has a test, `unsupported_live_definition_is_a_typed_refusal`, that uses Lzcount as its example of an unsupported op. Switch it to an op that stays unsupported.
+- The input width must be respected: `Lzcount` of an N-byte value counts within N*8 bits (see `r2il::eval` unary Lzcount).
+## Done when
+- A new test in `crates/r2engine/tests/native.rs` renders `bsr rax, rdi; xor rax, 63; ret` and `lzcnt rax, rdi; ret`, compiles the C, and checks it against `__builtin_clzll` over nonzero inputs (and width at zero for lzcnt). Model it on `a_bit_scan_renders_as_the_count_it_computes` and `run_rendered`.
+- `tests/equiv/run_equiv.py --sources tests/corpus/values.c --only value_count_bits --baseline tests/equiv/baseline.json` shows the six records `equal`, and the ratchet holds.
+ADDITIONAL: the r2sleigh_* helper must be emitted into pddj's self-contained unit (the P0 prelude mechanism) and verified exact for every width (8/16/32/64) against the r2il::eval semantics with an exhaustive 8/16-bit and randomized 32/64-bit test, as the other prelude helpers are.

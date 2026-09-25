@@ -1,0 +1,403 @@
+
+##### trace:data-objects | Data objects, strings and symbolization (native r2s route; x86-64 gcc PIE, plus the arm64 Mach-O fixtures)
+ - SILENT MISCOMPILE: on rv_O2 and rv_O2s, 'pdd @ classify' renders `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)"\n")`. 0x2020 is CSWTCH.12, a LOCAL OBJECT of 32 bytes in .rodata holding int[8] {10,21,32,43,54,65,-1,87}. 
+    owner: r2types owns the per-value literal fact. r2engine supplies the evidence: text bytes, objec | rewrite: True | repro: True
+ - Value-first symbolization hazard: every integer literal (7, 4, 0xffffffff in the classify trace) is looked up in the string and data-symbol tables by its numeric value, at every conversion boundary. In a PIE linked at 0,
+    owner: r2types: an address-typed value (pointer to object). r2ssa: evidence (used as a load/store | rewrite: True | repro: False
+ - Globals are only exact addresses, with no extent or identity. As a result `g_table[i]` renders as `*(uint32_t*)((uint64_t)i * 4 + (uint64_t)&g_table)`, CSWTCH.12 gets no base, and the fill -O2 loop end `if (RAX_1 == 0x40
+    owner: r2engine provides the object table (start, size, name, mutability, initializer when immuta | rewrite: True | repro: True
+ - `2 data object types refused`: g_counter, g_table and g_msg render as `#define g_counter__r2sleigh_addr 0x4010ULL / extern char g_counter[];`, and the body reads `*(uint32_t*)&g_counter`. This happens even on rv_O0g, who
+    owner: r2image reads DWARF objects (container evidence). r2engine carries them as SourceDataObjec | rewrite: False | repro: True
+ - Anonymous read-only constants render as raw absolute loads: rv_O0g main `*(uint64_t*)0x2040/0x2048/0x2050` (double d[3] = {1.0, 2.5, 3.5}), rv_O2 fill `*(__uint128_t*)0x2040/0x2050` ({0,1,2,3} and {4,4,4,4}), rv_O2 main 
+    owner: r2image and r2s supply the permissions. r2engine captures the immutable bytes into the sna | rewrite: False | repro: True
+ - A function address is passed as an integer: rv_O0g main `dispatch(0x11a9, ...)` and rv_O2 main `dispatch(0x1370, (uint64_t)(uint32_t)argc, 7)` (0x11a9 and 0x1370 are `add`). In addition, rv_O0g dispatch itself renders wi
+    owner: r2image: function types from DWARF. r2ssa: interprocedural 'argument is called' effect, an | rewrite: False | repro: True
+ - Hashed type names leak: list_len -O2 `*(struct sla_struct_28d371d39d586e37**)(RDI_0 + 8)` while the parameter stays `uint64_t RDI_0`; arm64 table_walk -O2 `((struct sla_struct_71851e91f9440fe3**)X0_0)[4]`. No struct defi
+    owner: r2types owns the aggregate identity, recursive type inference and deterministic naming. r2 | rewrite: True | repro: True
+ - DWARF struct layouts never reach the type graph. rv_O0g list_len has `const struct node* n` but renders `((uint64_t*)n)[1]` instead of `n->next`; rv_O0g main declares locals a, b, c as `struct r2sleigh_bits_192`, and `v`
+    owner: r2image reads the layouts; r2engine places them in SourceTypeGraph aggregates; r2types and | rewrite: True | repro: True
+ - CRASH: 'pdd @ sym.classify' on rv_O0g aborts with 'memory allocation of 4294967296 bytes failed' in r2ssa::indirect::dispatch_table_read. The trigger is the -O0 jump table at 0x2018; the switch index is reloaded from [rb
+    owner: r2ssa (indirect.rs table model; ValueRanges over stack slots) | rewrite: False | repro: True
+  Q: Should a LOCAL immutable object with a known initializer (CSWTCH.12, anonymous rodata tables) be emitted as a self-contained `static const T name[N] = {...}` definition, or kept as `extern` plus the ` || For gcc switch-conversion tables (CSWTCH.*), should we go further and restructure `if (x <= 7u) return CSWTCH_12[x];` back into a `switch` (better GED), or is the table read the final form? || Naming policy for inferred aggregates without DWARF: `struct <function>_arg<N>`, a program-wide `struct_<N>` numbered by first appearance, or a name derived from the address? It must be deterministic  || Anonymous immutable scalar constants: fold to the value (`1.0`), or synthesize a named `static const` object (closer to the source when the source used a named const)? The proposal folds anonymous dat || Is it acceptable that string-literal recall drops for untyped carriers in stripped binaries (rendered as address or name instead of a literal) until use-typing through callee summaries lands? This is 
+
+##### trace:binding | Variable binding and name coalescing: source/DWARF names attached to SSA values loaded from a stack slot instead of to the slot's storage. Covers the 
+ - F1 (origin of the mul_div miscompile). The r2ssa stack-reload certificate treats any unary op as preserving a value. It follows SUBPIECE at a non-zero offset, SEXT, ZEXT, TRUNC and CAST from a reload, and records the res
+    owner: r2ssa | rewrite: False | repro: True
+ - F2 (why the safety net did not fire). The binding plan has an interference check, but the liveness 'same content' relation exempts exactly the conflicting pair. It unions any SUBPIECE regardless of offset, and any SEXT/Z
+    owner: r2ssa | rewrite: False | repro: True
+ - F3 (why the proof line said '0 refused'). There is no independent check that a rendered read of a C variable sees the value the SSA expects. The binding-plan seal re-runs the same partition function against the same live
+    owner: r2dec | rewrite: False | repro: True
+ - F4 (the model gap behind the noise). -O0 declared locals and parameter homes are never promoted out of memory. Names therefore attach to values loaded from the slot, not to the slot's storage, and an elaborate reconcilia
+    owner: r2ssa (promotion and the storage-identity fact), r2types (entity and type), r2dec (render  | rewrite: True | repro: True
+ - F5 (unenforced invariant behind the '_2' names). Two bindings can claim the same StackSlot identity, and each takes the source name, so the symbol table appends _2. In copy_name, b4 (reload component) and b6 (stack_m16) 
+    owner: r2dec | rewrite: False | repro: True
+ - F6 (latent miscompile in the same machinery, not reproduced). When a memory-resident slot shares a binding with its reloads (or a parameter home binds to the parameter binding), each store to the slot renders as a write 
+    owner: r2dec (plan) / r2ssa (MemorySSA versions) | rewrite: False | repro: False
+ - F7 (list_len: 'uint32_t c' and 'return (uint64_t)c;' in an int32_t function). The declared type graph is thrown away for the whole function because one parameter type ('const struct node *') cannot be interned. Slot c lo
+    owner: r2engine (interface builder), r2source (type-graph contract), r2ssa (return logical projec | rewrite: False | repro: True
+  Q: Do you approve promoting DWARF-declared scalar locals and parameter homes out of memory (mem2reg, F4)? It deliberately reverses the documented choice in promote.rs:266-269 and 431-435 and changes -O0  || When the F3 reaching-values validator finds a stale read, should it refuse the whole function or emit a visible residual only at the offending construct? || For struct pointers in declared prototypes (F7): reuse SourceTypeKind::Void as an opaque pointee, or add an explicit Opaque/Incomplete{name} kind to the r2source contract? The first changes no contrac || Should signedness inference keep using SEXT/ZEXT of a reload as evidence about the slot's interpretation once those values are no longer certified as aliases (signature_infer.rs:236-248)? If so, it ne || F6 (a stale read across a store to a memory-resident slot bound to its reloads, e.g. a[n++] at -O0) was not reproduced because no suitable fixture exists and read-only mode prevents building one. Plea
+
+##### trace:memory-model | Memory model, stack frame partition, aggregates (rv_O0g main/list_len/sum_array/avg, rv_O2 main/avg; afv)
+ - DWARF aggregates and arrays never reach the engine. In `rv_O0g`, `unsigned v[4]`, `double d[3]` and `char buf[16]` get no declared slot and no name. `struct node a,b,c` get a 24-byte slot with no type, and `list_len(cons
+    owner: r2image (reads DWARF) + r2abi (declaration model: a type graph beside the spellings) | rewrite: True | repro: True
+ - One aggregate anywhere in a prototype wipes every type in the function. `list_len`'s own `int c` slot ends up 'type None', and main's c/b/a slots are untyped, which renders them as `struct r2sleigh_bits_192`.
+    owner: r2engine (policy: attach the declaration's graph to the interface) | rewrite: True | repro: True
+ - The stack frame is split into separate scalars across a proven address escape, so `sum_array(&stack_m200, 4)` relies on adjacent locals, which is undefined behaviour. `rv_O0g` main declares `uint32_t stack_m200..stack_m1
+    owner: r2ssa (evidence: frame object identity). New module crates/r2ssa/src/memory/partition.rs,  | rewrite: True | repro: True
+ - Callee argument-reach summaries are unbounded where the math is bounded, and unsound where they should be unbounded. At O0, `sum_array`, `avg` and `find` read `v[i]` for i<n, yet the summary says `Read Arg0 range: None`,
+    owner: r2ssa (interproc summaries, semantic/trips.rs, address.rs) | rewrite: False | repro: True
+ - `list_len` renders `((uint64_t*)n)[1]` instead of `n->next`. Even with a DWARF type graph (findings 1 and 2), the member projection cannot fire, because the base must be a parameter by identity: n is a loop phi (n = n->n
+    owner: r2types (the type of the base value and the member choice). r2ssa supplies only the eviden | rewrite: True | repro: True
+ - A memory object whose type is unknown is declared as a bit-vector scalar, `struct r2sleigh_bits_192 { uint8_t bytes[24]; } c;`, and accessed through pointer casts, `((uint64_t*)&c)[1] = 0; ((uint64_t*)&b)[1] = &c;`. That
+    owner: r2ssa (whether the object is a region: evidence). r2types (the declaration type). r2dec on | rewrite: False | repro: True
+ - `afv` lists parameter spill homes and promoted slots as anonymous locals and never uses DWARF names. On rv_O0g, sum_array prints `var uint32_t stack_m36` (n's home), `var uint64_t stack_m32` (v's home), `stack_m16` and `
+    owner: r2engine (program/info.rs: facts for the query surface). r2s only spells. | rewrite: False | repro: True
+ - There are two owners of frame reachability, and body-proved extents take precedence over declared ones. promote.rs decides 'an escape reaches everything above it', while the object model decides 'each root is an object'.
+    owner: r2ssa (partition is the single owner). r2engine (restatement policy). | rewrite: False | repro: False
+  Q: How should a frame object with an unproven extent be spelled? Option (a) is one byte region, `uint8_t stack_m200[168]`, with `*(uint32_t*)&stack_m200[4] = 2`. Option (b) is an anonymous struct synthes || When the callee's reach is unbounded (an unmodelled import given &x), should x's object merge up to the next proven barrier (a declared object, a saved register, the canary or the frame top)? That is  || Interior accesses into regions: accept `*(T*)&region[k]`, which compiles and is conventional but is a strict-aliasing pun? Or require `memcpy` spellings, which are strictly defined but noisier? || Should the invariant 'one machine access never spans two source objects' be kept as an axiom? It is already assumed at shared.rs:1790-1795. Store merging across distinct locals by a compiler would bre || When a DWARF-declared extent is contradicted by an access that straddles its boundary, should that one declaration be refused (the slot becomes an undeclared region, with evidence), or should the func || How should afv spell a parameter's home slot: as radare2 does for DWARF binaries (to be diffed against r2), or omit it from locals since the arg line already names the parameter?
+
+##### trace:calls | Call sites, prototypes, varargs, cross-view consistency (rv_O0g/rv_O2 main, list_len, dispatch, add). Every defect below was reproduced on the current
+ - F1: WRONG C at a variadic call. rv_O0g main renders `printf((const int8_t*)"%d %s\n");` with the declaration `int32_t printf(const int8_t*);` and drops `r` (ESI) and `buf` (RDX). rv_O2 has the same bug with `int32_t __pr
+    owner: r2source (contract field) + r2engine (selects the declaration) + r2ssa (count and placemen | rewrite: True | repro: True
+ - F2: Inconsistent views of one function. In rv_O0g main the callee declaration reads `uint64_t list_len(uint64_t)`, while list_len's own pdd reads `int32_t list_len(const struct node* n)` and, inside that same function, `
+    owner: r2engine (declared-interface construction), r2source (type graph), r2types (one sealed sig | rewrite: True | repro: True
+ - F3: dispatch -O0 (DWARF says `int (*fn)(int,int)`) renders `/* r2dec gap: UnprovenReturn */ dispatch(int64_t RDI_0, int32_t ESI_0)` and calls `((void(*)(uint64_t,uint64_t,uint64_t,uint64_t))tmp)(a, a+1, fnptr, a+1)`. mai
+    owner: r2image (DWARF reading) -> r2abi/r2source (type representation) -> r2ssa (target provenanc | rewrite: True | repro: True
+ - F4: dispatch -O2 (`mov rax,rdi; mov edi,esi; lea esi,[rsi+1]; jmp rax`) is refused whole: `observation journal: RenderedValueRequired`. The recovered interface also loses parameter 1 (ESI).
+    owner: r2ssa (machine-state proof of a tail transfer); r2engine only stops treating it as unresol | rewrite: False | repro: True
+ - F5: unknown-arity calls are rendered as complete, proven calls. rv_O0g dispatch gets 4 arguments. rv_O2 main declares `uint64_t dispatch(uint64_t, uint64_t, uint64_t)`.
+    owner: r2ssa (evidence: which carriers were written) + r2engine (policy: whether an assumed arity | rewrite: False | repro: True
+ - F6: parameter widths without DWARF are over-wide. rv_O2 `add` renders `uint32_t add(uint64_t RDI_0, uint64_t RSI_0)`, although only EDI and ESI influence any observation.
+    owner: r2ssa (deadphi.rs demanded-bytes closure) | rewrite: False | repro: True
+ - F7: result widths are not closed over merges. rv_O2 list_len, classify and fact render `uint64_t` results although every return path defines RAX as zext(EAX).
+    owner: r2ssa (recover_interface) | rewrite: False | repro: True
+ - F8: a void function is claimed to return a value. rv_O2 `fill` renders as `uint64_t fill(uint32_t)`, and main declares it that way; RAX is only a loop pointer (lea rax,0x4040; add rax,0x10).
+    owner: r2ssa interproc (evidence) + r2engine (closed-world policy) | rewrite: False | repro: True
+ - F9: the convention model reaching r2ssa is incomplete. SourceConventionSlots has no floating-point argument slots, no vector-count hidden register (SysV AL), and never sets Apple arm64's variadic-tail-on-stack rule.
+    owner: r2source (convention contract) + r2engine (fills it from r2abi and the platform) | rewrite: False | repro: False
+ - F10: call arguments are derived twice. The interproc pass re-derives each call's argument carriers with its own iteration-capped dataflow, independently of the boundary facts.
+    owner: r2ssa (boundaries is the one owner; interproc consumes) | rewrite: False | repro: False
+  Q: Format-role source: add a declared format-attribute table to r2abi (GCC `format(archetype, string-index, first-to-check)` semantics, taken from glibc/Apple libc headers and keyed per import like the p || Unknown-arity indirect calls (no type, no body, no agreed target set): render the caller-writes arity as a visibly marked assumption counted in the proof line, or as a residual gap with arguments unre || Closed-world evidence: may the engine use whole-program facts (every call site known, address not escaping, symbol not exported) for (a) the target-set join for function-pointer parameters (dispatch r || Scope of the type-channel fix: do the full rewrite now (structured r2abi::CType from DWARF with aggregates and function signatures, touching r2image, r2abi, r2engine, r2source and r2types)? Or land th || Result-width narrowing (F7): accept that `long f(){return 5;}` compiled to `mov eax,5` is declared with a 32-bit result? It is observationally equivalent because the high bits are proven zero. The alt
+
+##### trace:values-dispatch | Value analysis, jump tables, whole-binary cost (HEAD 5a6571fc, branch engine/review-fixes-vfmgfv)
+ - OOM on 'pdd/pdf @ sym.classify' (rv_O0g). The dispatch read at 0x123c is reported as 2^32 entries, and r2ssa builds the case-label Vec before anything checks that size against memory.
+    owner: r2ssa (indirect.rs: the proof of the read's extent and the lazy labels); r2engine (native. | rewrite: False | repro: True
+ - At -O0 the value analysis cannot see through frame slots, so the guard on a spilled switch index never reaches the reload. 'cmp dword [rbp-4],7; ja' narrows load L1, while the dispatch reads a different load, L2.
+    owner: r2ssa (promote.rs: the fact of which slots are private scalars; values.rs: one copy-congru | rewrite: True | repro: True
+ - The selector-to-label inverse folds the whole index chain into one 64-bit affine map with checked_sub. Selectors offset by a negative constant are therefore refused, and the fold is not exact across a narrower add.
+    owner: r2ssa (indirect.rs) | rewrite: False | repro: False
+ - pdf (and every tier) has a hard dependency on the function's full analysis. One analysis failure or panic kills the disassembly, and an OOM kills the whole process and session.
+    owner: r2engine (program/requests.rs, native.rs) | rewrite: False | repro: True
+ - Per-command cost. The '~1.6 s per call, whole-binary analysis for pdd @ sym.add' claim does not reproduce at HEAD. The real costs are a fixed machine load, callee facts that are never reused, and an afl survey that is no
+    owner: r2engine (program/mod.rs, program/requests.rs, native.rs, query/memo.rs) | rewrite: False | repro: True
+  Q: F2 scope. Should every proven-private frame slot become SSA, including DWARF-declared locals and parameter homes (A1)? That changes -O0 rendering broadly and makes the r2types/r2dec parameter-home coa || Full-width selectors. A u8 index with no guard gives a 256-entry table, and in two-level tables (byte index table, then jump table) the loaded byte is top(8). Should these be refused (fail closed, vis || Panic isolation. Is catch_unwind at the per-function memo/prepared_callee boundary acceptable under the no-hacks rule if every caught panic is reported as that function's refusal with the message as e || Perf baseline. The reported ~1.6 s per call does not reproduce (0.36-0.48 s debug for pdd of small functions, 1.33 s for pdd @ main). Was it measured under parallel load or on another binary? Should t || Should the table extent bound use the containing section (tighter, from r2image) or the segment (what Program::read/read_upto currently clamps to)?
+
+##### trace:lowering | C lowering semantics in r2dec (P-code -> C): shift/rotate definedness, partial-register entry reads and result width, call-clobbered thread pointer, f
+ - rotl (rv_O0g and rv_O2) renders `x << t | x >> (uint8_t)(32 - t)` with t = r & 31. At t == 0 that is `x >> 32`, which is UB in C. P-code gives 0 there, and x86 `rol` gives x. The render still certifies "0 refused". The s
+    owner: r2rewrite (C operator admissibility in typed boundaries + rotate rule); r2ssa (count range | rewrite: False | repro: True
+ - rv_O2 sext renders `uint64_t RAX_0; RAX_0 = (RAX_0 & ~(...0xffff)) | (uint64_t)(uint16_t)(int8_t)DIL_0;`, which reads an indeterminate C variable. The return is uint32_t where the source is int16_t. The proof line neithe
+    owner: r2ssa (byte dependency and definedness facts, result width); r2engine/r2types (caller evid | rewrite: True | repro: True
+ - rv_O0g main declares `uint64_t FS_OFFSET_15;`, never assigns it, and reads it through `*(uint64_t*)(FS_OFFSET_15 + 40)` in the stack-canary check. The first canary load uses FS_OFFSET_0, which is held from entry.
+    owner: r2abi (register class fact) -> r2source (SourceCallEffect) -> r2ssa (rename); r2dec (certi | rewrite: False | repro: True
+ - rv_O0g avg renders `double tmp_6b00_4 = r2sleigh_float_from_bits_64(v[i]);` where v is `const double*`. v[i] is already a double, so this is an implicit double -> uint64_t value conversion followed by a reinterpretation,
+    owner: r2rewrite (typed boundary of Load/Subscript) + r2dec binding_plan/access_syntax (the spell | rewrite: False | repro: True
+ - rv_O0g avg is full of dead XMM lane noise: `__uint128_t XMM0_1; XMM0_1 = (XMM0_1 & ~((__uint128_t)~(uint64_t)0U << 64U)) | ...` for movsd upper-lane zeroing and loop-carried XMM0 writes that nothing observes. The return 
+    owner: r2ssa (byte demand, observed-lane narrowing); r2dec binding plan consumes it | rewrite: False | repro: True
+ - rv_O2 avg: the return is gapped as `UnprovenReturn`, and all addsd/divsd work is dropped as unobserved. The function returns a double in XMM0.
+    owner: r2source (contract gains float slots) + r2ssa recover_interface (class-aware result/parame | rewrite: False | repro: True
+ - arm64 manual_limits_O2 sparse_switch renders `W0_0 == 2 || r2sleigh_int_sborrow_32(W0_0, 2) != (int32_t)(W0_0 - 2) < 0` for `cmp w0,#2; b.le`, and `W0_0 + 7 == 0` for `cmn w0,#7; b.eq`.
+    owner: r2ssa (machine typing of boolean operands) + r2rewrite (flag rules with proofs, harness) | rewrite: False | repro: True
+ - Cast noise: `return (uint32_t)b + (uint32_t)a;` for int add, `i = (int32_t)((uint32_t)i + 1);` for i++. A latent UB of the same class: a narrow unsigned multiply or left shift is computed in signed int.
+    owner: r2rewrite typed.rs (carrier choice and admissibility); r2ssa (signedness-agnostic ranges); | rewrite: True | repro: True
+ - A fabricated fact leaks into user-visible range claims. The rebuilt formal root is ZEXT(SIL_0), so the listing claims `mov ecx, esi ; defines rcx in [0x0, 0xff] (solved)` in rv_O2 rotl. That is false of the machine: ECX 
+    owner: r2ssa | rewrite: False | repro: True
+
+##### trace:r2-prs | radare2 upstream PR triage (0verflowme's 9 open PRs) and working out which fork branch is meant by 'subregister-arg-spill'
+ - PR #26768 'Keep the Thumb bit off data symbols in ARM ELF'. It is OPEN and mergeable (mergeable_state=clean, base 39b18895). CI is green on head 7b459eca: 49 checks, 25 success and 24 skipped (the skipped ones are gated 
+    owner: radare2: libr/bin/format/elf/elf.c | rewrite: False | repro: False
+ - PR #26765 'Read registers and target details from lldb's debugserver'. It is OPEN, mergeable (clean) and CI green on head 2774ebf8, with no inline threads. trufae posted one COMMENTED review (2026-09-21 00:09) and it has
+    owner: radare2: shlr/gdb/src (core.c, packet.c, gdbr_common.h), libr/debug/p/debug_gdb.c | rewrite: True | repro: False
+ - PR #26762 'Format a scalar typedef as its target'. It is OPEN, mergeable (clean) and CI green, but REDUNDANT: its only commit a7a616fe was also the first commit of #26763, which trufae squash-merged on 2026-09-20 as a756
+    owner: radare2: libr/util/utype.c (landed); libr/core/cmd_type.inc.c if ts needs a guard | rewrite: False | repro: True
+ - PR #26743 'Declare the fortified libc functions under their identifiers'. It is OPEN and HAS A MERGE CONFLICT (mergeable=false, mergeable_state=dirty, stale base fbe0d631 of 2026-09-16). CI is green on the stale head 2c4
+    owner: radare2: libr/anal/d/types*.sdb.txt, libr/util/utype.c | rewrite: True | repro: False
+ - PR #26708 'Run plugin post-analysis hooks from aa and aaa with a depth'. It is OPEN, labeled DO_NOT_REVIEW, mergeable (clean), CI green on head bc386686 (rebased 2026-09-21), with no inline threads. trufae's design revie
+    owner: radare2: libr/core/cmd_anal.inc.c, libr/include/r_anal.h | rewrite: False | repro: True
+ - PR #26682 'Invalidate cached function ref counts with an xref generation counter'. It is OPEN, mergeable (clean), CI green on head 31c9a5eb (rebased 2026-09-19 after trufae's 'Conflicts'). All 7 review threads are resolv
+    owner: radare2: libr/anal/xrefs.c, libr/include/r_anal.h | rewrite: False | repro: False
+ - PR #26629 'Resolve the argument sequences once per function'. It is OPEN, milestone 6.2.4, mergeable (clean; trufae's 09-22 'not mergeable' has since cleared), CI green on head a52bc5f5 (rebased 2026-09-21 22:09). Its on
+    owner: radare2: libr/anal/var.c, libr/anal/cc.c | rewrite: False | repro: False
+ - PR #25942 'Optimize /as syscall search candidate discovery'. It is OPEN, mergeable (clean), CI green on head 54b79883 (rebased 2026-09-19). Two CHANGES_REQUESTED reviews (2026-05-12 'fix those and im mainly interested fo
+    owner: radare2: libr/core/cmd_scsearch.inc.c (policy); libr/arch plugins (encodings/alignment via | rewrite: True | repro: False
+ - PR #25935 'Spawn and attach x86 processes under Rosetta'. It is OPEN, mergeable (clean), CI green on head 15461d21, with no reviews or threads since the split. trufae's only request (2026-05-09: split out the gdb-protoco
+    owner: radare2: libr/io/p/io_debug.c, libr/debug/p/native/xnu | rewrite: False | repro: False
+ - No fork branch is named 'subregister-arg-spill'. Of the three candidates, only anal/subregister-argument-spills is live. The other two are single-commit branches whose upstream PRs are closed: one was rejected, the other
+    owner: radare2 fork: 0verflowme/radare2 | rewrite: False | repro: True
+ - r2sleigh vendors radare2 type data that is NOT upstream. crates/r2abi/data/types.sdb.txt and types-linux.sdb.txt contain PR #26743's unmerged renames (__memcpy_chk ... __fdelt_chk in the portable table, removed from linu
+    owner: r2abi (data and lookup), r2engine (platform policy), r2image (platform evidence) | rewrite: False | repro: True
+  Q: Is anal/subregister-argument-spills (4d068140) the branch you mean? No branch named 'subregister-arg-spill' exists on 0verflowme/radare2, and I can't see a local radare2 checkout from here. Do you hav || #26743: adopt trufae's 5-patch series, which keeps r2's normalized keys (memcpy_chk)? If yes, r2abi's vendored table has to become an explicitly documented fork keyed by C identifier. Or argue upstrea || #26708: close it, since no plugin consumes post_analysis now that the r2sleigh radare2 plugin is gone? Or build trufae's pass registry for a future plugin? || #26762: close it as already landed through #26763's squash (a756f859)? And should `ts size_t` keep printing (current master behavior), or should `ts` be limited to structs in the command handler? || #26682: ask trufae to merge now despite the RAnalFcnMeta ABI change, or hold it for the next ABI-bumping release? || #26629: change the cache key from (fcn, callconv, generation) to (callconv, generation), and change the PR title to trufae's subject? And do the O(1) register-parent link in r_reg_reindex as a separat || #25935/#26765: do you have an Apple Silicon machine with Rosetta and debugserver to validate on? CI can't test this path. || Delete the dead fork branches anal/subregister-spill-pr (rejected #26621) and pr/subregister-spill (superseded by upstream a91dad00f1)? || Should the DWARF duplicate-formal defect (upstream test/db/cmd/dwarf:653 expects 4 params for 2-param dbg.palya) become a new upstream PR? The author promised that fix in #26643.
+
+##### trace:commands | r2s command surface vs radare2 semantics (iz/ir/is/afl/afi/afv/axt/pdf/i/f/pd/w*)
+ - axt 0x2008 finds 0 references although g_msg (0x4018) points to it; on Mach-O code_pointer_table_O0, axt sym._table_op_xor finds 0 even though __const holds pointers to all three table_op_* functions, and `blr x8` in _ta
+    owner: r2image (loader-write values), r2engine (memory reads through stated values; the reference | rewrite: True | repro: True
+ - ir lists 9 of 13 ELF relocations: the four R_X86_64_RELATIVE entries are missing. It has no type, paddr or addend column, and on Mach-O it lists import stubs (from the indirect symbol table) as if they were relocations.
+    owner: r2image (single relocation/fixup reader), r2s (ir columns) | rewrite: True | repro: True
+ - afv @ sym.find (rv_O0g) lists the three argument spill homes as locals (stack_m40/stack_m36/stack_m32, typed uint32_t/uint32_t/uint64_t by width) and calls DWARF's `i` 'stack_m12', while pdd merges the homes into v/n/key
+    owner: r2engine (program/info.rs reads the interface roles and the presentation names); r2s only  | rewrite: False | repro: True
+ - afi, afv, pdf and pdd at an address inside a function analyse that address as a new function entry. `afi @ 0x14d0` (inside sym.find) reports addr 0x14d0, size 81, 8 blocks, args 0; `pdf @ 0x14d0` lists from mid-body; `af
+    owner: r2engine (a query over the discovery survey's block extents); r2s resolves before dispatch | rewrite: False | repro: True
+ - Unnamed functions collapse to '-' or three spellings. On stripped rv_O2s, afl prints '-' for every discovered function, pd/axt print `call 0x1370`, `s fcn.1370` and `s fcn.00001370` fail, afi omits the `name:` and `signa
+    owner: r2engine names/naming (the one table); r2source, r2types and r2dec consume a projection; r | rewrite: True | repro: True
+ - The name table silently drops a second name of the same namespace at one address. On rv_O0g `_edata` (same address as __bss_start), `data_start` (same as __data_start) and `completed.0` (same as __TMC_END__) are missing 
+    owner: r2engine names.rs (the table); r2image Symbol.bind (the ordering evidence) | rewrite: False | repro: True
+ - iz prints the raw newline of "%d %s\n", which breaks the table. It lists loader and linker metadata as program strings: .interp, 'GNU' from three NOTE sections, .dynstr import names and version strings, and '9*3$"' from 
+    owner: r2image (section role from container statements), r2engine (which roles hold program data; | rewrite: True | repro: True
+ - `i` reports baddr 0x0 for Mach-O (radare2: 0x100000000) and for non-PIE ELF (rv_O2np and hashes_gcc_x64_O2_stripped: 0x0, where radare2 reports 0x400000).
+    owner: r2image | rewrite: False | repro: True
+ - is lists no imported symbols and has no bind column. On stripped rv_O2s it is empty, where radare2 lists the dynamic imports.
+    owner: r2image (binding and library facts), r2engine (stub table = the import's address), r2s (co | rewrite: False | repro: True
+ - afl has no nbbs/size columns, a non-radare2 header, a 'confidence' column and a footer. radare2 prints `0x%08x %4d %6d name`, headerless.
+    owner: r2engine (the survey keeps each body's block extents); r2s (columns) | rewrite: False | repro: True
+ - pdf prints no function header (radare2 `┌ 108: int sym.find (…);`), no `; arg`/`; var` lines, no `; CALL XREF from …` lines and no `;-- name:` flag labels. pd at 0x10c0 omits `;-- entry0:` and `;-- section..text:`.
+    owner: r2s (render only; the facts exist in r2engine) | rewrite: False | repro: True
+ - Import stub flags have size 0 (`sym.imp.printf 0`) and reloc flags have size 0. radare2 gives the PLT cell size (16) and the pointer width (8).
+    owner: r2engine naming (ELF stubs), r2image (Mach-O stub size, relocation width) | rewrite: False | repro: True
+ - iS gives non-loaded sections (.comment, .debug_*, .symtab, .strtab, .shstrtab) permission -r-- (radare2: ----). Mach-O section identity drops the segment: `__const` rather than `__DATA_CONST.__const`, so two same-named s
+    owner: r2image (section permissions and full identity), r2s (print) | rewrite: False | repro: True
+ - pd spelling: `lea rdx, rax*0x4` loses its brackets (objdump `lea rdx,[rax*4+0x0]`, radare2 `lea rdx, [rax*4]`), which is not valid Intel syntax. On AArch64, `ldrb w10, [x1, x10, lsl ]` prints an empty shift amount (manua
+    owner: r2sleigh-lift (disassembly syntax) | rewrite: False | repro: True
+ - Errors print a double prefix: `r2s: r2s: 'zz' is not hex`, `r2s: r2s: a byte is two hex digits`, `r2s: r2s: ax takes no argument`.
+    owner: r2s | rewrite: False | repro: True
+ - Smaller command-surface divergences from radare2: (a) `axt` with zero results starts with an empty line, and its count counts facts while a fact with k owners prints k lines; (b) `w`/`wx` print `N bytes at 0x…` ('1 bytes
+    owner: r2s (a–e); r2engine names.rs (f: the one string predicate) | rewrite: False | repro: True
+  Q: iz semantics: should `str.` flags exist only for proven strings (the container states the section holds C strings, or a code or stated-pointer reference reaches the string's first byte)? Should `iz` t || afl layout: adopt radare2's exact headerless `0x%08x nbbs size name` so the two diff cleanly, and move the discovery confidence to `afll` or a verbose form? Or keep the confidence column and header? || Unnamed function spelling: switch to radare2's `fcn.%08x` (and `fcn_%08x` as the C identifier) everywhere, accepting a change to every golden that contains fcn_{x}? || Should a function handed to a declared function-typed parameter take that parameter's declared name and type? Example: 0x10c0 in stripped rv_O2s is handed as __libc_start_main arg 0, declared `func,ma || afi/afv/pdf/pdd at a non-entry address: resolve to the containing function as radare2 does, and refuse when there is none? Then force-analysing an arbitrary address becomes an explicit `af`. For an ad || afv for parameter spill homes: print the home on the arg line (`arg const int32_t* v @ rdi ; home fp-0x18`) as pdd's one-variable model implies, or also emit radare2's separate `var` line for the home || Stated loader-write values: may the engine read a RELATIVE or rebased word as B+A with B = baddr (image coordinates, 0 for PIE), so that pdd, axt and the pointer-table indirect call use it? Or should  || Exit status: should r2s follow radare2 (q -> 0, q N -> N, and radare2's rule for failing statements under -c), or keep 'any failed statement -> 1' for scripting?
+
+##### critique:data-objects | Data objects, strings and symbolization (native r2s route; x86-64 gcc PIE, plus the arm64 Mach-O fixtures). Adversarial re-review at HEAD 5a6571fc.
+ - SILENT MISCOMPILE (confirmed). On rv_O2 and rv_O2s, 'pdd @ classify' renders `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)"\n")`. 0x2020 is CSWTCH.12, a 32-byte LOCAL OBJ holding int[8]. Its first bytes 0a 00 read as th
+    owner: r2ssa: one provenance pass per constant-rooted value. It computes, per use, the access wid | rewrite: True | repro: True
+ - Value-first symbolization is a reproducible hazard, not a hypothetical one. Every Const operand (except 0) of every op is a candidate address. On a PIE linked at 0, loader-metadata sections are counted as static data. So
+    owner: r2ssa: use-derived address evidence (load/store base, pointer-typed escape, compared again | rewrite: True | repro: True
+ - Globals are exact addresses with no extent or identity. Symptoms: - rv_O0g fill renders `*(uint32_t*)((uint64_t)i * 4 + (uint64_t)&g_table)`. - CSWTCH.12 gets no base. - rv_O2 fill's loop exit `if (RAX_1 == 0x4080)` (one
+    owner: r2image supplies the evidence: symbol sizes, binding, Mach-O atom boundaries and DWARF var | rewrite: True | repro: True
+ - MISSED (arm64): data-object discovery is syntactic and has no folded pass, unlike literals. On aarch64 a global at page+off accessed as `adrp x8, page; ldr w0, [x8, #off]` is never named. The page base itself is named as
+    owner: r2ssa provenance (folded values) with the r2engine ObjectMap. This is the same pass as the | rewrite: False | repro: False
+ - `2 data object types refused`: g_counter, g_table and g_msg render as `extern char name[]` plus `*(uint32_t*)&g_counter`, even on rv_O0g, whose DWARF states their types.
+    owner: r2image reads DWARF objects and loader write values. r2engine attaches type and provenance | rewrite: False | repro: True
+ - Anonymous immutable constants render as raw absolute loads: - rv_O0g main `*(uint64_t*)0x2040..0x2050` (double d[3]). - rv_O2 fill `*(__uint128_t*)0x2040/0x2050`. - rv_O2 main `*(__uint128_t*)0x2060/0x2070`. - arm64 manu
+    owner: r2image: segment permissions plus RELRO and SG_READ_ONLY, and loader write values. r2s and | rewrite: False | repro: True
+ - MISSED — SILENT MISCOMPILE: the native route drops the variadic tail of every call to an import. rv_O0g main renders `printf((const int8_t*)"%d %s\n");` and declares `int32_t printf(const int8_t*);`. rv_O2 renders `__pri
+    owner: r2source: the SourceFunctionInterface contract carries `variadic` and `declared_format_par | rewrite: False | repro: True
+ - A function address is passed as an integer: `dispatch(0x11a9, ...)` on O0g and `dispatch(0x1370, ..., 7)` on O2. rv_O0g dispatch loses its declared return (UnprovenReturn). MISSED sibling hazard: when a body references a
+    owner: r2image: function types from DWARF. r2engine: the ObjectMap excludes code, and function en | rewrite: False | repro: True
+ - Hash-minted type names leak: list_len -O2 `*(struct sla_struct_28d371d39d586e37**)(RDI_0 + 8)` and arm64 table_walk `((struct sla_struct_71851e91f9440fe3**)X0_0)[4]`. In the same table_walk function, the same base X0_0 i
+    owner: r2types: aggregate identity (AggregateId in a program type table, with provenance), constr | rewrite: True | repro: True
+ - DWARF struct layouts never reach the type graph. rv_O0g list_len renders `((uint64_t*)n)[1]` instead of `n->next`, and main declares a, b and c as `struct r2sleigh_bits_192`.
+    owner: r2image reads the layouts into a neutral structured type table. r2engine places the reacha | rewrite: True | repro: True
+ - CRASH: 'pdd @ sym.classify' on rv_O0g aborts with 'memory allocation of 4294967296 bytes failed' in r2ssa::indirect::dispatch_table_read.
+    owner: r2ssa (indirect.rs table model; memory value numbering over unescaped frame slots). r2engi | rewrite: False | repro: True
+ - MISSED: data-object identity and spelling are decided in r2dec by display-name prefixes. - `c_identifier_for_data_symbol` (lib.rs:4523-4545) strips 'obj.', 'reloc.', 'sym.' and similar, and maps every non-identifier char
+    owner: r2engine NameDb assigns a unique C identifier per object program-wide, and the loader-slot | rewrite: False | repro: False
+  Q: Variadic calls whose tail cannot be proven (the format is not a literal, or it contains a floating operand without AL evidence): refuse the whole function, or render the call with a marked residual ob || promote.rs:840-848 keeps read-back parameter homes in memory on purpose. To bound -O0 guards, should we add load value numbering over memory SSA for unescaped frame slots (keeps the current frame cert || Mach-O extents: may we treat MH_SUBSECTIONS_VIA_SYMBOLS atoms (next symbol or section end) as stated object extents? Without them, every arm64 Mach-O global is exact-address only and `g[i]` subscripti || Should `holds_static_data` exclude loader-metadata section kinds (ELF SHT_STRTAB, DYNSYM, RELA, NOTE, GNU_HASH, DYNAMIC, versym), as container-stated evidence alongside the use-typing fix? It removes  || Immutable objects with a fully known initializer (CSWTCH.12, anonymous rodata, and literals that need identity): emit self-contained `static const` definitions (correct when recompiled, but changes th || Should the verifier apply loader write values (rebase targets) to captured blobs, or should r2dec emit definitions whose pointer members are symbolic, e.g. `const char *g_msg = "hello global";`? One o || Naming of inferred aggregates without DWARF: a program-wide first-appearance order (which needs a program type table and is unstable for single-function pdd), or a function-and-parameter-derived name 
+
+##### trace:decbench | DecBench readiness: native adapter, DWARF oracle leak, metric requirements, local install, and an in-image compile-and-diff equivalence gate
+ - D1: The r2sleigh_native backend finds no functions on the input the leaderboard actually uses. DecBench's official driver gives the decompiler a stripped copy of the binary. The adapter finds functions through the symbol
+    owner: tests/decbench (adapter); no engine change needed | rewrite: True | repro: True
+ - D2: On non-PIE binaries the native adapter shifts every address by the load base (e.g. find → 0x8015a0 instead of 0x4015a0). No DWARF target then matches, `narrow_to_source` falls back to every function, and `_relabel_to
+    owner: tests/decbench (adapter); r2image owns the baddr fact (open question) | rewrite: False | repro: True
+ - D3: When r2s fails a command, the function disappears silently. It is neither rendered nor declined. The run is also marked 'ended early' whenever any single statement failed.
+    owner: tests/decbench (adapter) | rewrite: False | repro: True
+ - D4: One crashed or timed-out function loses the rest of the binary, and nothing is checkpointed. The official driver hard-kills the decompiler at timeout, reads only the progress pickle, and so gets nothing.
+    owner: tests/decbench (adapter) | rewrite: True | repro: True
+ - D5 (Q2): Type-match oracle leak. Given a binary with debug info, r2s reads that binary's own DWARF and renders its prototypes, parameter names, local names and local types, plus noreturn facts. DecBench scores types agai
+    owner: tests/decbench (measurement protocol); r2image owns the DWARF read | rewrite: True | repro: True
+ - D6: type_match scores us by variable NAME, not by what the engine recovered. The adapter emits no `variables` and no `line_mappings`, and `r2sleigh_native` is not on DecBench's address-correspondence allowlist. Locals ar
+    owner: r2dec (emits the line→observation map and the variable table from the same RenderedFunctio | rewrite: False | repro: True
+ - D7: The measurement and gate tooling still runs the deleted plugin or runs only on macOS. The ROADMAP standing-debt list names only part of it.
+    owner: tests/, scripts/, ROADMAP.md | rewrite: True | repro: True
+ - D8 (Q5): There is no semantic-equivalence gate that runs on r2s. The only differential gate (tests/corpus/verify_rendering.py) is plugin-driven. It patches image addresses into the C text with a regex that only sees lite
+    owner: tests/equiv (new); r2s supplies `pddj` (D6) including a link map; r2dec owns the helper pr | rewrite: True | repro: True
+ - D9: Variadic arguments are dropped at printf-family calls. rv_O2 main renders `__printf_chk(2, (const int8_t*)"%d %s\n")` and rv_O0g renders `printf((const int8_t*)"%d %s\n")` while declaring the callee non-variadic. The
+    owner: r2engine (declared interface carries the format role from r2abi) → r2ssa (counting); delet | rewrite: False | repro: True
+ - D10: A C string literal is spelled over a sized non-string data object. rv_O2 classify reads the CSWTCH.12 int[8] table as `*(uint32_t*)((uint64_t)EDI_0 * 4 + (uint64_t)"\n")`, which reads up to 32 bytes past a 2-byte li
+    owner: r2engine (names DB is the one owner of string classification) | rewrite: False | repro: True
+ - D11: An O0 jump table makes r2s abort with a 4 GiB allocation (classify at -O0), which kills any batched run (D4).
+    owner: r2ssa | rewrite: False | repro: True
+ - D12: `pdd` at a non-executable address renders data bytes as a function with a clean proof line. On rv_O2s, `s 0x2020; pdd` (.rodata, the CSWTCH table) gives `void fcn_2020(void)` with '90 rendered … 0 refused'. It also 
+    owner: r2engine (request orchestration); r2dec (proof accounting of held-from-entry) | rewrite: False | repro: True
+ - D13: No frame-slot SSA, which makes O0 renderings unlike the source. Every value reloaded from a stack slot becomes a bound temporary (e.g. find O0: `uint32_t tmp_11f00_4 = v[i]; … RAX_8`). Recompiling at -O0 gives each 
+    owner: r2ssa (slot SSA: escape analysis plus SSA construction over non-escaping frame slots); r2d | rewrite: False | repro: True
+ - D14: Parameter and local types miss on width, pointer-ness and pointee class. On rv_O2s only 12 of 24 source parameters match after DecBench normalization.
+    owner: r2ssa (demanded-bits and range evidence) → r2types (commit types) → r2engine policy (ABI p | rewrite: False | repro: True
+ - D15: A function returning in xmm0 (avg) renders its return as a gap and elides the whole FP accumulation. Its caller then reads the XMM0 return as an uninitialized variable (`r2sleigh_float_from_bits_64(XMM0_4)` in main)
+    owner: r2engine (interprocedural orchestration of return summaries); r2ssa (call-site live-in evi | rewrite: False | repro: True
+ - D16: Structuring at O0 and O2 differs from the source CFG by construct choice alone, which costs GED. At O0 the rendering funnels to one return through gotos (find: 4 labels). At O2 a loop is spelled as an if-guard plus 
+    owner: r2dec (structurer); r2ssa supplies predicate equality through phis | rewrite: False | repro: True
+ - D17: The output costs byte_match in ways the engine can fix. It uses non-standard helper calls (r2sleigh_int_carry_*, r2sleigh_float_from_bits_*) that DecBench's fixup cannot define. It spells the stack-protector canary 
+    owner: r2dec (emit used helper definitions; flag folding into relational operators); r2ssa (SSP i | rewrite: False | repro: True
+  Q: Leaderboard protocol: may we drop `decbench run` and baseline.json entirely and re-baseline only through DecBench's scripts/run_benchmark.py (strip --strip-all, DWARF-target narrowing)? Or should we k || Fail-closed guard: should the adapter REFUSE a binary that carries .debug_info/.symtab, or only record it in metadata? Refusing prevents a silent leak but makes `decbench run` unusable. || Where should GED run? Joern cannot be downloaded here (github.com release assets are blocked with 403). Options: use the contabo host for GED only, or request egress for github.com/joernio/joern relea || Should `r2s i` `baddr` follow radare2's definition (the lowest PT_LOAD vaddr for ELF, i.e. 0x400000 for non-PIE), or keep object::relative_address_base? The adapter will not depend on it either way. || Is a gate population of non-PIE builds acceptable for v1 execution, with PIE via a radare2-compatible `r2s -B <base>` plus `setarch -R` later? Or must PIE be executable from the start (which requires  || Should r2dec emit the r2sleigh_* helper definitions it uses inline (a self-contained translation unit, my recommendation), or should we upstream an r2sleigh helper table to DecBench's fixup pass? || Policy ruling on the ABI promotion rule for sub-int parameters (read without self-extension → promoted int; self-extension → narrow type): is this acceptable evidence under the refusal-first rules? || Policy ruling: may a proven stack-protector idiom (fs:0x28 → slot → compare → noreturn __stack_chk_fail) be elided as a compiler-inserted obligation rather than rendered? || Once stable, should the adapter be upstreamed as a PR to noelo-lab/decbench (decbench/decompilers/raw/r2sleigh_raw.py), as tests/decbench/README.md says it belongs in their tree? || dispatch (a tail call through a register) refuses with 'observation journal: RenderedValueRequired', and main's `FS_OFFSET` is held from entry. Should these be traced in this cluster or assigned elsew
+
+##### critique:binding | Variable binding and name coalescing: source/DWARF names attached to SSA values loaded from a slot instead of to the slot's storage. Covers the mul_di
+ - F1 (origin of the mul_div miscompile, CONFIRMED on the current build, commit 5a6571fc). The stack-reload certificate treats any unary op as preserving the value: SUBPIECE at any offset, SEXT, ZEXT, TRUNC, and CAST of any
+    owner: r2ssa (one bit-identity fact that replaces the canonical_value_roots rules and feeds the r | rewrite: False | repro: True
+ - F2 (why interference did not fire, CONFIRMED). ValueLiveness::same_content unions any SUBPIECE regardless of offset, and Copy/ZExt/SExt when out ≥ in, all transitively. So the reload of a and RDX_4 count as one content, 
+    owner: r2ssa | rewrite: False | repro: True
+ - F3 (why the proof line said 0 refused, CONFIRMED). The seal re-runs construction::binding_components_with with the same liveness ('One derivation'). The journal checks coverage (rendered/elided/refused per cell), not whe
+    owner: r2dec | rewrite: False | repro: True
+ - F4 (the model gap behind the noise, CONFIRMED). -O0 declared locals and parameter homes are never promoted. Names attach to reloads, and the reconciliation layer (reload_values/stored_values/shared_reload_binding/home_re
+    owner: r2ssa (promotion, escape reachability, storage-to-declared-slot link), r2image (volatile a | rewrite: True | repro: True
+ - F5 (two bindings for one StackSlot identity: n/n_2, r/r_2, CONFIRMED). The certificate union stamps StackSlot(k) on the reload component (identity_by_root), and bind_stack_object(shared=None) mints another binding for th
+    owner: r2dec | rewrite: False | repro: True
+ - F6 (latent stale read through a memory-resident slot's name, plausible, not reproduced). A reload bound to the slot's binding is spelled as the slot's name at every later read (journal reload-elision), and every store re
+    owner: r2dec (plan interference), r2ssa (MemorySSA versions) | rewrite: False | repro: False
+ - F7 (list_len 'uint32_t c' / 'return (uint64_t)c;', CONFIRMED). One non-internable parameter type ('const struct node *') drops the whole declared type graph, so c loses int and the return falls back to the full carrier. 
+    owner: r2image (DWARF layouts), r2engine (per-item interning), r2ssa (single owner of logical ret | rewrite: False | repro: True
+ - F8 (MISSED, CONFIRMED). promote.rs classifies a slot as a parameter home by register offset. The carrier list includes the function's own return register (RAX), so in main 'mov [rbp-0xc4], eax' after 'call add' marks `r`
+    owner: r2ssa | rewrite: False | repro: True
+ - F9 (MISSED, CONFIRMED MISCOMPILE). Declared or escaped stack aggregates are split into independent C scalars, and their address is passed to callees that read past the one scalar. -O0 -g main renders 'uint32_t stack_m200
+    owner: r2image (DWARF extents), r2engine (declared-vs-recovered merge), r2ssa (one escape-reachab | rewrite: False | repro: True
+ - F10 (MISSED, latent, not reproduced). canonical_value_roots gives SUBPIECE(x, k>0) the root of x's low lane, and for a literal the low bytes. literal_of and resolve_const_value then resolve a high-lane read (AH, the uppe
+    owner: r2ssa | rewrite: False | repro: False
+  Q: F4: approve promoting DWARF-declared scalar locals and parameter homes (reversing promote.rs:266-269 and 431-435), together with the prerequisites F8, per-slot escape handling, DWARF-bounded escape re || F9 without DWARF (-O2 stripped): should a region reachable from an escaped frame address be rendered as one aggregate blob spanning [escaped address, frame top), which is sound but hard to read, or sh || F3: on a stale read, refuse the whole function (my recommendation, since the plan is global) or emit a construct-level residual? || F7: plumb full DWARF struct and array layouts through r2image → r2abi → r2engine now (recovers n->next, v[4], buf[16]), or land per-item interning plus an Opaque{name} pointee first? Void would lose t || F5: accept n/n_2 as readability-only (correct C) until F6 and F4 land, rather than making 'one identity, one binding' a seal error now, which would refuse currently correct output? || F10 and F2: should an uncertified Call/CallInd (objects.rs:106) clobber escaped memory in MemorySSA? The MemorySSA-version rule that replaces same_content_reads is only sound if every call that may wr || F6 and F10 were not reproduced, because read-only mode prevents building fixtures. Please confirm they can be compiled ('a[n++]=x' at -O0 -g on x86-64 and aarch64; a phi-merged constant read through a
+
+##### critique:memory-model | Memory model, stack frame partition, aggregates (rv_O0g main/list_len/sum_array/avg/find, rv_O2 main/avg/sum_array/find; afv). Adversarial review of t
+ - DWARF aggregates and arrays never reach the engine. `unsigned v[4]`, `double d[3]` and `char buf[16]` in rv_O0g get no declared slot. `struct node a,b,c` get a 24-byte slot with no type. `list_len(const struct node*)` ge
+    owner: r2image builds the graph from DWARF. r2abi holds the declaration model (a type graph besid | rewrite: True | repro: True
+ - One aggregate anywhere in a prototype wipes every type in the function. list_len's `int c` renders as `uint32_t c` with `return (uint64_t)c;`, and main's struct slots are untyped. Separately, the interface contract (r2so
+    owner: r2engine (the policy that attaches the declaration's graph). r2source (the SourceTypeGraph | rewrite: True | repro: True
+ - The stack frame is split into separate scalars across proven address escapes, and C objects are made adjacent by accident. rv_O0g main has `sum_array(&stack_m200)` beside stack_m196..188. rv_O2 main has avg(&stack_m104) 
+    owner: r2ssa: a new memory/partition.rs is the single owner of frame object identity. It is consu | rewrite: True | repro: True
+ - Callee argument-reach summaries are unbounded where they could be bounded, and unsound where they must be unbounded. Confirmed in a fresh trace on rv_O2: avg (0x1430) gets reach={0: Bytes(8)} although its effects include
+    owner: r2ssa: interproc summaries; values.rs, the single owner of value ranges, extended with sym | rewrite: True | repro: True
+ - list_len renders `((uint64_t*)n)[1]` instead of `n->next`, because member naming requires the base to be a parameter by identity. n is a loop phi (O2), or a reload from a parameter home (O0).
+    owner: r2types (declared-pointee propagation and member resolution over SourceTypeGraph). r2ssa s | rewrite: True | repro: True
+ - A frame object with no logical type is declared as a bit-vector carrier (`struct r2sleigh_bits_192 c;`) and accessed through casts, so an integer is assigned to a pointer member. In r2dec, the storage disposition outrank
+    owner: r2ssa (region disposition from partition atoms). r2dec (declaration precedence). r2types ( | rewrite: False | repro: True
+ - afv lists parameter homes and promoted slots as anonymous `stack_mN`, disagrees with pdd on names, and types promoted slots by machine width (a promoted double prints uint64_t).
+    owner: r2engine (program/info.rs). r2s only spells. | rewrite: False | repro: True
+ - Restatement lets body-proved extents replace declared ones, and it fails as a whole in a way finding 2 will start triggering. A declared slot overlapped by a recovered slot of another extent is dropped. If its type node 
+    owner: r2ssa (partition, the single owner). r2engine (restatement policy). r2source (the closure  | rewrite: False | repro: False
+ - NEW: DWARF prototypes are keyed and looked up by NAME, and layered into the same name map as radare2's sdb library prototypes. Two `static` functions with the same name in different compilation units collide (the last on
+    owner: r2image (it keeps address identity). r2engine (it looks bodies up by address, and imports  | rewrite: False | repro: False
+ - NEW: DWARF-stated parameter homes (formal parameters with a DW_OP_fbreg location) are never declared. Parameter homes come only from body proof and are untyped: the rv_O0g trace shows 'ParameterHome ... type None'. Frame
+    owner: r2engine (it declares the homes). r2ssa (it states the frame pointer's entry offset as a f | rewrite: False | repro: False
+  Q: Adopt the MUST/MAY split: may-intervals (index ranges, callee reach, unknown escapes) are clipped at declared and role barriers under a UB-freedom axiom, and only exact accesses can contradict a decla || Escape axiom: accept 'an escaped address is the lowest byte its consumer reaches' for object spelling only, while memory-SSA clobbers use the full barrier window [b⁻, b⁺)? The alternative is to merge  || Frame object with an unproven layout: spell it as an atom struct synthesized from disjoint, naturally aligned access atoms (strictly valid C, member names invented), or as uint8_t name[N] with *(T*)&n || Symbolic ranges: land σ-narrowed symbolic bounds in values.rs, the single range owner, instead of extending trips.rs to feed reach? The first also bounds non-loop cases (copy_name) and multi-exit loop || DWARF locals sharing one slot across disjoint lexical blocks: carry DW_TAG_lexical_block pc ranges and name per program point, or keep dropping both names as today? || ICF-folded functions (several DWARF subprograms at one low_pc): refuse unless the prototypes are structurally equal, or pick one visibly? || Should the Mach-O path read DWARF from an adjacent .dSYM bundle (and the debug map's .o files)? Without it, the arm64 fixtures never benefit from the source-truth steps.
+
+##### critique:calls | Call sites, prototypes, varargs, cross-view consistency (rv_O0g/rv_O2 main, list_len, dispatch, add, avg, fill). This is an adversarial re-review at H
+ - F1 (confirmed; fix corrected): printf/__printf_chk calls drop their variadic tail. rv_O0g renders `printf("%d %s\n")` and declares `int32_t printf(const int8_t*)`. rv_O2 renders `__printf_chk(2, "%d %s\n")`, dropping EDX
+    owner: r2source (callee contract carries variadic and format role); r2engine (fills them from dec | rewrite: True | repro: True
+ - F2 (confirmed; fix corrected): two views of one signature. For list_len at O0g, main declares `uint64_t list_len(uint64_t)` while the callee's own header reads `int32_t list_len(const struct node* n)` and its body ends w
+    owner: r2engine (declared-interface interning); r2types (one sealed signature per function, compu | rewrite: True | repro: True
+ - F3 (confirmed; fix refined): calls through a DWARF-typed function pointer are unmodelled. rv_O0g dispatch renders `((void(*)(uint64_t, uint64_t, uint64_t, uint64_t))tmp)(...)` with an UnprovenReturn gap, and main renders
+    owner: r2image (DWARF) -> r2source (Code{signature}) -> r2ssa (indirect-call boundary from the po | rewrite: True | repro: True
+ - F4 (confirmed; fix corrected): rv_O2 dispatch (`mov rax,rdi; mov edi,esi; lea esi,[rsi+1]; jmp rax`) is refused whole with RenderedValueRequired, and parameter 1 is lost.
+    owner: r2ssa (machine-state proof of the transfer kind); r2engine stops deciding it | rewrite: False | repro: True
+ - F5 (confirmed; one test was wrong): unknown-arity calls are claimed complete from the caller's register writes. rv_O0g dispatch shows 4 arguments. rv_O2 main shows `dispatch(0x1370, argc, 7)`.
+    owner: r2ssa (evidence: callee arity Exact/AtLeast, caller writes); r2engine (policy: whether an  | rewrite: False | repro: True
+ - F6 (confirmed; the proposed rule table had an unsound entry and gaps): parameters recovered without DWARF are over-wide. rv_O2 `add(uint64_t, uint64_t)` and `bit_count(uint64_t)` both come from `lea e?x,[r?..]`.
+    owner: r2ssa (deadphi demanded-bytes closure) | rewrite: False | repro: True
+ - F7 (confirmed; the proposed lattice was value-range based and would invent types): rv_O2 list_len, classify and fact render `uint64_t` results although each defines EAX on every path.
+    owner: r2ssa (recover_interface) | rewrite: False | repro: True
+ - F8 (confirmed; the rule and its complexity were incomplete): rv_O2 `fill` renders `uint64_t fill(uint32_t)` with `return RAX_1;`, and main declares the same. RAX only holds a loop pointer.
+    owner: r2ssa interproc (demand evidence) + r2engine (closed-world policy and escape proof) | rewrite: False | repro: True
+ - F9 (confirmed latent; the fix scope was understated): the convention model reaching r2ssa has integer argument slots only and one result slot, and never sets Apple arm64's variadic-tail-on-stack rule. Placement lives in 
+    owner: r2source (convention contract plus the single classifier function); r2engine fills it from | rewrite: True | repro: False
+ - F10 (confirmed; framing corrected): the interproc pass re-derives each call's argument carriers with its own dataflow, a second owner of 'argument i at call c'.
+    owner: r2ssa (boundaries is the one owner; interproc projects it) | rewrite: False | repro: False
+ - F11 (NEW): r2engine re-asserts a result that r2ssa refused. rv_O0g main renders `uint32_t RAX_41 = dispatch(...)` and declares `uint64_t dispatch(uint64_t, uint64_t)`, while dispatch's own rendering is `/* r2dec gap: Unp
+    owner: r2ssa recover_interface is the sole owner of a body-derived result; r2engine only transpor | rewrite: False | repro: True
+ - F12 (NEW): every stack-protector canary check reads an uninitialized variable. rv_O0g and rv_O2 main declare `uint64_t FS_OFFSET_15;`, never assign it, and render `*(int64_t*)(FS_OFFSET_15 + 40)`. The proof line says 0 r
+    owner: r2abi (platform data: thread-pointer registers) -> r2engine (builds SourceCallEffect) -> r | rewrite: False | repro: True
+ - F13 (NEW): r2dec renders a read of an unclaimed call-clobbered value as a declared-but-never-assigned local. The read is indeterminate, and the proof line does not count it. Seen as FS_OFFSET_15 (F12) and XMM0_4 (F14).
+    owner: r2dec (render policy) with evidence from r2ssa (which CallDefines are unclaimed) | rewrite: False | repro: True
+ - F14 (NEW): floating-point results cannot be represented by recovered interfaces. rv_O2 avg renders `/* r2dec gap: UnprovenReturn */ avg(...)`, and main computes `(int)avg(d,3)` from `XMM0_4`, an unassigned local, under t
+    owner: r2ssa (recover_interface result classes) using the F9 convention contract | rewrite: False | repro: True
+ - F15 (NEW): the callee contract cannot say 'arity is only a floor', so minting uses 'result unproven' as a proxy and throws away proven parameters. rv_O2 main's call to avg loses avg's proven (RDI, ESI) interface and fall
+    owner: r2source (contract: arity Exact/AtLeast and a separate result state) + r2ssa (proves which | rewrite: False | repro: True
+  Q: Open-world result policy (F8/F11/F14): a function with no declaration whose result carrier is defined on every path but that has no demanding caller in the binary (exported API, dead code, shared obje || Closed-world evidence: may r2engine prove 'all callers known' (not in .dynsym, and no escaping code constant or data relocation, including .init_array and R_*_RELATIVE) and use it for (1) void (F8), ( || Unknown-arity calls (AtLeast(n), or caller writes only): render the proven prefix plus a visible residual for the tail (strict), or render the caller-writes arity marked as an assumption? This decides || Format-role source: add an r2abi data table with GCC format(archetype, m, n) semantics keyed per import (recommended; deletes parameter_names_a_format_string), or accept the sdb parameter name `format || Thread-pointer invariance (F12): put it in new r2abi platform data (recommended; the radare2-derived cc sdb files stay unmodified and nothing goes upstream), or add fs/tpidr_el0 to the cc preserve lis || Type-channel scope: minimal first (subroutine_type, Pointer->Void for incomplete, per-position logical values, enum as its underlying integer, FILE* typedef to incomplete) and then the structured DWAR || Constant-only results (F7): keep the full carrier width unless closed-world caller demand narrows it (recommended; the lifter gives no lane evidence for constants), or accept the magnitude of the cons || Fixtures: may we add prebuilt binaries to tests/fixtures (an arm64 Mach-O calling printf with a float and an int; an x86-64 stripped binary with a local variadic function; an ELF calling fclose/fprint
+
+##### critique:values-dispatch | Value analysis, jump tables, whole-binary cost (HEAD 5a6571fc, branch engine/review-fixes-vfmgfv). Adversarial review: F1-F5 checked against the code,
+ - F1 (corrected). OOM on 'pdd/pdf @ sym.classify' (rv_O0g): r2ssa allocates one case label per abstract table entry (2^32 here) before the memory owner has looked at any bytes. Related: a debug-build overflow panic when th
+    owner: r2ssa (strided.rs owns cardinality; indirect.rs owns the read description and lazy labels) | rewrite: False | repro: True
+ - F2 (confirmed, fix corrected). At -O0 the guard on a spilled switch index never reaches the reload: 'cmp dword [rbp-4],7; ja' narrows load L1 while the dispatch reads L2. Zero slots are promoted across -O0 DWARF function
+    owner: r2ssa (promote.rs: which slots are private scalars; graph.rs: one same-width copy congruen | rewrite: True | repro: True
+ - F3 (confirmed, widened). The selector-to-label inverse is one wrapping u64 fold. Biased-negative switches are refused. `sub reg, c` biased switches are labelled on the biased value. SExt in the index chain is conflated w
+    owner: r2ssa (indirect.rs index chain and labels; values.rs IntSExt transfer) | rewrite: False | repro: False
+ - F4 (confirmed). pdf and every analysis tier depend on the full prepare of the function. An analysis error removes the listing, a panic kills the process, and an OOM kills the session.
+    owner: r2engine (program/requests.rs listing policy; native.rs isolation boundary) | rewrite: False | repro: True
+ - F5 (confirmed, with additions). Callee facts are rebuilt for every root: `pdd @ main` rebuilds 14 callees. afl's survey is not memoised. Callee facts come from a different body derivation (no dispatch) than the callee's 
+    owner: r2engine (program/mod.rs, requests.rs, native.rs, query/memo.rs) | rewrite: False | repro: True
+ - F6 (NEW, missed). Dispatch resolution runs one round, on the root only, over a partial body. That can silently under-approximate a switch: missing arms with no residual. Nested switches are never resolved. Every other co
+    owner: r2engine (one resolved-body derivation per function per Revision, used by every tier). r2s | rewrite: True | repro: False
+ - F7 (NEW, missed). Table targets are trusted from file bytes in memory that may be written (writable sections, or loader-relocated ranges). Target validity is 'some instruction decodes there' at any readable address, incl
+    owner: r2image (permissions, RELRO, relocation-resolved reads) -> r2engine::program::Source/Conta | rewrite: False | repro: False
+ - F8 (NEW, precision). The table-read shape is narrower than the mathematics requires. Struct-array dispatch (`cmds[i].fn()`, stride 16 with 8-byte load), singleton reaches, computed branch tables without a load (ARM32 `ad
+    owner: r2ssa (indirect.rs read model) | rewrite: False | repro: False
+  Q: F2/A1: promote every whole-object private scalar slot, including DWARF locals and parameter homes, with declared name and type attached by entry offset and declared aggregates kept in memory. This acc || Unguarded full-width selectors (u8 tables, two-level tables): accept when the range is immutable, the targets are in code and on instruction boundaries (F7), and the entries decode? I recommend yes. O || RELRO: implement PT_GNU_RELRO plus read-as-loaded for RELATIVE relocations in r2image now, so PIE/ARM absolute tables in .data.rel.ro resolve? Or refuse loader-written tables for now? || F6: should discovery (afl) and references (axt) pay one values solve per function with an unresolved indirect branch, to close over switch arms? Without it, stripped binaries miss arm-only callees. || Panic isolation: is catch_unwind at the root memo and prepared_callee boundaries acceptable if every caught panic carries its location in the output and CI fails on any Panicked refusal? || The pass-2 declared Local at entry SP+0 (return address) for avg: file it as a separate stack/interface defect, or fold it into F2 since it feeds the promotion predicate?
+
+##### critique:lowering | How r2dec lowers P-code to C, reviewed adversarially: shift and rotate definedness, partial-register entry reads and result width, the call-clobbered 
+ - rotl (rv_O0g and rv_O2) renders `x << t | x >> (uint8_t)(32 - t)` with t = r & 31. At t == 0 the second shift is `x >> 32`, which is UB in C. P-code gives 0 there and x86 `rol` gives x, yet the proof line still says 0 re
+    owner: r2ssa owns the count/operand range facts, which it already computes. r2rewrite owns the C  | rewrite: False | repro: True
+ - rv_O2 sext renders `uint64_t RAX_0; RAX_0 = (RAX_0 & ~...) | (uint64_t)(uint16_t)(int8_t)DIL_0; return (uint32_t)RAX_0 - (uint32_t)(RAX_0 * 4);`. This reads an indeterminate C object, returns uint32_t where the source re
+    owner: r2ssa owns one per-op byte dependency relation and derives three facts from it: backward d | rewrite: True | repro: True
+ - rv_O0g and rv_O2 main declare `uint64_t FS_OFFSET_15;`, never assign it, and read it in the stack-canary check, while the proof line lists only FS_OFFSET_0. rv_O2 main also declares `uint64_t XMM0_4;` and reads it uninit
+    owner: r2abi (with the data upstream in radare2 libr/anal/d cc sdb) owns the register class, pass | rewrite: False | repro: True
+ - rv_O0g avg renders `double tmp_6b00_4 = r2sleigh_float_from_bits_64(v[i]);` with v declared `const double*`. The expression v[i] already has type double, so the output converts the value to uint64_t and then reinterprets
+    owner: r2rewrite typed.rs owns the produced type of Load/Subscript. r2dec access_syntax returns ( | rewrite: False | repro: True
+ - rv_O0g avg is full of dead XMM lane noise: `__uint128_t XMM0_1; XMM0_1 = (XMM0_1 & ~(...<<64)) | ...` for movsd upper-lane zeroing and loop-carried XMM0 writes that nothing observes. The return is spelled `r2sleigh_float
+    owner: r2ssa owns byte demand and observed-lane narrowing in the machine projection. The r2dec bi | rewrite: False | repro: True
+ - rv_O2 avg: the return is gapped as `UnprovenReturn` and all addsd/divsd work is dropped as unobserved, although the function returns a double in XMM0. The damage reaches the callers: rv_O2 main renders `avg(...)` as a st
+    owner: r2source owns the float slots in the contract. r2ssa recover_interface owns class-aware re | rewrite: False | repro: True
+ - arm64 manual_limits_O2 sparse_switch renders `W0_0 == 2 || r2sleigh_int_sborrow_32(W0_0, 2) != (int32_t)(W0_0 - 2) < 0` for `cmp w0,#2; b.le`, and `W0_0 + 7 == 0` for `cmn w0,#7; b.eq`. The same gap appears on x86: rv_O2
+    owner: r2ssa owns value typing: a leaf's type is its value's type. r2rewrite owns value identity  | rewrite: False | repro: True
+ - Cast noise: `return (uint32_t)b + (uint32_t)a;` for int add, and `i = (int32_t)((uint32_t)i + 1);` for i++. A 16-bit multiply on narrow unsigned operands is evaluated in signed int (0xffff*0xffff overflows, which is UB).
+    owner: r2rewrite typed.rs owns carrier choice and admissibility. r2ssa owns the signedness-agnost | rewrite: True | repro: True
+ - The rv_O2 rotl listing claims `mov ecx, esi ; defines rcx in [0x0, 0xff] (solved)`, which is false of the machine: ECX = ESI holds 32 bits.
+    owner: r2ssa | rewrite: False | repro: True
+ - MISSED: arm64 sparse_switch recovers `uint64_t _sparse_switch(...)` and returns `(uint64_t)(...)` and `0xffffffff` for an int-returning function.
+    owner: r2ssa (recover_interface consuming ValueRanges or known bits) | rewrite: False | repro: True
+ - MISSED (out of this cluster, but fake C): printf's variadic tail is silently dropped. rv_O0g main declares `int32_t printf(const int8_t*)` and calls `printf((const int8_t*)"%d %s\n");`. rv_O2 main calls `__printf_chk(2, 
+    owner: r2ssa owns call-site interface minting. r2engine owns import prototype correlation. | rewrite: False | repro: True
+  Q: Output C dialect: declare GNU C with -fwrapv (plus the GCC implementation-defined conversions and arithmetic right shift the output already relies on) as the product contract, or stay strict ISO C and || Total spellings: prelude helpers (r2sleigh_shl_32, r2sleigh_rotl_32, r2sleigh_sdiv_32_aarch64) or inline idioms such as `(x << t) | (x >> (-t & 31))`? Helpers are exact and evaluate each argument once || Where should the system-reserved register class (x86-64 FS base, i386 GS, AArch64 TPIDR_EL0, Darwin x18, MXCSR/x87 CW control bits) live: as a new radare2 cc sdb key upstreamed by PR, or as a local r2 || Result-width policy: accept the 'compiler-generated, well-defined program' premise for callee-side narrowing from must-dependence, or always require caller corroboration (closed call graph) and otherw || Should a rendered read of an unspecified entry register or of an unsummarised CallDefine be a hard gap (the function drops out of decbench) or a visible residual that still compiles? || printf variadic drop: confirm why types.sdb's variadic prototype is not correlated to the PLT target (placed_parameters on the ellipsis, or target-identity correlation) before choosing the fix order.
+
+##### critique:commands | r2s command surface vs radare2 semantics (iz/ir/is/afl/afi/afv/axt/pdf/i/f/pd/w*): adversarial review
+ - axt misses every data-to-data and data-to-code reference. rv_O0g: `axt 0x2008` = 0 although 0x4018 (g_msg) holds a RELATIVE pointer to it. code_pointer_table_O0: `axt sym._table_op_xor` = 0, and `blr x8` stays 'arguments
+    owner: r2image (LoaderWrite with stated values, new chained/bind decoders), r2engine (one stated- | rewrite: True | repro: True
+ - ir lists 9 of 13 ELF relocations (the 4 R_X86_64_RELATIVE are missing), with no type/paddr/addend columns, and lists Mach-O S_SYMBOL_STUBS entries (code) as relocations.
+    owner: r2image (one relocation reader), r2s (ir columns) | rewrite: True | repro: True
+ - afv lists parameter spill homes as locals with width types and invented names (stack_m40/36/32 for sym.find's v/n/key homes), while pdd merges them into the parameters. It names DWARF's `i` stack_m12. On main at -O0, eve
+    owner: r2engine program/info.rs (reads role from the entity, name from the sealed display names); | rewrite: False | repro: True
+ - afi/afv/pdf/pdd at an address inside a function analyse it as a new entry (`afi @ 0x14d0` inside sym.find reports a function at 0x14d0).
+    owner: r2engine (function_at over the ONE resolved body per function); r2s resolves before dispat | rewrite: False | repro: True
+ - Unnamed functions collapse to '-' in afl and get several different spellings elsewhere: fcn.10c0 (axt), fcn_10c0 (pdd), bare 0x1370 (pd), unresolvable seeks. radare2 spells fcn.000010c0.
+    owner: r2engine NameDb (one typed table); r2source/r2types/r2dec/r2ssa consume a typed projection | rewrite: True | repro: True
+ - A second name of the same namespace at one address is silently dropped: _edata, data_start and completed.0 are missing from `f`, and `s loc._edata` fails.
+    owner: r2engine names.rs (order); r2image Symbol.section + bind + visibility (evidence) | rewrite: False | repro: True
+ - iz prints the raw newline of "%d %s\n" and lists loader/linker metadata (.interp, NOTE 'GNU', .dynstr, version strings, eh_frame '9*3$"'). The same scan mints str.* flags.
+    owner: r2image (SectionRole), r2types (whether a pointer's pointee is char: use-typing), r2engine | rewrite: True | repro: True
+ - `i` reports baddr 0x0 for Mach-O (radare2: 0x100000000) and non-PIE ELF (0x400000).
+    owner: r2image | rewrite: False | repro: True
+ - is lists no imports, no bind column; empty on stripped rv_O2s.
+    owner: r2image (bind, visibility, section, library, table+index), r2engine (stub address of an im | rewrite: False | repro: True
+ - afl lacks radare2's nbbs/size columns, adds a header, a confidence column and a footer.
+    owner: r2engine (survey owns the resolved body partition); r2s (columns) | rewrite: False | repro: True
+ - pdf has no function header, arg/var lines, XREF lines or `;-- name:` labels; pd omits `;-- entry0:`/`;-- section..text:`.
+    owner: r2s (render only) | rewrite: False | repro: True
+ - Import stub flags and reloc flags have size 0.
+    owner: r2engine naming; r2image (S_SYMBOL_STUBS type and reserved2, relocation width) | rewrite: False | repro: True
+ - iS shows unloaded sections as -r--. Mach-O section names drop the segment, so same-named sections in different segments collide.
+    owner: r2image (permissions, full identity), r2s | rewrite: False | repro: True
+ - pd spelling: `lea rdx, rax*0x4` loses brackets. AArch64 prints `ldrb w10, [x1, x10, lsl ]`.
+    owner: sleigh-config fork (AArch64 display constructors) and upstream Ghidra; r2sleigh-lift (LEA  | rewrite: False | repro: True
+ - Errors print a doubled prefix: `r2s: r2s: 'zz' is not hex`.
+    owner: r2s | rewrite: False | repro: True
+ - Smaller divergences: (a) axt leading blank line; (b) w/wx print 'N bytes at'; (c) `q` exits 1 and ignores `q N`; (d) no address expressions; (e) px header misaligns for wide addresses; (f) text_in rejects \r\e\b\v; (g, M
+    owner: r2s (a-e, g); r2engine names.rs (f) | rewrite: False | repro: True
+ - MISSED, and a crash: `afi`, `afv`, `pdf` and `pdd @ sym.classify` on rv_O0g abort with 'memory allocation of 4294967296 bytes failed'. The stored out/rv_O0g.classify.pdd is the same backtrace. Every command that prepares
+    owner: r2ssa (indirect.rs; value ranges through frame slots) | rewrite: False | repro: True
+ - MISSED: switch arms belong to no body outside prepare. The survey, the reference index (`axt`/`ax`: coverage says '8 unresolved indirect transfers' on rv_O0g), and the proposed afl/function_at all use bodies that stop at
+    owner: r2engine survey (with r2ssa dispatch evidence) | rewrite: True | repro: True
+ - MISSED: axt misses references to addresses the code forms and then indexes. rv_O0g `axt 0x2018` (jump-table base formed by lea at 0x1226 and 0x1232) = 0. rv_O2 `axt 0x2020` (CSWTCH.12 formed at 0x13c0, read at 0x13c7) = 
+    owner: r2ssa (effective-address value ranges: evidence), r2engine (interval references + stabbing | rewrite: True | repro: True
+ - MISSED: the engine's container types duplicate r2image's field by field (engine program/source.rs:33-176 Section/Symbol/Relocation/Entry versus r2image lib.rs:91-211, projected by r2s session.rs:95-159). This is the mech
+    owner: one statement-types home both crates depend on (r2abi, or a small new crate) | rewrite: True | repro: True
+  Q: Stated loader values in decompilation: may pdd and the indirect-call resolver use a stated word as the runtime value only when it is read-only after load (PT_GNU_RELRO, non-writable segment, Mach-O SG || Preemptible definitions: in a shared library, should a GLOB_DAT/R_64 against a default-visibility defined symbol render as the local definition with a visible 'may be interposed' residual, or as an im || iz semantics: str.* flags and pdd literals only from typed-use evidence or container statements, with iz listing those plus scan candidates marked by an evidence column and izz scanning everything? Or || Shared tails: when function_at finds k>1 owners, refuse and list the owners (recommended), or pick the lowest entry as radare2 effectively does? || Unnamed spelling: switch everything to fcn.%08x / fcn_%08x (every fcn_{x} golden changes)? And should a function handed to __libc_start_main arg 0, whose declaration names it `main`, take that declare || axt for a data source: radare2 prints `(nofunc)` for a source outside any function. Should r2s match it, or name the containing object (obj.g_msg), which says more? || afl layout: radare2's exact headerless `addr nbbs size name`, with the confidence column moved to a verbose afl variant? || -O0 main: DWARF locals (v, a, b, c, d, buf, r) reach neither afv nor pdd, and struct layouts are not read from DWARF (debug.rs spells types as strings only). Is that in scope for this cluster or the t || Exit status: follow radare2 (q -> 0, q N -> N) or keep 'any failed statement -> 1'? Today a clean `q` also exits 1.

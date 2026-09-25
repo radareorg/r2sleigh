@@ -1,0 +1,21 @@
+USER TASK (verbatim, binding):
+## Problem
+In `crates/r2sleigh-lift/src/internal_control.rs`, `normalize_instruction_local_control` handles forward local branches one at a time. A conditional skip is converted to `Select` only when every skipped op is speculatable. `CMPXCHG` (x86 `ia.sinc` register forms around line 3084, and `lockable.sinc` around line 598) is a diamond inside one instruction:
+```
+if (ZF) goto <equal>; EAX = dest; RAX = zext(EAX); goto <done or inst_next>; <equal> STORE [m] = src; ...
+```
+What happens today:
+1. The conditional branch's range contains the unconditional `Branch`, so that branch becomes `Unimplemented`.
+2. The unconditional forward branch is then rewritten by `rewrite_unconditional_forward_branch`, which deletes the ops between it and its target. That removes the `<equal>` arm, including the store.
+The function still refuses, because the Unimplemented is kept. But the IL left behind is wrong, and every function using `lock cmpxchg` (C11 atomics, `__sync_*`) refuses.
+To reproduce, lift bytes `f0 0f b1 37` (`lock cmpxchg [rdi], esi`) with `Disassembler::from_trusted_profile(TrustedSleighProfile::X86_64)` and look for `Unimplemented`.
+## Direction
+Generalise the forward pass to acyclic if-conversion. A simple, provable rewrite:
+- Save the condition `c`.
+- Turn `goto B` at the end of the then-arm plus label `A:` into `A: if (!c) goto B`.
+- Now there are two sequential forward skips. The existing select and guarded-memory rewrites (`guard_memory_in_range` makes the store a `StoreGuarded`) already handle each of them.
+`rewrite_unconditional_forward_branch` must never delete ops that another branch lands on. Keep refusing any shape that is not proven.
+The new constant-decided loop walker (`crates/r2sleigh-lift/src/internal_control/unroll.rs`, on branch `track/core-lift`) leaves such diamonds untouched. Coordinate with it if that branch has merged.
+## Done when
+A test in the style of `crates/r2sleigh-lift/src/disasm/local_control_tests.rs` (on `track/core-lift`) runs Sleigh's raw p-code for the CMPXCHG forms and the lifted block through `r2il::eval` from the same states, and compares registers and stores for the equal and unequal cases. It must fail on the old code. An r2engine native test renders a compare-exchange loop and runs the C.
+ADDITIONAL: cover all CMPXCHG forms (8/16/32/64-bit register and memory, with and without LOCK, and CMPXCHG8B/16B if Sleigh gives them the same diamond shape); state the invariant of the generalised if-conversion (which CFG shapes inside one instruction's p-code are accepted and why the rewrite preserves the p-code semantics) and keep a refusal for every other shape.

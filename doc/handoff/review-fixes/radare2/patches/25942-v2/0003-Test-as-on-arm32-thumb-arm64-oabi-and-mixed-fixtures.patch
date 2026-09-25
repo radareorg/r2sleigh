@@ -1,0 +1,143 @@
+From a230e887c6baddd9d7c043c5f01af61359f64be0 Mon Sep 17 00:00:00 2001
+From: Priyanshu Kumar <priyanshukumarpu@gmail.com>
+Date: Fri, 25 Sep 2026 14:08:49 +0000
+Subject: [PATCH 3/3] Test /as on arm32, thumb, arm64, oabi and mixed fixtures
+ ##search
+
+---
+ test/db/cmd/cmd_search | 112 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 112 insertions(+)
+
+diff --git a/test/db/cmd/cmd_search b/test/db/cmd/cmd_search
+index 49efc7b..47ead5b 100644
+--- a/test/db/cmd/cmd_search
++++ b/test/db/cmd/cmd_search
+@@ -1117,6 +1117,74 @@ EXPECT=<<EOF
+ EOF
+ RUN
+ 
++NAME=/as arm32 eabi fixture
++FILE=bins/elf/syscall-eabi-arm32
++CMDS=<<EOF
++/as
++?e --
++e search.in=bin.sections.r
++/as
++EOF
++EXPECT=<<EOF
++0x000100a4 write
++0x000100ac exit
++--
++0x0001009c execve
++0x000100a4 write
++0x000100ac exit
++EOF
++RUN
++
++NAME=/as thumb eabi fixture
++FILE=bins/elf/syscall-eabi-thumb
++CMDS=<<EOF
++/as
++?e --
++e search.in=bin.sections.r
++/as
++EOF
++EXPECT=<<EOF
++0x000100a2 write
++0x000100a6 exit
++0x000100a8 exit
++--
++0x00010096 execve
++0x000100a2 write
++0x000100a6 exit
++0x000100a8 exit
++EOF
++RUN
++
++NAME=/as arm64 fixture
++FILE=bins/elf/syscall-arm64
++CMDS=<<EOF
++/as
++?e --
++e search.in=bin.sections.r
++/as
++EOF
++EXPECT=<<EOF
++0x002000f4 write
++0x002000fc exit
++--
++0x002000ec exit
++0x002000f4 write
++0x002000fc exit
++EOF
++RUN
++
++NAME=/as arm32 oabi fixture
++FILE=bins/elf/syscall-oabi-arm32
++CMDS=<<EOF
++e asm.abi
++/asj
++EOF
++EXPECT=<<EOF
++eabi0
++{"cmd":"/asj","results":[{"addr":65684,"name":"write","sysnum":4,"num":9437188},{"addr":65688,"name":"exit","sysnum":1,"num":9437185}]}
++EOF
++RUN
++
+ NAME=/as libflutter data and unproven numbers
+ FILE=bins/elf/libflutter.so
+ CMDS=/as
+@@ -1124,6 +1192,50 @@ EXPECT=<<EOF
+ EOF
+ RUN
+ 
++NAME=/as arm and thumb in one binary
++FILE=bins/elf/syscall-mixed-arm32
++CMDS=<<EOF
++/as
++?e --
++pi 1 @ sym.tfun
++/as
++?e --
++aa
++/as
++EOF
++EXPECT=<<EOF
++0x00010098 write
++0x000100a2 exit
++--
++movs r7, 1
++0x00010098 write
++0x000100a2 exit
++--
++0x00010098 write
++0x000100a2 exit
++EOF
++RUN
++
++NAME=/as sections of the binary each map belongs to
++FILE=bins/elf/syscall-eabi-arm32
++CMDS=<<EOF
++o bins/elf/syscall-second-arm32
++/as
++?e --
++o malloc://64 0x800000
++/as
++EOF
++EXPECT=<<EOF
++0x000100a4 write
++0x000100ac exit
++0x00400098 exit
++--
++0x000100a4 write
++0x000100ac exit
++0x00400098 exit
++EOF
++RUN
++
+ NAME=/as arm conditional write of r7
+ FILE=-
+ CMDS=<<EOF
+-- 
+2.43.0
+

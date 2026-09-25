@@ -1,0 +1,194 @@
+From 4a311137869c4016bc5e390e61d8483f65e35d25 Mon Sep 17 00:00:00 2001
+From: Priyanshu Kumar <priyanshukumarpu@gmail.com>
+Date: Fri, 25 Sep 2026 14:08:48 +0000
+Subject: [PATCH 1/3] Let arch plugins declare their syscall instruction
+ encodings ##arch
+
+---
+ libr/anal/anal.c            | 39 ++++++++++++++++++++++---------------
+ libr/arch/arch_session.c    |  6 ++++++
+ libr/arch/p/arm/plugin_cs.c | 16 +++++++++++++++
+ libr/arch/p/x86/plugin_cs.c |  9 +++++++++
+ libr/include/r_anal.h       |  1 +
+ libr/include/r_arch.h       |  2 ++
+ libr/include/r_lib.h        |  2 +-
+ 7 files changed, 58 insertions(+), 17 deletions(-)
+
+diff --git a/libr/anal/anal.c b/libr/anal/anal.c
+index 37b7026..2a3406a 100644
+--- a/libr/anal/anal.c
++++ b/libr/anal/anal.c
+@@ -798,24 +798,31 @@ R_API void r_anal_bind(RAnal *anal, RAnalBind *b) {
+ 	b->use = r_anal_use;
+ }
+ 
++static RList *session_keywords(RAnal *anal, RList *(*patterns)(RArchSession *)) {
++	RArchSession *session = anal->arch->session;
++	if (!session || strcmp (session->config->arch, anal->config->arch)) {
++		return NULL;
++	}
++	RList *l = r_list_newf ((RListFree)r_search_keyword_free);
++	RList *ap = patterns (session);
++	RListIter *iter;
++	char *s;
++	r_list_foreach (ap, iter, s) {
++		r_list_append (l, r_search_keyword_new_hexstr (s, NULL));
++	}
++	r_list_free (ap);
++	return l;
++}
++
+ R_API RList *r_anal_preludes(RAnal *anal) {
+ 	R_RETURN_VAL_IF_FAIL (anal, NULL);
+-	if (anal->arch->session) {
+-		const char *const a = anal->arch->session? anal->arch->session->config->arch: "";
+-		const char *const b = anal->config->arch;
+-		if (!strcmp (a, b)) {
+-			RList *l = r_list_newf ((RListFree)r_search_keyword_free);
+-			RList *ap = r_arch_session_preludes (anal->arch->session);
+-			RListIter *iter;
+-			char *s;
+-			r_list_foreach (ap, iter, s) {
+-				r_list_append (l, r_search_keyword_new_hexstr (s, NULL));
+-			}
+-			r_list_free (ap);
+-			return l;
+-		}
+-	}
+-	return NULL;
++	return session_keywords (anal, r_arch_session_preludes);
++}
++
++// search keywords for the syscall instructions of the current arch, empty when the plugin declares none
++R_API RList *r_anal_syscalls(RAnal *anal) {
++	R_RETURN_VAL_IF_FAIL (anal, NULL);
++	return session_keywords (anal, r_arch_session_syscalls);
+ }
+ 
+ R_API bool r_anal_is_prelude(RAnal *anal, ut64 addr, const ut8 *data, int len) {
+diff --git a/libr/arch/arch_session.c b/libr/arch/arch_session.c
+index 71f9275..62d6472 100644
+--- a/libr/arch/arch_session.c
++++ b/libr/arch/arch_session.c
+@@ -85,6 +85,12 @@ R_API RList *r_arch_session_preludes(RArchSession *s) {
+ 	return NULL;
+ }
+ 
++R_API RList *r_arch_session_syscalls(RArchSession *s) {
++	R_RETURN_VAL_IF_FAIL (s, NULL);
++	RArchPluginPreludesCallback syscalls = R_UNWRAP3 (s, plugin, syscalls);
++	return syscalls? syscalls (s): NULL;
++}
++
+ R_API int r_arch_session_info(RArchSession *s, int query) {
+ 	R_RETURN_VAL_IF_FAIL (s, -1);
+ 	RArchPluginInfoCallback info = R_UNWRAP3 (s, plugin, info);
+diff --git a/libr/arch/p/arm/plugin_cs.c b/libr/arch/p/arm/plugin_cs.c
+index ca4b091..f44f7a9 100644
+--- a/libr/arch/p/arm/plugin_cs.c
++++ b/libr/arch/p/arm/plugin_cs.c
+@@ -5127,6 +5127,21 @@ static int archinfo(RArchSession *as, ut32 q) {
+ 
+ #include "preludes.inc.c"
+ 
++// svc/swi encodings with any immediate; A32 only the unconditional one, a conditional svc decodes as CSWI.
++// A 32-bit binary mixes A32 and T32 wherever its hints say so, whatever asm.bits is now: both.
++// A64 instruction words are little-endian whatever the data endianness (see cs/arm64.c).
++static RList *archsyscalls(RArchSession *as) {
++	const bool be = R_ARCH_CONFIG_IS_BIG_ENDIAN (as->config);
++	RList *l = r_list_newf (free);
++	if (as->config->bits == 64) {
++		r_list_append (l, strdup ("010000d4 1f00e0ff"));
++	} else {
++		r_list_append (l, strdup (be? "ef000000 ff000000": "000000ef 000000ff")); // A32
++		r_list_append (l, strdup (be? "df00 ff00": "00df 00ff")); // T32
++	}
++	return l;
++}
++
+ extern char *r_arm_cs_mnemonics(RArchSession *as, csh *cs_handle, int id, bool json);
+ extern char *r_arm64_cs_mnemonics(RArchSession *as, csh *cs_handle, int id, bool json);
+ 
+@@ -5212,6 +5227,7 @@ const RArchPlugin r_arch_plugin_arm_cs = {
+ 	.anal_mask = anal_mask,
+ #endif
+ 	.preludes = anal_preludes,
++	.syscalls = archsyscalls,
+ 	.decode = decode,
+ 	.init = init,
+ 	.fini = fini,
+diff --git a/libr/arch/p/x86/plugin_cs.c b/libr/arch/p/x86/plugin_cs.c
+index 6d75c0a..719e482 100644
+--- a/libr/arch/p/x86/plugin_cs.c
++++ b/libr/arch/p/x86/plugin_cs.c
+@@ -4886,6 +4886,14 @@ static RList *anal_preludes(RArchSession *as) {
+ 	return l;
+ }
+ 
++static RList *archsyscalls(RArchSession *as) {
++	RList *l = r_list_newf (free);
++	r_list_append (l, strdup ("0f05")); // syscall
++	r_list_append (l, strdup ("0f34")); // sysenter
++	r_list_append (l, strdup ("cd00 ff00")); // int imm8
++	return l;
++}
++
+ static char *mnemonics(RArchSession *as, int id, bool json) {
+ 	R_RETURN_VAL_IF_FAIL (as && as->data, NULL);
+ 	CapstonePluginData *cpd = as->data;
+@@ -4940,6 +4948,7 @@ const RArchPlugin r_arch_plugin_x86_cs = {
+ 	.bits = R_SYS_BITS_PACK3 (16, 32, 64),
+ 	.decode = &decode,
+ 	.preludes = anal_preludes,
++	.syscalls = archsyscalls,
+ 	.init = init,
+ 	.fini = fini,
+ 	.info = archinfo,
+diff --git a/libr/include/r_anal.h b/libr/include/r_anal.h
+index 487cf18..16e02f3 100644
+--- a/libr/include/r_anal.h
++++ b/libr/include/r_anal.h
+@@ -1701,6 +1701,7 @@ R_API void r_anal_rtti_recover_all(RAnal *anal);
+ 
+ 
+ R_API RList *r_anal_preludes(RAnal *anal);
++R_API RList *r_anal_syscalls(RAnal *anal);
+ R_API bool r_anal_is_prelude(RAnal *anal, ut64 addr, const ut8 *data, int len);
+ R_API bool r_anal_is_invalid_code(RAnal *anal, const ut8 *buf, int len, bool check_zeros);
+ 
+diff --git a/libr/include/r_arch.h b/libr/include/r_arch.h
+index 97ca915..810b917 100644
+--- a/libr/include/r_arch.h
++++ b/libr/include/r_arch.h
+@@ -176,6 +176,7 @@ typedef struct r_arch_plugin_t {
+ 	const RArchPluginPreludesCallback preludes;
+ 	const RArchPluginEsilCallback esilcb;
+ 	const RArchPluginResetCallback reset;
++	const RArchPluginPreludesCallback syscalls; // "bytes mask" hexpairs of the syscall encodings of every instruction set the session decodes
+ } RArchPlugin;
+ 
+ R_API char *r_arch_platform_unset(RArch *arch, const char *name);
+@@ -203,6 +204,7 @@ R_API bool r_arch_session_encode(RArchSession *as, RAnalOp *op, RArchEncodeMask
+ R_API bool r_arch_session_patch(RArchSession *as, RAnalOp *op, RArchModifyMask mask);
+ R_API int r_arch_session_info(RArchSession *as, int q);
+ R_API RList *r_arch_session_preludes(RArchSession *as);
++R_API RList *r_arch_session_syscalls(RArchSession *as);
+ 
+ 
+ // arch.c
+diff --git a/libr/include/r_lib.h b/libr/include/r_lib.h
+index 11db523..ad0c850 100644
+--- a/libr/include/r_lib.h
++++ b/libr/include/r_lib.h
+@@ -23,7 +23,7 @@ R_LIB_VERSION_HEADER (r_lib);
+ // double-indirection required because cpp is crap
+ #define STRINGIFY2(x) #x
+ #define STRINGIFY(x) STRINGIFY2(x)
+-#define R2_ABIVERSION 144
++#define R2_ABIVERSION 145
+ #define R2_ABIVERSION_STRING STRINGIFY(R2_ABIVERSION)
+ 
+ #define R_LIB_ENV "R2_LIBR_PLUGINS"
+-- 
+2.43.0
+
