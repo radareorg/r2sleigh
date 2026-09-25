@@ -397,42 +397,20 @@ impl<'a> Solver<'a> {
                     phi.sources.iter().map(|(_, source)| source).collect(),
                 ));
             }
-            for op in &block.ops {
-                if let Some((dst, src, step)) = step_of(op) {
-                    nodes.push(dst);
-                    definitions.push(Definition::Step(src, step));
-                }
+            for (dst, src, step) in block.ops.iter().filter_map(step_of) {
+                nodes.push(dst);
+                definitions.push(Definition::Step(src, step));
             }
         }
         Self::over(nodes, definitions)
     }
 
     fn from_graph(graph: &'a crate::graph::SsaGraph) -> Self {
-        let mut nodes = Vec::new();
-        let mut definitions = Vec::new();
-        for inst in &graph.insts {
-            match &inst.payload {
-                crate::graph::InstPayload::Phi { .. } => {
-                    let Some(output) = inst.output.and_then(|output| graph.value(output)) else {
-                        continue;
-                    };
-                    nodes.push(&output.var);
-                    definitions.push(Definition::Phi(
-                        inst.inputs
-                            .iter()
-                            .filter_map(|input| graph.value(*input))
-                            .map(|input| &input.var)
-                            .collect(),
-                    ));
-                }
-                crate::graph::InstPayload::Op(op) => {
-                    if let Some((dst, src, step)) = step_of(op) {
-                        nodes.push(dst);
-                        definitions.push(Definition::Step(src, step));
-                    }
-                }
-            }
-        }
+        let (nodes, definitions) = graph
+            .insts
+            .iter()
+            .filter_map(|inst| graph_definition(graph, inst))
+            .unzip();
         Self::over(nodes, definitions)
     }
 
@@ -459,137 +437,96 @@ impl<'a> Solver<'a> {
         }
     }
 
-    /// The strongly connected components over "reads the view of", each
-    /// after every component it reads (Tarjan, iteratively).
-    fn components(&self) -> Vec<Vec<usize>> {
-        const UNVISITED: usize = usize::MAX;
-        let count = self.nodes.len();
-        let successors = (0..count).map(|node| self.inputs(node)).collect::<Vec<_>>();
-        let mut order = vec![UNVISITED; count];
-        let mut low = vec![0usize; count];
-        let mut on_stack = vec![false; count];
-        let mut stack = Vec::new();
-        let mut components = Vec::new();
-        let mut next = 0usize;
-        for start in 0..count {
-            if order[start] != UNVISITED {
-                continue;
-            }
-            // (node, index of the next successor to look at)
-            let mut frames = vec![(start, 0usize)];
-            order[start] = next;
-            low[start] = next;
-            next += 1;
-            stack.push(start);
-            on_stack[start] = true;
-            while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
-                if let Some(&successor) = successors[node].get(*edge) {
-                    *edge += 1;
-                    if order[successor] == UNVISITED {
-                        order[successor] = next;
-                        low[successor] = next;
-                        next += 1;
-                        stack.push(successor);
-                        on_stack[successor] = true;
-                        frames.push((successor, 0));
-                    } else if on_stack[successor] {
-                        low[node] = low[node].min(order[successor]);
-                    }
-                    continue;
-                }
-                frames.pop();
-                if let Some(&(parent, _)) = frames.last() {
-                    low[parent] = low[parent].min(low[node]);
-                }
-                if low[node] == order[node] {
-                    let mut component = Vec::new();
-                    while let Some(member) = stack.pop() {
-                        on_stack[member] = false;
-                        component.push(member);
-                        if member == node {
-                            break;
-                        }
-                    }
-                    // Definition order inside a component, so the
-                    // evaluation below visits a loop's header phi first.
-                    component.sort_unstable();
-                    components.push(component);
-                }
-            }
-        }
-        components
-    }
-
     fn solve(self) -> ValueViews {
         let count = self.nodes.len();
-        let mut state: Vec<Option<ValueView>> = vec![None; count];
-        let mut fallen = vec![false; count];
+        let mut work = Work {
+            state: vec![None; count],
+            fallen: vec![false; count],
+            queued: vec![false; count],
+            pending: Vec::new(),
+        };
+        let successors = (0..count).map(|node| self.inputs(node)).collect::<Vec<_>>();
+        let components = strongly_connected_components(&successors);
         let mut component_of = vec![usize::MAX; count];
-        let components = self.components();
-        for (id, component) in components.iter().enumerate() {
-            for member in component {
-                component_of[*member] = id;
-            }
+        for (id, member) in components
+            .iter()
+            .enumerate()
+            .flat_map(|(id, component)| component.iter().map(move |member| (id, *member)))
+        {
+            component_of[member] = id;
         }
         // Readers inside the same component, to re-evaluate when a view moves.
         let mut readers = vec![Vec::new(); count];
-        for node in 0..count {
-            for input in self.inputs(node) {
-                if component_of[input] == component_of[node] {
-                    readers[input].push(node);
-                }
-            }
+        for (node, input) in successors
+            .iter()
+            .enumerate()
+            .flat_map(|(node, inputs)| inputs.iter().map(move |input| (node, *input)))
+            .filter(|(node, input)| component_of[*input] == component_of[*node])
+        {
+            readers[input].push(node);
         }
         for component in &components {
-            let mut pending = component.clone();
-            pending.reverse();
-            let mut queued = vec![false; count];
-            for member in component {
-                queued[*member] = true;
-            }
-            loop {
-                while let Some(node) = pending.pop() {
-                    queued[node] = false;
-                    let next = self.evaluate(node, &state, &mut fallen);
-                    if next != state[node] {
-                        state[node] = next;
-                        for reader in &readers[node] {
-                            if !queued[*reader] {
-                                queued[*reader] = true;
-                                pending.push(*reader);
-                            }
-                        }
-                    }
-                }
-                // A cycle nothing outside it enters leaves its phis
-                // unvisited; each is its own root, and what reads it follows.
-                let Some(unreached) = component
-                    .iter()
-                    .copied()
-                    .find(|member| state[*member].is_none() && self.is_phi(*member))
-                else {
-                    break;
-                };
-                fallen[unreached] = true;
-                pending.push(unreached);
-                queued[unreached] = true;
-            }
+            self.settle(component, &readers, &mut work);
         }
 
-        let mut views = HashMap::new();
-        for (node, view) in state.into_iter().enumerate() {
-            let var = self.nodes[node];
-            match view {
-                Some(view) if view.root != *var => {
-                    views.insert(var.clone(), view);
-                }
-                _ => {}
-            }
-        }
+        let views = work
+            .state
+            .into_iter()
+            .enumerate()
+            .filter_map(|(node, view)| {
+                let var = self.nodes[node];
+                view.filter(|view| view.root != *var)
+                    .map(|view| (var.clone(), view))
+            })
+            .collect::<HashMap<_, _>>();
         let representatives = representatives(&self.nodes, &views);
         ValueViews {
             views,
             representatives,
+        }
+    }
+
+    /// Evaluate one component to its fixed point. Every component it reads
+    /// is settled already, so only its own members move.
+    fn settle(&self, component: &[usize], readers: &[Vec<usize>], work: &mut Work) {
+        work.pending.extend(component.iter().rev().copied());
+        for member in component {
+            work.queued[*member] = true;
+        }
+        loop {
+            self.drain(readers, work);
+            // A cycle nothing outside it enters leaves its phis unvisited;
+            // each is its own root, and what reads it follows.
+            let Some(unreached) = component
+                .iter()
+                .copied()
+                .find(|member| work.state[*member].is_none() && self.is_phi(*member))
+            else {
+                break;
+            };
+            work.fallen[unreached] = true;
+            work.pending.push(unreached);
+            work.queued[unreached] = true;
+        }
+    }
+
+    /// Evaluate what is pending until nothing moves; a value that moves
+    /// queues its readers.
+    fn drain(&self, readers: &[Vec<usize>], work: &mut Work) {
+        while let Some(node) = work.pending.pop() {
+            work.queued[node] = false;
+            let next = self.evaluate(node, &work.state, &mut work.fallen);
+            if next == work.state[node] {
+                continue;
+            }
+            work.state[node] = next;
+            let queued = &mut work.queued;
+            work.pending.extend(
+                readers[node]
+                    .iter()
+                    .copied()
+                    .filter(|reader| !std::mem::replace(&mut queued[*reader], true)),
+            );
         }
     }
 
@@ -616,30 +553,140 @@ impl<'a> Solver<'a> {
         if fallen[node] {
             return Some(ValueView::own(var));
         }
-        match &self.definitions[node] {
+        let sources = match &self.definitions[node] {
             Definition::Step(source, step) => {
                 let input = self.input_view(source, state)?;
-                Some(transfer(*step, &input, var).unwrap_or_else(|| ValueView::own(var)))
+                return Some(transfer(*step, &input, var).unwrap_or_else(|| ValueView::own(var)));
             }
-            Definition::Phi(sources) => {
-                let mut common: Option<ValueView> = None;
-                for source in sources {
-                    // An input not reached yet is assumed to agree.
-                    let Some(view) = self.input_view(source, state) else {
-                        continue;
-                    };
-                    match &common {
-                        None => common = Some(view),
-                        Some(known) if *known == view => {}
-                        Some(_) => {
-                            fallen[node] = true;
-                            return Some(ValueView::own(var));
-                        }
-                    }
-                }
-                common
+            Definition::Phi(sources) => sources,
+        };
+        // An input not reached yet is assumed to agree.
+        let mut views = sources
+            .iter()
+            .filter_map(|source| self.input_view(source, state));
+        let first = views.next()?;
+        if views.all(|view| view == first) {
+            return Some(first);
+        }
+        fallen[node] = true;
+        Some(ValueView::own(var))
+    }
+}
+
+/// The solver's state, and its worklist.
+struct Work {
+    state: Vec<Option<ValueView>>,
+    /// Phis that have fallen to their own root, for good.
+    fallen: Vec<bool>,
+    /// Whether a value is on `pending`; every flag is clear between
+    /// components, since draining clears each one it pops.
+    queued: Vec<bool>,
+    pending: Vec<usize>,
+}
+
+/// How one graph instruction defines its output, where the view reads it.
+fn graph_definition<'a>(
+    graph: &'a crate::graph::SsaGraph,
+    inst: &'a crate::graph::GraphInst,
+) -> Option<(&'a SSAVar, Definition<'a>)> {
+    match &inst.payload {
+        crate::graph::InstPayload::Phi { .. } => {
+            let output = graph.value(inst.output?)?;
+            let sources = inst
+                .inputs
+                .iter()
+                .filter_map(|input| graph.value(*input))
+                .map(|input| &input.var)
+                .collect();
+            Some((&output.var, Definition::Phi(sources)))
+        }
+        crate::graph::InstPayload::Op(op) => {
+            step_of(op).map(|(dst, src, step)| (dst, Definition::Step(src, step)))
+        }
+    }
+}
+
+const UNVISITED: usize = usize::MAX;
+
+/// The strongly connected components of a graph given as each node's
+/// successors, each after every component it reaches (Tarjan, iteratively),
+/// with its members in index order so a loop's header phi comes first.
+fn strongly_connected_components(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let count = successors.len();
+    let mut tarjan = Tarjan {
+        order: vec![UNVISITED; count],
+        low: vec![0; count],
+        on_stack: vec![false; count],
+        stack: Vec::new(),
+        components: Vec::new(),
+        next: 0,
+    };
+    for start in 0..count {
+        if tarjan.order[start] == UNVISITED {
+            tarjan.run(start, successors);
+        }
+    }
+    tarjan.components
+}
+
+struct Tarjan {
+    order: Vec<usize>,
+    low: Vec<usize>,
+    on_stack: Vec<bool>,
+    stack: Vec<usize>,
+    components: Vec<Vec<usize>>,
+    next: usize,
+}
+
+impl Tarjan {
+    fn enter(&mut self, node: usize) {
+        self.order[node] = self.next;
+        self.low[node] = self.next;
+        self.next += 1;
+        self.stack.push(node);
+        self.on_stack[node] = true;
+    }
+
+    /// One depth-first walk from `start`, with an explicit stack of
+    /// (node, index of the next successor to look at).
+    fn run(&mut self, start: usize, successors: &[Vec<usize>]) {
+        let mut frames = vec![(start, 0usize)];
+        self.enter(start);
+        while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
+            let Some(&successor) = successors[node].get(*edge) else {
+                frames.pop();
+                self.leave(node, frames.last().map(|(parent, _)| *parent));
+                continue;
+            };
+            *edge += 1;
+            if self.order[successor] == UNVISITED {
+                self.enter(successor);
+                frames.push((successor, 0));
+            } else if self.on_stack[successor] {
+                self.low[node] = self.low[node].min(self.order[successor]);
             }
         }
+    }
+
+    /// Finish `node`: hand its low link to its parent, and close a component
+    /// where it is the root of one.
+    fn leave(&mut self, node: usize, parent: Option<usize>) {
+        if let Some(parent) = parent {
+            self.low[parent] = self.low[parent].min(self.low[node]);
+        }
+        if self.low[node] != self.order[node] {
+            return;
+        }
+        let mut component = Vec::new();
+        while let Some(member) = self.stack.pop() {
+            self.on_stack[member] = false;
+            component.push(member);
+            if member == node {
+                break;
+            }
+        }
+        component.sort_unstable();
+        self.components.push(component);
     }
 }
 
@@ -903,7 +950,7 @@ mod tests {
         // SUBPIECE(SEXT(t), 8) has no step at all: the lane is its own value.
         assert!(
             step_of(&SSAOp::Subpiece {
-                dst: sign.clone(),
+                dst: sign,
                 src: wide.clone(),
                 offset: 8,
             })
