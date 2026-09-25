@@ -74,6 +74,13 @@ fn a_declared_array_and_a_declared_struct_are_one_object_each() {
     // `c.tag` is `char tag[8]`, which one eight-byte store does not assign
     // in C; the store is bytes of `c`, not a member.
     assert!(!out.contains("c.tag ="), "{out}");
+    // `dispatch` is declared to take `int (*fn)(int, int)`, and `main` hands
+    // it the address of `add`: a bare integer there is not C.
+    assert!(
+        out.contains("int32_t dispatch(int32_t(*)(int32_t, int32_t), int32_t);"),
+        "{out}"
+    );
+    assert!(!out.contains("dispatch(0x11a9"), "{out}");
 }
 
 /// The review fixture's globals are typed by their DWARF: they rendered as
