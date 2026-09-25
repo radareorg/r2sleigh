@@ -641,7 +641,11 @@ impl<'a> FoldingContext<'a> {
             Some(field) => self.member_access_expr(indexed, field.to_string()),
             None => indexed,
         };
-        Some(PendingReplacementExpr::canonical_access(memory, rendered))
+        Some(PendingReplacementExpr::canonical_access_over(
+            memory,
+            rendered,
+            [Some(base_value), Some(index_value)],
+        ))
     }
 
     /// Whether this expression can stand on the left of an assignment.
@@ -741,12 +745,13 @@ impl<'a> FoldingContext<'a> {
                 let rendered =
                     self.observe_certified_address_read_expr(*base, fact.access, rendered);
                 Some(PendingMemoryAccessExpr::Replacement(
-                    PendingReplacementExpr::canonical_access(
+                    PendingReplacementExpr::canonical_access_over(
                         fact,
                         CExpr::PtrMember {
                             base: Box::new(rendered),
                             member: field,
                         },
+                        [Some(*base), None],
                     ),
                 ))
             }

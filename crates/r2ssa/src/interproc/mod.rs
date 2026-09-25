@@ -77,6 +77,8 @@ pub enum SummaryArgumentReach {
         stride: i64,
         base: i64,
         width: u32,
+        /// The index's sign-extended width, as `SummaryScaledOffset` states it.
+        sign_bits: Option<u32>,
     },
 }
 
@@ -90,12 +92,24 @@ impl SummaryArgumentReach {
                 stride,
                 base,
                 width,
+                sign_bits,
             } => {
+                let bound = bound(argument)?;
+                // A sign-extended index is the bound's value only where the
+                // bound leaves its sign bit clear; past that it may be
+                // negative, and nothing bounds the reach below the base.
+                if let Some(bits) = sign_bits
+                    && 1u64
+                        .checked_shl(bits.checked_sub(1)?)
+                        .is_none_or(|sign| bound >= sign)
+                {
+                    return None;
+                }
                 // The last index reaches `stride * bound`, and the element
                 // there occupies `width` bytes, so that is where the object
                 // ends. Counting `bound + 1` elements and adding the width on
                 // top of them measures one element too many.
-                let last = stride.checked_mul(i64::try_from(bound(argument)?).ok()?)?;
+                let last = stride.checked_mul(i64::try_from(bound).ok()?)?;
                 u64::try_from(base.checked_add(last)?.checked_add(i64::from(width))?).ok()
             }
         }
@@ -115,6 +129,11 @@ pub struct SummaryScaledOffset {
     /// Which of the callee's arguments the offset scales with.
     pub argument: usize,
     pub stride: i64,
+    /// How the index is widened to the address: its unsigned value where
+    /// this is `None`, or its low `bits` sign-extended. A sign-extended index
+    /// the caller cannot prove below `2^(bits-1)` may be negative, and reaches
+    /// below the base the stride is counted up from.
+    pub sign_bits: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1362,6 +1381,7 @@ impl PreparedCalleeSummary {
                         stride: term.stride,
                         base: range.offset_lo,
                         width: range.width.unwrap_or(0),
+                        sign_bits: term.sign_bits,
                     },
                 );
                 continue;
@@ -2622,18 +2642,29 @@ fn classify_memory_access_location(
     classify_memory_access_location_value(prepared, abi, value_id, space, width)
 }
 
-/// Which of the callee's own arguments a scaling value is, if it is one.
+/// Which of the callee's own arguments a scaling value is, if it is one, and
+/// how it was widened to the address: the argument's unsigned value (or its
+/// low bits, which are no more), or its low bits sign-extended.
 ///
 /// The value is usually not the argument as it arrived: at `-O0` the index is
 /// spilled to its home slot in the prologue and the indexing reads it back, so
 /// the question is answered from the formal-identity fact rather than from the
-/// value's storage, which is the slot's.
-fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<usize> {
+/// value's storage, which is the slot's. An `int` index is sign-extended
+/// before it scales, which the address facts keep as a term of its own; the
+/// value view says whose bits it extends, and how.
+fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
     let var = prepared.value_var(value)?;
-    prepared
-        .function()
-        .decompile_prep_facts()?
-        .formal_parameter_of(var)
+    let facts = prepared.function().decompile_prep_facts()?;
+    if let Some(index) = facts.formal_parameter_of(var) {
+        return Some((index, None));
+    }
+    let view = facts.view(var);
+    let index = facts.formal_parameter_of(&view.root)?;
+    match view.extension {
+        crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
+        crate::view::ViewExtension::Sign => Some((index, Some(view.prefix_bits))),
+        crate::view::ViewExtension::Unknown => None,
+    }
 }
 
 /// Where an access through `value_id` lands, as a summary region.
@@ -2717,13 +2748,14 @@ fn classify_address_root(
             // it knows what it passed for the index and so how far the read
             // goes. Discarding it left the reach merely "through argument n".
             if let [term] = expression.terms.as_slice()
-                && let Some(index) = scaled_argument_index(prepared, term.value)
+                && let Some((index, sign_bits)) = scaled_argument_index(prepared, term.value)
             {
                 return Some(scaled_arg_location(
                     parameter,
                     SummaryScaledOffset {
                         argument: index,
                         stride: term.coefficient,
+                        sign_bits,
                     },
                     expression.offset,
                     Some(width),
@@ -3331,10 +3363,10 @@ fn return_call_site_for_value(
 ///
 /// Both questions are already answered once during preparation. A constant is
 /// what the value folds to. An argument is what the address facts propagated:
-/// they carry a parameter through copies, widenings, same-width lane
-/// projections, spill slots and affine arithmetic, which is exactly the
-/// derivation this used to re-walk here with its own depth limit and its own
-/// op set.
+/// they carry a parameter through what the value view calls the same integer
+/// (copies, same-width casts and lanes, zero extensions), same-width spill
+/// slots and affine arithmetic, which is exactly the derivation this used to
+/// re-walk here with its own depth limit and its own op set.
 fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar) -> SummaryOperand {
     let Some(value_id) = prepared.graph().value_id_for_var(var) else {
         return SummaryOperand::Unknown;

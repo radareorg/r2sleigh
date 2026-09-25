@@ -2488,3 +2488,53 @@ fn a_constant_address_read_at_a_scaled_index_is_the_global() {
         Some(&SummaryArgumentReach::Bytes(4))
     );
 }
+
+/// `int get(int *a, int i) { return a[i]; }`: the index is sign-extended
+/// before it scales, so the reach the callee states per index holds only
+/// where the caller keeps the index's sign bit clear. Past that the index may
+/// be negative and the read lands below the array the reach is counted from.
+#[test]
+fn a_sign_extended_index_reaches_only_as_far_as_its_sign_bit_is_clear() {
+    let arch = two_argument_arch();
+    let blocks = [block(
+        0x4700,
+        vec![
+            R2ILOp::IntSExt {
+                dst: tmp(1, 8),
+                src: reg(32, 4),
+            },
+            R2ILOp::IntMult {
+                dst: tmp(2, 8),
+                a: tmp(1, 8),
+                b: c(4, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: tmp(3, 8),
+                a: reg(8, 8),
+                b: tmp(2, 8),
+            },
+            R2ILOp::Load {
+                dst: tmp(4, 4),
+                space: SpaceId::Ram,
+                addr: tmp(3, 8),
+            },
+            R2ILOp::Return { target: reg(16, 8) },
+        ],
+    )];
+    let prepared = exact_untyped_artifact(
+        &blocks,
+        &arch,
+        b"sign-extended-index",
+        "sysv64",
+        &[8, 32],
+        16,
+        24,
+    );
+    let reach = touch_reach(&prepared);
+    let through = reach
+        .get(&0)
+        .copied()
+        .unwrap_or_else(|| panic!("a reach through the array: {reach:?}"));
+    assert_eq!(through.bytes(|_| Some(9)), Some(40), "{through:?}");
+    assert_eq!(through.bytes(|_| Some(1 << 31)), None, "{through:?}");
+}
