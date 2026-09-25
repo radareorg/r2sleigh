@@ -1741,6 +1741,33 @@ impl TableBytes {
             (false, true) => Self::Unsealed,
         }
     }
+
+    /// Whether the file's bytes of the table at `at` may be read as the
+    /// run's, saying why wherever the answer is not a plain yes.
+    ///
+    /// Unsealed is not a refusal yet: the statement that would seal it is not
+    /// asked for until the immutability check lands, so it is said here and
+    /// carried on the table.
+    fn read_as_run(self, at: u64) -> bool {
+        match self {
+            Self::LoaderWritten => {
+                r2il::refusal_evidence!(
+                    "dispatch-table",
+                    "{at:#x}: {self:?}: the file's bytes are not what the dispatch reads"
+                );
+                false
+            }
+            Self::Unsealed => {
+                r2il::refusal_evidence!(
+                    "dispatch-table",
+                    "{at:#x}: {self:?}: read from memory the program may write, which \
+                     nothing the container states seals after load"
+                );
+                true
+            }
+            Self::ReadOnly => true,
+        }
+    }
 }
 
 /// One function walked out of the program.
@@ -1897,18 +1924,8 @@ impl Native<'_> {
             return None;
         };
         let stated = TableBytes::of(self.program, &region, at..end);
-        match stated {
-            TableBytes::LoaderWritten => {
-                refused(format_args!(
-                    "{stated:?}: the file's bytes are not what the dispatch reads"
-                ));
-                return None;
-            }
-            // Not a refusal yet: the statement that would seal it is not asked for until P2, so it is said here and carried on the table.
-            TableBytes::Unsealed => refused(format_args!(
-                "{stated:?}: read from memory the program may write, which nothing the container states seals after load"
-            )),
-            TableBytes::ReadOnly => {}
+        if !stated.read_as_run(at) {
+            return None;
         }
         let bytes = self.program.read(at, span).unwrap_or_default();
         if bytes.len() < span {
