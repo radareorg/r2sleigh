@@ -268,6 +268,11 @@ impl AbiProfile {
             .position(|slot| slot.storage == Some(storage))
     }
 
+    /// The storages of the argument slots the profile names.
+    pub(crate) fn argument_storages(&self) -> impl Iterator<Item = CanonicalStorageId> + '_ {
+        self.args.iter().filter_map(|slot| slot.storage)
+    }
+
     pub(crate) const fn is_source_owned(&self) -> bool {
         self.source_owned
     }

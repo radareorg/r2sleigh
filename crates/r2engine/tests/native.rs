@@ -2748,3 +2748,49 @@ fn the_sign_word_a_division_extends_into_is_not_the_parameter_it_extends() {
         assert!(!assigned, "{parameter} is assigned:\n{text}");
     }
 }
+
+/// `long f(long *p, long *q, void (**g)(long *)) { long x = *p; (*g)(q); }`:
+///
+/// ```text
+///   1000  mov rax, [rdi]     ; the first argument's first word
+///   1003  mov rdi, rsi       ; the call is handed the second argument
+///   1006  mov rax, [rdx]     ; the function pointer, through the third
+///   1009  call rax
+///   100b  ret
+/// ```
+const HANDS_ON_ITS_SECOND_ARGUMENT: &[u8] = &[
+    0x48, 0x8b, 0x07, // 1000 mov rax, [rdi]
+    0x48, 0x89, 0xf7, // 1003 mov rdi, rsi
+    0x48, 0x8b, 0x02, // 1006 mov rax, [rdx]
+    0xff, 0xd0, // 1009 call rax
+    0xc3, // 100b ret
+];
+
+/// A call the summary cannot see into reaches through what it is handed and
+/// nothing else. Emptying every argument's reach for it threw away the first
+/// argument's eight bytes, which the call is never given: its register is
+/// overwritten with the second argument before the call.
+#[test]
+fn an_unknown_call_leaves_the_reach_through_an_argument_it_is_not_handed() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: HANDS_ON_ITS_SECOND_ARGUMENT.to_vec(),
+        name: "hands_on",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let shared = prepared.shared_artifact();
+    let summary = r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(BASE), &shared)
+        .expect("a summary");
+    let reach = summary.argument_touch_reach();
+    assert_eq!(
+        reach.get(&0),
+        Some(&r2ssa::SummaryArgumentReach::Bytes(8)),
+        "{reach:?}"
+    );
+    // The second argument is handed to the call, which may touch any of it,
+    // and so is the third: it is still in its register at the call, and a
+    // callee no interface states the arity of may read every argument
+    // register.
+    assert!(!reach.contains_key(&1), "{reach:?}");
+    assert!(!reach.contains_key(&2), "{reach:?}");
+}
