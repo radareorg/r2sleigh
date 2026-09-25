@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{OpenProgram, Source, SymbolKind};
-use crate::discovery::{Confidence, Discovered};
+use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
 use crate::query::references::Indexing;
@@ -412,7 +412,7 @@ impl<S: Source> OpenProgram<S> {
                     .map(|symbol| (symbol.vaddr, symbol.thumb)),
             )
             .chain(self.imports.keys().map(|vaddr| (*vaddr, false)))
-            .map(|(vaddr, thumb)| (vaddr, Confidence::Stated, thumb))
+            .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
             .collect()
     }
 

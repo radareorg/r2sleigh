@@ -12,8 +12,10 @@
 // unsafe; the manifest said so until the lints moved to the workspace.
 #![deny(unsafe_code)]
 
+pub mod confidence;
 pub mod display_names;
 pub mod native;
+pub use confidence::{Basis, Confidence, Premise};
 pub use display_names::{DisplayNames, unnamed_function, unnamed_identifier};
 
 use std::collections::BTreeSet;

@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use r2engine::discovery::Confidence;
+use r2engine::discovery::Basis;
 use r2engine::program::{
     Arch, Container, Endian, Entry, EntryKind, Format, Libc, Mapping, OpenProgram, Permissions,
     PlatformEvidence, Section, SectionRole, Segment, Source, Symbol, SymbolKind,
@@ -285,14 +285,14 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
         .functions()
         .expect("discovery runs")
         .iter()
-        .map(|one| (one.address, one.confidence, one.thumb))
+        .map(|one| (one.address, one.confidence.basis, one.thumb))
         .collect::<Vec<_>>();
     assert_eq!(
         found,
         [
-            (ARM, Confidence::Stated, false),
-            (ARM + 0x10, Confidence::Stated, false),
-            (ARM + 0x14, Confidence::Handed, true),
+            (ARM, Basis::Stated, false),
+            (ARM + 0x10, Basis::Stated, false),
+            (ARM + 0x14, Basis::Handed, true),
         ]
     );
 }

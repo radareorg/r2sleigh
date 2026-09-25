@@ -10,16 +10,16 @@ use common::{
     ARM_ENTRY, BASE, CALLER, FORKED, GLIBC, JOINED, Literal, ONE, PASSES, STEPPED, THUMB_CALLED,
     THUMB_LEAF, TWO, VENEER,
 };
-use r2engine::discovery::Confidence;
+use r2engine::discovery::Basis;
 use r2engine::program::{OpenProgram, Symbol, SymbolKind};
 use r2engine::query::{Listing, Role, Stop};
 
-fn believed(program: &mut OpenProgram<Literal>) -> Vec<(u64, Confidence)> {
+fn believed(program: &mut OpenProgram<Literal>) -> Vec<(u64, Basis)> {
     program
         .functions()
         .expect("discovery runs")
         .iter()
-        .map(|one| (one.address, one.confidence))
+        .map(|one| (one.address, one.confidence.basis))
         .collect()
 }
 
@@ -29,13 +29,13 @@ fn every_function_the_container_states_is_found_as_stated() {
     assert_eq!(
         believed(&mut program),
         [
-            (ONE, Confidence::Stated),
-            (CALLER, Confidence::Stated),
-            (TWO, Confidence::Stated),
-            (FORKED, Confidence::Stated),
-            (JOINED, Confidence::Stated),
-            (PASSES, Confidence::Stated),
-            (STEPPED, Confidence::Stated)
+            (ONE, Basis::Stated),
+            (CALLER, Basis::Stated),
+            (TWO, Basis::Stated),
+            (FORKED, Basis::Stated),
+            (JOINED, Basis::Stated),
+            (PASSES, Basis::Stated),
+            (STEPPED, Basis::Stated)
         ]
     );
 }
@@ -58,7 +58,7 @@ fn a_function_handed_to_an_import_through_its_slot_is_found_as_handed() {
         ],
     );
     assert!(
-        believed(&mut program).contains(&(TWO, Confidence::Handed)),
+        believed(&mut program).contains(&(TWO, Basis::Handed)),
         "{:?}",
         believed(&mut program)
     );
@@ -123,13 +123,13 @@ fn a_function_nothing_states_is_found_by_its_caller() {
     assert_eq!(
         believed(&mut program),
         [
-            (ONE, Confidence::Called),
-            (CALLER, Confidence::Stated),
-            (TWO, Confidence::Stated),
-            (FORKED, Confidence::Stated),
-            (JOINED, Confidence::Stated),
-            (PASSES, Confidence::Stated),
-            (STEPPED, Confidence::Stated)
+            (ONE, Basis::Called),
+            (CALLER, Basis::Stated),
+            (TWO, Basis::Stated),
+            (FORKED, Basis::Stated),
+            (JOINED, Basis::Stated),
+            (PASSES, Basis::Stated),
+            (STEPPED, Basis::Stated)
         ]
     );
 }
@@ -161,15 +161,15 @@ fn a_function_reached_only_by_a_call_is_in_the_instruction_set_the_call_enters()
         .functions()
         .expect("discovery runs")
         .iter()
-        .map(|one| (one.address, one.confidence, one.thumb))
+        .map(|one| (one.address, one.confidence.basis, one.thumb))
         .collect::<Vec<_>>();
     assert_eq!(
         found,
         [
-            (ARM_ENTRY, Confidence::Stated, false),
-            (THUMB_CALLED, Confidence::Called, true),
-            (THUMB_LEAF, Confidence::Called, true),
-            (VENEER, Confidence::Stated, true),
+            (ARM_ENTRY, Basis::Stated, false),
+            (THUMB_CALLED, Basis::Called, true),
+            (THUMB_LEAF, Basis::Called, true),
+            (VENEER, Basis::Stated, true),
         ]
     );
     // A listing answers the same whether or not discovery was asked first.
@@ -249,7 +249,7 @@ fn a_caller_of_a_function_that_only_calls_exit_ends_at_that_call() {
     // Discovery asked first derives the same answers for the whole program.
     let mut warm = OpenProgram::of(literal());
     let found = believed(&mut warm);
-    assert!(found.contains(&(next, Confidence::Called)), "{found:?}");
+    assert!(found.contains(&(next, Basis::Called)), "{found:?}");
     assert_eq!(extent(&mut warm, user), (next, true));
 }
 

@@ -90,6 +90,33 @@ fn a_container_statement_type_has_one_definition() {
 }
 
 #[test]
+fn how_far_a_derived_fact_is_trusted_has_one_definition() {
+    // Discovery defined its own confidence, so the first inferred fact the
+    // engine produced said how far it could be trusted in a word no other
+    // fact could use. It is `r2source`'s, with the premises a fact assumes,
+    // and every crate that derives a fact states its trust in it.
+    let restated = ["r2engine", "r2s", "r2ssa", "r2types", "r2dec", "r2image"]
+        .iter()
+        .flat_map(|krate| {
+            mentions(
+                &root().join("crates").join(krate).join("src"),
+                &[
+                    "pub enum Confidence",
+                    "pub struct Confidence",
+                    "pub enum Basis",
+                    "pub enum Premise",
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        restated.is_empty(),
+        "a confidence is defined again outside r2source::confidence:\n{}",
+        restated.join("\n")
+    );
+}
+
+#[test]
 fn the_shell_depends_on_the_engine_and_the_container_only() {
     // Asked of the resolved dependency graph rather than of the manifest text.
     // Reading the manifest said what was written down; this says what the

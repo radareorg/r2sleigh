@@ -23,37 +23,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::native::Program;
 
-/// Why an address is believed to begin a function.
+/// Why an address is believed to begin a function, and what that assumes.
 ///
-/// Ordered by how much is being claimed, strongest first, so a consumer may
-/// take everything at or above the level it is willing to act on. An address
-/// found twice keeps the stronger reason: a symbol that is also called is
-/// stated, not inferred.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Confidence {
-    /// The image says so. An entry point, an initialiser or finaliser array
-    /// slot, a symbol typed as a function, a linkage stub the format declares.
-    /// Nothing is inferred and nothing can be wrong here that is not wrong in
-    /// the file.
-    Stated,
-    /// A walked body calls it. One decoded call instruction with a constant
-    /// target, which is a reading of bytes this engine did itself.
-    Called,
-    /// A walked body hands it to a function whose declaration says that
-    /// parameter is a function.
-    ///
-    /// `entry0` never calls `main`: it passes it to `__libc_start_main`, whose
-    /// prototype spells the first parameter `func`. The address is a function
-    /// on the declaration's authority plus a constant this engine folded, so
-    /// it is weaker than a call the machine makes and stronger than a
-    /// transfer that may be a jump inside one function.
-    Handed,
-    /// A walked body leaves for it without returning. The same reading, over
-    /// an instruction that is a jump: whether the target is a function of its
-    /// own or a continuation of this one is exactly what a tail call makes
-    /// ambiguous.
-    Reached,
-}
+/// `r2source`'s, the one type every derived fact states its trust in; the
+/// engine's answers carry it, so the shell reads it from here.
+pub use r2source::confidence::{Basis, Confidence, Premise};
 
 /// One address discovery believes is a function.
 #[derive(Debug, Clone)]
@@ -237,7 +211,11 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
     /// Believe an address for a reason, keeping the stronger one; the first reason decides the instruction set.
     fn offer(&mut self, address: u64, confidence: Confidence, thumb: bool) {
         match self.believed.get_mut(&address) {
-            Some((held, _)) => *held = (*held).min(confidence),
+            Some((held, _)) => {
+                if confidence < *held {
+                    *held = confidence;
+                }
+            }
             None => {
                 self.believed.insert(address, (confidence, thumb));
                 if self.seed.is_none() {
@@ -271,10 +249,10 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         // A transfer that states no instruction set keeps this body's.
         let entered = |target: u64| transfers.entered_in.get(&target).copied().unwrap_or(thumb);
         for &target in &transfers.calls {
-            self.offer(target, Confidence::Called, entered(target));
+            self.offer(target, Confidence::of(Basis::Called), entered(target));
         }
         for &target in &transfers.tail_calls {
-            self.offer(target, Confidence::Reached, entered(target));
+            self.offer(target, Confidence::of(Basis::Reached), entered(target));
             self.wait(address, target, Wait::TailCall);
         }
         for &callee in &transfers.gated {
@@ -346,7 +324,7 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         self.read.extend(self.walks.keys().copied());
         for (_, handed) in unread {
             for (target, thumb) in handed {
-                self.offer(target, Confidence::Handed, thumb);
+                self.offer(target, Confidence::of(Basis::Handed), thumb);
             }
         }
         !self.pending.is_empty()
@@ -506,13 +484,17 @@ mod tests {
     }
 
     fn found(bodies: &[(u64, &[Step])], seeds: &[u64]) -> Discovery<At, ()> {
-        let seeds = seeds.iter().map(|seed| (*seed, Confidence::Stated, false));
+        let seeds = seeds
+            .iter()
+            .map(|seed| (*seed, Confidence::of(Basis::Stated), false));
         functions(&Named, seeds, &Bodies::of(bodies))
     }
 
-    fn seen(discovery: &Discovery<At, ()>) -> Vec<(u64, Confidence)> {
+    fn seen(discovery: &Discovery<At, ()>) -> Vec<(u64, Basis)> {
         let functions = discovery.functions.iter();
-        functions.map(|one| (one.address, one.confidence)).collect()
+        functions
+            .map(|one| (one.address, one.confidence.basis))
+            .collect()
     }
 
     #[test]
@@ -524,9 +506,9 @@ mod tests {
         assert_eq!(
             seen(&found),
             [
-                (0x1000, Confidence::Stated),
-                (0x2000, Confidence::Called),
-                (0x3000, Confidence::Reached),
+                (0x1000, Basis::Stated),
+                (0x2000, Basis::Called),
+                (0x3000, Basis::Reached),
             ]
         );
         assert_eq!(found.functions[0].name.as_deref(), Some("entry"));
@@ -537,7 +519,7 @@ mod tests {
         // Reached first and stated second: the order a walk happens to take
         // must not decide how far a fact can be trusted.
         let found = found(&[(0x1000, &[Step::Tail(0x2000)])], &[0x2000, 0x1000]);
-        assert!(seen(&found).contains(&(0x2000, Confidence::Stated)));
+        assert!(seen(&found).contains(&(0x2000, Basis::Stated)));
     }
 
     #[test]
@@ -547,7 +529,7 @@ mod tests {
         let found = found(&[(0x1000, &[Step::Hand(0x4000), Step::Return])], &[0x1000]);
         assert_eq!(
             seen(&found),
-            [(0x1000, Confidence::Stated), (0x4000, Confidence::Handed)]
+            [(0x1000, Basis::Stated), (0x4000, Basis::Handed)]
         );
     }
 
@@ -555,7 +537,7 @@ mod tests {
     fn a_call_outranks_a_handoff_for_the_same_address() {
         let body = [Step::Hand(0x4000), Step::Call(0x4000), Step::Return];
         let found = found(&[(0x1000, &body), (0x4000, &[Step::Return])], &[0x1000]);
-        assert!(seen(&found).contains(&(0x4000, Confidence::Called)));
+        assert!(seen(&found).contains(&(0x4000, Basis::Called)));
     }
 
     #[test]
