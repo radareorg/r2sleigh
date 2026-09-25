@@ -117,6 +117,21 @@ pub enum NativeRefusal {
     Capture(r2source::SnapshotValidationError),
     Lift(String),
     Prepare(String),
+    /// The analysis panicked: a defect, kept to this function and reported
+    /// with where it was raised rather than taking the session with it.
+    Panicked {
+        location: Option<crate::isolation::PanicLocation>,
+        message: String,
+    },
+}
+
+impl From<crate::isolation::Panicked> for NativeRefusal {
+    fn from(panicked: crate::isolation::Panicked) -> Self {
+        Self::Panicked {
+            location: panicked.location,
+            message: panicked.message,
+        }
+    }
 }
 
 impl std::fmt::Display for NativeRefusal {
@@ -128,6 +143,13 @@ impl std::fmt::Display for NativeRefusal {
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),
+            Self::Panicked { location, message } => {
+                let panicked = crate::isolation::Panicked {
+                    location: location.clone(),
+                    message: message.clone(),
+                };
+                write!(f, "the analysis {panicked}")
+            }
         }
     }
 }
@@ -292,6 +314,11 @@ impl Prepared {
         &self.artifact
     }
 
+    /// What the program calls the function this analysis is of.
+    pub fn name(&self) -> &str {
+        &self.root.name
+    }
+
     /// The lift of each block of the body this analysis read, dispatches followed.
     pub fn lifted(&self) -> Vec<r2il::R2ILBlock> {
         self.root
@@ -319,14 +346,14 @@ impl Prepared {
 }
 
 /// A callee whose contribution to this analysis is missing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unread {
     pub address: u64,
     pub reason: Unreadable,
 }
 
 /// How far reading a callee got before it stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unreadable {
     /// The body could not be walked, so nothing about its boundary is known.
     NotWalked,
@@ -335,14 +362,27 @@ pub enum Unreadable {
     /// It was prepared and proved nothing about its boundary that a caller
     /// could use.
     NothingProved,
+    /// Reading it panicked: a defect in the analysis, kept to this callee.
+    Panicked(crate::isolation::Panicked),
+}
+
+impl Unread {
+    /// Whether reading this callee panicked: a defect in the engine, not a
+    /// fact about the program, which a reader has to be shown.
+    pub const fn panicked(&self) -> bool {
+        matches!(self.reason, Unreadable::Panicked(_))
+    }
 }
 
 impl std::fmt::Display for Unread {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let reason = match self.reason {
+        let reason = match &self.reason {
             Unreadable::NotWalked => "its body could not be walked",
             Unreadable::NotPrepared => "its body could not be prepared",
             Unreadable::NothingProved => "it proved nothing about its boundary",
+            Unreadable::Panicked(panicked) => {
+                return write!(f, "{:#x}: its analysis {panicked}", self.address);
+            }
         };
         write!(f, "{:#x}: {reason}", self.address)
     }
@@ -567,7 +607,20 @@ fn declare_imports(
 ///
 /// This is what a caller learns about a callee -- its interface, and what its
 /// own body does through each parameter -- so every caller learns it the same way.
+///
+/// An isolation boundary: a panic preparing the callee is this callee's
+/// `Unreadable::Panicked`, and its caller goes on without it.
 fn prepared_callee(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+    ptr_bits: u32,
+) -> Result<Arc<TrustedSsaArtifact>, Unreadable> {
+    crate::isolation::isolated(|| prepare_callee(native, target, address, ptr_bits))
+        .unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))
+}
+
+fn prepare_callee(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
     address: u64,
@@ -680,12 +733,24 @@ fn read_callees(
         {
             callees.interfaces.insert(*address, interface.clone());
         }
-        let Some(derived) = CalleeFacts::derive(&artifact, ptr_bits) else {
-            unread.push(Unread {
-                address: *address,
-                reason: Unreadable::NothingProved,
-            });
-            continue;
+        // What the callee proves is read under the same boundary as its preparation.
+        let derived = crate::isolation::isolated(|| CalleeFacts::derive(&artifact, ptr_bits));
+        let derived = match derived {
+            Ok(Some(derived)) => derived,
+            Ok(None) => {
+                unread.push(Unread {
+                    address: *address,
+                    reason: Unreadable::NothingProved,
+                });
+                continue;
+            }
+            Err(panicked) => {
+                unread.push(Unread {
+                    address: *address,
+                    reason: Unreadable::Panicked(panicked),
+                });
+                continue;
+            }
         };
         callees.record(*address, &derived);
         facts.push(derived);

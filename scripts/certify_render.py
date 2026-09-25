@@ -21,9 +21,19 @@ import sys
 
 NOISE = re.compile(r"^\s*(INFO|WARN|ERROR|DEBUG):")
 PROOF = re.compile(r"^\s*/\* r2dec proof:.*\*/\s*$")
+# A panic the engine caught at an isolation boundary: the function is refused
+# and the defect named where it was raised. Isolation keeps the session alive;
+# it does not make the panic acceptable, so the gate fails on every one.
+PANICKED = re.compile(r"panicked at ")
 
 
 def run(argv, timeout):
+    """The shell's answer, stdout then stderr, or why there is none.
+
+    Stderr is part of the answer: a refusal the shell reports as an error is
+    printed there, and so is a panic. A process a signal ended -- an abort for
+    memory, say -- answered nothing at all, and says so.
+    """
     try:
         done = subprocess.run(
             argv, capture_output=True, text=True, timeout=timeout, check=False
@@ -32,7 +42,9 @@ def run(argv, timeout):
         return "", "timeout"
     except OSError as error:
         return "", str(error)
-    return done.stdout, ""
+    if done.returncode < 0:
+        return "", f"crashed: signal {-done.returncode}"
+    return done.stdout + done.stderr, ""
 
 
 def clean(text):
@@ -181,13 +193,19 @@ def proof_refusals(lines):
 
 def lint(args, binary, found):
     """Report what the rendering claims it proved and did not."""
-    tally = {"rendered": 0, "refused": 0, "undefined reads": 0}
+    tally = {"rendered": 0, "refused": 0, "undefined reads": 0, "panicked": 0, "crashed": 0}
     for address, name in found[: args.functions]:
         native, error = native_render(args.r2s, binary, address, args.timeout)
         if error:
+            if error.startswith("crashed"):
+                tally["crashed"] += 1
             print(f"  {name}: {error}")
             continue
         lines = clean(native)
+        panics = [line for line in lines if PANICKED.search(line)]
+        if panics:
+            tally["panicked"] += 1
+            print(f"  {name}: {panics[0].strip()}")
         if refused(lines):
             tally["refused"] += 1
             continue
@@ -282,10 +300,12 @@ def main():
             totals[key] = totals.get(key, 0) + value
 
     print()
-    for key in ("rendered", "refused", "undefined reads"):
+    for key in ("rendered", "refused", "undefined reads", "panicked", "crashed"):
         print(f"{key:16} {totals.get(key, 0)}")
-    # An uncertified rendering is a defect on its own terms.
-    return 1 if totals.get("undefined reads", 0) else 0
+    # An uncertified rendering is a defect on its own terms, and so is a
+    # panic the engine isolated or a process that never answered.
+    failed = ("undefined reads", "panicked", "crashed")
+    return 1 if any(totals.get(key, 0) for key in failed) else 0
 
 
 if __name__ == "__main__":

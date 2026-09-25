@@ -253,6 +253,83 @@ fn a_call_is_rendered_from_the_callee_body() {
     );
 }
 
+/// `CALLER`, whose callee's bytes cannot be read without the program panicking:
+/// a defect reached only by reading the callee.
+struct PanickingCallee;
+
+impl r2ssa::body::Program for PanickingCallee {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        assert!(vaddr < 0x100a, "a defect reading the callee at {vaddr:#x}");
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = CALLER.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        code_region(CALLER.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x100a)
+    }
+}
+
+impl Program for PanickingCallee {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == BASE).then(|| "caller".to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+#[test]
+fn a_callee_whose_analysis_panics_is_unread_with_where_and_its_caller_renders() {
+    // A panic reading one callee used to unwind through the caller and end
+    // the session. It is a defect, so it is named -- where it was raised and
+    // what it said -- and it stays with the callee.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let prepared =
+        r2engine::native::analysed(&target, &PanickingCallee, BASE).expect("the caller prepares");
+    let [unread] = prepared.unread() else {
+        panic!("one callee unread: {:?}", prepared.unread());
+    };
+    assert_eq!(unread.address, 0x100a);
+    let r2engine::native::Unreadable::Panicked(panicked) = &unread.reason else {
+        panic!("the callee panicked: {unread}");
+    };
+    assert_eq!(panicked.message, "a defect reading the callee at 0x100a");
+    let location = panicked.location.as_ref().expect("the hook saw where");
+    assert!(location.file.ends_with("native.rs"), "{location}");
+    assert!(
+        unread.to_string().starts_with(&format!(
+            "0x100a: its analysis panicked at {location}: a defect reading"
+        )),
+        "{unread}"
+    );
+    let response = decompile(&target, &PanickingCallee, BASE).expect("the caller renders");
+    assert!(
+        response.output.text().contains("fcn_100a("),
+        "{}",
+        response.output
+    );
+}
+
 #[test]
 fn a_callee_that_returns_the_pushed_address_gives_its_caller_a_constant() {
     let machine = Machine::new("x86-64", "x86-64", 64);

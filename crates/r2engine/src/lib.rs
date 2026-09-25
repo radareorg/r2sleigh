@@ -11,6 +11,7 @@
 mod tests;
 
 pub mod discovery;
+pub mod isolation;
 pub mod names;
 pub mod native;
 pub mod program;
@@ -3390,6 +3391,20 @@ pub fn format_phase_timing(metrics: &EngineMetrics) -> String {
 }
 
 /// Append the timing comment to a rendered body, or leave it exactly as it was.
+/// The response for a function whose type analysis or rendering panicked: a
+/// refusal that says where, so the defect is printed wherever the answer is.
+pub(crate) fn panicked_decompile_response(
+    function_name: &str,
+    panicked: &isolation::Panicked,
+) -> EngineDecompileResponse {
+    refused_decompile_response(
+        function_name,
+        &format!("the analysis {panicked}"),
+        Duration::default(),
+        None,
+    )
+}
+
 fn refused_decompile_response(
     function_name: &str,
     reason: &str,

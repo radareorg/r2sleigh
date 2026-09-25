@@ -83,6 +83,10 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// Read one prepared function's sealed type analysis; a refusal may be this request's stop, so it is not held.
+    ///
+    /// Sealing and reading are isolation boundaries: a panic in either is this
+    /// function's refusal, saying where it was raised, and a sealing that
+    /// unwound is never held.
     fn read_sealed<R>(
         &self,
         entry: u64,
@@ -90,8 +94,25 @@ impl<S: Source> OpenProgram<S> {
         read: impl FnOnce(&SealedFunctionAnalysis) -> R,
     ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
         let target = self.target(entry)?;
-        let seal = || crate::native::sealed(&target, entry, prepared, &self.control);
-        Ok(self.memo.read_sealed(prepared, seal, read))
+        let refused = |panicked: crate::isolation::Panicked| {
+            Box::new(crate::panicked_decompile_response(
+                prepared.name(),
+                &panicked,
+            ))
+        };
+        let seal = || {
+            crate::isolation::isolated(|| {
+                crate::native::sealed(&target, entry, prepared, &self.control)
+            })
+            .unwrap_or_else(|panicked| Err(refused(panicked)))
+        };
+        let read = |sealed: &SealedFunctionAnalysis| {
+            crate::isolation::isolated(|| read(sealed)).map_err(refused)
+        };
+        Ok(self
+            .memo
+            .read_sealed(prepared, seal, read)
+            .and_then(|read| read))
     }
 
     /// One function rendered at one tier.
