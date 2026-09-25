@@ -172,10 +172,8 @@ impl FormalDependence {
 
     /// One pass over the blocks in order; whether any value gained a bit.
     fn pass(&mut self, prepared: &SsaArtifact) -> bool {
-        let function = prepared.function();
-        let graph = prepared.graph();
         let mut changed = false;
-        for block in function.blocks() {
+        for block in prepared.function().blocks() {
             for phi in &block.phis {
                 let inputs = phi
                     .sources
@@ -184,37 +182,51 @@ impl FormalDependence {
                     .fold(0, |left, right| left | right);
                 changed |= self.raise(prepared, &phi.dst, inputs);
             }
-            // What the last call in this block was handed: the definitions
-            // that follow it are what it left, and may be any of it.
-            let mut last_call = 0u64;
-            for (index, op) in block.ops.iter().enumerate() {
-                let inputs = match op {
-                    SSAOp::Load { dst, .. }
-                    | SSAOp::LoadLinked { dst, .. }
-                    | SSAOp::LoadGuarded { dst, .. } => self.reloaded_bits(prepared, dst),
-                    SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                        last_call = graph
-                            .inst_id_for_op_site(block.addr, index)
-                            .and_then(|inst| prepared.call_sites().by_inst.get(&inst))
-                            .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
-                        let unseen = self.unseen | last_call;
-                        changed |= unseen != self.unseen;
-                        self.unseen = unseen;
-                        continue;
-                    }
-                    SSAOp::CallDefine { .. } => last_call,
-                    op => op
-                        .sources()
-                        .into_iter()
-                        .map(|source| self.var_bits(prepared, source))
-                        .fold(0, |left, right| left | right),
-                };
-                if let Some(dst) = op.dst() {
-                    changed |= self.raise(prepared, dst, inputs);
-                }
-            }
+            changed |= self.ops_pass(prepared, block);
         }
         changed
+    }
+
+    /// One block's operations, in order; whether any value gained a bit.
+    fn ops_pass(&mut self, prepared: &SsaArtifact, block: &crate::block::SSABlock) -> bool {
+        let mut changed = false;
+        // What the last call in this block was handed: the definitions that
+        // follow it are what it left, and may be any of it.
+        let mut last_call = 0u64;
+        for (index, op) in block.ops.iter().enumerate() {
+            if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+                last_call = prepared
+                    .graph()
+                    .inst_id_for_op_site(block.addr, index)
+                    .and_then(|inst| prepared.call_sites().by_inst.get(&inst))
+                    .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
+                let unseen = self.unseen | last_call;
+                changed |= unseen != self.unseen;
+                self.unseen = unseen;
+                continue;
+            }
+            let Some(dst) = op.dst() else {
+                continue;
+            };
+            let inputs = self.op_bits(prepared, op, last_call);
+            changed |= self.raise(prepared, dst, inputs);
+        }
+        changed
+    }
+
+    /// The bits an operation's output is computed from.
+    fn op_bits(&self, prepared: &SsaArtifact, op: &SSAOp, last_call: u64) -> u64 {
+        match op {
+            SSAOp::Load { dst, .. }
+            | SSAOp::LoadLinked { dst, .. }
+            | SSAOp::LoadGuarded { dst, .. } => self.reloaded_bits(prepared, dst),
+            SSAOp::CallDefine { .. } => last_call,
+            op => op
+                .sources()
+                .into_iter()
+                .map(|source| self.var_bits(prepared, source))
+                .fold(0, |left, right| left | right),
+        }
     }
 
     /// A load's bits: what was stored in the stack slot it reads back.

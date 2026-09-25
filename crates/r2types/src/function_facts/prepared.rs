@@ -1417,6 +1417,13 @@ pub(crate) struct AddressBases<'a> {
     resolved: BTreeMap<r2ssa::ValueId, Option<(r2ssa::ValueId, i64)>>,
 }
 
+/// The values waiting on others while one address is resolved, and the merges
+/// being resolved, which a cycle must not re-enter.
+struct AddressWalk {
+    pending: Vec<(r2ssa::ValueId, bool)>,
+    visiting: BTreeSet<r2ssa::ValueId>,
+}
+
 /// How one value's base follows from its definition.
 enum AddressStep {
     /// Known without looking further.
@@ -1453,66 +1460,78 @@ impl<'a> AddressBases<'a> {
 
     /// The value `value` is a constant displacement from, and the displacement.
     pub(crate) fn base(&mut self, value: r2ssa::ValueId) -> Option<(r2ssa::ValueId, i64)> {
-        let mut pending = vec![(value, false)];
-        let mut visiting = BTreeSet::new();
-        while let Some((current, expanded)) = pending.pop() {
+        let mut walk = AddressWalk {
+            pending: vec![(value, false)],
+            visiting: BTreeSet::new(),
+        };
+        while let Some((current, expanded)) = walk.pending.pop() {
             if self.resolved.contains_key(&current) {
                 continue;
             }
-            let step = self.step(current);
-            let result = match step {
-                AddressStep::Settled(result) => result,
-                AddressStep::Displaced(input, delta) => {
-                    if !expanded && !self.resolved.contains_key(&input) {
-                        if visiting.contains(&input) {
-                            None
-                        } else {
-                            pending.push((current, true));
-                            pending.push((input, false));
-                            continue;
-                        }
-                    } else {
-                        self.resolved
-                            .get(&input)
-                            .copied()
-                            .flatten()
-                            .and_then(|(base, offset)| Some((base, offset.checked_add(delta)?)))
-                    }
-                }
-                AddressStep::Merge(inputs) => {
-                    if !expanded {
-                        visiting.insert(current);
-                        pending.push((current, true));
-                        pending.extend(
-                            inputs
-                                .iter()
-                                .filter(|input| {
-                                    !self.resolved.contains_key(input) && !visiting.contains(input)
-                                })
-                                .map(|input| (*input, false)),
-                        );
-                        continue;
-                    }
-                    visiting.remove(&current);
-                    let mut common = None;
-                    let mut agreed = true;
-                    for input in &inputs {
-                        let Some(known) = self.resolved.get(input).copied().flatten() else {
-                            agreed = false;
-                            break;
-                        };
-                        if common.is_some_and(|common| common != known) {
-                            agreed = false;
-                            break;
-                        }
-                        common = Some(known);
-                    }
-                    common.filter(|_| agreed)
-                }
-            };
-            self.resolved.insert(current, result);
+            if let Some(result) = self.resolve(current, expanded, &mut walk) {
+                self.resolved.insert(current, result);
+            }
         }
         self.resolved.get(&value).copied().flatten()
+    }
+
+    /// `current`'s base, where every input it needs is resolved; otherwise it
+    /// queues those inputs, and itself after them, and answers nothing yet.
+    fn resolve(
+        &self,
+        current: r2ssa::ValueId,
+        expanded: bool,
+        walk: &mut AddressWalk,
+    ) -> Option<Option<(r2ssa::ValueId, i64)>> {
+        let (input, delta) = match self.step(current) {
+            AddressStep::Settled(result) => return Some(result),
+            AddressStep::Merge(inputs) => return self.merged(current, &inputs, expanded, walk),
+            AddressStep::Displaced(input, delta) => (input, delta),
+        };
+        if !expanded && !self.resolved.contains_key(&input) {
+            // A cycle back into a merge being resolved has no base yet.
+            if walk.visiting.contains(&input) {
+                return Some(None);
+            }
+            walk.pending.push((current, true));
+            walk.pending.push((input, false));
+            return None;
+        }
+        Some(
+            self.resolved
+                .get(&input)
+                .copied()
+                .flatten()
+                .and_then(|(base, offset)| Some((base, offset.checked_add(delta)?))),
+        )
+    }
+
+    fn merged(
+        &self,
+        current: r2ssa::ValueId,
+        inputs: &[r2ssa::ValueId],
+        expanded: bool,
+        walk: &mut AddressWalk,
+    ) -> Option<Option<(r2ssa::ValueId, i64)>> {
+        if !expanded {
+            walk.visiting.insert(current);
+            walk.pending.push((current, true));
+            let visiting = &walk.visiting;
+            walk.pending.extend(
+                inputs
+                    .iter()
+                    .filter(|input| !self.resolved.contains_key(input) && !visiting.contains(input))
+                    .map(|input| (*input, false)),
+            );
+            return None;
+        }
+        walk.visiting.remove(&current);
+        // Every input known, at one base and one displacement.
+        let mut bases = inputs
+            .iter()
+            .map(|input| self.resolved.get(input).copied().flatten());
+        let common = bases.next().flatten();
+        Some(common.filter(|common| bases.all(|base| base == Some(*common))))
     }
 
     fn step(&self, value: r2ssa::ValueId) -> AddressStep {
