@@ -1125,8 +1125,7 @@ fn trusted_external_type_db(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::Ext
         if name.is_empty() {
             continue;
         }
-        let mut fields = std::collections::BTreeMap::new();
-        collect_external_struct_fields(graph, aggregate, 0, "", &mut fields, 0);
+        let fields = external_struct_fields(graph, aggregate);
         if fields.is_empty() {
             continue;
         }
@@ -1148,64 +1147,64 @@ fn trusted_external_type_db(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::Ext
 /// four-byte read after the eight-byte `Point` sharing its offset would claim a
 /// member the access is not. Flattening gives that read the name it deserves:
 /// `r->top_left.x` rather than an unnamed subscript.
-fn collect_external_struct_fields(
+///
+/// The type graph refuses an aggregate that holds itself by value, so the
+/// nesting is well founded and read to its end: no aggregate recurs on one
+/// path, a path is at most as long as the graph has aggregates, and each
+/// member of each nested instance is visited once. The members of one struct
+/// occupy disjoint bytes, so no two scalars claim one offset and the order the
+/// explicit stack visits them in does not change the map.
+fn external_struct_fields(
     graph: &r2ssa::SourceTypeGraph,
     aggregate: &r2ssa::SourceAggregateLayout,
-    base_offset: u64,
-    prefix: &str,
-    fields: &mut std::collections::BTreeMap<u64, r2types::ExternalField>,
-    depth: u32,
-) {
-    // A type graph is acyclic, but a bound keeps a malformed capture from
-    // walking forever.
-    if depth > 4 {
-        return;
-    }
-    for member in aggregate.members() {
-        // A member the capture could not name, or one that does not start on a
-        // byte, cannot be spelled as a field access.
-        if member.name().is_empty() || member.offset_bits() % 8 != 0 {
-            continue;
-        }
-        let Some(offset) = base_offset.checked_add(member.offset_bits() / 8) else {
-            continue;
-        };
-        let path = if prefix.is_empty() {
-            member.name().to_string()
-        } else {
-            format!("{prefix}.{}", member.name())
-        };
-        let member_type = usize::try_from(member.type_id())
-            .ok()
-            .and_then(|id| graph.types().get(id));
-        // A union's members share one offset, so no single name is the name
-        // of a read at it; the field stays unnamed rather than guessed.
-        if let Some(source_type) = member_type
-            && matches!(source_type.kind(), r2ssa::SourceTypeKind::Union { .. })
-        {
-            continue;
-        }
-        if let Some(source_type) = member_type
-            && let r2ssa::SourceTypeKind::Struct { aggregate_id } = source_type.kind()
-        {
-            if let Some(nested) = graph
-                .aggregates()
-                .iter()
-                .find(|candidate| candidate.id() == aggregate_id)
-            {
-                collect_external_struct_fields(graph, nested, offset, &path, fields, depth + 1);
+) -> std::collections::BTreeMap<u64, r2types::ExternalField> {
+    let mut fields = std::collections::BTreeMap::new();
+    let mut pending = vec![(aggregate, 0u64, String::new())];
+    while let Some((aggregate, base_offset, prefix)) = pending.pop() {
+        for member in aggregate.members() {
+            // A member the capture could not name, or one that does not start on a
+            // byte, cannot be spelled as a field access.
+            if member.name().is_empty() || member.offset_bits() % 8 != 0 {
+                continue;
             }
-            continue;
+            let Some(offset) = base_offset.checked_add(member.offset_bits() / 8) else {
+                continue;
+            };
+            let path = if prefix.is_empty() {
+                member.name().to_string()
+            } else {
+                format!("{prefix}.{}", member.name())
+            };
+            let member_type = usize::try_from(member.type_id())
+                .ok()
+                .and_then(|id| graph.types().get(id));
+            match member_type.map(r2ssa::SourceType::kind) {
+                // A union's members share one offset, so no single name is the
+                // name of a read at it; the field stays unnamed rather than
+                // guessed.
+                Some(r2ssa::SourceTypeKind::Union { .. }) => {}
+                Some(r2ssa::SourceTypeKind::Struct { aggregate_id }) => {
+                    if let Some(nested) = usize::try_from(aggregate_id)
+                        .ok()
+                        .and_then(|id| graph.aggregates().get(id))
+                    {
+                        pending.push((nested, offset, path));
+                    }
+                }
+                _ => {
+                    fields.insert(
+                        offset,
+                        r2types::ExternalField {
+                            name: path,
+                            offset,
+                            ty: source_member_type_spelling(graph, member),
+                        },
+                    );
+                }
+            }
         }
-        fields.insert(
-            offset,
-            r2types::ExternalField {
-                name: path,
-                offset,
-                ty: source_member_type_spelling(graph, member),
-            },
-        );
     }
+    fields
 }
 
 /// How a captured aggregate member's type spells in C, so the width check that
