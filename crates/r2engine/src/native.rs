@@ -25,6 +25,7 @@ use r2source::{
 use r2ssa::body::{BodyError, WINDOW};
 use r2ssa::{CalleePreservedCarriers, SummaryArgumentReach, TrustedSsaArtifact};
 
+use crate::declared::{Declared, Placement, Restatement};
 use crate::{
     CalleeFacts, EngineDecompileResponse, EngineFunctionDecompileRequestInput, EngineFunctionInput,
     EngineFunctionInputQuality, EngineSession,
@@ -96,6 +97,9 @@ pub struct NativeTarget<'a> {
     /// import has no body to read an interface off, so without this a call to
     /// one renders with no arguments at all.
     pub prototypes: &'a Prototypes,
+    /// What the binary's own debug information declares, by the address each
+    /// body begins and each object sits at.
+    pub declarations: &'a r2abi::Declarations,
 }
 
 /// Why a native decompile could not be attempted.
@@ -527,7 +531,7 @@ fn request(
         tables: _,
     } = prepared;
     let block_count = artifact.source_block_count();
-    let signatures = declared_signatures(target, root, *ptr_bits, extents);
+    let signatures = declared_signatures(target, root, extents);
     EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
             function_name: root.name.clone(),
@@ -572,26 +576,21 @@ fn declare_imports(
     ptr_bits: u32,
     callees: &mut Callees,
 ) -> Vec<r2types::SourceOwnedCalleeSignature> {
-    let mut declared = Vec::new();
+    let placement = Placement::new(target, &native.machine);
+    let mut signatures = Vec::new();
     for address in targets {
         let Some(name) = native.program.import_at(*address) else {
             continue;
         };
-        let Some(prototype) = target.prototypes.get(&name) else {
+        let Some(declared) = Declared::import(target, &name) else {
             continue;
         };
         // An import has no body here, so nothing it declares about its own
         // frame is about anything this program can see.
-        let Some(interface) = declared_interface(
-            prototype,
-            target,
-            &native.machine,
-            ptr_bits,
-            &DeclaredFrame::default(),
-        ) else {
+        let Some(interface) = placement.restatement(declared, false).interface else {
             continue;
         };
-        if let Some(signature) = function_type(prototype, ptr_bits)
+        if let Some(signature) = placement.function_type(declared)
             && let Some(declaration) = r2types::SourceOwnedCalleeSignature::declared(
                 *address,
                 interface.clone(),
@@ -599,11 +598,11 @@ fn declare_imports(
                 ptr_bits,
             )
         {
-            declared.push(declaration);
+            signatures.push(declaration);
         }
         callees.interfaces.insert(*address, interface);
     }
-    declared
+    signatures
 }
 
 /// One callee's body, prepared against what the binary declares about it and its imports, and against no callee body of its own.
@@ -644,7 +643,7 @@ fn prepare_callee(
     // prepared: a callee prepared without its declaration proves only what
     // its instructions show, which for a result register is nothing, and
     // then the call site renders it as returning nothing.
-    let declared = declaration_for(native, target, address, ptr_bits);
+    let declared = native.declaration(address);
     // An import's prototype is a declaration, not a body, so what the callee returns through one is known.
     let targets = walked
         .body
@@ -793,11 +792,8 @@ fn analyse(
     // convention's slots the same way and the body is prepared against it.
     // Without this the engine reads every parameter as the width of the
     // register it arrived in, whatever the source said.
-    let declared_prototype = native
-        .program
-        .name_at(entry)
-        .and_then(|name| target.prototypes.get(&name).cloned());
-    let declared_root = declaration_for(&native, target, entry, ptr_bits);
+    let declared_prototype = Declared::body(target, entry).map(|declared| declared.prototype);
+    let declared_root = native.declaration(entry);
     let first = match declared_root.interface.is_some() {
         false => native.prepare(&root, &callees)?,
         true => native.prepare_restated(&root, &callees, Vec::new(), declared_root.clone(), &[])?,
@@ -842,7 +838,7 @@ fn analyse(
     // prologue moved, which the first pass proved for every object it placed,
     // so the declaration is restated into those coordinates rather than
     // dropped for being in the other ones.
-    let declared_root = rebased(declared_root, &first, &declared_prototype);
+    let declared_root = crate::declared::rebased(declared_root, &first, declared_prototype);
     let declared_slots = declared_root
         .interface
         .as_ref()
@@ -876,271 +872,6 @@ fn analyse(
     })
 }
 
-/// What a capture states about the boundary beyond what the bytes say.
-///
-/// Both halves describe the same declaration -- where each parameter arrives
-/// and what it is called -- so they travel together and a capture that has one
-/// without the other would render a signature its body was not prepared for.
-#[derive(Debug, Clone, Default)]
-struct Restatement {
-    interface: Option<r2source::SourceFunctionInterface>,
-    signature: Option<r2source::SourceSignaturePresentation>,
-    slot_names: Vec<r2source::SourceStackSlotName>,
-}
-
-/// How a declaration spells a function, for rendering rather than for reading.
-///
-/// The interface carries the widths; without this the renderer has only those,
-/// so a `size_t` arrives as a 64-bit register and is spelled as one.
-fn declared_signature(prototype: &r2abi::Prototype) -> r2source::SourceSignaturePresentation {
-    let parameters = prototype.parameters.iter().map(|parameter| {
-        r2source::SourceSignatureParameter::new(
-            parameter.name.clone(),
-            Some(parameter.spelling.as_written().to_owned()),
-        )
-    });
-    let ellipsis = prototype
-        .variadic
-        .then(|| r2source::SourceSignatureParameter::new(Some("..."), None::<String>));
-    r2source::SourceSignaturePresentation::new(
-        Some(prototype.returns.as_written().to_owned()),
-        None::<String>,
-        false,
-        parameters.chain(ellipsis),
-    )
-}
-
-/// One declaration, with anything it measured from the frame pointer measured
-/// from the entry stack pointer instead.
-///
-/// Unchanged where the declaration used no frame pointer, and unchanged where
-/// the body placed no object against one -- there is then nothing to restate
-/// it by, and a guessed distance would put every local at the wrong address.
-fn rebased(
-    declared: Restatement,
-    artifact: &TrustedSsaArtifact,
-    prototype: &Option<r2abi::Prototype>,
-) -> Restatement {
-    let frame_based = |base| base == r2source::StackAddressBase::FramePointer;
-    if !declared
-        .slot_names
-        .iter()
-        .any(|name| frame_based(name.base()))
-    {
-        return declared;
-    }
-    let Some(from_entry) = prototype
-        .as_ref()
-        .and_then(|prototype| frame_pointer_from_entry(artifact, prototype))
-    else {
-        r2il::refusal_evidence!(
-            "declared-stack-slot",
-            "nothing states one slot in both coordinate systems, so the \
-             declaration's frame-relative slots cannot be restated"
-        );
-        return declared;
-    };
-    let interface = declared.interface.and_then(|interface| {
-        // A slot measured from the entry pointer names the stack pointer as
-        // its base, whatever register the declaration measured it from.
-        let stack_pointer = interface.stack_pointer_storage()?;
-        let slots = interface
-            .stack_slots()
-            .iter()
-            .map(|slot| match frame_based(slot.base()) {
-                false => *slot,
-                true => {
-                    let rebased = r2source::SourceStackSlotSpec::new_local(
-                        r2source::StackAddressBase::StackPointer,
-                        stack_pointer,
-                        slot.offset().saturating_add(from_entry),
-                        slot.size_bytes(),
-                    );
-                    match slot.logical_type() {
-                        None => rebased,
-                        Some(id) => rebased.with_logical_type(id),
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        let revision = interface.revision_identity().to_vec();
-        restate(&interface, slots, revision)
-    });
-    Restatement {
-        interface,
-        signature: declared.signature,
-        slot_names: declared
-            .slot_names
-            .into_iter()
-            .map(|name| match frame_based(name.base()) {
-                false => name,
-                true => r2source::SourceStackSlotName::new(
-                    r2source::StackAddressBase::StackPointer,
-                    name.offset().saturating_add(from_entry),
-                    name.name(),
-                )
-                .with_type_spelling(name.type_spelling()),
-            })
-            .collect(),
-    }
-}
-
-/// How far the frame pointer sits from the pointer the function was entered
-/// with.
-///
-/// A parameter the prologue spills is the one place the same slot is stated
-/// twice: the declaration says where it sits in the frame, and the body proves
-/// where it sits relative to the pointer the function was entered with. The
-/// difference is the distance, and every such parameter has to agree on it --
-/// a frame pointer that moved during the body is not one distance.
-fn frame_pointer_from_entry(
-    artifact: &TrustedSsaArtifact,
-    prototype: &r2abi::Prototype,
-) -> Option<i64> {
-    let prepared = artifact.shared_artifact();
-    let mut proved: Option<i64> = None;
-    for slot in r2ssa::recover_interface::recovered_stack_slots(prepared.as_ref()) {
-        let Some(declared) = slot
-            .parameter
-            .and_then(|index| prototype.parameters.get(index as usize))
-            .and_then(|parameter| parameter.frame_offset)
-        else {
-            continue;
-        };
-        let distance = slot.offset.checked_sub(declared)?;
-        match proved {
-            None => proved = Some(distance),
-            Some(proved) if proved == distance => {}
-            Some(_) => return None,
-        }
-    }
-    proved
-}
-
-/// The frame the declaration states, in this machine's coordinates.
-///
-/// A slot and its name are built together because the snapshot requires every
-/// name to land on a slot the interface carries: a name for a place the
-/// function does not have would be rendered against whatever the engine
-/// happened to recover there.
-#[derive(Default)]
-struct DeclaredFrame {
-    names: Vec<r2source::SourceStackSlotName>,
-    slots: Vec<r2source::SourceStackSlotSpec>,
-    /// The register the declaration says the frame is measured from, where it
-    /// names one. A slot measured from it is a false statement about the
-    /// machine unless the interface says which register that is.
-    frame_pointer: Option<CanonicalStorageId>,
-}
-
-/// What the declaration calls each frame slot, in this machine's coordinates.
-///
-/// The debug information measures a frame offset from an origin it names, and
-/// the engine measures one from the stack pointer this function was entered
-/// with or from the frame pointer. Both origins are exact, so the distance
-/// between them is derived rather than assumed: the canonical frame address is
-/// the caller's stack pointer before the call, which is this function's entry
-/// pointer plus whatever the call itself pushed.
-fn declared_frame(
-    prototype: &r2abi::Prototype,
-    target: &NativeTarget<'_>,
-    machine: &NativeMachine,
-    ptr_bits: u32,
-) -> DeclaredFrame {
-    let (Some(stated), Some(stack_pointer)) =
-        (prototype.frame_base, machine.roles.stack_pointer_storage())
-    else {
-        return DeclaredFrame::default();
-    };
-    let mut frame = DeclaredFrame::default();
-    let (base, base_storage, from_entry) = match stated {
-        r2abi::FrameBase::CallFrameCfa => {
-            // The canonical frame address is the caller's stack pointer before
-            // the call, so it is the entry pointer plus whatever the call left
-            // on the stack. The specification states that slot, and a machine
-            // that leaves the return address in a register states none.
-            let pushed = target
-                .compiler
-                .return_address_slot
-                .map_or(0, |(_, size)| i64::from(size));
-            (
-                r2source::StackAddressBase::StackPointer,
-                stack_pointer,
-                pushed,
-            )
-        }
-        r2abi::FrameBase::Register(number) => {
-            match r2abi::dwarf_frame_register(target.arch.name.as_str(), ptr_bits, number) {
-                Some((r2abi::FrameRole::FramePointer, name)) => {
-                    let Ok(storage) = storage(target.arch, name) else {
-                        return DeclaredFrame::default();
-                    };
-                    frame.frame_pointer = Some(storage);
-                    (r2source::StackAddressBase::FramePointer, storage, 0)
-                }
-                // A base that is the stack pointer inside the body is a
-                // distance from a value the body moves, which names no origin
-                // the engine can place a slot against.
-                _ => return DeclaredFrame::default(),
-            }
-        }
-    };
-    // Two locals declared over one place are two names for it: the compiler
-    // gave them the same storage because their scopes do not overlap, and
-    // `mbsstr_trimmed_wordbounded` has three at one offset. Nothing here knows
-    // which name the storage holds at a given point, so neither is stated --
-    // and stating both made the whole declaration unstatable, which cost the
-    // function its parameter types as well as its locals.
-    let places = prototype
-        .locals
-        .iter()
-        .filter_map(|local| Some((local.frame_offset, local.size_bytes?)))
-        .collect::<Vec<_>>();
-    let overlaps = |local: &r2abi::Local, size: u32| {
-        places
-            .iter()
-            .filter(|(offset, other)| {
-                local.frame_offset < offset.saturating_add(i64::from(*other))
-                    && *offset < local.frame_offset.saturating_add(i64::from(size))
-            })
-            .count()
-            > 1
-    };
-    for local in &prototype.locals {
-        // A slot with no stated extent is not a slot, and a name for it would
-        // have nothing to attach to.
-        let Some(size_bytes) = local.size_bytes else {
-            continue;
-        };
-        if overlaps(local, size_bytes) {
-            r2il::refusal_evidence!(
-                "declared-stack-slot",
-                "{}: `{}` shares its place with another declaration",
-                prototype.name,
-                local.name
-            );
-            continue;
-        }
-        let offset = local.frame_offset.saturating_add(from_entry);
-        frame.names.push(
-            r2source::SourceStackSlotName::new(base, offset, local.name.clone())
-                .with_type_spelling(
-                    local
-                        .spelling
-                        .as_ref()
-                        .map(|spelled| spelled.as_written().to_owned()),
-                ),
-        );
-        frame.slots.push(r2source::SourceStackSlotSpec::new_local(
-            base,
-            base_storage,
-            offset,
-            size_bytes,
-        ));
-    }
-    frame
-}
-
 /// What to call each parameter the interface declares.
 ///
 /// Exactly as long as that list, because the presentation is read positionally
@@ -1161,36 +892,6 @@ fn declared_parameter_names(
         .collect()
 }
 
-/// What the binary declares about the function at this address, placed in this
-/// machine's carriers.
-fn declaration_for(
-    native: &Native<'_>,
-    target: &NativeTarget<'_>,
-    address: u64,
-    ptr_bits: u32,
-) -> Restatement {
-    let Some(prototype) = native
-        .program
-        .name_at(address)
-        .and_then(|name| target.prototypes.get(&name).cloned())
-    else {
-        return Restatement::default();
-    };
-    // The spelling and the interface are one declaration: a signature whose
-    // arity the convention could not place would render a parameter list the
-    // body was never prepared against.
-    let frame = declared_frame(&prototype, target, &native.machine, ptr_bits);
-    let Some(interface) = declared_interface(&prototype, target, &native.machine, ptr_bits, &frame)
-    else {
-        return Restatement::default();
-    };
-    Restatement {
-        interface: Some(interface),
-        signature: Some(declared_signature(&prototype)),
-        slot_names: frame.names,
-    }
-}
-
 /// Where each integer argument arrives under this machine's convention, by index.
 pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageId> {
     machine(target)
@@ -1200,204 +901,47 @@ pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageI
 
 /// Where an import's declaration says it takes a pointer.
 pub(crate) fn declared_pointers(target: &NativeTarget<'_>, name: &str) -> Vec<CanonicalStorageId> {
-    let (Some(prototype), Ok(machine)) = (target.prototypes.get(name), machine(target)) else {
+    let (Some(declared), Ok(machine)) = (Declared::import(target, name), machine(target)) else {
         return Vec::new();
     };
-    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let placed = placed_prefix(prototype, target, &machine, ptr_bits);
-    prototype
-        .parameters
-        .iter()
-        .zip(placed)
-        .filter(|(parameter, _)| {
-            // The type data spells a function parameter `func`, which is a code address on the declaration's authority.
-            parameter.is_function()
-                || r2types::parse_c_type_like(parameter.spelling.as_type(), ptr_bits).is_some_and(
-                    |parsed| {
-                        matches!(
-                            unnamed(&parsed),
-                            r2types::CTypeLike::Pointer(_) | r2types::CTypeLike::Function { .. }
-                        )
-                    },
-                )
-        })
-        .map(|(_, storage)| storage)
-        .collect()
+    Placement::new(target, &machine).pointers(declared)
 }
 
-/// The declared interfaces of the library functions this body calls.
+/// The declared interfaces of the functions this body calls.
 ///
-/// Keyed by name, because that is what an import is: the body is elsewhere and
-/// only the name reaches the program.
+/// A function whose body the program carries is declared by the binary's
+/// debug information at the address the call reaches; an import, by the
+/// library table under its name. Either reaches the type layer under the
+/// name the call renders with.
 fn declared_signatures(
     target: &NativeTarget<'_>,
     root: &Walked,
-    ptr_bits: u32,
     extents: &r2types::ProgramExtents,
 ) -> r2types::ParsedExternalContext {
     let mut context = r2types::ParsedExternalContext {
         program_extents: extents.clone(),
         ..r2types::ParsedExternalContext::default()
     };
-    for name in &root.callee_names {
-        let Some(prototype) = target.prototypes.get(name) else {
-            continue;
-        };
-        let Some(signature) = function_type(prototype, ptr_bits) else {
+    let Ok(machine) = machine(target) else {
+        return context;
+    };
+    let placement = Placement::new(target, &machine);
+    for callee in &root.callees {
+        let declared = Declared::body(target, callee.address).or_else(|| {
+            callee
+                .import
+                .as_deref()
+                .and_then(|import| Declared::import(target, import))
+        });
+        let Some(signature) = declared.and_then(|declared| placement.function_type(declared))
+        else {
             continue;
         };
         context
             .known_function_signatures
-            .insert(name.clone(), signature);
+            .insert(callee.name.clone(), signature);
     }
     context
-}
-
-/// A declared prototype, placed in the convention's slots and typed.
-///
-/// The prototype says how many arguments there are and what they are; the
-/// convention says where they arrive. Neither alone describes the call, and
-/// nothing here proves anything about the callee's body, which is why this is
-/// only reached for a function whose body the program does not carry.
-fn declared_interface(
-    prototype: &r2abi::Prototype,
-    target: &NativeTarget<'_>,
-    machine: &NativeMachine,
-    ptr_bits: u32,
-    frame: &DeclaredFrame,
-) -> Option<r2source::SourceFunctionInterface> {
-    let placed = placed_parameters(prototype, target, machine, ptr_bits)?;
-    let parameters = placed
-        .iter()
-        .enumerate()
-        .map(|(index, storage)| r2source::SourceAbiParameterSpec::new(index as u32, *storage))
-        .collect::<Vec<_>>();
-    // A result arrives where its own class arrives: a machine with separate
-    // floating-point registers returns a `double` in one of those, and calling
-    // it the integer result register would have the renderer read the bits of
-    // whatever the integer register happened to hold.
-    let result = match float_spelling(prototype.returns.as_type(), ptr_bits) {
-        true => target
-            .convention
-            .float_return
-            .as_ref()
-            .and_then(|slot| storage(target.arch, slot.name()).ok()),
-        false => machine.slots.result_slot(),
-    };
-    let returns = match (prototype.returns.as_type(), result) {
-        ("void" | "", _) | (_, None) => r2source::SourceFunctionReturn::Void,
-        (_, Some(storage)) => r2source::SourceFunctionReturn::Register { storage },
-    };
-
-    // The declared types, as the graph the interface carries. A spelling this
-    // build cannot place leaves the prototype untyped rather than half-typed.
-    let mut graph = DeclaredTypes::default();
-    // A slot's own declared type joins the same graph, so a local declared
-    // `double` is rendered as one rather than as the bits its carrier holds.
-    // A spelling with no place in the graph leaves its slot untyped, which the
-    // interface allows: the slot is still a slot of that size.
-    let slots_declared = frame
-        .names
-        .iter()
-        .zip(&frame.slots)
-        .map(|(name, slot)| {
-            match name
-                .type_spelling()
-                .and_then(|spelling| graph.type_id(spelling, ptr_bits))
-            {
-                None => *slot,
-                Some(id) => slot.with_logical_type(id),
-            }
-        })
-        .collect::<Vec<_>>();
-    let parameter_values = prototype
-        .parameters
-        .iter()
-        .zip(&placed)
-        .map(|(parameter, storage)| {
-            graph.value(parameter.spelling.as_type(), ptr_bits, storage.size)
-        })
-        .collect::<Vec<_>>();
-    let return_value = match (returns, result) {
-        (r2source::SourceFunctionReturn::Void, _) | (_, None) => None,
-        (_, Some(storage)) => graph.value(prototype.returns.as_type(), ptr_bits, storage.size),
-    };
-    let typed = parameter_values.iter().all(Option::is_some)
-        && matches!(returns, r2source::SourceFunctionReturn::Void) == return_value.is_none();
-    let type_graph = typed
-        .then(|| r2source::SourceTypeGraph::new(graph.types.clone(), []).ok())
-        .flatten();
-
-    let revision = format!("declared:{}", prototype.name);
-    let interface = match &type_graph {
-        Some(_) => r2source::SourceFunctionInterface::new_exact_with_logical_types(
-            revision.into_bytes(),
-            machine.slots.calling_convention(),
-            parameters,
-            returns,
-            slots_declared,
-            parameter_values,
-            return_value,
-            type_graph,
-        ),
-        None => r2source::SourceFunctionInterface::new_exact(
-            revision.into_bytes(),
-            machine.slots.calling_convention(),
-            parameters,
-            returns,
-            // With no graph to name them in, a slot carries no type.
-            frame.slots.clone(),
-        ),
-    };
-
-    let interface = match interface {
-        Ok(interface) => interface,
-        Err(error) => {
-            r2il::refusal_evidence!(
-                "declared-interface",
-                "{} does not state an interface: {error:?}",
-                prototype.name
-            );
-            return None;
-        }
-    };
-    let roles = machine.roles;
-    let Some(return_address) = roles.return_address_storage() else {
-        r2il::refusal_evidence!(
-            "declared-interface",
-            "{}: this machine names no return address carrier",
-            prototype.name
-        );
-        return None;
-    };
-    let Some(stack_pointer) = roles.stack_pointer_storage() else {
-        r2il::refusal_evidence!(
-            "declared-interface",
-            "{}: this machine names no stack pointer carrier",
-            prototype.name
-        );
-        return None;
-    };
-    let placed = interface
-        .with_return_address_storage(return_address)
-        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer))
-        .and_then(|interface| match frame.frame_pointer {
-            None => Ok(interface),
-            Some(storage) => interface.with_frame_pointer_storage(storage),
-        });
-    match placed {
-        // The types are radare2's declarations, which is exactly what this flag
-        // says: the prototype was read rather than recovered.
-        Ok(interface) => Some(interface.with_prototype_from_source_types()),
-        Err(error) => {
-            r2il::refusal_evidence!(
-                "declared-interface",
-                "{} does not fit this machine's carriers: {error:?}",
-                prototype.name
-            );
-            None
-        }
-    }
 }
 
 /// One interface again, with stack slots it did not have.
@@ -1406,7 +950,7 @@ fn declared_interface(
 /// it says about itself. The order matters: a return mechanism validates
 /// against the carriers, and a carrier refuses to move once a mechanism is
 /// bound, so the carriers go on first.
-fn restate(
+pub(crate) fn restate(
     interface: &r2source::SourceFunctionInterface,
     slots: Vec<r2source::SourceStackSlotSpec>,
     revision: Vec<u8>,
@@ -1469,218 +1013,6 @@ fn restate(
         restated = restated.with_prototype_from_source_types();
     }
     Some(restated)
-}
-
-/// The types one declared prototype needs, interned as it is read.
-#[derive(Default)]
-struct DeclaredTypes {
-    types: Vec<r2source::SourceType>,
-}
-
-impl DeclaredTypes {
-    /// The graph node one C spelling stands for.
-    fn type_id(&mut self, spelling: &str, ptr_bits: u32) -> Option<u32> {
-        let parsed = r2types::parse_c_type_like(spelling, ptr_bits)?;
-        self.intern(&parsed, ptr_bits)
-    }
-
-    /// The logical value one C spelling stands for, in the carrier it arrives
-    /// in.
-    ///
-    /// A declared type narrower than its carrier occupies the carrier's low
-    /// bits and says so, which is what `int` in a 64-bit register is. Calling
-    /// that the whole carrier is what made every prototype with an `int` in it
-    /// refuse, and with it every `main`.
-    fn value(
-        &mut self,
-        spelling: &str,
-        ptr_bits: u32,
-        carrier_size_bytes: u32,
-    ) -> Option<r2source::SourceLogicalValue> {
-        let parsed = r2types::parse_c_type_like(spelling, ptr_bits)?;
-        let id = self.intern(&parsed, ptr_bits)?;
-        let bits = self.types[id as usize].size_bits();
-        let kind = match bits == u64::from(carrier_size_bytes) * 8 {
-            true => r2source::SourceCarrierKind::Full,
-            false => r2source::SourceCarrierKind::LowBits,
-        };
-        Some(r2source::SourceLogicalValue::new(
-            id,
-            r2source::SourceCarrierProjection::new(kind, 0, bits),
-        ))
-    }
-
-    fn intern(&mut self, parsed: &r2types::CTypeLike, ptr_bits: u32) -> Option<u32> {
-        use r2source::SourceTypeKind as Kind;
-        use r2types::{CTypeLike, Signedness};
-
-        let (kind, bits) = match parsed {
-            CTypeLike::Void => (Kind::Void, 0),
-            CTypeLike::Bool => (Kind::UnsignedInteger, 8),
-            CTypeLike::Int { bits, signedness } => match signedness {
-                Signedness::Signed => (Kind::SignedInteger, *bits),
-                _ => (Kind::UnsignedInteger, *bits),
-            },
-            CTypeLike::Float(bits) => (Kind::Float, *bits),
-            CTypeLike::Pointer(target) => {
-                let target_type_id = self.intern(target, ptr_bits)?;
-                (Kind::Pointer { target_type_id }, ptr_bits)
-            }
-            // A name for a type is that type. The graph carries no names, and
-            // the spelling that keeps `size_t` readable travels beside it, so
-            // interning the target is the whole of what this has to do --
-            // without which one `size_t` in a prototype left the function with
-            // no exact type and no source name at all.
-            // A qualifier changes no layout and no register class, so the
-            // graph node is the type it qualifies. Without this a single
-            // `const char *` parameter left the whole prototype untyped, which
-            // is most of the library functions there are.
-            CTypeLike::Typedef { ty, .. } | CTypeLike::Const(ty) => {
-                return self.intern(ty, ptr_bits);
-            }
-            // An aggregate needs a layout this declaration does not carry.
-            _ => return None,
-        };
-        // One node per distinct type. Interning the same spelling twice used
-        // to make two nodes, and the graph must have nothing in it that its
-        // roots cannot reach -- so a node whose only reference was a slot the
-        // body later proved for itself left the whole interface unstatable.
-        let size_bits = u64::from(bits);
-        // An object the graph does not describe has no extent and no
-        // alignment, and the graph says so: giving `void` a byte's alignment
-        // made every prototype through a `void *` unstatable, which is most of
-        // the allocating ones.
-        let align_bits = match kind {
-            Kind::Void | Kind::Code { .. } => 0,
-            _ => u64::from(bits.max(8)),
-        };
-        if let Some(found) = self.types.iter().find(|type_| {
-            type_.kind() == kind
-                && type_.size_bits() == size_bits
-                && type_.align_bits() == align_bits
-        }) {
-            return Some(found.id());
-        }
-        let id = u32::try_from(self.types.len()).ok()?;
-        self.types
-            .push(r2source::SourceType::new(id, kind, size_bits, align_bits));
-        Some(id)
-    }
-}
-
-/// What a spelling stands for, with any name it was given taken off.
-///
-/// A register class is decided by what a type is, and a `typedef` is a name
-/// for something else: `size_t` arrives where an unsigned long does.
-fn unnamed(parsed: &r2types::CTypeLike) -> &r2types::CTypeLike {
-    match parsed {
-        r2types::CTypeLike::Typedef { ty, .. } | r2types::CTypeLike::Const(ty) => unnamed(ty),
-        other => other,
-    }
-}
-
-/// Whether a spelling names a floating-point type.
-fn float_spelling(spelling: &str, ptr_bits: u32) -> bool {
-    r2types::parse_c_type_like(spelling, ptr_bits)
-        .is_some_and(|parsed| matches!(unnamed(&parsed), r2types::CTypeLike::Float(_)))
-}
-
-/// Where each declared parameter arrives.
-///
-/// A parameter arrives in the registers its own class uses, and the two
-/// classes are counted separately: the third integer argument takes the third
-/// integer register however many floating-point arguments came before it. A
-/// class this does not place -- an aggregate, which the ABI may split across
-/// registers or put in memory depending on its members -- refuses the whole
-/// declaration rather than putting it in the next integer register and being
-/// wrong about every argument after it.
-fn placed_parameters(
-    prototype: &r2abi::Prototype,
-    target: &NativeTarget<'_>,
-    machine: &NativeMachine,
-    ptr_bits: u32,
-) -> Option<Vec<CanonicalStorageId>> {
-    let placed = placed_prefix(prototype, target, machine, ptr_bits);
-    (placed.len() == prototype.parameters.len()).then_some(placed)
-}
-
-/// Where the declared parameters arrive, up to the first that does not arrive in a register this can name.
-///
-/// Every parameter before that one is placed whatever follows it: a seventh
-/// argument on the stack does not move the first six out of their registers.
-fn placed_prefix(
-    prototype: &r2abi::Prototype,
-    target: &NativeTarget<'_>,
-    machine: &NativeMachine,
-    ptr_bits: u32,
-) -> Vec<CanonicalStorageId> {
-    let integer_slots = machine.slots.argument_slots();
-    let mut integers = 0usize;
-    let mut floats = 0usize;
-    let mut placed = Vec::with_capacity(prototype.parameters.len());
-    for parameter in &prototype.parameters {
-        let Some(parsed) = r2types::parse_c_type_like(parameter.spelling.as_type(), ptr_bits)
-        else {
-            r2il::refusal_evidence!(
-                "declared-interface",
-                "{}: no register class for `{}`",
-                prototype.name,
-                parameter.spelling.as_written()
-            );
-            break;
-        };
-        let storage = match unnamed(&parsed) {
-            r2types::CTypeLike::Float(_) => {
-                let slot = target.convention.float_args.get(floats);
-                floats += 1;
-                slot.and_then(|slot| storage(target.arch, slot.name()).ok())
-            }
-            // How an aggregate travels depends on its size and on what its
-            // members are: one register, two, or memory. Nothing here knows
-            // its members, so it refuses rather than taking the next integer
-            // register and being wrong about every argument after it too.
-            r2types::CTypeLike::Struct(_)
-            | r2types::CTypeLike::Union(_)
-            | r2types::CTypeLike::Array(..) => {
-                r2il::refusal_evidence!(
-                    "declared-interface",
-                    "{}: `{}` is an aggregate and its register class depends on its members",
-                    prototype.name,
-                    parameter.spelling.as_written()
-                );
-                None
-            }
-            _ => {
-                let slot = integer_slots.get(integers).copied();
-                integers += 1;
-                slot
-            }
-        };
-        let Some(storage) = storage else {
-            break;
-        };
-        placed.push(storage);
-    }
-    placed
-}
-
-/// One declared prototype as the type layer states it.
-///
-/// A spelling this build cannot parse leaves the whole prototype out rather
-/// than contributing a parameter list with a hole in it.
-fn function_type(prototype: &r2abi::Prototype, ptr_bits: u32) -> Option<r2types::FunctionType> {
-    let mut params = Vec::with_capacity(prototype.parameters.len());
-    for parameter in &prototype.parameters {
-        params.push(r2types::parse_c_type_like(
-            parameter.spelling.as_type(),
-            ptr_bits,
-        )?);
-    }
-    Some(r2types::FunctionType {
-        return_type: r2types::parse_c_type_like(prototype.returns.as_type(), ptr_bits)?,
-        params,
-        variadic: prototype.variadic,
-    })
 }
 
 /// What the bodies a function calls say about their own boundaries.
@@ -1774,8 +1106,17 @@ impl TableBytes {
 struct Walked {
     name: String,
     body: r2ssa::body::Body,
-    /// What each function this one calls is called.
-    callee_names: Vec<String>,
+    /// Each function this one calls, and what it is called.
+    callees: Vec<Callee>,
+}
+
+/// One function a body calls.
+struct Callee {
+    address: u64,
+    /// What the program calls it.
+    name: String,
+    /// The import it stands for, where the binary says it is one.
+    import: Option<String>,
 }
 
 /// One program, one machine, and the walk over it.
@@ -1826,10 +1167,16 @@ impl Native<'_> {
 
     /// One walked body, with what the program calls it and each function it calls.
     fn walked(&self, body: r2ssa::body::Body) -> Walked {
-        let callee_names = body
+        let callees = body
             .calls
             .iter()
-            .filter_map(|address| self.program.name_at(*address))
+            .filter_map(|address| {
+                Some(Callee {
+                    address: *address,
+                    name: self.program.name_at(*address)?,
+                    import: self.program.import_at(*address),
+                })
+            })
             .collect();
         Walked {
             name: self
@@ -1837,7 +1184,7 @@ impl Native<'_> {
                 .name_at(body.entry)
                 .unwrap_or_else(|| r2source::unnamed_function(body.entry)),
             body,
-            callee_names,
+            callees,
         }
     }
 
@@ -2072,42 +1419,19 @@ impl Native<'_> {
             })
             .collect::<Vec<_>>();
 
-        // What the declaration stated about the frame stays stated: the body
-        // proves where its own slots are, and it proves nothing about a slot
-        // it never touched. A slot both describe keeps the recovered one,
-        // which is the proven statement.
-        let covers = |slot: &r2source::SourceStackSlotSpec,
-                      other: &r2source::SourceStackSlotSpec| {
-            slot.base() == other.base()
-                && slot.offset() < other.offset() + i64::from(other.size_bytes())
-                && other.offset() < slot.offset() + i64::from(slot.size_bytes())
-        };
-        let kept = declared
-            .iter()
-            .filter(|declared| !slots.iter().any(|slot| covers(slot, declared)))
-            .cloned()
-            .collect::<Vec<_>>();
-        // A slot both describe is one slot: the body's extent stands, and the
-        // declaration still says what type sits there.
-        let mut slots = slots
-            .into_iter()
-            .map(|slot| {
-                match declared.iter().find(|other| {
-                    covers(&slot, other)
-                        && other.offset() == slot.offset()
-                        && other.size_bytes() == slot.size_bytes()
-                }) {
-                    Some(other) => match other.logical_type() {
-                        None => slot,
-                        Some(id) => slot.with_logical_type(id),
-                    },
-                    None => slot,
-                }
-            })
-            .collect::<Vec<_>>();
-        slots.extend(kept);
-
+        // What the declaration states about the frame stays stated, extent and
+        // type: the body proves where its own accesses land, and one inside a
+        // declared object is a member of it, not an object of its own.
+        let slots = crate::declared::restated_slots(declared, slots, interface);
         restate(interface, slots, interface.revision_identity().to_vec())
+    }
+
+    /// What the binary's debug information declares about the body at this
+    /// address, placed in this machine's carriers with the frame it states.
+    fn declaration(&self, address: u64) -> Restatement {
+        Declared::body(self.target, address)
+            .map(|declared| Placement::new(self.target, &self.machine).restatement(declared, true))
+            .unwrap_or_default()
     }
 
     fn prepare_with_literals(
@@ -2593,7 +1917,7 @@ fn profile(arch: &ArchSpec) -> Result<(&'static str, u32, SourceEndianness), Nat
 ///
 /// The convention data spells registers in lower case and Sleigh spells them
 /// in upper, so the match ignores case rather than either side converting.
-fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId, NativeRefusal> {
+pub(crate) fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId, NativeRefusal> {
     arch.registers
         .iter()
         .find(|register| register.name.eq_ignore_ascii_case(name))

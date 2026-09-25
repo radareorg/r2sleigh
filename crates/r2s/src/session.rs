@@ -175,6 +175,6 @@ fn container_of(image: &Image) -> Container {
                 thumb: entry.thumb,
             })
             .collect(),
-        declared: image.debug_prototypes().prototypes().collect(),
+        declarations: image.declarations().clone(),
     }
 }

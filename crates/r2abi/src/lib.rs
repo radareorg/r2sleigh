@@ -11,12 +11,20 @@
 //! a convention is spelled `cc.<name>.<what>`.
 
 pub mod compiler_spec;
+pub mod declarations;
 pub mod prototypes;
+mod spelling;
+pub mod types;
 
 pub use compiler_spec::CompilerSpec;
+pub use declarations::{DataObject, Declarations};
 pub use prototypes::{
-    FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
-    dwarf_frame_register,
+    Arrival, FrameBase, FrameRole, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
+    dwarf_frame_register, dwarf_register,
+};
+pub use types::{
+    DataModel, Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind,
+    Signature, Type, TypeGraph, TypeId, Width,
 };
 
 use std::collections::BTreeMap;

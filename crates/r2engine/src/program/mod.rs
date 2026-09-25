@@ -355,15 +355,11 @@ impl<S: Source> OpenProgram<S> {
             });
         // The format says which platform's own declarations apply: `_Exit` is
         // declared by the platform, not by the table every target shares.
-        let mut prototypes = r2abi::Prototypes::embedded_for(match container.format {
+        let prototypes = r2abi::Prototypes::embedded_for(match container.format {
             Format::Elf => r2abi::Platform::Linux,
             Format::MachO => r2abi::Platform::Darwin,
             Format::Other => r2abi::Platform::Unknown,
         });
-        // What the binary's own debug information says beats the shared table:
-        // the table describes what a library is expected to look like, and
-        // this describes what this one is.
-        prototypes.declare(container.declared.iter().cloned());
         self.assembled = Some(Assembled {
             machine: key,
             conventions,
@@ -403,6 +399,7 @@ impl<S: Source> OpenProgram<S> {
             call_effect: assembled.call_effect.as_ref(),
             compiler: &assembled.compiler,
             prototypes: &assembled.prototypes,
+            declarations: &self.source.container().declarations,
         })
     }
 

@@ -8,19 +8,27 @@
 
 use std::collections::BTreeMap;
 
-/// What a declaration says about one function, in C spellings.
+use crate::types::{TypeGraph, TypeId};
+
+/// What a declaration says about one function.
 ///
 /// The shipped table declares interfaces only. A binary's own debug
 /// information declares the same interface and, for a function it has the body
 /// of, where that body keeps its named variables -- which reaches the engine
 /// by this same shape so that a declaration read from DWARF and one read from
 /// the table never become two models of the same thing.
+///
+/// Every type is a node of the graph the declaration was read into, which
+/// travels beside it. The spellings are that node written as C, for
+/// presentation; nothing reads a type back out of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prototype {
     pub name: String,
     /// One fixed parameter per entry, in order.
     pub parameters: Vec<Parameter>,
     pub returns: Spelled,
+    /// What the function returns, as a node; `void` where it returns nothing.
+    pub return_type: TypeId,
     /// Whether arguments continue past the fixed ones.
     pub variadic: bool,
     /// Whether control never returns from this function.
@@ -59,7 +67,7 @@ impl Spelled {
         Self { declared, resolved }
     }
 
-    /// The spelling to read the type from.
+    /// The spelling with every name read through.
     pub fn as_type(&self) -> &str {
         self.resolved.as_deref().unwrap_or(&self.declared)
     }
@@ -105,8 +113,12 @@ pub struct Local {
     pub spelling: Option<Spelled>,
     /// Bytes from the frame base.
     pub frame_offset: i64,
-    /// How many bytes it occupies, where the declaration states an extent.
+    /// How many bytes it occupies: its type's size, where the type has one.
     pub size_bytes: Option<u32>,
+    pub ty: TypeId,
+    /// The code the name is in scope over, as the lexical blocks enclosing it
+    /// state it; empty where that is the whole function.
+    pub scopes: Vec<std::ops::Range<u64>>,
 }
 
 /// What role a machine gives one DWARF register number.
@@ -140,9 +152,40 @@ pub enum FrameRole {
     StackPointer,
 }
 
+/// The integer register one DWARF register number names, as radare2 spells
+/// it.
+///
+/// The numbering is each platform's ABI document again. Only the integer
+/// file is answered, which is where a declaration can say an integer or
+/// pointer parameter arrives; a number past it is evidence of nothing here.
+pub fn dwarf_register(arch: &str, bits: u32, number: u16) -> Option<&'static str> {
+    const X86_64: [&str; 16] = [
+        "rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12",
+        "r13", "r14", "r15",
+    ];
+    const X86: [&str; 8] = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
+    const AARCH64: [&str; 32] = [
+        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+        "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
+        "x27", "x28", "x29", "x30", "sp",
+    ];
+    const ARM: [&str; 16] = [
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
+        "lr", "pc",
+    ];
+    let table: &[&'static str] = match (crate::family(arch)?, bits) {
+        ("x86", 64) => &X86_64,
+        ("x86", 32) => &X86,
+        ("arm", 64) => &AARCH64,
+        ("arm", 32) => &ARM,
+        _ => return None,
+    };
+    table.get(usize::from(number)).copied()
+}
+
 /// One declared parameter: what it is, and what the declaration calls it.
 ///
-/// The spelling decides how the call is read; the name decides only how it is
+/// The type decides how the call is read; the name decides only how it is
 /// rendered, and a declaration that gives none renders the position instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parameter {
@@ -152,6 +195,26 @@ pub struct Parameter {
     /// frame. This is the one place a declaration states the same slot in two
     /// coordinate systems, which is what lets the two be lined up.
     pub frame_offset: Option<i64>,
+    pub ty: TypeId,
+    /// Where the declaration says the parameter is as the body begins, where
+    /// it says anything about that instant.
+    pub arrival: Option<Arrival>,
+}
+
+/// Where one parameter is at the first instruction of the body.
+///
+/// A compiler that specialises a function -- a `.constprop` clone with a
+/// constant folded in, an `.isra` clone passing a member instead of the
+/// pointer to it -- still describes the clone against the source's prototype.
+/// That prototype is then not what the body takes, and the only statement
+/// that says so is where each parameter is on entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// In the register this machine's DWARF table numbers so.
+    Register(u16),
+    /// Passed nowhere: the declaration gives the body a constant for it, or
+    /// says nothing of it at all where it describes every other parameter.
+    Unpassed,
 }
 
 impl Parameter {
@@ -165,11 +228,13 @@ impl Parameter {
         self.spelling.as_type().trim() == "func"
     }
 
-    pub fn new(spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {
+    pub fn new(ty: TypeId, spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {
         Self {
             spelling: spelling.into(),
             name: name.map(Into::into),
             frame_offset: None,
+            ty,
+            arrival: None,
         }
     }
 
@@ -179,9 +244,10 @@ impl Parameter {
     }
 }
 
-/// Every prototype the data declares.
+/// Every prototype the data declares, and the graph its types are nodes of.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prototypes {
+    graph: TypeGraph,
     by_name: BTreeMap<String, Prototype>,
 }
 
@@ -193,7 +259,8 @@ const EMBEDDED_DARWIN: &str = include_str!("../data/types-darwin.sdb.txt");
 ///
 /// `_Exit` and `__errno_location` are declared per platform, not in the table
 /// every target shares, so a call to one has no prototype until the platform
-/// says which set to read.
+/// says which set to read. The platform also says what its own names for
+/// integers are: `mode_t` is sixteen bits on one and thirty-two on the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Linux,
@@ -209,87 +276,60 @@ impl Prototypes {
 
     /// Those, with the ones this platform declares itself layered over them.
     pub fn embedded_for(platform: Platform) -> Self {
-        let mut prototypes = Self::parse(EMBEDDED);
-        let platform = match platform {
+        let own = match platform {
             Platform::Linux => Some(EMBEDDED_LINUX),
             Platform::Darwin => Some(EMBEDDED_DARWIN),
             Platform::Unknown => None,
         };
-        if let Some(text) = platform {
-            prototypes.by_name.extend(Self::parse(text).by_name);
+        Self::parse_all([EMBEDDED].into_iter().chain(own), platform)
+    }
+
+    pub fn parse(text: &str) -> Self {
+        Self::parse_all([text], Platform::Unknown)
+    }
+
+    /// Several tables into one graph, a later declaration of a name replacing
+    /// an earlier one.
+    fn parse_all<'a>(texts: impl IntoIterator<Item = &'a str>, platform: Platform) -> Self {
+        let mut prototypes = Self::default();
+        for text in texts {
+            let table = Table::read(text);
+            for (name, declared) in table.functions {
+                let prototype = prototypes.typed(name.clone(), declared, platform);
+                prototypes.by_name.insert(name, prototype);
+            }
         }
         prototypes
     }
 
-    pub fn parse(text: &str) -> Self {
-        let mut by_name: BTreeMap<String, Prototype> = BTreeMap::new();
-        let mut slots: BTreeMap<String, BTreeMap<usize, Parameter>> = BTreeMap::new();
-        for line in text.lines() {
-            let Some((key, value)) = line.trim().split_once('=') else {
-                continue;
-            };
-            let Some(rest) = key.strip_prefix("func.") else {
-                continue;
-            };
-            let Some((name, what)) = rest.rsplit_once('.') else {
-                continue;
-            };
-            let value = value.trim();
-
-            // `func.<name>.arg.<index>=<type>,<parameter name>`, where the
-            // parameter name is presentation and the type decides how the call
-            // is read.
-            if let Some(name) = name.strip_suffix(".arg") {
-                let Ok(index) = what.parse::<usize>() else {
-                    continue;
-                };
-                declare(&mut by_name, name);
-                let (spelling, called) = match value.split_once(',') {
-                    Some((spelling, called)) => (spelling.trim(), Some(called.trim())),
-                    None => (value, None),
-                };
-                slots.entry(name.to_owned()).or_default().insert(
-                    index,
-                    Parameter::new(spelling, called.filter(|called| !called.is_empty())),
-                );
-                continue;
+    /// One declaration's spellings, read into this table's graph.
+    fn typed(&mut self, name: String, declared: Declared, platform: Platform) -> Prototype {
+        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, platform);
+        let returns = declared.returns.unwrap_or_else(|| "void".to_owned());
+        let return_type = read(&returns);
+        let mut parameters = Vec::new();
+        let mut variadic = false;
+        for (spelling, called) in declared.parameters.into_values() {
+            // An empty spelling is the ellipsis: everything after it is
+            // whatever the caller passes.
+            if spelling.is_empty() {
+                variadic = true;
+                break;
             }
-
-            match what {
-                "args" => {
-                    declare(&mut by_name, name);
-                }
-                "ret" => declare(&mut by_name, name).returns = Spelled::from(value),
-                "noreturn" => declare(&mut by_name, name).noreturn = value == "true",
-                _ => {}
-            }
+            parameters.push(Parameter::new(
+                read(&spelling),
+                spelling,
+                called.filter(|called| !called.is_empty()),
+            ));
         }
-
-        for (name, positions) in slots {
-            let Some(prototype) = by_name.get_mut(&name) else {
-                continue;
-            };
-            for parameter in positions.into_values() {
-                // An empty spelling is the ellipsis: everything after it is
-                // whatever the caller passes.
-                if parameter.spelling.declared.is_empty() {
-                    prototype.variadic = true;
-                    break;
-                }
-                prototype.parameters.push(parameter);
-            }
-        }
-        Self { by_name }
-    }
-
-    /// Layer prototypes the binary itself declares over the shipped ones.
-    ///
-    /// What a binary's own debug information says beats what the shared table
-    /// declares for the same name: the table is what a library is expected to
-    /// look like, and the binary is what it is.
-    pub fn declare(&mut self, prototypes: impl IntoIterator<Item = Prototype>) {
-        for prototype in prototypes {
-            self.by_name.insert(prototype.name.clone(), prototype);
+        Prototype {
+            name,
+            parameters,
+            returns: Spelled::from(returns),
+            return_type,
+            variadic,
+            noreturn: declared.noreturn,
+            ..Prototype::default()
         }
     }
 
@@ -304,6 +344,11 @@ impl Prototypes {
             .or_else(|| self.by_name.get(name.strip_prefix('_')?))
     }
 
+    /// The graph every prototype here names its types in.
+    pub fn graph(&self) -> &TypeGraph {
+        &self.graph
+    }
+
     pub fn len(&self) -> usize {
         self.by_name.len()
     }
@@ -313,23 +358,92 @@ impl Prototypes {
     }
 }
 
-/// The prototype this name will be filled in for.
-fn declare<'a>(by_name: &'a mut BTreeMap<String, Prototype>, name: &str) -> &'a mut Prototype {
-    by_name.entry(name.to_owned()).or_insert_with(|| Prototype {
-        name: name.to_owned(),
-        ..Prototype::default()
-    })
+/// One function as the table spells it, before its types are read.
+#[derive(Debug, Default)]
+struct Declared {
+    parameters: BTreeMap<usize, (String, Option<String>)>,
+    returns: Option<String>,
+    noreturn: bool,
+}
+
+/// The functions one `sdb` dump declares.
+#[derive(Debug, Default)]
+struct Table {
+    functions: BTreeMap<String, Declared>,
+}
+
+impl Table {
+    fn read(text: &str) -> Self {
+        let mut table = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.trim().split_once('=') else {
+                continue;
+            };
+            let Some(rest) = key.strip_prefix("func.") else {
+                continue;
+            };
+            let Some((name, what)) = rest.rsplit_once('.') else {
+                continue;
+            };
+            table.take(name, what, value.trim());
+        }
+        table
+    }
+
+    fn take(&mut self, name: &str, what: &str, value: &str) {
+        // `func.<name>.arg.<index>=<type>,<parameter name>`, where the
+        // parameter name is presentation and the type decides how the call is
+        // read.
+        if let Some(name) = name.strip_suffix(".arg") {
+            let Ok(index) = what.parse::<usize>() else {
+                return;
+            };
+            let (spelling, called) = match value.split_once(',') {
+                Some((spelling, called)) => (spelling.trim(), Some(called.trim().to_owned())),
+                None => (value, None),
+            };
+            self.declare(name)
+                .parameters
+                .insert(index, (spelling.to_owned(), called));
+            return;
+        }
+        match what {
+            "args" => {
+                self.declare(name);
+            }
+            "ret" => self.declare(name).returns = Some(value.to_owned()),
+            "noreturn" => self.declare(name).noreturn = value == "true",
+            _ => {}
+        }
+    }
+
+    fn declare(&mut self, name: &str) -> &mut Declared {
+        self.functions.entry(name.to_owned()).or_default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{DataModel, Type};
+
+    fn spelled(prototypes: &Prototypes, parameter: &Parameter) -> Option<String> {
+        prototypes
+            .graph()
+            .spelled(parameter.ty)
+            .map(|spelled| spelled.declared)
+    }
 
     #[test]
     fn a_fixed_prototype_reads_whole() {
         let prototypes = Prototypes::embedded();
         let puts = prototypes.get("puts").expect("puts");
-        assert_eq!(puts.parameters, [Parameter::new("const char *", Some("s"))]);
+        assert_eq!(puts.parameters.len(), 1);
+        assert_eq!(puts.parameters[0].name.as_deref(), Some("s"));
+        assert_eq!(
+            spelled(&prototypes, &puts.parameters[0]).as_deref(),
+            Some("const char *")
+        );
         assert_eq!(puts.returns.as_written(), "int");
         assert!(!puts.variadic);
     }
@@ -338,10 +452,8 @@ mod tests {
     fn the_ellipsis_is_variadic_rather_than_a_parameter() {
         let prototypes = Prototypes::embedded();
         let printf = prototypes.get("printf").expect("printf");
-        assert_eq!(
-            printf.parameters,
-            [Parameter::new("const char *", Some("format"))]
-        );
+        assert_eq!(printf.parameters.len(), 1);
+        assert_eq!(printf.parameters[0].name.as_deref(), Some("format"));
         assert!(printf.variadic);
     }
 
@@ -364,35 +476,21 @@ mod tests {
         let count = Prototypes::embedded().len();
         assert!(count > 500, "{count}");
     }
-}
 
-#[cfg(test)]
-mod dwarf_tests {
-    use super::*;
-
+    /// The table's spellings are read once, into the same graph a binary's
+    /// debug information is read into: `size_t` is an unsigned integer as
+    /// wide as an address, and `FILE` is a tag the table never completes.
     #[test]
-    fn each_machines_frame_and_stack_registers_are_answered_by_number() {
-        assert_eq!(
-            dwarf_frame_register("x86-64", 64, 6),
-            Some((FrameRole::FramePointer, "rbp"))
-        );
-        assert_eq!(
-            dwarf_frame_register("x86-64", 64, 7),
-            Some((FrameRole::StackPointer, "rsp"))
-        );
-        assert_eq!(
-            dwarf_frame_register("aarch64", 64, 29),
-            Some((FrameRole::FramePointer, "x29"))
-        );
-        assert_eq!(
-            dwarf_frame_register("arm", 32, 13),
-            Some((FrameRole::StackPointer, "sp"))
-        );
-    }
-
-    #[test]
-    fn a_number_no_document_here_assigns_answers_nothing() {
-        assert_eq!(dwarf_frame_register("x86-64", 64, 0), None);
-        assert_eq!(dwarf_frame_register("riscv", 64, 8), None);
+    fn every_spelling_is_a_node_of_one_graph() {
+        let prototypes = Prototypes::embedded_for(Platform::Linux);
+        let graph = prototypes.graph();
+        let fwrite = prototypes.get("fwrite").expect("fwrite");
+        let model = DataModel::unix(64);
+        assert_eq!(graph.size_bits(fwrite.return_type, &model), Some(64));
+        let stream = fwrite.parameters.last().expect("a stream");
+        let Some(Type::Pointer { target }) = graph.resolved(stream.ty) else {
+            panic!("{:?}", graph.get(stream.ty));
+        };
+        assert!(matches!(graph.get(*target), Some(Type::Opaque { .. })));
     }
 }

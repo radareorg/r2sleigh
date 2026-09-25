@@ -64,6 +64,7 @@ struct Machine {
     effects: BTreeMap<String, Option<SourceCallEffect>>,
     compiler: CompilerSpec,
     prototypes: Prototypes,
+    declarations: r2abi::Declarations,
 }
 
 impl Machine {
@@ -84,6 +85,7 @@ impl Machine {
             effects,
             compiler,
             prototypes: Prototypes::embedded(),
+            declarations: r2abi::Declarations::default(),
         }
     }
 
@@ -106,6 +108,7 @@ impl Machine {
             call_effect: self.effects[name].as_ref(),
             compiler: &self.compiler,
             prototypes: &self.prototypes,
+            declarations: &self.declarations,
         }
     }
 }

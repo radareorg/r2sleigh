@@ -514,6 +514,12 @@ impl Literal {
         self
     }
 
+    /// The same program with what its debug information would declare.
+    pub fn with_declarations(mut self, declarations: r2abi::Declarations) -> Self {
+        self.container.declarations = declarations;
+        self
+    }
+
     /// The same program with an import: a linkage stub, and the slot it reads.
     pub fn importing(mut self, import: &str) -> Self {
         let section = |name: &str, vaddr, vsize, is_code| Section {

@@ -7,7 +7,7 @@
 //! threads behind an `Arc`.
 
 use object::read::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
-pub mod debug;
+mod debug;
 mod loader;
 
 use std::borrow::Cow;
@@ -569,7 +569,7 @@ pub struct Image {
     segments: Vec<Segment>,
     sections: Vec<Section>,
     symbols: Vec<Symbol>,
-    debug_prototypes: debug::DebugPrototypes,
+    declarations: r2abi::Declarations,
     entry_points: Vec<EntryPoint>,
     relocations: Vec<Relocation>,
     /// The bytes the loader writes before the program runs, sorted and disjoint.
@@ -812,7 +812,7 @@ impl Image {
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
-        let debug_prototypes = debug::read(&file);
+        let declarations = debug::read(&file);
 
         let mut entry_points = Vec::new();
         let declared_entry = file.entry();
@@ -895,7 +895,7 @@ impl Image {
             segments,
             sections,
             symbols,
-            debug_prototypes,
+            declarations,
             entry_points,
             relocations,
             loader_writes,
@@ -930,10 +930,11 @@ impl Image {
         &self.symbols
     }
 
-    /// What the binary's own debug information says its functions take and
-    /// return. Empty where it carries none.
-    pub fn debug_prototypes(&self) -> &debug::DebugPrototypes {
-        &self.debug_prototypes
+    /// What the binary's own debug information declares: its functions by
+    /// the address each body begins, its objects by address, and the types
+    /// both name. Empty where it carries none.
+    pub fn declarations(&self) -> &r2abi::Declarations {
+        &self.declarations
     }
 
     /// The slots the loader fills, in address order.
@@ -1367,7 +1368,7 @@ mod tests {
             entry_points: Vec::new(),
             relocations: Vec::new(),
             loader_writes: Vec::new(),
-            debug_prototypes: debug::DebugPrototypes::default(),
+            declarations: r2abi::Declarations::default(),
             patches: BTreeMap::new(),
             byte_revision: 0,
             written: Vec::new(),

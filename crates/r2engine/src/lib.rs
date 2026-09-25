@@ -10,6 +10,7 @@
 #[path = "lib_tests.rs"]
 mod tests;
 
+mod declared;
 pub mod discovery;
 pub mod isolation;
 pub mod names;

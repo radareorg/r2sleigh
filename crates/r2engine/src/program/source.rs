@@ -42,8 +42,9 @@ pub struct Container {
     /// The bytes the loader writes before the program runs, sorted and disjoint; what the file holds there is not what the program reads.
     pub loader_writes: Vec<Range<u64>>,
     pub entries: Vec<Entry>,
-    /// Prototypes the program's own debug information declares.
-    pub declared: Vec<r2abi::Prototype>,
+    /// What the program's own debug information declares: its functions by
+    /// the address each body begins, its objects by address.
+    pub declarations: r2abi::Declarations,
 }
 
 impl Container {
