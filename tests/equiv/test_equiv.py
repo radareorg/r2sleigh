@@ -158,6 +158,12 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(report.answers[1].cause.startswith("harness: pddj breaks its contract"))
         self.assertEqual(report.answers[2].kind, "output")
 
+    def test_an_answer_about_another_address_is_never_filed_as_this_one(self):
+        report = self.ask(STUB_R2S_MODE="minimal", STUB_R2S_FAULTS="elsewhere@3000")
+        self.assertEqual([a.kind for a in report.answers], ["output", "output", "decline",
+                                                            "output"])
+        self.assertIn("`addr` is 0x3010, not the 0x3000 asked for", report.answers[2].cause)
+
     def test_a_refusal_keeps_its_reason(self):
         report = self.ask(STUB_R2S_MODE="refuse", STUB_R2S_FAULTS="")
         self.assertTrue(all(a.kind == "decline" for a in report.answers))
@@ -173,6 +179,29 @@ class ContractTests(unittest.TestCase):
         problems = contract_problems(record)
         self.assertIn("no `links`", problems)
         self.assertIn("proof.residual is not a count", problems)
+
+    def test_an_answer_about_another_address_is_a_breach(self):
+        record = selftest.synthetic_pddj(selftest.CASES[0], 0x1000, {})
+        self.assertEqual(contract_problems(record, 0x1000), [])
+        self.assertEqual(contract_problems(record, 0x2000),
+                         ["`addr` is 0x1000, not the 0x2000 asked for"])
+
+    def test_lines_and_variables_are_checked_entry_by_entry(self):
+        record = selftest.synthetic_pddj(selftest.CASES[0], 0x1000, {})
+        lines_in_code = len(record["code"].splitlines())
+        record["lines"] = [{"line": lines_in_code, "addrs": [0x1000]}]
+        record["variables"] = [{"name": "a", "type": "int32_t", "kind": "param",
+                                "location": "rdi"}]
+        self.assertEqual(contract_problems(record), [])
+        for bad in ({"line": 0, "addrs": []}, {"line": lines_in_code + 1, "addrs": []},
+                    {"line": 1, "addrs": ["0x1000"]}, {"line": "1", "addrs": []}, 7):
+            record["lines"] = [bad]
+            self.assertEqual(len(contract_problems(record)), 1, bad)
+        record["lines"] = []
+        for bad in ({"name": "a", "type": "int", "kind": "arg", "location": "rdi"},
+                    {"name": "a", "kind": "local", "location": "stack-8"}, "a"):
+            record["variables"] = [bad]
+            self.assertEqual(len(contract_problems(record)), 1, bad)
 
     def test_a_refusal_needs_only_its_identity(self):
         self.assertEqual(

@@ -291,7 +291,9 @@ class R2sDecompiler(Decompiler):
             requested.setdefault(address, None)
         source = "targets" if requested else "afl"
 
-        declined: dict[str, str] = {}
+        # Keyed by address: two requested functions may share a name (static
+        # functions of different compile units), and each is its own decline.
+        declined: dict[int, tuple[str, str]] = {}
         rendered: dict[str, FunctionDecompilation] = {}
         extra: dict = {"requested_from": source}
 
@@ -300,7 +302,7 @@ class R2sDecompiler(Decompiler):
                 "requested": len(requested),
                 "rendered": len(rendered),
                 "declined": len(declined),
-                "decline_causes": dict(sorted(declined.items())),
+                "decline_causes": decline_causes(declined),
             })
             return DecompilationResult(
                 binary_path=binary_path,
@@ -309,7 +311,7 @@ class R2sDecompiler(Decompiler):
                     decompiler_name=self.id,
                     decompiler_version=self.get_version(),
                     total_time_seconds=time.time() - started,
-                    failed_functions=sorted(declined),
+                    failed_functions=sorted(label for label, _ in declined.values()),
                     extra=dict(extra),
                 ),
                 functions=dict(rendered),
@@ -323,13 +325,15 @@ class R2sDecompiler(Decompiler):
                      "declarations DecBench scores against (strip --strip-all it, as "
                      "scripts/run_benchmark.py does)")
             for address, name in requested.items() or [(0, None)]:
-                declined[name or (f"0x{address:x}" if address else binary_path.name)] = cause
+                declined[address] = (name or (f"0x{address:x}" if address else binary_path.name),
+                                     cause)
             extra["fail_closed"] = leaked
             return result()
         if executable is None:
             cause = "harness: no r2s ($R2SLEIGH_R2S_BIN unset and r2s not on PATH)"
             for address, name in requested.items() or [(0, None)]:
-                declined[name or (f"0x{address:x}" if address else binary_path.name)] = cause
+                declined[address] = (name or (f"0x{address:x}" if address else binary_path.name),
+                                     cause)
             return result()
 
         if not requested:
@@ -341,10 +345,8 @@ class R2sDecompiler(Decompiler):
                 requested.setdefault(address, None)
             extra["discovered"] = len(found)
             if not requested:
-                declined[binary_path.name] = (
-                    "harness: afl found no function to render"
-                    + (f" ({ending})" if ending else "")
-                )
+                declined[0] = (binary_path.name, "harness: afl found no function to render"
+                               + (f" ({ending})" if ending else ""))
                 return result()
 
         def file_answer(answer: "r2s_batch.Answer") -> None:
@@ -356,7 +358,7 @@ class R2sDecompiler(Decompiler):
                     function.name = f"{function.name}_{answer.address:x}"
                 rendered[function.name] = function
             else:
-                declined[key] = answer.cause or "harness: no answer"
+                declined[answer.address] = (key, answer.cause or "harness: no answer")
             common.dump_progress(progress_path, result())
 
         report = r2s_batch.run_batch(
@@ -374,7 +376,23 @@ class R2sDecompiler(Decompiler):
         return result()
 
 
-def _write_census(output_dir: Path | None, binary_path: Path, declined: dict[str, str],
+def decline_causes(declined: dict[int, tuple[str, str]]) -> dict[str, str]:
+    """``label -> cause``, one entry per declined address.
+
+    A label two declined addresses share is spelled ``label@0x<addr>`` for each,
+    so neither decline hides the other.
+    """
+    uses: dict[str, int] = {}
+    for label, _ in declined.values():
+        uses[label] = uses.get(label, 0) + 1
+    out: dict[str, str] = {}
+    for address, (label, cause) in declined.items():
+        out[label if uses[label] == 1 else f"{label}@0x{address:x}"] = cause
+    return dict(sorted(out.items()))
+
+
+def _write_census(output_dir: Path | None, binary_path: Path,
+                  declined: dict[int, tuple[str, str]],
                   rendered: dict[str, FunctionDecompilation]) -> None:
     """Why each function was declined and how much of each rendering is residual.
 
@@ -387,7 +405,7 @@ def _write_census(output_dir: Path | None, binary_path: Path, declined: dict[str
     target = Path(override) if override else Path(output_dir) if output_dir else binary_path.parent
     try:
         counts: dict[str, int] = {}
-        for cause in declined.values():
+        for _, cause in declined.values():
             counts[cause] = counts.get(cause, 0) + 1
         residual = {name: f.metadata.get("residual", 0) for name, f in rendered.items()
                     if f.metadata.get("residual", 0)}
@@ -399,7 +417,7 @@ def _write_census(output_dir: Path | None, binary_path: Path, declined: dict[str
             "rendered": len(rendered),
             "declined": len(declined),
             "causes": dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))),
-            "by_function": dict(sorted(declined.items())),
+            "by_function": decline_causes(declined),
             "with_residual": len(residual),
             "fully_proven": len(rendered) - len(residual),
             "residual_by_function": dict(sorted(residual.items())),

@@ -194,6 +194,27 @@ class Backend(unittest.TestCase):
         self.assertEqual({f.address for f in result.functions.values()}, targets)
         self.assertEqual(extra["processes"], 1)
 
+    def test_two_functions_of_one_name_are_two_declines(self):
+        # Static functions of different compile units share a name; each is
+        # its own decline, and the count still closes.
+        os.environ["STUB_R2S_MODE"] = "refuse"
+        result = self.decompile(functions=[("helper", TARGETS[0]), ("helper", TARGETS[1])])
+        extra = result.decompiler.extra
+        self.assertEqual((extra["requested"], extra["declined"]), (2, 2))
+        self.assertEqual(extra["decline_causes"], {
+            f"helper@0x{TARGETS[0]:x}": "refused: stub refuses",
+            f"helper@0x{TARGETS[1]:x}": "refused: stub refuses",
+        })
+        self.assertEqual(result.decompiler.failed_functions, ["helper", "helper"])
+
+    def test_a_malformed_answer_is_a_decline_not_a_lost_binary(self):
+        os.environ["STUB_R2S_FAULTS"] = f"elsewhere@{TARGETS[1]:x}"
+        result = self.decompile(function_names=set(TARGETS[:3]))
+        causes = result.decompiler.extra["decline_causes"]
+        self.assertEqual(list(causes), [f"0x{TARGETS[1]:x}"])
+        self.assertIn("breaks its contract", causes[f"0x{TARGETS[1]:x}"])
+        self.assertEqual(len(result.functions), 2)
+
     def test_a_refusal_is_declined_with_its_reason(self):
         os.environ["STUB_R2S_MODE"] = "refuse"
         result = self.decompile(function_names={TARGETS[0]})

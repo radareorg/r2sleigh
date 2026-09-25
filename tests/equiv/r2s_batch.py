@@ -135,7 +135,7 @@ def parse_pddj(address: int, body: str) -> Answer:
     if not isinstance(record, dict):
         return Answer(address, "decline", text=body,
                       cause="harness: pddj printed JSON that is not an object")
-    problems = contract_problems(record)
+    problems = contract_problems(record, address)
     if problems:
         return Answer(address, "decline", text=body, record=record,
                       cause="harness: pddj breaks its contract: " + "; ".join(problems))
@@ -164,9 +164,22 @@ PROOF_COUNTERS = ("rendered", "elided", "refused", "residual", "split",
                   "compiler_inserted", "assumed")
 
 
-def contract_problems(record: dict) -> list[str]:
+VARIABLE_KINDS = ("param", "local", "global")
+
+
+def _count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def contract_problems(record: dict, address: int | None = None) -> list[str]:
+    """Every way ``record`` breaks the ``pddj`` contract; ``address`` is what was asked."""
     problems: list[str] = []
     refused = record.get("refused")
+    at = record.get("addr")
+    if address is not None and _count(at) and at != address:
+        # An answer about another function (a seek that did not take) must
+        # never be graded or filed as this one.
+        problems.append(f"`addr` is 0x{at:x}, not the 0x{address:x} asked for")
     for name, kind in PDDJ_FIELDS.items():
         if name not in record:
             # A refused function need not carry the rendering's fields.
@@ -188,6 +201,25 @@ def contract_problems(record: dict) -> list[str]:
             break
         if link.get("kind") not in ("function", "object", "import"):
             problems.append(f"link `{link.get('ident')}` has kind {link.get('kind')!r}")
+            break
+    code = record.get("code")
+    code_lines = code.count("\n") + (0 if code.endswith("\n") else 1) if isinstance(code, str) else 0
+    lines = record.get("lines")
+    for entry in lines if isinstance(lines, list) else []:
+        if not (isinstance(entry, dict) and _count(entry.get("line"))
+                and 1 <= entry["line"] <= code_lines
+                and isinstance(entry.get("addrs"), list)
+                and all(_count(a) for a in entry["addrs"])):
+            problems.append(f"`lines` entry {entry!r:.80} is not a line of `code` with its "
+                            "addresses")
+            break
+    variables = record.get("variables")
+    for entry in variables if isinstance(variables, list) else []:
+        if not (isinstance(entry, dict)
+                and all(isinstance(entry.get(k), str) for k in ("name", "type", "location"))
+                and entry.get("kind") in VARIABLE_KINDS):
+            problems.append(f"`variables` entry {entry!r:.80} is not a name, type, kind "
+                            "and location")
             break
     return problems
 
