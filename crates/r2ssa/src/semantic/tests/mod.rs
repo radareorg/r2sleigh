@@ -990,6 +990,12 @@ fn exact_signed_low_return_artifact(write_logical_carrier: bool) -> SsaArtifact 
 /// A function whose whole body is `mov eax, N; ret`, lifted as an
 /// eight-byte constant copy into the return carrier.
 fn constant_low_return_artifact(constant: u64) -> SsaArtifact {
+    constant_return_artifact(constant, true)
+}
+
+/// The same body under an interface that types its values: exactly, with an
+/// `int` result, or inexactly, stating no type for the register result.
+fn constant_return_artifact(constant: u64, result_typed: bool) -> SsaArtifact {
     let mut arch = ArchSpec::new("x86-64");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("rax", 0, 8));
@@ -1058,18 +1064,32 @@ fn constant_low_return_artifact(constant: u64) -> SsaArtifact {
         [],
     )
     .expect("constant low return type graph");
-    let interface = SourceFunctionInterface::new_exact_with_logical_types(
-        b"constant-low-return".to_vec(),
-        "test-register-abi",
-        [],
-        SourceFunctionReturn::Register {
-            storage: register_storage(0, 8),
-        },
-        [],
-        [],
-        Some(logical),
-        Some(type_graph),
-    )
+    let result = SourceFunctionReturn::Register {
+        storage: register_storage(0, 8),
+    };
+    let interface = if result_typed {
+        SourceFunctionInterface::new_exact_with_logical_types(
+            b"constant-low-return".to_vec(),
+            "test-register-abi",
+            [],
+            result,
+            [],
+            [],
+            Some(logical),
+            Some(type_graph),
+        )
+    } else {
+        SourceFunctionInterface::new_with_logical_types(
+            b"constant-untyped-return".to_vec(),
+            "test-register-abi",
+            [],
+            result,
+            [],
+            [],
+            None,
+            Some(type_graph),
+        )
+    }
     .and_then(|interface| interface.with_return_address_storage(register_storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
     .expect("constant low return interface");

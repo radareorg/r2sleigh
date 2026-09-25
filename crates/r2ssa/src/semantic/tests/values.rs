@@ -141,6 +141,35 @@ fn low_bit_return_certificate_owns_a_constant_that_is_its_own_zero_extension() {
     }
 }
 
+/// An interface that types its values and states no type for its register
+/// result has said nothing about that result. The carrier's width is not a
+/// statement either, so no certificate takes the whole register as the
+/// function's logical return: the declaration owns it, or nothing does.
+#[test]
+fn a_typed_interface_that_types_no_result_certifies_no_return_value() {
+    let artifact = constant_return_artifact(7, false);
+    let boundary = artifact
+        .facts()
+        .boundaries
+        .returns
+        .values()
+        .next()
+        .expect("return boundary");
+    assert!(boundary.complete);
+    assert!(
+        artifact
+            .machine_context()
+            .function_interface()
+            .is_some_and(|interface| interface.type_graph().is_some()
+                && interface.return_logical_value().is_none())
+    );
+    assert!(
+        artifact.certificates().returns.is_empty(),
+        "{:?}",
+        artifact.certificates().returns
+    );
+}
+
 /// The same shape with a constant that does not fit the logical width:
 /// its upper bits are not zero, so the carrier is not the zero-extension
 /// of the declared return and nothing proves what the return holds.
