@@ -75,3 +75,16 @@ fn ir_never_lists_a_mach_o_stub() {
     assert!(!out.contains("0x100000fd8"), "{out}");
     assert!(rows[0].starts_with("0x100004000") && rows[0].ends_with("_memcpy"));
 }
+
+#[test]
+fn axt_lists_a_pointer_in_data_by_the_address_the_loader_writes_there() {
+    // 0x4018 is `g_msg`, which the loader fills through R_X86_64_RELATIVE
+    // with 0x2008, the string it points at; no instruction names 0x2008.
+    let out = run("rv_O0g", "axt 0x2008");
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("(nofunc) 0x4018 [DATA:---]")),
+        "{out}"
+    );
+    assert!(out.contains("1 references to 0x2008"), "{out}");
+}

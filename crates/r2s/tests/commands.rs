@@ -603,13 +603,17 @@ mod listing {
         assert!(run.ok, "{}", run.out);
         let page = "add x8, x8, 0x0 ; defines x8 = 0x100004000 (folded)";
         assert!(run.out.contains(page), "{}", run.out);
-        // The word is a chained fixup dyld rebases to 0x100000400, so what the file holds there is no value to state.
+        // The word is a chained fixup dyld rebases to 0x100000400: what the
+        // file holds there is the fixup's encoding, and what the container
+        // states the loader writes is the address, which is what is said.
         let load = run
             .out
             .lines()
             .find(|line| line.contains("ldr x8, [x8, 0x10]"));
+        let loaded =
+            "ldr x8, [x8, 0x10] ; [0x100004010:8] loaded 0x100000400 sym._table_op_mul (folded)";
         assert!(
-            load.is_some_and(|line| line.ends_with("ldr x8, [x8, 0x10]")),
+            load.is_some_and(|line| line.ends_with(loaded)),
             "{}",
             run.out
         );

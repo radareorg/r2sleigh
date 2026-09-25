@@ -224,6 +224,22 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
                 named.map(|name| format!(" {name}")).unwrap_or_default()
             ))
         }
+        // What the loader writes there, which the file does not hold: spelled apart from what the revision holds.
+        r2engine::query::AnnotationKind::Loaded {
+            address,
+            width,
+            value,
+        } => {
+            let named = session
+                .program
+                .names()
+                .of(value)
+                .map(r2engine::names::Name::spelled);
+            Some(format!(
+                "[{address:#x}:{width}] loaded {value:#x}{}",
+                named.map(|name| format!(" {name}")).unwrap_or_default()
+            ))
+        }
         // The value this line defines, over its whole life: not what the storage holds at this point.
         r2engine::query::AnnotationKind::Bounds {
             storage, low, high, ..
@@ -404,6 +420,7 @@ fn addresses(blocks: &[u64]) -> String {
 pub(crate) fn rung(support: r2engine::query::Support) -> &'static str {
     use r2engine::query::Support;
     match support {
+        Support::Stated => "stated",
         Support::Decoded => "decoded",
         Support::Folded => "folded",
         Support::Certified => "certified",

@@ -403,11 +403,6 @@ mod tests {
             false
         }
 
-        /// Nothing here is loaded, so nothing is written by a loader.
-        fn loader_writes(&self, _range: &std::ops::Range<u64>) -> bool {
-            false
-        }
-
         fn extents(&self) -> &r2types::ProgramExtents {
             const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
             NONE

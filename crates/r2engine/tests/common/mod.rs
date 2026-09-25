@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Applies, Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions,
-    Relocation, RelocationSymbol, Section, Segment, Source, Symbol, SymbolKind,
+    Applies, Arch, Container, Endian, Entry, EntryKind, Format, LoaderWrite, Mapping, OpenProgram,
+    Permissions, Relocation, RelocationSymbol, Section, Segment, Source, Symbol, SymbolKind,
+    WriteKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -325,6 +326,17 @@ pub fn import_slot(vaddr: u64, import: &str) -> Relocation {
     }
 }
 
+/// What the loader writes into an import's slot: the import's address, which another image defines.
+pub fn import_write(place: u64, width: u64, import: &str) -> LoaderWrite {
+    LoaderWrite {
+        place,
+        width,
+        kind: WriteKind::Import {
+            symbol: import.to_owned(),
+        },
+    }
+}
+
 /// One run of code the loader maps readable and executable.
 pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
     Segment {
@@ -473,7 +485,10 @@ impl Literal {
         ];
         program.container.symbols.clear();
         program.container.relocations = vec![import_slot(PLT_SLOT, "_Exit")];
-        program.container.loader_writes.push(PLT_SLOT..PLT_SLOT + 8);
+        program
+            .container
+            .loader_writes
+            .push(import_write(PLT_SLOT, 8, "_Exit"));
         program
     }
 
@@ -482,7 +497,9 @@ impl Literal {
         ".plt".clone_into(&mut self.container.sections[0].name);
         self.container.symbols.clear();
         self.container.relocations.push(import_slot(slot, import));
-        self.container.loader_writes.push(slot..slot + 4);
+        self.container
+            .loader_writes
+            .push(import_write(slot, 4, import));
         self
     }
 
@@ -546,7 +563,9 @@ impl Literal {
         ]);
         self.container.relocations.push(import_slot(SLOT, import));
         // The loader writes the import's address into the slot, as the container states for every relocation.
-        self.container.loader_writes.push(SLOT..SLOT + 8);
+        self.container
+            .loader_writes
+            .push(import_write(SLOT, 8, import));
         self
     }
 
@@ -615,6 +634,15 @@ impl Literal {
             },
             ..Segment::default()
         });
+        self
+    }
+
+    /// The same program, stating that the loader writes this before it runs.
+    pub fn loader_written(mut self, write: LoaderWrite) -> Self {
+        self.container.loader_writes.push(write);
+        self.container
+            .loader_writes
+            .sort_by_key(|write| write.place);
         self
     }
 

@@ -336,11 +336,23 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
     let mut count = 0usize;
     for (fact, source) in index.to(wanted) {
         count += 1;
-        let text = crate::listing::spelled(&source.line, names);
-        for owner in &source.owners {
+        let text = match &source.line.syntax {
+            Some(_) => crate::listing::spelled(&source.line, names),
+            // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
+            None => format!("{} {wanted:#010x}", datum(session)),
+        };
+        // A source in no function is radare2's `(nofunc)`.
+        let owners = match source.owners.is_empty() {
+            true => vec!["(nofunc)".to_owned()],
+            false => source
+                .owners
+                .iter()
+                .map(|owner| names.function(*owner))
+                .collect(),
+        };
+        for owner in owners {
             out.push_str(&format!(
-                "{} {:#x} [{}] {text}\n",
-                names.function(*owner),
+                "{owner} {:#x} [{}] {text}\n",
                 fact.from,
                 role(fact.role)
             ));
@@ -354,6 +366,14 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
     }
     out.push_str(&coverage(&index.coverage));
     Ok(out)
+}
+
+/// How radare2 spells a pointer-sized datum: `.qword` or `.dword` by the program's width.
+fn datum(session: &Session) -> &'static str {
+    match session.image().arch().bits {
+        64 => ".qword",
+        _ => ".dword",
+    }
 }
 
 /// What a reference index was read over, as a trailing comment.

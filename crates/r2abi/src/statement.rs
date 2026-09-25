@@ -34,9 +34,11 @@ pub struct Container {
     pub relocations: Vec<Relocation>,
     /// The stubs the format declares stand for imports.
     pub import_stubs: Vec<ImportStub>,
-    /// The bytes the loader writes before the program runs, sorted and
-    /// disjoint; what the file holds there is not what the program reads.
-    pub loader_writes: Vec<Range<u64>>,
+    /// What the loader writes before the program runs, and what the container
+    /// states it writes, sorted by place and disjoint: several records
+    /// writing one place are composed in the order the loader applies them.
+    /// What the file holds at any of these bytes is not what the program reads.
+    pub loader_writes: Vec<LoaderWrite>,
     pub entries: Vec<Entry>,
     /// Prototypes the program's own debug information declares.
     pub declared: Vec<crate::Prototype>,
@@ -59,26 +61,51 @@ impl Container {
     /// one itself; a word bound to a symbol this image defines, a copy, or a
     /// thread-local offset is no such slot.
     pub fn import_slots(&self) -> impl Iterator<Item = (u64, &str)> {
-        self.relocations.iter().filter_map(|relocation| {
-            let symbol = relocation.symbol.as_ref()?;
-            let bound = matches!(
-                relocation.applies,
-                Applies::Symbol | Applies::SymbolPlusAddend
-            );
-            (bound && symbol.defined.is_none() && !symbol.name.is_empty())
-                .then_some((relocation.vaddr, symbol.name.as_str()))
-        })
+        self.loader_writes
+            .iter()
+            .filter_map(|write| match &write.kind {
+                WriteKind::Import { symbol } if !symbol.is_empty() => {
+                    Some((write.place, symbol.as_str()))
+                }
+                _ => None,
+            })
     }
 
     /// Whether the loader writes any byte of this range: one search over the sorted, disjoint writes.
     pub fn loader_writes_any(&self, range: &Range<u64>) -> bool {
-        let first = self
-            .loader_writes
-            .partition_point(|written| written.end <= range.start);
-        self.loader_writes
-            .get(first)
-            .is_some_and(|written| written.start < range.end)
+        writes_any(&self.loader_writes, range)
     }
+
+    /// The loader's write covering `place`, where it makes one: one search.
+    pub fn loader_write_at(&self, place: u64) -> Option<&LoaderWrite> {
+        write_at(&self.loader_writes, place)
+    }
+
+    /// The bytes the loader writes, as sorted, disjoint ranges with touching ones made one.
+    pub fn written_ranges(&self) -> Vec<Range<u64>> {
+        let mut ranges: Vec<Range<u64>> = Vec::with_capacity(self.loader_writes.len());
+        for write in &self.loader_writes {
+            match ranges.last_mut() {
+                Some(last) if write.place <= last.end => last.end = last.end.max(write.end()),
+                _ => ranges.push(write.place..write.end()),
+            }
+        }
+        ranges
+    }
+}
+
+/// Whether any of the sorted, disjoint `writes` touches `range`: one binary search.
+pub fn writes_any(writes: &[LoaderWrite], range: &Range<u64>) -> bool {
+    let first = writes.partition_point(|written| written.end() <= range.start);
+    writes
+        .get(first)
+        .is_some_and(|written| written.place < range.end)
+}
+
+/// The one of the sorted, disjoint `writes` covering `place`: one binary search.
+pub fn write_at(writes: &[LoaderWrite], place: u64) -> Option<&LoaderWrite> {
+    let first = writes.partition_point(|written| written.end() <= place);
+    writes.get(first).filter(|written| written.place <= place)
 }
 
 /// The container format the bytes were parsed as.
@@ -349,6 +376,74 @@ pub enum Visibility {
     Protected,
 }
 
+/// Bytes the loader writes before the program runs, and what the container states it writes there.
+///
+/// Values are in the coordinates the image is linked at. The load bias moves
+/// every address the image states by one amount, so an address of this image
+/// is its link-time value here: a relative relocation's value is its addend,
+/// never the addend plus wherever `baddr` puts the first file byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoaderWrite {
+    pub place: u64,
+    pub width: u64,
+    pub kind: WriteKind,
+}
+
+impl LoaderWrite {
+    /// The address after its last byte.
+    pub const fn end(&self) -> u64 {
+        self.place.saturating_add(self.width)
+    }
+
+    /// The address the word holds once the program runs, where the container
+    /// states it outright: an address of this image, or a definition in it
+    /// no other image can replace.
+    pub const fn value(&self) -> Option<u64> {
+        match self.kind {
+            WriteKind::Relative(value) | WriteKind::Absolute(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The address of this image the container states the word holds when the
+    /// program starts, which is a reference from the word whether or not
+    /// another image may replace it later.
+    pub const fn stated_address(&self) -> Option<u64> {
+        match self.kind {
+            WriteKind::Relative(value)
+            | WriteKind::Absolute(value)
+            | WriteKind::Preemptible { default: value, .. } => Some(value),
+            _ => None,
+        }
+    }
+}
+
+/// What the loader writes into one place.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WriteKind {
+    /// An address of this image, moved with it.
+    Relative(u64),
+    /// The address of a definition in this image that no other image can
+    /// replace: the executable's own, a hidden or protected one, or any under
+    /// `DT_SYMBOLIC`.
+    Absolute(u64),
+    /// The address of an import, which another image defines.
+    Import { symbol: String },
+    /// This image's own definition, which an image loaded ahead of it may
+    /// replace; `default` is what the word holds when none does.
+    Preemptible { symbol: String, default: u64 },
+    /// What a resolver function returns. The resolver is at the address this
+    /// states; what it returns is chosen when the program runs.
+    Resolver(u64),
+    /// A thread-local module number or offset, which is no address.
+    NotAnAddress,
+    /// Written, with no value the container states: a copy of another image's
+    /// object, a word its psABI reserves, a signed pointer, or a format this
+    /// reader does not decode.
+    #[default]
+    Unknown,
+}
+
 /// One stub the format itself declares stands for an import.
 ///
 /// Mach-O states it outright: a section of type `S_SYMBOL_STUBS` holds one
@@ -429,12 +524,23 @@ mod tests {
 
     #[test]
     fn a_range_touching_a_loader_write_is_written_and_one_beside_it_is_not() {
+        let write = |place, width| LoaderWrite {
+            place,
+            width,
+            kind: WriteKind::Unknown,
+        };
         let container = Container {
-            loader_writes: vec![0x10..0x18, 0x40..0x48],
+            loader_writes: vec![write(0x10, 8), write(0x18, 8), write(0x40, 8)],
             ..Container::default()
         };
         assert!(container.loader_writes_any(&(0x14..0x15)));
         assert!(container.loader_writes_any(&(0x08..0x11)));
-        assert!(!container.loader_writes_any(&(0x18..0x40)));
+        assert!(!container.loader_writes_any(&(0x20..0x40)));
+        assert_eq!(
+            container.loader_write_at(0x1f).map(|write| write.place),
+            Some(0x18)
+        );
+        assert_eq!(container.loader_write_at(0x20), None);
+        assert_eq!(container.written_ranges(), [0x10..0x20, 0x40..0x48]);
     }
 }

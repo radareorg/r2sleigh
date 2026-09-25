@@ -62,8 +62,13 @@ pub trait Program: r2ssa::body::Program {
     /// [`holds_static_data`](crate::program::Section::holds_static_data).
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
-    /// Whether the loader writes any byte of this range before the program runs, so the file's bytes there are not what it reads.
-    fn loader_writes(&self, range: &std::ops::Range<u64>) -> bool;
+    /// What the loader writes before the program runs, sorted by place and
+    /// disjoint, with the value the container states for each: the file's
+    /// bytes there are not what the program reads. Nothing, where nothing is
+    /// loaded. Read through [`crate::stated`], never directly.
+    fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
+        &[]
+    }
 
     /// Where the program's loaded sections lie, code or data.
     ///
@@ -1721,9 +1726,9 @@ pub enum TableBytes {
     ReadOnly,
     /// Writable, and nothing the container states seals it after load.
     Unsealed,
-    /// The loader writes some of them -- a relocation, an import's slot, or
-    /// the zeros it fills past what the file holds -- so the file's bytes are
-    /// not what runs.
+    /// The loader writes some of them -- a rebased pointer, a chained fixup,
+    /// an import's slot -- so the file's bytes are not what runs; each entry
+    /// is what the container states the loader writes there, or nothing.
     LoaderWritten,
 }
 
@@ -1734,7 +1739,7 @@ impl TableBytes {
         region: &r2ssa::body::Region,
         range: std::ops::Range<u64>,
     ) -> Self {
-        let written = range.end > region.file_end || program.loader_writes(&range);
+        let written = crate::stated::written(program, &range);
         match (written, region.write) {
             (true, _) => Self::LoaderWritten,
             (false, false) => Self::ReadOnly,
@@ -1742,20 +1747,22 @@ impl TableBytes {
         }
     }
 
-    /// Whether the file's bytes of the table at `at` may be read as the
-    /// run's, saying why wherever the answer is not a plain yes.
+    /// Whether the table at `at` may be read as the run's, saying why
+    /// wherever the answer is not a plain yes.
     ///
-    /// Unsealed is not a refusal yet: the statement that would seal it is not
-    /// asked for until the immutability check lands, so it is said here and
-    /// carried on the table.
+    /// A table the loader writes is read as the container states the loader
+    /// writes it, entry by entry; an entry whose value it does not state
+    /// refuses the table there. Unsealed is not a refusal yet: the statement
+    /// that would seal it is not asked for until the immutability check
+    /// lands, so it is said here and carried on the table.
     fn read_as_run(self, at: u64) -> bool {
         match self {
             Self::LoaderWritten => {
                 r2il::refusal_evidence!(
                     "dispatch-table",
-                    "{at:#x}: {self:?}: the file's bytes are not what the dispatch reads"
+                    "{at:#x}: {self:?}: read as the values the container states the loader writes"
                 );
-                false
+                true
             }
             Self::Unsealed => {
                 r2il::refusal_evidence!(
@@ -1923,22 +1930,39 @@ impl Native<'_> {
             ));
             return None;
         };
+        // Past what the file holds the loader fills zeros, and a container can
+        // state a region as long as it likes: bounding the span by the file
+        // is what bounds every allocation below by the file's own size.
+        if end > region.file_end {
+            refused(format_args!(
+                "{} entries by {} span past what the file holds, which ends at {:#x}",
+                read.count, read.stride, region.file_end
+            ));
+            return None;
+        }
         let stated = TableBytes::of(self.program, &region, at..end);
         if !stated.read_as_run(at) {
             return None;
         }
-        let bytes = self.program.read(at, span).unwrap_or_default();
-        if bytes.len() < span {
-            refused(format_args!("{} of {span} bytes are mapped", bytes.len()));
-            return None;
-        }
-        let word = |slot: &[u8]| match self.machine.endianness {
-            SourceEndianness::Little => slot.iter().rev().fold(0u64, |v, b| (v << 8) | *b as u64),
-            SourceEndianness::Big => slot.iter().fold(0u64, |v, b| (v << 8) | *b as u64),
+        let endian = match self.machine.endianness {
+            SourceEndianness::Little => r2il::Endianness::Little,
+            SourceEndianness::Big => r2il::Endianness::Big,
         };
-        // Every entry lies inside `bytes`: the last ends at `(count - 1) * stride + size`, which is `span`.
-        let targets = (0..count)
-            .map(|k| word(&bytes[k * stride..k * stride + size]))
+        // Every entry lies inside the span, which lies inside what the file holds of one region.
+        let mut entries = Vec::with_capacity(count);
+        for k in 0..count {
+            let place = at + (k * stride) as u64;
+            let width = u32::try_from(size).unwrap_or(u32::MAX);
+            let Some(word) = crate::stated::stated_word(self.program, place, width, endian) else {
+                refused(format_args!(
+                    "entry {k} at {place:#x}: nothing the container states is what it holds when the dispatch runs"
+                ));
+                return None;
+            };
+            entries.push(word.value());
+        }
+        let targets = entries
+            .into_iter()
             .map(|entry| read.transform.target(entry, read.size))
             .collect::<Vec<_>>();
         let distinct = targets.iter().copied().collect::<BTreeSet<_>>();
@@ -2394,13 +2418,15 @@ impl Native<'_> {
     }
 }
 
-/// The text a section of static data holds at an address; the one reader a rendering and a listing share.
+/// The text a section of static data holds at an address, where the loader leaves every byte of it and its terminator alone; the one reader a rendering and a listing share.
 pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
     if !program.holds_static_data(address) {
         return None;
     }
     let bytes = program.read(address, crate::names::LITERAL_LIMIT)?;
-    crate::names::text_in(&bytes).map(str::to_owned)
+    let text = crate::names::text_in(&bytes)?;
+    let end = address.saturating_add(text.len() as u64 + 1);
+    (!crate::stated::written(program, &(address..end))).then(|| text.to_owned())
 }
 
 /// Whether an instruction decodes at an address, in a region where one can run.

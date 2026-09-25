@@ -11,7 +11,7 @@ expression: run.out
             0x100000438      08010091       add x8, x8, 0x0 ; defines x8 = 0x100004000 (folded)
             0x10000043c      0001c03d       ldr q0, [x8]
             0x100000440      e007803d       str q0, [sp, 0x10]
-            0x100000444      080940f9       ldr x8, [x8, 0x10]
+            0x100000444      080940f9       ldr x8, [x8, 0x10] ; [0x100004010:8] loaded 0x100000400 sym._table_op_mul (folded)
             0x100000448      e81300f9       str x8, [sp, 0x20]
             0x10000044c      a8835ff8       ldur x8, [x29, -0x8]
             0x100000450      e80700f9       str x8, [sp, 0x8]

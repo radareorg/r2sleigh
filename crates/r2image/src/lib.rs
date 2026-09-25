@@ -609,8 +609,8 @@ impl Image {
         &self.container.import_stubs
     }
 
-    /// The bytes the loader writes before the program runs, sorted and disjoint: what the file holds there is not what the program reads.
-    pub fn loader_writes(&self) -> &[std::ops::Range<u64>] {
+    /// What the loader writes before the program runs, sorted by place and disjoint: what the file holds there is not what the program reads.
+    pub fn loader_writes(&self) -> &[LoaderWrite] {
         &self.container.loader_writes
     }
 

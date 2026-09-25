@@ -316,6 +316,7 @@ impl<S: Source> OpenProgram<S> {
         let walked = self.surveyed()?.walked;
         let mut index = Indexing::default();
         let mut coverage = Coverage::default();
+        index.read_words(&self.source.container().loader_writes);
         // A program that states no function is never assembled, and has nothing to index.
         if walked.is_empty() {
             return Ok(index.finish(coverage));

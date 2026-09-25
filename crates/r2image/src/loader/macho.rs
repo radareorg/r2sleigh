@@ -11,7 +11,8 @@ use object::macho;
 use object::read::macho::{LoadCommandVariant, MachHeader};
 
 use r2abi::statement::{
-    Applies, Binding, ImportStub, Record, Relocation, RelocationSymbol, Visibility,
+    Applies, Binding, ImportStub, LoaderWrite, Record, Relocation, RelocationSymbol, Visibility,
+    WriteKind,
 };
 
 use super::written;
@@ -19,6 +20,9 @@ use super::written;
 /// What dyld writes into one Mach-O image, and the stubs its format declares.
 pub(super) struct Read {
     pub relocations: Vec<Relocation>,
+    /// What each record writes, in the order dyld applies them.
+    pub writes: Vec<LoaderWrite>,
+    /// Every range written, stated by a record or not.
     pub ranges: Vec<Range<u64>>,
     pub stubs: Vec<ImportStub>,
 }
@@ -33,6 +37,7 @@ pub(super) fn read(file: &object::File<'_>, data: &[u8]) -> Read {
     macho.map_or_else(
         || Read {
             relocations: Vec::new(),
+            writes: Vec::new(),
             ranges: Vec::new(),
             stubs: Vec::new(),
         },
@@ -279,10 +284,45 @@ impl<'d> Macho<'d> {
             }
         }
         found.ranges.extend(self.filled());
+        let writes = found
+            .records
+            .iter()
+            .map(|record| LoaderWrite {
+                place: record.vaddr,
+                width: record.width,
+                kind: self.kind(record),
+            })
+            .collect();
         Read {
             relocations: found.records,
+            writes,
             ranges: found.ranges,
             stubs,
+        }
+    }
+
+    /// What one record writes, in the coordinates the image is linked at.
+    ///
+    /// A rebase from an opcode stream writes the word the file holds, which
+    /// the linker laid out as the unslid address; a chained rebase states its
+    /// target, decoded per pointer format. A bind writes the import's address,
+    /// where nothing is added to it.
+    fn kind(&self, record: &Relocation) -> WriteKind {
+        match (record.applies, &record.symbol) {
+            (Applies::Relative, _) => match record.addend {
+                Some(target) => WriteKind::Relative(target as u64),
+                None => self
+                    .word(record.vaddr, record.width)
+                    .map_or(WriteKind::Unknown, |(_, value)| WriteKind::Relative(value)),
+            },
+            (Applies::Symbol | Applies::SymbolPlusAddend, Some(symbol))
+                if symbol.defined.is_none() && matches!(record.addend, None | Some(0)) =>
+            {
+                WriteKind::Import {
+                    symbol: symbol.name.clone(),
+                }
+            }
+            _ => WriteKind::Unknown,
         }
     }
 

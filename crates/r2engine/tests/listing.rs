@@ -8,7 +8,7 @@ use common::{
     OVERWRITTEN, PASSES, PLT_CALLER, PLT_STUB, SHIFT_MERGE, SLOT, STEPPED, STUB, THUMB_CALLED,
     THUMB_LEAF, TRANSFERRED, TWO, VENEER, handing, opened, table_switch, transferring,
 };
-use r2engine::program::{Container, OpenProgram, Source};
+use r2engine::program::{Container, LoaderWrite, OpenProgram, Source, WriteKind};
 use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop, Support};
 
 /// The result each line claims, by address.
@@ -672,6 +672,65 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
         .iter()
         .any(|(_, kind, _)| *kind == AnnotationKind::Unresolved);
     assert!(!unresolved, "{said:?}");
+}
+
+/// Each dispatch table a function listing reads: where, how many entries, and what the container states of its bytes.
+fn tables_of(lines: &[Line]) -> Vec<(u64, usize, r2engine::native::TableBytes)> {
+    lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .filter_map(|annotation| match &annotation.kind {
+            AnnotationKind::Switch { table, .. } => *table,
+            _ => None,
+        })
+        .map(|table| (table.address, table.entries, table.stated))
+        .collect()
+}
+
+#[test]
+fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
+    // A PIE linked without applying its dynamic relocations leaves each
+    // relocated word zero in the file; the relative records state the
+    // addresses. Reading the file's words read four entries at address zero,
+    // and refusing every loader-written table left the dispatch unresolved.
+    let table = BASE + 0x30;
+    let mut literal = table_switch();
+    literal.write(table, &[0; 32]);
+    for (k, target) in [0x100e, 0x1014, 0x101a, 0x1026].into_iter().enumerate() {
+        literal = literal.loader_written(LoaderWrite {
+            place: table + 8 * k as u64,
+            width: 8,
+            kind: WriteKind::Relative(target),
+        });
+    }
+    let lines = OpenProgram::of(literal).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    let loaded = r2engine::native::TableBytes::LoaderWritten;
+    assert_eq!(tables_of(&lines), [(table, 4, loaded)]);
+    let arms = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .find_map(|annotation| match &annotation.kind {
+            AnnotationKind::Switch { arms, .. } => Some(arms.clone()),
+            _ => None,
+        });
+    assert_eq!(
+        arms,
+        Some(vec![(0, 0x100e), (1, 0x1014), (2, 0x101a), (3, 0x1026)])
+    );
+
+    // One entry the loader binds to an import states no address, so the table is refused whole.
+    let mut literal = table_switch().loader_written(LoaderWrite {
+        place: table + 8,
+        width: 8,
+        kind: WriteKind::Import {
+            symbol: "elsewhere".to_owned(),
+        },
+    });
+    literal.write(table + 8, &[0; 8]);
+    let lines = OpenProgram::of(literal).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    assert_eq!(tables_of(&lines), []);
 }
 
 #[test]

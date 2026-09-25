@@ -16,16 +16,21 @@ use object::read::elf::{
 };
 use object::{Object, elf};
 
-use r2abi::statement::{Applies, Binding, Record, Relocation, RelocationSymbol, Visibility};
+use r2abi::statement::{
+    Applies, Binding, LoaderWrite, Record, Relocation, RelocationSymbol, Visibility, WriteKind,
+};
 
 use super::written;
 
-/// Every relocation record the dynamic loader, or a static binary's own start-up, applies, in the order it applies them; and every range they and the psABI's reserved words write.
-pub(super) fn read(file: &object::File<'_>, pointer: u64) -> (Vec<Relocation>, Vec<Range<u64>>) {
+/// Every relocation record the dynamic loader, or a static binary's own start-up, applies, in the order it applies them; what each writes; and the words the psABI reserves, which it writes with no record.
+pub(super) fn read(
+    file: &object::File<'_>,
+    pointer: u64,
+) -> (Vec<Relocation>, Vec<LoaderWrite>, Vec<Range<u64>>) {
     match file {
         object::File::Elf32(file) => Elf::of(file, pointer).read(),
         object::File::Elf64(file) => Elf::of(file, pointer).read(),
-        _ => (Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     }
 }
 
@@ -100,7 +105,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
     }
 
     /// Every record once, in application order, and every range written.
-    fn read(&self) -> (Vec<Relocation>, Vec<Range<u64>>) {
+    fn read(&self) -> (Vec<Relocation>, Vec<LoaderWrite>, Vec<Range<u64>>) {
         let mut views = self.tabled();
         views.extend(self.sectioned());
         // A record is where its bytes are; the first view to reach it -- the
@@ -119,12 +124,111 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         // Stable: within one phase, table order is application order.
         records.sort_by_key(|(phase, _)| *phase);
         let relocations: Vec<Relocation> = records.into_iter().map(|(_, record)| record).collect();
-        let mut ranges: Vec<Range<u64>> = relocations
+        let writes = relocations
             .iter()
-            .map(|record| written(record.vaddr, extent(record, self.pointer)))
+            .map(|record| LoaderWrite {
+                place: record.vaddr,
+                width: extent(record, self.pointer),
+                kind: self.kind(record),
+            })
             .collect();
-        ranges.extend(self.reserved());
-        (relocations, ranges)
+        (relocations, writes, self.reserved().into_iter().collect())
+    }
+
+    /// What one record writes, in the coordinates the image is linked at.
+    ///
+    /// A relative record's value is its addend, or the word the file holds
+    /// where the table states none: the load bias is what moves it, and in
+    /// link coordinates the bias is zero whatever address the first segment
+    /// is linked at. A definition's address is the value only where no image
+    /// loaded ahead of this one can replace it.
+    fn kind(&self, record: &Relocation) -> WriteKind {
+        let addend = || match record.addend {
+            Some(addend) => Some(addend as u64),
+            None => self.file_word(record.vaddr, record.width),
+        };
+        match record.applies {
+            Applies::Relative => addend().map_or(WriteKind::Unknown, WriteKind::Relative),
+            Applies::Resolver => addend().map_or(WriteKind::Unknown, WriteKind::Resolver),
+            Applies::ThreadLocal => WriteKind::NotAnAddress,
+            Applies::Copy | Applies::Unknown => WriteKind::Unknown,
+            Applies::Symbol | Applies::SymbolPlusAddend => {
+                let offset = match record.applies {
+                    Applies::Symbol => Some(0),
+                    _ => addend(),
+                };
+                let Some(offset) = offset else {
+                    return WriteKind::Unknown;
+                };
+                let Some(symbol) = &record.symbol else {
+                    // Symbol index zero is the value zero: the addend, not moved.
+                    return WriteKind::Absolute(offset);
+                };
+                // An import's address is the value only where nothing is added to it.
+                let Some(defined) = symbol.defined else {
+                    return match offset {
+                        0 => WriteKind::Import {
+                            symbol: symbol.name.clone(),
+                        },
+                        _ => WriteKind::Unknown,
+                    };
+                };
+                let value = defined.wrapping_add(offset);
+                match self.binds_locally(symbol) {
+                    true => WriteKind::Absolute(value),
+                    false => WriteKind::Preemptible {
+                        symbol: symbol.name.clone(),
+                        default: value,
+                    },
+                }
+            }
+        }
+    }
+
+    /// Whether a definition this image makes is the one every reference in it binds to.
+    ///
+    /// The executable is first in every lookup scope, so nothing replaces its
+    /// definitions; a hidden, internal or protected symbol, or a local one, is
+    /// never exported to be replaced; and `DT_SYMBOLIC` binds a library's own
+    /// references to its own definitions.
+    fn binds_locally(&self, symbol: &RelocationSymbol) -> bool {
+        const DF_SYMBOLIC: u64 = 0x2;
+        const DF_1_PIE: u64 = 0x0800_0000;
+        let endian = self.endian;
+        let header = self.file.elf_header();
+        let executable = header.e_type(endian) == elf::ET_EXEC
+            || self
+                .tag(elf::DT_FLAGS_1)
+                .is_some_and(|flags| flags & DF_1_PIE != 0)
+            || self
+                .file
+                .elf_program_headers()
+                .iter()
+                .any(|header| header.p_type(endian) == elf::PT_INTERP);
+        let symbolic = self.tag(elf::DT_SYMBOLIC).is_some()
+            || self
+                .tag(elf::DT_FLAGS)
+                .is_some_and(|flags| flags & DF_SYMBOLIC != 0);
+        executable
+            || symbolic
+            || symbol.binding == Binding::Local
+            || symbol.visibility != Visibility::Default
+    }
+
+    /// The word the file holds at a loaded address, in the image's byte order.
+    fn file_word(&self, vaddr: u64, width: u64) -> Option<u64> {
+        let bytes = self.bytes(self.offset_of(vaddr, width)?, width);
+        if bytes.len() as u64 != width || width > 8 {
+            return None;
+        }
+        let little = self.file.is_little_endian();
+        Some(bytes.iter().enumerate().fold(0u64, |value, (at, byte)| {
+            let shift = match little {
+                true => 8 * at,
+                false => 8 * (bytes.len() - 1 - at),
+            };
+            value | u64::from(*byte) << shift
+        }))
     }
 
     fn tag(&self, wanted: u32) -> Option<u64> {
