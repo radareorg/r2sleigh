@@ -333,10 +333,13 @@ pub(super) fn binding_components_with(
             values_by_span.entry(span).or_default().insert(value.id);
         }
     }
-    // Whether merging every one of these values into one object would put a
-    // value where another is still needed. Each run's liveness is kept at its
-    // root and grown as runs join, so a merge is judged against everything
-    // already in the runs it touches and never against the whole function.
+    // Whether every one of these values can be one object, and if so the
+    // liveness of the run they make. Each run's liveness is kept at its root
+    // and grown as runs join, so a merge is judged against the runs it touches
+    // and never against the whole function. The run with the most segments is
+    // judged in place and taken whole; the others are copied into it, so a
+    // run grown one store at a time costs each store its own segments rather
+    // than a rebuild of the run.
     let mut live_by_root = vec![None::<r2ssa::liveness::ComponentLiveness>; value_count];
     // A stack slot or a parameter is one object by identity, whatever its
     // values' live ranges say. A run that would carry two of them is two runs.
@@ -353,48 +356,63 @@ pub(super) fn binding_components_with(
         let first = identities.pop_first();
         first.zip(identities.pop_first())
     };
-    let merge_would_interfere = |parent: &mut Vec<usize>,
-                                 ring: &[u32],
-                                 live_by_root: &mut Vec<
-        Option<r2ssa::liveness::ComponentLiveness>,
-    >,
-                                 values: &BTreeSet<ValueId>| {
+    let merged_liveness = |parent: &mut Vec<usize>,
+                           ring: &[u32],
+                           live_by_root: &mut Vec<Option<r2ssa::liveness::ComponentLiveness>>,
+                           values: &BTreeSet<ValueId>|
+     -> Option<r2ssa::liveness::ComponentLiveness> {
         let roots = values
             .iter()
             .map(|value| find(parent, value.0 as usize))
             .collect::<BTreeSet<_>>();
-        let mut merged = None::<r2ssa::liveness::ComponentLiveness>;
-        for root in roots {
-            let component = live_by_root[root]
-                .get_or_insert_with(|| {
-                    let mut component = r2ssa::liveness::ComponentLiveness::default();
-                    for member in ring_members(ring, root) {
-                        component.absorb(r2ssa::liveness::ComponentLiveness::of(liveness, member));
-                    }
-                    component
-                })
-                .clone();
-            match merged.as_mut() {
-                None => merged = Some(component),
-                Some(merged) => {
-                    if let Some((left, right)) = merged.first_interference(&component, liveness) {
-                        r2il::refusal_evidence!(
-                            "union-declined",
-                            "{} is live where {} is written",
-                            graph
-                                .value(left)
-                                .map_or("?".to_string(), |value| value.var.display_name()),
-                            graph
-                                .value(right)
-                                .map_or("?".to_string(), |value| value.var.display_name())
-                        );
-                        return true;
-                    }
-                    merged.absorb(component);
+        for root in &roots {
+            if live_by_root[*root].is_none() {
+                let mut component = r2ssa::liveness::ComponentLiveness::default();
+                for member in ring_members(ring, *root) {
+                    component.absorb(r2ssa::liveness::ComponentLiveness::of(liveness, member));
                 }
+                live_by_root[*root] = Some(component);
             }
         }
-        false
+        let largest = roots.iter().copied().max_by_key(|root| {
+            (
+                live_by_root[*root]
+                    .as_ref()
+                    .map_or(0, r2ssa::liveness::ComponentLiveness::segment_count),
+                std::cmp::Reverse(*root),
+            )
+        })?;
+        let mut others = r2ssa::liveness::ComponentLiveness::default();
+        for root in roots.iter().copied().filter(|root| *root != largest) {
+            let (Some(component), Some(against)) =
+                (live_by_root[root].as_ref(), live_by_root[largest].as_ref())
+            else {
+                continue;
+            };
+            if let Some((left, right)) = against
+                .first_interference(component, liveness)
+                .or_else(|| others.first_interference(component, liveness))
+            {
+                r2il::refusal_evidence!(
+                    "union-declined",
+                    "{} is live where {} is written",
+                    graph
+                        .value(left)
+                        .map_or("?".to_string(), |value| value.var.display_name()),
+                    graph
+                        .value(right)
+                        .map_or("?".to_string(), |value| value.var.display_name())
+                );
+                return None;
+            }
+            others.absorb(component.clone());
+        }
+        let mut merged = live_by_root[largest].take().unwrap_or_default();
+        merged.absorb(others);
+        for root in &roots {
+            live_by_root[*root] = None;
+        }
+        Some(merged)
     };
 
     if let Some(render) = source_owned.report().render() {
@@ -441,14 +459,15 @@ pub(super) fn binding_components_with(
                     );
                     continue;
                 }
-                if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
+                let Some(merged) = merged_liveness(&mut parent, &ring, &mut live_by_root, &values)
+                else {
                     r2il::refusal_evidence!(
                         "coalescing-declined",
                         "entity {:?} members {values:?}: a member is live where another is written",
                         entity.id()
                     );
                     continue;
-                }
+                };
                 let joined = identity.or_else(|| {
                     values
                         .iter()
@@ -456,9 +475,10 @@ pub(super) fn binding_components_with(
                 });
                 for value in values.iter().copied().skip(1) {
                     union(&mut parent, &mut rank, &mut ring, first, value);
-                    live_by_root[find(&mut parent, first.0 as usize)] = None;
                 }
-                identity_by_root[find(&mut parent, first.0 as usize)] = joined;
+                let root = find(&mut parent, first.0 as usize);
+                live_by_root[root] = Some(merged);
+                identity_by_root[root] = joined;
                 r2il::refusal_evidence!(
                     "coalescing-union",
                     "entity {:?} members {values:?} identity {joined:?}",
@@ -492,19 +512,21 @@ pub(super) fn binding_components_with(
                 );
                 continue;
             }
-            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &values) {
+            let Some(merged) = merged_liveness(&mut parent, &ring, &mut live_by_root, &values)
+            else {
                 r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
                 continue;
-            }
+            };
             let joined = values
                 .iter()
                 .find_map(|value| identity_by_root[find(&mut parent, value.0 as usize)]);
             let first = values.first().copied().expect("multi-member span");
             for value in values.iter().copied().skip(1) {
                 union(&mut parent, &mut rank, &mut ring, first, value);
-                live_by_root[find(&mut parent, first.0 as usize)] = None;
             }
-            identity_by_root[find(&mut parent, first.0 as usize)] = joined;
+            let root = find(&mut parent, first.0 as usize);
+            live_by_root[root] = Some(merged);
+            identity_by_root[root] = joined;
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
         }
     }
@@ -582,13 +604,15 @@ pub(super) fn binding_components_with(
                     );
                     continue;
                 }
-                if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed) {
+                let Some(merged) =
+                    merged_liveness(&mut parent, &ring, &mut live_by_root, &proposed)
+                else {
                     r2il::refusal_evidence!(
                         "store-declined",
                         "{id:?} stored {stored:?} stays a copy"
                     );
                     continue;
-                }
+                };
                 r2il::refusal_evidence!(
                     "coalescing-union",
                     "{id:?} stored {stored:?} joins mate {mate:?} (identities {:?} and {:?})",
@@ -597,7 +621,7 @@ pub(super) fn binding_components_with(
                 );
                 union(&mut parent, &mut rank, &mut ring, mate, stored);
                 let root = find(&mut parent, mate.0 as usize);
-                live_by_root[root] = None;
+                live_by_root[root] = Some(merged);
                 identity_by_root[root] = Some(*id);
                 certificate_sets.push((BindingCertificateSource::CertifiedEntity(*id), proposed));
             }
@@ -616,15 +640,17 @@ pub(super) fn binding_components_with(
         };
         for literal in literals {
             let proposed = BTreeSet::from([literal, mate]);
-            if merge_would_interfere(&mut parent, &ring, &mut live_by_root, &proposed) {
+            let Some(merged) = merged_liveness(&mut parent, &ring, &mut live_by_root, &proposed)
+            else {
                 r2il::refusal_evidence!(
                     "span-declined",
                     "{span:?} literal {literal:?} stays alone"
                 );
                 continue;
-            }
+            };
             union(&mut parent, &mut rank, &mut ring, mate, literal);
-            live_by_root[find(&mut parent, mate.0 as usize)] = None;
+            let root = find(&mut parent, mate.0 as usize);
+            live_by_root[root] = Some(merged);
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), proposed));
         }
     }

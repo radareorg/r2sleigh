@@ -728,30 +728,45 @@ fn order_touched_blocks(touched: &mut Vec<BlockId>, scratch: &[BlockScratch], st
 ///
 /// Built up by union: two components are asked whether they interfere, then
 /// the smaller is absorbed into the larger, so a run of a thousand versions
-/// costs a thousand small merges rather than a thousand rescans.
+/// costs a thousand small merges rather than a thousand rescans. Within a
+/// block the segments are kept in the order they start, so the question is
+/// one sweep over the two components' segments in that block rather than every
+/// pair of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComponentLiveness {
+    /// Per block, the segments sorted by where they start.
     by_block: BTreeMap<BlockId, Vec<(LiveSegment, ValueId)>>,
     members: usize,
+    segments: usize,
 }
 
 impl ComponentLiveness {
     pub fn of(liveness: &ValueLiveness, value: ValueId) -> Self {
         let mut by_block = BTreeMap::<BlockId, Vec<(LiveSegment, ValueId)>>::new();
-        for segment in liveness.segments(value) {
+        let segments = liveness.segments(value);
+        for segment in segments {
             by_block
                 .entry(segment.block)
                 .or_default()
                 .push((*segment, value));
         }
+        for block in by_block.values_mut() {
+            block.sort_by_key(|(segment, _)| segment.start);
+        }
         Self {
             by_block,
             members: 1,
+            segments: segments.len(),
         }
     }
 
     pub const fn members(&self) -> usize {
         self.members
+    }
+
+    /// How many live segments the component holds.
+    pub const fn segment_count(&self) -> usize {
+        self.segments
     }
 
     /// Whether any value of one component is live where a value of the other
@@ -763,6 +778,13 @@ impl ComponentLiveness {
     /// The first pair of values, one from each component, that are both live
     /// at one point and are not one content; which pair it is names the
     /// reason a union was declined.
+    ///
+    /// For each block both components are live in, one sweep in start order:
+    /// a segment is compared only with the other component's segments that
+    /// began no later and have not ended where it begins, which are exactly
+    /// the ones it can overlap from that side. `O(m + n)` per shared block
+    /// plus the overlapping pairs, where the nested scan it replaces was
+    /// `O(m * n)`.
     pub fn first_interference(
         &self,
         other: &Self,
@@ -774,14 +796,10 @@ impl ComponentLiveness {
             (other, self)
         };
         small.by_block.iter().find_map(|(block, mine)| {
-            large.by_block.get(block).and_then(|theirs| {
-                mine.iter().find_map(|(segment, value)| {
-                    theirs.iter().find_map(|(candidate, member)| {
-                        (segment.overlaps(*candidate) && !liveness.same_content(*value, *member))
-                            .then_some((*value, *member))
-                    })
-                })
-            })
+            large
+                .by_block
+                .get(block)
+                .and_then(|theirs| first_overlap(mine, theirs, liveness))
         })
     }
 
@@ -792,9 +810,54 @@ impl ComponentLiveness {
             return self.absorb(mine);
         }
         for (block, segments) in other.by_block {
-            self.by_block.entry(block).or_default().extend(segments);
+            let held = self.by_block.entry(block).or_default();
+            held.extend(segments);
+            // Two sorted runs: the stable sort merges them in linear time.
+            held.sort_by_key(|(segment, _)| segment.start);
         }
         self.members += other.members;
+        self.segments += other.segments;
+    }
+}
+
+/// The first overlapping pair of one block's segments, one from each side,
+/// that are not one content. Both sides are sorted by start.
+fn first_overlap(
+    mine: &[(LiveSegment, ValueId)],
+    theirs: &[(LiveSegment, ValueId)],
+    liveness: &ValueLiveness,
+) -> Option<(ValueId, ValueId)> {
+    let (mut next_mine, mut next_theirs) = (0, 0);
+    let mut open_mine = Vec::<(LiveSegment, ValueId)>::new();
+    let mut open_theirs = Vec::<(LiveSegment, ValueId)>::new();
+    loop {
+        let take_mine = match (mine.get(next_mine), theirs.get(next_theirs)) {
+            (Some((left, _)), Some((right, _))) => left.start <= right.start,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return None,
+        };
+        let (segment, value, open_other, open_same) = if take_mine {
+            let (segment, value) = mine[next_mine];
+            next_mine += 1;
+            (segment, value, &mut open_theirs, &mut open_mine)
+        } else {
+            let (segment, value) = theirs[next_theirs];
+            next_theirs += 1;
+            (segment, value, &mut open_mine, &mut open_theirs)
+        };
+        // What ended where this begins overlaps nothing that begins later.
+        open_other.retain(|(open, _)| open.end > segment.start);
+        for (open, member) in open_other.iter() {
+            if segment.overlaps(*open) && !liveness.same_content(value, *member) {
+                return Some(if take_mine {
+                    (value, *member)
+                } else {
+                    (*member, value)
+                });
+            }
+        }
+        open_same.push((segment, value));
     }
 }
 
@@ -1346,5 +1409,52 @@ mod tests {
         let unmapped = ValueContent::of(&graph, None);
         assert!(!unmapped.same_content(whole, high));
         assert!(!unmapped.same_content(whole, low));
+    }
+
+    #[test]
+    fn the_sweep_finds_an_interference_exactly_where_a_pair_interferes() {
+        let (_func, graph) = loop_with_exit_read();
+        let liveness = ValueLiveness::compute(
+            &graph,
+            &FunctionLiveOut::default(),
+            ValueContent::of(&graph, None),
+        );
+        let values = graph
+            .values
+            .iter()
+            .map(|value| value.id)
+            .collect::<Vec<_>>();
+        for left in &values {
+            for right in &values {
+                let one = ComponentLiveness::of(&liveness, *left);
+                let other = ComponentLiveness::of(&liveness, *right);
+                assert_eq!(
+                    one.interferes(&other, &liveness),
+                    left != right && liveness.interferes(*left, *right),
+                    "{left:?} against {right:?}"
+                );
+            }
+        }
+        // A component of several values interferes with a value exactly when
+        // one of its members does.
+        for (index, first) in values.iter().enumerate() {
+            for second in &values[index + 1..] {
+                if liveness.interferes(*first, *second) {
+                    continue;
+                }
+                let mut run = ComponentLiveness::of(&liveness, *first);
+                run.absorb(ComponentLiveness::of(&liveness, *second));
+                for other in &values {
+                    if other == first || other == second {
+                        continue;
+                    }
+                    assert_eq!(
+                        run.interferes(&ComponentLiveness::of(&liveness, *other), &liveness),
+                        liveness.interferes(*first, *other) || liveness.interferes(*second, *other),
+                        "{first:?}+{second:?} against {other:?}"
+                    );
+                }
+            }
+        }
     }
 }
