@@ -112,7 +112,26 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
     assert_eq!(answer["addr"].as_u64(), Some(addr), "{label}");
     let code = answer["code"].as_str().expect("code is text");
     let text = code.lines().collect::<Vec<_>>();
+    check_proof(&label, &answer);
+    check_lines(&label, &answer, &text, &instructions(binary, addr));
+    for residual in answer["residuals"].as_array().expect("residuals") {
+        check_residual(&label, residual, &text);
+    }
+    check_names(&label, &answer, code);
+    check_definition(&label, &answer, code);
+    if let Some(cc) = cc {
+        compile(cc, code, &label);
+    }
+    answer
+}
 
+/// The proof's columns partition the total, and it counts residual
+/// obligations exactly when the unit holds a residual site.
+///
+/// A residual stands in for some obligation, and an obligation counted as
+/// residual has one standing in for it: a function whose text traps never
+/// reads as fully proven, and one that reads unproven shows where.
+fn check_proof(label: &str, answer: &Value) {
     let proof = &answer["proof"];
     let columns = [
         "rendered",
@@ -132,9 +151,6 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
     })
     .sum::<u64>();
     assert_eq!(Some(columns), proof["total"].as_u64(), "{label}: {proof}");
-    // A residual stands in for some obligation, and an obligation counted as
-    // residual has one standing in for it: a function whose text traps
-    // never reads as fully proven, and one that reads unproven shows where.
     let residuals = answer["residuals"].as_array().expect("residuals");
     assert_eq!(
         proof["residual"].as_u64() == Some(0),
@@ -142,8 +158,11 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
         "{label}: {proof} beside {} residual sites",
         residuals.len()
     );
+}
 
-    let listed = instructions(binary, addr);
+/// Every line is a line of the code, and every address it names is an
+/// instruction the function's own listing has.
+fn check_lines(label: &str, answer: &Value, text: &[&str], listed: &BTreeSet<u64>) {
     for line in answer["lines"].as_array().expect("lines") {
         let at = line["line"].as_u64().expect("a line number");
         assert!(
@@ -151,48 +170,53 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
             "{label}: line {at} of {}",
             text.len()
         );
-        for address in line["addrs"].as_array().expect("addresses") {
-            let address = address.as_u64().expect("an address");
-            assert!(
-                listed.contains(&address),
-                "{label}: line {at} names {address:#x}, which the listing does not have"
-            );
-        }
+        let addresses = line["addrs"].as_array().expect("addresses");
+        let foreign = addresses
+            .iter()
+            .map(|address| address.as_u64().expect("an address"))
+            .find(|address| !listed.contains(address));
+        assert_eq!(
+            foreign, None,
+            "{label}: line {at} names an address the listing does not have"
+        );
     }
-    for residual in answer["residuals"].as_array().expect("residuals") {
-        let at = residual["line"].as_u64().expect("a line") as usize;
-        let call = format!(
-            "r2sleigh_residual_{}({})",
-            residual["type"].as_str().expect("a type"),
-            residual["site"]
-        );
+}
+
+/// The causes a residual site may state.
+const CAUSES: [&str; 6] = [
+    "unproven-return",
+    "held-from-entry",
+    "unadmitted-argument",
+    "never-assigned",
+    "unrepresentable-float",
+    "gap",
+];
+
+/// A residual is written at its site on its line, and says why it is
+/// unproven; a gap also names its marker's kind, which the comment after it
+/// spells.
+fn check_residual(label: &str, residual: &Value, text: &[&str]) {
+    let at = residual["line"].as_u64().expect("a line") as usize;
+    let call = format!(
+        "r2sleigh_residual_{}({})",
+        residual["type"].as_str().expect("a type"),
+        residual["site"]
+    );
+    let line = text.get(at - 1).copied().unwrap_or_default();
+    assert!(line.contains(&call), "{label}: {call} is not on line {at}");
+    let cause = residual["cause"].as_str().expect("a cause");
+    assert!(CAUSES.contains(&cause), "{label}: {call} has cause {cause}");
+    if cause == "gap" {
+        let kind = residual["gap"].as_str().expect("a gap's kind");
         assert!(
-            text.get(at - 1).is_some_and(|line| line.contains(&call)),
-            "{label}: {call} is not on line {at}"
+            line.contains(&format!("r2dec gap: {kind} ")),
+            "{label}: {call} is a {kind} gap"
         );
-        // Each site says why it is unproven; a gap also names its marker's
-        // kind, which the comment after it spells.
-        let cause = residual["cause"].as_str().expect("a cause");
-        assert!(
-            [
-                "unproven-return",
-                "held-from-entry",
-                "unadmitted-argument",
-                "never-assigned",
-                "unrepresentable-float",
-                "gap",
-            ]
-            .contains(&cause),
-            "{label}: {call} has cause {cause}"
-        );
-        if cause == "gap" {
-            let kind = residual["gap"].as_str().expect("a gap's kind");
-            assert!(
-                text[at - 1].contains(&format!("r2dec gap: {kind} ")),
-                "{label}: {call} is a {kind} gap"
-            );
-        }
     }
+}
+
+/// Every link and every variable is a name the code spells.
+fn check_names(label: &str, answer: &Value, code: &str) {
     for link in answer["links"].as_array().expect("links") {
         let ident = link["ident"].as_str().expect("an identifier");
         assert!(
@@ -207,28 +231,28 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
             "{label}: variable {name} is not in the code"
         );
     }
-    match &answer["refused"] {
-        Value::Null => {
-            let signature = answer["signature"].as_str().expect("a signature");
-            assert!(code.contains(signature), "{label}: {signature}");
-            let definition = answer["definition"].as_str().expect("a definition");
-            assert!(signature.contains(definition), "{label}: {signature}");
-            // The header is C: it names a type before the function, never a
-            // comment where a type should be.
-            assert!(!signature.starts_with("/*"), "{label}: {signature}");
-        }
-        // A refusal always says why, whichever layer refused.
-        refused => assert!(
+}
+
+/// A unit that defines the function carries its header, which is C; one that
+/// refuses says why, whichever layer refused.
+fn check_definition(label: &str, answer: &Value, code: &str) {
+    let refused = &answer["refused"];
+    if !refused.is_null() {
+        assert!(
             refused["reason"]
                 .as_str()
                 .is_some_and(|reason| !reason.trim().is_empty()),
             "{label}: {refused}"
-        ),
+        );
+        return;
     }
-    if let Some(cc) = cc {
-        compile(cc, code, &label);
-    }
-    answer
+    let signature = answer["signature"].as_str().expect("a signature");
+    assert!(code.contains(signature), "{label}: {signature}");
+    let definition = answer["definition"].as_str().expect("a definition");
+    assert!(signature.contains(definition), "{label}: {signature}");
+    // The header is C: it names a type before the function, never a comment
+    // where a type should be.
+    assert!(!signature.starts_with("/*"), "{label}: {signature}");
 }
 
 #[test]
@@ -252,6 +276,36 @@ fn an_unmapped_address_has_no_answer() {
     assert!(!ok, "{out}");
 }
 
+/// Whether `dispatch` at -O0 marks its return unproven as the contract says.
+///
+/// It returns what a function pointer it was handed returns, which nothing
+/// proves. Its header states the result carrier, every return is a residual
+/// of it whose cause is the unproven return, and the proof counts it.
+fn dispatch_marks_its_unproven_return(answer: &Value) -> bool {
+    let signature = answer["signature"].as_str().unwrap_or_default();
+    let code = answer["code"].as_str().unwrap_or_default();
+    let sites = answer["residuals"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let returns_residual = sites
+        .iter()
+        .any(|site| site["cause"] == "unproven-return" && site["type"] == "u64");
+    signature.starts_with("uint64_t dispatch(")
+        && code.contains("return r2sleigh_residual_u64(")
+        && returns_residual
+        && answer["proof"]["residual"].as_u64() != Some(0)
+}
+
+/// What a caught panic said.
+fn panic_text(cause: &(dyn std::any::Any + Send)) -> String {
+    cause
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| cause.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_default()
+}
+
 /// The review fixtures, named by `R2S_REVIEW_FIXTURES`: a directory holding
 /// `rv_O0g` (gcc -O0 -g) and `rv_O2` (gcc -O2) built from `review.c`. Skipped
 /// when unset, since the binaries are not in the tree.
@@ -271,35 +325,16 @@ fn the_review_fixtures_are_units_that_compile() {
             let answer = match std::panic::catch_unwind(|| checked(&binary, addr, cc)) {
                 Ok(answer) => answer,
                 Err(cause) => {
-                    let cause = cause
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| cause.downcast_ref::<&str>().map(|text| (*text).to_owned()))
-                        .unwrap_or_default();
-                    failures.push(format!("{build} {addr:#x}: {cause}"));
+                    failures.push(format!("{build} {addr:#x}: {}", panic_text(&*cause)));
                     continue;
                 }
             };
-            // `dispatch` returns what a function pointer it was handed
-            // returns, which nothing proves. At -O0 it renders, and its header
-            // states the result carrier and every return is a residual of it.
-            if build == "rv_O0g" && answer["definition"] == "dispatch" {
-                dispatch_at_o0 = true;
-                let signature = answer["signature"].as_str().unwrap_or_default();
-                let returns_residual = answer["residuals"].as_array().is_some_and(|sites| {
-                    sites
-                        .iter()
-                        .any(|site| site["cause"] == "unproven-return" && site["type"] == "u64")
-                });
-                if !signature.starts_with("uint64_t dispatch(")
-                    || !answer["code"]
-                        .as_str()
-                        .is_some_and(|code| code.contains("return r2sleigh_residual_u64("))
-                    || !returns_residual
-                    || answer["proof"]["residual"].as_u64() == Some(0)
-                {
-                    failures.push(format!("{build} dispatch: {answer}"));
-                }
+            if build != "rv_O0g" || answer["definition"] != "dispatch" {
+                continue;
+            }
+            dispatch_at_o0 = true;
+            if !dispatch_marks_its_unproven_return(&answer) {
+                failures.push(format!("{build} dispatch: {answer}"));
             }
         }
     }
