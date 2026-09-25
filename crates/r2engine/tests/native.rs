@@ -1460,6 +1460,169 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     );
 }
 
+/// `v ^= 0xff` on the low byte of a spilled `uint64_t`, as gcc -O0 writes
+/// siphash's `xor dl, 0xff`.
+const FLIP_LOW_BYTE: &[u8] = &[
+    0x55, // 0x1000 push rbp
+    0x48, 0x89, 0xe5, // 0x1001 mov rbp, rsp
+    0x48, 0x89, 0x7d, 0xf8, // 0x1004 mov [rbp-8], rdi
+    0x48, 0x8b, 0x45, 0xf8, // 0x1008 mov rax, [rbp-8]
+    0x34, 0xff, // 0x100c xor al, 0xff
+    0x48, 0x89, 0x45, 0xf8, // 0x100e mov [rbp-8], rax
+    0x48, 0x8b, 0x45, 0xf8, // 0x1012 mov rax, [rbp-8]
+    0x5d, // 0x1016 pop rbp
+    0xc3, // 0x1017 ret
+];
+
+/// mov rax, rdi; mov edx, esi; mov ah, dl; ret -- the second byte replaced.
+const REPLACE_SECOND_BYTE: &[u8] = &[
+    0x48, 0x89, 0xf8, // 0x1000 mov rax, rdi
+    0x89, 0xf2, // 0x1003 mov edx, esi
+    0x88, 0xd4, // 0x1005 mov ah, dl
+    0xc3, // 0x1007 ret
+];
+
+/// mov rax, rdi; mov ax, si; not rax; ret -- the low half-word replaced,
+/// and then the whole register read.
+const REPLACE_LOW_WORD: &[u8] = &[
+    0x48, 0x89, 0xf8, // 0x1000 mov rax, rdi
+    0x66, 0x89, 0xf0, // 0x1003 mov ax, si
+    0x48, 0xf7, 0xd0, // 0x1006 not rax
+    0xc3, // 0x1009 ret
+];
+
+/// A write to part of a register keeps the rest of the register.
+///
+/// The lane's mask was spelled `~(uint8_t)0`, which C promotes to the `int`
+/// -1 before the complement applies; widened to the register it is all ones,
+/// so `root & ~mask` kept nothing and every bit above the lane was lost. The
+/// renderings are compiled and run, so C's own promotion rules judge them.
+#[test]
+fn a_write_to_part_of_a_register_keeps_the_rest_of_it() {
+    let text = rendered(FLIP_LOW_BYTE, "flip_low_byte");
+    run_rendered(
+        "flip_low_byte",
+        &text,
+        r#"int main(void) {
+    const uint64_t cases[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL, 0xff00ULL};
+    for (int i = 0; i < 4; i++) {
+        if (flip_low_byte(cases[i]) != (cases[i] ^ 0xff)) {
+            return 1 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+
+    let text = rendered(REPLACE_SECOND_BYTE, "replace_second_byte");
+    run_rendered(
+        "replace_second_byte",
+        &text,
+        r#"int main(void) {
+    const uint64_t roots[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL};
+    const uint64_t lanes[] = {0xa5, 0x1ff, 0};
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            uint64_t want = (roots[i] & ~0xff00ULL) | (lanes[j] & 0xff) << 8;
+            if (replace_second_byte(roots[i], lanes[j]) != want) {
+                return 1 + 3 * i + j;
+            }
+        }
+    }
+    return 0;
+}"#,
+    );
+
+    let text = rendered(REPLACE_LOW_WORD, "replace_low_word");
+    run_rendered(
+        "replace_low_word",
+        &text,
+        r#"int main(void) {
+    const uint64_t roots[] = {0x1122334455667788ULL, 0, 0xffffffffffffffffULL};
+    const uint64_t lanes[] = {0xa5a5, 0x1ffff, 0};
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            uint64_t want = ~((roots[i] & ~0xffffULL) | (lanes[j] & 0xffff));
+            if (replace_low_word(roots[i], lanes[j]) != want) {
+                return 1 + 3 * i + j;
+            }
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
+/// `int typed_compete(int q) { g_sink = q; g_note = q; return g_sink +
+/// (int)g_note; }` for an `int g_sink` and a `long g_note` at fixed
+/// addresses, as gcc -O0 writes it: the parameter spilled, and each store
+/// made from its own reload, the second sign-extended.
+#[cfg(target_os = "linux")]
+const TYPED_COMPETE: &[u8] = &[
+    0x55, // 0x1000 push rbp
+    0x48, 0x89, 0xe5, // 0x1001 mov rbp, rsp
+    0x89, 0x7d, 0xfc, // 0x1004 mov [rbp-4], edi
+    0x8b, 0x45, 0xfc, // 0x1007 mov eax, [rbp-4]
+    0x89, 0x04, 0x25, 0x08, 0x00, 0x00, 0x40, // 0x100a mov [0x40000008], eax
+    0x8b, 0x45, 0xfc, // 0x1011 mov eax, [rbp-4]
+    0x48, 0x98, // 0x1014 cdqe
+    0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, // 0x1016 mov [0x40000000], rax
+    0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, // 0x101e mov rax, [0x40000000]
+    0x89, 0xc2, // 0x1026 mov edx, eax
+    0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x40, // 0x1028 mov eax, [0x40000008]
+    0x01, 0xd0, // 0x102f add eax, edx
+    0x5d, // 0x1031 pop rbp
+    0xc3, // 0x1032 ret
+];
+
+/// A store writes the bytes the instruction writes, whatever its value is typed.
+///
+/// The sign extension of the parameter's reload was certified as the reload
+/// itself, so the eight-byte value carried the four-byte parameter's type,
+/// and the store was spelled at that type: `*(uint32_t*)g_note = ...` left
+/// the upper four bytes of `g_note` as they were. The harness maps both
+/// globals, fills them, and checks every byte after each call. The globals
+/// sit at a fixed address the harness maps with a Linux mapping.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_store_writes_the_bytes_the_instruction_writes() {
+    let text = rendered(TYPED_COMPETE, "typed_compete");
+    run_rendered(
+        "typed_compete",
+        &text,
+        r#"#include <sys/mman.h>
+/* -std=c11 hides the Linux names; the values are the kernel's. */
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS 0x20
+#endif
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+int main(void) {
+    void *page = mmap((void *)0x40000000, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (page != (void *)0x40000000) {
+        return 100;
+    }
+    volatile int64_t *g_note = (volatile int64_t *)0x40000000;
+    volatile uint32_t *g_sink = (volatile uint32_t *)0x40000008;
+    const int32_t cases[] = {-1, INT32_MIN, 7, 0};
+    for (int i = 0; i < 4; i++) {
+        *g_note = 0x5555555555555555LL;
+        *g_sink = 0x55555555u;
+        uint32_t sum = (uint32_t)typed_compete((uint32_t)cases[i]);
+        if (*g_note != (int64_t)cases[i]) {
+            return 1 + i;
+        }
+        if (*g_sink != (uint32_t)cases[i] || sum != 2u * (uint32_t)cases[i]) {
+            return 11 + i;
+        }
+    }
+    return 0;
+}"#,
+    );
+}
+
 /// and x0, x0, #0xffffffffffff; ret
 const AARCH64_MASK_48: &[u8] = &[
     0x00, 0xbc, 0x40, 0x92, // 0x1000 and x0, x0, #0xffffffffffff
