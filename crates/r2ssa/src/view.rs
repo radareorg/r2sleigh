@@ -120,6 +120,13 @@ impl ValueViews {
         Solver::new(function).solve()
     }
 
+    /// The same fact, read off a graph rather than the function it was
+    /// built from: the passes that hold only the graph ask it here, by the
+    /// same rules, instead of keeping rules of their own.
+    pub(crate) fn of_graph(graph: &crate::graph::SsaGraph) -> Self {
+        Solver::from_graph(graph).solve()
+    }
+
     /// The view of `var`: its own where nothing derives it.
     pub fn view(&self, var: &SSAVar) -> ValueView {
         self.views
@@ -397,6 +404,39 @@ impl<'a> Solver<'a> {
                 }
             }
         }
+        Self::over(nodes, definitions)
+    }
+
+    fn from_graph(graph: &'a crate::graph::SsaGraph) -> Self {
+        let mut nodes = Vec::new();
+        let mut definitions = Vec::new();
+        for inst in &graph.insts {
+            match &inst.payload {
+                crate::graph::InstPayload::Phi { .. } => {
+                    let Some(output) = inst.output.and_then(|output| graph.value(output)) else {
+                        continue;
+                    };
+                    nodes.push(&output.var);
+                    definitions.push(Definition::Phi(
+                        inst.inputs
+                            .iter()
+                            .filter_map(|input| graph.value(*input))
+                            .map(|input| &input.var)
+                            .collect(),
+                    ));
+                }
+                crate::graph::InstPayload::Op(op) => {
+                    if let Some((dst, src, step)) = step_of(op) {
+                        nodes.push(dst);
+                        definitions.push(Definition::Step(src, step));
+                    }
+                }
+            }
+        }
+        Self::over(nodes, definitions)
+    }
+
+    fn over(nodes: Vec<&'a SSAVar>, definitions: Vec<Definition<'a>>) -> Self {
         let index = nodes
             .iter()
             .enumerate()

@@ -1682,19 +1682,29 @@ fn projected_peer_loop_artifact(
         target: SSAVar::new("ram:1b30", 0, 8),
         cond: SSAVar::constant(1, 1),
     }];
+    // A coherent run writes the register once and reads its narrower widths
+    // back from what it wrote: `mov eax, eax`, then `eax` and `ax` are that
+    // result's low bits. Each width's update is then the others' low bits,
+    // which is what lets the three be one object. The latch also reads `ax`
+    // before the write, so every width is carried.
     function.get_block_mut(0x1b20).expect("loop latch").ops = if coherent_storage_run {
         vec![
+            SSAOp::Copy {
+                dst: SSAVar::new(format!("{name_prefix}:read:2"), 1, 2),
+                src: phis[2].clone(),
+            },
             SSAOp::IntZExt {
                 dst: updates[0].clone(),
                 src: phis[1].clone(),
             },
-            SSAOp::IntZExt {
+            SSAOp::Subpiece {
                 dst: updates[1].clone(),
-                src: phis[2].clone(),
+                src: updates[0].clone(),
+                offset: 0,
             },
             SSAOp::Subpiece {
                 dst: updates[2].clone(),
-                src: phis[0].clone(),
+                src: updates[0].clone(),
                 offset: 0,
             },
             SSAOp::Branch {

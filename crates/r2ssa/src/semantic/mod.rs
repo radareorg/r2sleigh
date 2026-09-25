@@ -158,6 +158,7 @@ impl PreparedFunctionFacts {
         let liveness = crate::liveness::ValueLiveness::compute(
             graph,
             &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(graph, None),
         );
         let storage_spans = StorageSpans::compute(graph, &liveness);
         Self::collect_inner(
@@ -182,6 +183,7 @@ impl PreparedFunctionFacts {
         let liveness = crate::liveness::ValueLiveness::compute(
             graph,
             &crate::liveout::FunctionLiveOut::default(),
+            crate::liveness::ValueContent::of(graph, None),
         );
         let storage_spans = StorageSpans::compute(graph, &liveness);
         Self::collect_inner(
