@@ -1,29 +1,52 @@
-//! The bytes the loader writes before the program runs, where the file's own bytes are not what the program reads.
+//! What the loader does before the program runs: the relocation records it applies, the bytes it writes, where the file's own bytes are not what the program reads, and the stubs a format declares stand for imports.
 
 use std::ops::Range;
 
 use object::read::pe::ImageNtHeaders;
 use object::{Object, ObjectSection};
 
+use r2abi::statement::{ImportStub, Relocation};
+
 mod elf;
 mod macho;
 
-/// Every range of the image the loader writes, sorted and merged.
-pub(crate) fn writes(
+/// What the loader applies to one image.
+pub(crate) struct Loaded {
+    /// Every relocation record, each once, in the order it is applied.
+    pub relocations: Vec<Relocation>,
+    /// Every range of the image the loader writes, sorted and merged.
+    pub writes: Vec<Range<u64>>,
+    pub import_stubs: Vec<ImportStub>,
+}
+
+/// Every record the loader applies to the image, every range it writes, and the stubs the format declares.
+pub(crate) fn read(
     file: &object::File<'_>,
     data: &[u8],
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
     pointer: u64,
-) -> Vec<Range<u64>> {
-    let ranges = match file {
-        _ if file.kind() == object::ObjectKind::Relocatable => linked(file, placed, pointer),
-        object::File::Elf32(_) | object::File::Elf64(_) => elf::writes(file, pointer),
-        object::File::MachO32(_) | object::File::MachO64(_) => macho::writes(file, data),
-        object::File::Pe32(pe) => pe_writes(pe),
-        object::File::Pe64(pe) => pe_writes(pe),
-        _ => Vec::new(),
+) -> Loaded {
+    let (relocations, ranges, import_stubs) = match file {
+        _ if file.kind() == object::ObjectKind::Relocatable => {
+            (Vec::new(), linked(file, placed, pointer), Vec::new())
+        }
+        object::File::Elf32(_) | object::File::Elf64(_) => {
+            let (relocations, ranges) = elf::read(file, pointer);
+            (relocations, ranges, Vec::new())
+        }
+        object::File::MachO32(_) | object::File::MachO64(_) => {
+            let read = macho::read(file, data);
+            (read.relocations, read.ranges, read.stubs)
+        }
+        object::File::Pe32(pe) => (Vec::new(), pe_writes(pe), Vec::new()),
+        object::File::Pe64(pe) => (Vec::new(), pe_writes(pe), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
-    merged(ranges)
+    Loaded {
+        relocations,
+        writes: merged(ranges),
+        import_stubs,
+    }
 }
 
 /// Sorted, with overlapping and touching ranges made one.

@@ -29,7 +29,11 @@ pub struct Container {
     pub segments: Vec<Segment>,
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
+    /// Every relocation record the loader or the program's start-up applies,
+    /// each once, in the order they are applied.
     pub relocations: Vec<Relocation>,
+    /// The stubs the format declares stand for imports.
+    pub import_stubs: Vec<ImportStub>,
     /// The bytes the loader writes before the program runs, sorted and
     /// disjoint; what the file holds there is not what the program reads.
     pub loader_writes: Vec<Range<u64>>,
@@ -46,6 +50,24 @@ impl Container {
             .partition_point(|segment| segment.vaddr <= vaddr);
         let segment = self.segments.get(after.checked_sub(1)?)?;
         segment.contains(vaddr).then_some(segment)
+    }
+
+    /// Each slot the loader fills with the address of an import, and the
+    /// import's name as the record states it.
+    ///
+    /// A call to an import reaches a stub that reads one of these, or reads
+    /// one itself; a word bound to a symbol this image defines, a copy, or a
+    /// thread-local offset is no such slot.
+    pub fn import_slots(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.relocations.iter().filter_map(|relocation| {
+            let symbol = relocation.symbol.as_ref()?;
+            let bound = matches!(
+                relocation.applies,
+                Applies::Symbol | Applies::SymbolPlusAddend
+            );
+            (bound && symbol.defined.is_none() && !symbol.name.is_empty())
+                .then_some((relocation.vaddr, symbol.name.as_str()))
+        })
     }
 
     /// Whether the loader writes any byte of this range: one search over the sorted, disjoint writes.
@@ -232,14 +254,111 @@ pub struct Symbol {
     pub thumb: bool,
 }
 
-/// A slot the loader fills, and the symbol it fills it with.
+/// One relocation record the loader, or the program's own start-up, applies.
 ///
-/// The slot is where the pointer goes, not where the code is: a call to an
-/// import reaches a stub that reads this slot, so naming the stub means
-/// following the stub's own read back to here.
+/// A record, not a place: two records writing one slot are two records, and
+/// one record reached through two views of the same table -- the dynamic
+/// table's and a section header's -- is one. Where it writes is `vaddr`; which
+/// record it is, is `record`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Relocation {
+    /// Where it writes, in the coordinates the image is linked at.
     pub vaddr: u64,
+    /// Which record this is.
+    pub record: Record,
+    /// The format's own number for what it computes: ELF's `r_type`, or the
+    /// Mach-O rebase or bind type. Zero where the format numbers nothing.
+    pub ntype: u32,
+    /// How many bytes it writes.
+    pub width: u64,
+    /// The addend the record states, where it states one. `None` where the
+    /// word the file holds at `vaddr` is the addend: ELF `REL` and `RELR`, and
+    /// a Mach-O rebase.
+    pub addend: Option<i64>,
+    /// The symbol it is computed against, where it names one.
+    pub symbol: Option<RelocationSymbol>,
+    /// What the loader computes for it.
+    pub applies: Applies,
+}
+
+/// Where a relocation record is stated in the file.
+///
+/// `table` is a file offset and `index` a position there: an ELF `REL` or
+/// `RELA` entry is at its own offset with index zero, a `RELR` bitmap word
+/// states one record per bit, and a record decoded out of a stream (Android's
+/// packed tables, a Mach-O opcode stream or chain) is the stream's offset and
+/// its position in it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Record {
+    pub table: u64,
+    pub index: u64,
+}
+
+/// The symbol a relocation is computed against, as the table it names states it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelocationSymbol {
+    pub name: String,
+    /// The address this image defines it at; `None` where it is an import.
+    pub defined: Option<u64>,
+    pub size: u64,
+    pub binding: Binding,
+    pub visibility: Visibility,
+}
+
+/// What the loader computes for one relocation, by its type.
+///
+/// The psABI of each machine says it per type number; this is the part of it
+/// the value of the word depends on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Applies {
+    /// The image's own address, moved with it: the addend, or the word the file holds.
+    Relative,
+    /// The symbol's address, whatever the record's addend (`GLOB_DAT`, `JUMP_SLOT`).
+    Symbol,
+    /// The symbol's address plus the addend (`R_X86_64_64`, `R_AARCH64_ABS64`).
+    SymbolPlusAddend,
+    /// The address a resolver function returns; the addend is the resolver.
+    Resolver,
+    /// A thread-local module number or offset, which is no address.
+    ThreadLocal,
+    /// The bytes of an object another image defines, copied in.
+    Copy,
+    /// A type whose computation this reader does not state.
+    #[default]
+    Unknown,
+}
+
+/// A symbol's binding, as the table states it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Binding {
+    Local,
+    #[default]
+    Global,
+    Weak,
+    /// A binding the format numbers but this reader does not name.
+    Other(u8),
+}
+
+/// A symbol's visibility, as ELF's `st_other` states it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Visibility {
+    #[default]
+    Default,
+    Internal,
+    Hidden,
+    Protected,
+}
+
+/// One stub the format itself declares stands for an import.
+///
+/// Mach-O states it outright: a section of type `S_SYMBOL_STUBS` holds one
+/// stub per entry, `reserved2` bytes each, and the indirect symbol table says
+/// which import each stands for. The stub is code a call lands on, so it is
+/// never a relocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportStub {
+    pub vaddr: u64,
+    pub size: u64,
     pub symbol: String,
 }
 

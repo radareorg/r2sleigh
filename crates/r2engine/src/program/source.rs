@@ -34,7 +34,4 @@ pub trait Source {
 /// One definition, in `r2abi::statement`: the loader produces these and the
 /// engine reads them as they are, so a fact the container states reaches every
 /// consumer without a copy between them that could narrow it.
-pub use r2abi::statement::{
-    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section,
-    Segment, Symbol, SymbolKind,
-};
+pub use r2abi::statement::*;

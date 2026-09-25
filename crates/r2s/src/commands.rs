@@ -523,18 +523,53 @@ fn hexdump(session: &Session, argument: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// `ir`: the slots the loader fills, and what it fills them with.
+/// `ir`: every relocation record the loader applies, as radare2 lays them out.
+///
+/// `type` is radare2's: how many bits the record writes, `ADD_` where the
+/// loader adds a stated addend and `SET_` where it sets the word outright;
+/// `ntype` is the format's own number. A record naming no symbol is spelled
+/// by its addend, which for a relative relocation is the address it writes.
 fn relocations(session: &Session) -> Result<String, String> {
-    let mut out = String::from("vaddr      name\n");
+    let mut out = String::from("vaddr      paddr      type   ntype name\n");
     out.push_str(&"-".repeat(40));
-    out.push('\n');
-    for relocation in session.image().relocations() {
+    // In address order, as radare2 lists them; the container keeps the order they are applied in.
+    let mut records: Vec<&r2image::Relocation> = session.image().relocations().iter().collect();
+    records.sort_by_key(|relocation| (relocation.vaddr, relocation.record));
+    for relocation in records {
+        let paddr = file_offset_of(session, relocation.vaddr).map_or_else(
+            || "----------".to_owned(),
+            |offset| format!("{offset:#010x}"),
+        );
+        let additive = relocation.addend.is_some()
+            && relocation.ntype != 0
+            && !matches!(
+                relocation.applies,
+                r2image::Applies::Symbol | r2image::Applies::Resolver
+            );
+        let kind = format!(
+            "{}_{}",
+            if additive { "ADD" } else { "SET" },
+            relocation.width * 8
+        );
+        let mut name = relocation
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.name.clone())
+            .unwrap_or_default();
+        match relocation.addend {
+            Some(addend) if addend < 0 => name.push_str(&format!(" - {:#010x}", -addend)),
+            Some(addend) if addend > 0 && !name.is_empty() => {
+                name.push_str(&format!(" + {addend:#010x}"));
+            }
+            Some(addend) if addend > 0 => name.push_str(&format!(" {addend:#010x}")),
+            _ => {}
+        }
         out.push_str(&format!(
-            "{:#010x} {}\n",
-            relocation.vaddr, relocation.symbol
+            "\n{:#010x} {paddr} {kind:<6} {:<5} {name}",
+            relocation.vaddr, relocation.ntype
         ));
     }
-    Ok(out.trim_end().to_owned())
+    Ok(out)
 }
 
 /// The lift tier: the operations Sleigh produced, before any analysis.

@@ -1,74 +1,32 @@
-//! What an ELF loader writes: every relocation its dynamic table or its sections name, and the table words its psABI reserves.
+//! What an ELF loader writes: every relocation record its dynamic table or its sections name, and the table words its psABI reserves.
+//!
+//! There is one reader of relocation records. A table is reached two ways --
+//! through the dynamic table, as the loader reads it, and through a section
+//! header, as a static binary's start-up reads `.rela.iplt` -- and a record is
+//! identified by where its bytes are in the file, so a table both routes reach
+//! states each of its records once. The dynamic table's route is the loader's
+//! own, so its order is the order of application.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use object::read::elf::{
-    Dyn as _, ElfFile, FileHeader, ProgramHeader as _, Rel as _, Rela as _, Sym as _,
+    Dyn as _, ElfFile, FileHeader, ProgramHeader as _, Rel as _, Rela as _, SectionHeader as _,
+    Sym as _,
 };
-use object::{Object, ObjectSymbol, ObjectSymbolTable, elf};
+use object::{Object, elf};
 
-use super::{width, written};
+use r2abi::statement::{Applies, Binding, Record, Relocation, RelocationSymbol, Visibility};
 
-/// Every range the dynamic loader, or a static binary's own start-up, writes.
-pub(super) fn writes(file: &object::File<'_>, pointer: u64) -> Vec<Range<u64>> {
-    let mut ranges = sectioned(file, pointer);
-    let tabled = match file {
-        object::File::Elf32(file) => tabled(file, pointer),
-        object::File::Elf64(file) => tabled(file, pointer),
-        _ => Vec::new(),
-    };
-    ranges.extend(tabled);
-    ranges
-}
+use super::written;
 
-/// The relocation sections: what a static binary's start-up applies, and what the dynamic table names where it has sections.
-fn sectioned(file: &object::File<'_>, pointer: u64) -> Vec<Range<u64>> {
-    let copy = copy_type(file.architecture());
-    let one = |(vaddr, relocation): (u64, object::Relocation)| {
-        let copied = matches!(relocation.flags(), object::RelocationFlags::Elf { r_type } if Some(r_type) == copy);
-        let bytes = match copied {
-            true => copied_size(file, &relocation).unwrap_or(pointer),
-            false => width(relocation.size(), pointer),
-        };
-        written(vaddr, bytes)
-    };
-    let mut ranges = file
-        .dynamic_relocations()
-        .into_iter()
-        .flatten()
-        .map(one)
-        .collect::<Vec<_>>();
-    let packed = match file {
-        object::File::Elf32(file) => relr(file),
-        object::File::Elf64(file) => relr(file),
-        _ => Vec::new(),
-    };
-    ranges.extend(packed.into_iter().map(|vaddr| written(vaddr, pointer)));
-    ranges
-}
-
-/// What the dynamic table names, read as the loader reads it: through the program headers, whatever sections remain.
-fn tabled<'data, E, R>(file: &ElfFile<'data, E, R>, pointer: u64) -> Vec<Range<u64>>
-where
-    E: FileHeader,
-    R: object::ReadRef<'data>,
-{
-    let Some(table) = Table::of(file) else {
-        return Vec::new();
-    };
-    let copy = copy_type(file.architecture());
-    let mut ranges = Vec::new();
-    for (offset, typ, symbol) in table.relocations() {
-        let bytes = match Some(typ) == copy {
-            true => table.symbol_size(symbol).unwrap_or(pointer),
-            false => pointer,
-        };
-        ranges.push(written(offset, bytes));
+/// Every relocation record the dynamic loader, or a static binary's own start-up, applies, in the order it applies them; and every range they and the psABI's reserved words write.
+pub(super) fn read(file: &object::File<'_>, pointer: u64) -> (Vec<Relocation>, Vec<Range<u64>>) {
+    match file {
+        object::File::Elf32(file) => Elf::of(file, pointer).read(),
+        object::File::Elf64(file) => Elf::of(file, pointer).read(),
+        _ => (Vec::new(), Vec::new()),
     }
-    let packed = table.packed();
-    ranges.extend(packed.into_iter().map(|vaddr| written(vaddr, pointer)));
-    ranges.extend(table.reserved(pointer));
-    ranges
 }
 
 /// Tags Android's linker reads beside the standard ones.
@@ -81,45 +39,105 @@ const DT_ANDROID_RELRSZ: u32 = 0x6fff_e001;
 /// The generic packed relative table, which `object` does not name.
 const DT_RELR: u32 = 36;
 const DT_RELRSZ: u32 = 35;
+/// Android's section types for the same tables.
+const SHT_ANDROID_REL: u32 = 0x6000_0001;
+const SHT_ANDROID_RELA: u32 = 0x6000_0002;
+const SHT_ANDROID_RELR: u32 = 0x6fff_ff00;
 
-/// One image's dynamic table, and the loaded bytes its addresses name.
-struct Table<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> {
-    file: &'f ElfFile<'data, E, R>,
-    entries: &'data [E::Dyn],
+/// How a table spells its records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    Rel,
+    Rela,
+    Relr,
+    /// Android's `APS2` stream, with or without addends.
+    Packed {
+        addend: bool,
+    },
 }
 
-impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Table<'f, 'data, E, R> {
-    fn of(file: &'f ElfFile<'data, E, R>) -> Option<Self> {
-        let (endian, data) = (file.endian(), file.data());
-        let mut headers = file.elf_program_headers().iter();
-        let header = headers.find(|header| header.p_type(endian) == elf::PT_DYNAMIC)?;
-        let offset: u64 = header.p_offset(endian).into();
-        let length = data
-            .len()
-            .ok()?
-            .saturating_sub(offset)
-            .min(header.p_filesz(endian).into());
-        let entries = whole::<E::Dyn>(data.read_bytes_at(offset, length).ok()?);
-        // The loader reads to the terminating entry, whatever size the header claims.
-        let end = entries
+/// Where a table's symbol indices point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Symbols {
+    /// The dynamic table's own `DT_SYMTAB`, which is what the loader reads.
+    Dynamic,
+    /// The symbol table a section header links to.
+    Section(object::SectionIndex),
+    /// None: a record naming a symbol names nothing this image states.
+    None,
+}
+
+/// One table of relocation records, located in the file.
+#[derive(Debug, Clone, Copy)]
+struct View {
+    offset: u64,
+    size: u64,
+    form: Form,
+    /// When the loader applies it: packed relative words first, then the
+    /// explicit tables, then the procedure-linkage table, then what only a
+    /// static start-up applies.
+    phase: u8,
+    symbols: Symbols,
+}
+
+/// One image's program headers, dynamic table and section headers, read the way its loader reads them.
+struct Elf<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> {
+    file: &'f ElfFile<'data, E, R>,
+    endian: E::Endian,
+    pointer: u64,
+    dynamic: &'data [E::Dyn],
+}
+
+impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
+    fn of(file: &'f ElfFile<'data, E, R>, pointer: u64) -> Self {
+        let endian = file.endian();
+        Self {
+            file,
+            endian,
+            pointer,
+            dynamic: dynamic_entries(file).unwrap_or_default(),
+        }
+    }
+
+    /// Every record once, in application order, and every range written.
+    fn read(&self) -> (Vec<Relocation>, Vec<Range<u64>>) {
+        let mut views = self.tabled();
+        views.extend(self.sectioned());
+        // A record is where its bytes are; the first view to reach it -- the
+        // loader's own, where it has one -- says when it is applied.
+        let mut seen: BTreeMap<Record, usize> = BTreeMap::new();
+        let mut records: Vec<(u8, Relocation)> = Vec::new();
+        for view in &views {
+            for record in self.records(view) {
+                if seen.contains_key(&record.record) {
+                    continue;
+                }
+                seen.insert(record.record, records.len());
+                records.push((view.phase, record));
+            }
+        }
+        // Stable: within one phase, table order is application order.
+        records.sort_by_key(|(phase, _)| *phase);
+        let relocations: Vec<Relocation> = records.into_iter().map(|(_, record)| record).collect();
+        let mut ranges: Vec<Range<u64>> = relocations
             .iter()
-            .position(|entry| entry.d_tag(endian).into() == 0);
-        let entries = &entries[..end.unwrap_or(entries.len())];
-        Some(Self { file, entries })
+            .map(|record| written(record.vaddr, extent(record, self.pointer)))
+            .collect();
+        ranges.extend(self.reserved());
+        (relocations, ranges)
     }
 
     fn tag(&self, wanted: u32) -> Option<u64> {
-        let endian = self.file.endian();
         let entry = self
-            .entries
+            .dynamic
             .iter()
-            .find(|entry| entry.tag32(endian) == Some(wanted))?;
-        Some(entry.d_val(endian).into())
+            .find(|entry| entry.tag32(self.endian) == Some(wanted))?;
+        Some(entry.d_val(self.endian).into())
     }
 
-    /// The file bytes a loaded range holds, found through the segment that loads it.
-    fn bytes(&self, vaddr: u64, size: u64) -> Option<&'data [u8]> {
-        let endian = self.file.endian();
+    /// The file offset a loaded range starts at, found through the segment that loads it.
+    fn offset_of(&self, vaddr: u64, size: u64) -> Option<u64> {
+        let endian = self.endian;
         let header = self.file.elf_program_headers().iter().find(|header| {
             let (start, filesz): (u64, u64) = (
                 header.p_vaddr(endian).into(),
@@ -132,93 +150,229 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Table<'f, 'data, E, R>
                     .is_some_and(|end| end <= filesz)
         })?;
         let into = vaddr - header.p_vaddr(endian).into();
-        let offset = header.p_offset(endian).into().checked_add(into)?;
-        self.file.data().read_bytes_at(offset, size).ok()
+        header.p_offset(endian).into().checked_add(into)
     }
 
-    /// The bytes a pair of tags names: where a table is loaded, and how long it is.
-    fn table(&self, address: u32, size: u32) -> Option<&'data [u8]> {
-        self.bytes(self.tag(address)?, self.tag(size)?)
+    fn bytes(&self, offset: u64, size: u64) -> &'data [u8] {
+        self.file
+            .data()
+            .read_bytes_at(offset, size)
+            .unwrap_or_default()
     }
 
-    /// Each explicit relocation: its offset, its type and its symbol.
-    fn relocations(&self) -> Vec<(u64, u32, u32)> {
-        let mut found = Vec::new();
+    /// The tables the dynamic table names, as the loader reads them: through the program headers, whatever sections remain.
+    fn tabled(&self) -> Vec<View> {
         let plt_rela = self.tag(elf::DT_PLTREL) == Some(u64::from(elf::DT_RELA));
-        for (bytes, rela) in [
-            (self.table(elf::DT_RELA, elf::DT_RELASZ), true),
-            (self.table(elf::DT_REL, elf::DT_RELSZ), false),
-            (self.table(elf::DT_JMPREL, elf::DT_PLTRELSZ), plt_rela),
-        ] {
-            found.extend(bytes.map_or_else(Vec::new, |bytes| self.entries_of(bytes, rela)));
-        }
-        found
+        let tables = [
+            (DT_RELR, DT_RELRSZ, Form::Relr, 0),
+            (DT_ANDROID_RELR, DT_ANDROID_RELRSZ, Form::Relr, 0),
+            (elf::DT_RELA, elf::DT_RELASZ, Form::Rela, 1),
+            (elf::DT_REL, elf::DT_RELSZ, Form::Rel, 1),
+            (
+                DT_ANDROID_RELA,
+                DT_ANDROID_RELASZ,
+                Form::Packed { addend: true },
+                1,
+            ),
+            (
+                DT_ANDROID_REL,
+                DT_ANDROID_RELSZ,
+                Form::Packed { addend: false },
+                1,
+            ),
+            (
+                elf::DT_JMPREL,
+                elf::DT_PLTRELSZ,
+                if plt_rela { Form::Rela } else { Form::Rel },
+                2,
+            ),
+        ];
+        tables
+            .into_iter()
+            .filter_map(|(address, size, form, phase)| {
+                let (address, size) = (self.tag(address)?, self.tag(size)?);
+                Some(View {
+                    offset: self.offset_of(address, size)?,
+                    size,
+                    form,
+                    phase,
+                    symbols: Symbols::Dynamic,
+                })
+            })
+            .collect()
     }
 
-    /// The entries of one `Rel` or `Rela` table.
-    fn entries_of(&self, bytes: &'data [u8], rela: bool) -> Vec<(u64, u32, u32)> {
-        let (endian, mips64el) = (
-            self.file.endian(),
-            self.file.elf_header().is_mips64el(self.file.endian()),
-        );
-        match rela {
-            true => whole::<E::Rela>(bytes)
+    /// Every loaded relocation section: what a static binary's start-up applies, and the same tables again where the dynamic table names them.
+    fn sectioned(&self) -> Vec<View> {
+        let endian = self.endian;
+        let table = self.file.elf_section_table();
+        let mut views = Vec::new();
+        for header in table.iter() {
+            let form = match header.sh_type(endian) {
+                elf::SHT_REL => Form::Rel,
+                elf::SHT_RELA => Form::Rela,
+                elf::SHT_RELR | SHT_ANDROID_RELR => Form::Relr,
+                SHT_ANDROID_REL => Form::Packed { addend: false },
+                SHT_ANDROID_RELA => Form::Packed { addend: true },
+                _ => continue,
+            };
+            let flags: u64 = header.sh_flags(endian).into();
+            if flags & u64::from(elf::SHF_ALLOC) == 0 {
+                continue;
+            }
+            let link = header.sh_link(endian);
+            views.push(View {
+                offset: header.sh_offset(endian).into(),
+                size: header.sh_size(endian).into(),
+                form,
+                phase: 3,
+                symbols: match link {
+                    0 => Symbols::None,
+                    link => Symbols::Section(object::SectionIndex(link as usize)),
+                },
+            });
+        }
+        views
+    }
+
+    /// The records of one table.
+    fn records(&self, view: &View) -> Vec<Relocation> {
+        let bytes = self.bytes(view.offset, view.size);
+        let (endian, mips64el) = (self.endian, self.file.elf_header().is_mips64el(self.endian));
+        let at = |index: usize, size: usize| Record {
+            table: view.offset + (index * size) as u64,
+            index: 0,
+        };
+        let raw: Vec<(Record, u64, u32, u32, Option<i64>)> = match view.form {
+            Form::Rela => whole::<E::Rela>(bytes)
                 .iter()
-                .map(|entry| {
+                .enumerate()
+                .map(|(index, entry)| {
                     (
+                        at(index, std::mem::size_of::<E::Rela>()),
                         entry.r_offset(endian).into(),
                         entry.r_type(endian, mips64el),
                         entry.r_sym(endian, mips64el),
+                        Some(entry.r_addend(endian).into()),
                     )
                 })
                 .collect(),
-            false => whole::<E::Rel>(bytes)
+            Form::Rel => whole::<E::Rel>(bytes)
                 .iter()
-                .map(|entry| {
+                .enumerate()
+                .map(|(index, entry)| {
                     (
+                        at(index, std::mem::size_of::<E::Rel>()),
                         entry.r_offset(endian).into(),
                         entry.r_type(endian),
                         entry.r_sym(endian),
+                        None,
                     )
                 })
                 .collect(),
-        }
+            Form::Relr => {
+                let relative = relative_type(self.file.elf_header().e_machine(endian));
+                relr(bytes, self.pointer, self.file.is_little_endian())
+                    .into_iter()
+                    .map(|(offset, bit, vaddr)| {
+                        let record = Record {
+                            table: view.offset + offset,
+                            index: bit,
+                        };
+                        (record, vaddr, relative.unwrap_or(0), 0, None)
+                    })
+                    .collect()
+            }
+            Form::Packed { addend } => {
+                let is_64 = self.file.is_64();
+                android_packed(bytes, addend)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (vaddr, info, addend))| {
+                        let (symbol, typ) = match is_64 {
+                            true => ((info >> 32) as u32, info as u32),
+                            false => ((info >> 8) as u32, (info & 0xff) as u32),
+                        };
+                        let record = Record {
+                            table: view.offset,
+                            index: index as u64,
+                        };
+                        (record, vaddr, typ, symbol, addend)
+                    })
+                    .collect()
+            }
+        };
+        let machine = self.file.elf_header().e_machine(endian);
+        raw.into_iter()
+            .filter_map(|(record, vaddr, ntype, symbol, addend)| {
+                // A packed relative word is a relative relocation of a pointer, whatever the machine numbers it.
+                let (applies, width) = match view.form {
+                    Form::Relr => (Applies::Relative, self.pointer),
+                    _ => applies(machine, ntype, self.pointer)?,
+                };
+                let symbol = (symbol != 0)
+                    .then(|| self.symbol(view.symbols, symbol))
+                    .flatten();
+                Some(Relocation {
+                    vaddr,
+                    record,
+                    ntype,
+                    width,
+                    addend,
+                    symbol,
+                    applies,
+                })
+            })
+            .collect()
     }
 
-    /// Every address a packed table relocates: `DT_RELR` and Android's packed forms.
-    fn packed(&self) -> Vec<u64> {
-        let endian = self.file.endian();
-        let mut found = Vec::new();
-        for (address, size) in [(DT_RELR, DT_RELRSZ), (DT_ANDROID_RELR, DT_ANDROID_RELRSZ)] {
-            let words = whole::<E::Relr>(self.table(address, size).unwrap_or_default());
-            found.extend(object::read::elf::RelrIterator::<E>::new(endian, words).map(Into::into));
-        }
-        for (address, size, rela) in [
-            (DT_ANDROID_REL, DT_ANDROID_RELSZ, false),
-            (DT_ANDROID_RELA, DT_ANDROID_RELASZ, true),
-        ] {
-            found.extend(android_packed(
-                self.table(address, size).unwrap_or_default(),
-                rela,
-            ));
-        }
-        found
-    }
-
-    /// The size of the object a dynamic symbol names, read from the table the loader reads it from.
-    fn symbol_size(&self, index: u32) -> Option<u64> {
-        let (symbols, entry) = (self.tag(elf::DT_SYMTAB)?, self.tag(elf::DT_SYMENT)?);
-        let bytes = self.bytes(
-            symbols.wrapping_add(u64::from(index).wrapping_mul(entry)),
-            entry,
-        )?;
-        let (symbol, _) = object::pod::from_bytes::<E::Sym>(bytes).ok()?;
-        Some(symbol.st_size(self.file.endian()).into()).filter(|size| *size > 0)
+    /// The symbol one index names, in the table the view's records index.
+    fn symbol(&self, symbols: Symbols, index: u32) -> Option<RelocationSymbol> {
+        let endian = self.endian;
+        let data = self.file.data();
+        let (symbol, name): (&E::Sym, &[u8]) = match symbols {
+            Symbols::None => return None,
+            Symbols::Section(section) => {
+                let table = self
+                    .file
+                    .elf_section_table()
+                    .symbol_table_by_index(endian, data, section)
+                    .ok()?;
+                let symbol = table.symbol(object::SymbolIndex(index as usize)).ok()?;
+                (symbol, table.symbol_name(endian, symbol).ok()?)
+            }
+            Symbols::Dynamic => {
+                let entry = self.tag(elf::DT_SYMENT)?;
+                let address = self
+                    .tag(elf::DT_SYMTAB)?
+                    .checked_add(u64::from(index).checked_mul(entry)?)?;
+                let offset = self.offset_of(address, entry)?;
+                let (symbol, _) =
+                    object::pod::from_bytes::<E::Sym>(self.bytes(offset, entry)).ok()?;
+                let strings = self.tag(elf::DT_STRTAB)?;
+                let length = self.tag(elf::DT_STRSZ)?;
+                let start = u64::from(symbol.st_name(endian));
+                let table = self.offset_of(strings, length)?;
+                let text = self.bytes(table, length).get(start as usize..)?;
+                let end = text.iter().position(|byte| *byte == 0)?;
+                (symbol, &text[..end])
+            }
+        };
+        let name = core::str::from_utf8(name).ok()?.to_owned();
+        let defined = symbol.st_shndx(endian) != elf::SHN_UNDEF;
+        Some(RelocationSymbol {
+            name,
+            defined: defined.then(|| symbol.st_value(endian).into()),
+            size: symbol.st_size(endian).into(),
+            binding: binding(symbol.st_bind()),
+            visibility: visibility(symbol.st_visibility()),
+        })
     }
 
     /// The words of the global offset table the loader fills with no relocation naming them, as each psABI reserves them.
-    fn reserved(&self, pointer: u64) -> Option<Range<u64>> {
+    fn reserved(&self) -> Option<Range<u64>> {
         use object::Architecture as A;
+        let pointer = self.pointer;
         let got = self.tag(elf::DT_PLTGOT)?;
         let (first, count) = match self.file.architecture() {
             // The link map and the lazy resolver, after the word that holds `_DYNAMIC`.
@@ -241,71 +395,194 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Table<'f, 'data, E, R>
     }
 }
 
+/// The dynamic table's entries, read through `PT_DYNAMIC` to the terminating one.
+fn dynamic_entries<'data, E: FileHeader, R: object::ReadRef<'data>>(
+    file: &ElfFile<'data, E, R>,
+) -> Option<&'data [E::Dyn]> {
+    let (endian, data) = (file.endian(), file.data());
+    let mut headers = file.elf_program_headers().iter();
+    let header = headers.find(|header| header.p_type(endian) == elf::PT_DYNAMIC)?;
+    let offset: u64 = header.p_offset(endian).into();
+    let length = data
+        .len()
+        .ok()?
+        .saturating_sub(offset)
+        .min(header.p_filesz(endian).into());
+    let entries = whole::<E::Dyn>(data.read_bytes_at(offset, length).ok()?);
+    // The loader reads to the terminating entry, whatever size the header claims.
+    let end = entries
+        .iter()
+        .position(|entry| entry.d_tag(endian).into() == 0);
+    Some(&entries[..end.unwrap_or(entries.len())])
+}
+
+/// How many bytes one record writes: a copy writes the whole object it names.
+fn extent(record: &Relocation, pointer: u64) -> u64 {
+    match record.applies {
+        Applies::Copy => record
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol.size)
+            .filter(|size| *size > 0)
+            .unwrap_or(pointer),
+        _ => record.width,
+    }
+}
+
+fn binding(bind: u8) -> Binding {
+    match bind {
+        elf::STB_LOCAL => Binding::Local,
+        elf::STB_GLOBAL => Binding::Global,
+        elf::STB_WEAK => Binding::Weak,
+        other => Binding::Other(other),
+    }
+}
+
+fn visibility(other: u8) -> Visibility {
+    match other & 3 {
+        elf::STV_INTERNAL => Visibility::Internal,
+        elf::STV_HIDDEN => Visibility::Hidden,
+        elf::STV_PROTECTED => Visibility::Protected,
+        _ => Visibility::Default,
+    }
+}
+
+/// The machine's type number for a relative relocation, which a `RELR` word applies.
+fn relative_type(machine: u16) -> Option<u32> {
+    Some(match machine {
+        elf::EM_X86_64 => elf::R_X86_64_RELATIVE,
+        elf::EM_386 => elf::R_386_RELATIVE,
+        elf::EM_AARCH64 => elf::R_AARCH64_RELATIVE,
+        elf::EM_ARM => elf::R_ARM_RELATIVE,
+        elf::EM_RISCV => elf::R_RISCV_RELATIVE,
+        elf::EM_LOONGARCH => elf::R_LARCH_RELATIVE,
+        _ => return None,
+    })
+}
+
+/// What a dynamic relocation type computes and how many bytes it writes, as the machine's psABI states it; `None` for the type that writes nothing.
+///
+/// A type this table does not name is still a write the loader makes, so it
+/// is kept, at the width of a pointer, with its computation unknown.
+fn applies(machine: u16, ntype: u32, pointer: u64) -> Option<(Applies, u64)> {
+    use Applies as A;
+    if ntype == 0 {
+        return None;
+    }
+    let (applies, width) = match machine {
+        elf::EM_X86_64 => match ntype {
+            elf::R_X86_64_64 => (A::SymbolPlusAddend, 8),
+            elf::R_X86_64_32 | elf::R_X86_64_32S => (A::SymbolPlusAddend, 4),
+            elf::R_X86_64_COPY => (A::Copy, pointer),
+            elf::R_X86_64_GLOB_DAT | elf::R_X86_64_JUMP_SLOT => (A::Symbol, pointer),
+            elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 => (A::Relative, pointer),
+            elf::R_X86_64_IRELATIVE => (A::Resolver, pointer),
+            elf::R_X86_64_DTPMOD64 | elf::R_X86_64_DTPOFF64 | elf::R_X86_64_TPOFF64 => {
+                (A::ThreadLocal, 8)
+            }
+            elf::R_X86_64_TLSDESC => (A::ThreadLocal, 16),
+            _ => (A::Unknown, pointer),
+        },
+        elf::EM_386 => match ntype {
+            elf::R_386_32 => (A::SymbolPlusAddend, 4),
+            elf::R_386_COPY => (A::Copy, 4),
+            elf::R_386_GLOB_DAT | elf::R_386_JMP_SLOT => (A::Symbol, 4),
+            elf::R_386_RELATIVE => (A::Relative, 4),
+            elf::R_386_IRELATIVE => (A::Resolver, 4),
+            elf::R_386_TLS_TPOFF
+            | elf::R_386_TLS_DTPMOD32
+            | elf::R_386_TLS_DTPOFF32
+            | elf::R_386_TLS_TPOFF32 => (A::ThreadLocal, 4),
+            elf::R_386_TLS_DESC => (A::ThreadLocal, 8),
+            _ => (A::Unknown, 4),
+        },
+        elf::EM_AARCH64 => match ntype {
+            elf::R_AARCH64_ABS64 => (A::SymbolPlusAddend, 8),
+            elf::R_AARCH64_ABS32 => (A::SymbolPlusAddend, 4),
+            elf::R_AARCH64_COPY => (A::Copy, 8),
+            // AArch64 adds the addend to both, which ELF gABI leaves to the psABI.
+            elf::R_AARCH64_GLOB_DAT | elf::R_AARCH64_JUMP_SLOT => (A::SymbolPlusAddend, 8),
+            elf::R_AARCH64_RELATIVE => (A::Relative, 8),
+            elf::R_AARCH64_IRELATIVE => (A::Resolver, 8),
+            elf::R_AARCH64_TLS_DTPMOD | elf::R_AARCH64_TLS_DTPREL | elf::R_AARCH64_TLS_TPREL => {
+                (A::ThreadLocal, 8)
+            }
+            elf::R_AARCH64_TLSDESC => (A::ThreadLocal, 16),
+            _ => (A::Unknown, pointer),
+        },
+        elf::EM_ARM => match ntype {
+            elf::R_ARM_ABS32 => (A::SymbolPlusAddend, 4),
+            elf::R_ARM_COPY => (A::Copy, 4),
+            elf::R_ARM_GLOB_DAT | elf::R_ARM_JUMP_SLOT => (A::Symbol, 4),
+            elf::R_ARM_RELATIVE => (A::Relative, 4),
+            elf::R_ARM_IRELATIVE => (A::Resolver, 4),
+            elf::R_ARM_TLS_DTPMOD32 | elf::R_ARM_TLS_DTPOFF32 | elf::R_ARM_TLS_TPOFF32 => {
+                (A::ThreadLocal, 4)
+            }
+            elf::R_ARM_TLS_DESC => (A::ThreadLocal, 8),
+            _ => (A::Unknown, 4),
+        },
+        elf::EM_RISCV => match ntype {
+            elf::R_RISCV_32 => (A::SymbolPlusAddend, 4),
+            elf::R_RISCV_64 => (A::SymbolPlusAddend, 8),
+            elf::R_RISCV_COPY => (A::Copy, pointer),
+            elf::R_RISCV_JUMP_SLOT => (A::Symbol, pointer),
+            elf::R_RISCV_RELATIVE => (A::Relative, pointer),
+            elf::R_RISCV_IRELATIVE => (A::Resolver, pointer),
+            elf::R_RISCV_TLS_DTPMOD32 | elf::R_RISCV_TLS_DTPREL32 | elf::R_RISCV_TLS_TPREL32 => {
+                (A::ThreadLocal, 4)
+            }
+            elf::R_RISCV_TLS_DTPMOD64 | elf::R_RISCV_TLS_DTPREL64 | elf::R_RISCV_TLS_TPREL64 => {
+                (A::ThreadLocal, 8)
+            }
+            _ => (A::Unknown, pointer),
+        },
+        _ => (A::Unknown, pointer),
+    };
+    Some((applies, width))
+}
+
 /// As many whole entries as the bytes hold.
 fn whole<T: object::Pod>(bytes: &[u8]) -> &[T] {
     let count = bytes.len() / std::mem::size_of::<T>().max(1);
     object::pod::slice_from_bytes::<T>(bytes, count).map_or(&[], |(entries, _)| entries)
 }
 
-/// The relocation type that copies a whole object out of a library, which is as wide as that object.
-fn copy_type(architecture: object::Architecture) -> Option<u32> {
-    use object::Architecture as A;
-    Some(match architecture {
-        A::X86_64 | A::X86_64_X32 => elf::R_X86_64_COPY,
-        A::I386 => elf::R_386_COPY,
-        A::Aarch64 | A::Aarch64_Ilp32 => elf::R_AARCH64_COPY,
-        A::Arm => elf::R_ARM_COPY,
-        A::Riscv32 | A::Riscv64 => elf::R_RISCV_COPY,
-        A::PowerPc | A::PowerPc64 => elf::R_PPC_COPY,
-        A::Mips | A::Mips64 | A::Mips64_N32 => elf::R_MIPS_COPY,
-        A::Sparc | A::Sparc32Plus | A::Sparc64 => elf::R_SPARC_COPY,
-        A::S390x => elf::R_390_COPY,
-        A::LoongArch64 => elf::R_LARCH_COPY,
-        _ => return None,
-    })
-}
-
-/// How many bytes a copy relocation writes: the size of the object it names.
-fn copied_size(file: &object::File<'_>, relocation: &object::Relocation) -> Option<u64> {
-    let object::RelocationTarget::Symbol(index) = relocation.target() else {
-        return None;
-    };
-    let symbol = file.dynamic_symbol_table()?.symbol_by_index(index).ok()?;
-    Some(symbol.size()).filter(|size| *size > 0)
-}
-
-/// Every address a packed section relocates: `SHT_RELR`, and Android's packed forms.
-fn relr<'data, Elf, R>(file: &object::read::elf::ElfFile<'data, Elf, R>) -> Vec<u64>
-where
-    Elf: object::read::elf::FileHeader,
-    R: object::ReadRef<'data>,
-{
-    use object::read::elf::{RelrIterator, SectionHeader as _};
-    const ANDROID_REL: u32 = 0x6000_0001;
-    const ANDROID_RELA: u32 = 0x6000_0002;
-    const ANDROID_RELR: u32 = 0x6fff_ff00;
-    let endian = file.endian();
+/// Every address a packed relative table relocates, each with the offset of the word stating it and which bit of that word does.
+///
+/// An even word is an address, and states itself; an odd one is a bitmap over
+/// the pointer-sized words after the last address, each set bit above bit
+/// zero one relocation, and the next bitmap continues where it ends.
+fn relr(bytes: &[u8], pointer: u64, little: bool) -> Vec<(u64, u64, u64)> {
     let mut found = Vec::new();
-    for section in file.elf_section_table().iter() {
-        let kind = section.sh_type(endian);
-        match kind {
-            object::elf::SHT_RELR | ANDROID_RELR => {
-                let words = section.data_as_array::<Elf::Relr, _>(endian, file.data());
-                let words = words.unwrap_or_default();
-                found.extend(RelrIterator::<Elf>::new(endian, words).map(Into::into));
-            }
-            ANDROID_REL | ANDROID_RELA => {
-                let data = section.data(endian, file.data()).unwrap_or_default();
-                found.extend(android_packed(data, kind == ANDROID_RELA));
-            }
-            _ => {}
+    let mut base = 0u64;
+    let bits = pointer * 8;
+    for (index, word) in bytes.chunks_exact(pointer as usize).enumerate() {
+        let offset = index as u64 * pointer;
+        let value = word.iter().enumerate().fold(0u64, |value, (at, byte)| {
+            let shift = match little {
+                true => 8 * at,
+                false => 8 * (word.len() - 1 - at),
+            };
+            value | u64::from(*byte) << shift
+        });
+        if value & 1 == 0 {
+            found.push((offset, 0, value));
+            base = value.wrapping_add(pointer);
+            continue;
         }
+        for bit in 1..bits {
+            if value >> bit & 1 == 1 {
+                found.push((offset, bit, base.wrapping_add((bit - 1) * pointer)));
+            }
+        }
+        base = base.wrapping_add((bits - 1) * pointer);
     }
     found
 }
 
-/// The offsets an `APS2` packed relocation section names, as bionic's linker decodes it.
-fn android_packed(data: &[u8], addend: bool) -> Vec<u64> {
+/// Each relocation an `APS2` packed stream states, as bionic's linker decodes it: its offset, its info word, and its addend where the stream carries them.
+fn android_packed(data: &[u8], addend: bool) -> Vec<(u64, u64, Option<i64>)> {
     let Some(stream) = data.strip_prefix(b"APS2") else {
         return Vec::new();
     };
@@ -320,6 +597,8 @@ fn android_packed(data: &[u8], addend: bool) -> Vec<u64> {
         leb,
         addend,
         offset,
+        info: 0,
+        value: 0,
         found: Vec::new(),
     };
     let mut left = count;
@@ -332,12 +611,15 @@ fn android_packed(data: &[u8], addend: bool) -> Vec<u64> {
     packed.found
 }
 
-/// An `APS2` stream being decoded: where it is, and the offset the last relocation left.
+/// An `APS2` stream being decoded: where it is, and the fields the last relocation left.
 struct Packed<'b> {
     leb: Leb<'b>,
     addend: bool,
     offset: i64,
-    found: Vec<u64>,
+    info: i64,
+    /// The addend, which the stream states as a running sum.
+    value: i64,
+    found: Vec<(u64, u64, Option<i64>)>,
 }
 
 impl Packed<'_> {
@@ -351,14 +633,26 @@ impl Packed<'_> {
         let (by_info, by_delta, by_addend) = (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
         let has_addend = self.addend && flags & 8 != 0;
         let delta = if by_delta { self.leb.sleb()? } else { 0 };
-        let shared = usize::from(by_info) + usize::from(has_addend && by_addend);
-        let own = usize::from(!by_info) + usize::from(has_addend && !by_addend);
-        self.leb.skip(shared)?;
+        if by_info {
+            self.info = self.leb.sleb()?;
+        }
+        if self.addend && by_addend {
+            self.value = self.value.wrapping_add(self.leb.sleb()?);
+        } else if !has_addend {
+            self.value = 0;
+        }
         for _ in 0..size {
             let step = if by_delta { delta } else { self.leb.sleb()? };
             self.offset = self.offset.wrapping_add(step);
-            self.leb.skip(own)?;
-            self.found.push(self.offset as u64);
+            if !by_info {
+                self.info = self.leb.sleb()?;
+            }
+            if has_addend && !by_addend {
+                self.value = self.value.wrapping_add(self.leb.sleb()?);
+            }
+            let addend = self.addend.then_some(self.value);
+            self.found
+                .push((self.offset as u64, self.info as u64, addend));
         }
         Some(size)
     }
@@ -390,13 +684,6 @@ impl Leb<'_> {
             value
         })
     }
-
-    fn skip(&mut self, count: usize) -> Option<()> {
-        for _ in 0..count {
-            self.sleb()?;
-        }
-        Some(())
-    }
 }
 
 #[cfg(test)]
@@ -413,6 +700,24 @@ mod tests {
             0x01, 0x09, 0x83, 0x08, 0x80, 0x02,
             0x10, // group: size, flags, info; a delta and an addend
         ];
-        assert_eq!(android_packed(&stream, true), [0x1008, 0x1010, 0x1110]);
+        let offsets: Vec<u64> = android_packed(&stream, true)
+            .into_iter()
+            .map(|(offset, ..)| offset)
+            .collect();
+        assert_eq!(offsets, [0x1008, 0x1010, 0x1110]);
+    }
+
+    #[test]
+    fn a_relr_bitmap_states_one_relocation_per_set_bit_after_the_address_it_follows() {
+        // 0x1000, then a bitmap with bits 1 and 3 set: 0x1008 and 0x1018.
+        let mut words = Vec::new();
+        words.extend_from_slice(&0x1000u64.to_le_bytes());
+        words.extend_from_slice(&0b1011u64.to_le_bytes());
+        let found = relr(&words, 8, true);
+        assert_eq!(
+            found,
+            [(0, 0, 0x1000), (8, 1, 0x1008), (8, 3, 0x1018)],
+            "each record is the word stating it and the bit"
+        );
     }
 }

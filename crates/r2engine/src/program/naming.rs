@@ -243,26 +243,27 @@ pub fn imports(
     alignment: u32,
 ) -> BTreeMap<u64, String> {
     let image = source.container();
-    let slots: BTreeMap<u64, &str> = image
-        .relocations
+    // The format's own statement first: a Mach-O section of stubs says which
+    // import each of its stubs stands for, with nothing to decode.
+    let mut named: BTreeMap<u64, String> = image
+        .import_stubs
         .iter()
-        .map(|relocation| (relocation.vaddr, relocation.symbol.as_str()))
+        .map(|stub| (stub.vaddr, stub.symbol.clone()))
         .collect();
-    let mut named = BTreeMap::new();
+    let slots: BTreeMap<u64, &str> = image.import_slots().collect();
     if slots.is_empty() {
         return named;
     }
-
-    // Mach-O names the stub itself rather than a slot the stub reads, so a
-    // relocation landing inside a stub section already is the answer.
-    for section in image.sections.iter().filter(|section| stubs(&section.name)) {
-        let end = section.vaddr + section.vsize;
-        for (vaddr, symbol) in slots.range(section.vaddr..end) {
-            named.insert(*vaddr, (*symbol).to_owned());
-        }
-    }
-
-    for section in image.sections.iter().filter(|section| stubs(&section.name)) {
+    let declared = |section: &Section| {
+        let (start, end) = section.range();
+        named.range(start..end).next().is_some()
+    };
+    let decoded: Vec<&Section> = image
+        .sections
+        .iter()
+        .filter(|section| stubs(&section.name) && !declared(section))
+        .collect();
+    for section in decoded {
         for (start, symbol) in section_stubs(source, decoder, section, &slots, alignment) {
             named.entry(start).or_insert(symbol);
         }

@@ -28,10 +28,7 @@ pub enum ImageError {
     UnsupportedArchitecture(object::Architecture),
 }
 
-pub use r2abi::statement::{
-    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section,
-    Segment, Symbol, SymbolKind,
-};
+pub use r2abi::statement::*;
 
 /// The mapping a symbol name states, per the ARM ELF ABI: `$a`, `$t` or `$d`,
 /// optionally followed by `.` and anything.
@@ -222,12 +219,6 @@ where
     }
 }
 
-/// Which symbol each stub and pointer slot stands for, in a Mach-O.
-///
-/// A section of stubs or of symbol pointers says where its entries begin in the
-/// indirect symbol table (`reserved1`) and how wide one entry is
-/// (`reserved2`), and the table says which symbol each entry stands for. That
-/// is the whole mapping, and it needs no bind-opcode interpreter.
 /// Whether the loader maps this section, asked of the format rather than
 /// guessed from the address.
 ///
@@ -257,144 +248,6 @@ fn states_instructions<'a>(section: &impl object::read::ObjectSection<'a>) -> bo
         }
         _ => section.kind() == object::SectionKind::Text,
     }
-}
-
-fn macho_indirect_symbols(file: &object::File<'_>, data: &[u8]) -> Vec<Relocation> {
-    match file {
-        object::File::MachO64(macho) => indirect_symbols(macho, data),
-        object::File::MachO32(macho) => indirect_symbols(macho, data),
-        _ => Vec::new(),
-    }
-}
-
-/// The two fields a Mach-O section uses to point into the indirect symbol
-/// table. They are struct fields rather than trait methods in `object`, so a
-/// generic walk over both widths needs this to reach them.
-trait IndirectRange {
-    fn first_indirect(&self, endian: object::Endianness) -> u32;
-    fn entry_stride(&self, endian: object::Endianness) -> u32;
-}
-
-impl IndirectRange for object::macho::Section64<object::Endianness> {
-    fn first_indirect(&self, endian: object::Endianness) -> u32 {
-        self.reserved1.get(endian)
-    }
-
-    fn entry_stride(&self, endian: object::Endianness) -> u32 {
-        self.reserved2.get(endian)
-    }
-}
-
-impl IndirectRange for object::macho::Section32<object::Endianness> {
-    fn first_indirect(&self, endian: object::Endianness) -> u32 {
-        self.reserved1.get(endian)
-    }
-
-    fn entry_stride(&self, endian: object::Endianness) -> u32 {
-        self.reserved2.get(endian)
-    }
-}
-
-fn indirect_symbols<'data, Mach, R>(
-    file: &object::read::macho::MachOFile<'data, Mach, R>,
-    data: &'data [u8],
-) -> Vec<Relocation>
-where
-    Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
-    Mach::Section: IndirectRange,
-    R: object::ReadRef<'data>,
-{
-    use object::read::macho::{Nlist as _, Section as _};
-    use object::{Object, ObjectSection, macho};
-
-    let endian = match file.macho_header().endian() {
-        Ok(endian) => endian,
-        Err(_) => return Vec::new(),
-    };
-    let Ok(mut commands) = file.macho_header().load_commands(endian, data, 0) else {
-        return Vec::new();
-    };
-    let mut table = None;
-    while let Ok(Some(command)) = commands.next() {
-        if let Ok(Some(dysymtab)) = command.dysymtab() {
-            table = Some(dysymtab);
-            break;
-        }
-    }
-    let Some(dysymtab) = table else {
-        return Vec::new();
-    };
-    let offset = dysymtab.indirectsymoff.get(endian) as usize;
-    let count = dysymtab.nindirectsyms.get(endian) as usize;
-    let Some(end) = count
-        .checked_mul(4)
-        .and_then(|size| offset.checked_add(size))
-    else {
-        return Vec::new();
-    };
-    let Some(bytes) = data.get(offset..end) else {
-        return Vec::new();
-    };
-    let indirect: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|word| {
-            let word = [word[0], word[1], word[2], word[3]];
-            match endian {
-                object::Endianness::Big => u32::from_be_bytes(word),
-                object::Endianness::Little => u32::from_le_bytes(word),
-            }
-        })
-        .collect();
-
-    let symbols = file.macho_symbol_table();
-    let mut named = Vec::new();
-    for section in file.sections() {
-        let raw = section.macho_section();
-        let kind = raw.flags(endian) & macho::SECTION_TYPE;
-        if !matches!(
-            kind,
-            macho::S_NON_LAZY_SYMBOL_POINTERS
-                | macho::S_LAZY_SYMBOL_POINTERS
-                | macho::S_SYMBOL_STUBS
-        ) {
-            continue;
-        }
-        let stride = match kind {
-            macho::S_SYMBOL_STUBS => u64::from(raw.entry_stride(endian)),
-            _ if file.is_64() => 8,
-            _ => 4,
-        };
-        if stride == 0 {
-            continue;
-        }
-        let first = raw.first_indirect(endian) as usize;
-        let entries = section.size() / stride;
-        for entry in 0..entries {
-            let Some(index) = indirect.get(first + entry as usize).copied() else {
-                break;
-            };
-            if index & (macho::INDIRECT_SYMBOL_LOCAL | macho::INDIRECT_SYMBOL_ABS) != 0 {
-                continue;
-            }
-            let Ok(symbol) = symbols.symbol(object::SymbolIndex(index as usize)) else {
-                continue;
-            };
-            let Ok(name) = symbol.name(endian, symbols.strings()) else {
-                continue;
-            };
-            let Ok(name) = core::str::from_utf8(name) else {
-                continue;
-            };
-            if name.is_empty() {
-                continue;
-            }
-            named.push(Relocation {
-                vaddr: section.address() + entry * stride,
-                symbol: name.to_owned(),
-            });
-        }
-    }
-    named
 }
 
 /// A parsed binary, with its bytes retained for address reads.
@@ -611,34 +464,12 @@ impl Image {
         });
         symbols.dedup_by(|left, right| left.vaddr == right.vaddr && left.name == right.name);
 
-        // What the loader will write into each slot it fills. `object` reports
-        // the dynamic relocations for a linked image and the static ones for an
-        // object file, and both name their symbol the same way.
-        let mut relocations: Vec<Relocation> = file
-            .dynamic_relocations()
-            .into_iter()
-            .flatten()
-            .filter_map(|(vaddr, relocation)| {
-                let object::RelocationTarget::Symbol(index) = relocation.target() else {
-                    return None;
-                };
-                let table = file.dynamic_symbol_table()?;
-                let symbol =
-                    object::read::ObjectSymbolTable::symbol_by_index(&table, index).ok()?;
-                let name = symbol.name().ok()?;
-                (!name.is_empty()).then(|| Relocation {
-                    vaddr,
-                    symbol: name.to_owned(),
-                })
-            })
-            .collect();
-        // Mach-O states its imports through the indirect symbol table rather
-        // than through relocations, and `object` reports none for it.
-        relocations.extend(macho_indirect_symbols(&file, data.as_slice()));
-        relocations.sort_by(|left, right| left.vaddr.cmp(&right.vaddr));
-        relocations.dedup_by_key(|relocation| relocation.vaddr);
-        let loader_writes =
-            loader::writes(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
+        // Every record the loader applies, once each, and what it writes.
+        let loader::Loaded {
+            relocations,
+            writes: loader_writes,
+            import_stubs,
+        } = loader::read(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
 
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
@@ -727,6 +558,7 @@ impl Image {
                 sections,
                 symbols,
                 relocations,
+                import_stubs,
                 loader_writes,
                 entries,
                 declared,
@@ -767,9 +599,14 @@ impl Image {
         &self.container.symbols
     }
 
-    /// The slots the loader fills, in address order.
+    /// Every relocation record the loader applies, each once, in the order it applies them.
     pub fn relocations(&self) -> &[Relocation] {
         &self.container.relocations
+    }
+
+    /// The stubs the format declares stand for imports.
+    pub fn import_stubs(&self) -> &[ImportStub] {
+        &self.container.import_stubs
     }
 
     /// The bytes the loader writes before the program runs, sorted and disjoint: what the file holds there is not what the program reads.

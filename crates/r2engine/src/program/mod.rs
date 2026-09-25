@@ -15,10 +15,7 @@ pub mod source;
 
 pub use requests::{AnalysisRefused, FunctionListing, Rendering};
 
-pub use source::{
-    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, Permissions, Relocation, Section,
-    Segment, Source, Symbol, SymbolKind,
-};
+pub use source::*;
 
 use std::collections::BTreeMap;
 
@@ -129,9 +126,8 @@ impl<S: Source> OpenProgram<S> {
             names: NameDb::new(),
             imports: BTreeMap::new(),
             slots: container
-                .relocations
-                .iter()
-                .map(|relocation| (relocation.vaddr, relocation.symbol.clone()))
+                .import_slots()
+                .map(|(slot, symbol)| (slot, symbol.to_owned()))
                 .collect(),
             defined: definitions(container),
             extents: r2types::ProgramExtents::new(

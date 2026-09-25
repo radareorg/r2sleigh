@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use r2engine::program::{
-    Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions,
-    Relocation, Section, Segment, Source, Symbol, SymbolKind,
+    Applies, Arch, Container, Endian, Entry, EntryKind, Format, Mapping, OpenProgram, Permissions,
+    Relocation, RelocationSymbol, Section, Segment, Source, Symbol, SymbolKind,
 };
 
 pub const BASE: u64 = 0x1000;
@@ -310,6 +310,21 @@ pub fn table_switch() -> Literal {
     Literal::of_code(TABLE_SWITCH, &[("pick", BASE, 0x2c)])
 }
 
+/// A slot the loader binds to an import, as a `JUMP_SLOT` record states it.
+pub fn import_slot(vaddr: u64, import: &str) -> Relocation {
+    Relocation {
+        vaddr,
+        ntype: 7,
+        width: 8,
+        symbol: Some(RelocationSymbol {
+            name: import.to_owned(),
+            ..RelocationSymbol::default()
+        }),
+        applies: Applies::Symbol,
+        ..Relocation::default()
+    }
+}
+
 /// One run of code the loader maps readable and executable.
 pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
     Segment {
@@ -457,10 +472,7 @@ impl Literal {
             },
         ];
         program.container.symbols.clear();
-        program.container.relocations = vec![Relocation {
-            vaddr: PLT_SLOT,
-            symbol: "_Exit".to_owned(),
-        }];
+        program.container.relocations = vec![import_slot(PLT_SLOT, "_Exit")];
         program.container.loader_writes.push(PLT_SLOT..PLT_SLOT + 8);
         program
     }
@@ -469,10 +481,7 @@ impl Literal {
     pub fn in_plt(mut self, slot: u64, import: &str) -> Self {
         ".plt".clone_into(&mut self.container.sections[0].name);
         self.container.symbols.clear();
-        self.container.relocations.push(Relocation {
-            vaddr: slot,
-            symbol: import.to_owned(),
-        });
+        self.container.relocations.push(import_slot(slot, import));
         self.container.loader_writes.push(slot..slot + 4);
         self
     }
@@ -535,10 +544,7 @@ impl Literal {
             section(".plt", STUB, 6, true),
             section(".got", SLOT, 8, false),
         ]);
-        self.container.relocations.push(Relocation {
-            vaddr: SLOT,
-            symbol: import.to_owned(),
-        });
+        self.container.relocations.push(import_slot(SLOT, import));
         // The loader writes the import's address into the slot, as the container states for every relocation.
         self.container.loader_writes.push(SLOT..SLOT + 8);
         self
