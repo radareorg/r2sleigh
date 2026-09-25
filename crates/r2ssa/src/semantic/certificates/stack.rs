@@ -303,6 +303,11 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
     }
 
     candidates.retain(|object, certificate| {
+        // A save slot is the compiler's by the convention's own restore, so a
+        // neighbour's recovered extent reaching over it does not unmake it.
+        if objects.saved_register_objects.contains(object) {
+            return true;
+        }
         !objects.objects.iter().any(|(other_object, other_fact)| {
             if other_object == object {
                 return false;

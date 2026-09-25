@@ -300,6 +300,11 @@ pub struct ObjectModel {
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
     /// Stack objects whose address leaves this body as a value.
     pub escaping_addresses: BTreeSet<ObjectId>,
+    /// The slots the body saves a convention-preserved register into and puts
+    /// it back from (`saved_register_slots`). The convention's restore proves
+    /// no access of the program's reaches one, so an extent something
+    /// recovered around it is that extent's error, not the slot's.
+    pub saved_register_objects: BTreeSet<ObjectId>,
 }
 
 impl ObjectModel {
@@ -1384,6 +1389,9 @@ pub(crate) struct ObjectModelBuilder<'a> {
     /// Frame positions something proves an object starts at: a declared slot,
     /// a direct access, or an address that leaves as a value.
     pub(crate) evidenced_roots: BTreeSet<StackAddressRoot>,
+    /// Where the body saves a register the convention preserves and puts it
+    /// back (`saved_register_slots`): each is an object of its own.
+    pub(crate) saved_slots: BTreeSet<StackAddressRoot>,
     /// How far each evidenced root's indexed accesses reach.
     pub(crate) evidenced_spans: BTreeMap<StackAddressRoot, i64>,
     /// Roots whose address leaves the body as a value.
@@ -1450,6 +1458,7 @@ impl<'a> ObjectModelBuilder<'a> {
             displaced_indexed_addresses: BTreeSet::new(),
             indexed_displacements: BTreeMap::new(),
             evidenced_roots: BTreeSet::new(),
+            saved_slots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
             escaping_roots: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
@@ -1491,6 +1500,7 @@ impl<'a> ObjectModelBuilder<'a> {
                     .and_modify(|known| *known = (*known).max(end))
                     .or_insert(end);
             }
+            let saved_slots = saved_register_slots(facts, graph, self.machine_context);
             let evidenced = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
@@ -1499,8 +1509,10 @@ impl<'a> ObjectModelBuilder<'a> {
                 self.stack_pointer_carrier,
                 values,
                 &self.callee_write_spans,
+                &saved_slots,
             );
             self.evidenced_roots = evidenced.roots;
+            self.saved_slots = saved_slots;
             self.evidenced_spans = evidenced.spans;
             self.escaping_roots = evidenced.escaping;
             let mut stack_roots: Vec<StackAddressRoot> =
@@ -1577,9 +1589,16 @@ impl<'a> ObjectModelBuilder<'a> {
             .filter(|(key, _)| self.escaping_roots.contains(&key.root))
             .map(|(_, object)| *object)
             .collect();
+        let saved_register_objects = self
+            .stack_objects
+            .iter()
+            .filter(|(key, _)| self.saved_slots.contains(&key.root))
+            .map(|(_, object)| *object)
+            .collect();
         ObjectModel {
             callee_write_reach,
             escaping_addresses,
+            saved_register_objects,
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,
@@ -1617,10 +1636,15 @@ impl<'a> ObjectModelBuilder<'a> {
         let object = if space == SpaceId::Ram {
             if let Some(root) = resolve_stack_root(self.facts, value) {
                 // A member of a declared aggregate is that aggregate at an
-                // offset, so the address resolves to the slot that contains it.
+                // offset, so the address resolves to the slot that contains it
+                // -- unless it is a save slot, which no declaration of the
+                // program's owns: the convention's restore is what proves no
+                // access of the program's reaches it.
                 let (root, interior) = match self.declared_slots.containing(root) {
-                    Some((container, displacement)) => (container, Some(displacement)),
-                    None => (root, None),
+                    Some((container, displacement)) if !self.saved_slots.contains(&root) => {
+                        (container, Some(displacement))
+                    }
+                    _ => (root, None),
                 };
                 // A position nothing proves an object starts at is not one.
                 // Inside the span an evidenced root's index reaches it is a

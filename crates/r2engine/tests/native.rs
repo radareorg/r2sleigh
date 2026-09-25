@@ -2526,3 +2526,32 @@ fn a_call_does_not_redefine_the_register_the_platform_reserves() {
         without.output
     );
 }
+
+/// `rbx` pushed and popped around a frame whose buffer is indexed by a byte
+/// nothing bounds below 0xf8: the index's reach covers the slot `rbx` is saved
+/// in, and the return address beyond it.
+const SAVE_BESIDE_AN_INDEXED_BUFFER: &[u8] = &[
+    0x53, // 1000 push rbx
+    0x48, 0x83, 0xec, 0x60, // 1001 sub rsp, 0x60
+    0x89, 0xf8, // 1005 mov eax, edi
+    0x25, 0xf8, 0x00, 0x00, 0x00, // 1007 and eax, 0xf8
+    0x40, 0x88, 0x34, 0x04, // 100c mov [rsp+rax], sil
+    0x0f, 0xb6, 0x04, 0x24, // 1010 movzx eax, byte [rsp]
+    0x48, 0x83, 0xc4, 0x60, // 1014 add rsp, 0x60
+    0x5b, // 1018 pop rbx
+    0xc3, // 1019 ret
+];
+
+/// The convention makes the callee put `rbx` back, and it puts it back from
+/// the slot it pushed it to, so no store of the program's lands there: that
+/// slot is the compiler's, however far the buffer's index is proved to reach.
+/// Before the save was evidence an object ends there, the buffer's recovered
+/// extent absorbed it, and the push rendered as a store of `rbx`'s entry
+/// value into the buffer, a residual held from entry.
+#[test]
+fn a_register_saved_beside_an_indexed_buffer_is_no_store_of_the_program() {
+    let text = rendered(SAVE_BESIDE_AN_INDEXED_BUFFER, "indexed_store");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(!text.contains("RBX_0"), "{text}");
+    assert!(text.contains("= SIL_0;"), "{text}");
+}

@@ -1650,6 +1650,81 @@ pub(crate) fn callee_write_spans(
     spans
 }
 
+/// Where the body saves a register the convention preserves, and puts it back.
+///
+/// A store of a preserved register's entry value, by copies alone, at an
+/// exact frame place that some load of the same place returns to that
+/// register by copies alone. The convention says the callee restores the
+/// register, and it restores it from these bytes, so no access of the
+/// program's writes them in between: they are the compiler's save slot, not a
+/// place in a buffer, however far an index's bound is proved to reach. That
+/// is evidence an object must end there -- the partition never absorbs one.
+///
+/// One pass over the stores and loads, each copy chain walked once per access
+/// that starts it: O(instructions).
+pub(crate) fn saved_register_slots(
+    facts: &DecompilePrepFacts,
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+) -> BTreeSet<StackAddressRoot> {
+    let Some(effect) = machine_context.and_then(SourceMachineContext::call_effect) else {
+        return BTreeSet::new();
+    };
+    let mut saved = BTreeMap::<StackAddressRoot, CanonicalStorageId>::new();
+    let mut loaded = BTreeMap::<StackAddressRoot, Vec<ValueId>>::new();
+    for inst in &graph.insts {
+        match &inst.payload {
+            InstPayload::Op(SSAOp::Store {
+                addr,
+                val,
+                space: SpaceId::Ram,
+            }) => {
+                let (Some(root), Some(value)) = (
+                    resolve_stack_root(Some(facts), addr),
+                    graph.value_id_for_var(val),
+                ) else {
+                    continue;
+                };
+                if let Some((storage, _, _, _)) =
+                    super::certificates::exact_copy_chain_to_entry_storage(graph, value, val.size)
+                    && effect.preserves(storage)
+                {
+                    saved.insert(root, storage);
+                }
+            }
+            InstPayload::Op(SSAOp::Load {
+                addr,
+                space: SpaceId::Ram,
+                ..
+            }) => {
+                if let (Some(root), Some(output)) =
+                    (resolve_stack_root(Some(facts), addr), inst.output)
+                {
+                    loaded.entry(root).or_default().push(output);
+                }
+            }
+            _ => {}
+        }
+    }
+    saved
+        .into_iter()
+        .filter(|(root, storage)| {
+            let restored = loaded.get(root).is_some_and(|loads| {
+                loads.iter().any(|load| {
+                    super::certificates::exact_copy_chain_to_storage(graph, *load, *storage)
+                        .is_some()
+                })
+            });
+            r2il::refusal_evidence!(
+                "saved-register-slot",
+                "{root:?} holds {storage:?} from entry; restored={restored}"
+            );
+            restored
+        })
+        .map(|(root, _)| root)
+        .collect()
+}
+
 pub(crate) fn evidenced_stack_roots(
     facts: &DecompilePrepFacts,
     declared_slots: &DeclaredStackSlots,
@@ -1658,6 +1733,7 @@ pub(crate) fn evidenced_stack_roots(
     stack_pointer_carrier: Option<CanonicalStorageId>,
     values: &crate::values::ValueRanges,
     callee_write_spans: &BTreeMap<StackAddressRoot, i64>,
+    saved_slots: &BTreeSet<StackAddressRoot>,
 ) -> EvidencedStackRoots {
     let mut roots = BTreeSet::new();
     let exact_root = |var: &SSAVar| resolve_stack_root(Some(facts), var);
@@ -1845,6 +1921,10 @@ pub(crate) fn evidenced_stack_roots(
             .or_insert(*end);
     }
     roots.retain(|root| {
+        // A save slot is an object's end, whatever a bound reaches past it.
+        if saved_slots.contains(root) {
+            return true;
+        }
         let inside = spans.iter().any(|(base, end)| {
             base.base == root.base && base.offset < root.offset && root.offset < *end
         });
