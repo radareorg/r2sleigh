@@ -1231,7 +1231,8 @@ fn source_member_type_spelling(
         | r2ssa::SourceTypeKind::Union { .. }
         | r2ssa::SourceTypeKind::Array { .. }
         | r2ssa::SourceTypeKind::Void
-        | r2ssa::SourceTypeKind::Code => return None,
+        | r2ssa::SourceTypeKind::Code { .. }
+        | r2ssa::SourceTypeKind::Opaque { .. } => return None,
     };
     // A member wider than one element repeats it. The capture states the repeat
     // count, but the Rust contract for a member does not carry it, so the

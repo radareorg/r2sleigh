@@ -53,9 +53,11 @@ pub(crate) fn member_run_layout(
             .get(usize::try_from(aggregate_id).ok()?)
             .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
             .map(MemberRunLayout::Aggregate),
+        // An array with no bound is a flexible member: nothing is stored
+        // into it whole, so it has no run of members to spell.
         crate::SourceTypeKind::Array {
             element_type_id,
-            count,
+            count: Some(count),
         } => {
             let element = graph.types().get(usize::try_from(element_type_id).ok()?)?;
             let stride_bits = element.size_bits();

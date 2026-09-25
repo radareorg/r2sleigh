@@ -1551,7 +1551,7 @@ impl DeclaredTypes {
         // made every prototype through a `void *` unstatable, which is most of
         // the allocating ones.
         let align_bits = match kind {
-            Kind::Void | Kind::Code => 0,
+            Kind::Void | Kind::Code { .. } => 0,
             _ => u64::from(bits.max(8)),
         };
         if let Some(found) = self.types.iter().find(|type_| {

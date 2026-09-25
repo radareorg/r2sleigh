@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::type_graph::{SourceLogicalValue, SourceTypeGraph};
+
 /// Name-independent storage identity retained from a lifted varnode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CanonicalStorageSpace {
@@ -91,7 +93,6 @@ pub enum StackAddressBase {
 
 pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 12;
 pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 3;
-pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 1;
 
 /// Typed classification of one source-owned calling-convention spelling.
 ///
@@ -183,663 +184,6 @@ impl SourceAbiClass {
             "vectorcall" => Self::Vectorcall,
             _ => Self::Other,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SourceTypeKind {
-    SignedInteger,
-    UnsignedInteger,
-    Pointer {
-        target_type_id: u32,
-    },
-    Struct {
-        aggregate_id: u32,
-    },
-    /// An object the graph does not describe. It has no size and no layout
-    /// and exists only as a pointer's target: it is how `void *` is placed
-    /// without inventing what it points at.
-    Void,
-    /// Code. Like `Void` it has no size and is only a pointer's target; the
-    /// signature is not carried, so a pointer to it is a function pointer
-    /// whose parameters the graph does not state.
-    Code,
-    /// An aggregate whose members all begin at its start and which is as
-    /// wide as its widest member.
-    Union {
-        aggregate_id: u32,
-    },
-    /// A run of `count` elements of one type. The count is stated, never
-    /// inferred: an array whose bound the source does not give is not this.
-    Array {
-        element_type_id: u32,
-        count: u64,
-    },
-    /// An IEEE binary floating-point object.
-    ///
-    /// Not an integer of the same width: the bits mean something else, a cast
-    /// between the two is a conversion rather than a reinterpretation, and the
-    /// value travels in a different register class. Leaving it out did not
-    /// make a `double` unrepresentable in isolation -- it refused the whole
-    /// graph, so one `double` in a signature cost the function every exact
-    /// type and every source name it had.
-    Float,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SourceType {
-    id: u32,
-    kind: SourceTypeKind,
-    size_bits: u64,
-    align_bits: u64,
-}
-
-impl SourceType {
-    pub const fn new(id: u32, kind: SourceTypeKind, size_bits: u64, align_bits: u64) -> Self {
-        Self {
-            id,
-            kind,
-            size_bits,
-            align_bits,
-        }
-    }
-
-    pub const fn id(&self) -> u32 {
-        self.id
-    }
-
-    pub const fn kind(&self) -> SourceTypeKind {
-        self.kind
-    }
-
-    pub const fn size_bits(&self) -> u64 {
-        self.size_bits
-    }
-
-    pub const fn align_bits(&self) -> u64 {
-        self.align_bits
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum SourceCarrierKind {
-    Full,
-    LowBits,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct SourceCarrierProjection {
-    kind: SourceCarrierKind,
-    offset_bits: u64,
-    size_bits: u64,
-}
-
-impl SourceCarrierProjection {
-    pub const fn new(kind: SourceCarrierKind, offset_bits: u64, size_bits: u64) -> Self {
-        Self {
-            kind,
-            offset_bits,
-            size_bits,
-        }
-    }
-
-    pub const fn kind(&self) -> SourceCarrierKind {
-        self.kind
-    }
-
-    pub const fn offset_bits(&self) -> u64 {
-        self.offset_bits
-    }
-
-    pub const fn size_bits(&self) -> u64 {
-        self.size_bits
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct SourceLogicalValue {
-    type_id: u32,
-    carrier: SourceCarrierProjection,
-}
-
-impl SourceLogicalValue {
-    pub const fn new(type_id: u32, carrier: SourceCarrierProjection) -> Self {
-        Self { type_id, carrier }
-    }
-
-    pub const fn type_id(self) -> u32 {
-        self.type_id
-    }
-
-    pub const fn carrier(&self) -> SourceCarrierProjection {
-        self.carrier
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SourceAggregateMember {
-    member_id: u32,
-    type_id: u32,
-    offset_bits: u64,
-    size_bits: u64,
-    name: String,
-}
-
-impl SourceAggregateMember {
-    pub fn new(
-        member_id: u32,
-        type_id: u32,
-        offset_bits: u64,
-        size_bits: u64,
-        name: impl Into<String>,
-    ) -> Self {
-        Self {
-            member_id,
-            type_id,
-            offset_bits,
-            size_bits,
-            name: name.into(),
-        }
-    }
-
-    pub const fn member_id(&self) -> u32 {
-        self.member_id
-    }
-
-    pub const fn type_id(&self) -> u32 {
-        self.type_id
-    }
-
-    pub const fn offset_bits(&self) -> u64 {
-        self.offset_bits
-    }
-
-    pub const fn size_bits(&self) -> u64 {
-        self.size_bits
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SourceAggregateLayout {
-    id: u32,
-    type_id: u32,
-    size_bits: u64,
-    align_bits: u64,
-    name: String,
-    members: Box<[SourceAggregateMember]>,
-}
-
-impl SourceAggregateLayout {
-    pub fn new(
-        id: u32,
-        type_id: u32,
-        size_bits: u64,
-        align_bits: u64,
-        name: impl Into<String>,
-        members: impl IntoIterator<Item = SourceAggregateMember>,
-    ) -> Self {
-        Self {
-            id,
-            type_id,
-            size_bits,
-            align_bits,
-            name: name.into(),
-            members: members.into_iter().collect::<Vec<_>>().into_boxed_slice(),
-        }
-    }
-
-    pub const fn id(&self) -> u32 {
-        self.id
-    }
-
-    pub const fn type_id(&self) -> u32 {
-        self.type_id
-    }
-
-    pub const fn size_bits(&self) -> u64 {
-        self.size_bits
-    }
-
-    pub const fn align_bits(&self) -> u64 {
-        self.align_bits
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub const fn members(&self) -> &[SourceAggregateMember] {
-        &self.members
-    }
-}
-
-/// A name the source gave one of this graph's types.
-///
-/// Compilation destroys the name but the producer's own type database keeps
-/// it, and a rendering that writes `UInt16 *p` has to say what `UInt16` is --
-/// a pointer to an undeclared tag is legal C, a pointer to an undeclared
-/// typedef name is not. The binding is exact rather than inferred: the capture
-/// resolved this spelling to this type while it was building the graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SourceTypeAlias {
-    name: String,
-    type_id: u32,
-}
-
-impl SourceTypeAlias {
-    pub const fn new(name: String, type_id: u32) -> Self {
-        Self { name, type_id }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub const fn type_id(&self) -> u32 {
-        self.type_id
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SourceTypeGraph {
-    schema_version: u32,
-    types: Box<[SourceType]>,
-    aggregates: Box<[SourceAggregateLayout]>,
-    aliases: Box<[SourceTypeAlias]>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceTypeGraphError {
-    InvalidType,
-    InvalidAggregate,
-    InvalidMember,
-    InvalidAlias,
-}
-
-impl std::fmt::Display for SourceTypeGraphError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid source type graph: {self:?}")
-    }
-}
-
-impl std::error::Error for SourceTypeGraphError {}
-
-fn source_align_up(value: u64, alignment: u64) -> Option<u64> {
-    if alignment == 0 || !alignment.is_power_of_two() {
-        return None;
-    }
-    let mask = alignment - 1;
-    value.checked_add(mask).map(|aligned| aligned & !mask)
-}
-
-impl SourceTypeGraph {
-    /// A graph that carries no source names for its types.
-    pub fn new(
-        types: impl IntoIterator<Item = SourceType>,
-        aggregates: impl IntoIterator<Item = SourceAggregateLayout>,
-    ) -> Result<Self, SourceTypeGraphError> {
-        Self::new_with_aliases(types, aggregates, [])
-    }
-
-    pub fn new_with_aliases(
-        types: impl IntoIterator<Item = SourceType>,
-        aggregates: impl IntoIterator<Item = SourceAggregateLayout>,
-        aliases: impl IntoIterator<Item = SourceTypeAlias>,
-    ) -> Result<Self, SourceTypeGraphError> {
-        let types = types.into_iter().collect::<Vec<_>>();
-        let aggregates = aggregates.into_iter().collect::<Vec<_>>();
-        let aliases = aliases.into_iter().collect::<Vec<_>>();
-        // A function that mentions no type has an empty graph. That is a
-        // complete account of the types it uses, not an absent one, and
-        // rejecting it refused every function whose body needs nothing named.
-        for (position, source_type) in types.iter().enumerate() {
-            if u32::try_from(position) != Ok(source_type.id) {
-                return Err(SourceTypeGraphError::InvalidType);
-            }
-            // An opaque kind has no size and no alignment, by definition;
-            // every other kind is an object and has both.
-            if matches!(
-                source_type.kind,
-                SourceTypeKind::Void | SourceTypeKind::Code
-            ) {
-                if source_type.size_bits != 0 || source_type.align_bits != 0 {
-                    return Err(SourceTypeGraphError::InvalidType);
-                }
-                continue;
-            }
-            if source_type.size_bits == 0
-                || !source_type.size_bits.is_multiple_of(8)
-                || source_type.align_bits == 0
-                || !source_type.align_bits.is_multiple_of(8)
-                || !source_type.align_bits.is_power_of_two()
-                || source_type.align_bits > source_type.size_bits
-            {
-                return Err(SourceTypeGraphError::InvalidType);
-            }
-            match source_type.kind {
-                SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger => {
-                    if !matches!(source_type.size_bits, 8 | 16 | 32 | 64)
-                        || source_type.align_bits != source_type.size_bits
-                    {
-                        return Err(SourceTypeGraphError::InvalidType);
-                    }
-                }
-                SourceTypeKind::Float => {
-                    // binary32, binary64, and whatever the target makes `long
-                    // double`, which is sixteen bytes on every target here.
-                    if !matches!(source_type.size_bits, 32 | 64 | 128)
-                        || source_type.align_bits != source_type.size_bits
-                    {
-                        return Err(SourceTypeGraphError::InvalidType);
-                    }
-                }
-                SourceTypeKind::Pointer { target_type_id } => {
-                    // `char **argv` is ordinary C, and reachability already walks targets through a visited set
-                    if !matches!(source_type.size_bits, 32 | 64)
-                        || source_type.align_bits != source_type.size_bits
-                        || usize::try_from(target_type_id)
-                            .ok()
-                            .and_then(|id| types.get(id))
-                            .is_none()
-                    {
-                        return Err(SourceTypeGraphError::InvalidType);
-                    }
-                }
-                SourceTypeKind::Struct { aggregate_id }
-                | SourceTypeKind::Union { aggregate_id } => {
-                    if usize::try_from(aggregate_id)
-                        .ok()
-                        .is_none_or(|id| id >= aggregates.len())
-                    {
-                        return Err(SourceTypeGraphError::InvalidType);
-                    }
-                }
-                SourceTypeKind::Array {
-                    element_type_id,
-                    count,
-                } => {
-                    // The extent is the element's, `count` times, so a zero
-                    // count or a size that is not that product is not an array.
-                    let element = usize::try_from(element_type_id)
-                        .ok()
-                        .and_then(|id| types.get(id));
-                    let Some(element) = element else {
-                        return Err(SourceTypeGraphError::InvalidType);
-                    };
-                    if count == 0
-                        || element
-                            .size_bits
-                            .checked_mul(count)
-                            .is_none_or(|extent| extent != source_type.size_bits)
-                        || source_type.align_bits != element.align_bits
-                    {
-                        return Err(SourceTypeGraphError::InvalidType);
-                    }
-                }
-                SourceTypeKind::Void | SourceTypeKind::Code => {}
-            }
-        }
-        for (position, aggregate) in aggregates.iter().enumerate() {
-            let Some(owner) = usize::try_from(aggregate.type_id)
-                .ok()
-                .and_then(|id| types.get(id))
-                .filter(|source_type| {
-                    source_type.size_bits == aggregate.size_bits
-                        && source_type.align_bits == aggregate.align_bits
-                })
-            else {
-                r2il::refusal_evidence!(
-                    "type-graph",
-                    "aggregate {} ({}) has no owning type of its size and alignment: type {} size {} align {}",
-                    aggregate.id,
-                    aggregate.name,
-                    aggregate.type_id,
-                    aggregate.size_bits,
-                    aggregate.align_bits
-                );
-                return Err(SourceTypeGraphError::InvalidAggregate);
-            };
-            let is_union = match owner.kind {
-                SourceTypeKind::Struct { aggregate_id } if aggregate_id == aggregate.id => false,
-                SourceTypeKind::Union { aggregate_id } if aggregate_id == aggregate.id => true,
-                _ => {
-                    r2il::refusal_evidence!(
-                        "type-graph",
-                        "aggregate {} ({}) is owned by a type of another kind: {:?}",
-                        aggregate.id,
-                        aggregate.name,
-                        owner.kind
-                    );
-                    return Err(SourceTypeGraphError::InvalidAggregate);
-                }
-            };
-            if u32::try_from(position) != Ok(aggregate.id) || aggregate.members.is_empty() {
-                r2il::refusal_evidence!(
-                    "type-graph",
-                    "aggregate {} ({}) at position {} has {} members",
-                    aggregate.id,
-                    aggregate.name,
-                    position,
-                    aggregate.members.len()
-                );
-                return Err(SourceTypeGraphError::InvalidAggregate);
-            }
-            let mut cursor = 0u64;
-            let mut maximum_alignment = 0u64;
-            for (member_position, member) in aggregate.members.iter().enumerate() {
-                let Some(member_type) = usize::try_from(member.type_id)
-                    .ok()
-                    .and_then(|id| types.get(id))
-                    .filter(|member_type| {
-                        !matches!(
-                            member_type.kind,
-                            SourceTypeKind::Void | SourceTypeKind::Code
-                        )
-                    })
-                else {
-                    return Err(SourceTypeGraphError::InvalidMember);
-                };
-                // Any type this graph already validated may be a member. What
-                // has to hold of a member is where it sits, not what it is:
-                // admitting only integers refused `struct state *next`, and
-                // with it every function that mentions an ordinary C struct.
-                // A member holds a whole number of its element type: one for a
-                // plain member, more for an array. Demanding exactly one refused
-                // every struct with an array in it, and refusing the struct lost
-                // the layout of its other members too, so a `VmState` holding
-                // `int32_t r[8]` reached the consumer with no layout at all.
-                if u32::try_from(member_position) != Ok(member.member_id)
-                    || member.size_bits == 0
-                    || member_type.size_bits == 0
-                    || !member.size_bits.is_multiple_of(member_type.size_bits)
-                    || !member.offset_bits.is_multiple_of(8)
-                {
-                    return Err(SourceTypeGraphError::InvalidMember);
-                }
-                // A struct lays its members out in order; a union lays every
-                // member at its start and is as wide as the widest.
-                if is_union {
-                    if member.offset_bits != 0 {
-                        return Err(SourceTypeGraphError::InvalidMember);
-                    }
-                    cursor = cursor.max(member.size_bits);
-                } else {
-                    if source_align_up(cursor, member_type.align_bits) != Some(member.offset_bits) {
-                        return Err(SourceTypeGraphError::InvalidMember);
-                    }
-                    cursor = member
-                        .offset_bits
-                        .checked_add(member.size_bits)
-                        .ok_or(SourceTypeGraphError::InvalidMember)?;
-                }
-                maximum_alignment = maximum_alignment.max(member_type.align_bits);
-            }
-            if maximum_alignment != aggregate.align_bits
-                || source_align_up(cursor, maximum_alignment) != Some(aggregate.size_bits)
-            {
-                r2il::refusal_evidence!(
-                    "type-graph",
-                    "aggregate {} ({}) members end at {} with alignment {} but it claims size {} align {}",
-                    aggregate.id,
-                    aggregate.name,
-                    cursor,
-                    maximum_alignment,
-                    aggregate.size_bits,
-                    aggregate.align_bits
-                );
-                return Err(SourceTypeGraphError::InvalidAggregate);
-            }
-        }
-        // Every aggregate is owned by exactly one struct or union type, and
-        // every struct or union type owns exactly one aggregate.
-        if types
-            .iter()
-            .filter(|source_type| {
-                matches!(
-                    source_type.kind,
-                    SourceTypeKind::Struct { .. } | SourceTypeKind::Union { .. }
-                )
-            })
-            .count()
-            != aggregates.len()
-        {
-            return Err(SourceTypeGraphError::InvalidAggregate);
-        }
-        // A name binds one of this graph's types and binds it once. A name
-        // that resolved to two types would make the rendering's declaration of
-        // it a coin toss, which is worse than not spelling the name at all.
-        let mut named = BTreeSet::new();
-        for alias in &aliases {
-            if alias.name.is_empty()
-                || !alias
-                    .name
-                    .starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic())
-                || !alias
-                    .name
-                    .chars()
-                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-                || usize::try_from(alias.type_id)
-                    .ok()
-                    .is_none_or(|id| id >= types.len())
-                || !named.insert(alias.name.clone())
-            {
-                return Err(SourceTypeGraphError::InvalidAlias);
-            }
-        }
-        Ok(Self {
-            schema_version: SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
-            types: types.into_boxed_slice(),
-            aggregates: aggregates.into_boxed_slice(),
-            aliases: aliases.into_boxed_slice(),
-        })
-    }
-
-    pub const fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    pub const fn aliases(&self) -> &[SourceTypeAlias] {
-        &self.aliases
-    }
-
-    pub const fn types(&self) -> &[SourceType] {
-        &self.types
-    }
-
-    pub const fn aggregates(&self) -> &[SourceAggregateLayout] {
-        &self.aggregates
-    }
-
-    /// Check source pointer types against the exact captured machine width.
-    /// Structural type construction alone cannot grant this machine-specific
-    /// fact because the type graph is also used by analysis-only callers.
-    pub fn validates_pointer_width(&self, pointer_bits: u32) -> bool {
-        self.types.iter().all(|source_type| {
-            !matches!(source_type.kind, SourceTypeKind::Pointer { .. })
-                || source_type.size_bits == u64::from(pointer_bits)
-        })
-    }
-
-    fn validates_logical_value(&self, value: SourceLogicalValue, carrier_size_bytes: u32) -> bool {
-        let Some(source_type) = usize::try_from(value.type_id)
-            .ok()
-            .and_then(|id| self.types.get(id))
-        else {
-            return false;
-        };
-        let carrier_bits = u64::from(carrier_size_bytes) * 8;
-        if value.carrier.offset_bits != 0
-            || value.carrier.size_bits != source_type.size_bits
-            || source_type.size_bits > carrier_bits
-        {
-            return false;
-        }
-        match value.carrier.kind {
-            SourceCarrierKind::Full => source_type.size_bits == carrier_bits,
-            // A scalar narrower than the register it travels in occupies that
-            // register's low bits, and a floating-point value is such a scalar:
-            // a `double` returned in a 128-bit vector register is the low half
-            // of it, exactly as an `int` is the low half of a 64-bit register.
-            SourceCarrierKind::LowBits => {
-                source_type.size_bits < carrier_bits
-                    && matches!(
-                        source_type.kind,
-                        SourceTypeKind::SignedInteger
-                            | SourceTypeKind::UnsignedInteger
-                            | SourceTypeKind::Float
-                    )
-            }
-        }
-    }
-
-    fn all_types_reachable(&self, roots: impl IntoIterator<Item = u32>) -> bool {
-        let mut reachable = BTreeSet::new();
-        let mut worklist = Vec::new();
-        for root in roots {
-            if usize::try_from(root)
-                .ok()
-                .is_none_or(|id| id >= self.types.len())
-            {
-                return false;
-            }
-            if reachable.insert(root) {
-                worklist.push(root);
-            }
-        }
-        while let Some(type_id) = worklist.pop() {
-            match self.types[type_id as usize].kind {
-                SourceTypeKind::Pointer { target_type_id } => {
-                    if reachable.insert(target_type_id) {
-                        worklist.push(target_type_id);
-                    }
-                }
-                SourceTypeKind::Struct { aggregate_id }
-                | SourceTypeKind::Union { aggregate_id } => {
-                    for member in &self.aggregates[aggregate_id as usize].members {
-                        if reachable.insert(member.type_id) {
-                            worklist.push(member.type_id);
-                        }
-                    }
-                }
-                SourceTypeKind::Array {
-                    element_type_id, ..
-                } => {
-                    if reachable.insert(element_type_id) {
-                        worklist.push(element_type_id);
-                    }
-                }
-                SourceTypeKind::SignedInteger
-                | SourceTypeKind::UnsignedInteger
-                | SourceTypeKind::Float
-                | SourceTypeKind::Void
-                | SourceTypeKind::Code => {}
-            }
-        }
-        reachable.len() == self.types.len()
     }
 }
 
@@ -1261,6 +605,22 @@ impl SourceStackSlotSpec {
         self.logical_type
     }
 
+    /// The same slot measured from another origin: its role, its type and
+    /// who declared it are unchanged.
+    pub const fn measured_from(
+        self,
+        base: StackAddressBase,
+        base_storage: CanonicalStorageId,
+        offset: i64,
+    ) -> Self {
+        Self {
+            base,
+            base_storage,
+            offset,
+            ..self
+        }
+    }
+
     /// The same slot, stated by the source's debug information.
     pub const fn with_debug_declaration(self) -> Self {
         Self {
@@ -1489,6 +849,126 @@ impl std::fmt::Display for SourceFunctionInterfaceError {
 }
 
 impl std::error::Error for SourceFunctionInterfaceError {}
+
+/// The logical half of an interface: what type each value has, and the
+/// graph those types are nodes of.
+struct LogicalTypes {
+    parameters: Vec<Option<SourceLogicalValue>>,
+    returns: Option<SourceLogicalValue>,
+    graph: Option<SourceTypeGraph>,
+    slots: Vec<SourceStackSlotSpec>,
+}
+
+impl LogicalTypes {
+    /// These types, checked against the physical interface, with the graph
+    /// closed over exactly what they name.
+    ///
+    /// The graph holds every type the interface names and nothing else. That
+    /// is made true here rather than demanded of the caller: a declaration
+    /// interned item by item leaves a node nothing names once one item is
+    /// dropped, and refusing the interface for it lost every other type.
+    ///
+    /// An exact interface states a logical value for every parameter and for
+    /// a register result. Absence there meant only that a capture could not
+    /// type something, and the consumer read it as "the whole carrier", which
+    /// is a width nothing stated.
+    fn validated(
+        self,
+        parameters: &[SourceAbiParameterSpec],
+        return_kind: SourceFunctionReturn,
+        exact: bool,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        let refused = |reason| Err(SourceFunctionInterfaceError::InvalidLogicalTypes { reason });
+        let Some(graph) = self.graph.as_ref() else {
+            if self.parameters.iter().any(Option::is_some) || self.returns.is_some() {
+                return refused("logical values without a type graph");
+            }
+            if self.slots.iter().any(|slot| slot.logical_type.is_some()) {
+                return refused("a slot names a type without a type graph");
+            }
+            return Ok(self);
+        };
+        if self.parameters.len() != parameters.len() {
+            return refused("one logical value per parameter");
+        }
+        let unstated_result =
+            matches!(return_kind, SourceFunctionReturn::Register { .. }) && self.returns.is_none();
+        if exact && (self.parameters.iter().any(Option::is_none) || unstated_result) {
+            return refused("an exact interface states every logical value");
+        }
+        let fits = |value: &Option<SourceLogicalValue>, parameter: &SourceAbiParameterSpec| {
+            value.is_none_or(|value| {
+                graph.validates_logical_value(value, parameter.location.size_bytes())
+            })
+        };
+        if !self
+            .parameters
+            .iter()
+            .zip(parameters)
+            .all(|(v, p)| fits(v, p))
+        {
+            return refused("a parameter's logical value does not fit its carrier");
+        }
+        match (return_kind, self.returns) {
+            (SourceFunctionReturn::Register { storage }, Some(value))
+                if !graph.validates_logical_value(value, storage.size) =>
+            {
+                return refused("the return's logical value does not fit its carrier");
+            }
+            (SourceFunctionReturn::Void | SourceFunctionReturn::Unproven, Some(_)) => {
+                return refused("a return that names no carrier has no logical value");
+            }
+            _ => {}
+        }
+        if self
+            .slots
+            .iter()
+            .filter_map(|slot| slot.logical_type)
+            .any(|id| !graph.names_object(id))
+        {
+            return refused("a slot's type is not an object of the graph");
+        }
+        Ok(self.closed())
+    }
+
+    /// The same values, over the graph of only what they name.
+    fn closed(self) -> Self {
+        let Some(graph) = self.graph.as_ref() else {
+            return self;
+        };
+        let roots = self
+            .parameters
+            .iter()
+            .flatten()
+            .chain(&self.returns)
+            .map(|value| value.type_id())
+            .chain(self.slots.iter().filter_map(|slot| slot.logical_type));
+        let closure = graph.closure(roots);
+        let renumber = |value: SourceLogicalValue| {
+            SourceLogicalValue::new(
+                closure.id(value.type_id()).unwrap_or(value.type_id()),
+                value.carrier(),
+            )
+        };
+        Self {
+            parameters: self
+                .parameters
+                .iter()
+                .map(|value| value.map(renumber))
+                .collect(),
+            returns: self.returns.map(renumber),
+            slots: self
+                .slots
+                .iter()
+                .map(|slot| SourceStackSlotSpec {
+                    logical_type: slot.logical_type.and_then(|id| closure.id(id)),
+                    ..*slot
+                })
+                .collect(),
+            graph: Some(closure.into_graph()),
+        }
+    }
+}
 
 impl SourceFunctionInterface {
     pub fn new(
@@ -1751,91 +1231,18 @@ impl SourceFunctionInterface {
                 }
             }
         }
-        let parameter_logical_values = parameter_logical_values.into_iter().collect::<Vec<_>>();
-        match type_graph.as_ref() {
-            None => {
-                if parameter_logical_values.iter().any(Option::is_some)
-                    || return_logical_value.is_some()
-                {
-                    return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                        reason: "logical values without a type graph",
-                    });
-                }
-                if stack_slots.iter().any(|slot| slot.logical_type.is_some()) {
-                    return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                        reason: "a slot names a type without a type graph",
-                    });
-                }
-            }
-            Some(graph) => {
-                if parameter_logical_values.len() != parameters.len() {
-                    return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                        reason: "one logical value per parameter",
-                    });
-                }
-                if parameter_logical_values
-                    .iter()
-                    .zip(&parameters)
-                    .any(|(value, parameter)| {
-                        value.is_some_and(|value| {
-                            !graph.validates_logical_value(value, parameter.location.size_bytes())
-                        })
-                    })
-                {
-                    return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                        reason: "a parameter's logical value does not fit its carrier",
-                    });
-                }
-                match (return_kind, return_logical_value) {
-                    // A register return whose type the capture could not place
-                    // carries no logical value, the same as such a parameter.
-                    // A void return never has one.
-                    (SourceFunctionReturn::Void, None)
-                    | (SourceFunctionReturn::Unproven, None)
-                    | (SourceFunctionReturn::Register { .. }, None) => {}
-                    (SourceFunctionReturn::Register { storage }, Some(value)) => {
-                        if !graph.validates_logical_value(value, storage.size) {
-                            return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                                reason: "the return's logical value does not fit its carrier",
-                            });
-                        }
-                    }
-                    (SourceFunctionReturn::Void | SourceFunctionReturn::Unproven, Some(_)) => {
-                        return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                            reason: "a return that names no carrier has no logical value",
-                        });
-                    }
-                }
-                // A slot's declared type is a root like a parameter's: the
-                // graph holds every type the interface names, and the locals
-                // name types too.
-                if !graph.all_types_reachable(
-                    parameter_logical_values
-                        .iter()
-                        .filter_map(|value| value.map(SourceLogicalValue::type_id))
-                        .chain(return_logical_value.map(SourceLogicalValue::type_id))
-                        .chain(stack_slots.iter().filter_map(|slot| slot.logical_type)),
-                ) {
-                    r2il::refusal_evidence!(
-                        "logical-types",
-                        "roots {:?} return {:?} slots {:?} against a graph of {} types",
-                        parameter_logical_values
-                            .iter()
-                            .filter_map(|value| value.map(SourceLogicalValue::type_id))
-                            .collect::<Vec<_>>(),
-                        return_logical_value.map(SourceLogicalValue::type_id),
-                        stack_slots
-                            .iter()
-                            .filter_map(|slot| slot.logical_type)
-                            .collect::<Vec<_>>(),
-                        graph.types.len()
-                    );
-                    return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
-                        reason: "a logical type is not in the graph",
-                    });
-                }
-            }
+        let LogicalTypes {
+            parameters: parameter_logical_values,
+            returns: return_logical_value,
+            graph: type_graph,
+            slots: stack_slots,
+        } = LogicalTypes {
+            parameters: parameter_logical_values.into_iter().collect(),
+            returns: return_logical_value,
+            graph: type_graph,
+            slots: stack_slots,
         }
+        .validated(&parameters, return_kind, require_exact_stack_slot_roles)?;
         Ok(Self {
             schema_version: SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
             revision_identity: revision_identity.into_boxed_slice(),

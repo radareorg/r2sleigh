@@ -1598,7 +1598,8 @@ fn stack_home_strength_reduced_index_certifies_struct_array_field_access() {
     );
 }
 
-/// Parameter 0 points at a declared `Buffer { data, len }`; parameter 1 points at nothing declared.
+/// Parameter 0 points at a declared `Buffer { data, len }`; parameter 1 is a
+/// `void *`, which says it is a pointer and nothing about what it points at.
 fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInterface) {
     let storage = |offset| r2ssa::CanonicalStorageId {
         space: r2ssa::CanonicalStorageSpace::Register,
@@ -1623,6 +1624,13 @@ fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInt
             r2ssa::SourceType::new(
                 2,
                 r2ssa::SourceTypeKind::Pointer { target_type_id: 0 },
+                64,
+                64,
+            ),
+            r2ssa::SourceType::new(3, r2ssa::SourceTypeKind::Void, 0, 0),
+            r2ssa::SourceType::new(
+                4,
+                r2ssa::SourceTypeKind::Pointer { target_type_id: 3 },
                 64,
                 64,
             ),
@@ -1654,7 +1662,10 @@ fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInt
                 2,
                 r2ssa::SourceCarrierProjection::new(r2ssa::SourceCarrierKind::Full, 0, 64),
             )),
-            None,
+            Some(r2ssa::SourceLogicalValue::new(
+                4,
+                r2ssa::SourceCarrierProjection::new(r2ssa::SourceCarrierKind::Full, 0, 64),
+            )),
         ],
         None,
         Some(graph),

@@ -22,12 +22,12 @@ pub use r2source::{
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
     SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity,
     SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
-    SourceCarrierProjection, SourceConventionSlots, SourceFormatParameterRule,
+    SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots, SourceFormatParameterRule,
     SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError, SourceParameterLocation,
-    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceType, SourceTypeAlias, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
-    StackAddressBase,
+    SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag,
+    SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
+    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 26;
@@ -807,7 +807,14 @@ fn write_type_graph(writer: &mut MachineContextIdentityWriter, graph: Option<&So
             }
             SourceTypeKind::Float => writer.u8(9),
             SourceTypeKind::Void => writer.u8(5),
-            SourceTypeKind::Code => writer.u8(6),
+            SourceTypeKind::Code { signature_id } => {
+                writer.u8(6);
+                writer.u32(signature_id);
+            }
+            SourceTypeKind::Opaque { tag_id } => {
+                writer.u8(10);
+                writer.u32(tag_id);
+            }
             SourceTypeKind::Union { aggregate_id } => {
                 writer.u8(7);
                 writer.u32(aggregate_id);
@@ -818,7 +825,13 @@ fn write_type_graph(writer: &mut MachineContextIdentityWriter, graph: Option<&So
             } => {
                 writer.u8(8);
                 writer.u32(element_type_id);
-                writer.u64(count);
+                match count {
+                    Some(count) => {
+                        writer.u8(1);
+                        writer.u64(count);
+                    }
+                    None => writer.u8(0),
+                }
             }
         }
         writer.u64(source_type.size_bits());
@@ -836,7 +849,26 @@ fn write_type_graph(writer: &mut MachineContextIdentityWriter, graph: Option<&So
             writer.u32(member.type_id());
             writer.u64(member.offset_bits());
             writer.u64(member.size_bits());
+            writer.u8(u8::from(member.is_bit_field()));
         }
+    }
+    writer.usize(graph.signatures().len());
+    for signature in graph.signatures() {
+        writer.u32(signature.id());
+        writer.u32(signature.return_type_id());
+        writer.usize(signature.parameter_type_ids().len());
+        for parameter in signature.parameter_type_ids() {
+            writer.u32(*parameter);
+        }
+        writer.u8(u8::from(signature.variadic()));
+        writer.u8(u8::from(signature.prototyped()));
+    }
+    // An incomplete tag's name is what a pointer to it spells.
+    writer.usize(graph.opaque_tags().len());
+    for tag in graph.opaque_tags() {
+        writer.u32(tag.id());
+        writer.u8(tag.keyword() as u8);
+        writer.bytes(tag.name().as_bytes());
     }
     // A name is semantically inert and still decides what the rendering
     // spells, so two graphs that differ only in names are different inputs.
@@ -3409,9 +3441,18 @@ mod tests {
 
     #[test]
     fn function_interface_retains_exact_logical_type_graph() {
-        assert_eq!(
+        // An `int` aligned to two bytes is m68k's; one aligned to eight, in
+        // four bytes, is no C object anywhere.
+        assert!(
             SourceTypeGraph::new(
                 [SourceType::new(0, SourceTypeKind::SignedInteger, 32, 16)],
+                [],
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            SourceTypeGraph::new(
+                [SourceType::new(0, SourceTypeKind::SignedInteger, 32, 64)],
                 [],
             ),
             Err(SourceTypeGraphError::InvalidType)
