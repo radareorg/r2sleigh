@@ -55,55 +55,51 @@ pub struct StructShape {
 Constraints
 -----------
 
-Type constraints are collected from SSA operations:
+Type constraints are gathered from a prepared function's evidence
+(`r2types::evidence`): SSA identities, callee prototypes at each call site,
+and certified memory access widths.
 
 ```rust
-pub enum Constraint {
-    SetType { var, ty, source },
-    Equal { a, b, source },
-    Subtype { var, ty, source },
-    HasCapability { ptr, capability, elem_ty, source },
-    CallSig { target, args, params, ret, source },
-    FieldAccess { base_ptr, offset, field_ty, field_name, source },
+pub enum Constraint<K> {
+    Equal { a, b, source },    // a and b are one variable
+    Subtype { var, ty, source }, // var's type lies below ty
 }
 ```
 
+Every constraint only tightens. A constraint that would loosen a type -- a
+join, a priority override, a rewrite of a field already typed -- cannot be
+written, because meets and joins over one variable do not settle.
+
 ### Constraint Sources
 
-Each constraint has a priority based on its source:
-
-- Inferred (priority 1): from SSA operations
-- SignatureRegistry (priority 2): from built-in function signatures
-- External (priority 3): from radare2 type info (highest priority)
-
-Higher-priority constraints override lower ones when conflicting.
+`Inferred`, `SignatureRegistry` and `External` record where a bound came from.
+They carry no priority: every bound holds at once, and two that cannot both
+hold meet at `Bottom`, which refuses that variable's type.
 
 Solver
 ------
 
 ```rust
-pub struct TypeSolver {
-    config: SolverConfig,  // max_iterations: 64
-}
+pub fn solve_constraints<K>(arena: TypeArena, constraints: &[Constraint<K>]) -> SolvedTypes<K>
 ```
 
-The solver:
-1. Rewrites Equal constraints into equivalence classes
-2. Iterates over constraints, applying each to the type state
-3. Uses TypeLattice for meet/join operations
-4. Stops when no changes occur or iteration cap is reached
+1. `Equal` constraints merge nodes into classes (union-find).
+2. Each class's type is the left fold of `TypeLattice::meet` over the bounds
+   on its members, in constraint order.
+
+There are no rounds and nothing to converge: after the fold has met a bound,
+the class type lies below it, and `meet(x, b)` is `x` whenever `x` already lies
+below `b`, so the folded type satisfies every bound. Cost: O(C α(N)) plus one
+memoised meet per bound.
 
 ### Output
 
 ```rust
-pub struct SolvedTypes {
+pub struct SolvedTypes<K> {
     pub arena: TypeArena,
-    pub var_types: HashMap<SSAVar, TypeId>,
-    pub diagnostics: SolverDiagnostics,
+    pub var_types: HashMap<K, TypeId>, // present iff the class carries a bound
 }
 ```
-
-Diagnostics include warnings, conflicts, iteration count, and convergence.
 
 Integration with Decompiler
 ---------------------------

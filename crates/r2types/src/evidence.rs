@@ -21,7 +21,7 @@ use crate::facts::FunctionType;
 use crate::model::{Signedness, Type, TypeArena, TypeId};
 
 use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
-use crate::solver::{SolvedTypes, SolverConfig, TypeSolver};
+use crate::solver::{SolvedTypes, solve_constraints};
 
 /// A node of the recovered type graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -670,8 +670,7 @@ impl<'a> EvidenceBuilder<'a> {
     }
 
     fn solve(&self) -> SolvedTypes<EvidenceNode> {
-        let solver = TypeSolver::new(SolverConfig::default());
-        solver.solve(self.arena.clone(), &self.constraints)
+        solve_constraints(self.arena.clone(), &self.constraints)
     }
 
     fn read_back(&mut self, solved: &SolvedTypes<EvidenceNode>) -> EvidenceTypes {
@@ -992,7 +991,7 @@ mod tests {
                 source: ConstraintSource::SignatureRegistry,
             })
             .collect::<Vec<_>>();
-        let solved = TypeSolver::new(SolverConfig::default()).solve(arena, &constraints);
+        let solved = solve_constraints(arena, &constraints);
         let solved_ty = solved.var_types.get(&node).copied().expect("node visited");
         assert!(type_is_unresolved(&solved.arena, solved_ty));
     }
@@ -1015,8 +1014,7 @@ mod tests {
                     source: ConstraintSource::SignatureRegistry,
                 })
                 .collect::<Vec<_>>();
-            let solved =
-                TypeSolver::new(SolverConfig::default()).solve(arena.clone(), &constraints);
+            let solved = solve_constraints(arena.clone(), &constraints);
             let solved_ty = solved.var_types.get(&node).copied().expect("node typed");
             assert_eq!(
                 structural_type_like(&solved.arena, solved_ty),

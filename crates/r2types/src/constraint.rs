@@ -19,6 +19,11 @@ impl SolverNode for SSAVar {
     }
 }
 
+/// Where a constraint's evidence came from.
+///
+/// Provenance only: every bound holds at once, so no source outranks another.
+/// Two sources that disagree meet at `Bottom`, which is a refusal of that
+/// node's type, not a contest one of them wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConstraintSource {
     Inferred,
@@ -26,29 +31,15 @@ pub enum ConstraintSource {
     External,
 }
 
-impl ConstraintSource {
-    pub fn priority(self) -> u8 {
-        match self {
-            Self::Inferred => 1,
-            Self::SignatureRegistry => 2,
-            Self::External => 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MemoryCapability {
-    Load,
-    Store,
-}
-
+/// One fact about the type of a node.
+///
+/// Every constraint only tightens: `Equal` makes two nodes one class, and
+/// `Subtype` bounds a class from above. A constraint that loosens -- a join, an
+/// override, a rewrite of a field already typed -- cannot be written here,
+/// because meets and joins over one class do not settle and no round count
+/// makes them.
 #[derive(Debug, Clone)]
 pub enum Constraint<K = SSAVar> {
-    SetType {
-        var: K,
-        ty: TypeId,
-        source: ConstraintSource,
-    },
     Equal {
         a: K,
         b: K,
@@ -59,37 +50,12 @@ pub enum Constraint<K = SSAVar> {
         ty: TypeId,
         source: ConstraintSource,
     },
-    HasCapability {
-        ptr: K,
-        capability: MemoryCapability,
-        elem_ty: TypeId,
-        source: ConstraintSource,
-    },
-    CallSig {
-        target: K,
-        args: Vec<K>,
-        params: Vec<TypeId>,
-        ret: Option<(K, TypeId)>,
-        source: ConstraintSource,
-    },
-    FieldAccess {
-        base_ptr: K,
-        offset: u64,
-        field_ty: TypeId,
-        field_name: Option<String>,
-        source: ConstraintSource,
-    },
 }
 
 impl<K> Constraint<K> {
     pub fn source(&self) -> ConstraintSource {
         match self {
-            Self::SetType { source, .. }
-            | Self::Equal { source, .. }
-            | Self::Subtype { source, .. }
-            | Self::HasCapability { source, .. }
-            | Self::CallSig { source, .. }
-            | Self::FieldAccess { source, .. } => *source,
+            Self::Equal { source, .. } | Self::Subtype { source, .. } => *source,
         }
     }
 }
