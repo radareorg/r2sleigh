@@ -285,6 +285,8 @@ pub struct DispatchTable {
     pub address: u64,
     pub entry_size: u32,
     pub entries: usize,
+    /// What the container states about whether the bytes the fetch read are the ones the dispatch reads when it runs.
+    pub stated: TableBytes,
 }
 
 impl DispatchTable {
@@ -294,6 +296,7 @@ impl DispatchTable {
             address: fetched.table.address(),
             entry_size: fetched.table.entry_size(),
             entries: fetched.targets.len(),
+            stated: fetched.stated,
         };
         (fetched.instruction, table)
     }
@@ -1708,10 +1711,12 @@ impl Callees {
 /// The seam immutability arrives through. A writable region is `Unsealed`:
 /// the container has not yet been asked whether anything seals it after load
 /// (a RELRO range, a read-only Mach-O segment), and that statement is what
-/// turns it into one the program cannot change or refuses it. Until then it
-/// is read as it is today and the evidence names it.
+/// turns it into one the program cannot change or refuses it. Until then the
+/// table is read as before, the refusal evidence says it was read unsealed,
+/// and every table carries this statement -- on `DispatchTable` and so on the
+/// listing's `Switch` -- for that check to consume rather than recompute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TableBytes {
+pub enum TableBytes {
     /// No write permission: the bytes are the program's for its whole run.
     ReadOnly,
     /// Writable, and nothing the container states seals it after load.
@@ -1732,11 +1737,6 @@ impl TableBytes {
             (false, true) => Self::Unsealed,
         }
     }
-
-    /// Whether the file's bytes may be read as the run's: not where the loader writes over them.
-    const fn read_as_run(self) -> bool {
-        !matches!(self, Self::LoaderWritten)
-    }
 }
 
 /// One function walked out of the program.
@@ -1751,6 +1751,8 @@ struct Walked {
 /// One dispatch's table, read, and where the dispatch that reads it stands.
 struct NativePointerTable {
     instruction: u64,
+    /// What the container states about whether the bytes read are the run's.
+    stated: TableBytes,
     targets: Vec<u64>,
     /// What the selector is on each arm, and where that arm goes.
     cases: Vec<(u64, u64)>,
@@ -1888,11 +1890,18 @@ impl Native<'_> {
             return None;
         };
         let stated = TableBytes::of(self.program, &region, at..end);
-        if !stated.read_as_run() {
-            refused(format_args!(
-                "{stated:?}: the file's bytes are not what the dispatch reads"
-            ));
-            return None;
+        match stated {
+            TableBytes::LoaderWritten => {
+                refused(format_args!(
+                    "{stated:?}: the file's bytes are not what the dispatch reads"
+                ));
+                return None;
+            }
+            // Not a refusal yet: the statement that would seal it is not asked for until P2, so it is said here and carried on the table.
+            TableBytes::Unsealed => refused(format_args!(
+                "{stated:?}: read from memory the program may write, which nothing the container states seals after load"
+            )),
+            TableBytes::ReadOnly => {}
         }
         let bytes = self.program.read(at, span).unwrap_or_default();
         if bytes.len() < span {
@@ -1922,6 +1931,7 @@ impl Native<'_> {
             .collect::<Option<Vec<_>>>()?;
         Some(NativePointerTable {
             instruction: read.instruction?,
+            stated,
             cases,
             table: r2source::SourceCodePointerTable::new(
                 at,

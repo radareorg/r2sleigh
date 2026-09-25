@@ -576,7 +576,16 @@ impl Literal {
     }
 
     /// The same program with its bytes from `end` on mapped as data: readable, and no instruction there can run.
-    pub fn data_mapped_after(mut self, end: u64) -> Self {
+    pub fn data_mapped_after(self, end: u64) -> Self {
+        self.data_after(end, false)
+    }
+
+    /// The same program with its bytes from `end` on mapped as data the program may write once it runs.
+    pub fn writable_data_after(self, end: u64) -> Self {
+        self.data_after(end, true)
+    }
+
+    fn data_after(mut self, end: u64, write: bool) -> Self {
         let code = &mut self.container.segments[0];
         let stop = code.vaddr + code.vsize;
         code.vsize = end - code.vaddr;
@@ -585,7 +594,7 @@ impl Literal {
             vsize: stop - end,
             permissions: Permissions {
                 read: true,
-                write: false,
+                write,
                 execute: false,
             },
         });

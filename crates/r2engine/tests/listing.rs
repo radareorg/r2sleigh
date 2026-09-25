@@ -634,10 +634,12 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
     let lines = lines.expect("it lists").lines.value;
     let dispatch = BASE + 7;
     let arms = [(0, 0x100e), (1, 0x1014), (2, 0x101a), (3, 0x1026)];
+    // The table lies in the code, which nothing writes once the program runs.
     let table = r2engine::native::DispatchTable {
         address: BASE + 0x30,
         entry_size: 8,
         entries: 4,
+        stated: r2engine::native::TableBytes::ReadOnly,
     };
     let case = |value: u64| AnnotationKind::Case {
         values: vec![value],
@@ -670,6 +672,28 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
         .iter()
         .any(|(_, kind, _)| *kind == AnnotationKind::Unresolved);
     assert!(!unresolved, "{said:?}");
+}
+
+#[test]
+fn a_table_the_program_may_write_is_read_as_the_file_holds_it_and_says_so() {
+    // Nothing the container states is yet asked whether it seals a writable
+    // table after load -- a RELRO range, a read-only segment -- so the table
+    // is read as the file holds it, and it carries that it was unsealed for
+    // the check that asks to consume rather than recompute.
+    let program = table_switch().writable_data_after(BASE + 0x30);
+    let lines = OpenProgram::of(program).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    let tables = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .filter_map(|annotation| match &annotation.kind {
+            AnnotationKind::Switch { table, .. } => *table,
+            _ => None,
+        })
+        .map(|table| (table.address, table.entries, table.stated))
+        .collect::<Vec<_>>();
+    let unsealed = r2engine::native::TableBytes::Unsealed;
+    assert_eq!(tables, [(BASE + 0x30, 4, unsealed)]);
 }
 
 #[test]
