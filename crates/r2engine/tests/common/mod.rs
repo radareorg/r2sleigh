@@ -637,6 +637,12 @@ impl Literal {
         self
     }
 
+    /// The same program, stating that the loader makes this range read-only once it is done.
+    pub fn sealed(mut self, range: Range<u64>) -> Self {
+        self.container.sealed.push(range);
+        self
+    }
+
     /// The same program, stating that the loader writes this before it runs.
     pub fn loader_written(mut self, write: LoaderWrite) -> Self {
         self.container.loader_writes.push(write);

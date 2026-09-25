@@ -734,25 +734,46 @@ fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
 }
 
 #[test]
-fn a_table_the_program_may_write_is_read_as_the_file_holds_it_and_says_so() {
-    // Nothing the container states is yet asked whether it seals a writable
-    // table after load -- a RELRO range, a read-only segment -- so the table
-    // is read as the file holds it, and it carries that it was unsealed for
-    // the check that asks to consume rather than recompute.
-    let program = table_switch().writable_data_after(BASE + 0x30);
-    let lines = OpenProgram::of(program).function_listing(BASE);
+fn a_dispatch_table_in_memory_the_program_may_write_is_refused_unless_the_loader_seals_it() {
+    // The file's entries need not be the ones a writable table holds when the
+    // dispatch runs, so reading them resolved the switch on a guess about
+    // the program's own stores. The same table the loader seals after it is
+    // done -- a RELRO range, a Mach-O `SG_READ_ONLY` segment -- is the
+    // program's for its whole run, and is read.
+    let table = BASE + 0x30;
+    let writable = table_switch().writable_data_after(table);
+    let lines = OpenProgram::of(writable).function_listing(BASE);
     let lines = lines.expect("it lists").lines.value;
-    let tables = lines
+    assert_eq!(tables_of(&lines), []);
+    let unresolved = lines
         .iter()
         .flat_map(|line| &line.annotations)
-        .filter_map(|annotation| match &annotation.kind {
-            AnnotationKind::Switch { table, .. } => *table,
-            _ => None,
-        })
-        .map(|table| (table.address, table.entries, table.stated))
-        .collect::<Vec<_>>();
-    let unsealed = r2engine::native::TableBytes::Unsealed;
-    assert_eq!(tables, [(BASE + 0x30, 4, unsealed)]);
+        .any(|annotation| annotation.kind == AnnotationKind::Unresolved);
+    assert!(unresolved, "the dispatch is said to be unresolved");
+
+    let sealed = table_switch()
+        .writable_data_after(table)
+        .sealed(table..table + 0x20);
+    let lines = OpenProgram::of(sealed).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    let read_only = r2engine::native::TableBytes::ReadOnly;
+    assert_eq!(tables_of(&lines), [(table, 4, read_only)]);
+}
+
+#[test]
+fn a_dispatch_table_whose_entry_leaves_what_the_container_states_is_code_is_refused() {
+    // The segment is executable throughout, so every entry decodes; but from
+    // 0x101a on the container states a data section, and a word that decodes
+    // there is not an arm the program was built to jump to.
+    let program = table_switch().with_data_after(BASE + 0x1a);
+    let lines = OpenProgram::of(program).function_listing(BASE);
+    let lines = lines.expect("it lists").lines.value;
+    assert_eq!(tables_of(&lines), []);
+    let unresolved = lines
+        .iter()
+        .flat_map(|line| &line.annotations)
+        .any(|annotation| annotation.kind == AnnotationKind::Unresolved);
+    assert!(unresolved, "the dispatch is said to be unresolved");
 }
 
 #[test]

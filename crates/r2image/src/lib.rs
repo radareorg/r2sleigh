@@ -471,6 +471,8 @@ impl Image {
             import_stubs,
         } = loader::read(&file, data.as_slice(), &placed, u64::from(arch.bits / 8));
 
+        let sealed = loader::sealed(&file);
+
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
         let declared = debug::read(&file).prototypes().collect();
@@ -561,6 +563,7 @@ impl Image {
                 import_stubs,
                 loader_writes,
                 entries,
+                sealed,
                 declared,
             },
             patches: BTreeMap::new(),

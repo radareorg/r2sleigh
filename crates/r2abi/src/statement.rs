@@ -40,6 +40,10 @@ pub struct Container {
     /// What the file holds at any of these bytes is not what the program reads.
     pub loader_writes: Vec<LoaderWrite>,
     pub entries: Vec<Entry>,
+    /// Ranges of writable segments the loader makes read-only once it is
+    /// done, sorted and disjoint: ELF's `PT_GNU_RELRO`, and a Mach-O segment
+    /// flagged `SG_READ_ONLY`, whose fixups dyld applies before sealing it.
+    pub sealed: Vec<Range<u64>>,
     /// Prototypes the program's own debug information declares.
     pub declared: Vec<crate::Prototype>,
 }
@@ -79,6 +83,29 @@ impl Container {
     /// The loader's write covering `place`, where it makes one: one search.
     pub fn loader_write_at(&self, place: u64) -> Option<&LoaderWrite> {
         write_at(&self.loader_writes, place)
+    }
+
+    /// Whether nothing can write any byte of `range` once the program runs.
+    ///
+    /// A segment mapped without write permission is immutable for the whole
+    /// run; a writable one is immutable after load only where the loader
+    /// seals it. Either way what the loader wrote first is what stays, so a
+    /// word here holds its stated value for the whole run. `O(log S)`.
+    pub fn immutable(&self, range: &Range<u64>) -> bool {
+        if range.start >= range.end {
+            return true;
+        }
+        let read_only = self
+            .segment_at(range.start)
+            .is_some_and(|segment| !segment.permissions.write && range.end <= segment.range().1);
+        let after = self
+            .sealed
+            .partition_point(|sealed| sealed.start <= range.start);
+        let sealed = after
+            .checked_sub(1)
+            .and_then(|at| self.sealed.get(at))
+            .is_some_and(|sealed| range.end <= sealed.end);
+        read_only || sealed
     }
 
     /// The bytes the loader writes, as sorted, disjoint ranges with touching ones made one.

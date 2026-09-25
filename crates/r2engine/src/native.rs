@@ -62,6 +62,22 @@ pub trait Program: r2ssa::body::Program {
     /// [`holds_static_data`](crate::program::Section::holds_static_data).
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
+    /// Whether nothing can write any byte of `range` once the program runs:
+    /// a segment mapped without write permission, or one the loader seals
+    /// after it is done. Where the program says nothing of sealing, only the
+    /// region's own permission answers.
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.region(range.start)
+            .is_some_and(|region| !region.write && range.end <= region.end)
+    }
+
+    /// Whether the container states the code at this address is instructions:
+    /// a section it says holds code, or, where it states no sections, a region
+    /// it maps executable.
+    fn holds_code(&self, vaddr: u64) -> bool {
+        self.region(vaddr).is_some_and(|region| region.execute)
+    }
+
     /// What the loader writes before the program runs, sorted by place and
     /// disjoint, with the value the container states for each: the file's
     /// bytes there are not what the program reads. Nothing, where nothing is
@@ -1722,28 +1738,30 @@ impl Callees {
 /// listing's `Switch` -- for that check to consume rather than recompute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableBytes {
-    /// No write permission: the bytes are the program's for its whole run.
+    /// Nothing writes them once the program runs, and the loader leaves them
+    /// alone: the bytes are the program's for its whole run.
     ReadOnly,
-    /// Writable, and nothing the container states seals it after load.
+    /// The program may write them once it runs, and nothing the container
+    /// states seals them after load: what the file holds is not what a
+    /// dispatch reads, so the table is refused.
     Unsealed,
-    /// The loader writes some of them -- a rebased pointer, a chained fixup,
-    /// an import's slot -- so the file's bytes are not what runs; each entry
-    /// is what the container states the loader writes there, or nothing.
+    /// Nothing writes them once the program runs, and the loader writes some
+    /// -- a rebased pointer, a chained fixup -- before it seals them: each
+    /// entry is what the container states the loader writes there, or the
+    /// table is refused.
     LoaderWritten,
 }
 
 impl TableBytes {
-    /// O(log n) in the loader's writes: one search, and one comparison against the file's extent.
-    fn of(
-        program: &dyn Program,
-        region: &r2ssa::body::Region,
-        range: std::ops::Range<u64>,
-    ) -> Self {
-        let written = crate::stated::written(program, &range);
-        match (written, region.write) {
-            (true, _) => Self::LoaderWritten,
-            (false, false) => Self::ReadOnly,
-            (false, true) => Self::Unsealed,
+    /// O(log n): one search in the loader's writes and one in what it seals.
+    fn of(program: &dyn Program, range: std::ops::Range<u64>) -> Self {
+        match (
+            program.immutable(&range),
+            crate::stated::written(program, &range),
+        ) {
+            (false, _) => Self::Unsealed,
+            (true, true) => Self::LoaderWritten,
+            (true, false) => Self::ReadOnly,
         }
     }
 
@@ -1752,9 +1770,8 @@ impl TableBytes {
     ///
     /// A table the loader writes is read as the container states the loader
     /// writes it, entry by entry; an entry whose value it does not state
-    /// refuses the table there. Unsealed is not a refusal yet: the statement
-    /// that would seal it is not asked for until the immutability check
-    /// lands, so it is said here and carried on the table.
+    /// refuses the table there. A table the program may write is refused
+    /// whole: the entries the file holds need not be the ones it jumps by.
     fn read_as_run(self, at: u64) -> bool {
         match self {
             Self::LoaderWritten => {
@@ -1767,10 +1784,10 @@ impl TableBytes {
             Self::Unsealed => {
                 r2il::refusal_evidence!(
                     "dispatch-table",
-                    "{at:#x}: {self:?}: read from memory the program may write, which \
+                    "{at:#x}: {self:?}: in memory the program may write, which \
                      nothing the container states seals after load"
                 );
-                true
+                false
             }
             Self::ReadOnly => true,
         }
@@ -1940,7 +1957,7 @@ impl Native<'_> {
             ));
             return None;
         }
-        let stated = TableBytes::of(self.program, &region, at..end);
+        let stated = TableBytes::of(self.program, at..end);
         if !stated.read_as_run(at) {
             return None;
         }
@@ -1966,7 +1983,9 @@ impl Native<'_> {
             .map(|entry| read.transform.target(entry, read.size))
             .collect::<Vec<_>>();
         let distinct = targets.iter().copied().collect::<BTreeSet<_>>();
-        if let Some(target) = distinct.iter().find(|target| !self.decodes(**target)) {
+        // An arm is code the container states is instructions, and decodes there.
+        let arm = |target: u64| self.program.holds_code(target) && self.decodes(target);
+        if let Some(target) = distinct.iter().find(|target| !arm(**target)) {
             refused(format_args!(
                 "{} entries of {} bytes: entry target {target:#x} is not an instruction",
                 read.count, read.size

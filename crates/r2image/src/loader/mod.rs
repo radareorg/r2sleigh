@@ -52,6 +52,42 @@ pub(crate) fn read(
     }
 }
 
+/// The ranges of writable segments the loader makes read-only once it is done, sorted and merged.
+///
+/// ELF states them as `PT_GNU_RELRO`, which the dynamic loader `mprotect`s
+/// after relocating; Mach-O as a segment flagged `SG_READ_ONLY`, which dyld
+/// seals after applying its fixups. A segment mapped without write
+/// permission needs no statement: it is read-only from the start.
+pub(crate) fn sealed(file: &object::File<'_>) -> Vec<Range<u64>> {
+    use object::read::ObjectSegment as _;
+    use object::read::elf::ProgramHeader as _;
+    const SG_READ_ONLY: u32 = 0x10;
+    let ranges = match file {
+        object::File::Elf32(elf) => relro(elf),
+        object::File::Elf64(elf) => relro(elf),
+        object::File::MachO32(_) | object::File::MachO64(_) => file
+            .segments()
+            .filter(|segment| {
+                matches!(segment.flags(), object::SegmentFlags::MachO { flags, .. } if flags & SG_READ_ONLY != 0)
+            })
+            .map(|segment| written(segment.address(), segment.size()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    return merged(ranges);
+
+    fn relro<'data, E: object::read::elf::FileHeader, R: object::ReadRef<'data>>(
+        elf: &object::read::elf::ElfFile<'data, E, R>,
+    ) -> Vec<Range<u64>> {
+        let endian = elf.endian();
+        elf.elf_program_headers()
+            .iter()
+            .filter(|header| header.p_type(endian) == object::elf::PT_GNU_RELRO)
+            .map(|header| written(header.p_vaddr(endian).into(), header.p_memsz(endian).into()))
+            .collect()
+    }
+}
+
 /// The writes as the program sees them once the loader is done: sorted by place and disjoint.
 ///
 /// Records writing one place are applied in order, so the last one's value

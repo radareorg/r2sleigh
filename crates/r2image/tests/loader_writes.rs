@@ -117,3 +117,40 @@ fn a_chained_rebase_states_its_target_and_a_bind_its_import() {
         Some(r2image::WriteKind::Relative(0x1_0000_0fe4))
     );
 }
+
+#[test]
+fn what_the_loader_seals_after_it_is_done_is_stated_beside_what_it_never_lets_the_program_write() {
+    // `readelf -l rv_O0g`: GNU_RELRO covers 0x3da0..0x4000 of the writable
+    // segment; `.data` after it stays writable.
+    let rv = r2image::Image::parse(include_bytes!("../../../tests/fixtures/rv_O0g").to_vec())
+        .expect("the fixture parses");
+    let container = rv.container();
+    let sealed: Vec<(u64, u64)> = container
+        .sealed
+        .iter()
+        .map(|range| (range.start, range.end))
+        .collect();
+    assert_eq!(sealed, [(0x3da0, 0x4000)]);
+    assert!(
+        container.immutable(&(0x3fc8..0x3fd0)),
+        "a GOT slot is sealed"
+    );
+    assert!(
+        container.immutable(&(0x2018..0x2038)),
+        "read-only data is immutable"
+    );
+    assert!(
+        !container.immutable(&(0x4018..0x4020)),
+        "`g_msg` stays writable"
+    );
+    assert!(
+        !container.immutable(&(0x3ff8..0x4008)),
+        "a range leaving the seal is not"
+    );
+    // `__DATA_CONST` of the Mach-O fixture is mapped writable for dyld and flagged `SG_READ_ONLY`.
+    let table = r2image::Image::parse(
+        include_bytes!("../../../tests/fixtures/code_pointer_table_O0").to_vec(),
+    )
+    .expect("the fixture parses");
+    assert!(table.container().immutable(&(0x1_0000_4000..0x1_0000_4018)));
+}

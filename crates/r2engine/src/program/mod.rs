@@ -67,6 +67,9 @@ pub struct OpenProgram<S: Source> {
     /// body names, and scanning every section for each was one pass per
     /// question.
     static_data: r2types::ProgramExtents,
+    /// Where the container states instructions lie, indexed once the same
+    /// way; `None` where it states no section holds any.
+    code: Option<r2types::ProgramExtents>,
     /// Whether each function discovery found is Thumb, by its entry.
     ///
     /// Derived from the whole program, since a function nothing states is in
@@ -144,6 +147,15 @@ impl<S: Source> OpenProgram<S> {
                     .filter(|section| section.holds_static_data())
                     .map(Section::range),
             ),
+            code: {
+                let code = container
+                    .sections
+                    .iter()
+                    .filter(|section| section.loaded && section.is_code && section.vsize > 0)
+                    .map(Section::range)
+                    .collect::<Vec<_>>();
+                (!code.is_empty()).then(|| r2types::ProgramExtents::new(code))
+            },
             modes: BTreeMap::new(),
             mapped: container
                 .symbols
@@ -592,6 +604,17 @@ impl<S: Source> crate::native::Program for OpenProgram<S> {
         &self.source.container().loader_writes
     }
 
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.source.container().immutable(range)
+    }
+
+    fn holds_code(&self, vaddr: u64) -> bool {
+        match &self.code {
+            Some(code) => code.holds(vaddr),
+            None => r2ssa::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
+        }
+    }
+
     fn extents(&self) -> &r2types::ProgramExtents {
         &self.extents
     }
@@ -663,6 +686,14 @@ impl<S: Source> crate::native::Program for Recording<'_, S> {
 
     fn loader_writes(&self) -> &[LoaderWrite] {
         crate::native::Program::loader_writes(self.program)
+    }
+
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        crate::native::Program::immutable(self.program, range)
+    }
+
+    fn holds_code(&self, vaddr: u64) -> bool {
+        crate::native::Program::holds_code(self.program, vaddr)
     }
 
     fn extents(&self) -> &r2types::ProgramExtents {
