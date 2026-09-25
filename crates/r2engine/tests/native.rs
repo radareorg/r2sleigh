@@ -1557,6 +1557,7 @@ fn a_write_to_part_of_a_register_keeps_the_rest_of_it() {
 /// (int)g_note; }` for an `int g_sink` and a `long g_note` at fixed
 /// addresses, as gcc -O0 writes it: the parameter spilled, and each store
 /// made from its own reload, the second sign-extended.
+#[cfg(target_os = "linux")]
 const TYPED_COMPETE: &[u8] = &[
     0x55, // 0x1000 push rbp
     0x48, 0x89, 0xe5, // 0x1001 mov rbp, rsp
@@ -1580,7 +1581,9 @@ const TYPED_COMPETE: &[u8] = &[
 /// itself, so the eight-byte value carried the four-byte parameter's type,
 /// and the store was spelled at that type: `*(uint32_t*)g_note = ...` left
 /// the upper four bytes of `g_note` as they were. The harness maps both
-/// globals, fills them, and checks every byte after each call.
+/// globals, fills them, and checks every byte after each call. The globals
+/// sit at a fixed address the harness maps with a Linux mapping.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_store_writes_the_bytes_the_instruction_writes() {
     let text = rendered(TYPED_COMPETE, "typed_compete");
