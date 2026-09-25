@@ -138,12 +138,19 @@ impl StridedInterval {
         })
     }
 
-    /// How many values this describes, where that is worth counting.
+    /// How many values this describes: nought for the empty set, and `None`
+    /// only where the count is 2^64, which no `u64` holds.
+    ///
+    /// Every value of a 64-bit integer is exactly that many, and the one place
+    /// a count is taken as a size -- how many entries a table read can reach --
+    /// has to be told so rather than handed a sum that wrapped to nought.
     pub fn count(&self) -> Option<u64> {
-        let body = self.body?;
+        let Some(body) = self.body else {
+            return Some(0);
+        };
         match body.low == body.high {
             true => Some(1),
-            false => Some((body.high - body.low) / body.stride + 1),
+            false => ((body.high - body.low) / body.stride).checked_add(1),
         }
     }
 
@@ -436,6 +443,19 @@ mod tests {
         assert!(!four.contains(2));
         assert_eq!(four.count(), Some(11));
         assert_eq!(four.stride(), Some(4));
+    }
+
+    #[test]
+    fn every_value_of_sixty_four_bits_is_counted_as_too_many_for_a_u64() {
+        // 2^64 values: the old sum wrapped to nought in release and panicked in debug.
+        assert_eq!(StridedInterval::top(64).count(), None);
+        assert_eq!(StridedInterval::top(32).count(), Some(1 << 32));
+        assert_eq!(
+            StridedInterval::strided(64, 2, 0, u64::MAX).count(),
+            Some(1 << 63)
+        );
+        assert_eq!(StridedInterval::constant(64, u64::MAX).count(), Some(1));
+        assert_eq!(StridedInterval::bottom(64).count(), Some(0));
     }
 
     #[test]
