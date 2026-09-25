@@ -24,11 +24,11 @@ merger = load("merge_decbench")
 
 
 def payload(project: str, score: float | None, decompiled: bool = True) -> dict:
-    values = {"r2sleigh": {"byte_match": score}} if score is not None else {}
+    values = {"r2sleigh_native": {"byte_match": score}} if score is not None else {}
     return {
         "schema_version": 2,
-        "decompilers": ["r2sleigh"],
-        "decompiler_versions": {"r2sleigh": "test"},
+        "decompilers": ["r2sleigh_native"],
+        "decompiler_versions": {"r2sleigh_native": "test"},
         "metrics": ["byte_match"],
         "groups": [
             {
@@ -39,7 +39,7 @@ def payload(project: str, score: float | None, decompiled: bool = True) -> dict:
                     {
                         "function": "same_function",
                         "values": values,
-                        "decompiled": {"r2sleigh": decompiled},
+                        "decompiled": {"r2sleigh_native": decompiled},
                     }
                 ],
             }
@@ -48,6 +48,23 @@ def payload(project: str, score: float | None, decompiled: bool = True) -> dict:
 
 
 class ReportTests(unittest.TestCase):
+    def test_an_invalid_baseline_is_neither_compared_nor_merged(self) -> None:
+        self.assertEqual(report.usable_baseline(None), (None, None))
+        kept = {"functions": {}}
+        self.assertEqual(report.usable_baseline(kept), (kept, None))
+        self.assertEqual(
+            report.usable_baseline({"functions": {"x": {}}, "invalid": {"reason": "plugin era"}}),
+            (None, "plugin era"),
+        )
+
+    def test_the_plugin_era_record_may_not_grade_a_run(self) -> None:
+        import json
+
+        recorded = json.loads((HERE / "baseline.json").read_text())
+        baseline, invalid = report.usable_baseline(recorded)
+        self.assertIsNone(baseline)
+        self.assertIn("unstripped", invalid)
+
     def test_project_is_part_of_function_key(self) -> None:
         merged = merger.merge([payload("one", 0.5), payload("two", 0.75)])
         collected = report.collect(merged)
@@ -268,13 +285,13 @@ class ReportTests(unittest.TestCase):
                                 "functions": [
                                     {
                                         "function": "down",
-                                        "values": {"r2sleigh": {"byte_match": 0.40}},
-                                        "decompiled": {"r2sleigh": True},
+                                        "values": {"r2sleigh_native": {"byte_match": 0.40}},
+                                        "decompiled": {"r2sleigh_native": True},
                                     },
                                     {
                                         "function": "up",
-                                        "values": {"r2sleigh": {"byte_match": 0.90}},
-                                        "decompiled": {"r2sleigh": True},
+                                        "values": {"r2sleigh_native": {"byte_match": 0.90}},
+                                        "decompiled": {"r2sleigh_native": True},
                                     },
                                 ],
                             }

@@ -79,6 +79,14 @@ jobs:
         run: bash .github/scripts/ensure-radare2-ci.sh
       - name: The gate reads the proof line by name
         run: python3 scripts/test_certify_render.py
+      # No harness may drive the deleted plugin; the equivalence gate's
+      # self-tests must hold before its verdicts mean anything; the DecBench
+      # backend files every function it is asked for.
+      - name: Harness contracts
+        run: |
+          python3 -m unittest tests/test_no_plugin.py scripts/test_esil_differential.py
+          python3 -m unittest discover -s tests/decbench -p 'test_*.py'
+          python3 -m unittest discover -s tests/equiv -p 'test_*.py'
       - name: Build the shell
         run: cargo build --release -p r2s --features sleigh
       - name: A rendering may not read what nothing wrote

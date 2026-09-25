@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Serve lldb to an MCP client over stdio, with radare2 and the plugin tree
-# already known to the debugger.
+# Serve lldb to an MCP client over stdio, with r2s already its target.
 #
 # `lldb-mcp` (Homebrew `lldb`, 23.1.1) multiplexes lldb sessions that register
 # under ~/.lldb. Its own spawn of an lldb backend gives that lldb no stdin, and
@@ -8,40 +7,42 @@
 # stdin held open, waits for the registration and then hands stdio to lldb-mcp.
 # The backend dies with the multiplexer.
 #
-# The session starts with the fork's radare2 as its target and the environment
-# the probe scripts use, with refusal tracing on so evidence lines run and can
-# be stopped at. Run tests/corpus/probe_plugin.sh install first so the plugin
-# radare2 loads carries symbols; `restore` puts the release build back. Then,
-# through the `command` tool:
-#   breakpoint set --shlib libr2sleigh_plugin.dylib --file function.rs --line N
+# The session's target is the dev-profile r2s (debug info is in the dev profile
+# already; `cargo build -p r2s --features sleigh`), with refusal tracing on so
+# evidence lines run and can be stopped at. Then, through the `command` tool:
+#   breakpoint set --file function.rs --line N
 #   breakpoint set -n r2ssa::function::promote_private_stack_slots
-#   process launch -i /dev/null -o /tmp/out.txt -e /tmp/err.txt -- -q -c "a:sla; aaa; s <addr>; pd:s" <binary>
+#   process launch -i /dev/null -o /tmp/out.txt -e /tmp/err.txt -- -q -c "s <addr>; pdd" <binary>
 #   process status            (the session is asynchronous: poll until stopped)
 #   frame variable / bt / expression / continue / process kill
-# A pending file breakpoint needs `--shlib`, the plugin is loaded at run time.
 # The inferior must not inherit the backend's stdio (`-i`, `-o`, `-e` above),
 # and `script` is not to be run through the session: both take the backend down.
+# For one stop in batch, tests/corpus/lldb_r2s.sh does the same without MCP.
 #
-# Configured for Claude Code by .mcp.json at the repository root. R2_BIN and
-# PLUGIN_DIR override the radare2 and the plugin directory.
+# Configured for Claude Code by .mcp.json at the repository root. R2S overrides
+# the r2s the session targets.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-lldb_bin=${LLDB_BIN:-/opt/homebrew/opt/lldb/bin/lldb}
-lldb_mcp=${LLDB_MCP:-/opt/homebrew/opt/lldb/bin/lldb-mcp}
-r2_bin=${R2_BIN:-$root/../radare2/binr/radare2/radare2}
-plugin_dir=${PLUGIN_DIR:-/tmp/r2sleigh-r2r-tmp/plugins}
+lldb_bin=${LLDB_BIN:-$(command -v lldb || echo /opt/homebrew/opt/lldb/bin/lldb)}
+lldb_mcp=${LLDB_MCP:-$(command -v lldb-mcp || echo /opt/homebrew/opt/lldb/bin/lldb-mcp)}
+r2s=${R2S:-${CARGO_TARGET_DIR:-$root/target}/debug/r2s}
 for tool in "$lldb_bin" "$lldb_mcp"; do
-    [[ -x $tool ]] || { echo "missing $tool; brew install lldb" >&2; exit 69; }
+    [[ -x $tool ]] || { echo "missing $tool; install lldb (brew install lldb)" >&2; exit 69; }
 done
-
-libs=""
-if [[ $r2_bin == */binr/radare2/radare2 && -d ${r2_bin%/binr/radare2/radare2}/libr ]]; then
-    libs=$(ls -d "${r2_bin%/binr/radare2/radare2}"/libr/*/ | tr '\n' ':')
+# A fresh checkout has no r2s yet. The server still starts, with no target,
+# so the MCP client does not fail at launch; build r2s and then
+# `target create <path to r2s>` through the `command` tool.
+target=(-- "$r2s")
+if [[ ! -x $r2s ]]; then
+    echo "lldb_mcp: no $r2s yet (cargo build -p r2s --features sleigh);" \
+        "starting with no target" >&2
+    target=()
 fi
-env_vars="DYLD_LIBRARY_PATH=$libs R2_LIBR_PLUGINS=$plugin_dir XDG_DATA_HOME=${XDG_DATA_HOME:-/tmp/r2sleigh-probe-xdg} TMPDIR=${TMPDIR:-/tmp} R2DEC_TRACE_REFUSAL=1"
 
-hold=$(mktemp -u -t r2sleigh-lldb-mcp)
+env_vars="TMPDIR=${TMPDIR:-/tmp} R2DEC_TRACE_REFUSAL=1"
+
+hold=$(mktemp -u -t r2sleigh-lldb-mcp.XXXXXX)
 mkfifo "$hold"
 log=${LLDB_MCP_BACKEND_LOG:-/tmp/r2sleigh-lldb-mcp-backend.log}
 "$lldb_bin" \
@@ -49,7 +50,7 @@ log=${LLDB_MCP_BACKEND_LOG:-/tmp/r2sleigh-lldb-mcp-backend.log}
     -O "settings set target.disable-aslr false" \
     -O "settings set target.load-cwd-lldbinit false" \
     -o "protocol start MCP" \
-    -- "$r2_bin" \
+    ${target[@]+"${target[@]}"} \
     <"$hold" >"$log" 2>&1 &
 backend=$!
 exec 3>"$hold"

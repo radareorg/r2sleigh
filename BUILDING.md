@@ -73,10 +73,10 @@ python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30
 ./tests/coverage/run_coverage.sh
 ```
 
-Advisory, non-blocking:
+Whether the rendered C computes what the binary computes (x86-64 Linux):
 
 ```bash
-python3 scripts/bench_semantic_metadata.py --runs 7 --max-overhead-pct 5
+tests/equiv/run_equiv.py --r2s target/debug/r2s
 ```
 
 See [doc/testing.md](doc/testing.md) for the full guide.

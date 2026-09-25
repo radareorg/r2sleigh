@@ -21,7 +21,7 @@ class CensusReconciliationTests(unittest.TestCase):
             "binary_path": "/run/out/O0/other/compiled/libz.so.1.2.13",
             "by_function": {"dbg.baz": "different project"},
         }]
-        functions = [{"function": name, "decompiled": {"r2sleigh": False, "angr": True}}
+        functions = [{"function": name, "decompiled": {"r2sleigh_native": False, "angr": True}}
                      for name in ("foo", "bar", "baz", "clone.part.0")]
         result = {"groups": [{
             "project": "zlib", "opt_level": "O0", "binary": "libz.so.1.2",
@@ -45,14 +45,14 @@ class CensusReconciliationTests(unittest.TestCase):
             "by_function": {"dbg.foo": "one cause", "sym.foo": "another cause"},
         }], [{"groups": [{
             "project": "project", "opt_level": "O0", "binary": "bin",
-            "functions": [{"function": "foo", "decompiled": {"r2sleigh": False}}],
+            "functions": [{"function": "foo", "decompiled": {"r2sleigh_native": False}}],
         }]}])
         self.assertEqual(joined["totals"]["ambiguous_census_name"], 1)
         self.assertEqual(len(joined["misses"][0]["matches"]), 2)
 
     def test_symbol_alias_requires_the_same_function_entry_address(self):
         binary_path = "/run/out/O2/project/compiled/bin"
-        functions = [{"function": name, "decompiled": {"r2sleigh": name == "foo"}}
+        functions = [{"function": name, "decompiled": {"r2sleigh_native": name == "foo"}}
                      for name in ("foo", "foo.constprop.0", "foo.constprop.1", "bar.isra.0")]
         result = {"groups": [{"project": "project", "opt_level": "O2", "binary": "bin",
                               "functions": functions}]}

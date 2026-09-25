@@ -23,8 +23,6 @@ mutants.out/
 mutants.out.old/
 **/mutants.out/
 **/mutants.out.old/
-r2sleigh-kernel-smoke*.json
-r2sleigh-reversing-benchmark*.json
 r2sleigh-corpora*/
 
 # Debug
@@ -38,5 +36,10 @@ tests/coverage/artifacts/
 # machine, so tracking them made every worktree's merge collide on a file
 # nobody reads.
 tests/decbench/artifacts/
+
+# Equivalence gate output: builds, renderings, records. Only
+# tests/equiv/baseline.json is a record, and only once the integrator blesses it.
+tests/equiv/artifacts/
+__pycache__/
 
 .claude/settings.local.json

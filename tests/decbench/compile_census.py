@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-"""Compile every rendering in a control census and report what did not build.
+"""Compile every rendering of a binary on its own, and report what did not build.
 
-DecBench scores `byte_match` by recompiling the rendered C and comparing the
-assembly, so a rendering the compiler rejects scores zero however good it is.
-The benchmark's own result record never says which ones those were -- its
-`compiles` field is empty on every function -- so a rendering that is wrong and
-one that never built are indistinguishable in the numbers.
+DecBench scores ``byte_match`` by recompiling the rendered C, so a rendering
+the compiler rejects scores zero however good it is, and the benchmark's own
+record never says which ones those were. ``pddj`` prints a self-contained
+translation unit (its headers, the helpers it uses, its residual declaration,
+its externs), so each one is compiled exactly as printed, with nothing
+prepended:
 
-This runs the same question locally against the output of
-`tests/corpus/control_census.sh`, which is the one place a full binary's worth
-of renderings is already on disk.
+    tests/decbench/compile_census.py <binary> [...] [--r2s target/release/r2s]
 
-    tests/decbench/compile_census.py <census-dir-or-file> [...]
+* ``builds``: ``-std=gnu11 -c`` with warnings left on and non-fatal except
+  ``implicit-function-declaration``, which is an error -- a call to a helper
+  the rendering does not define means the unit is not self-contained. (``-w``
+  would silence that error too under GCC: GCC 13 accepts an undeclared call
+  with ``-w -Werror=implicit-function-declaration``.)
+* ``strict``: ``-std=c11 -O2 -Wall -Wextra -Werror -c``, the bar the plan sets
+  for every rendering.
 
-Each rendering is compiled on its own, with `stdint.h` ahead of it and warnings
-silenced, because the question is whether the translation unit is well formed
-and not whether a compiler would complain about it. Failures are grouped by the
-compiler's own first message.
+Failures are grouped by the compiler's first message with its quoted names
+generalised. r2s is shown a ``strip --strip-all`` copy (``renderings.py``).
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import json
 import os
 import re
 import subprocess
@@ -30,52 +34,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-# The census writes two certificate lines above each rendering; everything from
-# the first line that is neither of those down to the closing brace is the C.
-_CERTIFICATE = re.compile(r"^(control-certificate|register-identity) ")
-_REFUSED = "r2sleigh refused"
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 
-# Silenced deliberately. An old GCC accepts a `char *` passed to a `uint64_t`
-# parameter with a warning and the ABI is unaffected on a 64-bit target, so
-# treating it as a failure here would measure the compiler's era rather than
-# the rendering. What is left is a translation unit that genuinely will not
-# build.
-_LENIENT = (
-    "-std=gnu11",
-    "-w",
-    "-Wno-error=int-conversion",
-    "-Wno-error=incompatible-pointer-types",
-    "-Wno-error=implicit-function-declaration",
-    "-Wno-error=incompatible-pointer-types-discards-qualifiers",
-    "-Wno-error=return-type",
-)
+from renderings import DEFAULT_R2S, render_binary  # noqa: E402
 
-_PROLOGUE = "#include <stdint.h>\n"
-
-
-def renderings(text: str) -> list[tuple[str, str]]:
-    """Every `(marker, C source)` pair a census file holds."""
-    found: list[tuple[str, str]] = []
-    for block in text.split("==MARK ")[1:]:
-        lines = block.splitlines()
-        marker = lines[0].strip() if lines else "?"
-        if any(_REFUSED in line for line in lines):
-            continue
-        start = next(
-            (
-                index
-                for index, line in enumerate(lines[1:], start=1)
-                if line.strip() and not _CERTIFICATE.match(line)
-            ),
-            None,
-        )
-        if start is None:
-            continue
-        closes = [index for index, line in enumerate(lines) if line.rstrip() == "}"]
-        if not closes or closes[-1] <= start:
-            continue
-        found.append((marker, "\n".join(lines[start : closes[-1] + 1])))
-    return found
+BUILDS = ("-std=gnu11", "-O0", "-Werror=implicit-function-declaration", "-c")
+STRICT = ("-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-c")
 
 
 def first_error(stderr: str) -> str:
@@ -87,67 +52,76 @@ def first_error(stderr: str) -> str:
     return "failed without naming an error"
 
 
-def compile_one(source: str, compiler: str) -> str | None:
+def compile_one(code: str, compiler: str, flags: tuple[str, ...]) -> str | None:
     """``None`` when it built, else the first error."""
-    handle = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
+    with tempfile.NamedTemporaryFile("w", suffix=".c", delete=False) as handle:
+        handle.write(code)
+        path = handle.name
     try:
-        handle.write(_PROLOGUE + source + "\n")
-        handle.close()
-        run = subprocess.run(
-            [compiler, "-c", "-O0", "-o", os.devnull, handle.name, *_LENIENT],
-            capture_output=True,
-            text=True,
-        )
+        run = subprocess.run([compiler, *flags, "-o", os.devnull, path],
+                             capture_output=True, text=True, check=False)
     finally:
-        os.unlink(handle.name)
+        os.unlink(path)
     return None if run.returncode == 0 else first_error(run.stderr)
 
 
-def census_files(paths: list[str]) -> list[Path]:
-    files: list[Path] = []
-    for raw in paths:
-        path = Path(raw)
-        files.extend(sorted(path.glob("*.txt")) if path.is_dir() else [path])
-    return files
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("paths", nargs="+", help="census directories or files")
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("binaries", nargs="+", type=Path)
+    parser.add_argument("--r2s", type=Path, default=DEFAULT_R2S)
     parser.add_argument("--compiler", default=os.environ.get("CC", "cc"))
-    parser.add_argument(
-        "--limit", type=int, default=0, help="stop after this many renderings"
-    )
-    parser.add_argument(
-        "--show", type=int, default=0, help="print this many failing markers per cause"
-    )
+    parser.add_argument("--limit", type=int, default=0, help="functions per binary")
+    parser.add_argument("--show", type=int, default=3, help="examples per failure cause")
+    parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args()
 
-    causes: collections.Counter[str] = collections.Counter()
-    examples: dict[str, list[str]] = collections.defaultdict(list)
-    total = failed = 0
-    for path in census_files(args.paths):
-        for marker, source in renderings(path.read_text(errors="ignore")):
-            if args.limit and total >= args.limit:
-                break
-            total += 1
-            error = compile_one(source, args.compiler)
-            if error is None:
+    totals = collections.Counter()
+    declines: collections.Counter[str] = collections.Counter()
+    causes: dict[str, collections.Counter[str]] = {
+        "builds": collections.Counter(), "strict": collections.Counter()}
+    examples: dict[tuple[str, str], list[str]] = collections.defaultdict(list)
+    rows = []
+    for binary in args.binaries:
+        for rendering in render_binary(binary, args.r2s, limit=args.limit):
+            where = f"{binary.name}@0x{rendering.address:x}" + (
+                f" ({rendering.name})" if rendering.name else "")
+            totals["asked"] += 1
+            answer = rendering.answer
+            if not answer.ok or answer.record is None:
+                totals["declined"] += 1
+                declines[answer.cause] += 1
+                rows.append({"function": where, "declined": answer.cause})
                 continue
-            failed += 1
-            causes[error] += 1
-            if len(examples[error]) < max(args.show, 1):
-                examples[error].append(f"{path.name} {marker}")
+            totals["rendered"] += 1
+            code = str(answer.record.get("code", ""))
+            row = {"function": where}
+            for tier, flags in (("builds", BUILDS), ("strict", STRICT)):
+                error = compile_one(code, args.compiler, flags)
+                row[tier] = error or "ok"
+                if error is None:
+                    totals[tier] += 1
+                    continue
+                causes[tier][error] += 1
+                if len(examples[(tier, error)]) < args.show:
+                    examples[(tier, error)].append(where)
+            rows.append(row)
 
-    if not total:
-        print("no renderings found", file=sys.stderr)
+    if not totals["asked"]:
+        print("no function was asked", file=sys.stderr)
         return 70
-    print(f"renderings {total} built {total - failed} failed {failed} "
-          f"({failed / total:.1%})")
-    for cause, count in causes.most_common():
-        print(f"  {count:5d}  {cause}")
-        for example in examples[cause][: args.show]:
-            print(f"           {example}")
+    rendered = totals["rendered"]
+    print(f"asked {totals['asked']}  rendered {rendered}  declined {totals['declined']}")
+    if rendered:
+        print(f"builds {totals['builds']}/{rendered}  strict {totals['strict']}/{rendered}")
+    for tier in ("builds", "strict"):
+        for cause, count in causes[tier].most_common():
+            print(f"  {tier:6} {count:5d}  {cause}")
+            for example in examples[(tier, cause)]:
+                print(f"                {example}")
+    for cause, count in declines.most_common(10):
+        print(f"  declined {count:5d}  {cause[:160]}")
+    if args.json:
+        args.json.write_text(json.dumps({"totals": dict(totals), "functions": rows}, indent=1))
     return 0
 
 

@@ -34,11 +34,14 @@ import sys
 
 HARNESS = "harness:"
 FLAG_PREFIX = re.compile(r"^(?:(?:dbg|sym|fcn|loc|flirt)\.)+")
+LAYOUT_DIRS = ("compiled", "stripped")
 
 
 def _binary_key(payload: dict) -> tuple[str, str, str]:
     parts = pathlib.PurePosixPath(payload.get("binary_path", "")).parts
-    if len(parts) < 4 or parts[-2] != "compiled":
+    # `decbench run` decompiles <out>/<opt>/<project>/compiled/<binary>; the
+    # official scripts/run_benchmark.py hands over the stripped copy beside it.
+    if len(parts) < 4 or parts[-2] not in LAYOUT_DIRS:
         raise ValueError(f"cannot identify census binary: {payload.get('binary_path')}")
     # DecBench records Path.stem, including for versioned shared libraries.
     return parts[-3], parts[-4], pathlib.PurePosixPath(parts[-1]).stem
@@ -90,7 +93,7 @@ def reconcile(payloads: list[dict], results: list[dict], discovery: list[dict] =
             census = censuses.get(key)
             counts = binaries.setdefault(key, collections.Counter())
             rendered_names = {function["function"] for function in group.get("functions", [])
-                              if function.get("decompiled", {}).get("r2sleigh")}
+                              if function.get("decompiled", {}).get("r2sleigh_native")}
             for function in group.get("functions", []):
                 name = function["function"]
                 identity = (*key, name)
@@ -98,9 +101,9 @@ def reconcile(payloads: list[dict], results: list[dict], discovery: list[dict] =
                     raise ValueError(f"duplicate scored function: {identity}")
                 seen.add(identity)
                 totals["scored"] += 1
-                totals["rendered"] += bool(function.get("decompiled", {}).get("r2sleigh"))
+                totals["rendered"] += bool(function.get("decompiled", {}).get("r2sleigh_native"))
                 totals["angr_rendered"] += bool(function.get("decompiled", {}).get("angr"))
-                if function.get("decompiled", {}).get("r2sleigh"):
+                if function.get("decompiled", {}).get("r2sleigh_native"):
                     continue
                 matches = census.get(name, []) if census is not None else []
                 alias = aliases.get(key, {}).get(name) if not matches else None
@@ -145,7 +148,7 @@ def _cell(payload: dict) -> str:
     if not raw:
         return "unknown"
     parts = pathlib.PurePosixPath(raw).parts
-    if len(parts) >= 4 and parts[-2] == "compiled":
+    if len(parts) >= 4 and parts[-2] in LAYOUT_DIRS:
         return f"{parts[-3]}/{parts[-4]}"
     return "unknown"
 
@@ -177,10 +180,12 @@ def report(payloads: list[dict], top: int) -> None:
         cell = by_cell[_cell(payload)]
         cell[0] += payload.get("rendered", 0)
         cell[1] += payload.get("declined", 0)
-        cell[2] += payload.get("gapped", 0)
+        # Schema 4 counts renderings that carry a residual instead of a gap.
+        marked = payload.get("gapped", payload.get("with_residual", 0))
+        cell[2] += marked
         causes.update(payload.get("causes", {}))
         gap_causes.update(payload.get("gap_causes", {}))
-        gapped += payload.get("gapped", 0)
+        gapped += marked
         gap_ops += payload.get("gap_ops", 0)
 
     print(f"binaries   {len(payloads)}")

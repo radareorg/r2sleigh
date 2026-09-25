@@ -89,10 +89,12 @@ Carried with a cause, not as a baseline:
 - Entry condition flags cannot be booleans until the architecture
   specification carries a flag fact; nothing available today tells `CF` from
   `AL`.
-- `scripts/kernel_smoke.py`, `scripts/bench_semantic_metadata.py`,
-  `scripts/reversing_benchmark.py` and `tests/decbench/` still drive radare2
-  with the deleted plugin. Source-gold is restored natively; the
-  fixed-performance gate is not.
+- The plugin-era harnesses are retired (`tests/test_no_plugin.py` keeps them
+  out): the corpus matrix gave way to the `tests/equiv` equivalence gate and
+  DecBench runs through its official driver. The fixed-performance gate that
+  `scripts/reversing_benchmark.py` carried has no successor yet, and the byte
+  counters in `r2il::allocation` read zero because the allocator that fed them
+  lived in the deleted plugin.
 - With no debug information nothing proves the signedness of a 32-bit return,
   so `main` renders `uint32_t` where the source says `int`. Recorded in
   `tests/gold/source_gold_baseline.json` with its cause.

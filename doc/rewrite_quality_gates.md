@@ -25,7 +25,7 @@ scripts/quality-gate.sh --strict-dylint
 ## Scope
 
 The gate is read-only with respect to tracked sources. It combines local tooling
-with the final binding-spine corpus admission check; it still does not replace
+with the equivalence gate over the corpus; it still does not replace
 the broader workspace, plugin, or radare2 validation required by `AGENTS.md`.
 
 The current phases are:
@@ -38,10 +38,14 @@ The current phases are:
 4. Local Dylint linting through `tools/dylints/r2sleigh_lints`.
 5. Every Kani harness in every crate that has one, so none can stop compiling unnoticed.
 6. Targeted mutation testing for `crates/r2ssa/src/var.rs`.
-7. The 54-cell binding-spine cutover corpus: clean provenance, repeated
-   byte-identical generation, exact audit admission, strict raw compilation,
-   and raw-backed differential vectors.
+7. The harness contracts (`tests/equiv`, `tests/decbench`, and
+   `tests/test_no_plugin.py`).
 8. Optional ESIL differential testing when `R2SLEIGH_ESIL_DIFF_BINARY` is set.
+9. The equivalence gate, last: every corpus and gold function rendered from
+   its stripped build and run beside its original, held to
+   `tests/equiv/baseline.json` (no function leaves `equal`; a new `differs`,
+   `uninit` or `ub` blocks). It replaces the plugin-driven 54-cell cutover
+   corpus, which could no longer run once the plugin was deleted.
 
 ## Required Tools
 
@@ -106,9 +110,11 @@ tighten the proof; do not delete a harness to make the gate pass.
 Surviving mutants in `r2ssa` variable handling mean tests do not pin the
 expected behavior tightly enough. Add focused tests before accepting the rewrite.
 
-The corpus phase refuses a dirty tracked tree. Commit the exact change under
-test first; do not bypass provenance or weaken `--gate cutover` to make an
-uncommitted experiment appear admitted.
+The equivalence phase fails without a blessed baseline and never writes one:
+bless it with `--write-baseline` only after reading `records.json`, with a cause
+recorded for every record that is not `equal`. Until then `run_equiv.py` exits 3
+("no baseline") and the gate stops there, which is why the phase is the last
+one: every other phase has already run and reported.
 
 This gate does not replace the full validation bar in `AGENTS.md`; run the
 crate and plugin checks there when the touched subsystem requires it.

@@ -19,7 +19,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-US = "r2sleigh"
+US = "r2sleigh_native"
 REFERENCE = "angr"
 LOWER_IS_BETTER = {"ged", "vj_ged"}
 
@@ -597,6 +597,22 @@ def compare(measured: dict, baseline: dict) -> int:
     return 0
 
 
+def usable_baseline(payload: dict | None) -> tuple[dict | None, str | None]:
+    """The baseline to compare with and to merge into, or why there is none.
+
+    A record marked ``invalid`` (the plugin-era sweep, measured on unstripped
+    binaries) is neither compared with nor merged into, and its cached
+    reference universe is not borrowed: an accepted run starts a new record.
+    """
+    if payload is None:
+        return None, None
+    invalid = payload.get("invalid")
+    if invalid:
+        reason = invalid.get("reason") if isinstance(invalid, dict) else str(invalid)
+        return None, reason or "no reason recorded"
+    return payload, None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", type=Path, required=True)
@@ -609,7 +625,15 @@ def main() -> int:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print(f"invalid result set: {exc}", file=sys.stderr)
         return 70
-    baseline = json.loads(args.baseline.read_text()) if args.baseline.exists() else None
+    baseline, invalid = usable_baseline(
+        json.loads(args.baseline.read_text()) if args.baseline.exists() else None
+    )
+    if invalid:
+        print(f"the baseline is marked invalid: {invalid}", file=sys.stderr)
+        if not args.accept_baseline:
+            print("nothing to compare against; run with --accept-baseline to start a new "
+                  "record", file=sys.stderr)
+            return 65
     rows, reference_fill = reference_universe(current, baseline)
     if not rows:
         print(

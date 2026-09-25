@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Differential ESIL check: r2sleigh's lifting against radare2's own.
 
-Both arch plugins decode the same bytes at the same address. This runs each
-instruction in radare2's ESIL virtual machine twice, once with the native
-architecture plugin and once with `r2sleigh`, from identical starting register
-state, and compares the machine state afterwards.
+radare2 decodes the instruction window with its native architecture plugin
+and steps each instruction in its ESIL virtual machine (`aes`). The r2sleigh
+side is the ESIL the `r2sleigh` CLI prints for the same bytes
+(`r2sleigh disasm --file <binary> --addr <start> -n <count> --format esil`),
+evaluated in the same virtual machine (`ae`) with the program counter already
+advanced past the instruction, as `aes` does. Both start from identical
+register state, and the machine state afterwards is compared.
 
-The native lifter is a reference, not an oracle: a divergence means the two
-disagree and one of them is wrong. Triage tells you which.
+radare2 is the reference here, not an oracle: a divergence means the two
+disagree and one of them is wrong. Triage tells you which. The r2sleigh plugin
+that used to supply the second side inside radare2 is deleted; the CLI is the
+lift's own surface.
 
     scripts/esil_differential.py --binary /bin/ls --arch arm --count 200
-    scripts/esil_differential.py --binary /tmp/x86 --arch x86 --bits 64 --json
+    scripts/esil_differential.py --binary /tmp/x86 --arch x86 --bits 64 --json \
+        --r2sleigh target/release/r2sleigh
 
 Exit status is non-zero when any instruction diverges, so the script can gate.
 """
@@ -19,6 +25,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -122,9 +131,16 @@ def list_instructions(binary: str, arch: str, bits: int, start: str, count: int)
 
 
 def emulation_script(
-    instructions: list[Instruction], family: str, trials: int
+    instructions: list[Instruction], family: str, trials: int,
+    sleigh: dict[int, list[str]] | None = None,
 ) -> list[str]:
-    """One session that steps every instruction once per seed, resetting between."""
+    """One session that steps every instruction once per seed, resetting between.
+
+    With ``sleigh`` (ESIL lines per address) each instruction is evaluated from
+    those lines instead of stepped with radare2's own lift; the program counter
+    is set past the instruction first, which is what `aes` does before it
+    evaluates.
+    """
     commands = ["aei", "aeim", "aeip"]
     for trial in range(trials):
         for inst in instructions:
@@ -137,8 +153,14 @@ def emulation_script(
             for flag in ("zf", "cf", "sf", "of", "pf", "nf", "vf"):
                 commands.append(f"aer {flag}=0")
             commands.append(f"s {inst.addr:#x}")
-            commands.append(f"aer {PC_REGISTER[family]}={inst.addr:#x}")
-            commands.append("aes")
+            if sleigh is None:
+                commands.append(f"aer {PC_REGISTER[family]}={inst.addr:#x}")
+                commands.append("aes")
+            else:
+                commands.append(f"aer {PC_REGISTER[family]}={inst.addr + inst.size:#x}")
+                for line in sleigh.get(inst.addr, []):
+                    # Quoted, so no character of the expression is a command operator.
+                    commands.append(f'"ae {line}"')
             for reg in COMPARE_REGISTERS[family]:
                 commands.append(f"aer {reg}")
     return commands
@@ -159,8 +181,51 @@ def parse_states(output: str, family: str) -> list[dict]:
     return states
 
 
+_SLEIGH_HEADER = re.compile(r"^# 0x([0-9a-fA-F]+): .*\(size=(\d+)\)\s*$")
+
+
+def parse_sleigh_esil(output: str) -> dict[int, list[str]]:
+    """``address -> ESIL lines`` from ``r2sleigh disasm --format esil``.
+
+    Each instruction is a ``# 0x<addr>: <mnemonic> (size=<n>)`` header followed
+    by its ESIL lines. A window can print an address twice; the first wins.
+    """
+    found: dict[int, list[str]] = {}
+    current: int | None = None
+    for line in output.splitlines():
+        header = _SLEIGH_HEADER.match(line.strip())
+        if header:
+            address = int(header.group(1), 16)
+            current = address if address not in found else None
+            if current is not None:
+                found[current] = []
+            continue
+        if current is not None and line.strip():
+            found[current].append(line.strip())
+    return found
+
+
+def lift_esil(r2sleigh: str, binary: str, instructions: list[Instruction]) -> dict[int, list[str]]:
+    """The r2sleigh CLI's ESIL for the window, by address."""
+    argv = [r2sleigh, "disasm", "--file", binary, "--addr", f"{instructions[0].addr:#x}",
+            "-n", str(len(instructions)), "--format", "esil"]
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"r2sleigh disasm failed: {completed.stderr.strip()[:400]}")
+    return parse_sleigh_esil(completed.stdout)
+
+
+def default_r2sleigh() -> str:
+    root = Path(__file__).resolve().parents[1]
+    target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+    for candidate in (target / "release" / "r2sleigh", target / "debug" / "r2sleigh"):
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("r2sleigh") or "r2sleigh"
+
+
 def esil_strings(binary: str, arch: str | None, bits: int, instructions: list[Instruction]) -> list[str]:
-    """The ESIL each plugin produces, kept for triage of a divergence."""
+    """The ESIL radare2's native plugin produces, kept for triage of a divergence."""
     commands = []
     for inst in instructions:
         commands.append(f"?e {MARKER}")
@@ -235,6 +300,10 @@ def main() -> int:
     parser.add_argument(
         "--show", type=int, default=10, help="how many divergences to print"
     )
+    parser.add_argument(
+        "--r2sleigh", default=default_r2sleigh(),
+        help="the r2sleigh CLI (cargo build -p r2sleigh-cli --bin r2sleigh --features x86)",
+    )
     args = parser.parse_args()
 
     instructions = list_instructions(args.binary, args.arch, args.bits, args.start, args.count)
@@ -242,11 +311,21 @@ def main() -> int:
         print(f"no instructions decoded at {args.start} in {args.binary}", file=sys.stderr)
         return 2
 
+    lifted = lift_esil(args.r2sleigh, args.binary, instructions)
+    missing = [inst for inst in instructions if not lifted.get(inst.addr)]
+    if missing:
+        print(f"r2sleigh printed no ESIL for {len(missing)} of {len(instructions)} "
+              f"instructions (first at {missing[0].addr:#x}); they are not compared",
+              file=sys.stderr)
+        instructions = [inst for inst in instructions if lifted.get(inst.addr)]
+        if not instructions:
+            return 2
     script = emulation_script(instructions, args.arch, args.trials)
     native = parse_states(run_r2(args.binary, args.arch, args.bits, script), args.arch)
-    sleigh = parse_states(run_r2(args.binary, "r2sleigh", args.bits, script), args.arch)
+    lifted_script = emulation_script(instructions, args.arch, args.trials, lifted)
+    sleigh = parse_states(run_r2(args.binary, args.arch, args.bits, lifted_script), args.arch)
     native_esil = esil_strings(args.binary, args.arch, args.bits, instructions)
-    sleigh_esil = esil_strings(args.binary, "r2sleigh", args.bits, instructions)
+    sleigh_esil = [",".join(lifted.get(inst.addr, [])) for inst in instructions]
 
     compared, divergences = compare(
         instructions, native, sleigh, args.arch, args.trials, native_esil, sleigh_esil

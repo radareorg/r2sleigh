@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Stop `r2s` at one source line and dump the frame there.
 #
-# The lldb-mcp backend in lldb_mcp.sh targets radare2 and the plugin, which is
-# the right target for a `pd:s` refusal. A native `pdd` refusal happens inside
-# `r2s` itself, with no plugin involved, so it needs its own target. Debug info
-# is in the dev profile already, so no special build is needed.
+# One stop in batch; lldb_mcp.sh serves an interactive session on the same
+# target. The probe profile keeps symbols at a speed a large binary needs.
 #
 #   tests/corpus/lldb_r2s.sh crates/r2ssa/src/machine.rs:3300 0x2e368 <binary>
 #
