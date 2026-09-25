@@ -1732,53 +1732,69 @@ impl Native<'_> {
         tables
     }
 
+    /// One dispatch's table, read and validated, or why it is not one.
+    ///
+    /// A resolved dispatch has at least one target and every entry decodes:
+    /// a table of no entries would resolve the branch to nowhere, which the
+    /// walk would read as a block with no successor rather than as a stop.
+    /// Each distinct target is decoded once, since a table repeats its default
+    /// arm for every hole in the case values.
     fn pointer_table(
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
     ) -> Option<NativePointerTable> {
-        let entry = usize::try_from(read.entry_size).ok()?;
-        let span = read.entries.checked_mul(entry)?;
-        let bytes = self.program.read(read.address, span).unwrap_or_default();
+        let at = read.address;
+        let refused = |why: std::fmt::Arguments<'_>| {
+            r2il::refusal_evidence!("dispatch-table", "{at:#x}: {why}");
+        };
+        if read.count == 0 {
+            refused(format_args!("a table of no entries sends control nowhere"));
+            return None;
+        }
+        let (Some(span), Ok(count), Ok(stride), Ok(size)) = (
+            read.span().and_then(|span| usize::try_from(span).ok()),
+            usize::try_from(read.count),
+            usize::try_from(read.stride),
+            usize::try_from(read.size),
+        ) else {
+            refused(format_args!(
+                "{} entries of {} bytes by {} span more than this machine addresses",
+                read.count, read.size, read.stride
+            ));
+            return None;
+        };
+        let bytes = self.program.read(at, span).unwrap_or_default();
         if bytes.len() < span {
-            r2il::refusal_evidence!(
-                "dispatch-table",
-                "{:#x}: {} of {span} bytes are mapped",
-                read.address,
-                bytes.len()
-            );
+            refused(format_args!("{} of {span} bytes are mapped", bytes.len()));
             return None;
         }
-        let targets = bytes
-            .chunks_exact(entry)
-            .map(|slot| match self.machine.endianness {
-                SourceEndianness::Little => {
-                    slot.iter().rev().fold(0u64, |v, b| (v << 8) | *b as u64)
-                }
-                SourceEndianness::Big => slot.iter().fold(0u64, |v, b| (v << 8) | *b as u64),
-            })
-            .map(|slot| read.transform.target(slot, read.entry_size))
+        let word = |slot: &[u8]| match self.machine.endianness {
+            SourceEndianness::Little => slot.iter().rev().fold(0u64, |v, b| (v << 8) | *b as u64),
+            SourceEndianness::Big => slot.iter().fold(0u64, |v, b| (v << 8) | *b as u64),
+        };
+        // Every entry lies inside `bytes`: the last ends at `(count - 1) * stride + size`, which is `span`.
+        let targets = (0..count)
+            .map(|k| word(&bytes[k * stride..k * stride + size]))
+            .map(|entry| read.transform.target(entry, read.size))
             .collect::<Vec<_>>();
-        if !targets.iter().all(|target| self.decodes(*target)) {
-            r2il::refusal_evidence!(
-                "dispatch-table",
-                "{:#x} x{} of {} bytes: an entry is not an instruction",
-                read.address,
-                read.entries,
-                read.entry_size
-            );
+        let distinct = targets.iter().copied().collect::<BTreeSet<_>>();
+        if let Some(target) = distinct.iter().find(|target| !self.decodes(**target)) {
+            refused(format_args!(
+                "{} entries of {} bytes: entry target {target:#x} is not an instruction",
+                read.count, read.size
+            ));
             return None;
         }
+        let cases = (0..read.count)
+            .zip(&targets)
+            .map(|(k, target)| Some((read.case(k)?, *target)))
+            .collect::<Option<Vec<_>>>()?;
         Some(NativePointerTable {
             instruction: read.instruction?,
-            cases: read
-                .cases
-                .iter()
-                .copied()
-                .zip(targets.iter().copied())
-                .collect(),
+            cases,
             table: r2source::SourceCodePointerTable::new(
-                read.address,
-                read.entry_size,
+                at,
+                read.size,
                 targets.clone(),
                 targets
                     .iter()

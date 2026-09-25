@@ -73,12 +73,42 @@ fn sign_extend(entry: u64, size: u32) -> u64 {
     }
 }
 
+/// How the address a dispatch reads is built from the value it switches on:
+/// `address = scale * selector + displacement`, the index chain folded.
+///
+/// Kept apart from [`EntryTransform`], which says what an entry read *means*;
+/// this says which entry a selector value *reads*, and its inverse is the case
+/// label. A sign extension on the way is a fact about the entry, not about
+/// the index, so nothing here carries one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexChain {
+    pub scale: u64,
+    pub displacement: u64,
+}
+
+impl IndexChain {
+    /// The selector value that reads the entry at `address`, where exactly one does.
+    fn preimage(&self, address: u64) -> Option<u64> {
+        let offset = address.checked_sub(self.displacement)?;
+        (self.scale != 0 && offset.is_multiple_of(self.scale)).then(|| offset / self.scale)
+    }
+}
+
 /// Where a dispatch reads its target, before anything has read that memory.
 ///
 /// The native route captures a function's own bytes and nothing else, so a
 /// jump table in another section is unread at this point. This says where it
 /// is, how far it runs, and what the entries mean, which is what a reader
 /// needs to go and fetch it.
+///
+/// **Nothing here is sized by the count.** The value analysis proves how many
+/// entries the selector can reach, and that proof is sound however large it
+/// is: a spilled 32-bit index nothing guards reaches 2^32 of them. Whether
+/// that much memory exists at the address, and holds what the program reads,
+/// is the memory owner's question, which is asked before any entry is read.
+/// So the read states `count`, `stride` and `size` and labels an entry only
+/// when asked for it, and the O(1) span check that owner makes is what
+/// refuses a table the program does not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTableRead {
     pub block_addr: u64,
@@ -88,15 +118,45 @@ pub struct DispatchTableRead {
     pub instruction: Option<u64>,
     /// The first entry the dispatch can read.
     pub address: u64,
-    /// Bytes between the entries it steps through, which is the entry size.
-    pub entry_size: u32,
-    /// How many entries it can reach, counted from `address`.
-    pub entries: usize,
+    /// Bytes from one entry to the next.
+    pub stride: u64,
+    /// Bytes one entry read takes.
+    pub size: u32,
+    /// How many entries it can reach, counted from `address`: at least one,
+    /// and at most 2^64 - 1, since a reach of every 64-bit address is refused
+    /// before it is counted.
+    pub count: u64,
     pub transform: EntryTransform,
     /// The value the dispatch switches on.
     pub selector: ValueId,
-    /// What that value is on each entry, in the order the entries are read.
-    pub cases: Vec<u64>,
+    /// How the address read is built from `selector`, whose inverse labels each entry.
+    pub indexing: IndexChain,
+}
+
+impl DispatchTableRead {
+    /// The address entry `k` is read from, for `k` below `count`.
+    pub fn entry_address(&self, k: u64) -> Option<u64> {
+        if k >= self.count {
+            return None;
+        }
+        k.checked_mul(self.stride)?.checked_add(self.address)
+    }
+
+    /// What the selector is when the dispatch reads entry `k`, for `k` below `count`.
+    ///
+    /// Every label is exact: the read is refused at construction unless the
+    /// first entry's preimage is whole and the stride is a multiple of the
+    /// scale, which is when every entry's is.
+    pub fn case(&self, k: u64) -> Option<u64> {
+        self.indexing.preimage(self.entry_address(k)?)
+    }
+
+    /// Bytes from the first entry's start to the last entry's end, where that fits a `u64`.
+    pub fn span(&self) -> Option<u64> {
+        (self.count.checked_sub(1)?)
+            .checked_mul(self.stride)?
+            .checked_add(u64::from(self.size))
+    }
 }
 
 /// Walk an index chain down to its end, folding the arithmetic on the way.
@@ -183,8 +243,13 @@ fn selector_of(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
     address: ValueId,
-) -> (ValueId, Option<EntryTransform>) {
-    walk_index(graph, values, address)
+) -> (ValueId, Option<IndexChain>) {
+    let (selector, folded) = walk_index(graph, values, address);
+    let indexing = folded.map(|folded| IndexChain {
+        scale: folded.scale,
+        displacement: folded.displacement,
+    });
+    (selector, indexing)
 }
 
 /// The operand an address step carries its index in, where the step is one.
@@ -308,40 +373,38 @@ fn dispatch_table_read(
     // The entry size is how far the read steps and how wide it reads. A read
     // that steps by anything but what it reads leaves gaps or overlaps, and
     // neither is a table walk.
-    let entry_size = u32::try_from(stride).ok()?;
-    if entry_size == 0 || entry_size != dst.size {
+    if u64::from(dst.size) != stride {
         evidence(&format!(
             "it steps by {stride} and reads {} bytes",
             dst.size
         ));
         return None;
     }
-    let entries = usize::try_from((last - base) / stride + 1).ok()?;
+    // Every 64-bit address is 2^64 entries, which is no table any program
+    // holds and no count a `u64` can state.
+    let Some(count) = reach.count() else {
+        evidence(&format!(
+            "the address {address:?} reaches every address of its width"
+        ));
+        return None;
+    };
     let (selector, indexing) = selector_of(graph, values, address);
     // What the selector was on an entry is where that entry sits, put back
-    // through the arithmetic that placed it.
-    let Some(cases) = indexing
-        .filter(|indexing| indexing.scale != 0)
-        .and_then(|indexing| {
-            (0..entries)
-                .map(|step| {
-                    let at = base.wrapping_add((step as u64).wrapping_mul(stride));
-                    let offset = at.checked_sub(indexing.displacement)?;
-                    offset
-                        .is_multiple_of(indexing.scale)
-                        .then(|| offset / indexing.scale)
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-    else {
+    // through the arithmetic that placed it. The entries are `base + k *
+    // stride`, so every one has a whole preimage exactly when the first does
+    // and the stride is a multiple of the scale: one test, not one per entry.
+    let labelled = indexing.filter(|indexing| {
+        indexing.preimage(base).is_some() && stride.is_multiple_of(indexing.scale)
+    });
+    let Some(indexing) = labelled else {
         evidence(&format!(
-            "selector {selector:?} does not label {entries} entries"
+            "selector {selector:?} does not label {count} entries"
         ));
         return None;
     };
     r2il::refusal_evidence!(
         "dispatch-table",
-        "{block_addr:#x}:{op_index} at {instruction:?} reads {base:#x}..={last:#x} by {entry_size}, target = {}*entry + {:#x}, on {selector:?}",
+        "{block_addr:#x}:{op_index} at {instruction:?} reads {count} entries {base:#x}..={last:#x} by {stride}, target = {}*entry + {:#x}, on {selector:?}",
         transform.scale,
         transform.displacement
     );
@@ -350,11 +413,12 @@ fn dispatch_table_read(
         op_index,
         instruction: *instruction,
         address: base,
-        entry_size,
-        entries,
+        stride,
+        size: dst.size,
+        count,
         transform,
         selector,
-        cases,
+        indexing,
     })
 }
 
@@ -539,8 +603,15 @@ mod tests {
         let reads = test_dispatch_reads(&blocks, &cfg);
         assert_eq!(reads.len(), 1);
         assert_eq!(reads[0].address, 0xc000);
-        assert_eq!(reads[0].entries, 5);
-        assert_eq!(reads[0].entry_size, 8);
+        assert_eq!(reads[0].count, 5);
+        assert_eq!((reads[0].stride, reads[0].size), (8, 8));
+        // Entry k is where the selector is k: the scale is the entry size.
+        assert_eq!(
+            (0..5).map(|k| reads[0].case(k)).collect::<Vec<_>>(),
+            (0..5).map(Some).collect::<Vec<_>>()
+        );
+        assert_eq!(reads[0].case(5), None);
+        assert_eq!(reads[0].span(), Some(40));
     }
 
     #[test]
@@ -553,7 +624,7 @@ mod tests {
         let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
         let reads = test_dispatch_reads(&blocks, &cfg);
         assert_eq!(reads.len(), 1);
-        assert_eq!(reads[0].entries, 9);
+        assert_eq!(reads[0].count, 9);
     }
 
     /// The shape hardware actually emits, taken from an arm64 -O1 dispatch.
@@ -669,7 +740,7 @@ mod tests {
         let reads = test_dispatch_reads(&blocks, &cfg);
         assert_eq!(reads.len(), 1);
         assert_eq!(reads[0].address, 0xc010);
-        assert_eq!(reads[0].entries, 4);
+        assert_eq!(reads[0].count, 4);
     }
 
     #[test]
@@ -770,6 +841,111 @@ mod tests {
             },
         ];
         let (cfg, _) = graph_for(&blocks, 0x20, Some(0x10));
+        assert!(test_dispatch_reads(&blocks, &cfg).is_empty());
+    }
+
+    /// gcc -O0's relative jump table read through an index nothing guards:
+    /// `movsxd rax, [0x2018 + zext(eax) * 4]; add rax, 0x2018; jmp rax`.
+    ///
+    /// This is `classify` at -O0, whose `cmp [rbp-4], 7` guards a load the
+    /// dispatch does not read: the index reaches every 32-bit value, which is
+    /// a sound fact the value analysis proves.
+    #[test]
+    fn a_selector_every_thirty_two_bit_value_reaches_is_counted_and_labelled_on_demand() {
+        let index = input("eax", 4);
+        let widened = temp("rax", 8);
+        let scaled = temp("scaled", 8);
+        let address = temp("address", 8);
+        let entry = temp("entry", 4);
+        let extended = temp("extended", 8);
+        let target = temp("target", 8);
+        let blocks = vec![SSABlock {
+            addr: 0,
+            phis: Vec::new(),
+            size: 0x10,
+            ops: vec![
+                SSAOp::IntZExt {
+                    dst: widened.clone(),
+                    src: index,
+                },
+                SSAOp::IntMult {
+                    dst: scaled.clone(),
+                    a: widened,
+                    b: SSAVar::constant(4, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: address.clone(),
+                    a: scaled,
+                    b: SSAVar::constant(0x2018, 8),
+                },
+                SSAOp::Load {
+                    dst: entry.clone(),
+                    space: r2il::SpaceId::Ram,
+                    addr: address,
+                },
+                SSAOp::IntSExt {
+                    dst: extended.clone(),
+                    src: entry,
+                },
+                SSAOp::IntAdd {
+                    dst: target.clone(),
+                    a: extended,
+                    b: SSAVar::constant(0x2018, 8),
+                },
+                SSAOp::BranchInd {
+                    target,
+                    instruction: None,
+                },
+            ],
+        }];
+        let (cfg, _) = graph_for(&blocks, 0, None);
+        // The old read built one label per entry before anything asked
+        // whether 16 GiB of table exists at 0x2018: a 32 GiB vector.
+        let reads = test_dispatch_reads(&blocks, &cfg);
+        assert_eq!(reads.len(), 1);
+        let read = &reads[0];
+        assert_eq!((read.address, read.stride, read.size), (0x2018, 4, 4));
+        assert_eq!(read.count, 1 << 32);
+        assert_eq!(read.case(0), Some(0));
+        assert_eq!(read.case(0xffff_ffff), Some(0xffff_ffff));
+        assert_eq!(read.case(1 << 32), None);
+        assert_eq!(read.span(), Some(1 << 34));
+        assert_eq!(
+            (read.transform.displacement, read.transform.signed),
+            (0x2018, true)
+        );
+    }
+
+    /// A one-byte load through an address nothing bounds: every 64-bit
+    /// address, stepped by one, which is 2^64 entries.
+    #[test]
+    fn a_load_through_every_address_is_no_table_and_no_overflow() {
+        let pointer = input("rdi", 8);
+        let byte = temp("byte", 1);
+        let target = temp("target", 8);
+        let blocks = vec![SSABlock {
+            addr: 0,
+            phis: Vec::new(),
+            size: 0x10,
+            ops: vec![
+                SSAOp::Load {
+                    dst: byte.clone(),
+                    space: r2il::SpaceId::Ram,
+                    addr: pointer,
+                },
+                SSAOp::IntZExt {
+                    dst: target.clone(),
+                    src: byte,
+                },
+                SSAOp::BranchInd {
+                    target,
+                    instruction: None,
+                },
+            ],
+        }];
+        let (cfg, _) = graph_for(&blocks, 0, None);
+        // The old count overflowed: a panic in debug, and a zero-entry table
+        // in release that the engine then resolved to no successor at all.
         assert!(test_dispatch_reads(&blocks, &cfg).is_empty());
     }
 }

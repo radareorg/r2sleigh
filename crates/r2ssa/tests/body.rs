@@ -133,6 +133,22 @@ fn an_indirect_branch_is_refused_not_guessed() {
     );
 }
 
+#[test]
+fn a_dispatch_told_it_goes_nowhere_is_still_unresolved() {
+    // A table of no entries resolves nothing. Read as resolved, the branch
+    // had no successor and no stop, which claims control ends there.
+    let dispatched = BTreeMap::from([(BASE, Vec::new())]);
+    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT), &dispatched).expect("body");
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1000, UnresolvedReason::IndirectBranch)]
+    );
+    assert!(body.blocks[0].successors.is_empty());
+}
+
 /// A backward branch to the function's own entry: the walk terminates.
 /// dec rdi; jne -5
 const LOOP: &[u8] = &[

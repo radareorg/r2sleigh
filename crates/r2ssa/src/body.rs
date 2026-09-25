@@ -510,7 +510,14 @@ impl Walk {
         if self.returns_after(addr, next) {
             return self.continues(Some(next), successors, program);
         }
-        let Some(arms) = self.dispatched.get(&addr).cloned() else {
+        // No arm is no resolution: a dispatch read as going nowhere would be a
+        // block with no successor, and that is a claim control stops there.
+        let Some(arms) = self
+            .dispatched
+            .get(&addr)
+            .filter(|arms| !arms.is_empty())
+            .cloned()
+        else {
             self.stop(addr, UnresolvedReason::IndirectBranch);
             return;
         };
