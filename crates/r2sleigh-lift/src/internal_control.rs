@@ -3,10 +3,13 @@
 //! Ghidra usually encodes instruction-local branches with a constant-space
 //! target whose signed offset is relative to the branch operation's index.
 //! Some specifications instead resolve a skip to the RAM address of the next
-//! instruction. Those edges are not machine CFG edges. Forward branches over
-//! speculatable value operations are converted to explicit value selects;
+//! instruction. Those edges are not machine CFG edges. A local loop every
+//! decision of which is a constant is unrolled ([`unroll`]). Forward branches
+//! over speculatable value operations are converted to explicit value selects;
 //! unsupported local control becomes `Unimplemented` so downstream consumers
 //! refuse instead of inventing a CFG.
+
+mod unroll;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -32,6 +35,9 @@ pub(crate) fn normalize_instruction_local_control(
     // speculated past. The whole sequence is one linked load or one
     // conditional store, and the vocabulary already has both.
     rewrite_exclusive_access(block, names);
+    // Any other loop decided by constants runs as many passes as they say. A
+    // loop that is not is left for the guard below.
+    resolve_local_loops(block);
     loop {
         let Some((branch_index, branch, target_index)) = block
             .ops
@@ -90,6 +96,23 @@ pub(crate) fn normalize_instruction_local_control(
                 }
             }
         }
+    }
+}
+
+/// Unroll an instruction's local loop where every decision in it is a constant.
+fn resolve_local_loops(block: &mut R2ILBlock) {
+    let loops = block
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| local_branch(block, index, op))
+        .any(|(index, _, target)| target <= index);
+    if !loops {
+        return;
+    }
+    if let Some((ops, metadata)) = unroll::unrolled(block) {
+        block.ops = ops;
+        block.op_metadata = metadata;
     }
 }
 
@@ -1397,5 +1420,98 @@ mod tests {
         normalize_instruction_local_control(&mut block, &|_| None);
 
         assert_eq!(block.ops, vec![branch]);
+    }
+
+    /// `i = 0; loop: i = i + 1; if (i != r) goto loop` counts to a register:
+    /// the decision is data, so the loop is not unrolled to any number of
+    /// passes, and stays refused.
+    #[test]
+    fn a_loop_decided_by_data_stays_refused() {
+        let (index, again) = (Varnode::unique(0x100, 8), Varnode::unique(0x110, 1));
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.ops = vec![
+            R2ILOp::Copy {
+                dst: index.clone(),
+                src: Varnode::constant(0, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: index.clone(),
+                a: index.clone(),
+                b: Varnode::constant(1, 8),
+            },
+            R2ILOp::IntNotEqual {
+                dst: again.clone(),
+                a: index.clone(),
+                b: Varnode::register(0x8, 8),
+            },
+            R2ILOp::CBranch {
+                target: Varnode::constant(u64::from((-2i32) as u32), 4),
+                cond: again,
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(0x0, 8),
+                src: index,
+            },
+        ];
+
+        normalize_instruction_local_control(&mut block, &|_| None);
+
+        assert_eq!(block.ops.len(), 5, "{:?}", block.ops);
+        assert!(
+            matches!(block.ops[3], R2ILOp::Unimplemented),
+            "{:?}",
+            block.ops
+        );
+    }
+
+    /// The same loop against a constant bound runs exactly as many passes as
+    /// the bound says, and no local branch is left.
+    #[test]
+    fn a_loop_decided_by_constants_runs_its_passes() {
+        let (index, again) = (Varnode::unique(0x100, 8), Varnode::unique(0x110, 1));
+        let counter = Varnode::register(0x0, 8);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.ops = vec![
+            R2ILOp::Copy {
+                dst: index.clone(),
+                src: Varnode::constant(0, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: counter.clone(),
+                a: counter.clone(),
+                b: Varnode::constant(3, 8),
+            },
+            R2ILOp::IntAdd {
+                dst: index.clone(),
+                a: index.clone(),
+                b: Varnode::constant(1, 8),
+            },
+            R2ILOp::IntNotEqual {
+                dst: again.clone(),
+                a: index,
+                b: Varnode::constant(5, 8),
+            },
+            R2ILOp::CBranch {
+                target: Varnode::constant(u64::from((-3i32) as u32), 4),
+                cond: again,
+            },
+        ];
+
+        normalize_instruction_local_control(&mut block, &|_| None);
+
+        let additions = block
+            .ops
+            .iter()
+            .filter(|op| matches!(op, R2ILOp::IntAdd { dst, .. } if dst == &counter))
+            .count();
+        assert_eq!(additions, 5, "{:?}", block.ops);
+        assert!(
+            !block
+                .ops
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Unimplemented | R2ILOp::CBranch { .. })),
+            "{:?}",
+            block.ops
+        );
     }
 }

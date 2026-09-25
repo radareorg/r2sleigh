@@ -7,6 +7,8 @@ pub mod syntax;
 pub(crate) mod user_operation;
 
 #[cfg(test)]
+mod local_control_tests;
+#[cfg(test)]
 mod tests;
 
 use libsla::{
