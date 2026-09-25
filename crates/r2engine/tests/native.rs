@@ -1393,6 +1393,49 @@ const MUTUAL_TAIL_RECURSION: &[u8] = &[
     0xeb, 0xbe, // 0x1040 jmp even
 ];
 
+/// A prologue in a block the body branches back to: every pass opens another
+/// frame under the last, so no displacement names one slot on both arrivals.
+const PROLOGUE_IN_A_LOOP: &[u8] = &[
+    0x48, 0x83, 0xec, 0x10, // 0x1000 sub rsp, 0x10
+    0x48, 0x89, 0x3c, 0x24, // 0x1004 mov [rsp], rdi
+    0x48, 0xff, 0xcf, // 0x1008 dec rdi
+    0x75, 0xf3, // 0x100b jnz 0x1000
+    0x48, 0x8b, 0x04, 0x24, // 0x100d mov rax, [rsp]
+    0x48, 0x83, 0xc4, 0x10, // 0x1011 add rsp, 0x10
+    0xc3, // 0x1015 ret
+];
+
+/// The same body with the branch taken past the prologue, which runs once.
+const PROLOGUE_BEFORE_A_LOOP: &[u8] = &[
+    0x48, 0x83, 0xec, 0x10, // 0x1000 sub rsp, 0x10
+    0x48, 0x89, 0x3c, 0x24, // 0x1004 mov [rsp], rdi
+    0x48, 0xff, 0xcf, // 0x1008 dec rdi
+    0x75, 0xf7, // 0x100b jnz 0x1004
+    0x48, 0x8b, 0x04, 0x24, // 0x100d mov rax, [rsp]
+    0x48, 0x83, 0xc4, 0x10, // 0x1011 add rsp, 0x10
+    0xc3, // 0x1015 ret
+];
+
+/// Promotion names a frame slot by its place under the frame the entry
+/// block's prologue opens, which holds only if that block runs once, on the
+/// way in: a slot is promoted past a prologue the body loops after, and kept
+/// in memory where the body loops back through it.
+#[test]
+fn a_frame_slot_is_promoted_only_where_the_prologue_runs_once() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let promoted = |bytes: &[u8]| {
+        let program = Fixture {
+            bytes: bytes.to_vec(),
+            name: "framed",
+        };
+        let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+        prepared.artifact().function().promoted_slot_sites().len()
+    };
+    assert!(promoted(PROLOGUE_BEFORE_A_LOOP) > 0);
+    assert_eq!(promoted(PROLOGUE_IN_A_LOOP), 0);
+}
+
 /// The first pass of a loop at the entry reads what the caller passed, and
 /// every later pass what the latch left: the latch's decrement is observed.
 #[test]
