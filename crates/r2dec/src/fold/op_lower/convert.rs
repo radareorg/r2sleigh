@@ -317,33 +317,30 @@ fn convert_typed(expr: CExpr, from: &CType, to: &CType, pointer_bits: u32) -> CE
                 CExpr::cast(to.clone(), expr)
             };
         }
-        (CType::Float(bits), _) => {
-            let raw = CExpr::call(
-                CExpr::External {
-                    name: format!("r2sleigh_float_to_bits_{bits}"),
-                    kind: crate::symbol::ExternalKind::Intrinsic,
-                },
-                vec![expr],
-            );
+        (CType::Float(bits), _) if crate::prelude::Helper::float_to_bits(*bits).is_some() => {
+            let raw = crate::prelude::Helper::FloatToBits { bits: *bits }.call(vec![expr]);
             return if *to == CType::uint(*bits) {
                 raw
             } else {
                 CExpr::cast(to.clone(), raw)
             };
         }
-        (_, CType::Float(bits)) => {
+        (_, CType::Float(bits)) if crate::prelude::Helper::float_from_bits(*bits).is_some() => {
             let raw = if *from == CType::uint(*bits) {
                 expr
             } else {
                 CExpr::cast(CType::uint(*bits), expr)
             };
-            return CExpr::call(
-                CExpr::External {
-                    name: format!("r2sleigh_float_from_bits_{bits}"),
-                    kind: crate::symbol::ExternalKind::Intrinsic,
-                },
-                vec![raw],
-            );
+            return crate::prelude::Helper::FloatFromBits { bits: *bits }.call(vec![raw]);
+        }
+        // A float no C type holds (x87's 80 bits, a half) has no bits C can
+        // read the other way. The operand is still evaluated, so what it
+        // spells is still written, and the conversion is a residual.
+        (CType::Float(_), _) | (_, CType::Float(_)) => {
+            return match crate::prelude::residual(to) {
+                Some(residual) => CExpr::Comma(vec![expr, residual]),
+                None => expr,
+            };
         }
         _ => {}
     }

@@ -755,7 +755,7 @@ fn radare_typed_global_renders_as_its_type_and_direct_value() {
         simplify_data_object_loads_in_stmt(stmt, 64, &used);
     }
     function.extern_objects = used.into_inner().into_values().collect();
-    note_unproven_constructs(&mut function, None, 0, 0, 0, &Default::default());
+    note_unproven_constructs(&mut function, None, 0, 0, 0, &[]);
     let ready = crate::codegen::prepare_function_for_emission(function);
     let rendered = crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
 
@@ -809,7 +809,7 @@ fn unplaceable_global_type_keeps_the_honest_byte_declaration() {
         simplify_data_object_loads_in_stmt(stmt, 64, &used);
     }
     function.extern_objects = used.into_inner().into_values().collect();
-    note_unproven_constructs(&mut function, None, 0, 0, 0, &Default::default());
+    note_unproven_constructs(&mut function, None, 0, 0, 0, &[]);
     let ready = crate::codegen::prepare_function_for_emission(function);
     let rendered = crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
 
@@ -964,7 +964,7 @@ fn an_engine_chosen_fallback_route_does_not_pre_empt_native_lowering() {
     let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
 
     assert!(
-        output.starts_with("/* unknown */ stable_demo()"),
+        output.starts_with("/* r2dec refused stable_demo: operation lowering refusal:"),
         "native lowering owns the rendering: {output}"
     );
     assert!(
@@ -1000,7 +1000,7 @@ fn a_facts_owned_fallback_route_does_not_pre_empt_native_lowering() {
     let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
 
     assert!(
-        output.starts_with("/* unknown */ stable_demo()"),
+        output.starts_with("/* r2dec refused stable_demo: operation lowering refusal:"),
         "native lowering owns the rendering: {output}"
     );
     assert!(
@@ -1193,7 +1193,7 @@ fn raw_fallback_comments_regenerate_and_sanitize_hostile_text() {
 
     let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
     assert!(
-        output.contains("bad____int_injected()"),
+        output.contains("r2dec refused bad____int_injected:"),
         "a hostile source name must render as one C identifier: {output}"
     );
     assert!(
@@ -1804,7 +1804,7 @@ fn unproven_constructs_are_counted_through_nested_bodies() {
     ];
     assert_eq!(count_residual_markers(&func.body), 2);
 
-    note_unproven_constructs(&mut func, None, 0, 0, 0, &Default::default());
+    note_unproven_constructs(&mut func, None, 0, 0, 0, &[]);
     let note = match func.body.first() {
         Some(CStmt::Comment(text)) => text.clone(),
         other => panic!("expected a leading proof note, got {other:?}"),
@@ -1828,7 +1828,7 @@ fn unproven_constructs_are_counted_through_nested_bodies() {
 fn a_rendering_says_so_even_with_nothing_marked() {
     let mut func = CFunction::new("unclaimed".to_string(), CType::Unknown);
     func.body = vec![CStmt::Return(Some(CExpr::IntLit(0)))];
-    note_unproven_constructs(&mut func, None, 0, 0, 0, &Default::default());
+    note_unproven_constructs(&mut func, None, 0, 0, 0, &[]);
     let note = match func.body.first() {
         Some(CStmt::Comment(text)) => text.clone(),
         other => panic!("expected a leading proof note, got {other:?}"),
@@ -1841,7 +1841,7 @@ fn a_rendering_says_so_even_with_nothing_marked() {
 fn proof_line_attributes_variadic_format_counts_to_radare2() {
     let mut func = CFunction::new("formatted".to_string(), CType::Unknown);
     func.body = vec![CStmt::Return(None)];
-    note_unproven_constructs(&mut func, None, 2, 0, 0, &Default::default());
+    note_unproven_constructs(&mut func, None, 2, 0, 0, &[]);
     let note = match func.body.first() {
         Some(CStmt::Comment(text)) => text,
         other => panic!("expected a leading proof note, got {other:?}"),
@@ -1861,7 +1861,7 @@ fn proof_line_attributes_variadic_format_counts_to_radare2() {
 fn a_body_that_rendered_nothing_says_so_rather_than_reading_as_empty() {
     let mut func = CFunction::new("nothing_rendered".to_string(), CType::Unknown);
     func.body = Vec::new();
-    note_unproven_constructs(&mut func, None, 0, 0, 0, &Default::default());
+    note_unproven_constructs(&mut func, None, 0, 0, 0, &[]);
     let text = format!("{:?}", func.body);
     assert!(
         text.contains("r2dec proof: rendering produced no statements"),

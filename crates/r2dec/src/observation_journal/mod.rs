@@ -1933,16 +1933,17 @@ impl SealedNativeFunction {
                 crate::residual_function_for_render_boundary(&function_name, &reason),
             );
         }
-        let mut function = self.ready.function().clone();
-        crate::note_unproven_constructs(
-            &mut function,
-            Some(ledger),
-            radare2_variadic_format_counts,
-            radare2_prototypes,
-            radare2_local_names,
-            entry_supplied,
-        );
-        self.ready = prepare_function_for_emission(function);
+        self.ready.rewrite_sealed(|function| {
+            let unassigned = crate::residualize_unassigned_reads(function, entry_supplied);
+            crate::note_unproven_constructs(
+                function,
+                Some(ledger),
+                radare2_variadic_format_counts,
+                radare2_prototypes,
+                radare2_local_names,
+                &unassigned,
+            );
+        });
     }
 
     pub(crate) fn effect_obligation_audit(&self) -> crate::EffectObligationAudit {

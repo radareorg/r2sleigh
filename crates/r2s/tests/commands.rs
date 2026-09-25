@@ -140,7 +140,14 @@ fn the_ledger_says_what_the_function_owes_and_whether_it_paid() {
     // behind an environment variable.
     let run = r2s(&format!("s {FNV1A32}; pddo"));
     assert!(run.ok, "{}", run.out);
-    for column in ["total=", "rendered=", "elided=", "refused=", "unaccounted="] {
+    for column in [
+        "total=",
+        "rendered=",
+        "elided=",
+        "refused=",
+        "residual=",
+        "unaccounted=",
+    ] {
         assert!(
             run.out.contains(column),
             "{column} missing from {}",

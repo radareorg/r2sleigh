@@ -550,7 +550,7 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     // table, reading the entry and branching through it are the statement, not
     // operations beside it that a marker has to stand in for.
     assert!(!output.contains("r2dec gap"), "{output}");
-    assert!(!output.contains("gapped"), "{output}");
+    assert!(!output.contains("residual"), "{output}");
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
@@ -678,10 +678,11 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
     assert!(!output.contains("r2dec gap"), "{output}");
 }
 
-/// Whether a rendering marks its return as unproven, in the header and at the return.
+/// Whether a rendering marks its return as unproven: the header declares the
+/// result carrier a caller reads, and the return hands back a residual of it,
+/// which traps if it is ever reached. Nothing else in the text claims a value.
 fn marks_an_unproven_return(output: &str) -> bool {
-    output.starts_with("/* r2dec gap: UnprovenReturn */")
-        && output.contains("r2dec gap: UnprovenReturn at")
+    output.starts_with("uint64_t ") && output.contains("return r2sleigh_residual_u64(")
 }
 
 #[test]
@@ -772,16 +773,23 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
         .lines()
         .find(|line| line.contains("r2dec proof:"))
         .unwrap_or_else(|| panic!("no proof line: {text}"));
-    // rbx is not an argument slot, and the function declares it and never
-    // assigns it: that is what held from entry means, and only that.
-    assert!(proof.contains("; 1 held from entry (RBX_0)"), "{text}");
+    // rbx is not an argument slot, and the function never assigns it: that is
+    // what held from entry means, and only that. C has no spelling for such a
+    // value, so the read is a residual rather than an indeterminate object.
+    assert!(
+        proof.contains("; 1 held from entry, read as residuals (RBX_0)"),
+        "{text}"
+    );
     // rsi is an argument slot with no parameter, so the rendering reads a value
     // its own signature says it was never given. It is not excused as held.
     assert!(
-        proof.contains("; 1 argument slot read with no parameter (RSI_0)"),
+        proof.contains("; 1 argument slot read with no parameter, read as residuals (RSI_0)"),
         "{text}"
     );
-    assert!(text.contains("uint64_t RSI_0;"), "{text}");
+    // Neither is declared as an object nothing assigns: each read traps.
+    assert!(!text.contains("uint64_t RSI_0;"), "{text}");
+    assert!(!text.contains("uint64_t RBX_0;"), "{text}");
+    assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 2, "{text}");
 
     // The first stack argument is an argument slot too: above the return
     // address, where the caller placed it. It was counted as held from entry.
@@ -791,7 +799,7 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
         .find(|line| line.contains("r2dec proof:"))
         .unwrap_or_else(|| panic!("no proof line: {text}"));
     assert!(
-        proof.contains("; 1 argument slot read with no parameter (stack_p8)"),
+        proof.contains("; 1 argument slot read with no parameter, read as residuals (stack_p8)"),
         "{text}"
     );
     assert!(!proof.contains("held from entry"), "{text}");
@@ -1980,19 +1988,27 @@ fn a_clear_direction_flag_survives_a_call() {
         let response = decompile(&machine.under(convention), &program, BASE).expect("decompile");
         let text = response.output.text();
         assert!(response.render_refusal.is_none(), "{convention}\n{text}");
-        // The import states no result, so the return is the only gap.
+        // The import states no result, so the return is a residual. The
+        // move's operands are registers the function entered holding, which C
+        // cannot spell, so each read of one is a residual too: four in all.
         assert!(marks_an_unproven_return(text), "{convention}\n{text}");
         assert_eq!(
-            text.matches("r2dec gap:").count(),
-            2,
+            text.matches("r2sleigh_residual_").count(),
+            4,
             "{convention}\n{text}"
         );
         assert!(
-            text.contains("to[transferred] = ((uint64_t*)RBP_0)[transferred];"),
+            text.contains("; 3 held from entry, read as residuals (R12_0, RBP_0, RBX_0)"),
             "{convention}\n{text}"
         );
+        // The copy still walks forward, which is what a clear flag means.
         assert!(
-            text.contains("while (transferred != R12_0)"),
+            text.contains("to[transferred] = ((uint64_t*)r2sleigh_residual_u64(3))[transferred];"),
+            "{convention}\n{text}"
+        );
+        assert!(text.contains("transferred++;"), "{convention}\n{text}");
+        assert!(
+            text.contains("while (transferred != r2sleigh_residual_u64(2))"),
             "{convention}\n{text}"
         );
     }
@@ -2084,7 +2100,7 @@ fn one_gap_answers_for_thousands_of_cells_on_a_small_stack() {
         "{effects:?}"
     );
     assert!(
-        text.contains(&format!(", {} gapped;", effects.gapped)),
+        text.contains(&format!(", {} residual;", effects.gapped)),
         "{text}"
     );
 }

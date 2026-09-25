@@ -101,6 +101,14 @@ impl EmissionReadyFunction {
         &self.function
     }
 
+    /// Rewrite a function the journal has sealed.
+    ///
+    /// For the passes that run after the seal and put no marker back: the
+    /// proof note, and the residuals for reads of objects nothing assigns.
+    pub(crate) fn rewrite_sealed(&mut self, rewrite: impl FnOnce(&mut CFunction)) {
+        rewrite(&mut self.function);
+    }
+
     pub(crate) fn function_mut_for_observation_seal(
         &mut self,
         _authority: &mut ObservationSealAuthority,
@@ -166,11 +174,63 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
     }
 }
 
+/// What the emitter wrote for one function.
+///
+/// One emission, read two ways. The definition is what a reader is shown: the
+/// function and the declarations it needs. The translation unit is that same
+/// text below its prelude -- the headers and the helper definitions -- and is
+/// what a compiler is handed. Residual sites are counted in the unit, so they
+/// name the text a consumer compiles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Emission {
+    definition: String,
+    unit: String,
+    residuals: Vec<ResidualSite>,
+}
+
+impl Emission {
+    /// The function and what it declares, as a reader is shown it.
+    pub fn definition(&self) -> &str {
+        &self.definition
+    }
+
+    /// The definition as its own translation unit.
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// Every residual in the unit, in the order its site numbers run.
+    pub fn residuals(&self) -> &[ResidualSite] {
+        &self.residuals
+    }
+
+    pub(crate) fn into_definition(self) -> String {
+        self.definition
+    }
+}
+
+/// One residual: a construct the rendering could not prove, written as a
+/// call that traps, numbered where it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidualSite {
+    /// The argument the call passes, counted from one in text order.
+    pub site: u32,
+    /// What the construct would have produced.
+    pub ty: crate::prelude::ResidualType,
+    /// One-based, in the unit.
+    pub line: usize,
+}
+
 /// C code generator.
 pub(crate) struct CodeGenerator<'c> {
     config: CodeGenConfig,
     output: String,
     indent_level: usize,
+    /// The line the next character of `output` goes on, as of `counted` bytes.
+    line: usize,
+    counted: usize,
+    /// Residuals written so far, whose count numbers the next one.
+    residuals: Vec<ResidualSite>,
     /// The names of the function being written, so a reference can be spelled.
     symbols: crate::symbol::SymbolTable,
     /// Where emission is counted. Writing the C out is the largest phase of a
@@ -190,9 +250,65 @@ impl<'c> CodeGenerator<'c> {
             config,
             output: String::new(),
             indent_level: 0,
+            line: 1,
+            counted: 0,
+            residuals: Vec::new(),
             symbols: crate::symbol::SymbolTable::new(),
             work: None,
             stopped: false,
+        }
+    }
+
+    /// The line the next character written goes on.
+    ///
+    /// Counted forward from where the last question left off, so asking once
+    /// per node costs one pass over the text in all.
+    fn current_line(&mut self) -> usize {
+        let fresh = &self.output.as_bytes()[self.counted.min(self.output.len())..];
+        self.line += fresh.iter().filter(|byte| **byte == b'\n').count();
+        self.counted = self.output.len();
+        self.line
+    }
+
+    /// Write a residual call: its helper, and the next site number.
+    fn emit_residual(&mut self, ty: crate::prelude::ResidualType) {
+        let site = u32::try_from(self.residuals.len() + 1).unwrap_or(u32::MAX);
+        let line = self.current_line();
+        self.residuals.push(ResidualSite { site, ty, line });
+        self.output
+            .push_str(&crate::prelude::Helper::Residual(ty).name());
+        self.output.push_str(&format!("({site})"));
+    }
+
+    /// Emit a function as a translation unit.
+    pub(crate) fn emit(&mut self, ready: &EmissionReadyFunction) -> Emission {
+        let definition = self.generate_function(ready);
+        let func = ready.function();
+        let mut prelude = String::new();
+        for include in crate::prelude::INCLUDES {
+            prelude.push_str(include);
+            prelude.push('\n');
+        }
+        prelude.push('\n');
+        if func.declaration_only.is_none() {
+            for helper in crate::prelude::helpers_called(func) {
+                prelude.push_str(&helper.definition());
+                prelude.push('\n');
+            }
+        }
+        let offset = prelude.bytes().filter(|byte| *byte == b'\n').count();
+        let residuals = std::mem::take(&mut self.residuals)
+            .into_iter()
+            .map(|residual| ResidualSite {
+                line: residual.line + offset,
+                ..residual
+            })
+            .collect();
+        prelude.push_str(&definition);
+        Emission {
+            definition,
+            unit: prelude,
+            residuals,
         }
     }
 
@@ -248,6 +364,9 @@ impl<'c> CodeGenerator<'c> {
         let func = ready.function();
         self.symbols = func.symbols.borrow().clone();
         self.output.clear();
+        self.line = 1;
+        self.counted = 0;
+        self.residuals.clear();
 
         // A declared address defines nothing: the reason stands where the body
         // would, and the declarations say what the address resolves to.
@@ -255,6 +374,15 @@ impl<'c> CodeGenerator<'c> {
             self.output.push_str("/* ");
             self.output.push_str(reason);
             self.output.push_str(" */\n");
+            // What the proof note says about a function nothing defines still
+            // stands, and a comment is all it can be.
+            for stmt in &func.body {
+                if let CStmt::Comment(text) = stmt.unobserved() {
+                    self.output.push_str("/* ");
+                    self.emit_comment_text(text);
+                    self.output.push_str(" */\n");
+                }
+            }
             self.emit_typedef_declarations(func);
             self.emit_extern_declarations(func, true);
             return self.output.clone();
@@ -292,11 +420,7 @@ impl<'c> CodeGenerator<'c> {
         }
 
         // Function signature
-        if func.return_unproven {
-            self.output.push_str("/* r2dec gap: UnprovenReturn */");
-        } else {
-            self.emit_type(&func.ret_type);
-        }
+        self.emit_type(&func.ret_type);
         self.output.push(' ');
         self.output.push_str(&func.name);
         self.output.push('(');
@@ -642,8 +766,11 @@ impl<'c> CodeGenerator<'c> {
                 // A gap is always written, whatever the comment configuration
                 // says: it is the record that this cell is unproven, and a
                 // rendering that dropped it would claim more than was proven.
+                // What it stands for is not computed, so running it traps
+                // rather than going on as if the work were done.
                 self.emit_indent();
-                self.output.push_str("/* ");
+                self.emit_residual(crate::prelude::ResidualType::Void);
+                self.output.push_str("; /* ");
                 self.emit_comment_text(&marker.to_string());
                 self.output.push_str(" */\n");
             }
@@ -865,17 +992,7 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push(')');
                 self.emit_expr(inner, my_prec);
             }
-            CExpr::Call { func, args, .. } => {
-                self.emit_expr(func, my_prec);
-                self.output.push('(');
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        self.output.push_str(", ");
-                    }
-                    self.emit_expr(arg, 0);
-                }
-                self.output.push(')');
-            }
+            CExpr::Call { func, args, .. } => self.emit_call(func, args, my_prec),
             CExpr::Subscript { base, index } => {
                 self.emit_expr(base, my_prec);
                 self.output.push('[');
@@ -929,6 +1046,24 @@ impl<'c> CodeGenerator<'c> {
         if need_parens {
             self.output.push(')');
         }
+    }
+
+    /// Emit a call. A residual's argument is its site, which is where it
+    /// stands in the text, so the emitter numbers it.
+    fn emit_call(&mut self, func: &CExpr, args: &[CExpr], my_prec: u8) {
+        if let Some(ty) = crate::prelude::is_residual_callee(func) {
+            self.emit_residual(ty);
+            return;
+        }
+        self.emit_expr(func, my_prec);
+        self.output.push('(');
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                self.output.push_str(", ");
+            }
+            self.emit_expr(arg, 0);
+        }
+        self.output.push(')');
     }
 
     /// Emit a type.

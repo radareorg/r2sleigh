@@ -733,7 +733,7 @@ impl<'a> FoldingContext<'a> {
                     .expr(*input)
                     .map(|expr| expr.ty().width_bits())
                     .ok_or_else(invalid)?;
-                float_unary(*op, width, child(0, *input)?)
+                float_unary(*op, width, child(0, *input)?).ok_or_else(invalid)?
             }
             Kind::FloatCompare { op, left, right } => {
                 CExpr::binary(comparison_op(*op), child(0, *left)?, child(1, *right)?)
@@ -857,7 +857,7 @@ impl<'a> FoldingContext<'a> {
             }
             Kind::FloatUnary { op, input } => {
                 let width = arena.term(input).width_bits();
-                float_unary(op, width, child(0, input)?)
+                float_unary(op, width, child(0, input)?).ok_or_else(invalid)?
             }
             Kind::FloatCompare { op, left, right } => {
                 CExpr::binary(comparison_op(op), child(0, left)?, child(1, right)?)
@@ -1049,18 +1049,9 @@ impl<'a> FoldingContext<'a> {
                 if arena.term(right).width_bits() != width || !CType::is_integer_width(width) {
                     return Err(invalid());
                 }
-                let operation = match op {
-                    r2ssa::MachineArithmeticFlagOp::UnsignedCarry => "carry",
-                    r2ssa::MachineArithmeticFlagOp::SignedCarry => "scarry",
-                    r2ssa::MachineArithmeticFlagOp::SignedBorrow => "sborrow",
-                };
-                CExpr::call(
-                    CExpr::External {
-                        name: format!("r2sleigh_int_{operation}_{width}"),
-                        kind: crate::symbol::ExternalKind::Intrinsic,
-                    },
-                    vec![child(0, left)?, child(1, right)?],
-                )
+                crate::prelude::Helper::flag(crate::prelude::FlagOp::of(op), width)
+                    .ok_or_else(invalid)?
+                    .call(vec![child(0, left)?, child(1, right)?])
             }
             // The object's address is a constant of the frame: the array's
             // name, or `&name` for anything else.
@@ -2099,25 +2090,13 @@ fn comparison_op(op: r2ssa::MachineComparisonOp) -> BinaryOp {
     }
 }
 
-/// Negation is the operator; the rest are the intrinsic header's helpers over
-/// the compiler builtins, at the operand's width.
-fn float_unary(op: r2ssa::MachineFloatUnaryOp, width: u32, operand: CExpr) -> CExpr {
-    let name = match op {
-        r2ssa::MachineFloatUnaryOp::Negate => return CExpr::unary(UnaryOp::Neg, operand),
-        r2ssa::MachineFloatUnaryOp::Absolute => "abs",
-        r2ssa::MachineFloatUnaryOp::SquareRoot => "sqrt",
-        r2ssa::MachineFloatUnaryOp::Ceiling => "ceil",
-        r2ssa::MachineFloatUnaryOp::Floor => "floor",
-        r2ssa::MachineFloatUnaryOp::Round => "round",
-        r2ssa::MachineFloatUnaryOp::IsNan => "isnan",
+/// Negation is the operator; the rest are the prelude's helpers, at the
+/// operand's width, and there is none at a width that is not a float's.
+fn float_unary(op: r2ssa::MachineFloatUnaryOp, width: u32, operand: CExpr) -> Option<CExpr> {
+    let Some(op) = crate::prelude::FloatOp::of(op) else {
+        return Some(CExpr::unary(UnaryOp::Neg, operand));
     };
-    CExpr::call(
-        CExpr::External {
-            name: format!("r2sleigh_float_{name}_{width}"),
-            kind: crate::symbol::ExternalKind::Intrinsic,
-        },
-        vec![operand],
-    )
+    Some(crate::prelude::Helper::float(op, width)?.call(vec![operand]))
 }
 
 #[cfg(test)]
