@@ -232,8 +232,25 @@ class Backend(unittest.TestCase):
         self.assertEqual(result.functions, {})
         causes = set(result.decompiler.extra["decline_causes"].values())
         self.assertEqual(len(causes), 1)
-        self.assertIn(".debug_info and .symtab", causes.pop())
-        self.assertEqual(result.decompiler.extra["fail_closed"], [".debug_info", ".symtab"])
+        cause = causes.pop()
+        self.assertIn(".debug_info", cause)
+        self.assertIn(".symtab", cause)
+        leaked = result.decompiler.extra["fail_closed"]
+        self.assertIn(".debug_info", leaked)
+        self.assertIn(".symtab", leaked)
+
+    @unittest.skipUnless(shutil.which("objcopy"), "needs objcopy to add a section")
+    def test_debug_information_in_any_spelling_is_refused_whole(self):
+        # Compressed DWARF and MiniDebugInfo carry the same facts as .debug_info.
+        for section in (".zdebug_info", ".gnu_debugdata", ".debug_line"):
+            binary = Path(self.tmp.name) / f"carries{section}"
+            payload = Path(self.tmp.name) / "payload"
+            payload.write_bytes(b"\0" * 16)
+            subprocess.run(["objcopy", "--add-section", f"{section}={payload}", str(STRIPPED),
+                            str(binary)], check=True, capture_output=True)
+            result = self.decompile(binary=binary, function_names=set(TARGETS[:2]))
+            self.assertEqual(result.functions, {}, section)
+            self.assertEqual(result.decompiler.extra["fail_closed"], [section])
 
     def test_variables_and_lines_come_from_pddj(self):
         # D6: the structured answer, not a parse of the C.

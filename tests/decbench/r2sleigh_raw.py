@@ -36,9 +36,11 @@ and the DWARF ``low_pc`` of every source function:
   ``rendered + declined == requested`` is checked before returning.
 * After every function the partial result is pickled to ``progress_path``, so
   the driver's hard kill loses nothing already answered.
-* It fails closed on a binary carrying ``.debug_info`` or ``.symtab``: r2s
-  reads the declarations of the file it opens, and DecBench scores types
-  against that same DWARF. Such a binary is declined whole with the reason.
+* It fails closed on a binary carrying ``.symtab`` or any debug section
+  (``.debug_*``, compressed ``.zdebug_*``, or the MiniDebugInfo
+  ``.gnu_debugdata``): r2s reads the declarations of the file it opens, and
+  DecBench scores names and types against that same DWARF. Such a binary is
+  declined whole with the reason.
 * ``variables`` and ``line_mappings`` come from ``pddj``, never from parsing C.
 
 Locate the shell with ``$R2SLEIGH_R2S_BIN`` or ``r2s`` on ``$PATH``.
@@ -82,8 +84,10 @@ log = logging.getLogger(__name__)
 
 BACKEND = "r2sleigh_native"
 
-# Sections whose presence means r2s would read facts DecBench grades against.
-FAIL_CLOSED_SECTIONS = (".debug_info", ".symtab")
+# Sections whose presence means r2s would read facts DecBench grades against:
+# the symbol table, and debug information in any of its spellings.
+FAIL_CLOSED_SECTIONS = (".symtab", ".gnu_debugdata")
+FAIL_CLOSED_PREFIXES = (".debug_", ".zdebug_")
 
 _STACK_OFFSET = re.compile(r"([+-])\s*(0x[0-9a-fA-F]+|\d+)\s*\]?\s*$")
 
@@ -139,7 +143,8 @@ def elf_section_names(binary: Path) -> list[str] | None:
 
 def leaked_sections(binary: Path) -> list[str]:
     names = elf_section_names(binary) or []
-    return [name for name in FAIL_CLOSED_SECTIONS if name in names]
+    return sorted({name for name in names
+                   if name in FAIL_CLOSED_SECTIONS or name.startswith(FAIL_CLOSED_PREFIXES)})
 
 
 def discover(executable: Path, binary: Path, timeout: float) -> tuple[list[tuple[str, int]], str]:
@@ -321,7 +326,7 @@ class R2sDecompiler(Decompiler):
         leaked = leaked_sections(binary_path)
         if leaked:
             # Fail closed: nothing r2s says about this file is admissible.
-            cause = (f"harness: the binary carries {' and '.join(leaked)}; r2s would read the "
+            cause = (f"harness: the binary carries {', '.join(leaked)}; r2s would read the "
                      "declarations DecBench scores against (strip --strip-all it, as "
                      "scripts/run_benchmark.py does)")
             for address, name in requested.items() or [(0, None)]:

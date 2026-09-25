@@ -75,7 +75,8 @@ function its own from the moment r2s starts on it
   `rendered + declined == requested` is checked.
 * **Checkpoints.** The partial result is pickled after every function, so the
   driver's hard kill keeps what was answered.
-* **Fails closed.** A binary carrying `.debug_info` or `.symtab` is declined
+* **Fails closed.** A binary carrying `.symtab` or any debug section
+  (`.debug_*`, `.zdebug_*`, `.gnu_debugdata`) is declined
   whole: nothing r2s says about it is admissible.
 * **Structured facts.** `variables` and `line_mappings` come from `pddj`.
   DecBench uses address correspondence for `type_match` only for the backends
