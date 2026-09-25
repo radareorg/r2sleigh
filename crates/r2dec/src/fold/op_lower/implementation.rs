@@ -1007,10 +1007,32 @@ impl<'a> FoldingContext<'a> {
         base_expr
     }
 
-
-
-
-
+    /// A type fact, admitted only where it describes `width_bytes` of storage.
+    ///
+    /// A type chooses how a value or an access of the operation's width is
+    /// spelled: its signedness, whether it is a pointer, which member it
+    /// names. It never chooses the width, which is the operation's. A fact
+    /// whose storage is another width is not the type of this value, and
+    /// spelling the access at it moves a different number of bytes than the
+    /// machine does: an eight-byte `mov [g], rax` whose value carried a
+    /// thirty-two-bit parameter's type was written `*(uint32_t*)g = ...`,
+    /// and the upper four bytes of `g` were never stored. The mismatch is
+    /// refusal evidence against the fact, and the caller falls back to the
+    /// operation's own unsigned width.
+    fn type_fact_of_width(&self, ty: CType, width_bytes: u32, fact: &str) -> Option<CType> {
+        let width_bits = width_bytes.saturating_mul(8);
+        let described = r2types::declaration_type_width_bits(&ty, self.pointer_bits());
+        if described == Some(width_bits) {
+            return Some(ty);
+        }
+        r2il::refusal_evidence!(
+            "type-fact-width",
+            "({:#x}, {:?}) {fact} type {ty:?} describes {described:?} bits, the operation {width_bits}",
+            self.current_block_addr.get().unwrap_or_default(),
+            self.current_op_idx.get()
+        );
+        None
+    }
 
     /// The type the declared aggregate gives the member this store writes.
     ///
@@ -1018,8 +1040,8 @@ impl<'a> FoldingContext<'a> {
     /// store to `arr[i].third` converted its value to the unsigned carrier and
     /// then assigned it to a signed member, which is the conversion
     /// `-Wsign-conversion` rejects. The member's own declaration is what the
-    /// destination is.
-    fn certified_member_type_for_current_store(&self) -> Option<CType> {
+    /// destination is, where it is as wide as the store.
+    fn certified_member_type_for_current_store(&self, width_bytes: u32) -> Option<CType> {
         let render = self.inputs.render_facts()?;
         let block_addr = self.current_block_addr.get()?;
         let op_idx = self.current_op_idx.get()?;
@@ -1030,9 +1052,12 @@ impl<'a> FoldingContext<'a> {
         let [member] = members.as_slice() else {
             return None;
         };
-        member.field_type.clone()
+        let ty = member.field_type.clone()?;
+        self.type_fact_of_width(ty, width_bytes, "member")
     }
 
+    /// The C type the facts give this value, where they agree on one and it
+    /// is as wide as the value.
     fn type_hint_for_var(&self, var: &SSAVar) -> Option<CType> {
         let value = self.prepared_value_id_for_var(var)?;
         let render = self.inputs.render_facts()?;
@@ -1070,7 +1095,7 @@ impl<'a> FoldingContext<'a> {
         if candidates.iter().any(|candidate| *candidate != ty) {
             return None;
         }
-        Some(ty)
+        self.type_fact_of_width(ty, var.size, "value")
     }
 
     pub(crate) fn should_materialize_call_result_at_source(
@@ -2025,7 +2050,7 @@ impl<'a> FoldingContext<'a> {
                 // the program never had, and the value crossing into it is
                 // unsigned, which the compiler rejects outright.
                 let elem_ty = self
-                    .certified_member_type_for_current_store()
+                    .certified_member_type_for_current_store(val.size)
                     .or_else(|| self.type_hint_for_var(val))
                     .unwrap_or_else(|| uint_type_from_size(val.size));
                 let certified_lhs =

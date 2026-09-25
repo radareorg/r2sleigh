@@ -105,6 +105,20 @@ impl<'a> FoldingContext<'a> {
                 );
                 OpLoweringRefusal::missing_machine_projection()
             })?;
+        // The access moves the operation's bytes: the element it is spelled
+        // at may say how they read, never how many there are. An element of
+        // another width would load or store a different number of bytes than
+        // the certificate just matched, so it is refused here rather than
+        // spelled.
+        let element_bits = r2types::declaration_type_width_bits(&elem_ty, self.pointer_bits());
+        if element_bits != Some(width.saturating_mul(8)) {
+            r2il::refusal_evidence!(
+                "memory-access-width",
+                "({block_addr:#x}, {op_idx}) {} of {width} bytes spelled at {elem_ty:?} ({element_bits:?} bits)",
+                if is_write { "store" } else { "load" }
+            );
+            return Err(OpLoweringRefusal::missing_machine_projection());
+        }
         let expr = self
             .finalize_certified_memory_expr_for_fact(fact, elem_ty)
             .ok_or_else(|| {
