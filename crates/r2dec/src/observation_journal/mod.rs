@@ -1905,6 +1905,39 @@ impl SealedNativeFunction {
             .expect("every native function retains the source effect domain")
     }
 
+    /// Spell each read of an object nothing assigns as a residual, in the
+    /// sealed tree.
+    pub(crate) fn residualize_unassigned_reads(
+        &mut self,
+        entry_supplied: &std::collections::BTreeMap<
+            crate::symbol::SymbolId,
+            crate::binding_plan::EntrySupply,
+        >,
+    ) -> Vec<crate::UnassignedRead> {
+        self.ready.rewrite_sealed(|function| {
+            crate::residualize_unassigned_reads(function, entry_supplied)
+        })
+    }
+
+    /// The obligations a residual stands in for: each one with an occurrence
+    /// that evaluates a residual.
+    ///
+    /// An effect marker stands on the statement or expression that discharges
+    /// its obligation. A residual beneath it traps before that occurrence
+    /// completes, so the obligation is rendered and not performed, and the
+    /// ledger counts it with the residuals. Asked of the final tree, after
+    /// every rewrite, and before the ledger closes. One walk over the body,
+    /// each marker a lookup.
+    pub(crate) fn obligations_under_residuals(&self) -> BTreeSet<SemanticObligationId> {
+        let Some(locations) = self.ready.observation_locations() else {
+            return BTreeSet::new();
+        };
+        crate::prelude::markers_over_residuals(&self.ready.function().body)
+            .into_iter()
+            .filter_map(|marker| locations.effect(marker))
+            .collect()
+    }
+
     /// Finalize native admission from the exact sealed effect stream.
     ///
     /// The public audit retains the tuple even when admission fails. Refused
@@ -1916,10 +1949,7 @@ impl SealedNativeFunction {
         radare2_variadic_format_counts: usize,
         radare2_prototypes: usize,
         radare2_local_names: usize,
-        entry_supplied: &std::collections::BTreeMap<
-            crate::symbol::SymbolId,
-            crate::binding_plan::EntrySupply,
-        >,
+        unassigned: &[crate::UnassignedRead],
     ) {
         self.ledger = Some(ledger.clone());
         let audit = self.effect_obligation_audit();
@@ -1934,14 +1964,13 @@ impl SealedNativeFunction {
             );
         }
         self.ready.rewrite_sealed(|function| {
-            let unassigned = crate::residualize_unassigned_reads(function, entry_supplied);
             crate::note_unproven_constructs(
                 function,
                 Some(ledger),
                 radare2_variadic_format_counts,
                 radare2_prototypes,
                 radare2_local_names,
-                &unassigned,
+                unassigned,
             );
         });
     }
@@ -1987,6 +2016,17 @@ impl LegacyObservationJournal {
                 .and_then(|obligation| obligation.source.graph_inst())
                 .and_then(at)
         };
+        // An effect marker stands on the occurrence that discharges its
+        // obligation, so a residual beneath it is one that occurrence
+        // evaluates, and the obligation traps rather than being performed.
+        let effects = self
+            .targets
+            .iter()
+            .map(|target| match *target {
+                ObservationTarget::Effect(id) => Some(id),
+                _ => None,
+            })
+            .collect();
         crate::codegen::ObservationLocations::new(
             self.targets
                 .iter()
@@ -2007,6 +2047,7 @@ impl LegacyObservationJournal {
                     | ObservationTarget::CertifiedArrayIndexRead { .. } => None,
                 })
                 .collect(),
+            effects,
         )
     }
 

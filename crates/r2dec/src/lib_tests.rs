@@ -1787,22 +1787,30 @@ fn audited_partial_retains_the_same_product_without_extra_polls() {
     );
 }
 
-/// The marks the structurer leaves are counted wherever they sit, including
-/// inside a loop or a switch arm, and the function says how many it carries.
+/// The residuals a rendering holds are counted wherever they sit, including
+/// inside a loop body: the trap the structurer writes for a branch whose test
+/// it could not render, and a residual value. The function says how many it
+/// carries, and each is a site the emitter numbers.
 #[test]
 fn unproven_constructs_are_counted_through_nested_bodies() {
     let mut func = CFunction::new("partly_proven".to_string(), CType::Unknown);
     func.body = vec![
-        CStmt::comment("r2dec residual: unresolved branch condition at 0x1000"),
+        CStmt::Gap(crate::ast::GapMarker {
+            kind: "UnresolvedBranchCondition".to_owned(),
+            origin: "structure".to_owned(),
+            block_addr: 0x1000,
+            op_idx: 0,
+            ops: 0,
+        }),
         CStmt::While {
             cond: CExpr::IntLit(1),
-            body: Box::new(CStmt::Block(vec![CStmt::comment(
-                "r2dec residual: uncertified loop structure at 0x1010",
+            body: Box::new(CStmt::Block(vec![CStmt::Expr(
+                crate::prelude::residual(&CType::uint(32)).expect("an integer residual"),
             )])),
         },
         CStmt::Return(Some(CExpr::IntLit(0))),
     ];
-    assert_eq!(count_residual_markers(&func.body), 2);
+    assert_eq!(crate::prelude::count_residuals(&func), 2);
 
     note_unproven_constructs(&mut func, None, 0, 0, 0, &[]);
     let note = match func.body.first() {

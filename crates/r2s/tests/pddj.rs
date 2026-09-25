@@ -132,6 +132,16 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
     })
     .sum::<u64>();
     assert_eq!(Some(columns), proof["total"].as_u64(), "{label}: {proof}");
+    // A residual stands in for some obligation, and an obligation counted as
+    // residual has one standing in for it: a function whose text traps
+    // never reads as fully proven, and one that reads unproven shows where.
+    let residuals = answer["residuals"].as_array().expect("residuals");
+    assert_eq!(
+        proof["residual"].as_u64() == Some(0),
+        residuals.is_empty(),
+        "{label}: {proof} beside {} residual sites",
+        residuals.len()
+    );
 
     let listed = instructions(binary, addr);
     for line in answer["lines"].as_array().expect("lines") {

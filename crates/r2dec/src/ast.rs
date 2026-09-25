@@ -888,67 +888,6 @@ impl CExpr {
             Self::Observed { .. } => unreachable!("handled before visiting semantic nodes"),
         }
     }
-
-    /// Visit this expression and all descendants in pre-order, for rewriting
-    /// one in place.
-    ///
-    /// Observation markers are stepped through, so a node replaced here keeps
-    /// the markers it stood under: the occurrence is the same one, spelled
-    /// differently.
-    pub(crate) fn visit_mut(&mut self, f: &mut impl FnMut(&mut CExpr)) {
-        if let Self::Observed { expr, .. } = self {
-            expr.visit_mut(f);
-            return;
-        }
-        f(self);
-        match self {
-            Self::Unary { operand, .. }
-            | Self::Cast { expr: operand, .. }
-            | Self::Sizeof(operand)
-            | Self::AddrOf(operand)
-            | Self::Deref(operand)
-            | Self::Paren(operand) => operand.visit_mut(f),
-            Self::Binary { left, right, .. } => {
-                left.visit_mut(f);
-                right.visit_mut(f);
-            }
-            Self::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                cond.visit_mut(f);
-                then_expr.visit_mut(f);
-                else_expr.visit_mut(f);
-            }
-            Self::Call { func, args, .. } => {
-                func.visit_mut(f);
-                for arg in args {
-                    arg.visit_mut(f);
-                }
-            }
-            Self::Subscript { base, index } => {
-                base.visit_mut(f);
-                index.visit_mut(f);
-            }
-            Self::Member { base, .. } | Self::PtrMember { base, .. } => base.visit_mut(f),
-            Self::Comma(items) => {
-                for item in items {
-                    item.visit_mut(f);
-                }
-            }
-            Self::IntLit(_)
-            | Self::UIntLit(_)
-            | Self::FloatLit(..)
-            | Self::StringLit(_)
-            | Self::CharLit(_)
-            | Self::Var(_)
-            | Self::External { .. }
-            | Self::DataObject { .. }
-            | Self::SizeofType(_)
-            | Self::Observed { .. } => {}
-        }
-    }
 }
 
 impl CExpr {
@@ -1370,13 +1309,6 @@ impl CFunction {
     pub(crate) fn visit_body_exprs(&self, f: &mut impl FnMut(&CExpr)) {
         for stmt in &self.body {
             stmt.visit_exprs(&mut |root| root.visit(f));
-        }
-    }
-
-    /// Every expression node in the body, for rewriting one in place.
-    pub(crate) fn visit_body_exprs_mut(&mut self, f: &mut impl FnMut(&mut CExpr)) {
-        for stmt in &mut self.body {
-            stmt.visit_exprs_mut(&mut |root| root.visit_mut(f));
         }
     }
 

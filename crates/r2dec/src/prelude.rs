@@ -435,6 +435,126 @@ pub(crate) fn count_residuals(function: &CFunction) -> usize {
     calls + function.body.iter().map(count_gaps).sum::<usize>()
 }
 
+/// Every marker standing over a residual the occurrence it marks evaluates.
+///
+/// A marker on an expression covers the residuals inside that expression. A
+/// marker on a statement covers the residuals in the statement's own
+/// expressions -- its value, its test, its header -- and not those in the
+/// statements it nests: an `if` whose arm traps still performs its test. A
+/// marked gap is a residual where it stands, covered by the markers of the
+/// statements it is the value of. One walk, the markers above the current
+/// node kept on a stack.
+pub(crate) fn markers_over_residuals(body: &[CStmt]) -> BTreeSet<crate::ast::RenderObservationId> {
+    let mut found = BTreeSet::new();
+    let mut over = Vec::new();
+    for stmt in body {
+        stmt_markers_over_residuals(stmt, &mut over, &mut found);
+    }
+    found
+}
+
+fn stmt_markers_over_residuals(
+    stmt: &CStmt,
+    over: &mut Vec<crate::ast::RenderObservationId>,
+    found: &mut BTreeSet<crate::ast::RenderObservationId>,
+) {
+    // A nested statement starts with nothing over it: what marks the
+    // statement holding it is not discharged by the nested one's residuals.
+    let nested = |stmt: &CStmt, found: &mut BTreeSet<_>| {
+        stmt_markers_over_residuals(stmt, &mut Vec::new(), found);
+    };
+    match stmt {
+        CStmt::Observed { ids, stmt } => {
+            let depth = over.len();
+            over.extend(ids.iter());
+            stmt_markers_over_residuals(stmt, over, found);
+            over.truncate(depth);
+        }
+        CStmt::StructuredRegion { stmt, .. } => stmt_markers_over_residuals(stmt, over, found),
+        CStmt::Expr(expr)
+        | CStmt::Decl {
+            init: Some(expr), ..
+        }
+        | CStmt::Return(Some(expr)) => expr_markers_over_residuals(expr, over, found),
+        CStmt::Gap(_) => found.extend(over.iter().copied()),
+        CStmt::Block(body) => {
+            for stmt in body {
+                nested(stmt, found);
+            }
+        }
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            expr_markers_over_residuals(cond, over, found);
+            nested(then_body, found);
+            if let Some(else_body) = else_body {
+                nested(else_body, found);
+            }
+        }
+        CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
+            expr_markers_over_residuals(cond, over, found);
+            nested(body, found);
+        }
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                stmt_markers_over_residuals(init, over, found);
+            }
+            for expr in cond.iter().chain(update) {
+                expr_markers_over_residuals(expr, over, found);
+            }
+            nested(body, found);
+        }
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            expr_markers_over_residuals(expr, over, found);
+            for stmt in cases
+                .iter()
+                .flat_map(|case| &case.body)
+                .chain(default.iter().flatten())
+            {
+                nested(stmt, found);
+            }
+        }
+        CStmt::Empty
+        | CStmt::Decl { init: None, .. }
+        | CStmt::Return(None)
+        | CStmt::Break
+        | CStmt::Continue
+        | CStmt::Goto(_)
+        | CStmt::Label(_)
+        | CStmt::Comment(_) => {}
+    }
+}
+
+fn expr_markers_over_residuals(
+    expr: &CExpr,
+    over: &mut Vec<crate::ast::RenderObservationId>,
+    found: &mut BTreeSet<crate::ast::RenderObservationId>,
+) {
+    let depth = over.len();
+    over.extend(expr.observation_ids().iter().copied());
+    let expr = expr.unobserved();
+    if let CExpr::Call { func, .. } = expr
+        && is_residual_callee(func).is_some()
+    {
+        found.extend(over.iter().copied());
+    }
+    for child in expr.children() {
+        expr_markers_over_residuals(child, over, found);
+    }
+    over.truncate(depth);
+}
+
 fn stmt_holds_gap(stmt: &CStmt) -> bool {
     count_gaps(stmt) > 0
 }
@@ -470,6 +590,52 @@ pub(crate) const INCLUDES: &[&str] = &["#include <stdint.h>"];
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::RenderObservationId;
+
+    /// A marker covers the residuals its own occurrence evaluates -- inside
+    /// its expression, in its statement's test, in a gap it stands on -- and
+    /// not those in a statement it nests: an `if` whose arm traps has still
+    /// performed its test.
+    #[test]
+    fn a_marker_covers_the_residuals_its_occurrence_evaluates() {
+        let [test, arm, value, gap, clean] = [0, 1, 2, 3, 4].map(RenderObservationId::from_index);
+        let trap = || residual(&CType::uint(64)).expect("a residual of an integer");
+        let body = vec![
+            CStmt::observe_all(
+                [test],
+                CStmt::If {
+                    cond: CExpr::binary(crate::ast::BinaryOp::Eq, trap(), CExpr::IntLit(0)),
+                    then_body: Box::new(CStmt::observe_all(
+                        [arm],
+                        CStmt::Return(Some(CExpr::observe_all([value], trap()))),
+                    )),
+                    else_body: None,
+                },
+            ),
+            CStmt::observe_all(
+                [gap],
+                CStmt::Gap(crate::ast::GapMarker {
+                    kind: "UnresolvedBranchCondition".to_owned(),
+                    origin: "structure".to_owned(),
+                    block_addr: 0x1000,
+                    op_idx: 0,
+                    ops: 0,
+                }),
+            ),
+            CStmt::observe_all(
+                [clean],
+                CStmt::If {
+                    cond: CExpr::IntLit(1),
+                    then_body: Box::new(CStmt::Return(Some(trap()))),
+                    else_body: None,
+                },
+            ),
+        ];
+        assert_eq!(
+            markers_over_residuals(&body),
+            BTreeSet::from([test, arm, value, gap])
+        );
+    }
 
     /// Every helper at every width it is made for.
     fn every_helper() -> BTreeSet<Helper> {

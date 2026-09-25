@@ -302,59 +302,6 @@ pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String 
     planner::artifact_guard_fallback_comment(func_name, reason)
 }
 
-/// Count the residual markers the structurer left in a rendered body.
-///
-/// The structurer already refuses per construct: an unresolved branch, loop,
-/// switch selector or case value becomes a `r2dec residual:` comment where that
-/// construct would have been. Counting them is a reading of the body, not a
-/// second opinion about what was proven.
-fn count_residual_markers(stmts: &[CStmt]) -> usize {
-    fn walk(stmts: &[CStmt], found: &mut usize) {
-        for stmt in stmts {
-            walk_one(stmt, found);
-        }
-    }
-    fn walk_one(stmt: &CStmt, found: &mut usize) {
-        match stmt.unobserved() {
-            CStmt::Comment(text) => {
-                if text.contains("r2dec residual:") {
-                    *found += 1;
-                }
-            }
-            CStmt::Block(body) => walk(body, found),
-            CStmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                walk_one(then_body, found);
-                if let Some(else_body) = else_body {
-                    walk_one(else_body, found);
-                }
-            }
-            CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk_one(body, found),
-            CStmt::For { init, body, .. } => {
-                if let Some(init) = init {
-                    walk_one(init, found);
-                }
-                walk_one(body, found);
-            }
-            CStmt::Switch { cases, default, .. } => {
-                for case in cases {
-                    walk(&case.body, found);
-                }
-                if let Some(default) = default {
-                    walk(default, found);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut found = 0;
-    walk(stmts, &mut found);
-    found
-}
-
 /// State what the rendering did and did not show.
 ///
 /// "Nothing was marked" and "everything was shown to be right" are different
@@ -376,9 +323,9 @@ fn note_unproven_constructs(
     unassigned: &[UnassignedRead],
 ) {
     let rendered_nothing = func.body.is_empty();
-    // A residual comment the structurer left, and a residual that traps:
-    // both are a construct the rendering says it did not prove.
-    let residuals = count_residual_markers(&func.body) + crate::prelude::count_residuals(func);
+    // Each residual is a construct the rendering says it did not prove, and
+    // it traps where it stands: a residual call, or a marked gap.
+    let residuals = crate::prelude::count_residuals(func);
     let detail = if rendered_nothing {
         "rendering produced no statements".to_string()
     } else {
@@ -568,6 +515,10 @@ fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
 /// dataflow; an object written on some paths and read before that on others
 /// needs the reaching definitions the SSA versions give, and is left as it is.
 ///
+/// The residual keeps the markers the read carried, so the line map still
+/// names the instruction that read it, and an obligation whose occurrence
+/// held the read is found under a residual when the ledger is closed.
+///
 /// Read off the final tree, because that is what is printed: one walk for the
 /// declarations, one for the writes and the reads, one to rewrite -- linear in
 /// the body.
@@ -579,13 +530,12 @@ pub(crate) fn residualize_unassigned_reads(
     if declared.is_empty() {
         return Vec::new();
     }
-    func.visit_body_exprs_mut(&mut |expr| {
-        if let CExpr::Var(symbol) = expr
-            && let Some(residual) = declared.get(symbol).and_then(crate::prelude::residual)
-        {
-            *expr = residual;
-        }
-    });
+    for stmt in &mut func.body {
+        stmt.visit_exprs_mut(&mut |root| {
+            let expr = std::mem::replace(root, CExpr::IntLit(0));
+            *root = residualize_reads_in(expr, &declared);
+        });
+    }
     func.visit_body_stmts_mut(&mut |stmt| {
         if let CStmt::Decl {
             name, init: None, ..
@@ -598,7 +548,7 @@ pub(crate) fn residualize_unassigned_reads(
     func.locals
         .retain(|local| !declared.contains_key(&local.name));
     let symbols = func.symbols.borrow();
-    let mut reads = declared
+    let mut objects = declared
         .keys()
         .map(|symbol| UnassignedRead {
             cause: match entry_supplied.get(symbol) {
@@ -611,8 +561,20 @@ pub(crate) fn residualize_unassigned_reads(
             name: symbols.name(*symbol).to_string(),
         })
         .collect::<Vec<_>>();
-    reads.sort();
-    reads
+    objects.sort();
+    objects
+}
+
+/// One expression with each read of a `declared` object replaced by a
+/// residual of its type, under the markers the read carried.
+fn residualize_reads_in(expr: CExpr, declared: &BTreeMap<SymbolId, CType>) -> CExpr {
+    if let CExpr::Var(symbol) = expr.unobserved()
+        && let Some(residual) = declared.get(symbol).and_then(crate::prelude::residual)
+    {
+        let (_, ids) = expr.into_semantic_with_observations();
+        return CExpr::observe_all(ids, residual);
+    }
+    expr.map_children(&mut |child| residualize_reads_in(child, declared))
 }
 
 /// The scalars the function declares without a value, never writes, and
@@ -623,13 +585,15 @@ fn unassigned_scalar_reads(func: &CFunction) -> BTreeMap<SymbolId, CType> {
         .iter()
         .map(|local| (local.name, local.ty.clone()))
         .collect::<BTreeMap<_, _>>();
+    // A declaration with a value writes the object it declares, and one name
+    // declared twice -- once with a value -- is written by that one.
+    let mut written = BTreeSet::new();
     for stmt in &func.body {
-        uninitialized_declarations(stmt, &mut declared);
+        declarations(stmt, &mut declared, &mut written);
     }
     if declared.is_empty() {
         return declared;
     }
-    let mut written = BTreeSet::new();
     let mut mentioned = BTreeSet::new();
     func.visit_body_exprs(&mut |node| match node {
         CExpr::Var(symbol) => {
@@ -659,12 +623,17 @@ fn unassigned_scalar_reads(func: &CFunction) -> BTreeMap<SymbolId, CType> {
     declared
 }
 
-/// Every name a statement and the statements inside it declare with no value,
-/// at the type it is declared.
-fn uninitialized_declarations(stmt: &CStmt, found: &mut BTreeMap<SymbolId, CType>) {
+/// Every name a statement and the statements inside it declare: with no
+/// value, at the type it is declared, into `uninitialized`, and with one into
+/// `initialized`.
+fn declarations(
+    stmt: &CStmt,
+    uninitialized: &mut BTreeMap<SymbolId, CType>,
+    initialized: &mut BTreeSet<SymbolId>,
+) {
     let mut each = |stmts: &[CStmt]| {
         for stmt in stmts {
-            uninitialized_declarations(stmt, found);
+            declarations(stmt, uninitialized, initialized);
         }
     };
     match stmt.unobserved() {
@@ -674,7 +643,14 @@ fn uninitialized_declarations(stmt: &CStmt, found: &mut BTreeMap<SymbolId, CType
             name,
             init: None,
         } => {
-            found.insert(*name, ty.clone());
+            uninitialized.insert(*name, ty.clone());
+        }
+        CStmt::Decl {
+            name,
+            init: Some(_),
+            ..
+        } => {
+            initialized.insert(*name);
         }
         CStmt::Block(body) => each(body),
         CStmt::If {
@@ -3997,10 +3973,15 @@ impl Decompiler {
         crate::stage_timing::mark("seal");
         native.define_declared_aggregates(prepared);
         native.define_declared_typedefs(prepared);
+        // Before the ledger closes, and after the last rewrite: an obligation
+        // whose occurrence evaluates a residual traps there, and the ledger
+        // counts it that way.
+        let unassigned = native.residualize_unassigned_reads(binding_names.entry_supplied());
         let ledger = effect_ledger::build_obligation_ledger(
             prepared,
             &normalization_origins,
             native.effect_observations(),
+            &native.obligations_under_residuals(),
         );
         debug_log_ledger(prepared, &ledger);
         let radare2_variadic_format_counts = self
@@ -4037,7 +4018,7 @@ impl Decompiler {
             radare2_variadic_format_counts,
             radare2_prototypes,
             binding_names.source_named_locals(),
-            binding_names.entry_supplied(),
+            &unassigned,
         );
         Ok(InternalBuildProduct::Native(native))
     }

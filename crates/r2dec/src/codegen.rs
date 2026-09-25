@@ -83,17 +83,31 @@ pub(crate) struct EmissionReadyFunction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ObservationLocations {
     at: Box<[Option<u64>]>,
+    /// The obligation each effect marker discharges where it stands. Any other
+    /// marker discharges none.
+    effects: Box<[Option<r2ssa::SemanticObligationId>]>,
 }
 
 impl ObservationLocations {
-    pub(crate) fn new(at: Vec<Option<u64>>) -> Self {
+    /// One entry per marker in each table, by the marker's dense index.
+    pub(crate) fn new(
+        at: Vec<Option<u64>>,
+        effects: Vec<Option<r2ssa::SemanticObligationId>>,
+    ) -> Self {
+        debug_assert_eq!(at.len(), effects.len());
         Self {
             at: at.into_boxed_slice(),
+            effects: effects.into_boxed_slice(),
         }
     }
 
     fn at(&self, id: RenderObservationId) -> Option<u64> {
         self.at.get(id.index() as usize).copied().flatten()
+    }
+
+    /// The obligation this marker discharges, where it is an effect's.
+    pub(crate) fn effect(&self, id: RenderObservationId) -> Option<r2ssa::SemanticObligationId> {
+        self.effects.get(id.index() as usize).copied().flatten()
     }
 }
 
@@ -139,9 +153,36 @@ impl EmissionReadyFunction {
     /// Rewrite a function the journal has sealed, keeping what its markers name.
     ///
     /// For the passes that run after the seal and change no marker: the proof
-    /// note, and the residuals for reads of objects nothing assigns.
-    pub(crate) fn rewrite_sealed(&mut self, rewrite: impl FnOnce(&mut CFunction)) {
-        rewrite(&mut self.function);
+    /// note, and the residuals for reads of objects nothing assigns. The
+    /// table the seal built is read by marker, so a rewrite that added,
+    /// dropped or duplicated one would make the line map name instructions a
+    /// line does not account for. The markers are compared before and after
+    /// wherever debug assertions run.
+    pub(crate) fn rewrite_sealed<T>(&mut self, rewrite: impl FnOnce(&mut CFunction) -> T) -> T {
+        let markers = |function: &CFunction| {
+            let mut ids = function
+                .body
+                .iter()
+                .flat_map(crate::ast::stmt_render_observation_ids)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        };
+        let before = cfg!(debug_assertions).then(|| markers(&self.function));
+        let result = rewrite(&mut self.function);
+        if let Some(before) = before {
+            assert_eq!(
+                before,
+                markers(&self.function),
+                "a rewrite after the seal changed which markers the tree carries"
+            );
+        }
+        result
+    }
+
+    /// What the markers of this sealed tree name, once it is sealed.
+    pub(crate) fn observation_locations(&self) -> Option<&ObservationLocations> {
+        self.locations.as_deref()
     }
 
     pub(crate) fn function_mut_for_observation_seal(

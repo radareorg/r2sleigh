@@ -791,7 +791,12 @@ fn placement_effect_elision_is_considered_only_at_zero_occurrences() {
     assert_eq!(effects.occurrence_count(obligation), Some(1));
 
     let origins = NormalizationOrigins::for_unchanged(source.source().function(), source.source());
-    let ledger = crate::effect_ledger::build_obligation_ledger(source.source(), &origins, &effects);
+    let ledger = crate::effect_ledger::build_obligation_ledger(
+        source.source(),
+        &origins,
+        &effects,
+        &std::collections::BTreeSet::new(),
+    );
     assert!(matches!(
         ledger.outcome(&obligation),
         crate::ledger::Outcome::Rendered { .. }
@@ -840,7 +845,12 @@ fn residual_memory_effect_is_unaccounted_not_a_rendered_occurrence() {
     assert_eq!(effects.occurrence_count(obligation), Some(0));
 
     let origins = NormalizationOrigins::for_unchanged(source.source().function(), source.source());
-    let ledger = crate::effect_ledger::build_obligation_ledger(source.source(), &origins, &effects);
+    let ledger = crate::effect_ledger::build_obligation_ledger(
+        source.source(),
+        &origins,
+        &effects,
+        &std::collections::BTreeSet::new(),
+    );
     assert_eq!(
         ledger.outcome(&obligation),
         crate::ledger::Outcome::Unattributed
@@ -875,7 +885,12 @@ fn duplicate_surviving_effect_occurrence_is_a_conflict() {
     assert_eq!(effects.occurrence_count(obligation), Some(2));
 
     let origins = NormalizationOrigins::for_unchanged(source.source().function(), source.source());
-    let ledger = crate::effect_ledger::build_obligation_ledger(source.source(), &origins, &effects);
+    let ledger = crate::effect_ledger::build_obligation_ledger(
+        source.source(),
+        &origins,
+        &effects,
+        &std::collections::BTreeSet::new(),
+    );
     assert!(matches!(
         ledger.outcome(&obligation),
         crate::ledger::Outcome::Rendered { .. }
