@@ -1016,22 +1016,28 @@ impl<'a> FoldingContext<'a> {
     /// spelling the access at it moves a different number of bytes than the
     /// machine does: an eight-byte `mov [g], rax` whose value carried a
     /// thirty-two-bit parameter's type was written `*(uint32_t*)g = ...`,
-    /// and the upper four bytes of `g` were never stored. The mismatch is
-    /// refusal evidence against the fact, and the caller falls back to the
+    /// and the upper four bytes of `g` were never stored.
+    ///
+    /// Whether a type describes a storage width is r2types' fact, answered by
+    /// the rule every declaration is admitted by, and the type admitted is
+    /// the one it answers with: its canonical spelling. A fact it does not
+    /// admit is traced as refusal evidence, and the caller falls back to the
     /// operation's own unsigned width.
     fn type_fact_of_width(&self, ty: CType, width_bytes: u32, fact: &str) -> Option<CType> {
         let width_bits = width_bytes.saturating_mul(8);
-        let described = r2types::declaration_type_width_bits(&ty, self.pointer_bits());
-        if described == Some(width_bits) {
-            return Some(ty);
+        let traced = r2il::refusal_evidence::tracing().then(|| ty.clone());
+        let admitted = r2types::admissible_declaration_type(ty, width_bits, self.pointer_bits());
+        if admitted.is_none()
+            && let Some(ty) = traced
+        {
+            r2il::refusal_evidence!(
+                "type-fact-width",
+                "({:#x}, {:?}) {fact} type {ty:?} does not describe the operation's {width_bits} bits",
+                self.current_block_addr.get().unwrap_or_default(),
+                self.current_op_idx.get()
+            );
         }
-        r2il::refusal_evidence!(
-            "type-fact-width",
-            "({:#x}, {:?}) {fact} type {ty:?} describes {described:?} bits, the operation {width_bits}",
-            self.current_block_addr.get().unwrap_or_default(),
-            self.current_op_idx.get()
-        );
-        None
+        admitted
     }
 
     /// The type the declared aggregate gives the member this store writes.
@@ -1056,8 +1062,13 @@ impl<'a> FoldingContext<'a> {
         self.type_fact_of_width(ty, width_bytes, "member")
     }
 
-    /// The C type the facts give this value, where they agree on one and it
-    /// is as wide as the value.
+    /// The C type the facts give this value, where every fact that describes
+    /// the value's width agrees on one.
+    ///
+    /// A fact of another width is not the type of this value, so it takes no
+    /// part in the vote: it can neither be chosen nor veto a fact of the right
+    /// width. The facts are compared as admitted, in their canonical spelling,
+    /// so `int32_t` from one source and `int32_t` from another agree.
     fn type_hint_for_var(&self, var: &SSAVar) -> Option<CType> {
         let value = self.prepared_value_id_for_var(var)?;
         let render = self.inputs.render_facts()?;
@@ -1091,11 +1102,11 @@ impl<'a> FoldingContext<'a> {
         {
             candidates.push(ty.clone());
         }
-        let ty = candidates.first()?.clone();
-        if candidates.iter().any(|candidate| *candidate != ty) {
-            return None;
-        }
-        self.type_fact_of_width(ty, var.size, "value")
+        let mut admitted = candidates
+            .into_iter()
+            .filter_map(|ty| self.type_fact_of_width(ty, var.size, "value"));
+        let ty = admitted.next()?;
+        admitted.all(|candidate| candidate == ty).then_some(ty)
     }
 
     pub(crate) fn should_materialize_call_result_at_source(
