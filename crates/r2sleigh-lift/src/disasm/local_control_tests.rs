@@ -365,3 +365,32 @@ fn constant_decided_loops_run_as_many_passes_as_their_p_code() {
         }
     }
 }
+
+#[test]
+fn zz_debug_cmpxchg_dump() {
+    let disassembler = x86();
+    let cases: [(&str, &[u8]); 12] = [
+        ("lock cmpxchg [rdi], esi", &[0xf0, 0x0f, 0xb1, 0x37]),
+        ("cmpxchg [rdi], esi", &[0x0f, 0xb1, 0x37]),
+        ("cmpxchg ecx, esi", &[0x0f, 0xb1, 0xf1]),
+        ("cmpxchg cl, sil", &[0x40, 0x0f, 0xb0, 0xf1]),
+        ("cmpxchg cx, si", &[0x66, 0x0f, 0xb1, 0xf1]),
+        ("cmpxchg rcx, rsi", &[0x48, 0x0f, 0xb1, 0xf1]),
+        ("lock cmpxchg [rdi], sil", &[0xf0, 0x40, 0x0f, 0xb0, 0x37]),
+        ("lock cmpxchg [rdi], si", &[0x66, 0xf0, 0x0f, 0xb1, 0x37]),
+        ("lock cmpxchg [rdi], rsi", &[0xf0, 0x48, 0x0f, 0xb1, 0x37]),
+        ("lock cmpxchg8b [rdi]", &[0xf0, 0x0f, 0xc7, 0x0f]),
+        ("lock cmpxchg16b [rdi]", &[0xf0, 0x48, 0x0f, 0xc7, 0x0f]),
+        ("cmpxchg eax, esi", &[0x0f, 0xb1, 0xf0]),
+    ];
+    for (name, bytes) in cases {
+        let (raw, lifted) = both(&disassembler, bytes);
+        eprintln!("==== {name} size {}", raw.size);
+        for (i, op) in raw.ops.iter().enumerate() {
+            eprintln!("  raw {i:2}: {op:?}");
+        }
+        for (i, op) in lifted.ops.iter().enumerate() {
+            eprintln!("  lift {i:2}: {op:?}");
+        }
+    }
+}

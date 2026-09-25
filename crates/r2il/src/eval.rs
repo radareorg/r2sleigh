@@ -657,6 +657,36 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
             let value = state.load(address, dst.size)?;
             state.write(dst, value)?;
         }
+        // A guarded access is the access where its guard holds -- any value
+        // but nought, as a branch's condition -- and nothing at all where it
+        // does not: no access is made, and a load's destination keeps what it
+        // held. Its ordering constrains other threads, and a run has one.
+        R2ILOp::StoreGuarded {
+            space: SpaceId::Ram,
+            addr,
+            val,
+            guard,
+            ..
+        } => {
+            if state.read(guard)? != 0 {
+                let address = state.address(addr)?;
+                let value = state.read(val)?;
+                state.store(address, val.size, value)?;
+            }
+        }
+        R2ILOp::LoadGuarded {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            guard,
+            ..
+        } => {
+            if state.read(guard)? != 0 {
+                let address = state.address(addr)?;
+                let value = state.load(address, dst.size)?;
+                state.write(dst, value)?;
+            }
+        }
         R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
             block(transfer, state)?;
         }
@@ -910,6 +940,47 @@ mod tests {
         };
         let stopped = Flow::Stop(Stop::Unmapped { address: 0x100 });
         assert_eq!(step(&unmapped, &mut little), stopped);
+    }
+
+    #[test]
+    fn a_guarded_access_is_the_access_where_its_guard_holds_and_nothing_where_it_does_not() {
+        let mapped = |address: u64| (0x100..0x104).contains(&address).then_some(0x5a);
+        let mut machine = State::new(Endianness::Little, mapped, u64::MAX).expect("little-endian");
+        let (guard, value, loaded) = (register(0, 1), register(8, 4), register(16, 4));
+        machine.set_register(8, 4, 0x1122_3344).expect("a value");
+        machine.set_register(16, 4, 7).expect("what the destination held");
+        let address = Varnode::constant(0x100, 8);
+        let store = R2ILOp::StoreGuarded {
+            space: SpaceId::Ram,
+            addr: address.clone(),
+            val: value,
+            guard: guard.clone(),
+            ordering: crate::MemoryOrdering::SeqCst,
+        };
+        let load = R2ILOp::LoadGuarded {
+            dst: loaded,
+            space: SpaceId::Ram,
+            addr: address,
+            guard,
+            ordering: crate::MemoryOrdering::SeqCst,
+        };
+        // Where the guard does not hold, neither access is made and the
+        // destination keeps what it held.
+        machine.set_register(0, 1, 0).expect("a guard");
+        assert_eq!(step(&store, &mut machine), Flow::Next);
+        assert_eq!(step(&load, &mut machine), Flow::Next);
+        assert_eq!(machine.take_accesses(), Vec::new());
+        assert_eq!(machine.register(16, 4), Some(7));
+        // Any value but nought holds, as a branch's condition does.
+        machine.set_register(0, 1, 2).expect("a guard");
+        assert_eq!(step(&store, &mut machine), Flow::Next);
+        assert_eq!(step(&load, &mut machine), Flow::Next);
+        assert_eq!(machine.register(16, 4), Some(0x1122_3344));
+        let kinds = machine.take_accesses().into_iter().map(|access| access.kind);
+        assert_eq!(
+            kinds.collect::<Vec<_>>(),
+            [AccessKind::Write, AccessKind::Read]
+        );
     }
 
     #[test]
