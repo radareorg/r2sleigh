@@ -521,10 +521,10 @@ impl SsaArtifact {
             graph_built_bytes.saturating_sub(prepare_entry_bytes),
             r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
         );
-        // Two reads of one object with no write to it between are one
+        // Two reads of the same bytes that the same memory reaches are one
         // content, which the graph cannot see and the memory facts can. The
         // spans above were judged without this and are at worst finer.
-        content.declare_same_content(&same_content_reads(&facts.structured));
+        content.declare_same_content(&same_content_reads(&facts.structured, &facts.memory));
         // A call's conventional read of a register the certified call does
         // not pass is not a read the text performs, and held values live
         // across every call that the machine merely might have read. The
@@ -2472,37 +2472,63 @@ struct SsaQueryIndex {
     uses: Vec<(u32, UseLocation)>,
 }
 
-/// One block of a reverse-postorder vector, by address.
-/// Reads of one memory object that see the same content: consecutive reads
-/// in one block with no write to that object between them.
+/// Reads that see one content: loads of the same bytes of one object -- the
+/// same object, an exact offset in it, the same width -- that the same memory
+/// versions reach, in whatever block.
+///
+/// A memory version is one write, one merge of writes, or the object's content
+/// at entry, and every write that may reach the bytes -- a call included, for
+/// whatever has escaped -- makes a new one. Two reads the same set of versions
+/// reaches therefore read the same bytes as last written by the same writes.
+/// A read with no exact offset, or annotated by more than one location, says
+/// nothing. `O(A log A)` in the reads.
 fn same_content_reads(
     structured: &crate::semantic::StructuredDataflowFacts,
+    memory: &crate::semantic::MemorySSAFacts,
 ) -> Vec<(crate::graph::ValueId, crate::graph::ValueId)> {
-    let mut by_block_object =
-        BTreeMap::<(u64, crate::ObjectId), Vec<&crate::semantic::StructuredMemoryAccessFact>>::new(
-        );
-    for access in structured.memory_accesses.values() {
-        by_block_object
-            .entry((access.block_addr, access.object))
-            .or_default()
-            .push(access);
-    }
+    type ReadKey = (
+        crate::ObjectId,
+        i64,
+        u32,
+        Vec<crate::semantic::MemoryVersion>,
+    );
+    let mut first_read = BTreeMap::<ReadKey, crate::graph::ValueId>::new();
     let mut pairs = Vec::new();
-    for accesses in by_block_object.values_mut() {
-        accesses.sort_by_key(|access| access.op_index);
-        let mut last_read = None;
-        for access in accesses.iter() {
-            if access.is_write {
-                last_read = None;
-                continue;
+    for access in structured.memory_accesses.values() {
+        if access.is_write || !access.provenance_complete {
+            continue;
+        }
+        let (Some(value), Some(offset)) = (access.value, access.object_offset) else {
+            continue;
+        };
+        let versions = memory
+            .uses_by_inst
+            .get(&access.id.inst)
+            .into_iter()
+            .flatten()
+            .filter(|reached| {
+                reached.location.object == access.object
+                    && reached.location.size == access.width
+                    && reached.location.address.exact_offset() == Some(offset)
+            })
+            .map(|reached| reached.version)
+            .collect::<std::collections::BTreeSet<_>>();
+        if versions.is_empty() {
+            continue;
+        }
+        let key = (
+            access.object,
+            offset,
+            access.width,
+            versions.into_iter().collect(),
+        );
+        match first_read.entry(key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(value);
             }
-            let Some(value) = access.value else {
-                continue;
-            };
-            if let Some(previous) = last_read {
-                pairs.push((previous, value));
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                pairs.push((*slot.get(), value));
             }
-            last_read = Some(value);
         }
     }
     pairs

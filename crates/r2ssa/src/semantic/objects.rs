@@ -12,7 +12,6 @@ pub(crate) fn collect_object_and_memory_facts(
     function: &SSAFunction,
     graph: &SsaGraph,
     addresses: &AddressProvenanceFacts,
-    call_sites: &CallSiteFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
     values: &crate::values::ValueRanges,
@@ -21,7 +20,7 @@ pub(crate) fn collect_object_and_memory_facts(
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
     let object_model = builder.build(function, graph, values);
     let access_summaries =
-        collect_access_summaries(function, graph, facts, addresses, &object_model, call_sites);
+        collect_access_summaries(function, graph, facts, addresses, &object_model);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries);
     (object_model, memory)
 }
@@ -32,7 +31,6 @@ pub(crate) fn collect_access_summaries(
     prep_facts: Option<&DecompilePrepFacts>,
     addresses: &AddressProvenanceFacts,
     object_model: &ObjectModel,
-    call_sites: &CallSiteFacts,
 ) -> BTreeMap<InstId, AccessSummary> {
     let mut summaries = BTreeMap::new();
 
@@ -103,21 +101,23 @@ pub(crate) fn collect_access_summaries(
                     uses.push(location.clone());
                     defs.push(location);
                 }
+                // Every call may read and write whatever has escaped, whether or
+                // not a call site certifies it: a call the site facts do not
+                // know is no less a call. Leaving it out made two reads of an
+                // escaped object on either side of it one memory version.
                 SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                    if call_sites.by_inst.contains_key(&inst_id) {
-                        for space in object_model.memory_spaces() {
-                            let Some(object) = object_model.escaped_unknown_object(space) else {
-                                continue;
-                            };
-                            let location = MemoryLocation {
-                                space,
-                                object,
-                                address: RelativeMemoryAddress::Unknown,
-                                size: 0,
-                            };
-                            uses.push(location.clone());
-                            defs.push(location);
-                        }
+                    for space in object_model.memory_spaces() {
+                        let Some(object) = object_model.escaped_unknown_object(space) else {
+                            continue;
+                        };
+                        let location = MemoryLocation {
+                            space,
+                            object,
+                            address: RelativeMemoryAddress::Unknown,
+                            size: 0,
+                        };
+                        uses.push(location.clone());
+                        defs.push(location);
                     }
                 }
                 _ => {}

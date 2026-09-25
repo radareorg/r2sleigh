@@ -59,7 +59,6 @@ impl MemoryPrefix {
             function,
             graph,
             &addresses,
-            &call_sites,
             machine_context,
             &declared_slots,
             &values,

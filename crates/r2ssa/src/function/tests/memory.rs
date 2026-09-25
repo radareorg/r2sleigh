@@ -708,3 +708,102 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
         certificate.argument_certificates
     );
 }
+
+#[test]
+fn reads_of_the_same_bytes_under_the_same_memory_are_one_content_in_any_block() {
+    // x1 = [x0]; x2 = [x0 + 8]; call; x3 = [x0]; goto next;
+    // next: x4 = [x0]. x0 is the first parameter, so every read is of the
+    // memory it points at: one object, at offsets 0 and 8.
+    let mut arch = ArchSpec::new("aarch64");
+    arch.addr_size = 8;
+    for (index, name) in ["x0", "x1", "x2", "x3", "x4", "x5"].into_iter().enumerate() {
+        arch.add_register(RegisterDef::new(name, index as u64 * 8, 8));
+    }
+    arch.add_register(RegisterDef::new("sp", 0x100, 8));
+    arch.add_register(RegisterDef::new("x30", 0x108, 8));
+    arch.add_space(r2il::AddressSpace::ram(8));
+    let load = |dst: u64, addr: Varnode| R2ILOp::Load {
+        dst: make_reg(dst, 8),
+        space: SpaceId::Ram,
+        addr,
+    };
+    let mut first = R2ILBlock::new(0x1000, 4);
+    first.push(load(8, make_reg(0, 8)));
+    first.push(R2ILOp::IntAdd {
+        dst: make_unique(0x100, 8),
+        a: make_reg(0, 8),
+        b: make_const(8, 8),
+    });
+    first.push(load(16, make_unique(0x100, 8)));
+    first.push(R2ILOp::Call {
+        target: make_const(0x2000, 8),
+    });
+    first.push(load(24, make_reg(0, 8)));
+    first.push(R2ILOp::Branch {
+        target: make_const(0x1010, 8),
+    });
+    let mut next = R2ILBlock::new(0x1010, 4);
+    next.push(load(32, make_reg(0, 8)));
+    next.push(R2ILOp::Return {
+        target: make_reg(0x108, 8),
+    });
+    let parameter = CanonicalStorageId {
+        space: CanonicalStorageSpace::Register,
+        offset: 0,
+        size: 8,
+    };
+    let interface = crate::SourceFunctionInterface::new_exact(
+        b"same-content-reads".to_vec(),
+        "aarch64-test",
+        [SourceAbiParameterSpec::new(0, parameter)],
+        SourceFunctionReturn::Void,
+        [],
+    )
+    .expect("interface");
+    // The call keeps x0, so every read after it is still of the parameter's memory.
+    let artifact = crate::testing::prepared(
+        &[first, next],
+        &arch,
+        Some(interface),
+        Vec::new(),
+        [parameter],
+    )
+    .expect("prepared");
+    let reads = artifact
+        .facts()
+        .structured
+        .memory_accesses
+        .values()
+        .filter(|access| !access.is_write)
+        .map(|access| {
+            (
+                access.object,
+                access.object_offset,
+                access.value.expect("read value"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let [
+        (object, Some(0), a),
+        (field_object, Some(8), b),
+        (_, Some(0), d),
+        (_, Some(0), e),
+    ] = reads.as_slice()
+    else {
+        panic!("four reads of the parameter's memory: {reads:?}");
+    };
+    assert_eq!(object, field_object, "one object at two offsets");
+    let content = artifact.liveness().values();
+    assert!(
+        !content.same_content(*a, *b),
+        "two fields of one object are two contents"
+    );
+    assert!(
+        !content.same_content(*a, *d),
+        "a call between the reads may have written the memory"
+    );
+    assert!(
+        content.same_content(*d, *e),
+        "nothing writes the memory between the reads, though they sit in two blocks"
+    );
+}
