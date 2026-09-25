@@ -303,23 +303,26 @@ impl BindingNameResolution {
         for (binding_id, binding) in plan.bindings() {
             let mut stack_object = None;
             let role = plan.binding_role(binding_id);
-            // Storage above the entry stack pointer is the caller's. The slot a
-            // call pushed the return address into is held from entry exactly as
-            // a preserved register is; the rest is the caller's outgoing
-            // argument area, where the convention places the arguments its
-            // registers cannot carry, and a read there is a parameter recovery
-            // missed.
-            let return_address = matches!(
-                role,
-                Some(BindingRole::StackObject { object })
-                    if plan.return_address_objects().contains(&object)
-            );
+            // Storage at or above the entry stack pointer is the caller's. The
+            // slot a call pushed the return address into is held from entry
+            // exactly as a preserved register is; the rest is the caller's
+            // outgoing argument area, where the convention places the
+            // arguments its registers cannot carry, and a read there is a
+            // parameter recovery missed. A slot below the entry stack pointer
+            // is this frame's, whatever it holds.
+            let in_argument_area = argument_area_placed
+                && matches!(
+                    role,
+                    Some(BindingRole::StackObject { object })
+                        if source.caller_stack_object(object)
+                            && !plan.return_address_objects().contains(&object)
+                );
             let supply = role.and_then(|role| {
                 EntrySupply::of(
                     role,
                     binding.caller_supplied,
                     argument_slot_bindings.contains(&binding_id),
-                    argument_area_placed && !return_address,
+                    in_argument_area,
                 )
             });
             if role.is_none() {
