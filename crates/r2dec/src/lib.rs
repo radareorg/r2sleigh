@@ -2674,10 +2674,9 @@ impl Decompiler {
     /// Render, keeping whatever was produced when a phase stopped.
     ///
     /// `decompile_input_with_control` returns only the stop, so a caller has to
-    /// discard the rendering to report that a budget ran out. That is why
-    /// `RefusalReason::BudgetExhausted` has never been constructed: the ledger
-    /// that would record it lives in the rendering being thrown away, and a
-    /// function that ran out of time reports as one that produced nothing.
+    /// discard the rendering to report that a budget ran out: the ledger that
+    /// would record it lives in the rendering being thrown away, and a function
+    /// that ran out of time reports as one that produced nothing.
     ///
     /// A stop while building the C function has no partial to keep. A stop
     /// during rendering does -- the function is built by then, and generating it
