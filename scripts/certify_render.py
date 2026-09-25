@@ -64,15 +64,19 @@ def functions(r2s, binary, timeout):
     if error:
         return [], error
     found = []
+    # radare2's layout: nth paddr vaddr bind type size lib name, the lib
+    # column empty for a symbol this binary defines. An import is listed
+    # after the symbols as `imp.<name>`, at its stub where it has one, and
+    # has no body of its own to render.
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) < 5 or not parts[1].startswith("0x"):
+        if len(parts) < 7 or not parts[2].startswith("0x"):
             continue
-        if parts[3] != "FUNC":
+        if parts[4] != "FUNC":
             continue
-        address = int(parts[1], 16)
-        name = parts[4]
-        if name.endswith("_header"):
+        address = int(parts[2], 16)
+        name = parts[-1]
+        if name.endswith("_header") or name.startswith("imp."):
             continue
         found.append((address, name))
     return found, ""
