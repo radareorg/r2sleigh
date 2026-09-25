@@ -1,5 +1,13 @@
 # Beating angr on DecBench, end to end
 
+> **Measurement status (2026-09-25).** Every DecBench number below was taken
+> through the deleted radare2 plugin with `decbench run`, which hands the
+> decompiler the unstripped `-g` binary: r2sleigh read the DWARF `type_match`
+> scores against and every symbol, and the population included CRT functions.
+> None of it is comparable to the official protocol (`scripts/run_benchmark.py`
+> on `strip --strip-all` copies), and it stands only as history until
+> re-measured with `tests/decbench/run_decbench.sh`. See `tests/decbench/README.md`.
+
 Written to be picked up cold. Three contexts, one per axis, landing sequentially
 so the corpus gate and the plugin install lock are never contested.
 

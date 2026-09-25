@@ -47410,6 +47410,10 @@
     "zlib/minigzipsh/O0",
     "zlib/minigzipsh/O2"
   ],
+  "invalid": {
+    "reason": "plugin-era record: measured through the deleted radare2 plugin backend with `decbench run`, which hands the decompiler the unstripped -g binary, so r2sleigh read the DWARF that type_match scores against and every function's symbol, and the population included CRT functions the leaderboard excludes. Not comparable to the official protocol (scripts/run_benchmark.py on strip --strip-all copies narrowed to DWARF source functions). Re-baseline with tests/decbench/run_decbench.sh --accept-baseline.",
+    "since": "2026-09-25"
+  },
   "reference": {
     "decompiler": "angr",
     "metric_cells": {

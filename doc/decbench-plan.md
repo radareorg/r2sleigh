@@ -1,6 +1,14 @@
 Where r2sleigh stands against DecBench, and what it would take
 ==============================================================
 
+> **Measurement status (2026-09-25).** Every DecBench number below was taken
+> through the deleted radare2 plugin with `decbench run`, which hands the
+> decompiler the unstripped `-g` binary: r2sleigh read the DWARF `type_match`
+> scores against and every symbol, and the population included CRT functions.
+> None of it is comparable to the official protocol (`scripts/run_benchmark.py`
+> on `strip --strip-all` copies), and it stands only as history until
+> re-measured with `tests/decbench/run_decbench.sh`. See `tests/decbench/README.md`.
+
 DecBench (decbench.com, Noelo Lab / University of Georgia) ranks decompilers by
 how often they recover source *exactly*. Three metrics, each scored as the
 percentage of functions on which a decompiler is perfect, plus a Union score for
