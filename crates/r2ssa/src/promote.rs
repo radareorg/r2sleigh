@@ -16,10 +16,6 @@ use super::*;
 /// The walk stops at a frame base, or at a register nothing earlier in the
 /// block defines; a frame address parked in another register on the way is
 /// followed back through it.
-/// Whether the value a prologue store spills came in with the call: a register
-/// nothing earlier in the entry block wrote, or one the interface names as an
-/// argument carrier. Copies on the way to the store do not change whose home
-/// the slot is, so the walk follows them back to the carrier they read.
 /// A frame address whose place is unknown: nothing below can say which slot
 /// it reaches, so the function keeps its frame in memory.
 fn unplaced(place: Option<i64>, block: &R2ILBlock, at: usize) -> Option<i64> {
@@ -33,40 +29,51 @@ fn unplaced(place: Option<i64>, block: &R2ILBlock, at: usize) -> Option<i64> {
     place
 }
 
-fn spills_an_incoming_value(
-    entry: &R2ILBlock,
-    at: usize,
-    val: &r2il::Varnode,
-    argument_carriers: &[CanonicalStorageId],
-) -> bool {
+/// Whether a prologue store spills a value the function was entered with --
+/// a parameter, or a register the function saves for its caller: the slot is
+/// that value's home, proven by dataflow and never by the register's name or
+/// offset.
+///
+/// The walk runs back from the store through the entry block. A copy that
+/// wrote the bytes being stored hands them on from its source, byte for byte
+/// -- `mov eax, edi; mov [rbp-4], al` stores `dil` -- and anything else that
+/// wrote them computed them. A call before the store may have left anything
+/// in any register the convention does not have it preserve, so what follows
+/// it is not what the function was entered with: `call f; mov [rbp-4], eax`
+/// spills `f`'s result. What the walk reaches at the top of the block is a
+/// register's entry value.
+fn spills_an_incoming_value(entry: &R2ILBlock, at: usize, val: &r2il::Varnode) -> bool {
     let mut root = val.clone();
-    let mut index = at;
-    while index > 0 {
-        index -= 1;
-        let earlier = &entry.ops[index];
-        if earlier.output() != Some(&root) {
+    for earlier in entry.ops[..at].iter().rev() {
+        if matches!(earlier, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }) {
+            return false;
+        }
+        let Some(dst) = earlier.output() else {
+            continue;
+        };
+        if dst.space != root.space
+            || dst.offset >= root.offset + u64::from(root.size)
+            || root.offset >= dst.offset + u64::from(dst.size)
+        {
             continue;
         }
+        let covers = dst.offset <= root.offset
+            && root.offset + u64::from(root.size) <= dst.offset + u64::from(dst.size);
         match earlier {
-            R2ILOp::Copy { src, .. } if src.size == root.size => root = src.clone(),
-            _ => break,
+            R2ILOp::Copy { src, .. }
+                if covers && src.size == dst.size && src.space != r2il::SpaceId::Const =>
+            {
+                root = r2il::Varnode {
+                    space: src.space,
+                    offset: src.offset + (root.offset - dst.offset),
+                    size: root.size,
+                    meta: None,
+                };
+            }
+            _ => return false,
         }
     }
-    // A constant is not a value the call brought in, whatever its offset happens to be.
-    if root.space != r2il::SpaceId::Register {
-        return false;
-    }
-    let entered_with_the_call = !entry.ops[..at].iter().any(|earlier| {
-        earlier.output().is_some_and(|dst| {
-            dst.space == root.space
-                && dst.offset < root.offset + u64::from(root.size)
-                && root.offset < dst.offset + u64::from(dst.size)
-        })
-    });
-    entered_with_the_call
-        || argument_carriers.iter().any(|carrier| {
-            carrier.space == CanonicalStorageSpace::Register && carrier.offset == root.offset
-        })
+    root.space == r2il::SpaceId::Register
 }
 
 fn resolved_stack_address(
@@ -271,15 +278,9 @@ pub(crate) fn promote_private_stack_slots(
     blocks: &[R2ILBlock],
     stack_pointer: Option<CanonicalStorageId>,
     interface: Option<&SourceFunctionInterface>,
-    argument_carriers: &[CanonicalStorageId],
     calls_refund_stack: bool,
 ) -> Option<crate::phi::PromotedStackSlots> {
-    r2il::refusal_evidence!(
-        "promote-stack-slot",
-        "asked over {} blocks with {} argument carriers",
-        blocks.len(),
-        argument_carriers.len()
-    );
+    r2il::refusal_evidence!("promote-stack-slot", "asked over {} blocks", blocks.len());
     let Some(stack_pointer) = stack_pointer else {
         r2il::refusal_evidence!("promote-stack-slot", "no stack pointer carrier");
         return None;
@@ -660,8 +661,7 @@ pub(crate) fn promote_private_stack_slots(
                             return None;
                         };
                         widths.entry(displacement).or_default().insert(val.size);
-                        if index == 0 && spills_an_incoming_value(block, at, val, argument_carriers)
-                        {
+                        if index == 0 && spills_an_incoming_value(block, at, val) {
                             parameter_homes.insert(displacement);
                         }
                         accesses.push(SlotAccess {
@@ -921,4 +921,93 @@ pub(crate) fn promote_private_stack_slots(
         promotable.iter().collect::<Vec<_>>()
     );
     Some(rewrites)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2il::{SpaceId, Varnode};
+
+    fn reg(offset: u64, size: u32) -> Varnode {
+        Varnode::new(SpaceId::Register, offset, size)
+    }
+
+    fn unique(offset: u64, size: u32) -> Varnode {
+        Varnode::new(SpaceId::Unique, offset, size)
+    }
+
+    /// `sp -= 32; [sp + 8] = val; load [sp + 8]` with `before_the_spill`
+    /// ahead of the store: how many of the slot's accesses are promoted.
+    fn promoted_accesses(before_the_spill: Vec<R2ILOp>, val: Varnode) -> usize {
+        let sp = reg(0, 8);
+        let width = val.size;
+        let mut block = R2ILBlock::new(0x4000, 4);
+        block.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(32, 8),
+        });
+        for op in before_the_spill {
+            block.push(op);
+        }
+        block.push(R2ILOp::IntAdd {
+            dst: unique(0x100, 8),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: unique(0x100, 8),
+            val,
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: unique(0x108, 8),
+            a: sp,
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: unique(0x110, width),
+            space: SpaceId::Ram,
+            addr: unique(0x108, 8),
+        });
+        block.push(R2ILOp::Return { target: reg(8, 8) });
+        let storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        promote_private_stack_slots(&[block], Some(storage(0)), None, true)
+            .map_or(0, |promoted| promoted.len())
+    }
+
+    #[test]
+    fn a_home_is_proven_by_the_entry_value_it_spills() {
+        // [sp + 8] = r2 before anything writes r2: its entry value, the
+        // parameter's home, which stays in memory under the parameter's name.
+        assert_eq!(promoted_accesses(Vec::new(), reg(24, 8)), 0);
+
+        // The same register after a call holds what the call left, not the
+        // parameter: `call f; mov [rbp-4], eax` spills a result, and the slot
+        // is an ordinary private one.
+        let call = R2ILOp::Call {
+            target: Varnode::constant(0x9000, 8),
+        };
+        assert_eq!(promoted_accesses(vec![call], reg(24, 8)), 2);
+
+        // A lane of a copy of the parameter is the parameter's lane:
+        // `mov eax, edi; mov [rbp-4], al` spills its low byte.
+        let copy = R2ILOp::Copy {
+            dst: reg(16, 8),
+            src: reg(24, 8),
+        };
+        assert_eq!(promoted_accesses(vec![copy], reg(16, 1)), 0);
+
+        // A register computed before the store is no one's entry value.
+        let computed = R2ILOp::IntAdd {
+            dst: reg(24, 8),
+            a: reg(24, 8),
+            b: Varnode::constant(1, 8),
+        };
+        assert_eq!(promoted_accesses(vec![computed], reg(24, 8)), 2);
+    }
 }
