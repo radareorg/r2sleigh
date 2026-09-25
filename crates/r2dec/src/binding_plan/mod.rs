@@ -1500,8 +1500,8 @@ pub(crate) use rules::admit_declaration;
 mod seal;
 
 pub(crate) use name_resolution::{
-    BindingNameResolution, BindingNameResolutionError, PlannedParameterSymbol, PlannedStackSymbol,
-    PlannedValueSymbol, RenderedIdentityRefusal,
+    BindingNameResolution, BindingNameResolutionError, EntrySupply, PlannedParameterSymbol,
+    PlannedStackSymbol, PlannedValueSymbol, RenderedIdentityRefusal,
 };
 pub(crate) use rules::{
     CertificateElidedCells, CertificateElidedCellsError, certificate_elided_cells,

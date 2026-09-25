@@ -788,8 +788,9 @@ pub(crate) fn convention_call_boundary(
         };
         // A call whose signature nothing knows takes its arity from the
         // registers this body provably wrote before it. One the caller merely
-        // arrived holding is not evidence the call reads it.
-        if graph.def_inst(value).is_none() {
+        // arrived holding is not evidence the call reads it, and a register
+        // the formals rebuilt still holds only what the caller passed.
+        if !graph.written_by_body(value) {
             break;
         }
         arguments.push(SourceCallArgumentFact {

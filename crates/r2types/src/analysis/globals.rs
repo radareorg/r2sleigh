@@ -101,9 +101,9 @@ pub(crate) fn score_global_type_links(
                     continue;
                 };
                 declared_offsets += 1;
-                if decl_ty
-                    == &normalize_external_type_name(&evidence.field_type).to_ascii_lowercase()
-                {
+                if evidence.field_type.as_deref().is_some_and(|field_type| {
+                    decl_ty == &normalize_external_type_name(field_type).to_ascii_lowercase()
+                }) {
                     exact_matches += 1;
                     evidence_weight +=
                         1 + evidence.reads.min(4) as i32 + evidence.writes.min(4) as i32;
@@ -365,7 +365,7 @@ pub(crate) fn infer_global_field_profiles(
                             .entry(expr.offset as u64)
                             .or_default();
                         entry.reads = entry.reads.saturating_add(1);
-                        entry.field_type = size_to_type(dst.size);
+                        entry.field_type = storage_type_spelling(dst.size, Signedness::Signed);
                     }
                 }
                 SSAOp::Store {
@@ -382,7 +382,7 @@ pub(crate) fn infer_global_field_profiles(
                             .entry(expr.offset as u64)
                             .or_default();
                         entry.writes = entry.writes.saturating_add(1);
-                        entry.field_type = size_to_type(val.size);
+                        entry.field_type = storage_type_spelling(val.size, Signedness::Signed);
                     }
                 }
                 _ => {}
@@ -397,5 +397,5 @@ pub(crate) fn infer_global_field_profiles(
 pub(crate) struct InferredGlobalFieldEvidence {
     pub(crate) reads: u32,
     pub(crate) writes: u32,
-    pub(crate) field_type: String,
+    pub(crate) field_type: Option<String>,
 }

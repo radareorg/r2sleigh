@@ -403,15 +403,14 @@ pub(crate) fn local_scalar_type_names(
 ) -> BTreeSet<String> {
     let observed = signedness.get(var);
     if observed.is_none_or(BTreeSet::is_empty) {
-        return BTreeSet::from([size_to_type(var.size)]);
+        return storage_type_spelling(var.size, Signedness::Signed)
+            .into_iter()
+            .collect();
     }
     observed
         .into_iter()
         .flatten()
-        .map(|value| match value {
-            ScalarSignednessEvidence::Signed => size_to_type(var.size),
-            ScalarSignednessEvidence::Unsigned => size_to_unsigned_type(var.size),
-        })
+        .filter_map(|value| storage_type_spelling(var.size, value.signedness()))
         .collect()
 }
 

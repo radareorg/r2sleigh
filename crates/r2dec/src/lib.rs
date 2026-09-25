@@ -58,6 +58,7 @@ use crate::fold::context::{FoldArchConfig, FoldInputs};
 use crate::observation_journal::{
     LegacyObservationCoverage, LegacyObservationJournal, MarkedNativeDraft, SealedNativeFunction,
 };
+use crate::symbol::SymbolId;
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::CodeGenConfig;
 pub use control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
@@ -71,7 +72,7 @@ use r2types::FunctionFacts;
 use r2types::FunctionTypeFacts;
 #[cfg(test)]
 use r2types::{ExternalTypeDb, FunctionType};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::rc::Rc;
 #[cfg(test)]
@@ -84,8 +85,19 @@ pub(crate) fn certified_memory_result_name(access: r2ssa::StructuredAccessId) ->
 }
 
 pub(crate) fn sanitize_comment_text(text: &str) -> String {
+    sanitize_comment_text_keeping(text, |_| false)
+}
+
+/// Sanitize a comment, keeping every token `declared` says the function
+/// declares.
+///
+/// The sanitizer exists to keep machine labels a reader cannot find in the
+/// body out of the prose around it. A name the function declares is one the
+/// reader can find: the body spells it, and a comment that rewrote it to
+/// "register" would disagree with the line below it.
+pub(crate) fn sanitize_comment_text_keeping(text: &str, declared: impl Fn(&str) -> bool) -> String {
     let flattened = text.replace("*/", "* /").replace(['\r', '\n'], " ");
-    sanitize_comment_raw_tokens(&sanitize_comment_debug_ids(&flattened))
+    sanitize_comment_raw_tokens(&sanitize_comment_debug_ids(&flattened), declared)
 }
 
 fn sanitize_comment_debug_ids(text: &str) -> String {
@@ -116,14 +128,16 @@ fn sanitize_comment_debug_ids(text: &str) -> String {
     out
 }
 
-fn sanitize_comment_raw_tokens(text: &str) -> String {
+fn sanitize_comment_raw_tokens(text: &str, declared: impl Fn(&str) -> bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut token = String::new();
     let flush_token = |out: &mut String, token: &mut String| {
         if token.is_empty() {
             return;
         }
-        if let Some(replacement) = sanitized_comment_token(token) {
+        if declared(token) {
+            out.push_str(token);
+        } else if let Some(replacement) = sanitized_comment_token(token) {
             out.push_str(replacement);
         } else {
             out.push_str(token);
@@ -356,7 +370,7 @@ fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    entry_held_values: usize,
+    entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
 ) {
     let rendered_nothing = func.body.is_empty();
     let residuals = count_residual_markers(&func.body);
@@ -394,16 +408,11 @@ fn note_unproven_constructs(
                 "; {} statements rendered",
                 count_body_statements(&func.body)
             );
-            // C cannot spell the value a register held on entry, so each is
-            // declared and never assigned; the count says so rather than
-            // letting the reading look like a value nothing wrote.
-            if entry_held_values > 0 {
-                let _ = write!(&mut line, "; {entry_held_values} held from entry");
-            }
             line
         }
         _ => detail,
     };
+    note_entry_supplied_reads(&mut detail, func, entry_supplied);
     let radare_typed_objects =
         func.extern_objects
             .iter()
@@ -470,10 +479,180 @@ fn note_unproven_constructs(
             "; {radare2_local_names} {noun} supplied by the source"
         );
     }
-    func.body.insert(
-        0,
-        CStmt::comment(sanitize_comment_text(&format!("r2dec proof: {detail}"))),
-    );
+    // The names are identifiers the body declares, so the sanitizer keeps them.
+    let text = {
+        let symbols = func.symbols.borrow();
+        sanitize_comment_text_keeping(&format!("r2dec proof: {detail}"), |token| {
+            symbols.by_name(token).is_some()
+        })
+    };
+    func.body.insert(0, CStmt::comment(text));
+}
+
+/// Name the objects the body declares, never assigns, and reads because they
+/// hold a value from before the first statement.
+///
+/// C cannot spell a value the function entered holding, so each is declared
+/// and never assigned. The line names exactly those, because a count cannot
+/// say which of the unassigned reads it excuses, and one it counted but the
+/// body never spells excuses a read it should not. An argument slot no
+/// parameter admits is named apart: the signature says the function was not
+/// given that value, so reading it is a gap in the interface, not a value held
+/// from entry.
+fn note_entry_supplied_reads(
+    detail: &mut String,
+    func: &CFunction,
+    entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
+) {
+    let (held, unadmitted) = entry_supplied_reads(func, entry_supplied);
+    if !held.is_empty() {
+        let _ = write!(
+            detail,
+            "; {} held from entry ({})",
+            held.len(),
+            held.join(", ")
+        );
+    }
+    if !unadmitted.is_empty() {
+        let noun = if unadmitted.len() == 1 {
+            "argument slot"
+        } else {
+            "argument slots"
+        };
+        let _ = write!(
+            detail,
+            "; {} {noun} read with no parameter ({})",
+            unadmitted.len(),
+            unadmitted.join(", ")
+        );
+    }
+}
+
+/// The entry-supplied objects the body declares without a value, never
+/// writes, and reads, spelled and sorted: first those held from entry, then
+/// those an unadmitted argument slot delivers.
+///
+/// Read off the final tree rather than off placement's decisions, because the
+/// tree is what is printed and a later trial can still move a declaration. One
+/// walk over the statements for declarations and one over the expressions for
+/// writes and mentions, so the cost is linear in the body.
+fn entry_supplied_reads(
+    func: &CFunction,
+    entry_supplied: &BTreeMap<SymbolId, binding_plan::EntrySupply>,
+) -> (Vec<String>, Vec<String>) {
+    let mut declared = func
+        .locals
+        .iter()
+        .map(|local| local.name)
+        .collect::<BTreeSet<_>>();
+    for stmt in &func.body {
+        uninitialized_declarations(stmt, &mut declared);
+    }
+    declared.retain(|symbol| entry_supplied.contains_key(symbol));
+    if declared.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut written = BTreeSet::new();
+    let mut mentioned = BTreeSet::new();
+    for stmt in &func.body {
+        stmt.visit_exprs(&mut |expr| {
+            expr.visit(&mut |node| match node {
+                CExpr::Var(symbol) => {
+                    mentioned.insert(*symbol);
+                }
+                CExpr::Binary { op, left, .. } if op.writes_left_operand() => {
+                    written.extend(written_object(left));
+                }
+                CExpr::Unary {
+                    op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+                    operand,
+                }
+                // Whoever holds the address may write through it.
+                | CExpr::AddrOf(operand) => {
+                    written.extend(written_object(operand));
+                }
+                _ => {}
+            });
+        });
+    }
+    let symbols = func.symbols.borrow();
+    let mut held = Vec::new();
+    let mut unadmitted = Vec::new();
+    for symbol in declared {
+        if written.contains(&symbol) || !mentioned.contains(&symbol) {
+            continue;
+        }
+        let spelling = symbols.name(symbol).to_string();
+        match entry_supplied[&symbol] {
+            binding_plan::EntrySupply::Held => held.push(spelling),
+            binding_plan::EntrySupply::UnadmittedArgument => unadmitted.push(spelling),
+        }
+    }
+    held.sort();
+    unadmitted.sort();
+    (held, unadmitted)
+}
+
+/// Every name a statement and the statements inside it declare with no value.
+fn uninitialized_declarations(stmt: &CStmt, found: &mut BTreeSet<SymbolId>) {
+    let mut each = |stmts: &[CStmt]| {
+        for stmt in stmts {
+            uninitialized_declarations(stmt, found);
+        }
+    };
+    match stmt.unobserved() {
+        CStmt::StructuredRegion { stmt, .. } => each(std::slice::from_ref(stmt)),
+        CStmt::Decl {
+            name, init: None, ..
+        } => {
+            found.insert(*name);
+        }
+        CStmt::Block(body) => each(body),
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            each(std::slice::from_ref(then_body));
+            each(
+                else_body
+                    .as_deref()
+                    .map(std::slice::from_ref)
+                    .unwrap_or_default(),
+            );
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+            each(std::slice::from_ref(body));
+        }
+        CStmt::For { init, body, .. } => {
+            each(
+                init.as_deref()
+                    .map(std::slice::from_ref)
+                    .unwrap_or_default(),
+            );
+            each(std::slice::from_ref(body));
+        }
+        CStmt::Switch { cases, default, .. } => {
+            for case in cases {
+                each(&case.body);
+            }
+            each(default.as_deref().unwrap_or_default());
+        }
+        _ => {}
+    }
+}
+
+/// The object a write lands in. An element or a member of an object is part
+/// of it; storage reached through a pointer is not the pointer.
+fn written_object(expr: &CExpr) -> Option<SymbolId> {
+    match expr.unobserved() {
+        CExpr::Var(symbol) => Some(*symbol),
+        CExpr::Subscript { base, .. }
+        | CExpr::Member { base, .. }
+        | CExpr::Paren(base)
+        | CExpr::Cast { expr: base, .. } => written_object(base),
+        _ => None,
+    }
 }
 
 /// Statements the body holds, counting the ones nested inside control flow.
@@ -3762,7 +3941,7 @@ impl Decompiler {
             radare2_variadic_format_counts,
             radare2_prototypes,
             binding_names.source_named_locals(),
-            binding_names.entry_held_values(),
+            binding_names.entry_supplied(),
         );
         Ok(InternalBuildProduct::Native(native))
     }

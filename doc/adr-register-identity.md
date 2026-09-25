@@ -315,7 +315,11 @@ the bytes the body observes of the entry value rather than the register's
 And where the interface declares a narrow formal but the body reads the whole
 register, the root is rebuilt from the declared lanes with zero above them,
 because the declaration is the source's own statement of what the caller
-passed and no source expression names the bytes outside it.
+passed and no source expression names the bytes outside it. The rebuild has a
+defining instruction, but it is no write the body made, so the function
+records it as one (`SSAFunction::formal_roots`) and the graph answers for it
+(`SsaGraph::written_by_body`): a call nothing declares takes its arity from
+the registers the body wrote, and a rebuilt root is not one of them.
 
 What §6 promised is done: the family pass, the alias temporaries, the
 per-alias call clobbers, the walk's slice fail-closed, the parameter entity's

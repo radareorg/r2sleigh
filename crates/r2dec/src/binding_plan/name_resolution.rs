@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use r2ssa::{
@@ -205,7 +206,54 @@ pub(crate) struct BindingNameResolution {
     symbols: Rc<RefCell<SymbolTable>>,
     by_binding: Box<[SymbolId]>,
     source_named_locals: usize,
-    entry_held: usize,
+    entry_supplied: BTreeMap<SymbolId, EntrySupply>,
+}
+
+/// How an object comes to hold a value before any statement in the function
+/// writes it.
+///
+/// C has no spelling for a value the function entered holding, so such an
+/// object is declared and never assigned. The proof line has to say which
+/// objects those are, by name, or a reader cannot tell one of them from a
+/// read of a value nothing wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum EntrySupply {
+    /// Held from entry, in storage no convention argument slot delivers: a
+    /// preserved or scratch register, or the slot a call pushed the return
+    /// address into.
+    Held,
+    /// Delivered where the convention passes an argument -- an argument
+    /// register, or the caller's outgoing argument area above the return
+    /// address -- and parameter recovery did not admit it. The signature does
+    /// not name it, so the rendering reads a value its own interface says the
+    /// function was never given.
+    UnadmittedArgument,
+}
+
+impl EntrySupply {
+    /// How a binding in `role` comes by a value before any statement writes
+    /// it, or `None` when a statement or the signature gives it one.
+    ///
+    /// `in_argument_slot` says some member occupies a register the convention
+    /// passes an argument in. `in_argument_area` says a caller-supplied stack
+    /// object lies in the outgoing argument area the convention states, which
+    /// is everything at or above the entry stack pointer but the return
+    /// address, once the return address's place is proven.
+    const fn of(
+        role: BindingRole,
+        caller_supplied: bool,
+        in_argument_slot: bool,
+        in_argument_area: bool,
+    ) -> Option<Self> {
+        match role {
+            BindingRole::EntryValue if in_argument_slot => Some(Self::UnadmittedArgument),
+            BindingRole::EntryValue => Some(Self::Held),
+            BindingRole::StackObject { .. } if !caller_supplied => None,
+            BindingRole::StackObject { .. } if in_argument_area => Some(Self::UnadmittedArgument),
+            BindingRole::StackObject { .. } => Some(Self::Held),
+            BindingRole::Parameter { .. } | BindingRole::Local | BindingRole::CallClobbered => None,
+        }
+    }
 }
 
 impl BindingNameResolution {
@@ -220,16 +268,22 @@ impl BindingNameResolution {
 
         let mut by_binding = Vec::with_capacity(plan.binding_count());
         let mut source_named_locals = 0usize;
-        let mut entry_held = 0usize;
+        let mut entry_supplied = BTreeMap::new();
         // One pass, not one per binding: whether a binding occupies a slot the
         // convention passes an argument in. An entry value there is a
-        // parameter this recovery missed, and counting it as unspellable would
-        // hide that.
+        // parameter this recovery missed, and excusing it as held from entry
+        // would hide that.
+        let machine = source_owned.source().machine_context();
+        let convention_slots = machine.convention_slots();
+        // Where the argument area begins is known only where the return
+        // address's place is: a stacked return the body proves, or a call that
+        // leaves the stack pointer alone. Recovery reads no stack parameter
+        // without one, and neither is a read there called a missed one.
+        let argument_area_placed = convention_slots
+            .is_some_and(|slots| slots.stack_arguments().is_some())
+            && (machine.return_mechanism().is_some() || !machine.call_moves_stack_pointer());
         let argument_slot_bindings = {
-            let slots = source_owned
-                .source()
-                .machine_context()
-                .convention_slots()
+            let slots = convention_slots
                 .map(|slots| slots.argument_slots().to_vec())
                 .unwrap_or_default();
             let mut found = std::collections::BTreeSet::new();
@@ -249,6 +303,25 @@ impl BindingNameResolution {
         for (binding_id, binding) in plan.bindings() {
             let mut stack_object = None;
             let role = plan.binding_role(binding_id);
+            // Storage above the entry stack pointer is the caller's. The slot a
+            // call pushed the return address into is held from entry exactly as
+            // a preserved register is; the rest is the caller's outgoing
+            // argument area, where the convention places the arguments its
+            // registers cannot carry, and a read there is a parameter recovery
+            // missed.
+            let return_address = matches!(
+                role,
+                Some(BindingRole::StackObject { object })
+                    if plan.return_address_objects().contains(&object)
+            );
+            let supply = role.and_then(|role| {
+                EntrySupply::of(
+                    role,
+                    binding.caller_supplied,
+                    argument_slot_bindings.contains(&binding_id),
+                    argument_area_placed && !return_address,
+                )
+            });
             if role.is_none() {
                 let members = source
                     .graph()
@@ -272,10 +345,6 @@ impl BindingNameResolution {
                 Some(BindingRole::Parameter { slot }) => SymbolRole::Parameter(slot),
                 Some(BindingRole::StackObject { object }) => {
                     stack_object = Some(object);
-                    // Storage above the entry stack pointer is the caller's:
-                    // the slot a call pushed the return address into is held
-                    // from entry exactly as a preserved register is.
-                    entry_held += usize::from(binding.caller_supplied);
                     let entity = r2ssa::SemanticId::StackSlot(object);
                     match source_owned
                         .report()
@@ -295,11 +364,9 @@ impl BindingNameResolution {
                 // An incoming machine value renders as an ordinary object; the
                 // role only says the declaration comes from entry rather than
                 // from a statement.
-                Some(BindingRole::EntryValue) => {
-                    entry_held += usize::from(!argument_slot_bindings.contains(&binding_id));
+                Some(BindingRole::EntryValue | BindingRole::Local | BindingRole::CallClobbered) => {
                     SymbolRole::Carrier
                 }
-                Some(BindingRole::Local | BindingRole::CallClobbered) => SymbolRole::Carrier,
                 None => {
                     return Err(BindingNameResolutionError::ConflictingCertifiedRoles(
                         binding_id,
@@ -328,6 +395,7 @@ impl BindingNameResolution {
                 binding.declaration_type().clone(),
                 role,
             );
+            entry_supplied.extend(supply.map(|supply| (symbol, supply)));
             by_binding.push(symbol);
         }
 
@@ -337,7 +405,7 @@ impl BindingNameResolution {
             symbols,
             by_binding: by_binding.into_boxed_slice(),
             source_named_locals,
-            entry_held,
+            entry_supplied,
         })
     }
 
@@ -346,12 +414,14 @@ impl BindingNameResolution {
         self.source_named_locals
     }
 
-    /// Values the function entered already holding.
+    /// The objects that hold a value before any statement writes one, and
+    /// how each came by it.
     ///
-    /// C cannot spell one, so each is declared and never assigned. Saying how
-    /// many is what keeps that from reading as a value nothing wrote.
-    pub(crate) const fn entry_held_values(&self) -> usize {
-        self.entry_held
+    /// Keyed by symbol, not counted: the proof line names the ones the
+    /// rendering declares and never assigns, and a count cannot say which
+    /// those are.
+    pub(crate) const fn entry_supplied(&self) -> &BTreeMap<SymbolId, EntrySupply> {
+        &self.entry_supplied
     }
 
     /// How a symbol is spelled in the rendered C.

@@ -256,16 +256,6 @@ fn incoming_stack_arg_addr_temp(
     }
 }
 
-pub fn size_to_type(size: u32) -> String {
-    match size {
-        1 => "int8_t".to_string(),
-        2 => "int16_t".to_string(),
-        4 => "int32_t".to_string(),
-        8 => "int64_t".to_string(),
-        _ => format!("byte[{size}]"),
-    }
-}
-
 /// A key that identifies one SSA variable across its width views.
 ///
 /// This deliberately does *not* include `size`. The maps it keys pool the
@@ -674,7 +664,11 @@ pub(crate) fn recover_vars_from_prepared_ssa(
             delta: 0,
             var_type: match parameter.initial_ty {
                 crate::CTypeLike::Pointer(_) => "void *".to_string(),
-                _ => size_to_type(parameter.ssa_var.size),
+                _ => crate::analysis::storage_type_spelling(
+                    parameter.ssa_var.size,
+                    crate::Signedness::Signed,
+                )
+                .unwrap_or_default(),
             },
             isarg: true,
             reg: prepared_register_name(prepared, parameter.arg_index),
@@ -704,7 +698,9 @@ pub(crate) fn recover_vars_from_prepared_ssa(
                 },
                 kind: "v".to_string(),
                 delta: slot.offset,
-                var_type: size_to_type(size),
+                // A slot nothing reads or writes a width of has no type.
+                var_type: crate::analysis::storage_type_spelling(size, crate::Signedness::Signed)
+                    .unwrap_or_default(),
                 isarg: false,
                 reg: None,
             }

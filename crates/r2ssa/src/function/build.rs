@@ -30,6 +30,7 @@ impl SSAFunction {
             op_instruction_addrs: BTreeMap::new(),
             canonical_storage_by_var: BTreeMap::new(),
             formal_projections: BTreeMap::new(),
+            formal_roots: BTreeMap::new(),
             decompile_prep_facts: None,
             query_index: RwLock::new(None),
         }
@@ -568,6 +569,7 @@ impl SSAFunction {
             op_instruction_addrs,
             canonical_storage_by_var: renamed_storage,
             formal_projections: BTreeMap::new(),
+            formal_roots: BTreeMap::new(),
             decompile_prep_facts: None,
             query_index: RwLock::new(None),
         };

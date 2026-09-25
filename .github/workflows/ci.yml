@@ -77,6 +77,8 @@ jobs:
       # itself.
       - name: Ensure radare2 checkout for its test binaries
         run: bash .github/scripts/ensure-radare2-ci.sh
+      - name: The gate reads the proof line by name
+        run: python3 scripts/test_certify_render.py
       - name: Build the shell
         run: cargo build --release -p r2s --features sleigh
       - name: A rendering may not read what nothing wrote

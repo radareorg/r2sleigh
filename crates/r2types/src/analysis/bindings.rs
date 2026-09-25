@@ -438,10 +438,9 @@ pub(crate) fn build_var_type_candidates(
             && let Some(bits) = exact_access_bits
             && integer_type_bits(&chosen_type, ctx.ptr_bits) == Some(bits)
         {
-            chosen_type = match signedness {
-                ScalarSignednessEvidence::Signed => size_to_type(bits / 8),
-                ScalarSignednessEvidence::Unsigned => size_to_unsigned_type(bits / 8),
-            };
+            if let Some(signed_type) = storage_type_spelling(bits / 8, signedness.signedness()) {
+                chosen_type = signed_type;
+            }
             confidence = confidence.max(97);
             source = TypeFactSource::DataflowRanked;
             evidence.push(TypeEvidence::CanonicalStackSignedness);

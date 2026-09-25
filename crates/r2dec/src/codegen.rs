@@ -960,7 +960,10 @@ impl<'c> CodeGenerator<'c> {
     }
 
     fn emit_comment_text(&mut self, text: &str) {
-        self.output.push_str(&sanitize_comment_text(text));
+        let symbols = &self.symbols;
+        let text =
+            crate::sanitize_comment_text_keeping(text, |token| symbols.by_name(token).is_some());
+        self.output.push_str(&text);
     }
 
     fn emit_positive_literal_magnitude(&mut self, literal: PositiveLiteralMagnitude) {
@@ -1129,10 +1132,6 @@ fn positive_product_expr(term: CExpr, magnitude: PositiveLiteralMagnitude) -> Op
         CExpr::IntLit(i64::try_from(magnitude.value).ok()?)
     };
     Some(CExpr::binary(BinaryOp::Mul, term, literal))
-}
-
-fn sanitize_comment_text(text: &str) -> String {
-    crate::sanitize_comment_text(text)
 }
 
 /// Whether C's own precedence would regroup this operand away from the reader.

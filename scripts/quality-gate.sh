@@ -232,6 +232,12 @@ phase "Corpus harness contracts"
 # check. They are pure Python and cost a fraction of a second.
 run python3 tests/corpus/test_verify_rendering.py
 
+phase "Certification gate contracts"
+# The certification gate excuses an unassigned read only when the proof line
+# names it as held from entry. These pin that reading on renderings the
+# engine printed; they run no binary.
+run python3 scripts/test_certify_render.py
+
 phase "Binding-spine cutover corpus"
 run tests/corpus/run_matrix.sh --gate cutover
 

@@ -149,8 +149,18 @@ impl CTypeLike {
     /// whose representation the renderer defines in each rendering that
     /// declares one.
     pub const fn machine_bits(bits: u32) -> Self {
+        Self::machine_storage(bits, Signedness::Unsigned)
+    }
+
+    /// Exact machine storage of the given width, read with `signedness`.
+    ///
+    /// [`Self::machine_bits`] with the sign stated: an integer of that
+    /// signedness where [`Self::is_integer_width`] says C has one, and
+    /// otherwise the same [`CTypeLike::BitVector`] carrier, which has no sign
+    /// to state.
+    pub const fn machine_storage(bits: u32, signedness: Signedness) -> Self {
         if Self::is_integer_width(bits) {
-            Self::uint(bits)
+            CTypeLike::Int { bits, signedness }
         } else {
             CTypeLike::BitVector(bits)
         }
@@ -538,6 +548,15 @@ pub fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
     parse_normalized(normalized.trim(), ptr_bits)
 }
 
+/// The width of the carrier a spelling names, if it names one.
+pub(crate) fn bit_vector_spelling_bits(spelling: &str) -> Option<u32> {
+    spelling
+        .trim()
+        .strip_prefix("struct ")
+        .and_then(|tag| tag.trim_start().strip_prefix(BIT_VECTOR_TAG_PREFIX))
+        .and_then(|bits| bits.parse::<u32>().ok())
+}
+
 /// Whether a spelling carries `const` as a word of its own.
 fn spells_const(spelling: &str) -> bool {
     spelling
@@ -575,11 +594,7 @@ fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
             len,
         ));
     }
-    if let Some(bits) = spelling
-        .strip_prefix("struct ")
-        .and_then(|tag| tag.strip_prefix(BIT_VECTOR_TAG_PREFIX))
-        .and_then(|bits| bits.parse::<u32>().ok())
-    {
+    if let Some(bits) = bit_vector_spelling_bits(spelling) {
         return Some(CTypeLike::BitVector(bits));
     }
     for (keyword, build) in [

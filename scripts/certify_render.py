@@ -79,12 +79,23 @@ def refused(lines):
 
 
 # A declaration names its variable last: `const int8_t* name;`. The name is an
-# identifier, which is what keeps an array bound from being read as one.
-DECLARATION = re.compile(r"^\s*(?:const\s+)?[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$")
+# identifier, which is what keeps an array bound from being read as one. A
+# statement that opens with a keyword has the same shape -- `return x;`,
+# `goto L2;` -- and declares nothing: taking `return x;` for a declaration
+# listed `x` once more for every return of it.
+DECLARATION = re.compile(
+    r"^\s*(?!(?:return|goto|else|case|do)\b)(?:const\s+)?"
+    r"[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$"
+)
 PROOF_REFUSED = re.compile(r"(\d+) refused")
-# What the rendering says it could not spell: a register's value on entry is
-# declared and never assigned because C has no other way to name it.
-PROOF_ENTRY_HELD = re.compile(r"(\d+) held from entry")
+# What the rendering says it could not spell: a value the function entered
+# holding is declared and never assigned because C has no other way to name it.
+# The proof line names each one; a count alone cannot say which of the
+# unassigned reads it excuses, so a count with no names excuses none.
+PROOF_ENTRY_HELD = re.compile(r"(\d+) held from entry \(([^)]*)\)")
+# An argument slot no recovered parameter admits. It is named so a reader can
+# find it, and never excused: the signature says the function was not given it.
+PROOF_UNADMITTED = re.compile(r"(\d+) argument slots? read with no parameter \(([^)]*)\)")
 # `==`, `!=`, `<=`, `>=` and `!` are comparisons; an assignment is a lone `=`.
 ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
 
@@ -121,11 +132,7 @@ def undefined_reads(lines):
         if not declared:
             continue
         name = declared.group(1)
-        # `goto L2;` has the shape of a declaration: a word, a name, a
-        # semicolon. The name is a label, which no statement assigns.
-        if name in ("return", "else", "struct", "union") or line.strip().startswith(
-            "goto "
-        ):
+        if name in ("return", "else", "struct", "union") or name in found:
             continue
         if any(assigns(other, name) for other in lines):
             continue
@@ -138,12 +145,30 @@ def undefined_reads(lines):
     return found
 
 
-def proof_entry_held(lines):
+def proof_names(lines, pattern):
+    """The names one clause of the proof line lists, or none.
+
+    The clause states its count beside its names. A count the names do not
+    match is an accounting the line cannot stand behind, so it lists nothing.
+    """
     for line in lines:
         if "r2dec proof:" in line:
-            found = PROOF_ENTRY_HELD.search(line)
-            return int(found.group(1)) if found else 0
-    return 0
+            found = pattern.search(line)
+            if not found:
+                return set()
+            names = {name.strip() for name in found.group(2).split(",") if name.strip()}
+            return names if len(names) == int(found.group(1)) else set()
+    return set()
+
+
+def proof_entry_held(lines):
+    """The values the proof line says the function entered holding."""
+    return proof_names(lines, PROOF_ENTRY_HELD)
+
+
+def proof_unadmitted(lines):
+    """The argument slots the proof line says no parameter admits."""
+    return proof_names(lines, PROOF_UNADMITTED)
 
 
 def proof_refusals(lines):
@@ -167,19 +192,40 @@ def lint(args, binary, found):
             tally["refused"] += 1
             continue
         tally["rendered"] += 1
-        undefined = undefined_reads(lines)
-        # A value held from entry is declared and never assigned on purpose,
-        # and the proof line says how many there are. Only the rest is a read
-        # of something the program never produced.
-        undefined = undefined[proof_entry_held(lines) :]
-        if undefined:
+        report = uncertified_reads(lines)
+        if report:
             tally["undefined reads"] += 1
-            print(
-                "  {}: reads {} which nothing assigns, proof says {} refused".format(
-                    name, ", ".join(undefined), proof_refusals(lines)
-                )
-            )
+            print(f"  {name}: {report}")
     return tally
+
+
+def uncertified_reads(lines):
+    """What a rendering reads that nothing assigns and the proof does not excuse.
+
+    A value held from entry is declared and never assigned on purpose, and the
+    proof line names each one. Exactly those names are excused -- by name, not
+    by count, so an excuse can never land on a different read. Everything else
+    is a read of something the program never produced, and an argument slot
+    the proof says no parameter admits is one of them.
+    """
+    held = proof_entry_held(lines)
+    unadmitted = proof_unadmitted(lines)
+    undefined = [name for name in undefined_reads(lines) if name not in held]
+    if not undefined:
+        return ""
+    parts = []
+    missing = [name for name in undefined if name in unadmitted]
+    unwritten = [name for name in undefined if name not in unadmitted]
+    if unwritten:
+        parts.append("reads {} which nothing assigns".format(", ".join(unwritten)))
+    if missing:
+        parts.append(
+            "reads {} from an argument slot no parameter admits".format(
+                ", ".join(missing)
+            )
+        )
+    parts.append("proof says {} refused".format(proof_refusals(lines)))
+    return ", ".join(parts)
 
 
 

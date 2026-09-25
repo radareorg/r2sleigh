@@ -1916,7 +1916,10 @@ impl SealedNativeFunction {
         radare2_variadic_format_counts: usize,
         radare2_prototypes: usize,
         radare2_local_names: usize,
-        entry_held_values: usize,
+        entry_supplied: &std::collections::BTreeMap<
+            crate::symbol::SymbolId,
+            crate::binding_plan::EntrySupply,
+        >,
     ) {
         self.ledger = Some(ledger.clone());
         let audit = self.effect_obligation_audit();
@@ -1937,7 +1940,7 @@ impl SealedNativeFunction {
             radare2_variadic_format_counts,
             radare2_prototypes,
             radare2_local_names,
-            entry_held_values,
+            entry_supplied,
         );
         self.ready = prepare_function_for_emission(function);
     }

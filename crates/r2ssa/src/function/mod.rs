@@ -2484,6 +2484,12 @@ pub struct SSAFunction {
     /// the family root's entry value (doc/adr-register-identity.md §8, 6).
     /// Keyed by the projection's variable, valued by the lane's storage.
     formal_projections: BTreeMap<SSAVar, CanonicalStorageId>,
+    /// Entry roots rebuilt from their declared lanes: the value a read of the
+    /// whole register takes once the formals describe it, defined at entry
+    /// from the projections with zero above them. Keyed by the rebuilt
+    /// variable, valued by the root's storage. The rebuild restates what the
+    /// caller passed; it is no write the body made.
+    formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
     /// Optional decompiler-prep fact snapshot for the current SSA state.
     decompile_prep_facts: Option<DecompilePrepFacts>,
     /// Structural def/use index for repeated SSA queries.
@@ -2661,6 +2667,7 @@ impl Clone for SSAFunction {
             op_instruction_addrs: self.op_instruction_addrs.clone(),
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
+            formal_roots: self.formal_roots.clone(),
             decompile_prep_facts: self.decompile_prep_facts.clone(),
             query_index: RwLock::new(None),
         }
@@ -3435,6 +3442,10 @@ impl SSAFunction {
         &self,
     ) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
         self.formal_projections.iter()
+    }
+
+    pub(crate) fn formal_root_vars(&self) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
+        self.formal_roots.iter()
     }
 
     /// Root the stack pointer a mask realigned, as an origin of its own.

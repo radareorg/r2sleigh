@@ -8,6 +8,16 @@ pub(crate) enum ScalarSignednessEvidence {
     Unsigned,
 }
 
+impl ScalarSignednessEvidence {
+    /// The signedness this evidence establishes.
+    pub(crate) const fn signedness(self) -> crate::Signedness {
+        match self {
+            Self::Signed => crate::Signedness::Signed,
+            Self::Unsigned => crate::Signedness::Unsigned,
+        }
+    }
+}
+
 /// Recover signedness only from operations whose machine semantics distinguish
 /// signed from unsigned values, then flow that evidence backward through exact
 /// same-width aliases. Width alone remains deliberately neutral.

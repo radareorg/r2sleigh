@@ -713,7 +713,9 @@ pub(crate) fn type_name_is_generic(ty: &str) -> bool {
     if lower.is_empty() {
         return true;
     }
-    if lower.starts_with("byte[") {
+    // A carrier is storage of a width C has no integer for. It states the
+    // width and nothing else, which is what no type states too.
+    if crate::convert::bit_vector_spelling_bits(&lower).is_some() {
         return true;
     }
     if type_name_is_opaque_placeholder(&lower) {
@@ -748,24 +750,25 @@ pub(crate) fn is_low_quality_stack_name(name: &str) -> bool {
         || is_generic_arg_name(&lower)
 }
 
-pub(crate) fn size_to_type(size: u32) -> String {
-    match size {
-        1 => "int8_t".to_string(),
-        2 => "int16_t".to_string(),
-        4 => "int32_t".to_string(),
-        8 => "int64_t".to_string(),
-        _ => format!("byte[{size}]"),
-    }
+/// What `bytes` bytes of storage are when nothing but an access of that width
+/// says anything about them: an integer of `signedness` where C has one that
+/// wide, and otherwise the carrier [`CTypeLike::machine_storage`] names. No
+/// bytes are no type.
+///
+/// This was a string, from one of two copies of a table that spelled every
+/// width but one, two, four and eight bytes `byte[N]`. That is not C -- `byte`
+/// names no type, so `(byte[16]*)` is not a cast -- and it reached the
+/// rendering as the element type of every sixteen- and thirty-two-byte vector
+/// access. Which widths C has an integer for is `CTypeLike`'s to state, so
+/// this states none of its own.
+pub(crate) fn storage_type(bytes: u32, signedness: Signedness) -> Option<CTypeLike> {
+    let bits = bytes.checked_mul(8).filter(|bits| *bits > 0)?;
+    Some(CTypeLike::machine_storage(bits, signedness))
 }
 
-pub(crate) fn size_to_unsigned_type(size: u32) -> String {
-    match size {
-        1 => "uint8_t".to_string(),
-        2 => "uint16_t".to_string(),
-        4 => "uint32_t".to_string(),
-        8 => "uint64_t".to_string(),
-        _ => format!("byte[{size}]"),
-    }
+/// [`storage_type`] spelled, where the analysis still keeps a type as text.
+pub(crate) fn storage_type_spelling(bytes: u32, signedness: Signedness) -> Option<String> {
+    storage_type(bytes, signedness).map(|ty| render_c_type_like(&ty))
 }
 
 pub(crate) fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {

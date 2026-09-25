@@ -479,6 +479,7 @@ impl SSAFunction {
             }
             highest_disambiguator.insert(composed.name().to_string(), disambiguator);
             self.canonical_storage_by_var.insert(composed.clone(), root);
+            self.formal_roots.insert(composed.clone(), root);
             substitutions.insert(root_var, composed);
         }
         // One walk for every root. Each root substitutes one variable, and

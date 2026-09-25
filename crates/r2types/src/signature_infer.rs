@@ -685,6 +685,12 @@ pub fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
             bits: 64,
             signedness: Signedness::Signed,
         } => "int64_t".to_string(),
+        // The one spelling of a 128-bit integer a C compiler accepts, as
+        // `render_c_type_like` spells it; `int128_t` is not one.
+        CTypeLike::Int {
+            bits: 128,
+            signedness: Signedness::Signed | Signedness::Unknown,
+        } => "__int128_t".to_string(),
         CTypeLike::Int {
             bits,
             signedness: Signedness::Signed | Signedness::Unknown,
@@ -705,6 +711,10 @@ pub fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
             bits: 64,
             signedness: Signedness::Unsigned,
         } => "uint64_t".to_string(),
+        CTypeLike::Int {
+            bits: 128,
+            signedness: Signedness::Unsigned,
+        } => "__uint128_t".to_string(),
         CTypeLike::Int {
             bits,
             signedness: Signedness::Unsigned,

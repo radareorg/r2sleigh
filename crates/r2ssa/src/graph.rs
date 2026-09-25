@@ -228,6 +228,9 @@ pub struct SsaGraph {
     /// Entry-lane projections by value, valued by the lane's storage
     /// (`SSAFunction::mint_entry_lane_projections`).
     pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
+    /// Entry roots rebuilt from their declared lanes, valued by the root's
+    /// storage (`SSAFunction::mint_entry_lane_projections`).
+    pub(crate) formal_roots: BTreeMap<ValueId, CanonicalStorageId>,
 }
 
 /// Record which machine instruction one operation came from, both ways round.
@@ -494,6 +497,10 @@ impl SsaGraph {
             .formal_projection_vars()
             .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
             .collect();
+        let formal_roots = function
+            .formal_root_vars()
+            .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
+            .collect();
         let value_index = value_index_of(&values);
         Self {
             entry,
@@ -511,6 +518,7 @@ impl SsaGraph {
             instruction_by_inst,
             insts_by_instruction,
             formal_projections,
+            formal_roots,
         }
     }
 
@@ -518,6 +526,15 @@ impl SsaGraph {
     /// defining instruction, or a lane the declaration mints from one.
     pub fn caller_supplied(&self, value: ValueId) -> bool {
         self.def_inst(value).is_none() || self.formal_projections.contains_key(&value)
+    }
+
+    /// Whether this function's body wrote the value. It wrote no
+    /// caller-supplied value, and no root the declaration rebuilt from its
+    /// formals: the rebuild has a defining instruction, but that instruction
+    /// restates what the caller passed rather than storing anything the body
+    /// computed.
+    pub fn written_by_body(&self, value: ValueId) -> bool {
+        !self.caller_supplied(value) && !self.formal_roots.contains_key(&value)
     }
 
     /// The lane storage an entry-lane projection stands for.

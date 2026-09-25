@@ -749,6 +749,61 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     assert!(output.starts_with("void store("), "{output}");
 }
 
+/// `lea rax, [rbx + rsi]; ret`: one register the function entered holding, and
+/// one argument slot whose parameter recovery does not admit, because the slot
+/// before it is never read.
+const ENTRY_AND_ARGUMENT: &[u8] = &[
+    0x48, 0x8d, 0x04, 0x33, // 1000 lea rax, [rbx + rsi]
+    0xc3, // 1004 ret
+];
+
+/// A read of a value nothing in the body assigns is accounted by name, and the
+/// two kinds are kept apart.
+///
+/// The proof line used to give a count of values held from entry. The count
+/// included the return-address slot, which the body never spells, and it
+/// excluded an argument slot on purpose. The certification gate took the count
+/// as how many unassigned reads to skip, so here it skipped both `RBX_0` and
+/// `RSI_0`, and an argument read with no parameter passed as certified.
+#[test]
+fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
+    let text = rendered(ENTRY_AND_ARGUMENT, "entry_and_argument");
+    let proof = text
+        .lines()
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_else(|| panic!("no proof line: {text}"));
+    // rbx is not an argument slot, and the function declares it and never
+    // assigns it: that is what held from entry means, and only that.
+    assert!(proof.contains("; 1 held from entry (RBX_0)"), "{text}");
+    // rsi is an argument slot with no parameter, so the rendering reads a value
+    // its own signature says it was never given. It is not excused as held.
+    assert!(
+        proof.contains("; 1 argument slot read with no parameter (RSI_0)"),
+        "{text}"
+    );
+    assert!(text.contains("uint64_t RSI_0;"), "{text}");
+
+    // The first stack argument is an argument slot too: above the return
+    // address, where the caller placed it. It was counted as held from entry.
+    let text = rendered(STACK_ARGUMENT, "stack_argument");
+    let proof = text
+        .lines()
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_else(|| panic!("no proof line: {text}"));
+    assert!(
+        proof.contains("; 1 argument slot read with no parameter (stack_p8)"),
+        "{text}"
+    );
+    assert!(!proof.contains("held from entry"), "{text}");
+}
+
+/// `mov rax, [rsp + 8]; ret`: the first stack argument, with no register
+/// argument before it that recovery would admit.
+const STACK_ARGUMENT: &[u8] = &[
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1000 mov rax, [rsp + 8]
+    0xc3, // 1005 ret
+];
+
 /// A loop entered at two blocks, whose counter climbs on every pass.
 ///
 /// ```text
@@ -1635,6 +1690,89 @@ fn a_call_keeps_the_low_half_of_a_callee_saved_vector_register() {
             "the store at {store:#x} reads what {origin:?} defined"
         );
     }
+}
+
+/// An AArch64 argument held across a call to an import nothing declares, of
+/// which only the low byte is read afterwards:
+///
+/// ```text
+///   1000  stp  x29, x30, [sp, #-32]!
+///   1004  str  x21, [sp, #16]
+///   1008  mov  x21, x2           ; the whole register, held across the call
+///   100c  add  x0, x0, x1
+///   1010  mov  w1, #2
+///   1014  bl   0x1028            ; the import's stub
+///   1018  and  w0, w21, #0xff    ; the only byte of it anything reads
+///   101c  ldr  x21, [sp, #16]
+///   1020  ldp  x29, x30, [sp], #32
+///   1024  ret
+///   1028  ldr  x16, 0x1030 ; br x16   ; the stub, through its slot
+/// ```
+const AARCH64_NARROWED_ARGUMENT_BESIDE_A_CALL: &[u8] = &[
+    0xfd, 0x7b, 0xbe, 0xa9, // 1000 stp x29, x30, [sp, #-32]!
+    0xf5, 0x0b, 0x00, 0xf9, // 1004 str x21, [sp, #16]
+    0xf5, 0x03, 0x02, 0xaa, // 1008 mov x21, x2
+    0x00, 0x00, 0x01, 0x8b, // 100c add x0, x0, x1
+    0x41, 0x00, 0x80, 0x52, // 1010 mov w1, #2
+    0x05, 0x00, 0x00, 0x94, // 1014 bl 0x1028
+    0xa0, 0x1e, 0x00, 0x12, // 1018 and w0, w21, #0xff
+    0xf5, 0x0b, 0x40, 0xf9, // 101c ldr x21, [sp, #16]
+    0xfd, 0x7b, 0xc2, 0xa8, // 1020 ldp x29, x30, [sp], #32
+    0xc0, 0x03, 0x5f, 0xd6, // 1024 ret
+    0x50, 0x00, 0x00, 0x58, // 1028 ldr x16, 0x1030
+    0x00, 0x02, 0x1f, 0xd6, // 102c br x16
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1030 the stub's slot
+];
+
+/// A call nothing declares takes its arity from the argument registers the
+/// body wrote before it. `x2` it never wrote: the interface declares only its
+/// low byte, and the register is rebuilt from that lane for the whole read at
+/// 0x1008, but the rebuild restates what the caller passed. The call takes
+/// `x0` and `x1` and stops there.
+#[test]
+fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let program = ImportCaller {
+        bytes: AARCH64_NARROWED_ARGUMENT_BESIDE_A_CALL,
+        stub: 0x1028,
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    // The case this is about: the value of `x2` reaching the call has a
+    // defining instruction, the rebuild, and none of the body's.
+    let rebuilt = graph
+        .values
+        .iter()
+        .filter(|value| {
+            value.canonical_storage.is_some_and(|storage| {
+                storage.space == r2ssa::CanonicalStorageSpace::Register && storage.size == 8
+            }) && graph.def_inst(value.id).is_some()
+                && !graph.written_by_body(value.id)
+        })
+        .map(|value| value.var.display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(rebuilt.len(), 1, "one register rebuilt: {rebuilt:?}");
+    let calls = &artifact.facts().boundaries.calls;
+    assert_eq!(calls.len(), 1, "{calls:#?}");
+    let call = calls.values().next().expect("the one call");
+    let slots = call
+        .arguments
+        .iter()
+        .map(|argument| match argument.slot {
+            r2ssa::CallBoundarySlot::Register { index, .. } => index,
+            ref other => panic!("an argument outside the registers: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(slots, [0, 1], "{call:#?}");
+
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(
+        text.contains("undeclared_import(X0_0 + X1_0, 2);"),
+        "{text}"
+    );
 }
 
 /// Every register a shipped default convention names is one register of its machine, so none is dropped.
