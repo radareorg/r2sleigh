@@ -1721,17 +1721,21 @@ pub enum TableBytes {
     ReadOnly,
     /// Writable, and nothing the container states seals it after load.
     Unsealed,
-    /// The loader writes some of them, so the file's bytes are not what runs.
+    /// The loader writes some of them -- a relocation, an import's slot, or
+    /// the zeros it fills past what the file holds -- so the file's bytes are
+    /// not what runs.
     LoaderWritten,
 }
 
 impl TableBytes {
+    /// O(log n) in the loader's writes: one search, and one comparison against the file's extent.
     fn of(
         program: &dyn Program,
         region: &r2ssa::body::Region,
         range: std::ops::Range<u64>,
     ) -> Self {
-        match (program.loader_writes(&range), region.write) {
+        let written = range.end > region.file_end || program.loader_writes(&range);
+        match (written, region.write) {
             (true, _) => Self::LoaderWritten,
             (false, false) => Self::ReadOnly,
             (false, true) => Self::Unsealed,
@@ -1845,6 +1849,9 @@ impl Native<'_> {
     /// inside the one region holding its first entry, which is an O(1)
     /// question of the container's statement: a spilled 32-bit index reaching
     /// 16 GiB of table is refused here with no byte read, never allocated.
+    /// It must lie in what the file holds of that region, too: past it the
+    /// loader fills zeros, and a container can state a region as long as it
+    /// likes. So every allocation below is bounded by the file's own size.
     ///
     /// A resolved dispatch has at least one target and every entry decodes
     /// where an instruction can run: a table of no entries would resolve the

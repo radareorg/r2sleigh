@@ -106,6 +106,7 @@ fn arm_only(code: &'static [u8], endian: r2il::Endianness) -> Mixed {
             segments: vec![Segment {
                 vaddr: ARM,
                 vsize: code.len() as u64,
+                file_size: code.len() as u64,
                 permissions: Permissions {
                     read: true,
                     write: false,
@@ -306,6 +307,7 @@ impl r2ssa::body::Program for Walked {
         (ARM..end).contains(&vaddr).then_some(r2ssa::body::Region {
             start: ARM,
             end,
+            file_end: end,
             execute: true,
             write: false,
         })

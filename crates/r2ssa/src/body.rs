@@ -80,6 +80,11 @@ pub struct Region {
     pub start: u64,
     /// The address after the last one.
     pub end: u64,
+    /// The address after the last byte the file holds, at most `end`: from
+    /// here to `end` the loader fills zeros, so no byte there is one the file
+    /// states. A container may say a run is far longer than the file, and
+    /// only this bounds what reading it can cost.
+    pub file_end: u64,
     /// Whether an instruction there can run.
     pub execute: bool,
     /// Whether the program may write there once it runs.

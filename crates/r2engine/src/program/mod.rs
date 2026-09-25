@@ -540,6 +540,7 @@ impl<S: Source> r2ssa::body::Program for OpenProgram<S> {
         Some(r2ssa::body::Region {
             start,
             end,
+            file_end: segment.file_end(),
             execute: segment.permissions.execute,
             write: segment.permissions.write,
         })

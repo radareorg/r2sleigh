@@ -264,6 +264,7 @@ mod tests {
                 .then_some(r2ssa::body::Region {
                     start: self.base,
                     end,
+                    file_end: end,
                     execute: true,
                     write: false,
                 })

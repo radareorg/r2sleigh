@@ -100,6 +100,9 @@ pub struct Arch {
 pub struct Segment {
     pub vaddr: u64,
     pub vsize: u64,
+    /// How many of its bytes, from its start, the file holds. The loader
+    /// fills the rest of `vsize` with zeros.
+    pub file_size: u64,
     pub permissions: Permissions,
 }
 
@@ -111,6 +114,16 @@ impl Segment {
     /// The half-open range of addresses the segment occupies.
     pub const fn range(&self) -> (u64, u64) {
         (self.vaddr, self.vaddr.saturating_add(self.vsize))
+    }
+
+    /// The address after the last byte the file holds; never past the segment's end.
+    pub const fn file_end(&self) -> u64 {
+        let held = if self.file_size < self.vsize {
+            self.file_size
+        } else {
+            self.vsize
+        };
+        self.vaddr.saturating_add(held)
     }
 }
 

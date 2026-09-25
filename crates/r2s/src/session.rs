@@ -89,6 +89,7 @@ fn segments_of(image: &Image) -> Vec<Segment> {
         .map(|segment| Segment {
             vaddr: segment.vaddr,
             vsize: segment.vsize,
+            file_size: segment.file_size,
             permissions: Permissions {
                 read: segment.permissions.read,
                 write: segment.permissions.write,

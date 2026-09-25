@@ -315,6 +315,7 @@ pub fn code_segment(vaddr: u64, vsize: u64) -> Segment {
     Segment {
         vaddr,
         vsize,
+        file_size: vsize,
         permissions: Permissions {
             read: true,
             write: false,
@@ -589,9 +590,11 @@ impl Literal {
         let code = &mut self.container.segments[0];
         let stop = code.vaddr + code.vsize;
         code.vsize = end - code.vaddr;
+        code.file_size = code.vsize;
         self.container.segments.push(Segment {
             vaddr: end,
             vsize: stop - end,
+            file_size: stop - end,
             permissions: Permissions {
                 read: true,
                 write,

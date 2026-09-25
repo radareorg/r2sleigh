@@ -701,6 +701,7 @@ mod tests {
                 .then_some(crate::body::Region {
                     start: self.base,
                     end,
+                    file_end: end,
                     execute: true,
                     write: false,
                 })

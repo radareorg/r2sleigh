@@ -50,6 +50,7 @@ impl r2ssa::body::Program for Fixture {
         (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
             start: BASE,
             end,
+            file_end: end,
             execute: true,
             write: false,
         })
@@ -199,6 +200,7 @@ impl r2ssa::body::Program for DataAfterCode {
         let region = |start, end, execute| r2ssa::body::Region {
             start,
             end,
+            file_end: end,
             execute,
             write: false,
         };

@@ -116,6 +116,7 @@ fn code_region(len: usize, vaddr: u64) -> Option<r2ssa::body::Region> {
     (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
         start: BASE,
         end,
+        file_end: end,
         execute: true,
         write: false,
     })
@@ -694,6 +695,21 @@ const TABLE_BYTES: [u8; 16] = [0; 16];
 #[derive(Default)]
 struct Unbounded {
     reads: std::cell::RefCell<Vec<std::ops::Range<u64>>>,
+    /// How far past the sixteen bytes the file holds the container says the
+    /// table's segment runs, all of it zeros the loader fills.
+    zero_filled: u64,
+}
+
+impl Unbounded {
+    /// Every read that asked for a byte of the table's segment.
+    fn table_reads(&self) -> Vec<std::ops::Range<u64>> {
+        let end = TABLE + 16 + self.zero_filled;
+        let reads = self.reads.borrow();
+        let touched = reads
+            .iter()
+            .filter(|read| read.start < end && TABLE < read.end);
+        touched.cloned().collect()
+    }
 }
 
 impl r2ssa::body::Program for Unbounded {
@@ -703,21 +719,25 @@ impl r2ssa::body::Program for Unbounded {
             true => UNBOUNDED_TABLE,
             false => &TABLE_BYTES,
         };
-        let rest = &bytes[usize::try_from(vaddr - region.start).ok()?..];
-        let read = rest[..rest.len().min(max)].to_vec();
+        // What was asked for is recorded, whatever is answered. Past what the
+        // file holds this answers nothing rather than allocating the zeros,
+        // so the old read runs out of bytes here and not out of memory.
         self.reads
             .borrow_mut()
-            .push(vaddr..vaddr + read.len() as u64);
-        Some(read)
+            .push(vaddr..vaddr.saturating_add(max as u64));
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
     }
 
     fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
         let code = code_region(UNBOUNDED_TABLE.len(), vaddr);
-        let table = (TABLE..TABLE + 16)
+        let end = TABLE + 16 + self.zero_filled;
+        let table = (TABLE..end)
             .contains(&vaddr)
             .then_some(r2ssa::body::Region {
                 start: TABLE,
-                end: TABLE + 16,
+                end,
+                file_end: TABLE + 16,
                 execute: false,
                 write: false,
             });
@@ -771,15 +791,13 @@ fn a_table_longer_than_the_region_it_starts_in_is_refused_before_a_byte_of_it_is
         vec![(TABLE, 1 << 32, Some(1 << 34))],
         "the value analysis states the whole reach"
     );
-    let touched = program
-        .reads
-        .borrow()
-        .iter()
-        .filter(|read| read.start < TABLE + 16 && TABLE < read.end)
-        .cloned()
-        .collect::<Vec<_>>();
+    let touched = program.table_reads();
     assert!(touched.is_empty(), "the table was read: {touched:?}");
-    // Refused, so the dispatch is where the walk stops rather than a guess.
+    unresolved_at_the_dispatch(&prepared);
+}
+
+/// Refused, so the dispatch is where the walk stops rather than a guess.
+fn unresolved_at_the_dispatch(prepared: &r2engine::native::Prepared) {
     assert!(prepared.table_at(0x1020).is_none());
     assert_eq!(
         prepared
@@ -790,6 +808,26 @@ fn a_table_longer_than_the_region_it_starts_in_is_refused_before_a_byte_of_it_is
             .collect::<Vec<_>>(),
         vec![(0x1020, r2ssa::body::UnresolvedReason::IndirectBranch)]
     );
+}
+
+#[test]
+fn a_table_running_into_bytes_the_loader_zero_fills_is_refused_before_a_byte_of_it_is_read() {
+    // A container may state a segment far longer than the file holds -- a
+    // large `.bss` after `.data`, or a header that simply claims it -- and
+    // reading there answers zeros the image allocates. Bounded by the
+    // segment alone, the same spilled index asked for 16 GiB of them. Zeros
+    // the loader fills are bytes it writes, so the file states none of the
+    // table and nothing past its sixteen bytes is asked for.
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Unbounded {
+        zero_filled: 1 << 40,
+        ..Unbounded::default()
+    };
+    let prepared = r2engine::native::analysed(&target, &program, BASE).expect("analysed");
+    let touched = program.table_reads();
+    assert!(touched.is_empty(), "the table was read: {touched:?}");
+    unresolved_at_the_dispatch(&prepared);
 }
 
 #[test]
