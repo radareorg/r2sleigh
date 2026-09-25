@@ -323,6 +323,18 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(status(trap(0x1120)), "differs")  # past the helper's end
         self.assertEqual(status({**trap(0x1108), "status": 11}), "differs")  # SIGSEGV
 
+    def test_a_build_that_runs_out_of_time_is_slow_not_undefined_or_wrong(self):
+        timeout = {"run": 2, "outcome": "timeout"}
+        o0_late = self.line(0, o0=timeout, pairs={(0, 2): False, (2, 3): False, (2, 4): False})
+        self.assertEqual(gate.classify([o0_late], [], 0, self.NONE)[0], "slow")
+        o2_late = self.line(0, pairs={(2, 4): False})
+        o2_late["runs"][4] = {"run": 4, "outcome": "timeout"}
+        self.assertEqual(gate.classify([o2_late], [], 0, self.NONE)[0], "slow")
+        # Both builds finished and still disagree: that stays undefined behaviour.
+        disagree = self.line(0, pairs={(2, 4): False})
+        self.assertEqual(gate.classify([disagree], [], 0, self.NONE)[0], "ub")
+        self.assertNotIn("slow", gate.BLOCKING)
+
     def test_an_equal_needs_its_floor_of_graded_vectors_and_a_defect_does_not(self):
         lines = [self.line(0), self.line(1, original="signal"), self.line(2, original="signal")]
         status, evidence, counts = gate.classify(lines, [], 0, self.NONE, min_graded=2)

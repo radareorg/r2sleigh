@@ -15,7 +15,10 @@ status is one of:
 ``uninit``                the ``=zero`` and ``=pattern`` builds disagree: the
                           rendering read a local nothing wrote
 ``ub``                    UBSan reported, or the ``-O0`` and ``-O2`` builds
-                          disagree
+                          disagree on a vector both finished
+``slow``                  every finished run agreed, but a rendering build ran
+                          out of its time budget on some vector: not evidence
+                          of a wrong answer, and not ``equal`` either
 ``compile-error``         the compiler or the loader rejected a build; the
                           diagnostic is kept (a compiler that timed out or
                           could not run is the harness's: ``harness-error``)
@@ -65,12 +68,12 @@ RUN_LABELS = ("original", "identity", "O0", "pattern", "O2", "ubsan")
 ORIGINAL, IDENTITY, O0, PATTERN, O2, UBSAN = range(6)
 PAIRS = ((ORIGINAL, IDENTITY), (ORIGINAL, O0), (O0, PATTERN), (O0, O2))
 
-ENGINE_STATUSES = ("equal", "residual-trap", "differs", "uninit", "ub", "compile-error",
+ENGINE_STATUSES = ("equal", "residual-trap", "slow", "differs", "uninit", "ub", "compile-error",
                    "refused", "no-record")
 HARNESS_STATUSES = ("unsupported", "untested", "harness-error")
 STATUSES = ENGINE_STATUSES + HARNESS_STATUSES
 # Worst first, among the statuses a vector can have.
-_VECTOR_SEVERITY = ("ub", "uninit", "differs", "residual-trap", "equal")
+_VECTOR_SEVERITY = ("ub", "uninit", "differs", "residual-trap", "slow", "equal")
 # Findings that block a landing whenever they are new.
 BLOCKING = frozenset({"differs", "uninit", "ub"})
 
@@ -317,7 +320,8 @@ class ResidualHelpers:
 def classify(vector_lines: list[dict], vectors: list, residual: int,
              helpers: ResidualHelpers, min_graded: int = 1) -> tuple[str, dict, dict]:
     counts = {"total": len(vector_lines), "dropped": 0, "unstable": 0, "incomplete": 0,
-              "graded": 0, "equal": 0, "residual-trap": 0, "differs": 0, "uninit": 0, "ub": 0}
+              "graded": 0, "equal": 0, "residual-trap": 0, "slow": 0, "differs": 0, "uninit": 0,
+              "ub": 0}
     first: dict[str, dict] = {}
     unstable_example: dict | None = None
     incomplete_example: dict | None = None
@@ -358,6 +362,10 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
             if helper is not None:
                 found["residual-trap"] = {"helper": helper,
                                           "fault_offset": _run_evidence(o0).get("fault_offset")}
+            elif _timed_out(o0):
+                # Running out of time is a cost, not an answer: nothing it
+                # computed can be compared.
+                found["slow"] = {"build": "O0", "original": _run_evidence(runs[ORIGINAL])}
             else:
                 found["differs"] = {**_pair_evidence(primary),
                                     "original": _run_evidence(runs[ORIGINAL]),
@@ -373,11 +381,20 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                         f"control reached the original function's body at {o0.get('fault_pc')}")
         uninit = pairs.get((O0, PATTERN))
         if uninit is not None and not uninit.get("equal"):
-            found["uninit"] = {"detector": "auto-var-init zero vs pattern",
-                               **_pair_evidence(uninit)}
+            late = [RUN_LABELS[i] for i in (O0, PATTERN) if len(runs) > i and _timed_out(runs[i])]
+            if late:
+                found.setdefault("slow", {"build": ", ".join(late)})
+            else:
+                found["uninit"] = {"detector": "auto-var-init zero vs pattern",
+                                   **_pair_evidence(uninit)}
         optimised = pairs.get((O0, O2))
         if optimised is not None and not optimised.get("equal") and "ub" not in found:
-            found["ub"] = {"detector": "-O0 and -O2 builds disagree", **_pair_evidence(optimised)}
+            late = [RUN_LABELS[i] for i in (O0, O2) if len(runs) > i and _timed_out(runs[i])]
+            if late:
+                found.setdefault("slow", {"build": ", ".join(late)})
+            else:
+                found["ub"] = {"detector": "-O0 and -O2 builds disagree",
+                               **_pair_evidence(optimised)}
         status = next((s for s in _VECTOR_SEVERITY if s in found), "equal")
         counts[status] += 1
         if status != "equal" and status not in first:
@@ -418,6 +435,10 @@ def _run_evidence(run: dict) -> dict:
     except (KeyError, ValueError):
         pass
     return kept
+
+
+def _timed_out(run: dict) -> bool:
+    return run.get("outcome") == "timeout"
 
 
 def _pair_evidence(pair: dict | None) -> dict:
