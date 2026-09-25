@@ -233,7 +233,7 @@ phase "Harness contracts"
 # compile and run small x86-64 programs.
 run python3 -m unittest discover -s tests/equiv -p 'test_*.py'
 run python3 -m unittest discover -s tests/decbench -p 'test_*.py'
-run python3 -m unittest tests/test_no_plugin.py
+run python3 -m unittest tests/test_no_plugin.py scripts/test_esil_differential.py
 
 phase "Certification gate contracts"
 # The certification gate excuses an unassigned read only when the proof line

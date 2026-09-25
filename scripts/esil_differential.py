@@ -205,7 +205,7 @@ def parse_sleigh_esil(output: str) -> dict[int, list[str]]:
     return found
 
 
-def sleigh_esil(r2sleigh: str, binary: str, instructions: list[Instruction]) -> dict[int, list[str]]:
+def lift_esil(r2sleigh: str, binary: str, instructions: list[Instruction]) -> dict[int, list[str]]:
     """The r2sleigh CLI's ESIL for the window, by address."""
     argv = [r2sleigh, "disasm", "--file", binary, "--addr", f"{instructions[0].addr:#x}",
             "-n", str(len(instructions)), "--format", "esil"]
@@ -311,7 +311,7 @@ def main() -> int:
         print(f"no instructions decoded at {args.start} in {args.binary}", file=sys.stderr)
         return 2
 
-    lifted = sleigh_esil(args.r2sleigh, args.binary, instructions)
+    lifted = lift_esil(args.r2sleigh, args.binary, instructions)
     missing = [inst for inst in instructions if not lifted.get(inst.addr)]
     if missing:
         print(f"r2sleigh printed no ESIL for {len(missing)} of {len(instructions)} "

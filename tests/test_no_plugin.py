@@ -42,6 +42,8 @@ RADARE2_ORACLES = {
     "scripts/esil_differential.py": "radare2's own lift is the reference the r2sleigh CLI's "
     "ESIL is stepped beside",
     "scripts/setup-runner.sh": "installs radare2 on a CI runner for its test binaries",
+    "scripts/test_esil_differential.py": "puts a stand-in `r2` on PATH to test the ESIL "
+    "differential without radare2",
 }
 
 RADARE2_RUN = re.compile(

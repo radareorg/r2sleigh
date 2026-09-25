@@ -338,7 +338,7 @@ class R2sDecompiler(Decompiler):
             extra["discovered"] = len(found)
             if not requested:
                 declined[binary_path.name] = (
-                    f"harness: afl found no function to render"
+                    "harness: afl found no function to render"
                     + (f" ({ending})" if ending else "")
                 )
                 return result()
