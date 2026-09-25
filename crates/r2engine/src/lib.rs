@@ -43,8 +43,7 @@ mod route;
 
 pub use r2dec::{
     BindingMachineProjectionFailure, BindingObservationAudit, BindingObservationDomainAudit,
-    BindingObservationJournalFailure, BindingShadowAuditFailure, BindingShadowAuditLedger,
-    BindingShadowAuditOutcome, BindingShadowDomainAudit, DecompileRenderRefusal,
+    BindingObservationJournalFailure, BindingShadowAuditFailure, DecompileRenderRefusal,
     EffectObligationAudit, EffectObligationDisposition, PlacementAudit, PlacementAuditRefusal,
 };
 use route::decompile_route_decision;
@@ -2075,7 +2074,6 @@ fn effect_obligations_of(
 #[derive(Debug, Clone)]
 pub struct EngineDecompileResponse {
     pub output: EngineRendering,
-    pub binding_audit: BindingShadowAuditOutcome,
     pub obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     pub placement_audit: PlacementAudit,
     pub render_refusal: Option<DecompileRenderRefusal>,
@@ -2321,7 +2319,6 @@ impl EngineSession {
                     metrics,
                     analyze_diagnostics,
                     Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
                     None,
                     PlacementAudit::NotRun,
                     None,
@@ -2338,7 +2335,6 @@ impl EngineSession {
                     metrics,
                     analyze_diagnostics,
                     Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
                     None,
                     PlacementAudit::NotRun,
                     None,
@@ -2357,7 +2353,6 @@ impl EngineSession {
                     *refusal.metrics,
                     *refusal.diagnostics,
                     Some(analyzed_function_facts),
-                    BindingShadowAuditOutcome::NotRun,
                     None,
                     PlacementAudit::NotRun,
                     None,
@@ -2398,7 +2393,6 @@ impl EngineSession {
                         metrics,
                         analyze_diagnostics,
                         Some(analyzed_function_facts),
-                        BindingShadowAuditOutcome::NotRun,
                         None,
                         PlacementAudit::NotRun,
                         None,
@@ -2498,7 +2492,6 @@ impl EngineSession {
                 sealed.metrics.clone(),
                 EngineDiagnostics::default(),
                 Some(response_function_facts),
-                BindingShadowAuditOutcome::NotRun,
                 None,
                 PlacementAudit::NotRun,
                 None,
@@ -2519,7 +2512,6 @@ impl EngineSession {
                 *refusal.metrics,
                 *refusal.diagnostics,
                 Some(response_function_facts),
-                BindingShadowAuditOutcome::NotRun,
                 None,
                 PlacementAudit::NotRun,
                 None,
@@ -2537,7 +2529,6 @@ impl EngineSession {
                     planning_time,
                     render_time,
                 );
-                let binding_audit = *stop.binding_audit;
                 let obligation_ledger = *stop.obligation_ledger;
                 let placement_audit = stop.placement_audit;
                 let render_refusal = stop.render_refusal.map(|refusal| *refusal);
@@ -2549,7 +2540,6 @@ impl EngineSession {
                     *refusal.metrics,
                     *refusal.diagnostics,
                     Some(response_function_facts),
-                    binding_audit,
                     obligation_ledger,
                     placement_audit,
                     render_refusal,
@@ -2601,7 +2591,7 @@ impl EngineSession {
         metrics.planning_time += planning_time;
         metrics.render_time = render_time;
         let rendering_stopped = rendered.stopped.is_some();
-        let (output, binding_audit, obligation_ledger, placement_audit, render_refusal) =
+        let (output, obligation_ledger, placement_audit, render_refusal) =
             rendered.product.finalize();
         if !rendering_stopped && let Some(reason) = placement_refusal_reason(placement_audit) {
             metrics.record_phase(
@@ -2616,7 +2606,6 @@ impl EngineSession {
                 metrics,
                 diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 render_refusal,
@@ -2636,7 +2625,6 @@ impl EngineSession {
                 metrics,
                 diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 Some(refusal),
@@ -2658,7 +2646,6 @@ impl EngineSession {
                 metrics,
                 diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 None,
@@ -2674,7 +2661,6 @@ impl EngineSession {
                 *refusal.metrics,
                 *refusal.diagnostics,
                 Some(response_function_facts),
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 None,
@@ -2683,7 +2669,6 @@ impl EngineSession {
         metrics.work_spent = request.execution.work_spent();
         EngineDecompileResponse {
             output,
-            binding_audit,
             obligation_ledger,
             placement_audit,
             render_refusal,
@@ -2856,7 +2841,6 @@ impl EngineRenderedDecompile {
         Self {
             product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
                 output: EngineRendering::Listing(output),
-                binding_audit: BindingShadowAuditOutcome::NotRun,
                 obligation_ledger: None,
                 placement_audit: PlacementAudit::NotRun,
                 render_refusal: None,
@@ -2870,7 +2854,6 @@ impl EngineRenderedDecompile {
 
 struct ReadyEngineRenderedProduct {
     output: EngineRendering,
-    binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -2886,7 +2869,6 @@ impl EngineRenderedProduct {
         self,
     ) -> (
         EngineRendering,
-        BindingShadowAuditOutcome,
         Option<r2dec::ledger::ObligationLedger>,
         PlacementAudit,
         Option<DecompileRenderRefusal>,
@@ -2895,28 +2877,19 @@ impl EngineRenderedProduct {
             Self::Ready(ready) => {
                 let ReadyEngineRenderedProduct {
                     output,
-                    binding_audit,
                     obligation_ledger,
                     placement_audit,
                     render_refusal,
                 } = *ready;
-                (
-                    output,
-                    binding_audit,
-                    obligation_ledger,
-                    placement_audit,
-                    render_refusal,
-                )
+                (output, obligation_ledger, placement_audit, render_refusal)
             }
             Self::Pending(pending) => {
                 let audited = (*pending).finalize();
-                let binding_audit = audited.binding_shadow();
                 let obligation_ledger = audited.obligation_ledger().cloned();
                 let placement_audit = audited.placement_audit();
                 let render_refusal = audited.render_refusal();
                 (
                     EngineRendering::Function(Box::new(audited.into_rendered())),
-                    binding_audit,
                     obligation_ledger,
                     placement_audit,
                     render_refusal,
@@ -2930,7 +2903,6 @@ impl EngineRenderedProduct {
 struct EngineRenderExecutionStop {
     reason: String,
     phase: EnginePhase,
-    binding_audit: Box<BindingShadowAuditOutcome>,
     obligation_ledger: Box<Option<r2dec::ledger::ObligationLedger>>,
     placement_audit: PlacementAudit,
     render_refusal: Option<Box<DecompileRenderRefusal>>,
@@ -2976,7 +2948,6 @@ fn engine_render_stop_reason(
     EngineRenderExecutionStop {
         reason,
         phase,
-        binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
         obligation_ledger: Box::new(None),
         placement_audit: PlacementAudit::NotRun,
         render_refusal: None,
@@ -3009,7 +2980,6 @@ fn poll_engine_render_control_with_completion<C: r2ssa::SsaWorkControl + ?Sized>
 
 fn engine_render_stop_from_decompiler(
     stop: r2dec::DecompileExecutionStop,
-    binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -3020,7 +2990,6 @@ fn engine_render_stop_from_decompiler(
         r2dec::DecompileWorkPhase::Rendering => EnginePhase::Rendering,
     };
     let mut mapped = engine_render_stop_reason(stop.reason(), phase);
-    mapped.binding_audit = Box::new(binding_audit);
     mapped.obligation_ledger = Box::new(obligation_ledger);
     mapped.placement_audit = placement_audit;
     mapped.render_refusal = render_refusal.map(Box::new);
@@ -3055,7 +3024,6 @@ fn render_listing_tier<C: r2ssa::SsaWorkControl>(
     Some(listing.map_err(|stop| EngineRenderExecutionStop {
         reason: format!("{stop:?}"),
         phase: EnginePhase::Rendering,
-        binding_audit: Box::new(BindingShadowAuditOutcome::NotRun),
         obligation_ledger: Box::new(None),
         placement_audit: PlacementAudit::NotRun,
         render_refusal: None,
@@ -3074,7 +3042,6 @@ fn rendering_reached_before_the_stop(
     partial: r2dec::PendingDecompileBindingAudit,
 ) -> EngineRenderedDecompile {
     let audited = partial.finalize();
-    let binding_audit = audited.binding_shadow();
     let obligation_ledger = audited.obligation_ledger().cloned();
     let placement_audit = audited.placement_audit();
     let render_refusal = audited.render_refusal();
@@ -3082,7 +3049,6 @@ fn rendering_reached_before_the_stop(
     EngineRenderedDecompile {
         product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
             output,
-            binding_audit,
             obligation_ledger: obligation_ledger.clone(),
             placement_audit,
             render_refusal,
@@ -3095,7 +3061,6 @@ fn rendering_reached_before_the_stop(
         structuring_executed: true,
         stopped: Some(engine_render_stop_from_decompiler(
             stop,
-            binding_audit,
             obligation_ledger,
             placement_audit,
             render_refusal,
@@ -3129,27 +3094,17 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
             return Ok(rendering_reached_before_the_stop(stop, partial));
         }
         Err((stop, partial)) => {
-            let (binding_audit, obligation_ledger, placement_audit, render_refusal) = partial
+            let (obligation_ledger, placement_audit, render_refusal) = partial
                 .map(r2dec::PendingDecompileBindingAudit::finalize)
-                .map_or(
+                .map_or((None, PlacementAudit::NotRun, None), |audit| {
                     (
-                        BindingShadowAuditOutcome::NotRun,
-                        None,
-                        PlacementAudit::NotRun,
-                        None,
-                    ),
-                    |audit| {
-                        (
-                            audit.binding_shadow(),
-                            audit.obligation_ledger().cloned(),
-                            audit.placement_audit(),
-                            audit.render_refusal(),
-                        )
-                    },
-                );
+                        audit.obligation_ledger().cloned(),
+                        audit.placement_audit(),
+                        audit.render_refusal(),
+                    )
+                });
             return Err(engine_render_stop_from_decompiler(
                 stop,
-                binding_audit,
                 obligation_ledger,
                 placement_audit,
                 render_refusal,
@@ -3166,7 +3121,6 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     }
 
     let audited = audited.finalize();
-    let binding_audit = audited.binding_shadow();
     let obligation_ledger = audited.obligation_ledger().cloned();
     let placement_audit = audited.placement_audit();
     let render_refusal = audited.render_refusal();
@@ -3179,7 +3133,6 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
                 )
                 .unwrap_or_default(),
             ),
-            binding_audit,
             obligation_ledger,
             placement_audit,
             render_refusal,
@@ -3290,7 +3243,6 @@ fn refused_decompile_response_with_metrics(
         metrics,
         diagnostics,
         None,
-        BindingShadowAuditOutcome::NotRun,
         None,
         PlacementAudit::NotRun,
         None,
@@ -3308,7 +3260,6 @@ fn refused_decompile_response_with_metrics_and_audits(
     metrics: EngineMetrics,
     mut diagnostics: EngineDiagnostics,
     existing_function_facts: Option<FunctionFacts>,
-    binding_audit: BindingShadowAuditOutcome,
     obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     placement_audit: PlacementAudit,
     render_refusal: Option<DecompileRenderRefusal>,
@@ -3328,7 +3279,6 @@ fn refused_decompile_response_with_metrics_and_audits(
     diagnostics.refusal = route_diagnostics.refusal;
     EngineDecompileResponse {
         output,
-        binding_audit,
         obligation_ledger,
         placement_audit,
         render_refusal,

@@ -20,6 +20,19 @@ mod tests {
     use r2ssa::SSAFunction;
     use r2types::{CalleeFact, CalleeReturnRelation};
 
+    /// Render `input` through the whole pipeline and assemble its audit product.
+    fn audited(
+        config: crate::DecompilerConfig,
+        input: &crate::DecompilerInput,
+    ) -> crate::DecompileBindingAudit {
+        crate::Decompiler::new(config)
+            .decompile_input_keeping_partial_with_binding_audit(
+                input,
+                &r2ssa::SsaExecutionControl::default(),
+            )
+            .expect("default decompiler control never stops")
+    }
+
     #[derive(Debug, Clone)]
     struct FunctionType {
         return_type: CType,
@@ -1027,13 +1040,13 @@ mod tests {
     fn exact_legacy_use(
         plan: &crate::binding_plan::BindingPlan,
         site: r2ssa::UseSite,
-    ) -> crate::shadow_report::LegacyUseObservation {
+    ) -> crate::observation_journal::LegacyUseObservation {
         match plan.use_disposition(site) {
             Some(r2ssa::MachineUseDisposition::Exact(slice)) => {
-                crate::shadow_report::LegacyUseObservation::Exact(slice)
+                crate::observation_journal::LegacyUseObservation::Exact(slice)
             }
             Some(r2ssa::MachineUseDisposition::MemoryAddress(_)) => {
-                crate::shadow_report::LegacyUseObservation::MemoryAddress
+                crate::observation_journal::LegacyUseObservation::MemoryAddress
             }
             other => panic!("expected exact machine use at {site:?}, got {other:?}"),
         }
@@ -1665,11 +1678,11 @@ mod tests {
         );
         assert_eq!(
             sealed.observations().use_observation(address_site),
-            Some(exact_legacy_use(&plan, address_site))
+            Some(Some(exact_legacy_use(&plan, address_site)))
         );
         assert_eq!(
             sealed.observations().use_observation(value_site),
-            Some(exact_legacy_use(&plan, value_site))
+            Some(Some(exact_legacy_use(&plan, value_site)))
         );
         for obligation in effect_obligations {
             assert_eq!(
@@ -1839,11 +1852,11 @@ mod tests {
         assert_eq!(
             sealed.observations().use_observation(target_site),
             if indirect {
-                Some(exact_legacy_use(&plan, target_site))
+                Some(Some(exact_legacy_use(&plan, target_site)))
             } else {
-                Some(crate::shadow_report::LegacyUseObservation::Elided(
+                Some(Some(crate::observation_journal::LegacyUseObservation::Elided(
                     crate::ledger::ElisionReason::DirectCallTarget,
-                ))
+                )))
             }
         );
         assert_eq!(
@@ -1935,8 +1948,7 @@ mod tests {
             .with_name("seventh"),
         );
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
+        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
         assert_eq!(audit.render_refusal(), None, "{}", audit.output());
         let signature = audit
             .output()
@@ -1995,8 +2007,7 @@ mod tests {
         };
         let fixture = SourceOwnedPreparedFixture::new_with_context(prepared, context);
         let input = crate::DecompilerInput::new(fixture.facts);
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
+        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
         assert_eq!(audit.render_refusal(), None, "{}", audit.output());
         let output = audit.output();
         assert!(
@@ -2042,8 +2053,7 @@ mod tests {
                 returns_value,
             );
             let input = crate::DecompilerInput::new(prepared.facts.clone());
-            let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-                .decompile_input_with_binding_audit(&input);
+            let audit = audited(crate::DecompilerConfig::x86_64(), &input);
             assert_eq!(audit.render_refusal(), None, "{}", audit.output());
             let output = audit.output();
             assert!(
@@ -2065,8 +2075,7 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(std::slice::from_ref(&thunk), &arch)
             .with_name("unresolved_dispatch");
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
+        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
         assert!(
             !audit.output().contains("fileno(") && !audit.output().contains("import stub"),
             "{}",
@@ -2108,8 +2117,7 @@ mod tests {
         });
         let prepared = prepared_from_r2il_blocks(&[entry], &arch).with_name("gap_between");
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
+        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
         let output = audit.output();
 
         assert_eq!(audit.render_refusal(), None, "{output}");
@@ -2175,27 +2183,28 @@ mod tests {
         }));
 
         let input = crate::DecompilerInput::new(prepared.facts);
-        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
-            .decompile_input_with_binding_audit(&input);
+        let audit = audited(crate::DecompilerConfig::x86_64(), &input);
 
         // An operation the machine projection cannot represent is marked
         // where it stands rather than taking the function down with it. The
         // cells it owns move from the refused column, which nothing in the
         // output accounted for, to the gap column, which the output states.
-        let crate::BindingShadowAuditOutcome::Complete {
-            ledger,
-            observations,
-        } = audit.binding_shadow()
-        else {
+        let product = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
+            .build_product_from_input_with_control(
+                &input,
+                &r2ssa::SsaExecutionControl::default(),
+            )
+            .expect("default decompiler control never stops");
+        let crate::InternalBuildProduct::Native(native) = &product else {
             panic!("a marked gap accounts for the opaque operations: {audit:?}");
         };
-        assert_eq!(ledger.values.refused, 0);
-        assert_eq!(ledger.uses.refused, 0);
-        assert_eq!(ledger.writes.refused, 0);
-        assert!(ledger.values.gapped > 0 && ledger.writes.gapped > 0);
-        assert!(!ledger.values.is_fully_proven());
-        assert_eq!(observations.values.unaccounted, 0);
-        assert_eq!(observations.writes.gapped, 2, "both opaque writes are gapped");
+        let coverage = native.observations().coverage();
+        assert_eq!(coverage.values.refused, 0);
+        assert_eq!(coverage.uses.refused, 0);
+        assert_eq!(coverage.writes.refused, 0);
+        assert!(coverage.values.gapped > 0 && coverage.writes.gapped > 0);
+        assert_eq!(coverage.values.unaccounted, 0);
+        assert_eq!(coverage.writes.gapped, 2, "both opaque writes are gapped");
 
         let effects = audit.effect_obligations();
         assert_eq!(
@@ -4245,8 +4254,7 @@ mod tests {
         fn rendered(insert: Insert) -> crate::DecompileBindingAudit {
             let arch = make_test_arch_x86_64();
             let fixture = prepared_from_r2il_blocks(&[insert.block()], &arch).with_name(insert.name());
-            crate::Decompiler::new(crate::DecompilerConfig::default())
-                .decompile_input_with_binding_audit(&crate::DecompilerInput::new(fixture.facts))
+            audited(crate::DecompilerConfig::default(), &crate::DecompilerInput::new(fixture.facts))
         }
 
         /// A harness that maps the fixture's page, then runs `checks`.

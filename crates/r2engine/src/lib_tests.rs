@@ -1096,12 +1096,6 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
         controlled.output
     );
     assert_ne!(
-        controlled.binding_audit,
-        BindingShadowAuditOutcome::NotRun,
-        "the completed native render must retain its exact r2dec audit: {}",
-        controlled.output
-    );
-    assert_ne!(
         controlled.effect_obligations(),
         EffectObligationAudit::NOT_RUN,
         "the completed native render must retain its exact effect audit"
@@ -1110,7 +1104,6 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
         controlled.render_refusal, None,
         "the exact fixture must not cross a renderer refusal boundary"
     );
-    let completed_binding_audit = controlled.binding_audit;
     let completed_effect_obligations = controlled.effect_obligations();
     let total_polls = counting.polls.get();
     assert!(total_polls > 3, "r2dec pipeline must expose inner polls");
@@ -1198,7 +1191,6 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
             "an execution stop remains primary over audits retained from the partial render"
         );
         if phase == EnginePhase::Rendering {
-            assert_eq!(response.binding_audit, completed_binding_audit);
             assert_eq!(response.effect_obligations(), completed_effect_obligations);
             assert!(
                 !response.output.text().trim().is_empty(),
@@ -1214,7 +1206,6 @@ fn r2dec_inner_stops_map_to_engine_refusals_and_keep_exact_audits() {
                 response.output
             );
         } else {
-            assert_eq!(response.binding_audit, BindingShadowAuditOutcome::NotRun);
             assert_eq!(
                 response.effect_obligations(),
                 EffectObligationAudit::NOT_RUN
@@ -1263,14 +1254,12 @@ fn r2dec_stop_mapping_preserves_all_decompiler_phases_and_reasons() {
         ] {
             let mapped = engine_render_stop_from_decompiler(
                 r2dec::DecompileExecutionStop::new(decompile_phase, reason),
-                BindingShadowAuditOutcome::NotRun,
                 Some(stop_test_ledger()),
                 PlacementAudit::NotRun,
                 Some(DecompileRenderRefusal::UnrepresentableOperation),
             );
             let counted = effect_obligations_of((*mapped.obligation_ledger).as_ref());
             assert_eq!(mapped.phase, engine_phase);
-            assert_eq!(*mapped.binding_audit, BindingShadowAuditOutcome::NotRun);
             assert_eq!(counted.total, 11);
             assert_eq!(counted.rendered, 6);
             assert_eq!(counted.justified_elision, 2);
@@ -1432,7 +1421,6 @@ fn refused_effect_obligations_produce_a_typed_engine_refusal() {
         metrics,
         EngineDiagnostics::default(),
         Some(FunctionFacts::default().with_input_quality(sentinel_quality.clone())),
-        BindingShadowAuditOutcome::NotRun,
         obligation_ledger,
         PlacementAudit::NotRun,
         None,
@@ -1502,7 +1490,6 @@ fn refused_placement_produces_a_typed_engine_refusal() {
         metrics,
         EngineDiagnostics::default(),
         None,
-        BindingShadowAuditOutcome::NotRun,
         None,
         placement_audit,
         None,
@@ -1549,7 +1536,6 @@ fn renderer_boundary_refusal_produces_a_typed_engine_refusal() {
         metrics,
         EngineDiagnostics::default(),
         None,
-        BindingShadowAuditOutcome::NotRun,
         None,
         PlacementAudit::NotRun,
         Some(render_refusal),
